@@ -10,6 +10,7 @@
     attachCoordinator,
     generateInvites,
     revokeAttendeeClient,
+    sendAdminCommand,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -97,10 +98,29 @@
     await navigator.clipboard.writeText(link);
   }
 
+  async function reprocess(req: PendingRequest) {
+    if (!ctx || !session.signer) return;
+    try {
+      if (ctx.config.coordinator) {
+        await sendAdminCommand(ctx, "reprocess", { pubkey: req.attendeePubkey });
+      } else {
+        await approveAttendee(session.signer, ctx, req); // re-publishes the entry
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   async function approve(req: PendingRequest) {
     if (!ctx || !session.signer) return;
     try {
-      await approveAttendee(session.signer, ctx, req);
+      if (ctx.config.coordinator) {
+        // Route through the coordinator so IT grants + publishes the directory
+        // (attendees discover directory/roster/matches under the coordinator key).
+        await sendAdminCommand(ctx, "approve", { pubkey: req.attendeePubkey });
+      } else {
+        await approveAttendee(session.signer, ctx, req);
+      }
       approvedSet = new Set([...approvedSet, req.attendeePubkey]);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -110,13 +130,13 @@
   let revokedSet = $state<Set<string>>(new Set());
   async function revoke(req: PendingRequest) {
     if (!ctx || !session.signer) return;
-    if (ctx.config.coordinator) {
-      error = "This event has a coordinator — revoke via its admin command instead.";
-      return;
-    }
     if (!confirm(`Revoke ${req.name}? This rotates the event key (forward-only).`)) return;
     try {
-      await revokeAttendeeClient(session.signer, ctx, req.attendeePubkey);
+      if (ctx.config.coordinator) {
+        await sendAdminCommand(ctx, "revoke", { pubkey: req.attendeePubkey });
+      } else {
+        await revokeAttendeeClient(session.signer, ctx, req.attendeePubkey);
+      }
       revokedSet = new Set([...revokedSet, req.attendeePubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== req.attendeePubkey));
     } catch (e) {
@@ -225,7 +245,7 @@
         {:else if approvedSet.has(req.attendeePubkey)}
           <p class="muted">Approved ✓</p>
           <div class="row">
-            <button class="btn inline" onclick={() => approve(req)}>Re-publish entry</button>
+            <button class="btn inline" onclick={() => reprocess(req)}>Re-process</button>
             <button class="btn inline danger" onclick={() => revoke(req)}>Revoke</button>
           </div>
         {:else}

@@ -40,8 +40,10 @@ import {
   isInviteValid,
   inviteHash,
   buildEventConfig,
+  wrapRumor,
   KIND_INVITE_LIST,
   KIND_COORDINATOR_GRANT,
+  KIND_ADMIN_COMMAND,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -284,6 +286,28 @@ function buildRosterEvent(
 function splitCoordinate(coordinate: string): { identifier: string } {
   const parts = coordinate.split(":");
   return { identifier: parts.slice(2).join(":") };
+}
+
+/**
+ * Send an admin command (kind 21604) to the coordinator, sealed by E_id (the
+ * coordinator authenticates commands as coming from the event authority). Used
+ * for manual approval, recompute, reprocess, and revoke when a coordinator is
+ * attached.
+ */
+export async function sendAdminCommand(
+  ctx: EventContext,
+  cmd: "approve" | "recompute" | "reprocess" | "revoke",
+  args: Record<string, unknown> = {},
+): Promise<void> {
+  if (!ctx.config.coordinator) throw new Error("no coordinator attached");
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
+  const eidSk = hexToBytes(keys.eidNsecHex);
+  const wrap = wrapRumor(eidSk, ctx.config.coordinator, {
+    kind: KIND_ADMIN_COMMAND,
+    content: { v: 1, a: ctx.coordinate, cmd, args },
+  });
+  await publishOrQueue(wrap as any, ctx.config.relays);
 }
 
 export interface GeneratedInvite {

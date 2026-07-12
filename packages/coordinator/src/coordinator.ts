@@ -211,6 +211,11 @@ export class Coordinator {
       `[install] event "${state.scoringCtx.title}" installed — nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}`,
     );
     log(`          coordinate ${grant.coordinate}`);
+    // Subscribe to this event's E_inbox NOW (not only at startup), so an install
+    // received while the daemon is already running starts receiving join requests
+    // + submissions immediately — including any published before it was attached
+    // (the subscription backfills with since = now − 3d).
+    this.subscribeEventInbox(state);
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -501,7 +506,7 @@ export class Coordinator {
   private async handleAdmin(
     from: string,
     coordinate: string,
-    cmd: "recompute" | "reprocess" | "revoke",
+    cmd: "approve" | "recompute" | "reprocess" | "revoke",
     args: Record<string, unknown>,
   ): Promise<void> {
     const state = this.events.get(coordinate);
@@ -509,7 +514,18 @@ export class Coordinator {
     // Only the organizer (E_id) may command the coordinator.
     if (from !== state.eidPubkey) return;
 
-    if (cmd === "recompute") {
+    if (cmd === "approve") {
+      // Manual approval routed through the coordinator so IT grants the ECK and
+      // publishes the directory/roster (attendees discover those under the
+      // coordinator's key).
+      const pubkey = String(args.pubkey ?? "");
+      const attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
+      if (attendee && attendee.status !== "approved") {
+        this.deps.store.upsertAttendee({ coordinate, pubkey, status: "approved", now: this.now() });
+        log(`[approve] organizer approved ${short(pubkey)}`);
+        await this.grantAndPublish(state, pubkey);
+      }
+    } else if (cmd === "recompute") {
       for (const a of this.deps.store.approvedAttendees(coordinate)) {
         this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:manual`, {
           coordinate,
@@ -615,8 +631,11 @@ export class Coordinator {
 
     const coordCloser = this.subscribeCoordInbox();
     this.closers.push(coordCloser);
-    for (const state of this.events.values()) this.subscribeEventInbox(state);
+    // Note: installEvent() already subscribes each event's inbox (idempotently),
+    // so restored events are covered by the loop above.
   }
+
+  private subscribedInboxes = new Set<string>();
 
   private eckFromStore(coordinate: string): EckVersion[] {
     const row = this.deps.store.getEvent(coordinate);
@@ -632,12 +651,15 @@ export class Coordinator {
   }
 
   private subscribeEventInbox(state: EventState): void {
+    if (this.subscribedInboxes.has(state.coordinate)) return; // idempotent
+    this.subscribedInboxes.add(state.coordinate);
     const closer = (this.deps.transport as any).subscribe?.(
       { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(state.inboxSk)], since: giftwrapSince() },
       (e: NostrEvent) => void this.handleInboxWrap(state.coordinate, e as unknown as GiftWrap).catch(() => {}),
       state.configRelays,
     );
     if (closer) this.closers.push(closer);
+    log(`[sub] listening on E_inbox for ${state.scoringCtx.title}`);
   }
 
   stop(): void {

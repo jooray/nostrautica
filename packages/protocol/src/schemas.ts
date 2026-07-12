@@ -108,7 +108,7 @@ export type CoordinatorGrantContent = z.infer<
 export const adminCommandContentSchema = z.object({
   v: version,
   a: z.string(),
-  cmd: z.enum(["recompute", "reprocess", "revoke"]),
+  cmd: z.enum(["approve", "recompute", "reprocess", "revoke"]),
   args: z.record(z.unknown()).default({}),
 });
 export type AdminCommandContent = z.infer<typeof adminCommandContentSchema>;
