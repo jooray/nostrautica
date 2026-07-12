@@ -1,0 +1,24 @@
+# systemd unit for a durable coordinator (spec §9, §11). Install to
+# /etc/systemd/system/, then: systemctl enable --now nostrautica-coordinator
+#
+# Put secrets in /etc/nostrautica/coordinator.env:
+#   VENICE_API_KEY=...
+#   NOSTRAUTICA_COORDINATOR_NSEC=nsec1...      (or use identity.ncryptsec_file + passphrase)
+#   NOSTRAUTICA_COORDINATOR_DB=/var/lib/nostrautica/coordinator.sqlite
+[Unit]
+Description=Nostrautica coordinator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nostrautica
+WorkingDirectory=/opt/nostrautica/packages/coordinator
+EnvironmentFile=/etc/nostrautica/coordinator.env
+ExecStart=/usr/bin/node dist/main.js coordinator.toml
+Restart=on-failure
+RestartSec=5
+# ffmpeg must be on PATH (audio extraction).
+
+[Install]
+WantedBy=multi-user.target

@@ -15,3 +15,6 @@ coordinator.toml
 !coordinator.example.toml
 *.ncryptsec
 .pnpm-store/
+
+# coordinator runtime artifacts
+coordinator.out

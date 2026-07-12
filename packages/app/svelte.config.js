@@ -16,7 +16,9 @@ const config = {
     // No server routes; everything is client-side hash routing.
     prerender: { entries: [] },
     // Deep links like /#/e/... never hit the server; a single fallback covers all.
-    paths: { relative: true },
+    // BASE_PATH lets the same artifact serve from a subdirectory (e.g.
+    // https://host/nostrautica/) — assets resolve under that prefix.
+    paths: { base: process.env.BASE_PATH || "", relative: true },
   },
 };
 

@@ -68,7 +68,9 @@ export class VeniceLlm implements LlmProvider {
       body: JSON.stringify({
         model: req.model,
         temperature: req.temperature ?? 0.2,
-        max_tokens: req.maxTokens,
+        // Reasoning models otherwise burn the whole budget on chain-of-thought and
+        // return empty content; give structured output real headroom.
+        max_tokens: req.maxTokens ?? 4096,
         messages: [
           { role: "system", content: req.system },
           { role: "user", content: req.user },
@@ -76,6 +78,13 @@ export class VeniceLlm implements LlmProvider {
         response_format: {
           type: "json_schema",
           json_schema: { name: req.schemaName, strict: true, schema: req.schema },
+        },
+        // Our system prompt is authoritative (no Venice persona), and we don't want
+        // reasoning tokens between us and the JSON.
+        venice_parameters: {
+          include_venice_system_prompt: false,
+          disable_thinking: true,
+          strip_thinking_response: true,
         },
       }),
     });
