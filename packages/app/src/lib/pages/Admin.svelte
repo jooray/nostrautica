@@ -98,6 +98,20 @@
     await navigator.clipboard.writeText(link);
   }
 
+  let recomputing = $state(false);
+  async function recomputeMatches() {
+    if (!ctx?.config.coordinator) return;
+    recomputing = true;
+    error = null;
+    try {
+      await sendAdminCommand(ctx, "recompute");
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      recomputing = false;
+    }
+  }
+
   async function reprocess(req: PendingRequest) {
     if (!ctx || !session.signer) return;
     try {
@@ -179,6 +193,9 @@
     <div class="field-label">AI coordinator</div>
     {#if ctx?.config.coordinator}
       <p class="muted">Attached: <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
+      <button class="btn inline" onclick={recomputeMatches} disabled={recomputing}>
+        {recomputing ? "Recomputing…" : "↻ Recompute all matches"}
+      </button>
     {:else if attached}
       <p class="muted">Coordinator attached ✓ Matchmaking will begin as attendees are processed.</p>
     {:else}

@@ -526,8 +526,11 @@ export class Coordinator {
         await this.grantAndPublish(state, pubkey);
       }
     } else if (cmd === "recompute") {
+      // Full recompute: drop cached pair scores so every pair is re-scored.
+      this.deps.store.clearPairs(coordinate);
+      const key = `${this.now()}`;
       for (const a of this.deps.store.approvedAttendees(coordinate)) {
-        this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:manual`, {
+        this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:${key}`, {
           coordinate,
           pubkey: a.pubkey,
         });

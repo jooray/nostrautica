@@ -41,9 +41,18 @@ export const PAIR_SYSTEM_PROMPT = [
   "(e.g. a cryptographer + a designer + a programmer at a cypherpunk event; a drummer + a",
   "bassist + a singer at a music gathering) — at least as much as similarity. Two people who",
   "are near-identical should score lower than two who fit together like puzzle pieces.",
+  "CRITICAL: score, similarity, and complementarity are each a DECIMAL FRACTION between",
+  "0.0 and 1.0 (e.g. 0.85). Never use a 0-10 or 0-100 scale.",
   "Return strict JSON. The reasoning must be specific to these two people, in plain language,",
   "addressed to one of them (\"you\"), never a bare score.",
 ].join(" ");
+
+/** Clamp to [0,1], rescaling values the model returned on a 0-10 / 0-100 scale. */
+function normalizeScore(v: number): number {
+  let x = typeof v === "number" && isFinite(v) ? v : 0;
+  if (x > 1) x = x > 10 ? x / 100 : x / 10;
+  return Math.max(0, Math.min(1, x));
+}
 
 /** Canonical hash of an ai_profile, for pair-cache invalidation (spec §9.3). */
 export function profileHash(profile: AiProfile): string {
@@ -109,7 +118,13 @@ export async function scorePair(
     model,
     temperature: 0.3,
   });
-  return value;
+  // Defensively normalize — models don't reliably honor the 0..1 range.
+  return {
+    score: normalizeScore(value.score),
+    similarity: normalizeScore(value.similarity),
+    complementarity: normalizeScore(value.complementarity),
+    reasoning: value.reasoning,
+  };
 }
 
 /** Cosine similarity between two equal-length vectors. */

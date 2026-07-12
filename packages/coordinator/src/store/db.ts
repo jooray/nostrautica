@@ -276,6 +276,11 @@ export class Store {
       )
       .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, row.now);
   }
+  /** Drop all cached pair scores for an event (forces a full re-score). */
+  clearPairs(coordinate: string): void {
+    this.db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(coordinate);
+  }
+
   pairsFor(coordinate: string, pubkey: string): {
     other: string;
     score: number;
