@@ -57,7 +57,7 @@
   }
 </script>
 
-{#if ctx}<EventHeader {ctx} compact />{/if}
+{#if ctx}<EventHeader {ctx} compact link />{/if}
 <h1>Who's here</h1>
 
 {#if error}

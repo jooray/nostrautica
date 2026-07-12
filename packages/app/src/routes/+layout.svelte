@@ -9,7 +9,9 @@
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
+  import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import TopBar from "$lib/components/TopBar.svelte";
+  import BottomNav from "$lib/components/BottomNav.svelte";
 
   let { children } = $props();
   let booted = $state(false);
@@ -19,6 +21,7 @@
     theme.init();
     i18n.init();
     online.init();
+    recentEvents.init();
     router.init();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
     await consumeNsecFromHash();
@@ -44,3 +47,5 @@
     <p class="muted" style="margin-top:2rem">Loading…</p>
   {/if}
 </div>
+
+<BottomNav />

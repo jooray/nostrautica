@@ -6,6 +6,7 @@
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { loadEventKeys } from "$lib/events/keystore.js";
+  import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr }: { naddr: string } = $props();
@@ -23,6 +24,13 @@
       approved = await isApproved(ctx.coordinate);
       const keys = await loadEventKeys(ctx.coordinate);
       organizer = keys?.role === "organizer";
+      // Remember this event so it shows up under "My events" on Home.
+      recentEvents.record({
+        naddr,
+        title: ctx.title,
+        icon: ctx.icon,
+        role: organizer ? "organizer" : approved ? "attendee" : "visitor",
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }

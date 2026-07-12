@@ -66,6 +66,11 @@ export class JobRunner {
       const attempts = job.attempts + 1;
       const poison = attempts >= this.maxAttempts;
       const backoff = this.baseBackoffMs * 2 ** (attempts - 1);
+      const msg = err instanceof Error ? err.message : String(err);
+      const t = new Date().toISOString().slice(11, 19);
+      console.warn(
+        `[${t}] [job] ${job.type} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts})`}: ${msg.slice(0, 160)}`,
+      );
       this.store.failJob(
         job.id,
         attempts,

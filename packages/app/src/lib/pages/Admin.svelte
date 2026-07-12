@@ -15,6 +15,8 @@
   } from "$lib/events/organizer.js";
   import { decode } from "nostr-tools/nip19";
   import QrCode from "$lib/components/QrCode.svelte";
+  import EventHeader from "$lib/components/EventHeader.svelte";
+  import { router } from "$lib/router/router.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -127,7 +129,17 @@
   }
 </script>
 
-<h1>Organizer admin</h1>
+{#if ctx}
+  <EventHeader {ctx} compact link />
+{/if}
+<div class="row" style="justify-content:space-between;align-items:center">
+  <h1 style="margin:0">Organizer admin</h1>
+  {#if ctx}
+    <button class="btn inline" onclick={() => router.go({ name: "event", naddr })}>
+      Done ✓
+    </button>
+  {/if}
+</div>
 
 {#if error}<div class="card warn">{error}</div>{/if}
 

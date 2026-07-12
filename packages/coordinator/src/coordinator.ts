@@ -76,6 +76,12 @@ export interface Transport {
   fetch(filter: any, relays?: string[], timeoutMs?: number): Promise<NostrEvent[]>;
 }
 
+const short = (pk: string) => pk.slice(0, 8);
+function log(msg: string): void {
+  const t = new Date().toISOString().slice(11, 19);
+  console.log(`[${t}] ${msg}`);
+}
+
 export interface CoordinatorDeps {
   store: Store;
   transport: Transport;
@@ -138,6 +144,7 @@ export class Coordinator {
 
     this.jobs.register("match_recompute", async (p, { enqueue }) => {
       const pairs = await this.selectPairs(p.coordinate, p.pubkey);
+      if (pairs.length) log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} new pair(s)`);
       for (const pair of pairs) {
         enqueue("score_pair", `pair:${p.coordinate}:${pair.a}:${pair.b}:${pair.inputsHash}`, {
           coordinate: p.coordinate,
@@ -200,6 +207,10 @@ export class Coordinator {
       },
     };
     this.events.set(grant.coordinate, state);
+    log(
+      `[install] event "${state.scoringCtx.title}" installed — nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}`,
+    );
+    log(`          coordinate ${grant.coordinate}`);
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -234,6 +245,7 @@ export class Coordinator {
       });
     } else if (rumor.kind === KIND_ADMIN_COMMAND) {
       const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
+      log(`[admin] "${cmd.cmd}" from organizer ${short(rumor.pubkey)}`);
       await this.handleAdmin(rumor.pubkey, cmd.a, cmd.cmd, cmd.args);
     }
   }
@@ -253,9 +265,11 @@ export class Coordinator {
 
     if (rumor.kind === KIND_JOIN_REQUEST) {
       const content = joinRequestContentSchema.parse(JSON.parse(rumor.content));
+      log(`[join] request from ${short(rumor.pubkey)} ("${content.name}")`);
       await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name);
     } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
       const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
+      log(`[submission] from ${short(rumor.pubkey)} — ${content.media.length} media, ${content.profile.skills.length} skills`);
       await this.handleSubmission(state, rumor.pubkey, content.profile, content.media);
     }
   }
@@ -290,6 +304,9 @@ export class Coordinator {
       now: this.now(),
     });
 
+    log(
+      `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"} → ${decision.grant ? "AUTO-APPROVED" : "manual queue (" + decision.reason + ")"}`,
+    );
     if (decision.grant) await this.grantAndPublish(state, attendeePubkey);
   }
 
@@ -333,6 +350,7 @@ export class Coordinator {
     await this.deps.transport.publish(grant, state.configRelays);
     await this.publishDirectory(state, attendeePubkey);
     await this.publishRoster(state);
+    log(`[grant] ECK granted to ${short(attendeePubkey)}; directory + roster published`);
     // The AI pipeline is kicked off when a profile submission arrives (there is
     // nothing to transcribe/profile until then). Directory text is already visible.
     if (this.deps.store.getAttendee(state.coordinate, attendeePubkey)?.profile_json) {
@@ -390,6 +408,7 @@ export class Coordinator {
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     if (!attendee) return;
     const { profile, media } = this.parseStoredProfile(attendee);
+    log(`[pipeline] ${short(pubkey)}: transcribe ${media.length} media → nostr-context → ai_profile…`);
 
     const aiProfile = await processAttendee(
       {
@@ -416,6 +435,7 @@ export class Coordinator {
       now: this.now(),
     });
     await this.publishDirectory(state, pubkey);
+    log(`[pipeline] ${short(pubkey)} ai_profile ready — skills: ${aiProfile.skills.slice(0, 4).join(", ")}`);
   }
 
   private buildMatchingRoster(coordinate: string): AttendeeForMatching[] {
@@ -457,6 +477,9 @@ export class Coordinator {
     if (!aiA || !aiB) return;
     const score = await scorePair(this.deps.llm, this.deps.matchModel.model, state.scoringCtx, aiA, aiB);
     recordPairScore(this.deps.store, coordinate, { a, b, inputsHash }, score, this.now());
+    log(
+      `[match] ${short(a)} × ${short(b)} = ${score.score.toFixed(2)} (sim ${score.similarity.toFixed(2)}, comp ${score.complementarity.toFixed(2)})`,
+    );
   }
 
   private loadAiProfile(coordinate: string, pubkey: string) {
@@ -471,6 +494,7 @@ export class Coordinator {
     if (list.matches.length === 0) return;
     const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, list);
     await this.deps.transport.publish(event, state.configRelays);
+    log(`[match] published list for ${short(pubkey)} — ${list.matches.length} match(es)`);
   }
 
   // ── admin commands (21604) ─────────────────────────────────────────────────

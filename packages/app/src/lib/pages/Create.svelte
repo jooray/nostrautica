@@ -9,6 +9,7 @@
     defaultEventIcon,
     uploadPublicImage,
   } from "$lib/media/image.js";
+  import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 
   let title = $state("");
   let summary = $state("");
@@ -83,6 +84,12 @@
         },
         blindingKey,
       );
+      recentEvents.record({
+        naddr: created.naddr,
+        title: title.trim(),
+        icon: iconUrl.trim() || undefined,
+        role: "organizer",
+      });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

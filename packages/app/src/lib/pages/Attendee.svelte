@@ -93,6 +93,10 @@
   const has = (list?: string[]) => !!list?.includes(pubkey);
 </script>
 
+<button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
+  ‹ Attendees
+</button>
+
 {#if error}<div class="card warn">{error}</div>{/if}
 
 <div class="card">

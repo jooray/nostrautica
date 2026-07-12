@@ -10,6 +10,7 @@
   import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 
   let { naddr, code }: { naddr: string; code?: string } = $props();
 
@@ -74,6 +75,7 @@
         blindingKey,
       );
       sent = true;
+      recentEvents.record({ naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
       // With an invite code, approval is usually instant — poll for the grant.
       if (code) {
@@ -120,9 +122,12 @@
         they approve.
       {/if}
     </p>
-    <button class="btn" onclick={() => router.go({ name: "event", naddr })}>
-      Back to event
-    </button>
+    <div class="stack">
+      <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
+        Back to event
+      </button>
+      <button class="btn" onclick={() => router.go({ name: "home" })}>My events</button>
+    </div>
   </div>
 {:else}
   <EventHeader {ctx} />

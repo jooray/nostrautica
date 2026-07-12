@@ -7,6 +7,7 @@
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { VideoCapture } from "$lib/media/capture.js";
+  import EventHeader from "$lib/components/EventHeader.svelte";
   import {
     uploadMedia,
     submitProfileAndMedia,
@@ -146,6 +147,7 @@
   }
 </script>
 
+{#if ctx}<EventHeader {ctx} compact link />{/if}
 <h1>{talk ? "Record a talk" : "Record your intro"}</h1>
 
 {#if error}<div class="card warn">{error}</div>{/if}
