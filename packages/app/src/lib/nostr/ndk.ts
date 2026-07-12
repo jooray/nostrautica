@@ -69,13 +69,29 @@ export function relaySet(urls?: string[]): NDKRelaySet | undefined {
   return NDKRelaySet.fromRelayUrls(urls, getNdk());
 }
 
-/** Publish an already-signed event to the given relays (or the default pool). */
+/**
+ * Publish an already-signed event to the given relays (or the default pool).
+ * Succeeds if it reaches at least one relay; per-relay failures (rate limits,
+ * timeouts, PoW/auth) are expected and non-fatal. Throws only if the event
+ * reached zero relays (so the caller can queue it for a retry).
+ */
 export async function publishSigned(
   event: VerifiedEvent,
   relays?: string[],
 ): Promise<void> {
   const ndkEvent = new NDKEvent(getNdk(), event as any);
-  await ndkEvent.publish(relaySet(relays));
+  try {
+    await ndkEvent.publish(relaySet(relays));
+  } catch (err) {
+    // NDK throws NDKPublishError only when fewer than 1 relay accepted; but it may
+    // also carry partial success. Treat any relay acceptance as success.
+    const reached =
+      (err as any)?.publishedToRelays?.size ??
+      (ndkEvent as any)?.onRelays?.length ??
+      0;
+    if (reached > 0) return;
+    throw err;
+  }
 }
 
 /** Subscribe with a filter; caller handles events and cleanup. */

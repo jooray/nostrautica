@@ -7,13 +7,15 @@ import { npubEncode } from "nostr-tools/nip19";
 import type { AppSigner } from "./types.js";
 import { LocalSigner } from "./local.js";
 import { Nip07Signer, hasNip07 } from "./nip07.js";
-import { Nip46Signer } from "./nip46.js";
+import { Nip46Signer, type Nip46Session } from "./nip46.js";
 import { importCredential } from "./backup.js";
 import {
   saveLocalKey,
   loadLocalKey,
   loadLoginMethod,
   saveLoginMethod,
+  saveNip46Session,
+  loadNip46Session,
   clearKeystore,
 } from "./keystore.js";
 
@@ -51,6 +53,20 @@ class Session {
       await this.adopt(new Nip07Signer());
       return true;
     }
+    // NIP-46 (Amber): reconnect the persisted bunker session (spec §5.3).
+    if (method === "nip46") {
+      const persisted = await loadNip46Session<Nip46Session>();
+      if (persisted) {
+        try {
+          const signer = await Nip46Signer.fromPersisted(persisted);
+          await this.adopt(signer);
+          return true;
+        } catch {
+          // Signer offline / revoked — fall back to logged-out.
+          return false;
+        }
+      }
+    }
     return false;
   }
 
@@ -62,7 +78,10 @@ class Session {
 
   async loginNip46(signer: Nip46Signer): Promise<void> {
     await this.adopt(signer);
-    await saveLoginMethod("nip46");
+    // Persist the bunker session so the user stays logged in across refreshes.
+    const session = signer.serialize();
+    if (session) await saveNip46Session(session);
+    else await saveLoginMethod("nip46");
   }
 
   /** Generate a brand-new local key (normie default), persist it, log in. */

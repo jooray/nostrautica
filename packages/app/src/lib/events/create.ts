@@ -34,7 +34,8 @@ export interface CreateEventInput {
   start: number; // unix seconds
   end?: number;
   location?: string;
-  image?: string;
+  icon?: string; // small event logo/avatar (kind-0 picture) — optional
+  banner?: string; // wide event banner (kind-0 banner + 31923 image) — optional
   hashtags?: string[];
   // config
   maxVideoSec: number;
@@ -83,7 +84,8 @@ export async function createEvent(
       content: JSON.stringify({
         name: input.title,
         about: input.summary,
-        ...(input.image ? { picture: input.image } : {}),
+        ...(input.icon ? { picture: input.icon } : {}),
+        ...(input.banner ? { banner: input.banner } : {}),
       }),
     },
     eidSk,
@@ -97,7 +99,7 @@ export async function createEvent(
   ];
   if (input.end) eventTags.push(["end", String(input.end)]);
   if (input.summary) eventTags.push(["summary", input.summary]);
-  if (input.image) eventTags.push(["image", input.image]);
+  if (input.banner) eventTags.push(["image", input.banner]);
   if (input.location) eventTags.push(["location", input.location]);
   for (const t of input.hashtags ?? []) eventTags.push(["t", t]);
   const event31923 = finalizeEvent(

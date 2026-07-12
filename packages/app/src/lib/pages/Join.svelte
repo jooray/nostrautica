@@ -9,6 +9,7 @@
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
+  import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr, code }: { naddr: string; code?: string } = $props();
 
@@ -124,6 +125,7 @@
     </button>
   </div>
 {:else}
+  <EventHeader {ctx} />
   <h1>Join {ctx.title}</h1>
   {#if !session.loggedIn}
     <div class="card">

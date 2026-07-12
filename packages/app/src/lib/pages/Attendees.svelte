@@ -8,6 +8,7 @@
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchDirectory, fetchMatches } from "$lib/events/attendee.js";
   import { fetchFollowSet } from "$lib/events/social.js";
+  import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -56,6 +57,7 @@
   }
 </script>
 
+{#if ctx}<EventHeader {ctx} compact />{/if}
 <h1>Who's here</h1>
 
 {#if error}

@@ -6,6 +6,7 @@
 import {
   KIND_EVENT_CONFIG,
   KIND_CALENDAR_EVENT,
+  KIND_PROFILE,
   parseEventConfig,
   naddrToCoordinate,
   parseCoordinate,
@@ -21,7 +22,8 @@ export interface EventContext {
   summary: string;
   start?: number;
   end?: number;
-  image?: string;
+  icon?: string; // small event logo (E_id kind-0 picture)
+  banner?: string; // wide banner (31923 image / kind-0 banner)
   location?: string;
   hashtags: string[];
 }
@@ -35,9 +37,10 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
   if (relays.length) addRelays(relays);
   const { pubkey, identifier } = parseCoordinate(coordinate);
 
-  const [configEvents, eventEvents] = await Promise.all([
+  const [configEvents, eventEvents, profileEvents] = await Promise.all([
     fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }),
     fetchEvents({ kinds: [KIND_CALENDAR_EVENT], authors: [pubkey], "#d": [identifier] }),
+    fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }),
   ]);
 
   const configEvent = configEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
@@ -46,16 +49,28 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
   // Pull in the event's own home relays for subsequent operations.
   if (config.relays.length) addRelays(config.relays);
 
+  // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.
+  const profileEvent = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  let kind0: Record<string, any> = {};
+  if (profileEvent) {
+    try {
+      kind0 = JSON.parse(profileEvent.content);
+    } catch {
+      kind0 = {};
+    }
+  }
+
   const evt = eventEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   return {
     naddr,
     coordinate,
     config,
-    title: (evt && tag(evt.tags, "title")) ?? "Untitled event",
-    summary: (evt && tag(evt.tags, "summary")) ?? "",
+    title: (evt && tag(evt.tags, "title")) ?? kind0.name ?? "Untitled event",
+    summary: (evt && tag(evt.tags, "summary")) ?? kind0.about ?? "",
     start: evt ? Number(tag(evt.tags, "start")) || undefined : undefined,
     end: evt ? Number(tag(evt.tags, "end")) || undefined : undefined,
-    image: evt ? tag(evt.tags, "image") : undefined,
+    icon: kind0.picture || undefined,
+    banner: (evt && tag(evt.tags, "image")) || kind0.banner || undefined,
     location: evt ? tag(evt.tags, "location") : undefined,
     hashtags: evt ? evt.tags.filter((t) => t[0] === "t").map((t) => t[1]!) : [],
   };

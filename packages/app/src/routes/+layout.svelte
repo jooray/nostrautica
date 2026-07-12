@@ -7,6 +7,7 @@
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
   import { online } from "$lib/stores/online.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
+  import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
   import TopBar from "$lib/components/TopBar.svelte";
 
@@ -14,6 +15,7 @@
   let booted = $state(false);
 
   onMount(async () => {
+    installRelayErrorGuard();
     theme.init();
     i18n.init();
     online.init();

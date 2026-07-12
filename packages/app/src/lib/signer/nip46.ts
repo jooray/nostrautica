@@ -19,7 +19,14 @@ import {
   createNostrConnectURI,
   parseBunkerInput,
 } from "nostr-tools/nip46";
+import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "./types.js";
+
+/** Serializable NIP-46 session for persistence across refreshes. */
+export interface Nip46Session {
+  clientSkHex: string;
+  bunker: { pubkey: string; relays: string[]; secret?: string };
+}
 
 const DEFAULT_PERMS = [
   "sign_event:0",
@@ -46,7 +53,28 @@ export class Nip46Signer implements AppSigner {
   readonly method = "nip46" as const;
   private pk: string | null = null;
 
-  private constructor(private readonly bunker: BunkerSigner) {}
+  private constructor(
+    private readonly bunker: BunkerSigner,
+    private readonly clientSk: Uint8Array,
+  ) {}
+
+  /** Serialize the session so it can be restored after a refresh (spec §5.3). */
+  serialize(): Nip46Session | null {
+    const bp = (this.bunker as any).bp;
+    if (!bp?.pubkey || !bp?.relays) return null;
+    return {
+      clientSkHex: bytesToHex(this.clientSk),
+      bunker: { pubkey: bp.pubkey, relays: bp.relays, secret: bp.secret },
+    };
+  }
+
+  /** Reconnect a persisted NIP-46 session (same client key → same Amber connection). */
+  static async fromPersisted(session: Nip46Session): Promise<Nip46Signer> {
+    const clientSk = hexToBytes(session.clientSkHex);
+    const bunker = BunkerSigner.fromBunker(clientSk, session.bunker as any);
+    await bunker.connect();
+    return new Nip46Signer(bunker, clientSk);
+  }
 
   /**
    * Start a client-initiated nostrconnect flow. Renders `handle.uri` as a QR;
@@ -66,7 +94,7 @@ export class Nip46Signer implements AppSigner {
       name: appName,
     });
     const connected = BunkerSigner.fromURI(clientSk, uri).then(
-      (bunker) => new Nip46Signer(bunker),
+      (bunker) => new Nip46Signer(bunker, clientSk),
     );
     return { uri, connected };
   }
@@ -78,7 +106,7 @@ export class Nip46Signer implements AppSigner {
     if (!pointer) throw new Error("Invalid bunker:// URI");
     const bunker = BunkerSigner.fromBunker(clientSk, pointer);
     await bunker.connect();
-    return new Nip46Signer(bunker);
+    return new Nip46Signer(bunker, clientSk);
   }
 
   async getPublicKey(): Promise<string> {

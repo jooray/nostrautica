@@ -9,6 +9,7 @@ const DB_NAME = "nostrautica";
 const STORE = "keystore";
 const SK_KEY = "local-sk";
 const METHOD_KEY = "login-method";
+const NIP46_KEY = "nip46-session";
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -75,7 +76,18 @@ export async function loadLoginMethod(): Promise<string | undefined> {
   return get<string>(METHOD_KEY);
 }
 
+/** Persist a NIP-46 (Amber) session so it survives a refresh (spec §5.3). */
+export async function saveNip46Session(session: unknown): Promise<void> {
+  await put(NIP46_KEY, session);
+  await put(METHOD_KEY, "nip46");
+}
+
+export async function loadNip46Session<T>(): Promise<T | undefined> {
+  return get<T>(NIP46_KEY);
+}
+
 export async function clearKeystore(): Promise<void> {
   await del(SK_KEY);
   await del(METHOD_KEY);
+  await del(NIP46_KEY);
 }

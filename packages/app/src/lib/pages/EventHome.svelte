@@ -6,6 +6,7 @@
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { loadEventKeys } from "$lib/events/keystore.js";
+  import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -37,8 +38,7 @@
 {:else if !ctx}
   <p class="muted">Loading event…</p>
 {:else}
-  <h1>{ctx.title}</h1>
-  {#if ctx.image}<img src={ctx.image} alt="" style="max-width:100%;border-radius:12px" />{/if}
+  <EventHeader {ctx} />
   <p>{ctx.summary}</p>
   <p class="muted">
     {#if ctx.start}📅 {fmt(ctx.start)}{/if}
