@@ -3,18 +3,24 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
+  import {
+    loadEventContext,
+    cachedEventContext,
+    type EventContext,
+  } from "$lib/events/event-context.js";
   import { sendJoinRequest } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
+  import { fetchProfiles } from "$lib/events/social.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 
   let { naddr, code }: { naddr: string; code?: string } = $props();
 
-  let ctx = $state<EventContext | null>(null);
+  // Render instantly from cache (e.g. arriving from the event page), refresh after.
+  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let error = $state<string | null>(null);
   let busy = $state(false);
   let sent = $state(false);
@@ -30,30 +36,30 @@
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
+      // Pre-fill the name for a returning Nostr user from their existing profile.
+      if (session.signer && !name) {
+        const pubkey = await session.signer.getPublicKey();
+        const me = await fetchProfiles([pubkey]).catch(() => new Map());
+        name = me.get(pubkey)?.name ?? "";
+      }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (!ctx) error = e instanceof Error ? e.message : String(e);
     }
   });
-
-  async function startAsNewUser() {
-    await session.createLocalKey();
-  }
 
   async function submit() {
     error = null;
     if (!ctx) return;
-    if (!session.signer) {
-      error = "Create or log into an identity first.";
-      return;
-    }
     if (!name.trim()) {
       error = "Please enter a display name.";
       return;
     }
     busy = true;
     try {
-      const signer = session.signer;
-      // Onboarding: publish a real kind-0 profile + default relay list (§5.4).
+      // First-timers get an identity created automatically — no separate step.
+      if (!session.loggedIn) await session.createLocalKey();
+      const signer = session.signer!;
+
       await publishProfile(signer, { name: name.trim(), about: about.trim() });
       await ensureRelayList(signer);
 
@@ -133,11 +139,11 @@
   <EventHeader {ctx} />
   <h1>Join {ctx.title}</h1>
   {#if !session.loggedIn}
-    <div class="card">
-      <p class="muted">First, get an identity — no jargon, we handle it.</p>
-      <button class="btn primary" onclick={startAsNewUser}>Create an identity</button>
-      <button class="btn" onclick={() => router.go({ name: "login" })}>I already have one</button>
-    </div>
+    <p class="muted">
+      Fill this in and you're in — we'll set up a Nostr identity for you, no
+      password needed. Already a Nostr user?
+      <a href="#/login" onclick={(e) => { e.preventDefault(); router.go({ name: "login" }); }}>Log in first</a>.
+    </p>
   {/if}
 
   <div class="card stack">
@@ -161,8 +167,8 @@
       <input type="checkbox" bind:checked={rsvpPublic} style="width:auto" />
       Publish a public RSVP (others can see I'm attending)
     </label>
-    <button class="btn primary" onclick={submit} disabled={busy || !session.loggedIn}>
-      {busy ? "Sending…" : "Send join request"}
+    <button class="btn primary" onclick={submit} disabled={busy}>
+      {busy ? "Sending…" : session.loggedIn ? "Send join request" : "Create identity & join"}
     </button>
   </div>
 {/if}

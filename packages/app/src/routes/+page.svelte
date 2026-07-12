@@ -30,19 +30,19 @@
 {:else if route.name === "settings"}
   <Settings />
 {:else if route.name === "event"}
-  <EventHome naddr={route.naddr} />
+  {#key route.naddr}<EventHome naddr={route.naddr} />{/key}
 {:else if route.name === "join"}
-  <Join naddr={route.naddr} code={route.code} />
+  {#key route.naddr}<Join naddr={route.naddr} code={route.code} />{/key}
 {:else if route.name === "record"}
-  <Record naddr={route.naddr} talk={route.talk} />
+  {#key route.naddr}<Record naddr={route.naddr} talk={route.talk} />{/key}
 {:else if route.name === "attendees"}
-  <Attendees naddr={route.naddr} />
+  {#key route.naddr}<Attendees naddr={route.naddr} />{/key}
 {:else if route.name === "attendee"}
-  <Attendee naddr={route.naddr} npub={route.npub} />
+  {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
 {:else if route.name === "matches"}
-  <Matches naddr={route.naddr} />
+  {#key route.naddr}<Matches naddr={route.naddr} />{/key}
 {:else if route.name === "admin"}
-  <Admin naddr={route.naddr} />
+  {#key route.naddr}<Admin naddr={route.naddr} />{/key}
 {:else}
   <NotFound />
 {/if}

@@ -5,14 +5,14 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchDirectory, fetchMatches } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr }: { naddr: string } = $props();
 
-  let ctx = $state<EventContext | null>(null);
+  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let entries = $state<DirectoryEntryContent[]>([]);
   let profiles = $state<Map<string, ProfileMeta>>(new Map());
   let followSet = $state<Set<string>>(new Set());

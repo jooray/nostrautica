@@ -32,6 +32,15 @@ function tag(tags: string[][], name: string): string | undefined {
   return tags.find((t) => t[0] === name)?.[1];
 }
 
+// In-memory cache so navigating between event sub-pages is instant — the page
+// renders from cache immediately and can refresh in the background.
+const contextCache = new Map<string, EventContext>();
+
+/** The already-loaded context for an naddr, if any (no network). */
+export function cachedEventContext(naddr: string): EventContext | undefined {
+  return contextCache.get(naddr);
+}
+
 export async function loadEventContext(naddr: string): Promise<EventContext> {
   let decoded: { coordinate: string; relays: string[] };
   try {
@@ -68,7 +77,7 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
   }
 
   const evt = eventEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  return {
+  const ctx: EventContext = {
     naddr,
     coordinate,
     config,
@@ -81,4 +90,6 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
     location: evt ? tag(evt.tags, "location") : undefined,
     hashtags: evt ? evt.tags.filter((t) => t[0] === "t").map((t) => t[1]!) : [],
   };
+  contextCache.set(naddr, ctx);
+  return ctx;
 }

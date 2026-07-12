@@ -2,8 +2,9 @@
   import { onMount } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
+  import { fetchRoster } from "$lib/events/attendee.js";
   import {
     fetchPending,
     approveAttendee,
@@ -22,17 +23,45 @@
 
   let { naddr }: { naddr: string } = $props();
 
-  let ctx = $state<EventContext | null>(null);
+  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let keys = $state<EventKeys | null>(null);
   let pending = $state<PendingRequest[]>([]);
-  let approvedSet = $state<Set<string>>(new Set());
+  let approvedSet = $state<Set<string>>(new Set()); // approved this session
+  let rosterApproved = $state<Set<string>>(new Set()); // approved per the roster
   let loading = $state(true);
   let error = $state<string | null>(null);
   let notOrganizer = $state(false);
+  let copiedLink = $state(false);
+
+  // Approved = anyone in the roster OR approved just now. Reading the roster makes
+  // approval persist across refreshes (it's not just session state).
+  function isApprovedNow(pubkey: string): boolean {
+    return approvedSet.has(pubkey) || rosterApproved.has(pubkey);
+  }
+  const pendingRequests = $derived(
+    pending.filter((p) => !isApprovedNow(p.attendeePubkey)),
+  );
+  const approvedRequests = $derived(
+    pending.filter((p) => isApprovedNow(p.attendeePubkey)),
+  );
 
   async function refresh() {
     if (!ctx || !keys) return;
     pending = await fetchPending(ctx, keys);
+    // Cross-reference the roster so already-approved attendees don't show as pending.
+    const roster = await fetchRoster(ctx).catch(() => undefined);
+    rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? []);
+  }
+
+  function scrollToRequests() {
+    document.getElementById("join-requests")?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  async function copyInviteLink() {
+    const link = `${window.location.origin}${window.location.pathname}#/e/${naddr}/join`;
+    await navigator.clipboard.writeText(link);
+    copiedLink = true;
+    setTimeout(() => (copiedLink = false), 1500);
   }
 
   onMount(async () => {
@@ -211,7 +240,13 @@
   <p class="muted">Loading pending requests…</p>
 {:else}
   <div class="row" style="justify-content:space-between">
-    <p class="muted">{pending.length} join request{pending.length === 1 ? "" : "s"}</p>
+    <button
+      class="btn inline"
+      onclick={scrollToRequests}
+      disabled={pendingRequests.length === 0}
+    >
+      {pendingRequests.length} pending request{pendingRequests.length === 1 ? "" : "s"} ↓
+    </button>
     <button class="btn inline" onclick={refresh}>Refresh</button>
   </div>
 
@@ -277,17 +312,22 @@
   </div>
 
   {#if ctx}
-    <p class="muted">
-      Invite link: <span class="mono"
-        >{typeof window !== "undefined"
-          ? window.location.origin + window.location.pathname
-          : ""}#/e/{naddr}/join</span
+    <div class="row" style="justify-content:space-between;gap:0.5rem">
+      <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+        >{window.location.origin + window.location.pathname}#/e/{naddr}/join</span
       >
-    </p>
+      <button class="btn inline" style="flex:none" onclick={copyInviteLink}>
+        {copiedLink ? "Copied ✓" : "Copy invite link"}
+      </button>
+    </div>
   {/if}
 
+  <h2 id="join-requests">Join requests</h2>
   <div class="stack">
-    {#each pending as req (req.attendeePubkey)}
+    {#if pendingRequests.length === 0}
+      <p class="muted">No pending requests.</p>
+    {/if}
+    {#each pendingRequests as req (req.attendeePubkey)}
       <div class="card">
         <strong>{req.name}</strong>
         <span class="badge">{short(req.attendeePubkey)}</span>
@@ -299,18 +339,30 @@
           </div>
         {/if}
         {#if req.media?.length}<span class="badge">🎥 {req.media.length} video</span>{/if}
-        {#if revokedSet.has(req.attendeePubkey)}
-          <p class="muted">Revoked ✓ (event key rotated)</p>
-        {:else if approvedSet.has(req.attendeePubkey)}
-          <p class="muted">Approved ✓</p>
-          <div class="row">
-            <button class="btn inline" onclick={() => reprocess(req)}>Re-process</button>
-            <button class="btn inline danger" onclick={() => revoke(req)}>Revoke</button>
-          </div>
-        {:else}
-          <button class="btn primary" onclick={() => approve(req)}>Approve</button>
-        {/if}
+        <button class="btn primary" onclick={() => approve(req)}>Approve</button>
       </div>
     {/each}
   </div>
+
+  {#if approvedRequests.length}
+    <h2>Approved ({approvedRequests.length})</h2>
+    <div class="stack">
+      {#each approvedRequests as req (req.attendeePubkey)}
+        <div class="card">
+          <strong>{req.name}</strong>
+          <span class="badge">{short(req.attendeePubkey)}</span>
+          {#if req.media?.length}<span class="badge">🎥 {req.media.length} video</span>{/if}
+          {#if revokedSet.has(req.attendeePubkey)}
+            <p class="muted">Revoked ✓ (event key rotated)</p>
+          {:else}
+            <p class="muted">Approved ✓</p>
+            <div class="row">
+              <button class="btn inline" onclick={() => reprocess(req)}>Re-process</button>
+              <button class="btn inline danger" onclick={() => revoke(req)}>Revoke</button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
 {/if}
