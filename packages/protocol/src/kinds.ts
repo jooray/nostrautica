@@ -47,6 +47,7 @@ export const KIND_PROFILE_SUBMISSION = 21601; // → E_inbox
 export const KIND_KEY_GRANT = 21602; // → attendee
 export const KIND_COORDINATOR_GRANT = 21603; // → coordinator
 export const KIND_ADMIN_COMMAND = 21604; // organizer → coordinator
+export const KIND_ORGANIZER_GRANT = 21605; // → co-organizer (E_id + E_inbox + ECK)
 
 /** Rumor kinds — the set of kinds ever delivered inside a NIP-59 gift wrap. */
 export const RUMOR_KINDS = [
@@ -55,6 +56,7 @@ export const RUMOR_KINDS = [
   KIND_KEY_GRANT,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
+  KIND_ORGANIZER_GRANT,
 ] as const;
 
 export type RumorKind = (typeof RUMOR_KINDS)[number];

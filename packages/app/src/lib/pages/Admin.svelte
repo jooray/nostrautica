@@ -11,6 +11,7 @@
     generateInvites,
     revokeAttendeeClient,
     sendAdminCommand,
+    addCoOrganizer,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -73,6 +74,31 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       attaching = false;
+    }
+  }
+
+  let coOrgInput = $state("");
+  let addingCoOrg = $state(false);
+  let coOrgAdded = $state(false);
+  async function addCoOrg() {
+    if (!ctx || !session.signer || !coOrgInput.trim()) return;
+    addingCoOrg = true;
+    error = null;
+    try {
+      let pubkey = coOrgInput.trim();
+      if (pubkey.startsWith("npub1")) {
+        const decoded = decode(pubkey);
+        if (decoded.type !== "npub") throw new Error("bad npub");
+        pubkey = decoded.data;
+      }
+      if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error("Enter an npub or 64-char hex pubkey");
+      await addCoOrganizer(session.signer, ctx, pubkey);
+      coOrgAdded = true;
+      coOrgInput = "";
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      addingCoOrg = false;
     }
   }
 
@@ -208,6 +234,22 @@
         {attaching ? "Attaching…" : "Attach coordinator"}
       </button>
     {/if}
+  </div>
+
+  <div class="card">
+    <div class="field-label">Co-organizers</div>
+    <p class="muted">
+      Add someone by their npub to share full organizer control — they can edit the
+      event, approve attendees, and manage the coordinator. (Their keys are
+      gift-wrapped to them; they'll get access next time they open the event.)
+    </p>
+    <input placeholder="npub1… (co-organizer)" bind:value={coOrgInput} />
+    <div class="row" style="margin-top:0.5rem">
+      <button class="btn inline" onclick={addCoOrg} disabled={addingCoOrg || !coOrgInput.trim()}>
+        {addingCoOrg ? "Adding…" : "Add co-organizer"}
+      </button>
+      {#if coOrgAdded}<span class="muted">Sent ✓</span>{/if}
+    </div>
   </div>
 
   <div class="card">

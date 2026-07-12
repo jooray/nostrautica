@@ -6,6 +6,7 @@
 import {
   KIND_GIFT_WRAP,
   KIND_KEY_GRANT,
+  KIND_ORGANIZER_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
   KIND_MATCH_LIST,
@@ -14,6 +15,7 @@ import {
   base64ToBytes,
   blindedD,
   keyGrantContentSchema,
+  organizerGrantContentSchema,
   directoryEntryContentSchema,
   rosterContentSchema,
   matchListContentSchema,
@@ -26,7 +28,7 @@ import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
-import { addEckVersions, loadEventKeys, currentEck } from "./keystore.js";
+import { addEckVersions, loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 
@@ -48,6 +50,23 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     try {
       rumor = await signerUnwrap(signer, wrap);
     } catch {
+      continue;
+    }
+    if (rumor.kind === KIND_ORGANIZER_GRANT) {
+      // Co-organizer custody: store the full event keys so this device can admin.
+      try {
+        const grant = organizerGrantContentSchema.parse(JSON.parse(rumor.content));
+        await saveEventKeys({
+          coordinate: grant.a,
+          role: "organizer",
+          eck: grant.eck,
+          eidNsecHex: grant.eid_nsec,
+          einboxNsecHex: grant.einbox_nsec,
+        });
+        coordinates.add(grant.a);
+      } catch {
+        /* malformed */
+      }
       continue;
     }
     if (rumor.kind !== KIND_KEY_GRANT) continue;

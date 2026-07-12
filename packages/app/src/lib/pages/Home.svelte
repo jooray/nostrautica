@@ -1,11 +1,45 @@
 <script lang="ts">
+  import { onMount } from "svelte";
+  import { coordinateToNaddr, parseCoordinate } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+  import { listEventKeys } from "$lib/events/keystore.js";
   import { defaultEventIcon } from "$lib/media/image.js";
 
   const events = $derived(recentEvents.list);
   const roleLabel = { organizer: "you organize", attendee: "joined", visitor: "viewed" };
+
+  /** A readable placeholder title from a coordinate's identifier. */
+  function placeholderTitle(coordinate: string): string {
+    let id = "event";
+    try {
+      id = parseCoordinate(coordinate).identifier;
+    } catch {
+      /* keep default */
+    }
+    return id
+      .replace(/-[0-9a-f]{6,}$/i, "") // strip the random slug suffix
+      .replace(/[-_]+/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase())
+      .trim() || "Event";
+  }
+
+  // Backfill "My events" from the local key store — every event the user created
+  // or was approved into — so events created before this list existed still show.
+  onMount(async () => {
+    const keys = await listEventKeys().catch(() => []);
+    for (const k of keys) {
+      if (recentEvents.has(k.coordinate)) continue;
+      recentEvents.record({
+        coordinate: k.coordinate,
+        naddr: coordinateToNaddr(k.coordinate),
+        title: placeholderTitle(k.coordinate),
+        role: k.role,
+        at: 1, // backfill without bumping to the top
+      });
+    }
+  });
 </script>
 
 <h1>Meet the right people</h1>

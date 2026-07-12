@@ -26,6 +26,7 @@
       organizer = keys?.role === "organizer";
       // Remember this event so it shows up under "My events" on Home.
       recentEvents.record({
+        coordinate: ctx.coordinate,
         naddr,
         title: ctx.title,
         icon: ctx.icon,

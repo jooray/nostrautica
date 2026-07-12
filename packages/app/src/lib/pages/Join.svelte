@@ -75,7 +75,7 @@
         blindingKey,
       );
       sent = true;
-      recentEvents.record({ naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
+      recentEvents.record({ coordinate: ctx.coordinate, naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
       // With an invite code, approval is usually instant — poll for the grant.
       if (code) {

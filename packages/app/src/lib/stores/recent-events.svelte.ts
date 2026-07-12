@@ -4,6 +4,7 @@
  * a convenience cache (the authoritative membership is the key material + relays).
  */
 export interface RecentEvent {
+  coordinate: string; // stable identity (naddr relay hints can vary)
   naddr: string;
   title: string;
   role: "organizer" | "attendee" | "visitor";
@@ -31,22 +32,36 @@ class RecentEvents {
     this.list = load().sort((a, b) => b.at - a.at);
   }
 
-  /** Record (or refresh) an event the user interacted with. */
-  record(evt: Omit<RecentEvent, "at">): void {
+  /**
+   * Record (or refresh) an event the user interacted with. `at` may be supplied
+   * to backfill without bumping the event to the top (used by reconcile).
+   */
+  record(evt: Omit<RecentEvent, "at"> & { at?: number }): void {
     if (typeof localStorage === "undefined") return;
-    const existing = load().filter((e) => e.naddr !== evt.naddr);
+    const all = load();
+    const prior = all.find((e) => e.coordinate === evt.coordinate);
+    const existing = all.filter((e) => e.coordinate !== evt.coordinate);
     // Never downgrade a stored role (organizer > attendee > visitor).
-    const prior = load().find((e) => e.naddr === evt.naddr);
     const rank = { visitor: 0, attendee: 1, organizer: 2 } as const;
-    const role =
-      prior && rank[prior.role] > rank[evt.role] ? prior.role : evt.role;
-    const next = [{ ...evt, role, at: Date.now() }, ...existing].slice(0, MAX);
+    const role = prior && rank[prior.role] > rank[evt.role] ? prior.role : evt.role;
+    // Prefer a real title over a placeholder; keep an existing icon if none given.
+    const title = evt.title || prior?.title || "Event";
+    const icon = evt.icon ?? prior?.icon;
+    const at = evt.at ?? Date.now();
+    const next = [{ ...evt, title, icon, role, at }, ...existing]
+      .sort((a, b) => b.at - a.at)
+      .slice(0, MAX);
     localStorage.setItem(KEY, JSON.stringify(next));
-    this.list = next.sort((a, b) => b.at - a.at);
+    this.list = next;
   }
 
-  remove(naddr: string): void {
-    const next = load().filter((e) => e.naddr !== naddr);
+  /** True if an event (by coordinate) is already tracked. */
+  has(coordinate: string): boolean {
+    return load().some((e) => e.coordinate === coordinate);
+  }
+
+  remove(coordinate: string): void {
+    const next = load().filter((e) => e.coordinate !== coordinate);
     if (typeof localStorage !== "undefined") localStorage.setItem(KEY, JSON.stringify(next));
     this.list = next;
   }

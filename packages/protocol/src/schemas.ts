@@ -113,6 +113,18 @@ export const adminCommandContentSchema = z.object({
 });
 export type AdminCommandContent = z.infer<typeof adminCommandContentSchema>;
 
+// ── 21605 Organizer Grant rumor content (co-organizer, full key custody) ─────
+export const organizerGrantContentSchema = z.object({
+  v: version,
+  a: z.string(), // coordinate
+  eid_nsec: z.string(), // E_id secret (hex) — lets a co-organizer edit the event
+  einbox_nsec: z.string(), // E_inbox secret (hex) — read submissions + approve
+  eck: z.array(eckVersionSchema),
+  config_relays: z.array(z.string()),
+  granted_by: hex32,
+});
+export type OrganizerGrantContent = z.infer<typeof organizerGrantContentSchema>;
+
 // ── 31602 My Event Profile / intro library (self-encrypted) ──────────────────
 export const myProfileContentSchema = z.object({
   v: version,

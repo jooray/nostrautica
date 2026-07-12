@@ -85,6 +85,7 @@
         blindingKey,
       );
       recentEvents.record({
+        coordinate: created.coordinate,
         naddr: created.naddr,
         title: title.trim(),
         icon: iconUrl.trim() || undefined,

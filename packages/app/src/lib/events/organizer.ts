@@ -44,6 +44,7 @@ import {
   KIND_INVITE_LIST,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
+  KIND_ORGANIZER_GRANT,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -306,6 +307,36 @@ export async function sendAdminCommand(
   const wrap = wrapRumor(eidSk, ctx.config.coordinator, {
     kind: KIND_ADMIN_COMMAND,
     content: { v: 1, a: ctx.coordinate, cmd, args },
+  });
+  await publishOrQueue(wrap as any, ctx.config.relays);
+}
+
+/**
+ * Add a co-organizer (spec §6.1, §13). Gift-wraps the event's keys (E_id, E_inbox,
+ * ECK) to the co-organizer's pubkey so they get full organizer custody — they can
+ * edit the event, approve attendees, and manage the coordinator. Their client
+ * picks it up via the normal grant-receiving path.
+ */
+export async function addCoOrganizer(
+  organizer: AppSigner,
+  ctx: EventContext,
+  coOrganizerPubkey: string,
+): Promise<void> {
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
+    throw new Error("organizer keys not available on this device");
+  }
+  const wrap = await signerWrap(organizer, coOrganizerPubkey, {
+    kind: KIND_ORGANIZER_GRANT,
+    content: {
+      v: 1,
+      a: ctx.coordinate,
+      eid_nsec: keys.eidNsecHex,
+      einbox_nsec: keys.einboxNsecHex,
+      eck: keys.eck,
+      config_relays: ctx.config.relays,
+      granted_by: await organizer.getPublicKey(),
+    },
   });
   await publishOrQueue(wrap as any, ctx.config.relays);
 }

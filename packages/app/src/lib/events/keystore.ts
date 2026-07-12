@@ -48,6 +48,19 @@ export async function saveEventKeys(keys: EventKeys): Promise<void> {
   db.close();
 }
 
+/** All events the user holds keys for (created or was approved into). */
+export async function listEventKeys(): Promise<EventKeys[]> {
+  const db = await openDb();
+  const keys = await new Promise<EventKeys[]>((resolve, reject) => {
+    const tx = db.transaction(STORE, "readonly");
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result as EventKeys[]);
+    req.onerror = () => reject(req.error);
+  });
+  db.close();
+  return keys;
+}
+
 export async function loadEventKeys(coordinate: string): Promise<EventKeys | undefined> {
   const db = await openDb();
   const keys = await new Promise<EventKeys | undefined>((resolve, reject) => {
