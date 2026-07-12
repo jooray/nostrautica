@@ -89,8 +89,11 @@ function makeLlm(counters: Counters): MockLlm {
         score: complementary ? 0.9 : 0.4,
         similarity: complementary ? 0.4 : 0.85,
         complementarity: complementary ? 0.95 : 0.2,
-        reasoning: complementary
-          ? `You should meet — complementary skills (${roles.join(" + ")}) fit this event.`
+        reasoning_for_a: complementary
+          ? `You (A) should meet them — complementary skills (${roles.join(" + ")}) fit this event.`
+          : "Similar backgrounds.",
+        reasoning_for_b: complementary
+          ? `You (B) should meet them — complementary skills (${roles.join(" + ")}) fit this event.`
           : "Similar backgrounds.",
       };
     }

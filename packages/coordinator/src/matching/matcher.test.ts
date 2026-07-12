@@ -35,7 +35,7 @@ describe("incremental matching (spec §9.3)", () => {
     expect(first).toHaveLength(1);
     // Record the score, then re-select: the pair is cached with matching inputs_hash.
     recordPairScore(store, coord, first[0]!, {
-      score: 0.9, similarity: 0.5, complementarity: 0.9, reasoning: "x",
+      score: 0.9, similarity: 0.5, complementarity: 0.9, reasoningForA: "x", reasoningForB: "x",
     }, 1);
     const second = selectPairsToScore(store, coord, roster[0]!, roster, DEFAULT_PREFILTER);
     expect(second).toHaveLength(0);
@@ -45,7 +45,7 @@ describe("incremental matching (spec §9.3)", () => {
     const store = new Store();
     let roster = [attendee("a".repeat(64), "h1"), attendee("b".repeat(64), "h2")];
     const pairs = selectPairsToScore(store, coord, roster[0]!, roster, DEFAULT_PREFILTER);
-    recordPairScore(store, coord, pairs[0]!, { score: 1, similarity: 1, complementarity: 1, reasoning: "" }, 1);
+    recordPairScore(store, coord, pairs[0]!, { score: 1, similarity: 1, complementarity: 1, reasoningForA: "", reasoningForB: "" }, 1);
     // b changes its profile hash → the a–b pair must be re-scored.
     roster = [attendee("a".repeat(64), "h1"), attendee("b".repeat(64), "h2-changed")];
     const after = selectPairsToScore(store, coord, roster[0]!, roster, DEFAULT_PREFILTER);
@@ -59,7 +59,7 @@ describe("incremental matching (spec §9.3)", () => {
     for (const [pk, score] of [["b", 0.3], ["c", 0.9], ["d", 0.6]] as const) {
       store.putPair({
         coordinate: coord, a: me, b: pk.repeat(64), inputsHash: "x",
-        score, similarity: score, complementarity: score, reasoning: `meet ${pk}`, now: 1,
+        score, similarity: score, complementarity: score, reasoningForA: `meet ${pk}`, reasoningForB: `meet ${pk}`, now: 1,
       });
     }
     const list = buildMatchList(store, coord, me, 2, 1000);

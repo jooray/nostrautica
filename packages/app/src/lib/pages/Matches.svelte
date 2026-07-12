@@ -7,6 +7,7 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchMatches, fetchDirectory } from "$lib/events/attendee.js";
+  import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr }: { naddr: string } = $props();
@@ -14,6 +15,7 @@
   let ctx = $state<EventContext | null>(null);
   let matches = $state<Match[]>([]);
   let names = $state<Map<string, DirectoryEntryContent>>(new Map());
+  let profiles = $state<Map<string, ProfileMeta>>(new Map());
   let loading = $state(true);
   let error = $state<string | null>(null);
   let noCoordinator = $state(false);
@@ -33,6 +35,7 @@
       ]);
       matches = list?.matches ?? [];
       names = new Map(directory.map((e) => [e.pubkey, e]));
+      profiles = await fetchProfiles(matches.map((m) => m.pubkey)).catch(() => new Map());
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -45,6 +48,9 @@
   }
   function pct(x: number) {
     return Math.round(x * 100);
+  }
+  function nameOf(pubkey: string): string {
+    return profiles.get(pubkey)?.name || names.get(pubkey)?.profile.about?.slice(0, 40) || "Attendee";
   }
 </script>
 
@@ -76,15 +82,20 @@
   <p class="muted">Ranked by how much you'd get from meeting — with the reasoning.</p>
   <div class="stack">
     {#each matches as m (m.pubkey)}
-      <button class="card" style="text-align:left;cursor:pointer" onclick={() => open(m.pubkey)}>
-        <div class="row" style="justify-content:space-between">
-          <strong>{names.get(m.pubkey)?.profile.about?.slice(0, 40) || "Attendee"}</strong>
-          <span class="badge">{pct(m.score)}% match</span>
+      <button class="card row" style="text-align:left;cursor:pointer;gap:0.75rem;align-items:flex-start" onclick={() => open(m.pubkey)}>
+        {#if profiles.get(m.pubkey)?.picture}
+          <img src={profiles.get(m.pubkey)!.picture} alt="" width="44" height="44" style="border-radius:50%;flex:none;object-fit:cover" />
+        {/if}
+        <div style="flex:1;min-width:0">
+        <div class="row" style="justify-content:space-between;gap:0.5rem">
+          <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{nameOf(m.pubkey)}</strong>
+          <span class="badge" style="flex:none">{pct(m.score)}% match</span>
         </div>
         <p style="margin:0.5rem 0">{m.reasoning}</p>
         <div class="row" style="flex-wrap:wrap">
           <span class="badge">similar {pct(m.similarity)}%</span>
           <span class="badge">complementary {pct(m.complementarity)}%</span>
+        </div>
         </div>
       </button>
     {/each}

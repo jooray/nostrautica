@@ -12,14 +12,17 @@ export interface PairScore {
   score: number;
   similarity: number;
   complementarity: number;
-  reasoning: string;
+  /** Addressed to PERSON A ("you"), explaining why A should meet B. */
+  reasoningForA: string;
+  /** Addressed to PERSON B ("you"), explaining why B should meet A. */
+  reasoningForB: string;
 }
 
 /** Strict JSON schema for structured output (additionalProperties:false, all required). */
 export const PAIR_SCORE_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  required: ["score", "similarity", "complementarity", "reasoning"],
+  required: ["score", "similarity", "complementarity", "reasoning_for_a", "reasoning_for_b"],
   properties: {
     score: { type: "number", description: "0..1 overall how much they should meet" },
     similarity: { type: "number", description: "0..1 shared interests/background" },
@@ -27,12 +30,26 @@ export const PAIR_SCORE_SCHEMA = {
       type: "number",
       description: "0..1 how much their skills complete each other for this event",
     },
-    reasoning: {
+    reasoning_for_a: {
       type: "string",
-      description: "1-2 sentences, plain language, why they should meet — specific, not generic",
+      description:
+        "Addressed to PERSON A as 'you', explaining why YOU (A) should meet B — reference A's own goals/skills and what B offers A. 1-2 sentences, specific, not generic.",
+    },
+    reasoning_for_b: {
+      type: "string",
+      description:
+        "Addressed to PERSON B as 'you', explaining why YOU (B) should meet A — reference B's own goals/skills and what A offers B. 1-2 sentences, specific, not generic.",
     },
   },
 } as const;
+
+interface RawPairScore {
+  score: number;
+  similarity: number;
+  complementarity: number;
+  reasoning_for_a: string;
+  reasoning_for_b: string;
+}
 
 export const PAIR_SYSTEM_PROMPT = [
   "You are a conference matchmaker. Given two attendees' AI profiles and the event context,",
@@ -43,8 +60,11 @@ export const PAIR_SYSTEM_PROMPT = [
   "are near-identical should score lower than two who fit together like puzzle pieces.",
   "CRITICAL: score, similarity, and complementarity are each a DECIMAL FRACTION between",
   "0.0 and 1.0 (e.g. 0.85). Never use a 0-10 or 0-100 scale.",
-  "Return strict JSON. The reasoning must be specific to these two people, in plain language,",
-  "addressed to one of them (\"you\"), never a bare score.",
+  "Write TWO separate reasonings, each addressed to that person as \"you\": reasoning_for_a",
+  "tells PERSON A why THEY should meet B (grounded in A's own goals/skills and what B brings",
+  "A); reasoning_for_b tells PERSON B why THEY should meet A. They are NOT the same sentence",
+  "with names swapped — each speaks to that person's specific situation. Plain language,",
+  "specific, never a bare score.",
 ].join(" ");
 
 /** Clamp to [0,1], rescaling values the model returned on a 0-10 / 0-100 scale. */
@@ -110,7 +130,7 @@ export async function scorePair(
     .filter(Boolean)
     .join("\n");
 
-  const { value } = await llm.completeStructured<PairScore>({
+  const { value } = await llm.completeStructured<RawPairScore>({
     system: PAIR_SYSTEM_PROMPT,
     user,
     schema: PAIR_SCORE_SCHEMA,
@@ -123,7 +143,8 @@ export async function scorePair(
     score: normalizeScore(value.score),
     similarity: normalizeScore(value.similarity),
     complementarity: normalizeScore(value.complementarity),
-    reasoning: value.reasoning,
+    reasoningForA: value.reasoning_for_a,
+    reasoningForB: value.reasoning_for_b,
   };
 }
 

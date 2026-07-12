@@ -35,6 +35,13 @@
   box-sizing: border-box;
 }
 
+/* Native <button> resets text color to the system color (often black). Any button
+   used as a container (a card, a list row) must inherit the theme text color. The
+   .btn class sets its own color explicitly, so this never affects real buttons. */
+button {
+  color: inherit;
+}
+
 html,
 body {
   margin: 0;
@@ -84,10 +91,12 @@ a:hover {
 
 .card {
   background: var(--bg-elev);
+  color: var(--text); /* buttons used as cards would otherwise reset to black */
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 1rem;
   margin: 0.75rem 0;
+  font: inherit;
 }
 
 .btn {

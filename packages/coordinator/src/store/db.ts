@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS pairs (
   score REAL NOT NULL,
   similarity REAL NOT NULL,
   complementarity REAL NOT NULL,
-  reasoning TEXT NOT NULL,
+  reasoning TEXT NOT NULL,      -- addressed to a (the lexically-smaller pubkey)
+  reasoning_b TEXT,             -- addressed to b (the lexically-larger pubkey)
   created_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, a, b)
 );
@@ -105,6 +106,12 @@ export class Store {
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(SCHEMA);
+    // Migration: add the directional-reasoning column to older DBs.
+    try {
+      this.db.exec("ALTER TABLE pairs ADD COLUMN reasoning_b TEXT");
+    } catch {
+      /* column already exists */
+    }
   }
 
   close(): void {
@@ -261,20 +268,26 @@ export class Store {
     score: number;
     similarity: number;
     complementarity: number;
-    reasoning: string;
+    reasoningForA: string; // addressed to row.a
+    reasoningForB: string; // addressed to row.b
     now: number;
   }): void {
-    const [x, y] = row.a < row.b ? [row.a, row.b] : [row.b, row.a];
+    const aFirst = row.a < row.b;
+    const [x, y] = aFirst ? [row.a, row.b] : [row.b, row.a];
+    // `reasoning` is addressed to x (the stored `a`); `reasoning_b` to y.
+    const reasoningX = aFirst ? row.reasoningForA : row.reasoningForB;
+    const reasoningY = aFirst ? row.reasoningForB : row.reasoningForA;
     this.db
       .prepare(
-        `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, reasoning_b, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(coordinate, a, b) DO UPDATE SET
            inputs_hash = excluded.inputs_hash, score = excluded.score,
            similarity = excluded.similarity, complementarity = excluded.complementarity,
-           reasoning = excluded.reasoning, created_at = excluded.created_at`,
+           reasoning = excluded.reasoning, reasoning_b = excluded.reasoning_b,
+           created_at = excluded.created_at`,
       )
-      .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, row.now);
+      .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, reasoningX, reasoningY, row.now);
   }
   /** Drop all cached pair scores for an event (forces a full re-score). */
   clearPairs(coordinate: string): void {
@@ -290,10 +303,11 @@ export class Store {
   }[] {
     return this.db
       .prepare(
-        `SELECT CASE WHEN a = ? THEN b ELSE a END AS other, score, similarity, complementarity, reasoning
+        `SELECT CASE WHEN a = ? THEN b ELSE a END AS other, score, similarity, complementarity,
+                CASE WHEN a = ? THEN reasoning ELSE COALESCE(reasoning_b, reasoning) END AS reasoning
          FROM pairs WHERE coordinate = ? AND (a = ? OR b = ?)`,
       )
-      .all(pubkey, coordinate, pubkey, pubkey) as any;
+      .all(pubkey, pubkey, coordinate, pubkey, pubkey) as any;
   }
 
   // ── invite usage (first-come, single-use) ─────────────────────────────────

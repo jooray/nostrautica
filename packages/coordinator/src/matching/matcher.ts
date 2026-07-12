@@ -87,7 +87,8 @@ export function recordPairScore(
     score: score.score,
     similarity: score.similarity,
     complementarity: score.complementarity,
-    reasoning: score.reasoning,
+    reasoningForA: score.reasoningForA,
+    reasoningForB: score.reasoningForB,
     now,
   });
 }

@@ -3,10 +3,39 @@
  * the user's kind-3 ∩ roster, plus a person's recent public notes for the profile
  * view. No full thread rendering in v1.
  */
-import { KIND_CONTACTS, KIND_NOTE } from "@nostrautica/protocol";
+import { KIND_CONTACTS, KIND_NOTE, KIND_PROFILE } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { fetchFollowTags } from "./nostr-actions.js";
+
+export interface ProfileMeta {
+  name?: string;
+  picture?: string;
+  about?: string;
+}
+
+/** Batch-fetch kind-0 profiles for a set of pubkeys → map of latest per pubkey. */
+export async function fetchProfiles(
+  pubkeys: string[],
+): Promise<Map<string, ProfileMeta>> {
+  const out = new Map<string, ProfileMeta>();
+  if (pubkeys.length === 0) return out;
+  const events = await fetchEvents({ kinds: [KIND_PROFILE], authors: pubkeys });
+  const latest = new Map<string, (typeof events)[number]>();
+  for (const e of events) {
+    const prev = latest.get(e.pubkey);
+    if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latest.set(e.pubkey, e);
+  }
+  for (const [pubkey, e] of latest) {
+    try {
+      const p = JSON.parse(e.content);
+      out.set(pubkey, { name: p.name || p.display_name, picture: p.picture, about: p.about });
+    } catch {
+      /* skip malformed profile */
+    }
+  }
+  return out;
+}
 
 /** The set of pubkeys the signed-in user follows (from their kind-3). */
 export async function fetchFollowSet(signer: AppSigner): Promise<Set<string>> {
