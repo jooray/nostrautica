@@ -8,9 +8,12 @@
     fetchPending,
     approveAttendee,
     attachCoordinator,
+    generateInvites,
     type PendingRequest,
+    type GeneratedInvite,
   } from "$lib/events/organizer.js";
   import { decode } from "nostr-tools/nip19";
+  import QrCode from "$lib/components/QrCode.svelte";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -69,6 +72,28 @@
     }
   }
 
+  let inviteCount = $state(5);
+  let invites = $state<GeneratedInvite[]>([]);
+  let generating = $state(false);
+
+  async function makeInvites() {
+    if (!ctx || !session.signer) return;
+    generating = true;
+    error = null;
+    try {
+      const base = window.location.origin + window.location.pathname;
+      invites = await generateInvites(session.signer, ctx, inviteCount, base);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      generating = false;
+    }
+  }
+
+  async function copyLink(link: string) {
+    await navigator.clipboard.writeText(link);
+  }
+
   async function approve(req: PendingRequest) {
     if (!ctx || !session.signer) return;
     try {
@@ -116,6 +141,30 @@
         {attaching ? "Attaching…" : "Attach coordinator"}
       </button>
     {/if}
+  </div>
+
+  <div class="card">
+    <div class="field-label">Invite codes</div>
+    <p class="muted">
+      Single-use links that auto-approve (with a coordinator). The code rides the
+      URL fragment and never touches a server.
+    </p>
+    <div class="row">
+      <input type="number" min="1" max="100" bind:value={inviteCount} style="max-width:5rem" />
+      <button class="btn inline" onclick={makeInvites} disabled={generating}>
+        {generating ? "Generating…" : "Generate"}
+      </button>
+    </div>
+    {#each invites as inv (inv.nsec)}
+      <div class="card" style="background:var(--bg-elev2)">
+        <div class="row" style="justify-content:space-between">
+          <span class="badge">{inv.label}</span>
+          <button class="btn inline" onclick={() => copyLink(inv.link)}>Copy link</button>
+        </div>
+        <QrCode data={inv.link} size={140} />
+        <p class="mono">{inv.link}</p>
+      </div>
+    {/each}
   </div>
 
   {#if ctx}

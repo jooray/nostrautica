@@ -1,24 +1,22 @@
 <script lang="ts">
   import { theme, type ThemePref } from "$lib/stores/theme.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
+  import { LOCALES, LOCALE_NAMES } from "$lib/i18n/messages.js";
 
-  const options: { value: ThemePref; label: string }[] = [
+  const themeOptions: { value: ThemePref; label: string }[] = [
     { value: "system", label: "System" },
     { value: "light", label: "Light" },
     { value: "dark", label: "Dark" },
   ];
 </script>
 
-<h1>Settings</h1>
+<h1>{t("settings.title")}</h1>
 
 <div class="card">
-  <div class="field-label">Theme</div>
+  <div class="field-label">{t("settings.theme")}</div>
   <div class="row">
-    {#each options as o (o.value)}
-      <button
-        class="btn inline"
-        class:primary={theme.pref === o.value}
-        onclick={() => theme.set(o.value)}
-      >
+    {#each themeOptions as o (o.value)}
+      <button class="btn inline" class:primary={theme.pref === o.value} onclick={() => theme.set(o.value)}>
         {o.label}
       </button>
     {/each}
@@ -26,6 +24,12 @@
 </div>
 
 <div class="card">
-  <div class="field-label">Language</div>
-  <p class="muted">English (Slovak coming in a later phase).</p>
+  <div class="field-label">{t("settings.language")}</div>
+  <div class="row">
+    {#each LOCALES as loc (loc)}
+      <button class="btn inline" class:primary={i18n.locale === loc} onclick={() => i18n.set(loc)}>
+        {LOCALE_NAMES[loc]}
+      </button>
+    {/each}
+  </div>
 </div>

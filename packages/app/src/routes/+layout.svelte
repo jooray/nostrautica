@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { theme } from "$lib/stores/theme.svelte.js";
+  import { i18n } from "$lib/i18n/i18n.svelte.js";
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { registerPwa } from "$lib/pwa.js";
@@ -13,6 +14,7 @@
 
   onMount(async () => {
     theme.init();
+    i18n.init();
     router.init();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
     await consumeNsecFromHash();

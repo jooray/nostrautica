@@ -12,8 +12,10 @@
 import {
   finalizeEvent,
   getPublicKey,
+  generateSecretKey,
   type VerifiedEvent,
 } from "nostr-tools/pure";
+import { nsecEncode } from "nostr-tools/nip19";
 
 import {
   KIND_GIFT_WRAP,
@@ -30,8 +32,11 @@ import {
   blindedD,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
+  inviteListContentSchema,
   isInviteValid,
+  inviteHash,
   buildEventConfig,
+  KIND_INVITE_LIST,
   KIND_COORDINATOR_GRANT,
   type InviteProof,
   type AttendeeProfile,
@@ -275,6 +280,72 @@ function buildRosterEvent(
 function splitCoordinate(coordinate: string): { identifier: string } {
   const parts = coordinate.split(":");
   return { identifier: parts.slice(2).join(":") };
+}
+
+export interface GeneratedInvite {
+  label: string;
+  nsec: string; // the invite code (an nsec, spec §6.5)
+  link: string; // #/e/:naddr/join?code=<nsec>
+}
+
+/**
+ * Generate N single-use invite codes (spec §6.5). Each code IS an nsec; the
+ * organizer publishes only sha256(invite-pubkey) in a replaceable 31601 (so
+ * observers can't enumerate or front-run codes). The nsec rides the link's URL
+ * fragment and never touches a server.
+ */
+export async function generateInvites(
+  organizer: AppSigner,
+  ctx: EventContext,
+  count: number,
+  appBaseUrl: string,
+  labelPrefix = "invite",
+): Promise<GeneratedInvite[]> {
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
+  const eidSk = hexToBytes(keys.eidNsecHex);
+
+  // Merge with any already-published invite hashes (replaceable event).
+  const existing = await fetchEvents(
+    { kinds: [KIND_INVITE_LIST], authors: [ctx.config.eidPubkey], "#d": [splitCoordinate(ctx.coordinate).identifier] },
+    ctx.config.relays,
+  );
+  const latest = existing.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  let invites: { h: string; label?: string }[] = [];
+  if (latest) {
+    try {
+      invites = inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
+    } catch {
+      invites = [];
+    }
+  }
+
+  const generated: GeneratedInvite[] = [];
+  const base = appBaseUrl.replace(/[#/]+$/, "");
+  for (let i = 0; i < count; i++) {
+    const sk = generateSecretKey();
+    const label = `${labelPrefix}-${invites.length + 1}`;
+    invites.push({ h: inviteHash(getPublicKey(sk)), label });
+    const nsec = nsecEncode(sk);
+    generated.push({
+      label,
+      nsec,
+      link: `${base}/#/e/${encodeURIComponent(ctx.naddr)}/join?code=${nsec}`,
+    });
+  }
+
+  const identifier = splitCoordinate(ctx.coordinate).identifier;
+  const event = finalizeEvent(
+    {
+      kind: KIND_INVITE_LIST,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "1"]],
+      content: JSON.stringify({ v: 1, invites }),
+    },
+    eidSk,
+  );
+  await publishOrQueue(event, ctx.config.relays);
+  return generated;
 }
 
 /**
