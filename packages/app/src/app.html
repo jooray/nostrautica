@@ -6,12 +6,17 @@
     <meta name="theme-color" content="#0b0b12" />
     <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
     <!--
-      CSP (spec §14): no third-party scripts; only relays (wss) and Blossom (https)
-      for network. Kept as a meta tag so it applies on dumb static hosts and nsite.
+      CSP (spec §14). The real goal is blocking THIRD-PARTY/external scripts and
+      limiting network to relays (wss) + Blossom (https) — enforced by the absence
+      of any external host in script-src/connect-src. 'unsafe-inline' is allowed for
+      scripts so SvelteKit's inline bootstrap runs AND NIP-07 signer extensions
+      (which inject inline content scripts) keep working; the app uses no {@html},
+      so there is no untrusted-HTML injection vector. Kept as a meta so it applies
+      on any dumb static host and on nsite.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' blob:; connect-src 'self' wss: https:; worker-src 'self' blob:; manifest-src 'self'"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' blob:; connect-src 'self' wss: https:; worker-src 'self' blob:; manifest-src 'self'"
     />
     %sveltekit.head%
   </head>
