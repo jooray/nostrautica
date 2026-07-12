@@ -99,6 +99,8 @@ Local-key users get multi-device by opening their emailed link or importing the 
 For users who arrived without Nostr, every profile-ish action publishes real, standard Nostr events, so that by the end of the event they own a working Nostr identity:
 
 1. **Profile creation.** When the user sets display name / picture / description: **first fetch any existing kind 0** for this pubkey from a broad relay set (the key may be imported, or created earlier). Merge: update only fields the user edited, preserve all unknown JSON fields. Then publish kind 0. Never blind-overwrite. Profile pictures upload to Blossom (public, unencrypted) and go into `picture`.
+
+   **Kind-0 write policy (implemented).** The client publishes/edits kind 0 **only for a key it generated itself** (the normie path where we are certain the user is brand-new). At join time: a user we just created a key for enters name + bio (labelled *public*) which we publish as their kind 0; an **existing Nostr user** (NIP-07 / NIP-46 / imported / returning local key) has their name + bio **fetched read-only from kind 0 and shown with a loading indicator** — we never modify their kind 0. Event-specific fields (skills, "looking for") live only in the encrypted submission, never in kind 0.
 2. **Relay list.** Publish kind 10002 (NIP-65) with sensible defaults so other clients find the user and the user finds content: `wss://relay.primal.net`, `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band` (read). Skip if the user already has a kind 10002.
 3. **Follows.** The "Follow" button on attendee profiles publishes a **kind-3 update**. **Always fetch the current kind 3 first and append** — publishing kind 3 without merging silently wipes the user's existing follow list (the classic Nostr data-loss footgun). Dedupe by pubkey; keep existing relay/petname fields of untouched entries.
 4. **The hand-off moment.** A "Your Nostr profile is ready" screen (end of onboarding + always in `#/me`): explains they own a portable identity, shows their npub, offers the nsec/ncryptsec, and links to Primal, Damus, Amethyst, Yakihonne. Message: *paste your key into any of these and you'll instantly see posts from the people you followed at this event.*
@@ -159,6 +161,7 @@ Privacy note: reusing the identical blob means the ciphertext hash publicly link
 Pairwise reasoning ("you should meet her because your startup lacks exactly her skill") is the most sensitive derived data in the system, so:
 
 - **Default `match_visibility: "pair"`** — the coordinator publishes one **match list per attendee** (kind 31605), NIP-44-encrypted coordinator→attendee. A pair's score/reasoning is visible only to its two members (each via their own list). N events, not N².
+- **Reasoning is directional.** Pair scoring emits two reasonings — one addressed to each member ("why *you* should meet them", grounded in that recipient's own goals) — stored per-direction; each attendee's list surfaces the reasoning written *for them*. It answers "why should I meet him/her?" from the reader's perspective, not a symmetric blurb. Scores (score/similarity/complementarity) are decimals in [0,1]; the coordinator defensively clamps/rescales provider output that ignores the range.
 - **Opt-in `match_visibility: "event"`** — additionally a full score matrix (kind 31606) under ECK, for facilitated events that project a "best matches" board.
 
 ### 6.5 Invite codes
@@ -188,7 +191,7 @@ Known metadata leak (accepted, documented): the *count* of directory entries per
 
 Reused standard kinds: **0** profile, **1** notes, **3** follows, **6** reposts, **10002** relay list, **10063** Blossom server list, **1059** gift wrap (NIP-59), **30078** app data (NIP-78), **31923/31924/31925** NIP-52 event/calendar/RSVP.
 
-Custom kinds: addressable block **31600–31609** and gift-wrap **rumor kinds 21600–21604**. Rumor kinds sit in the ephemeral range deliberately: rumors are never published directly, and if one ever leaks as a signed event through a client bug, relays won't store it. Every payload is versioned: public events carry `["v","1"]`; encrypted JSON payloads carry `"v": 1`.
+Custom kinds: addressable block **31600–31609** and gift-wrap **rumor kinds 21600–21605**. Rumor kinds sit in the ephemeral range deliberately: rumors are never published directly, and if one ever leaks as a signed event through a client bug, relays won't store it. Every payload is versioned: public events carry `["v","1"]`; encrypted JSON payloads carry `"v": 1`.
 
 Gift-wrap mechanics per NIP-59: rumor (unsigned) → seal kind 13 (NIP-44, signed by true author, empty tags) → wrap kind 1059 (random one-time key, single `p` tag = recipient, `created_at` randomized up to 2 days in the past). Consumers must query with `since = now − 3 days` overlap and dedupe by rumor id.
 
@@ -258,9 +261,16 @@ content: {"v":1, "a": <coordinate>, "inbox_nsec":"<hex>",
 **rumor kind 21604 — Admin Command** (organizer → coordinator)
 ```
 content: {"v":1, "a": <coordinate>,
-          "cmd": "recompute" | "reprocess" | "revoke", "args": { … }}
+          "cmd": "approve" | "recompute" | "reprocess" | "revoke", "args": { … }}
 ```
-`recompute` = full match recompute; `reprocess` = re-run pipeline for a pubkey; `revoke` = remove attendee + trigger ECK rotation.
+`approve` = grant + publish directory/roster for `args.pubkey` (manual approval routed through the coordinator so directory/roster are authored under the coordinator key); `recompute` = full match recompute (clears the pair cache so every pair is re-scored); `reprocess` = re-run pipeline for a pubkey; `revoke` = remove attendee + trigger ECK rotation. Admin commands are sealed by `E_id` (the coordinator authenticates them as coming from the event authority).
+
+**rumor kind 21605 — Organizer Grant** (→ co-organizer; spec §6.1, §13 "multi-organizer")
+```
+content: {"v":1, "a": <coordinate>, "eid_nsec":"<hex>", "einbox_nsec":"<hex>",
+          "eck":[…], "config_relays":["wss://…"], "granted_by": <organizer-pubkey-hex>}
+```
+Grants a co-organizer **full key custody** — E_id + E_inbox + ECK — so they can edit the event, approve/revoke attendees, and manage the coordinator. The recipient's client stores it as an organizer key record on the normal grant-receiving scan. (Scoped roles — approve-only vs full custody — remain future work, §13.)
 
 ### 7.3 Encrypted addressable events
 
@@ -518,4 +528,35 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 | nsite gateway behavior (404-status fallback, header policy, manifest sync interval) | test deploy against target gateway (e.g. nsite.lol) |
 | NDK v3 / nostr-tools / blossom-client-sdk APIs | pin versions at P0; notes in IMPLEMENTATION_PLAN.md |
 | Amber NIP-46 behavior (per-connection keys, `logout`) | test against current Amber release |
-| Custom kind collisions (31600–31609, 21600–21604 unassigned as of 2026-07) | re-check nostr-protocol/nips registry before first release |
+| Custom kind collisions (31600–31609, 21600–21605 unassigned as of 2026-07) | re-check nostr-protocol/nips registry before first release |
+
+---
+
+## 16. Implementation notes & deviations (v1, as built)
+
+This section records concrete decisions and small deviations made while building and running v1 (the sections above remain normative intent; this documents *as-built* reality).
+
+### 16.1 Custom kinds — additions
+- **21605 Organizer Grant** (co-organizer full key custody, §7.2).
+- **21604 Admin Command** gained an `approve` command (§7.2). Admin commands are sealed by `E_id`.
+- Rumor-kind range is now **21600–21605**; re-check the NIPs registry before public release (§15).
+
+### 16.2 Coordinator
+- **Store:** Node's built-in `node:sqlite` (Node ≥ 22.5) instead of `better-sqlite3` — same synchronous embedded-SQLite semantics as §9.1 intends, no fragile native build. Requires Node ≥ 22.5 (CI/Docker pin Node 24).
+- **Install-time subscription:** on receiving a `21603` grant while already running, the coordinator subscribes to that event's `E_inbox` immediately (idempotently); `since = now − 3d` backfills join requests/submissions published before it was attached.
+- **Manual approval with a coordinator:** the organizer's Approve routes through the coordinator via a `21604 approve` command so the directory/roster are authored under the coordinator key (which is where attendees look for them). Without a coordinator, the organizer publishes them signed by `E_id`.
+- **Matching:** pair scoring returns **directional reasoning** (`reasoning_for_a` / `reasoning_for_b`); scores are clamped/rescaled to [0,1] defensively. `recompute` clears the pair cache before re-scoring.
+- **Venice adapter:** requests set `venice_parameters` `{ disable_thinking:true, include_venice_system_prompt:false, strip_thinking_response:true }` and a higher default `max_tokens` — reasoning models otherwise spend the whole budget on chain-of-thought and return empty content.
+
+### 16.3 Client
+- **PWA auto-update:** on detecting a new deploy the app reloads itself (no "click to reload"): `autoUpdate` (skipWaiting + clientsClaim) + a guarded `controllerchange` reload; update checks run every 60s / on focus / on reconnect, fetching `sw.js` with `cache:'no-store'`. Classic hosts that cache `sw.js` aggressively still update because `registration.update()` bypasses the HTTP cache per the SW spec.
+- **Relay publish resilience:** a publish succeeds if it reaches ≥1 relay; a global `unhandledrejection` guard swallows expected relay rejections (rate-limited, timeout, PoW, auth-required, duplicate…) so a slow relay's late `OK=false` (NDK orphan-promise) never surfaces as an uncaught error.
+- **NIP-46 (Amber) session persistence:** the bunker pointer + client key are stored in IndexedDB and reconnected via `BunkerSigner.fromBunker` on refresh, so remote-signer logins survive reloads. The nostrconnect flow also offers an "Open in Amber" deep link + copy button alongside the QR.
+- **Event images:** two optional public (unencrypted) Blossom images — a small **icon** (E_id kind-0 `picture`) and a wide **banner** (31923 `image` / kind-0 `banner`) — with deterministic generated-gradient fallbacks; surfaced via an `EventHeader` used across attendee-facing pages.
+- **Navigation:** bottom nav bar; a "My events" list backfilled from the local key store (so events you created/joined always reappear), deduped by event coordinate; a smart Back button (in-app history + contextual-parent fallback); an in-memory event-context cache so event sub-pages render instantly.
+- **kind-0 write policy:** see §5.4 item 1 — publish only for self-generated keys; existing users are read-only.
+- **CSP (as deployed):** `script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'`. `'unsafe-inline'` is allowed so SvelteKit's inline bootstrap and NIP-07 signer extensions work; there is still no external script host and no `'unsafe-eval'` (NDK's tseep emitter is patched to its eval-free variant). No `{@html}` on untrusted content, so inline-script XSS is not a vector.
+
+### 16.4 Reference deployment (cypherpunk.today)
+- PWA served at `https://cypherpunk.today/nostrautica/` (built with `BASE_PATH=/nostrautica`).
+- Coordinator on Venice: STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; match `zai-org-glm-5-2`; embed `text-embedding-bge-m3` (all Venice private-tier; `require_private=true`). No Cashu.

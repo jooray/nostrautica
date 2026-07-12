@@ -197,3 +197,22 @@ Acceptance:
 ## 4. Definition of done (v1)
 
 A stranger can: open an invite link on a phone, register with just a display name, record a 90-second intro, get auto-approved, watch other attendees' intros, read an AI-written explanation of who to meet and why, follow people with one tap — and afterwards paste their key into Primal and find their profile, follows, and feed already alive. The organizer did nothing but create the event, send links, and attach a coordinator. Everything except the coordinator ran as static files served from Nostr itself.
+
+---
+
+## 5. Build status (as implemented)
+
+All phases **P0–P6 are implemented** (monorepo `packages/protocol`, `packages/app`, `packages/coordinator`, `e2e/`). Unit tests pass across packages (protocol + coordinator + app). A live reference deployment runs at `https://cypherpunk.today/nostrautica/` with a Venice-backed coordinator. See SPECIFICATION.md §16 for as-built protocol/architecture notes; the key deltas from this plan:
+
+- **Coordinator store:** `node:sqlite` (built-in, Node ≥ 22.5) instead of `better-sqlite3` — avoids a native build; CI/Docker pin Node 24.
+- **Providers verified live (Venice):** STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; match `zai-org-glm-5-2`; embed `text-embedding-bge-m3` (all private-tier). Reasoning models require `venice_parameters.disable_thinking` + suppressing Venice's system prompt, and pair scores are clamped to [0,1].
+- **Matching:** directional per-recipient reasoning (`reasoning_for_a`/`reasoning_for_b`).
+- **Co-organizers (multi-admin):** `21605` organizer grant (full key custody); manual approval routed through the coordinator via `21604 approve`.
+- **PWA:** automatic reload on new deploy (no prompt); relay-publish resilience (partial-success + benign-error guard); NIP-46 (Amber) session persistence.
+- **CSP:** `script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'` — tseep (NDK's emitter) is `pnpm patch`ed to its eval-free variant so no `'unsafe-eval'` is needed.
+- **UX added beyond the plan:** event icon+banner images, `EventHeader`, bottom navigation, "My events" (backfilled from the local key store), smart Back button, event-context cache for instant navigation, shared sign-in component, kind-0 write policy (publish only for self-generated keys; existing users read-only).
+
+### Remaining / manual-verification items
+- Playwright e2e specs are scaffolded (`e2e/`); the full-loop specs run against the dockerized relay + Blossom (`docker/docker-compose.yml`) and are gated behind `NOSTRAUTICA_E2E_RELAY`.
+- nsite deploy (`nsyte`) is wired in CI but the primary reference deploy currently targets a classic static host (nginx). On that host `sw.js` is served with a long `max-age`; PWA updates still work because the SW update check bypasses the HTTP cache, but serving `sw.js`/`index.html` as `no-cache` (spec §10.2) is preferred.
+- Custom kinds (`31600–31609`, `21600–21605`) remain to be re-checked against the NIPs registry before public release.
