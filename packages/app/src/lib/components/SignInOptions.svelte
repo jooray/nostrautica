@@ -72,7 +72,7 @@
   {/if}
 
   <div>
-    <div class="field-label">Remote signer (Amber)</div>
+    <div class="field-label">Remote signer</div>
     {#if nc}
       <p class="muted">Scan this with Amber, or open it directly on this device:</p>
       <QrCode data={nc.uri} />
@@ -86,8 +86,9 @@
       </div>
       <p class="muted" style="margin-top:0.5rem">Waiting for the signer to approve…</p>
     {:else}
+      <p class="muted" style="margin:0 0 0.5rem">such as Amber on Android, or Clave</p>
       <button class="btn" onclick={startNostrConnect} disabled={busy}>
-        Connect with Amber
+        Connect with Remote Signer
       </button>
     {/if}
   </div>
