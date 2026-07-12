@@ -2,6 +2,7 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
+  import { uploadPublicImage } from "$lib/media/image.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
@@ -10,6 +11,16 @@
   let busy = $state(false);
   let showExisting = $state(false);
   let newName = $state("");
+  let picFile = $state<File | null>(null);
+  let picPreview = $state("");
+
+  function onPicFile(e: Event) {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    if (picPreview) URL.revokeObjectURL(picPreview);
+    picFile = f;
+    picPreview = URL.createObjectURL(f);
+  }
 
   const createNew = () => {
     error = null;
@@ -17,9 +28,14 @@
     (async () => {
       try {
         await session.createLocalKey();
-        if (newName.trim() && session.signer) {
-          await publishProfile(session.signer, { name: newName.trim() }).catch(() => {});
-          await ensureRelayList(session.signer).catch(() => {});
+        const signer = session.signer;
+        if (signer) {
+          let picture: string | undefined;
+          if (picFile) picture = await uploadPublicImage(signer, picFile).catch(() => undefined);
+          if (newName.trim() || picture) {
+            await publishProfile(signer, { name: newName.trim() || undefined, picture }).catch(() => {});
+          }
+          await ensureRelayList(signer).catch(() => {});
         }
         // Stay so the freshly-generated key's backup card shows.
       } catch (e) {
@@ -78,6 +94,17 @@
       New to this? No problem — we'll set up a Nostr account for you. No password,
       no jargon.
     </p>
+    <div class="row" style="gap:0.75rem;align-items:center;margin-bottom:0.5rem">
+      <label style="cursor:pointer;flex:none;margin:0">
+        {#if picPreview}
+          <img src={picPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
+        {:else}
+          <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;font-size:1.4rem;color:var(--text-dim)">＋</span>
+        {/if}
+        <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
+      </label>
+      <div class="muted" style="font-size:0.85rem">Photo <span class="badge">public</span><br />tap to add</div>
+    </div>
     <label for="nm">Your name</label>
     <input id="nm" bind:value={newName} placeholder="How should people know you?" />
     <button class="btn primary" style="margin-top:0.75rem" onclick={createNew} disabled={busy}>
