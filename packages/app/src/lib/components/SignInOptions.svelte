@@ -15,6 +15,14 @@
   let nc = $state<NostrConnectHandle | null>(null);
   let pasteKey = $state("");
   let pastePw = $state("");
+  let copiedUri = $state(false);
+
+  async function copyUri() {
+    if (!nc) return;
+    await navigator.clipboard.writeText(nc.uri);
+    copiedUri = true;
+    setTimeout(() => (copiedUri = false), 1500);
+  }
 
   const looksLikeBunker = $derived(pasteKey.trim().startsWith("bunker://"));
 
@@ -66,12 +74,20 @@
   <div>
     <div class="field-label">Remote signer (Amber)</div>
     {#if nc}
+      <p class="muted">Scan this with Amber, or open it directly on this device:</p>
       <QrCode data={nc.uri} />
-      <p class="mono">{nc.uri}</p>
-      <p class="muted">Waiting for the signer to approve…</p>
+      <!-- Tapping opens Amber (nostrconnect:// deep link) on the same device. -->
+      <a class="btn primary" href={nc.uri} style="margin-top:0.5rem">Open in Amber</a>
+      <div class="row" style="margin-top:0.5rem">
+        <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{nc.uri}</span>
+        <button class="btn inline" style="flex:none" onclick={copyUri}>
+          {copiedUri ? "Copied ✓" : "Copy"}
+        </button>
+      </div>
+      <p class="muted" style="margin-top:0.5rem">Waiting for the signer to approve…</p>
     {:else}
       <button class="btn" onclick={startNostrConnect} disabled={busy}>
-        Scan a QR with Amber
+        Connect with Amber
       </button>
     {/if}
   </div>
