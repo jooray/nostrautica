@@ -59,14 +59,6 @@
     {#if ctx.config.coordinator}<span class="badge">AI coordinator attached</span>{/if}
   </div>
 
-  {#if ctx.config.coordinator}
-    <p class="muted" style="margin-top:0.5rem">
-      This event's AI matchmaking is operated by a coordinator chosen by the
-      organizer. It can read event-encrypted content but cannot impersonate the
-      event (spec §4.2).
-    </p>
-  {/if}
-
   <div class="card stack">
     {#if organizer}
       <button class="btn primary" onclick={() => router.go({ name: "admin", naddr })}>

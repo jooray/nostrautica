@@ -33,7 +33,14 @@ function tag(tags: string[][], name: string): string | undefined {
 }
 
 export async function loadEventContext(naddr: string): Promise<EventContext> {
-  const { coordinate, relays } = naddrToCoordinate(naddr);
+  let decoded: { coordinate: string; relays: string[] };
+  try {
+    decoded = naddrToCoordinate(naddr);
+  } catch (e) {
+    console.error("Bad event address:", JSON.stringify(naddr), e);
+    throw new Error("This event link looks invalid. Please reopen it from your invite or events list.");
+  }
+  const { coordinate, relays } = decoded;
   if (relays.length) addRelays(relays);
   const { pubkey, identifier } = parseCoordinate(coordinate);
 

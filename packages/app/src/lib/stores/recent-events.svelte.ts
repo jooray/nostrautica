@@ -3,6 +3,8 @@
  * joined, or opened, so they can always navigate back to them from Home. This is
  * a convenience cache (the authoritative membership is the key material + relays).
  */
+import { naddrToCoordinate } from "@nostrautica/protocol";
+
 export interface RecentEvent {
   coordinate: string; // stable identity (naddr relay hints can vary)
   naddr: string;
@@ -14,12 +16,46 @@ export interface RecentEvent {
 
 const KEY = "nostrautica:recent-events";
 const MAX = 30;
+const RANK = { visitor: 0, attendee: 1, organizer: 2 } as const;
+
+function coordOf(e: RecentEvent): string {
+  if (e.coordinate) return e.coordinate;
+  try {
+    return naddrToCoordinate(e.naddr).coordinate; // backfill legacy entries
+  } catch {
+    return e.naddr;
+  }
+}
+
+/** Collapse entries that refer to the same event (by coordinate). */
+function dedupe(list: RecentEvent[]): RecentEvent[] {
+  const byCoord = new Map<string, RecentEvent>();
+  for (const raw of list) {
+    const coordinate = coordOf(raw);
+    const e = { ...raw, coordinate };
+    const prior = byCoord.get(coordinate);
+    if (!prior) {
+      byCoord.set(coordinate, e);
+      continue;
+    }
+    // Merge: highest role, most-recent timestamp, prefer a real title/icon.
+    byCoord.set(coordinate, {
+      coordinate,
+      naddr: e.at >= prior.at ? e.naddr : prior.naddr,
+      title: (e.at >= prior.at ? e.title : prior.title) || prior.title || e.title,
+      role: RANK[e.role] >= RANK[prior.role] ? e.role : prior.role,
+      icon: e.icon ?? prior.icon,
+      at: Math.max(e.at, prior.at),
+    });
+  }
+  return [...byCoord.values()].sort((a, b) => b.at - a.at).slice(0, MAX);
+}
 
 function load(): RecentEvent[] {
   if (typeof localStorage === "undefined") return [];
   try {
     const raw = localStorage.getItem(KEY);
-    return raw ? (JSON.parse(raw) as RecentEvent[]) : [];
+    return dedupe(raw ? (JSON.parse(raw) as RecentEvent[]) : []);
   } catch {
     return [];
   }
@@ -29,7 +65,9 @@ class RecentEvents {
   list = $state<RecentEvent[]>([]);
 
   init(): void {
-    this.list = load().sort((a, b) => b.at - a.at);
+    const cleaned = load(); // migrates legacy entries + dedupes
+    if (typeof localStorage !== "undefined") localStorage.setItem(KEY, JSON.stringify(cleaned));
+    this.list = cleaned;
   }
 
   /**
