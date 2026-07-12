@@ -27,54 +27,90 @@
   let busy = $state(false);
   let sent = $state(false);
   let approved = $state(false);
+  let showSignIn = $state(false);
 
-  let name = $state("");
-  let about = $state("");
+  // New-user (we generate the key) editable fields — these become the kind-0 profile.
+  let newName = $state("");
+  let newAbout = $state("");
+  // Existing-Nostr-user profile, fetched read-only from their kind-0 (never edited).
+  let profileLoading = $state(false);
+  let profileLoaded = $state(false);
+  let existingName = $state("");
+  let existingAbout = $state("");
+  // Event-specific fields (not part of kind-0), editable for everyone.
   let skills = $state("");
   let lookingFor = $state("");
   let rsvpPublic = $state(false);
-  let showSignIn = $state(false);
 
   onMount(async () => {
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
-      // Pre-fill the name for a returning Nostr user from their existing profile.
-      if (session.signer && !name) {
-        const pubkey = await session.signer.getPublicKey();
-        const me = await fetchProfiles([pubkey]).catch(() => new Map());
-        name = me.get(pubkey)?.name ?? "";
-      }
     } catch (e) {
       if (!ctx) error = e instanceof Error ? e.message : String(e);
     }
   });
 
+  // When signed in (already, or via the sign-in options here), load the profile
+  // from kind-0 — read-only. We never modify an existing user's kind-0.
+  $effect(() => {
+    if (session.loggedIn && !profileLoaded && !profileLoading) void loadExistingProfile();
+  });
+
+  async function loadExistingProfile() {
+    if (!session.signer) return;
+    profileLoading = true;
+    try {
+      const pubkey = await session.signer.getPublicKey();
+      const me = await fetchProfiles([pubkey]);
+      existingName = me.get(pubkey)?.name ?? "";
+      existingAbout = me.get(pubkey)?.about ?? "";
+    } catch {
+      /* leave blank */
+    } finally {
+      profileLoading = false;
+      profileLoaded = true;
+    }
+  }
+
   async function submit() {
     error = null;
     if (!ctx) return;
-    if (!name.trim()) {
-      error = "Please enter a display name.";
-      return;
-    }
     busy = true;
     try {
-      // First-timers get an identity created automatically — no separate step.
-      if (!session.loggedIn) await session.createLocalKey();
+      let displayName: string;
+      let about: string;
+
+      if (!session.loggedIn) {
+        // Brand-new user we're creating a key for — these fields ARE the profile.
+        if (!newName.trim()) {
+          error = "Please enter a display name.";
+          return;
+        }
+        await session.createLocalKey();
+        const signer = session.signer!;
+        displayName = newName.trim();
+        about = newAbout.trim();
+        // Only for a key WE generated do we publish kind-0 (§5.4).
+        await publishProfile(signer, { name: displayName, about });
+        await ensureRelayList(signer);
+      } else {
+        // Existing Nostr user — use their kind-0 profile as-is; never touch it.
+        if (!profileLoaded) await loadExistingProfile();
+        displayName = existingName;
+        about = existingAbout;
+      }
+
       const signer = session.signer!;
-
-      await publishProfile(signer, { name: name.trim(), about: about.trim() });
-      await ensureRelayList(signer);
-
       const blindingKey = await deriveBlindingKey(signer);
       await sendJoinRequest(
         signer,
         ctx,
         {
-          name: name.trim(),
+          name: displayName,
           rsvpPublic,
           profile: {
-            about: about.trim(),
+            about,
             skills: skills.split(",").map((s) => s.trim()).filter(Boolean),
             looking_for: lookingFor.trim(),
             links: [],
@@ -154,14 +190,36 @@
   {/if}
 
   <div class="card stack">
-    <div>
-      <label for="n">Display name</label>
-      <input id="n" bind:value={name} placeholder="How should people know you?" />
-    </div>
-    <div>
-      <label for="a">About you</label>
-      <textarea id="a" rows="3" bind:value={about}></textarea>
-    </div>
+    {#if session.loggedIn}
+      <!-- Existing Nostr user: profile shown read-only from their kind-0. -->
+      {#if profileLoading}
+        <p class="muted">Fetching your Nostr profile…</p>
+      {:else}
+        <div>
+          <div class="field-label">Display name</div>
+          <p style="margin:0">{existingName || "(no name set in your Nostr profile)"}</p>
+        </div>
+        {#if existingAbout}
+          <div>
+            <div class="field-label">About you</div>
+            <p class="muted" style="margin:0">{existingAbout}</p>
+          </div>
+        {/if}
+        <p class="muted">From your Nostr profile — we won't change it.</p>
+      {/if}
+    {:else}
+      <!-- New user: name + bio become the public Nostr profile. -->
+      <p class="muted">Your name and bio become your public Nostr profile.</p>
+      <div>
+        <label for="n">Display name <span class="muted" style="font-weight:400">(public)</span></label>
+        <input id="n" bind:value={newName} placeholder="How should people know you?" />
+      </div>
+      <div>
+        <label for="a">About you <span class="muted" style="font-weight:400">(public)</span></label>
+        <textarea id="a" rows="3" bind:value={newAbout}></textarea>
+      </div>
+    {/if}
+
     <div>
       <label for="sk">Skills (comma-separated)</label>
       <input id="sk" bind:value={skills} placeholder="cryptography, rust, design" />
@@ -174,7 +232,7 @@
       <input type="checkbox" bind:checked={rsvpPublic} style="width:auto" />
       Publish a public RSVP (others can see I'm attending)
     </label>
-    <button class="btn primary" onclick={submit} disabled={busy}>
+    <button class="btn primary" onclick={submit} disabled={busy || profileLoading}>
       {busy ? "Sending…" : session.loggedIn ? "Send join request" : "Create identity & join"}
     </button>
   </div>
