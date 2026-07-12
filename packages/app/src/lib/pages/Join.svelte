@@ -15,6 +15,8 @@
   import { fetchProfiles } from "$lib/events/social.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import NostrichIcon from "$lib/components/NostrichIcon.svelte";
+  import SignInOptions from "$lib/components/SignInOptions.svelte";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 
   let { naddr, code }: { naddr: string; code?: string } = $props();
@@ -31,6 +33,7 @@
   let skills = $state("");
   let lookingFor = $state("");
   let rsvpPublic = $state(false);
+  let showSignIn = $state(false);
 
   onMount(async () => {
     try {
@@ -138,12 +141,16 @@
 {:else}
   <EventHeader {ctx} />
   <h1>Join {ctx.title}</h1>
+
   {#if !session.loggedIn}
-    <p class="muted">
-      Fill this in and you're in — we'll set up a Nostr identity for you, no
-      password needed. Already a Nostr user?
-      <a href="#/login" onclick={(e) => { e.preventDefault(); router.go({ name: "login" }); }}>Log in first</a>.
-    </p>
+    <button class="btn primary" style="padding:0.9rem;font-size:1.05rem" onclick={() => (showSignIn = !showSignIn)}>
+      <NostrichIcon size={24} />
+      Already a Nostr user? Sign in
+    </button>
+    {#if showSignIn}
+      <SignInOptions onSignedIn={() => (showSignIn = false)} />
+    {/if}
+    <div class="or-divider">or</div>
   {/if}
 
   <div class="card stack">
