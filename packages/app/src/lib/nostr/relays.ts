@@ -13,6 +13,12 @@ export const DEFAULT_RELAYS = [
 /** Read-oriented relay included in defaults for discovery breadth. */
 export const DEFAULT_READ_RELAYS = ["wss://relay.nostr.band"];
 
+/** Fallback Blossom servers when an event/user configures none (spec §11). */
+export const DEFAULT_BLOSSOM_SERVERS = [
+  "https://blossom.primal.net",
+  "https://cdn.satellite.earth",
+];
+
 /** NIP-65 relay-list defaults published for new users (spec §5.4 item 2). */
 export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean }[] = [
   { url: "wss://relay.primal.net", read: true, write: true },

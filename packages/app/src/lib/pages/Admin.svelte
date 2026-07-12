@@ -95,8 +95,12 @@
             {#each req.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
           </div>
         {/if}
+        {#if req.media?.length}<span class="badge">🎥 {req.media.length} video</span>{/if}
         {#if approvedSet.has(req.attendeePubkey)}
           <p class="muted">Approved ✓</p>
+          <button class="btn inline" onclick={() => approve(req)}>
+            Re-publish entry (pick up new videos)
+          </button>
         {:else}
           <button class="btn primary" onclick={() => approve(req)}>Approve</button>
         {/if}

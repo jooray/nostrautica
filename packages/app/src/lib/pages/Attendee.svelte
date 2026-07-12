@@ -10,6 +10,7 @@
   import { fetchDirectoryEntry } from "$lib/events/attendee.js";
   import { followUser, fetchFollowTags } from "$lib/events/nostr-actions.js";
   import { isFollowing } from "$lib/events/onboarding.js";
+  import MediaPlayer from "$lib/components/MediaPlayer.svelte";
 
   let { naddr, npub }: { naddr: string; npub: string } = $props();
 
@@ -83,6 +84,12 @@
 
   {#if kind0?.about || entry?.profile.about}
     <p style="margin-top:0.75rem">{entry?.profile.about || kind0?.about}</p>
+  {/if}
+
+  {#if entry?.media?.length}
+    {#each entry.media.filter((m) => m.kind === "intro") as m (m.x)}
+      <div style="margin:0.75rem 0"><MediaPlayer descriptor={m} /></div>
+    {/each}
   {/if}
 
   {#if entry?.profile.skills?.length}

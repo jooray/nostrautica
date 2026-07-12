@@ -33,6 +33,7 @@ import {
   isInviteValid,
   type InviteProof,
   type AttendeeProfile,
+  type MediaDescriptor,
   type EckVersion,
   type RosterContent,
 } from "@nostrautica/protocol";
@@ -51,6 +52,7 @@ export interface PendingRequest {
   message: string;
   rsvpPublic: boolean;
   profile?: AttendeeProfile;
+  media?: MediaDescriptor[];
   invite?: InviteProof;
   rumorCreatedAt: number;
 }
@@ -76,7 +78,10 @@ export async function fetchPending(
   )) as unknown as GiftWrap[];
 
   const byAttendee = new Map<string, PendingRequest>();
-  const submissions = new Map<string, { at: number; profile: AttendeeProfile }>();
+  const submissions = new Map<
+    string,
+    { at: number; profile: AttendeeProfile; media: MediaDescriptor[] }
+  >();
 
   for (const wrap of wraps) {
     let rumor;
@@ -109,7 +114,11 @@ export async function fetchPending(
         const parsed = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         const prev = submissions.get(rumor.pubkey);
         if (!prev || rumor.created_at > prev.at) {
-          submissions.set(rumor.pubkey, { at: rumor.created_at, profile: parsed.profile });
+          submissions.set(rumor.pubkey, {
+            at: rumor.created_at,
+            profile: parsed.profile,
+            media: parsed.media,
+          });
         }
       } catch {
         /* ignore malformed submission */
@@ -120,7 +129,10 @@ export async function fetchPending(
   // Fold submissions into their requests.
   for (const [pubkey, sub] of submissions) {
     const req = byAttendee.get(pubkey);
-    if (req) req.profile = sub.profile;
+    if (req) {
+      req.profile = sub.profile;
+      req.media = sub.media;
+    }
   }
   return [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
 }
@@ -178,7 +190,7 @@ export async function approveAttendee(
     v: 1,
     pubkey: req.attendeePubkey,
     profile: req.profile ?? { about: "", skills: [], looking_for: "", links: [] },
-    media: [],
+    media: req.media ?? [],
     updated_at: Math.floor(Date.now() / 1000),
   };
   const entryEvent = finalizeEvent(
