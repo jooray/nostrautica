@@ -1,0 +1,77 @@
+/**
+ * Transcription stage (spec §9.2). Fetch the encrypted blob from Blossom, verify
+ * + decrypt it, extract mono 16 kHz Opus audio (segmenting to fit the provider's
+ * byte limit), transcribe each segment, and concatenate. Cached by blob sha256
+ * so a restart never re-pays for a transcript.
+ */
+import { decryptMedia, sha256Hex, type MediaDescriptor } from "@nostrautica/protocol";
+import type { SttProvider } from "../providers/types.js";
+import type { Store } from "../store/db.js";
+import { extractAudioSegments } from "./audio.js";
+
+/** Download ciphertext from the first reachable mirror, verifying the hash. */
+export async function fetchBlob(
+  urls: string[],
+  expectedSha256: string,
+): Promise<Uint8Array> {
+  let lastErr: unknown;
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        lastErr = new Error(`${res.status} from ${url}`);
+        continue;
+      }
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (sha256Hex(bytes) !== expectedSha256) {
+        lastErr = new Error(`hash mismatch from ${url}`);
+        continue;
+      }
+      return bytes;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(`could not fetch blob ${expectedSha256}: ${lastErr}`);
+}
+
+export interface TranscribeDeps {
+  store: Store;
+  stt: SttProvider;
+  sttModel: string;
+  /** Injectable for tests; defaults to a real Blossom fetch. */
+  fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
+  now?: () => number;
+}
+
+/**
+ * Transcribe one media descriptor, using and updating the transcript cache.
+ * Returns the transcript text.
+ */
+export async function transcribeMedia(
+  deps: TranscribeDeps,
+  descriptor: MediaDescriptor,
+): Promise<string> {
+  const now = deps.now ?? (() => Date.now());
+  const cached = deps.store.getTranscript(descriptor.x);
+  if (cached !== undefined) return cached;
+
+  const download = deps.fetchBlob ?? fetchBlob;
+  const ciphertext = await download(descriptor.url, descriptor.x);
+  const plaintext = await decryptMedia(descriptor, ciphertext);
+
+  const caps = await deps.stt.capabilities();
+  const segments = await extractAudioSegments(plaintext, descriptor.m, caps.maxUploadBytes);
+
+  const parts: string[] = [];
+  for (const seg of segments) {
+    const { text } = await deps.stt.transcribe(
+      { data: seg.data, mime: seg.mime },
+      { model: deps.sttModel },
+    );
+    parts.push(text);
+  }
+  const transcript = parts.join(" ").trim();
+  deps.store.putTranscript(descriptor.x, transcript, now());
+  return transcript;
+}

@@ -31,6 +31,8 @@ import {
   joinRequestContentSchema,
   profileSubmissionContentSchema,
   isInviteValid,
+  buildEventConfig,
+  KIND_COORDINATOR_GRANT,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -273,4 +275,52 @@ function buildRosterEvent(
 function splitCoordinate(coordinate: string): { identifier: string } {
   const parts = coordinate.split(":");
   return { identifier: parts.slice(2).join(":") };
+}
+
+/**
+ * Attach a coordinator to the event (spec §8): republish the 31600 config with a
+ * `coordinator` tag (signed by E_id) and gift-wrap a Coordinator Grant (21603)
+ * carrying the E_inbox secret + ECK so it can read submissions. Installation is
+ * protocol-level — no per-event server config.
+ */
+export async function attachCoordinator(
+  organizer: AppSigner,
+  ctx: EventContext,
+  coordinatorPubkey: string,
+): Promise<void> {
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
+    throw new Error("organizer keys not available on this device");
+  }
+  const eidSk = hexToBytes(keys.eidNsecHex);
+
+  // 1. Republish 31600 with the coordinator tag (signed by E_id).
+  const cfg = { ...ctx.config, coordinator: coordinatorPubkey };
+  const built = buildEventConfig(cfg);
+  const configEvent = finalizeEvent(
+    {
+      kind: built.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: built.tags,
+      content: built.content,
+    },
+    eidSk,
+  );
+
+  // 2. Gift-wrap the Coordinator Grant (21603), sealed by the organizer.
+  const grantWrap = await signerWrap(organizer, coordinatorPubkey, {
+    kind: KIND_COORDINATOR_GRANT,
+    content: {
+      v: 1,
+      a: ctx.coordinate,
+      inbox_nsec: keys.einboxNsecHex,
+      eck: keys.eck,
+      config_relays: ctx.config.relays,
+    },
+  });
+
+  await Promise.all([
+    publishOrQueue(configEvent, ctx.config.relays),
+    publishOrQueue(grantWrap as any, ctx.config.relays),
+  ]);
 }

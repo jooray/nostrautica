@@ -7,8 +7,10 @@
   import {
     fetchPending,
     approveAttendee,
+    attachCoordinator,
     type PendingRequest,
   } from "$lib/events/organizer.js";
+  import { decode } from "nostr-tools/nip19";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -42,6 +44,31 @@
     }
   });
 
+  let coordinatorInput = $state("");
+  let attaching = $state(false);
+  let attached = $state(false);
+
+  async function attach() {
+    if (!ctx || !session.signer || !coordinatorInput.trim()) return;
+    attaching = true;
+    error = null;
+    try {
+      let pubkey = coordinatorInput.trim();
+      if (pubkey.startsWith("npub1")) {
+        const decoded = decode(pubkey);
+        if (decoded.type !== "npub") throw new Error("bad npub");
+        pubkey = decoded.data;
+      }
+      if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error("Enter an npub or 64-char hex pubkey");
+      await attachCoordinator(session.signer, ctx, pubkey);
+      attached = true;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      attaching = false;
+    }
+  }
+
   async function approve(req: PendingRequest) {
     if (!ctx || !session.signer) return;
     try {
@@ -71,6 +98,24 @@
   <div class="row" style="justify-content:space-between">
     <p class="muted">{pending.length} join request{pending.length === 1 ? "" : "s"}</p>
     <button class="btn inline" onclick={refresh}>Refresh</button>
+  </div>
+
+  <div class="card">
+    <div class="field-label">AI coordinator</div>
+    {#if ctx?.config.coordinator}
+      <p class="muted">Attached: <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
+    {:else if attached}
+      <p class="muted">Coordinator attached ✓ Matchmaking will begin as attendees are processed.</p>
+    {:else}
+      <p class="muted">
+        Paste the coordinator's npub to enable AI matchmaking. It can read
+        event-encrypted content but cannot impersonate the event (spec §4.2).
+      </p>
+      <input placeholder="npub1… (coordinator)" bind:value={coordinatorInput} />
+      <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
+        {attaching ? "Attaching…" : "Attach coordinator"}
+      </button>
+    {/if}
   </div>
 
   {#if ctx}

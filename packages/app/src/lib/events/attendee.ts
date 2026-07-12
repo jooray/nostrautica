@@ -8,15 +8,19 @@ import {
   KIND_KEY_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
+  KIND_MATCH_LIST,
   giftwrapSince,
   eckDecrypt,
   base64ToBytes,
+  blindedD,
   keyGrantContentSchema,
   directoryEntryContentSchema,
   rosterContentSchema,
+  matchListContentSchema,
   parseCoordinate,
   type DirectoryEntryContent,
   type RosterContent,
+  type MatchListContent,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -136,4 +140,33 @@ export async function fetchDirectoryEntry(
 ): Promise<DirectoryEntryContent | undefined> {
   const all = await fetchDirectory(ctx);
   return all.find((e) => e.pubkey === attendeePubkey);
+}
+
+/**
+ * Fetch + decrypt the signed-in attendee's own match list (kind 31605). The list
+ * is NIP-44-encrypted coordinator→recipient, so only the recipient can read the
+ * reasoning (spec §6.4). Returns undefined if there's no coordinator or no list.
+ */
+export async function fetchMatches(
+  signer: AppSigner,
+  ctx: EventContext,
+): Promise<MatchListContent | undefined> {
+  const coordinator = ctx.config.coordinator;
+  if (!coordinator) return undefined;
+  const eck = await eckBytesFor(ctx.coordinate);
+  if (!eck) return undefined;
+  const pubkey = await signer.getPublicKey();
+  const d = blindedD(eck, ctx.coordinate, pubkey);
+  const events = await fetchEvents(
+    { kinds: [KIND_MATCH_LIST], authors: [coordinator], "#d": [d] },
+    ctx.config.relays,
+  );
+  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  if (!latest) return undefined;
+  try {
+    const json = await signer.nip44Decrypt(coordinator, latest.content);
+    return matchListContentSchema.parse(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
 }

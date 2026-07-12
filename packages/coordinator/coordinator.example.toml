@@ -1,0 +1,43 @@
+# Nostrautica coordinator configuration (spec §9.5).
+# Installation is protocol-level (a 21603 grant from an organizer) — there is no
+# per-event server config here, only the daemon's identity, providers, and knobs.
+
+[identity]
+# Provide the secret key via env NOSTRAUTICA_COORDINATOR_NSEC (nsec or 64-hex),
+# or point at an NIP-49 encrypted key file and set NOSTRAUTICA_COORDINATOR_PASSPHRASE.
+ncryptsec_file = "coordinator.ncryptsec"
+
+[relays]
+default = ["wss://relay.primal.net", "wss://relay.damus.io"]
+
+[providers.venice]
+api_key_env = "VENICE_API_KEY"
+require_private = true            # restrict LLM selection to private/TEE-tier models
+
+# [providers.routstr]              # v2 (P6), Cashu-paid decentralized nodes
+# node_url = "https://api.routstr.com/v1"
+# mint = "https://mint.example"
+# wallet_db = "cashu-wallet.sqlite"
+
+[stt]
+provider = "venice-stt"           # or "local-whisper"
+model = "openai/whisper-large-v3"
+
+# Resolve these against GET /models at runtime — never hardcode volatile ids.
+[models.summary]
+provider = "venice"
+model = "qwen3-4b"                # cheap: nostr-context summaries
+
+[models.match]
+provider = "venice"
+model = "qwen3-235b"              # strong: profiles + pair scoring
+
+[models.embed]
+provider = "venice"
+model = "text-embedding-bge-m3"
+
+[matching]
+prefilter_threshold = 50          # below this many attendees, score everyone
+prefilter_top_m = 30              # top-M by cosine similarity
+prefilter_random = 10             # random low-similarity slice (complementarity!)
+top_k = 20                        # matches per attendee list
