@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.svelte-kit/
+coverage/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+coordinator.toml
+!coordinator.example.toml
+*.ncryptsec
+.pnpm-store/
