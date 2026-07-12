@@ -13,6 +13,7 @@
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
   import { fetchProfiles } from "$lib/events/social.js";
+  import { uploadPublicImage } from "$lib/media/image.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
@@ -32,11 +33,22 @@
   // New-user (we generate the key) editable fields — these become the kind-0 profile.
   let newName = $state("");
   let newAbout = $state("");
+  let newPicFile = $state<File | null>(null);
+  let newPicPreview = $state(""); // local object URL (uploaded on submit)
   // Existing-Nostr-user profile, fetched read-only from their kind-0 (never edited).
   let profileLoading = $state(false);
   let profileLoaded = $state(false);
   let existingName = $state("");
   let existingAbout = $state("");
+  let existingPicture = $state("");
+
+  function onPicFile(e: Event) {
+    const f = (e.target as HTMLInputElement).files?.[0];
+    if (!f) return;
+    if (newPicPreview) URL.revokeObjectURL(newPicPreview);
+    newPicFile = f;
+    newPicPreview = URL.createObjectURL(f);
+  }
   // Event-specific fields (not part of kind-0), editable for everyone.
   let skills = $state("");
   let lookingFor = $state("");
@@ -65,6 +77,7 @@
       const me = await fetchProfiles([pubkey]);
       existingName = me.get(pubkey)?.name ?? "";
       existingAbout = me.get(pubkey)?.about ?? "";
+      existingPicture = me.get(pubkey)?.picture ?? "";
     } catch {
       /* leave blank */
     } finally {
@@ -91,8 +104,13 @@
         const signer = session.signer!;
         displayName = newName.trim();
         about = newAbout.trim();
+        // Upload the chosen photo to public Blossom (needs the just-created signer).
+        let picture: string | undefined;
+        if (newPicFile) {
+          picture = await uploadPublicImage(signer, newPicFile, ctx.config.blossom);
+        }
         // Only for a key WE generated do we publish kind-0 (§5.4).
-        await publishProfile(signer, { name: displayName, about });
+        await publishProfile(signer, { name: displayName, about, picture });
         await ensureRelayList(signer);
       } else {
         // Existing Nostr user — use their kind-0 profile as-is; never touch it.
@@ -195,9 +213,14 @@
       {#if profileLoading}
         <p class="muted">Fetching your Nostr profile…</p>
       {:else}
-        <div>
-          <div class="field-label">Display name</div>
-          <p style="margin:0">{existingName || "(no name set in your Nostr profile)"}</p>
+        <div class="row" style="gap:0.75rem;align-items:center">
+          {#if existingPicture}
+            <img src={existingPicture} alt="" width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
+          {/if}
+          <div>
+            <div class="field-label">Display name</div>
+            <p style="margin:0">{existingName || "(no name set in your Nostr profile)"}</p>
+          </div>
         </div>
         {#if existingAbout}
           <div>
@@ -208,8 +231,19 @@
         <p class="muted">From your Nostr profile — we won't change it.</p>
       {/if}
     {:else}
-      <!-- New user: name + bio become the public Nostr profile. -->
-      <p class="muted">Your name and bio become your public Nostr profile.</p>
+      <!-- New user: name + bio + photo become the public Nostr profile. -->
+      <p class="muted">This becomes your public Nostr profile.</p>
+      <div class="row" style="gap:0.75rem;align-items:center">
+        <label style="cursor:pointer;flex:none;margin:0">
+          {#if newPicPreview}
+            <img src={newPicPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
+          {:else}
+            <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;font-size:1.4rem;color:var(--text-dim)">＋</span>
+          {/if}
+          <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
+        </label>
+        <div class="muted" style="font-size:0.85rem">Photo <span class="badge">public</span><br />tap to add</div>
+      </div>
       <div>
         <label for="n">Display name <span class="muted" style="font-weight:400">(public)</span></label>
         <input id="n" bind:value={newName} placeholder="How should people know you?" />
