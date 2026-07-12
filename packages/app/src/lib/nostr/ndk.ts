@@ -1,0 +1,88 @@
+/**
+ * NDK singleton + relay wiring (spec §10.1). Uses the Dexie (IndexedDB) cache so
+ * roster/directory/matches/profiles are available offline (spec §10.4).
+ *
+ * We sign events with the app's own signer (see signer/), then hand the already
+ * signed event to NDK for publishing — NDK is our relay transport, not our signer.
+ */
+import NDK, { NDKEvent, NDKRelaySet } from "@nostr-dev-kit/ndk";
+import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
+import NDKCacheAdapterDexie from "@nostr-dev-kit/cache-dexie";
+import type { VerifiedEvent } from "nostr-tools/pure";
+import { DEFAULT_RELAYS, DEFAULT_READ_RELAYS, unionRelays } from "./relays.js";
+
+let ndk: NDK | null = null;
+
+/** Get (lazily creating) the NDK singleton. Safe to call before connect(). */
+export function getNdk(): NDK {
+  if (ndk) return ndk;
+  ndk = new NDK({
+    explicitRelayUrls: unionRelays(DEFAULT_RELAYS, DEFAULT_READ_RELAYS),
+    cacheAdapter:
+      typeof indexedDB !== "undefined"
+        ? new NDKCacheAdapterDexie({ dbName: "nostrautica-cache" })
+        : undefined,
+    autoConnectUserRelays: false,
+  });
+  return ndk;
+}
+
+/** Connect to relays (idempotent enough for app boot). */
+export async function connectNdk(): Promise<NDK> {
+  const instance = getNdk();
+  await instance.connect(2000);
+  return instance;
+}
+
+/** Add relay URLs to the pool at runtime (event 31600 relays, user 10002). */
+export function addRelays(urls: string[]): void {
+  const instance = getNdk();
+  for (const url of urls) {
+    try {
+      instance.addExplicitRelay(url);
+    } catch {
+      /* ignore malformed URLs */
+    }
+  }
+}
+
+/** Build an NDKRelaySet from explicit URLs (or undefined for the whole pool). */
+export function relaySet(urls?: string[]): NDKRelaySet | undefined {
+  if (!urls || urls.length === 0) return undefined;
+  return NDKRelaySet.fromRelayUrls(urls, getNdk());
+}
+
+/** Publish an already-signed event to the given relays (or the default pool). */
+export async function publishSigned(
+  event: VerifiedEvent,
+  relays?: string[],
+): Promise<void> {
+  const ndkEvent = new NDKEvent(getNdk(), event as any);
+  await ndkEvent.publish(relaySet(relays));
+}
+
+/** Subscribe with a filter; caller handles events and cleanup. */
+export function subscribe(
+  filters: NDKFilter | NDKFilter[],
+  onEvent: (event: NDKEvent) => void,
+  relays?: string[],
+): NDKSubscription {
+  const sub = getNdk().subscribe(filters, { closeOnEose: false }, relaySet(relays));
+  sub.on("event", onEvent);
+  return sub;
+}
+
+/** One-shot fetch of matching events (uses cache first, then relays). */
+export async function fetchEvents(
+  filters: NDKFilter | NDKFilter[],
+  relays?: string[],
+): Promise<NDKEvent[]> {
+  const set = await getNdk().fetchEvents(
+    filters,
+    { closeOnEose: true },
+    relaySet(relays),
+  );
+  return [...set];
+}
+
+export { NDKEvent };

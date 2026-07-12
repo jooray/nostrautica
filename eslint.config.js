@@ -29,6 +29,8 @@ export default tseslint.config(
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
       "@typescript-eslint/no-explicit-any": "off",
+      // SvelteKit's app.d.ts declares empty App.* interfaces by design.
+      "@typescript-eslint/no-empty-object-type": "off",
       "no-restricted-imports": [
         "error",
         {
