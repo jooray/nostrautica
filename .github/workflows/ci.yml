@@ -21,3 +21,23 @@ jobs:
       - run: pnpm --filter @nostrautica/protocol build
       - run: pnpm check
       - run: pnpm --filter @nostrautica/app build
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nostrautica/protocol build
+      - run: pnpm --filter @nostrautica/app build
+      - run: pnpm --filter @nostrautica/e2e exec playwright install --with-deps chromium
+      # Dockerized relay + Blossom for the full-loop specs (skipped specs no-op).
+      - run: docker compose -f docker/docker-compose.yml up -d
+      - run: NOSTRAUTICA_E2E_RELAY=ws://localhost:7777 pnpm --filter @nostrautica/e2e test

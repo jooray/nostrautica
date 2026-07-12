@@ -24,10 +24,14 @@ import {
   KIND_KEY_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
+  KIND_DELETION,
   giftwrapSince,
   unwrapRumor,
   eckEncrypt,
+  eckDecrypt,
+  generateEck,
   base64ToBytes,
+  bytesToBase64,
   hexToBytes,
   blindedD,
   joinRequestContentSchema,
@@ -48,7 +52,7 @@ import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
-import { loadEventKeys, currentEck } from "./keystore.js";
+import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { signerWrap } from "./giftwrap.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
@@ -346,6 +350,105 @@ export async function generateInvites(
   );
   await publishOrQueue(event, ctx.config.relays);
   return generated;
+}
+
+/**
+ * Revoke an attendee client-side (no coordinator, spec §6.3, §8). Rotation is
+ * forward-only: mint ECK v(n+1), delete the removed entry (NIP-09), re-grant the
+ * new ECK to remaining attendees, and republish directory + roster under it. The
+ * removed attendee keeps only old versions and cannot read future content.
+ */
+export async function revokeAttendeeClient(
+  organizer: AppSigner,
+  ctx: EventContext,
+  removedPubkey: string,
+): Promise<void> {
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
+    throw new Error("organizer keys not available");
+  }
+  const eidSk = hexToBytes(keys.eidNsecHex);
+  const eidPubkey = ctx.config.eidPubkey;
+  const prevEck = currentEck(keys);
+  if (!prevEck) throw new Error("no ECK available");
+  const prevEckBytes = base64ToBytes(prevEck.key);
+
+  // 1. Delete the removed attendee's directory entry (NIP-09), addressed by its
+  //    blinded d under the current ECK.
+  const removedD = blindedD(prevEckBytes, ctx.coordinate, removedPubkey);
+  const deletion = finalizeEvent(
+    {
+      kind: KIND_DELETION,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["a", `${KIND_DIRECTORY_ENTRY}:${eidPubkey}:${removedD}`],
+        ["k", String(KIND_DIRECTORY_ENTRY)],
+      ],
+      content: "revoked",
+    },
+    eidSk,
+  );
+
+  // 2. Mint ECK v(n+1) and persist locally.
+  const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
+  const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
+  keys.eck = [...keys.eck, newEck];
+  await saveEventKeys(keys);
+  const newEckBytes = base64ToBytes(newEck.key);
+
+  // 3. Read the current roster, drop the removed attendee, re-encrypt everyone
+  //    else's directory entry under the new ECK, and re-grant to each.
+  const roster = await loadRoster(ctx, prevEckBytes, keys.eck);
+  const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
+  const publisher = directoryPublisher(ctx);
+  const newRoster: RosterContent = { v: 1, eck_current: newId, attendees: [] };
+  const pubs: Promise<unknown>[] = [publishOrQueue(deletion, ctx.config.relays)];
+
+  for (const a of remaining) {
+    // Fetch + decrypt the attendee's current entry (old ECK).
+    const events = await fetchEvents(
+      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": [a.d] },
+      ctx.config.relays,
+    );
+    const latest = events.sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))[0];
+    let content: unknown;
+    try {
+      content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
+    } catch {
+      content = undefined;
+    }
+    const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
+    newRoster.attendees.push({ pubkey: a.pubkey, d: newD, role: a.role });
+
+    if (content) {
+      const entryEvent = finalizeEvent(
+        {
+          kind: KIND_DIRECTORY_ENTRY,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "1"]],
+          content: eckEncrypt(newEckBytes, JSON.stringify(content)),
+        },
+        eidSk,
+      );
+      pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
+    }
+
+    // Re-grant the new ECK set (all versions) to this attendee.
+    const grantWrap = await signerWrap(organizer, a.pubkey, {
+      kind: KIND_KEY_GRANT,
+      content: {
+        v: 1,
+        a: ctx.coordinate,
+        role: a.role,
+        eck: keys.eck,
+        granted_by: await organizer.getPublicKey(),
+      },
+    });
+    pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
+  }
+
+  pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster), ctx.config.relays));
+  await Promise.all(pubs);
 }
 
 /**

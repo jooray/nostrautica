@@ -12,6 +12,8 @@ import { Coordinator, type Transport } from "./coordinator.js";
 import { verifyFfmpeg } from "./pipeline/audio.js";
 import { ApiKeyPayment } from "./providers/payment.js";
 import { VeniceLlm, VeniceStt } from "./providers/venice.js";
+import { RoutstrLlm } from "./providers/routstr.js";
+import { CashuPayment } from "./providers/cashu.js";
 import type { LlmProvider, SttProvider } from "./providers/types.js";
 
 async function main(): Promise<void> {
@@ -27,19 +29,41 @@ async function main(): Promise<void> {
   const coordPubkey = getPublicKey(coordSk);
   console.log(`[coordinator] identity ${npubEncode(coordPubkey)}`);
 
-  // Providers (v1: Venice).
+  // STT stays on Venice/local — Routstr has no STT today (spec §9.4).
   const apiKey = veniceApiKey(config);
-  if (!apiKey) throw new Error("No Venice API key (set the configured env var)");
-  const payment = new ApiKeyPayment(apiKey);
-  const veniceOpts = {
-    payment,
-    baseUrl: config.providers.venice?.base_url,
-    requirePrivate: config.providers.venice?.require_private ?? true,
-  };
-  const llm: LlmProvider = new VeniceLlm(veniceOpts);
+  const veniceOpts = apiKey
+    ? {
+        payment: new ApiKeyPayment(apiKey),
+        baseUrl: config.providers.venice?.base_url,
+        requirePrivate: config.providers.venice?.require_private ?? true,
+      }
+    : undefined;
+
+  // LLM: Routstr (Cashu-paid) if configured (v2 flag), else Venice (v1).
+  let llm: LlmProvider;
+  const nodeUrl = config.providers.routstr?.node_url;
+  if (nodeUrl) {
+    const r = config.providers.routstr!;
+    llm = new RoutstrLlm({
+      nodeUrl,
+      payment: new CashuPayment({
+        mintUrl: r.mint ?? "",
+        walletDbPath: r.wallet_db ?? "cashu-wallet.json",
+      }),
+    });
+    console.log(`[coordinator] LLM: Routstr ${nodeUrl} (Cashu)`);
+  } else {
+    if (!veniceOpts) throw new Error("No Venice API key and no Routstr node configured");
+    llm = new VeniceLlm(veniceOpts);
+    console.log("[coordinator] LLM: Venice");
+  }
+
   const stt: SttProvider =
     config.stt.provider === "venice-stt"
-      ? new VeniceStt(veniceOpts)
+      ? (() => {
+          if (!veniceOpts) throw new Error("venice-stt needs a Venice API key");
+          return new VeniceStt(veniceOpts);
+        })()
       : (() => {
           throw new Error("local-whisper STT not built in this daemon (set stt.provider = venice-stt)");
         })();

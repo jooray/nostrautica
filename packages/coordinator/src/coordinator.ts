@@ -7,7 +7,7 @@
  * The Nostr transport is injected (structural interface) so the whole thing is
  * unit-testable with an in-memory fake client and mock providers.
  */
-import { getPublicKey } from "nostr-tools/pure";
+import { getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import type { Event as NostrEvent } from "nostr-tools/core";
 import {
   KIND_GIFT_WRAP,
@@ -16,6 +16,8 @@ import {
   KIND_PROFILE_SUBMISSION,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
+  KIND_DIRECTORY_ENTRY,
+  KIND_DELETION,
   KIND_NOTE,
   KIND_REPOST,
   KIND_LONGFORM,
@@ -26,6 +28,7 @@ import {
   hexToBytes,
   bytesToBase64,
   blindedD,
+  generateEck,
   sha256Hex,
   utf8ToBytes,
   inviteListContentSchema,
@@ -495,12 +498,52 @@ export class Coordinator {
         this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
       }
     } else if (cmd === "revoke") {
-      // ECK rotation is implemented in P6 (spec §6.3). Mark the attendee removed.
       const pubkey = String(args.pubkey ?? "");
-      if (pubkey) {
-        this.deps.store.upsertAttendee({ coordinate, pubkey, status: "revoked", now: this.now() });
-      }
+      if (pubkey) await this.revokeAttendee(state, pubkey);
     }
+  }
+
+  /**
+   * Revoke an attendee and rotate the ECK (spec §6.3). Rotation is forward-only:
+   * old ciphertexts stay readable to old key-holders, but all FUTURE directory/
+   * roster/match content is encrypted under the new ECK, which the removed
+   * attendee never receives. Their directory entry is deleted (NIP-09).
+   */
+  async revokeAttendee(state: EventState, removedPubkey: string): Promise<void> {
+    const prev = this.currentEck(state); // capture the pre-rotation ECK
+
+    // 1. Delete the removed attendee's directory entry (addressable, NIP-09).
+    const removedD = blindedD(prev.bytes, state.coordinate, removedPubkey);
+    const deletion = finalizeEvent(
+      {
+        kind: KIND_DELETION,
+        created_at: Math.floor(this.now() / 1000),
+        tags: [["a", `${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${removedD}`], ["k", String(KIND_DIRECTORY_ENTRY)]],
+        content: "revoked",
+      },
+      this.deps.coordSk,
+    );
+    await this.deps.transport.publish(deletion, state.configRelays);
+
+    // 2. Mark removed, then mint the new ECK version.
+    this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey: removedPubkey, status: "revoked", now: this.now() });
+    const newId = state.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
+    state.eck = [...state.eck, { id: newId, key: bytesToBase64(generateEck()) }];
+    const row = this.deps.store.getEvent(state.coordinate);
+    if (row) {
+      this.deps.store.upsertEvent({
+        coordinate: state.coordinate, configJson: row.config_json, inboxNsec: row.inbox_nsec,
+        eckJson: JSON.stringify(state.eck), configRelays: row.config_relays, now: this.now(),
+      });
+    }
+
+    // 3. Re-grant the new ECK to every remaining attendee and republish content.
+    for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
+      const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
+      await this.deps.transport.publish(grant, state.configRelays);
+      await this.publishDirectory(state, a.pubkey);
+    }
+    await this.publishRoster(state);
   }
 
   // ── context fetch ───────────────────────────────────────────────────────────

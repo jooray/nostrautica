@@ -7,6 +7,7 @@ import {
   inviteHash,
   generateEck,
   bytesToBase64,
+  base64ToBytes,
   bytesToHex,
   eckDecrypt,
   nip44Decrypt,
@@ -16,8 +17,13 @@ import {
   KIND_PROFILE_SUBMISSION,
   KIND_MATCH_LIST,
   KIND_DIRECTORY_ENTRY,
+  KIND_ADMIN_COMMAND,
+  KIND_DELETION,
   directoryEntryContentSchema,
   matchListContentSchema,
+  rosterContentSchema,
+  keyGrantContentSchema,
+  unwrapRumor,
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
@@ -104,6 +110,7 @@ interface Harness {
   stt: MockStt;
   counters: Counters;
   coordSk: Uint8Array;
+  eidSk: Uint8Array;
   einboxSk: Uint8Array;
   coordinate: string;
   eck: Uint8Array;
@@ -163,7 +170,7 @@ async function setup(nostrContextN = 0): Promise<Harness> {
     coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"],
   });
 
-  return { coordinator, transport, store, llm, stt, counters, coordSk, einboxSk, coordinate, eck, invites, nextInvite: 0 };
+  return { coordinator, transport, store, llm, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0 };
 }
 
 async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<string> {
@@ -286,6 +293,56 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const d = blindedD(on.eck, on.coordinate, attendeePk);
     const entry = latestDirectoryWithAi(on.transport, on.eck, d);
     expect(entry?.ai_profile?.interests).toContain("from-nostr");
+  });
+
+  it("revoke rotates the ECK forward-only: removed attendee can't read new content, remaining can", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const designSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designPk = await join(h, designSk, "design");
+    await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+    const publishedBefore = h.transport.published.length;
+
+    // Organizer (E_id) sends a 21604 revoke admin command for the cryptographer.
+    const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 1, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
+    });
+    await h.coordinator.handleCoordinatorWrap(adminWrap as any);
+    await h.coordinator.jobs.drain();
+
+    const after = h.transport.published.slice(publishedBefore);
+
+    // The removed attendee's directory entry was deleted (NIP-09).
+    expect(after.some((e) => e.kind === KIND_DELETION)).toBe(true);
+
+    // A remaining attendee (design) received a re-grant carrying the new ECK v2.
+    const grantsToDesign = after
+      .filter((e) => e.kind === 1059)
+      .map((e) => {
+        try {
+          return unwrapRumor(e as any, designSk);
+        } catch {
+          return null;
+        }
+      })
+      .filter((r): r is NonNullable<typeof r> => !!r);
+    expect(grantsToDesign.length).toBeGreaterThan(0);
+    const grant = keyGrantContentSchema.parse(JSON.parse(grantsToDesign[0]!.content));
+    expect(grant.eck.length).toBe(2); // v1 + v2
+    const eckV2 = base64ToBytes(grant.eck.find((v) => v.id === 2)!.key);
+
+    // The newest roster is under v2: design can decrypt it, and crypto is gone.
+    const rosters = after.filter((e) => e.kind === 31604);
+    const newestRoster = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(eckV2, newestRoster.content)));
+    expect(roster.attendees.map((a) => a.pubkey)).not.toContain(cryptoPk);
+    expect(roster.attendees.map((a) => a.pubkey)).toContain(designPk);
+
+    // Forward-only: the removed attendee holds only v1 → cannot read v2 content.
+    expect(() => eckDecrypt(h.eck, newestRoster.content)).toThrow();
   });
 });
 

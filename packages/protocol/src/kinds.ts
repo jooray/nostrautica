@@ -15,6 +15,7 @@ export const KIND_PROFILE = 0; // NIP-01 metadata (kind 0)
 export const KIND_NOTE = 1; // NIP-01 short text note
 export const KIND_CONTACTS = 3; // NIP-02 follow list
 export const KIND_REPOST = 6; // NIP-18 repost
+export const KIND_DELETION = 5; // NIP-09 event deletion request
 export const KIND_SEAL = 13; // NIP-59 seal
 export const KIND_LONGFORM = 30023; // NIP-23 long-form content
 export const KIND_RELAY_LIST = 10002; // NIP-65 relay list metadata

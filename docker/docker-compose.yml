@@ -1,0 +1,20 @@
+# Local dev/test infra (IMPLEMENTATION_PLAN §2): a Nostr relay + a Blossom server.
+# Used by the Playwright e2e suite and coordinator integration tests.
+services:
+  relay:
+    image: ghcr.io/hoytech/strfry:latest
+    ports:
+      - "7777:7777"
+    volumes:
+      - strfry-data:/app/strfry-db
+
+  blossom:
+    image: ghcr.io/hzrd149/blossom-server:master
+    ports:
+      - "3000:3000"
+    volumes:
+      - blossom-data:/app/data
+
+volumes:
+  strfry-data:
+  blossom-data:

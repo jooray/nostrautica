@@ -9,6 +9,7 @@
     approveAttendee,
     attachCoordinator,
     generateInvites,
+    revokeAttendeeClient,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -104,6 +105,23 @@
     }
   }
 
+  let revokedSet = $state<Set<string>>(new Set());
+  async function revoke(req: PendingRequest) {
+    if (!ctx || !session.signer) return;
+    if (ctx.config.coordinator) {
+      error = "This event has a coordinator — revoke via its admin command instead.";
+      return;
+    }
+    if (!confirm(`Revoke ${req.name}? This rotates the event key (forward-only).`)) return;
+    try {
+      await revokeAttendeeClient(session.signer, ctx, req.attendeePubkey);
+      revokedSet = new Set([...revokedSet, req.attendeePubkey]);
+      approvedSet = new Set([...approvedSet].filter((p) => p !== req.attendeePubkey));
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+  }
+
   function short(pk: string) {
     return pk.slice(0, 8) + "…" + pk.slice(-4);
   }
@@ -190,11 +208,14 @@
           </div>
         {/if}
         {#if req.media?.length}<span class="badge">🎥 {req.media.length} video</span>{/if}
-        {#if approvedSet.has(req.attendeePubkey)}
+        {#if revokedSet.has(req.attendeePubkey)}
+          <p class="muted">Revoked ✓ (event key rotated)</p>
+        {:else if approvedSet.has(req.attendeePubkey)}
           <p class="muted">Approved ✓</p>
-          <button class="btn inline" onclick={() => approve(req)}>
-            Re-publish entry (pick up new videos)
-          </button>
+          <div class="row">
+            <button class="btn inline" onclick={() => approve(req)}>Re-publish entry</button>
+            <button class="btn inline danger" onclick={() => revoke(req)}>Revoke</button>
+          </div>
         {:else}
           <button class="btn primary" onclick={() => approve(req)}>Approve</button>
         {/if}
