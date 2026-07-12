@@ -11,6 +11,23 @@ import NDKCacheAdapterDexie from "@nostr-dev-kit/cache-dexie";
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { DEFAULT_RELAYS, DEFAULT_READ_RELAYS, unionRelays } from "./relays.js";
 
+/**
+ * A relay filter using plain numeric kinds (Nostrautica's custom kinds aren't in
+ * NDK's NDKKind enum). Cast to NDKFilter at the call boundary.
+ */
+export interface Filter {
+  ids?: string[];
+  kinds?: number[];
+  authors?: string[];
+  since?: number;
+  until?: number;
+  limit?: number;
+  "#p"?: string[];
+  "#d"?: string[];
+  "#a"?: string[];
+  "#e"?: string[];
+}
+
 let ndk: NDK | null = null;
 
 /** Get (lazily creating) the NDK singleton. Safe to call before connect(). */
@@ -63,22 +80,26 @@ export async function publishSigned(
 
 /** Subscribe with a filter; caller handles events and cleanup. */
 export function subscribe(
-  filters: NDKFilter | NDKFilter[],
+  filters: Filter | Filter[],
   onEvent: (event: NDKEvent) => void,
   relays?: string[],
 ): NDKSubscription {
-  const sub = getNdk().subscribe(filters, { closeOnEose: false }, relaySet(relays));
+  const sub = getNdk().subscribe(
+    filters as unknown as NDKFilter | NDKFilter[],
+    { closeOnEose: false },
+    relaySet(relays),
+  );
   sub.on("event", onEvent);
   return sub;
 }
 
 /** One-shot fetch of matching events (uses cache first, then relays). */
 export async function fetchEvents(
-  filters: NDKFilter | NDKFilter[],
+  filters: Filter | Filter[],
   relays?: string[],
 ): Promise<NDKEvent[]> {
   const set = await getNdk().fetchEvents(
-    filters,
+    filters as unknown as NDKFilter | NDKFilter[],
     { closeOnEose: true },
     relaySet(relays),
   );

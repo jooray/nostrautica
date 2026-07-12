@@ -1,0 +1,178 @@
+/**
+ * Create-event flow (spec §8). The organizer client mints the event's two
+ * keypairs (E_id, E_inbox) and ECK v1, publishes the public event + config
+ * signed by E_id, and self-encrypts a key backup. No coordinator needed yet.
+ */
+import {
+  finalizeEvent,
+  generateSecretKey,
+  getPublicKey,
+} from "nostr-tools/pure";
+import {
+  KIND_PROFILE,
+  KIND_CALENDAR_EVENT,
+  KIND_APP_DATA,
+  generateEck,
+  bytesToBase64,
+  bytesToHex,
+  makeCoordinate,
+  coordinateToNaddr,
+  buildEventConfig,
+  blindedD,
+  type Approval,
+  type MatchVisibility,
+  type EventKeysBackup,
+} from "@nostrautica/protocol";
+import type { AppSigner } from "$lib/signer/types.js";
+import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import { saveEventKeys } from "./keystore.js";
+
+export interface CreateEventInput {
+  title: string;
+  summary: string;
+  start: number; // unix seconds
+  end?: number;
+  location?: string;
+  image?: string;
+  hashtags?: string[];
+  // config
+  maxVideoSec: number;
+  maxTalkSec: number;
+  matching: "on" | "off";
+  matchVisibility: MatchVisibility;
+  approval: Approval;
+  nostrContext: number;
+  relays?: string[];
+  blossom?: string[];
+}
+
+export interface CreatedEvent {
+  coordinate: string;
+  naddr: string;
+  eidPubkey: string;
+  inboxPubkey: string;
+}
+
+function slug(title: string): string {
+  const base = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const rand = bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
+  return `${base || "event"}-${rand}`;
+}
+
+export async function createEvent(
+  organizer: AppSigner,
+  input: CreateEventInput,
+  blindingKey: Uint8Array,
+): Promise<CreatedEvent> {
+  const eidSk = generateSecretKey();
+  const einboxSk = generateSecretKey();
+  const eidPubkey = getPublicKey(eidSk);
+  const inboxPubkey = getPublicKey(einboxSk);
+  const eck = generateEck();
+  const d = slug(input.title);
+  const coordinate = makeCoordinate(eidPubkey, d);
+  const relays = input.relays?.length ? input.relays : DEFAULT_RELAYS;
+
+  // 1. kind 0 for E_id — the event's public profile (name/logo).
+  const kind0 = finalizeEvent(
+    {
+      kind: KIND_PROFILE,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: JSON.stringify({
+        name: input.title,
+        about: input.summary,
+        ...(input.image ? { picture: input.image } : {}),
+      }),
+    },
+    eidSk,
+  );
+
+  // 2. kind 31923 — the NIP-52 event itself (interoperates with any NIP-52 client).
+  const eventTags: string[][] = [
+    ["d", d],
+    ["title", input.title],
+    ["start", String(input.start)],
+  ];
+  if (input.end) eventTags.push(["end", String(input.end)]);
+  if (input.summary) eventTags.push(["summary", input.summary]);
+  if (input.image) eventTags.push(["image", input.image]);
+  if (input.location) eventTags.push(["location", input.location]);
+  for (const t of input.hashtags ?? []) eventTags.push(["t", t]);
+  const event31923 = finalizeEvent(
+    {
+      kind: KIND_CALENDAR_EVENT,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: eventTags,
+      content: input.summary,
+    },
+    eidSk,
+  );
+
+  // 3. kind 31600 — the networking config (signed by E_id).
+  const cfg = buildEventConfig({
+    d,
+    eidPubkey,
+    inbox: inboxPubkey,
+    relays,
+    blossom: input.blossom ?? [],
+    maxVideoSec: input.maxVideoSec,
+    maxTalkSec: input.maxTalkSec,
+    matching: input.matching,
+    matchVisibility: input.matchVisibility,
+    approval: input.approval,
+    eck: 1,
+    nostrContext: input.nostrContext,
+  });
+  const event31600 = finalizeEvent(
+    {
+      kind: cfg.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: cfg.tags,
+      content: cfg.content,
+    },
+    eidSk,
+  );
+
+  // 4. Self-encrypted organizer key backup (30078 eventkeys, spec §7.3).
+  const backup: EventKeysBackup = {
+    v: 1,
+    eid_nsec: bytesToHex(eidSk),
+    einbox_nsec: bytesToHex(einboxSk),
+    eck: [{ id: 1, key: bytesToBase64(eck) }],
+  };
+  const ownPubkey = await organizer.getPublicKey();
+  const backupContent = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
+  const backupD = `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
+  const event30078 = await organizer.signEvent({
+    kind: KIND_APP_DATA,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["d", backupD]],
+    content: backupContent,
+  });
+
+  // Publish public events to the event relays; backup to the user's relays.
+  await Promise.all([
+    publishOrQueue(kind0, relays),
+    publishOrQueue(event31923, relays),
+    publishOrQueue(event31600, relays),
+    publishOrQueue(event30078),
+  ]);
+
+  // Persist keys locally (organizer role) for immediate admin use + offline.
+  await saveEventKeys({
+    coordinate,
+    role: "organizer",
+    eck: [{ id: 1, key: bytesToBase64(eck) }],
+    eidNsecHex: bytesToHex(eidSk),
+    einboxNsecHex: bytesToHex(einboxSk),
+  });
+
+  return {
+    coordinate,
+    naddr: coordinateToNaddr(coordinate, relays),
+    eidPubkey,
+    inboxPubkey,
+  };
+}

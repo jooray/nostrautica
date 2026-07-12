@@ -1,0 +1,78 @@
+/**
+ * Standard-Nostr actions that make registration double as Nostr onboarding
+ * (spec §5.4). Each fetches the user's current replaceable event, merges, then
+ * publishes — never blind-overwrites.
+ */
+import {
+  KIND_PROFILE,
+  KIND_CONTACTS,
+  KIND_RELAY_LIST,
+} from "@nostrautica/protocol";
+import type { AppSigner } from "$lib/signer/types.js";
+import { fetchEvents } from "$lib/nostr/ndk.js";
+import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { ONBOARDING_RELAY_LIST } from "$lib/nostr/relays.js";
+import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
+
+async function latest(kind: number, pubkey: string) {
+  const events = await fetchEvents({ kinds: [kind], authors: [pubkey] });
+  return events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+}
+
+/** Fetch existing kind-0, merge edited fields, publish (spec §5.4 item 1). */
+export async function publishProfile(
+  signer: AppSigner,
+  edits: Record<string, string | undefined>,
+): Promise<void> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_PROFILE, pubkey);
+  const content = mergeProfileContent(existing?.content, edits);
+  const event = await signer.signEvent({
+    kind: KIND_PROFILE,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [],
+    content,
+  });
+  await publishOrQueue(event);
+}
+
+/** Publish kind-10002 relay defaults IF the user has none yet (spec §5.4 item 2). */
+export async function ensureRelayList(signer: AppSigner): Promise<boolean> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_RELAY_LIST, pubkey);
+  if (existing) return false; // never override a user's existing relay list
+  const tags: Tag[] = ONBOARDING_RELAY_LIST.map((r) =>
+    r.read && r.write ? ["r", r.url] : ["r", r.url, r.read ? "read" : "write"],
+  );
+  const event = await signer.signEvent({
+    kind: KIND_RELAY_LIST,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content: "",
+  });
+  await publishOrQueue(event);
+  return true;
+}
+
+/** The user's current follow (kind-3) tag set, or [] if none. */
+export async function fetchFollowTags(signer: AppSigner): Promise<Tag[]> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_CONTACTS, pubkey);
+  return (existing?.tags as Tag[]) ?? [];
+}
+
+/**
+ * Follow a pubkey via a kind-3 fetch-merge-APPEND (spec §5.4 item 3). Always
+ * fetches the current list first so pre-existing follows are never wiped.
+ */
+export async function followUser(signer: AppSigner, target: string): Promise<void> {
+  const existing = await fetchFollowTags(signer);
+  const merged = mergeFollowTags(existing, [target]);
+  const event = await signer.signEvent({
+    kind: KIND_CONTACTS,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: merged,
+    content: "", // preserve-nothing content; kind-3 content is legacy relay JSON
+  });
+  await publishOrQueue(event);
+}
