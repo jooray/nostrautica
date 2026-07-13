@@ -17,6 +17,7 @@ export const KIND_CONTACTS = 3; // NIP-02 follow list
 export const KIND_REPOST = 6; // NIP-18 repost
 export const KIND_DELETION = 5; // NIP-09 event deletion request
 export const KIND_SEAL = 13; // NIP-59 seal
+export const KIND_DM = 14; // NIP-17 private direct message (rumor only, never signed)
 export const KIND_LONGFORM = 30023; // NIP-23 long-form content
 export const KIND_RELAY_LIST = 10002; // NIP-65 relay list metadata
 export const KIND_BLOSSOM_SERVERS = 10063; // BUD-03 user server list
@@ -51,6 +52,7 @@ export const KIND_ORGANIZER_GRANT = 21605; // → co-organizer (E_id + E_inbox +
 
 /** Rumor kinds — the set of kinds ever delivered inside a NIP-59 gift wrap. */
 export const RUMOR_KINDS = [
+  KIND_DM,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
   KIND_KEY_GRANT,

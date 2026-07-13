@@ -11,7 +11,8 @@
   import { sendJoinRequest } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
-  import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
+  import { publishProfile, ensureRelayList, seedFollows } from "$lib/events/nostr-actions.js";
+  import { parseCoordinate } from "@nostrautica/protocol";
   import { fetchProfiles } from "$lib/events/social.js";
   import { uploadPublicImage } from "$lib/media/image.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
@@ -114,7 +115,14 @@
         // Only for a key WE generated do we publish kind-0 (§5.4).
         await publishProfile(signer, { name: displayName, about, picture });
         await ensureRelayList(signer);
+        // Seed the follow list with the event so it's never empty (§5.4 item 3).
+        await seedFollows(signer, parseCoordinate(ctx.coordinate).pubkey).catch(() => {});
       } else {
+        // A key we generated on the login screen (no event context there) gets
+        // its seed on first join; existing users' lists are never touched.
+        if (session.freshLocalKey) {
+          await seedFollows(session.signer!, parseCoordinate(ctx.coordinate).pubkey).catch(() => {});
+        }
         // Existing Nostr user — use their kind-0 profile as-is; never touch it.
         if (!profileLoaded) await loadExistingProfile();
         displayName = existingName;

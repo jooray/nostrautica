@@ -64,15 +64,44 @@ export async function fetchFollowTags(signer: AppSigner): Promise<Tag[]> {
 /**
  * Follow a pubkey via a kind-3 fetch-merge-APPEND (spec §5.4 item 3). Always
  * fetches the current list first so pre-existing follows are never wiped.
+ *
+ * Empty-list guard: if the fetched list has zero follows we REFUSE to publish —
+ * an empty fetch is indistinguishable from a failed fetch, and publishing
+ * "just the new target" would look exactly like a wiped follow list. Keys the
+ * app generates are seeded via `seedFollows` so they never hit this.
  */
 export async function followUser(signer: AppSigner, target: string): Promise<void> {
   const existing = await fetchFollowTags(signer);
+  if (!existing.some((t) => t[0] === "p")) {
+    throw new Error(
+      "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
+    );
+  }
   const merged = mergeFollowTags(existing, [target]);
   const event = await signer.signEvent({
     kind: KIND_CONTACTS,
     created_at: Math.floor(Date.now() / 1000),
     tags: merged,
     content: "", // preserve-nothing content; kind-3 content is legacy relay JSON
+  });
+  await publishOrQueue(event);
+}
+
+/**
+ * Seed a freshly-generated key's follow list with the event's E_id (spec §5.4
+ * item 3): generated identities always have a non-empty kind 3, so the
+ * empty-list guard in `followUser` never blocks them — and following the event
+ * is an honest default. No-op if the key already has any follows. Only ever
+ * call this for keys the app generated itself.
+ */
+export async function seedFollows(signer: AppSigner, eventPubkey: string): Promise<void> {
+  const existing = await fetchFollowTags(signer);
+  if (existing.some((t) => t[0] === "p")) return;
+  const event = await signer.signEvent({
+    kind: KIND_CONTACTS,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["p", eventPubkey]],
+    content: "",
   });
   await publishOrQueue(event);
 }

@@ -140,9 +140,18 @@
     </div>
   {/if}
 
-  <button class="btn primary" onclick={follow} disabled={busy || following}>
-    {following ? "Following ✓" : busy ? "Following…" : "Follow"}
-  </button>
+  <div class="row">
+    <button class="btn primary" onclick={follow} disabled={busy || following}>
+      {following ? "Following ✓" : busy ? "Following…" : "Follow"}
+    </button>
+    <button
+      class="btn"
+      onclick={() =>
+        session.loggedIn ? router.go({ name: "dmPeer", npub }) : router.go({ name: "login" })}
+    >
+      💬 Message
+    </button>
+  </div>
 </div>
 
 {#if settings}

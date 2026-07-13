@@ -18,3 +18,4 @@ coordinator.toml
 
 # coordinator runtime artifacts
 coordinator.out
+docs-site-build/

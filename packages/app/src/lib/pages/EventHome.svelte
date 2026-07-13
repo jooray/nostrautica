@@ -7,6 +7,8 @@
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { loadEventKeys } from "$lib/events/keystore.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+  import { fetchEventUpdates, type EventUpdate } from "$lib/events/updates.js";
+  import { renderMarkdown } from "$lib/social/markdown.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
 
   let { naddr }: { naddr: string } = $props();
@@ -15,6 +17,7 @@
   let error = $state<string | null>(null);
   let approved = $state(false);
   let organizer = $state(false);
+  let updates = $state<EventUpdate[]>([]);
 
   onMount(async () => {
     try {
@@ -32,6 +35,8 @@
         icon: ctx.icon,
         role: organizer ? "organizer" : approved ? "attendee" : "visitor",
       });
+      // Event updates (30023 by E_id) are public — everyone sees them.
+      updates = await fetchEventUpdates(ctx.coordinate).catch(() => []);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -95,4 +100,36 @@
       </p>
     {/if}
   </div>
+
+  {#if updates.length}
+    <h2>Updates from the organizer</h2>
+    {#each updates as u (u.d)}
+      <article class="card">
+        <div class="row" style="justify-content:space-between;align-items:baseline">
+          <h3 style="margin:0">{u.title}</h3>
+          <span class="muted" style="font-size:0.75rem;flex:none">
+            {new Date(u.publishedAt * 1000).toLocaleDateString()}
+            {#if u.editedAt > u.publishedAt}(edited){/if}
+          </span>
+        </div>
+        <!-- Safe: renderMarkdown escapes the source before emitting its own tags. -->
+        <div class="longform">{@html renderMarkdown(u.content)}</div>
+      </article>
+    {/each}
+  {/if}
 {/if}
+
+<style>
+  .longform :global(p) {
+    margin: 0.5rem 0;
+  }
+  .longform :global(ul) {
+    margin: 0.5rem 0;
+    padding-left: 1.25rem;
+  }
+  .longform :global(h3),
+  .longform :global(h4),
+  .longform :global(h5) {
+    margin: 0.75rem 0 0.25rem;
+  }
+</style>

@@ -102,7 +102,7 @@ For users who arrived without Nostr, every profile-ish action publishes real, st
 
    **Kind-0 write policy (implemented).** The client publishes/edits kind 0 **only for a key it generated itself** (the normie path where we are certain the user is brand-new). At join time: a user we just created a key for enters name + bio (labelled *public*) which we publish as their kind 0; an **existing Nostr user** (NIP-07 / NIP-46 / imported / returning local key) has their name + bio **fetched read-only from kind 0 and shown with a loading indicator** — we never modify their kind 0. Event-specific fields (skills, "looking for") live only in the encrypted submission, never in kind 0.
 2. **Relay list.** Publish kind 10002 (NIP-65) with sensible defaults so other clients find the user and the user finds content: `wss://relay.primal.net`, `wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band` (read). Skip if the user already has a kind 10002.
-3. **Follows.** The "Follow" button on attendee profiles publishes a **kind-3 update**. **Always fetch the current kind 3 first and append** — publishing kind 3 without merging silently wipes the user's existing follow list (the classic Nostr data-loss footgun). Dedupe by pubkey; keep existing relay/petname fields of untouched entries.
+3. **Follows.** The "Follow" button on attendee profiles publishes a **kind-3 update**. **Always fetch the current kind 3 first and append** — publishing kind 3 without merging silently wipes the user's existing follow list (the classic Nostr data-loss footgun). Dedupe by pubkey; keep existing relay/petname fields of untouched entries. **Empty-list guard:** if the fetched follow list has zero `p` tags (relays unreachable, or an existing user whose list simply didn't come back), the follow action **fails** with a retryable error rather than publishing — a kind 3 containing only the new target is indistinguishable from a wiped list downstream. To keep this guard from blocking brand-new users, **every key the app generates with an event in context is seeded with a kind 3 containing the event's `E_id` pubkey** (join flow: the event being joined; create flow: the organizer's own event) — so generated identities always have a non-empty follow list, and following the event is an honest default. Keys generated on the plain login screen (no event context) get seeded on their first join.
 4. **The hand-off moment.** A "Your Nostr profile is ready" screen (end of onboarding + always in `#/me`): explains they own a portable identity, shows their npub, offers the nsec/ncryptsec, and links to Primal, Damus, Amethyst, Yakihonne. Message: *paste your key into any of these and you'll instantly see posts from the people you followed at this event.*
 
 ## 6. Encryption & key model
@@ -219,6 +219,16 @@ tags:
 content: ""   (reserved for future JSON extension)
 ```
 
+**kind 30023 — Event updates (NIP-23 long-form, unmodified)** — announcements
+("schedule posted", "venue change", "afterparty") authored by `E_id` and rendered
+on the event page. Standard NIP-23: `d` (stable per update — republishing with
+the same `d` **edits** the update; clients MUST dedupe by `d` keeping the highest
+`created_at`), `title`, `summary` (optional), `published_at` (set on first
+publish, preserved on edits), markdown body in `content`. Being plain NIP-23
+under the event's author key, updates are also readable in any long-form Nostr
+client. The event page renders updates newest-first by `published_at` falling
+back to `created_at`.
+
 **kind 31601 — Invite List**
 ```
 tags: ["d", <event-d>], ["a", <coordinate>], ["v","1"]
@@ -227,6 +237,17 @@ content: {"v":1, "invites":[ {"h":"<sha256(invite-pubkey) hex>", "label":"vip-1"
 Replaceable — organizer republishes to add/void codes (voiding = removing the hash).
 
 ### 7.2 Gift-wrapped rumors (all delivered as kind 1059 wraps)
+
+**rumor kind 14 — Direct Message (NIP-17, unmodified)** (→ recipient pubkey, and a
+second wrap → the sender's own pubkey so sent messages are recoverable on any
+device). Standard NIP-17 private direct messages between attendees — plaintext in
+`content`, `["p", <recipient>]` tag, optional `["subject", …]`. Because this is
+plain NIP-17, conversations started in Nostrautica continue seamlessly in 0xchat,
+Amethyst, or any other NIP-17 client — before, during, and after the event. The
+app's DM inbox unwraps incoming 1059s and keeps only kind-14 rumors; wrap
+timestamps are randomized per NIP-59 so ordering uses the rumor's `created_at`.
+No event coupling: DMs are between pubkeys; the event UI is just the entry point
+(Message button on an attendee's profile).
 
 **rumor kind 21600 — Join Request** (→ `E_inbox.pubkey`)
 ```
@@ -326,6 +347,10 @@ content(nip44→recipient): {"v":1, "computed_at":<unix>, "matches":[
 **View matches.** Attendee opens `#/e/<naddr>/matches` → fetch own 31605 (compute own blinded `d` from ECK) → decrypt → ranked list with reasoning; tap through to the person's directory entry, their recent kind-1 posts, follow button.
 
 **Social overlay.** Fetch user's kind 3 ∩ roster pubkeys → "you already follow" badges; person view streams their recent notes (kind 1, with NIP-21 mentions, imeta images, link previews — no full thread rendering in v1).
+
+**Direct messages.** Attendee opens a person's profile → Message → NIP-17 conversation view (kind-14 rumor, sealed, double-wrapped: one 1059 to the recipient, one to self). Inbox = subscribe 1059 p-tagging own pubkey → unwrap → keep kind 14 → group by peer, order by rumor `created_at`. Works before/during/after the event and with any NIP-17 client.
+
+**Event updates (organizer).** Admin composes title + markdown → publish kind 30023 signed by `E_id` (`d` stable per update; same `d` = edit, `published_at` preserved). Event page fetches 30023 by author `E_id`, dedupes by `d` (highest `created_at` wins), renders newest-first.
 
 **Revoke attendee.** Organizer sends 21604 `revoke` (or does it client-side without coordinator): delete 31603 (NIP-09), rotate ECK, re-grant 21602 to remaining attendees, republish roster + future content under new ECK.
 
@@ -496,7 +521,7 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 - **Admission micro-app / QR check-in:** attendee shows a QR of a signed statement (pubkey + coordinate + timestamp); door staff verify offline against the ECK roster.
 - **Schedules & unconference:** sessions as NIP-52 (31923 children under a 31924 calendar) or NIP-53 (30312/30313 rooms); grid UI; per-person favorites (already in 30078); **.ics export** of the schedule and of "my favorites"; unconference board = attendee-proposed sessions + voting.
 - **Icebreakers:** coordinator emits 2–3 conversation starters per match from the reasoning.
-- **"Introduce us":** one-tap NIP-17 DM to a match, pre-filled with the shared reasoning.
+- **"Introduce us":** one-tap DM to a match **pre-filled with the shared reasoning** (plain NIP-17 DMs themselves shipped in v1, §7.2 kind 14; only the reasoning prefill remains future).
 - **Meeting slots:** free/busy publication and mutual-match time/table suggestions.
 - **Post-event contact export:** consent-gated vCard/npub list of people marked "met".
 - **WoT spam filtering:** rank join requests/discovery by follow-graph distance from the organizer.
@@ -556,6 +581,9 @@ This section records concrete decisions and small deviations made while building
 - **Navigation:** bottom nav bar; a "My events" list backfilled from the local key store (so events you created/joined always reappear), deduped by event coordinate; a smart Back button (in-app history + contextual-parent fallback); an in-memory event-context cache so event sub-pages render instantly.
 - **kind-0 write policy:** see §5.4 item 1 — publish only for self-generated keys; existing users are read-only.
 - **CSP (as deployed):** `script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'`. `'unsafe-inline'` is allowed so SvelteKit's inline bootstrap and NIP-07 signer extensions work; there is still no external script host and no `'unsafe-eval'` (NDK's tseep emitter is patched to its eval-free variant). No `{@html}` on untrusted content, so inline-script XSS is not a vector.
+- **Direct messages (2026-07-13):** NIP-17 kind-14 rumors via the signer-based NIP-59 path (§7.2); inbox route `#/dm`, conversation `#/dm/<npub>`, Message button on attendee profiles. Sent messages double-wrapped (recipient + self).
+- **Follow safety + seeded follows (2026-07-13):** §5.4 item 3 empty-list guard enforced in `followUser`; app-generated keys are seeded with a kind 3 containing the event's `E_id` at join/create.
+- **Event updates (2026-07-13):** NIP-23 30023 by `E_id` (§7.1); organizer composer in Admin (same-`d` edit), rendered on the event page with escape-then-markdown (organizer-authored, but still never raw `{@html}` of unescaped content).
 
 ### 16.4 Reference deployment (cypherpunk.today)
 - PWA served at `https://cypherpunk.today/nostrautica/` (built with `BASE_PATH=/nostrautica`).

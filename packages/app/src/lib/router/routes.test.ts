@@ -43,6 +43,8 @@ describe("buildHash", () => {
       { name: "record", naddr: "naddr1xyz", talk: true },
       { name: "attendee", naddr: "naddr1xyz", npub: "npub1abc" },
       { name: "matches", naddr: "naddr1xyz" },
+      { name: "dm" },
+      { name: "dmPeer", npub: "npub1abc" },
     ];
     for (const r of routes) {
       expect(parseHash(buildHash(r))).toEqual(r);

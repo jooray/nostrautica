@@ -21,11 +21,14 @@ function parentOf(route: Route): Route | null {
       return { name: "event", naddr: route.naddr };
     case "attendee":
       return { name: "attendees", naddr: route.naddr };
+    case "dmPeer":
+      return { name: "dm" };
     case "event":
     case "create":
     case "me":
     case "settings":
     case "login":
+    case "dm":
       return { name: "home" };
     default:
       return null;

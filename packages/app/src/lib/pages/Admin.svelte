@@ -20,6 +20,11 @@
   import QrCode from "$lib/components/QrCode.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import { router } from "$lib/router/router.svelte.js";
+  import {
+    fetchEventUpdates,
+    publishEventUpdate,
+    type EventUpdate,
+  } from "$lib/events/updates.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -74,6 +79,7 @@
         return;
       }
       await refresh();
+      await loadUpdates();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -231,6 +237,46 @@
   function short(pk: string) {
     return pk.slice(0, 8) + "…" + pk.slice(-4);
   }
+
+  // Event updates (spec §7.1 kind 30023): publish/edit announcements as E_id.
+  let updates = $state<EventUpdate[]>([]);
+  let updTitle = $state("");
+  let updContent = $state("");
+  let updEditing = $state<EventUpdate | null>(null); // null = new update
+  let updBusy = $state(false);
+
+  async function loadUpdates() {
+    if (!ctx) return;
+    updates = await fetchEventUpdates(ctx.coordinate).catch(() => []);
+  }
+
+  function startEdit(u: EventUpdate) {
+    updEditing = u;
+    updTitle = u.title;
+    updContent = u.content;
+  }
+
+  async function publishUpdate() {
+    if (!ctx || !updTitle.trim() || !updContent.trim()) return;
+    updBusy = true;
+    error = null;
+    try {
+      await publishEventUpdate(ctx, {
+        d: updEditing?.d,
+        publishedAt: updEditing?.publishedAt,
+        title: updTitle.trim(),
+        content: updContent,
+      });
+      updTitle = "";
+      updContent = "";
+      updEditing = null;
+      await loadUpdates();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      updBusy = false;
+    }
+  }
 </script>
 
 {#if ctx}
@@ -263,6 +309,60 @@
       {pendingRequests.length} pending request{pendingRequests.length === 1 ? "" : "s"} ↓
     </button>
     <button class="btn inline" onclick={refresh}>Refresh</button>
+  </div>
+
+  <div class="card">
+    <div class="field-label">Event updates</div>
+    <p class="muted">
+      Announcements shown on the event page ("schedule posted", "venue change").
+      Markdown works. Published as standard Nostr long-form posts under the
+      event's identity.
+    </p>
+    <input placeholder="Title" bind:value={updTitle} />
+    <textarea
+      rows="4"
+      placeholder="What's new? Markdown supported."
+      bind:value={updContent}
+      style="margin-top:0.5rem"
+    ></textarea>
+    <div class="row" style="margin-top:0.5rem">
+      <button
+        class="btn inline primary"
+        onclick={publishUpdate}
+        disabled={updBusy || !updTitle.trim() || !updContent.trim()}
+      >
+        {updBusy ? "Publishing…" : updEditing ? "Save edit" : "Publish update"}
+      </button>
+      {#if updEditing}
+        <button
+          class="btn inline"
+          onclick={() => {
+            updEditing = null;
+            updTitle = "";
+            updContent = "";
+          }}
+        >
+          Cancel edit
+        </button>
+      {/if}
+    </div>
+    {#if updates.length}
+      <div class="stack" style="margin-top:0.75rem">
+        {#each updates as u (u.d)}
+          <div class="row" style="justify-content:space-between">
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+              {u.title}
+              <span class="muted" style="font-size:0.75rem">
+                · {new Date(u.publishedAt * 1000).toLocaleDateString()}
+              </span>
+            </span>
+            <button class="btn inline" style="flex:none" onclick={() => startEdit(u)}>
+              Edit
+            </button>
+          </div>
+        {/each}
+      </div>
+    {/if}
   </div>
 
   <div class="card">

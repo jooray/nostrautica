@@ -14,6 +14,8 @@
   import Attendee from "$lib/pages/Attendee.svelte";
   import Matches from "$lib/pages/Matches.svelte";
   import Admin from "$lib/pages/Admin.svelte";
+  import Dm from "$lib/pages/Dm.svelte";
+  import DmChat from "$lib/pages/DmChat.svelte";
   import NotFound from "$lib/pages/NotFound.svelte";
 
   const route = $derived(router.route);
@@ -43,6 +45,10 @@
   {#key route.naddr}<Matches naddr={route.naddr} />{/key}
 {:else if route.name === "admin"}
   {#key route.naddr}<Admin naddr={route.naddr} />{/key}
+{:else if route.name === "dm"}
+  <Dm />
+{:else if route.name === "dmPeer"}
+  {#key route.npub}<DmChat npub={route.npub} />{/key}
 {:else}
   <NotFound />
 {/if}

@@ -15,6 +15,14 @@
   <button class:active={active("create")} onclick={() => router.go({ name: "create" })}>
     <span class="ico">＋</span><span class="lbl">Create</span>
   </button>
+  {#if session.loggedIn}
+    <button
+      class:active={active("dm") || active("dmPeer")}
+      onclick={() => router.go({ name: "dm" })}
+    >
+      <span class="ico">💬</span><span class="lbl">Messages</span>
+    </button>
+  {/if}
   <button
     class:active={active("me")}
     onclick={() => router.go({ name: session.loggedIn ? "me" : "login" })}

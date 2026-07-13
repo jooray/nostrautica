@@ -20,6 +20,8 @@ export type Route =
   | { name: "attendee"; naddr: string; npub: string }
   | { name: "matches"; naddr: string }
   | { name: "admin"; naddr: string }
+  | { name: "dm" }
+  | { name: "dmPeer"; npub: string }
   | { name: "notFound"; hash: string };
 
 /** Split "path?query" from a hash body into path segments + query params. */
@@ -51,6 +53,10 @@ export function parseHash(hash: string): Route {
       return { name: "me" };
     case "settings":
       return { name: "settings" };
+    case "dm": {
+      const npub = segments[1];
+      return npub ? { name: "dmPeer", npub } : { name: "dm" };
+    }
     case "e": {
       const naddr = segments[1];
       if (!naddr) return { name: "notFound", hash };
@@ -111,6 +117,10 @@ export function buildHash(route: Route): string {
       return `#/e/${route.naddr}/matches`;
     case "admin":
       return `#/e/${route.naddr}/admin`;
+    case "dm":
+      return "#/dm";
+    case "dmPeer":
+      return `#/dm/${route.npub}`;
     case "notFound":
       return route.hash;
   }

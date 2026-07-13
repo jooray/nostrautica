@@ -10,7 +10,7 @@
     uploadPublicImage,
   } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
-  import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
+  import { publishProfile, ensureRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
 
   let title = $state("");
@@ -111,6 +111,10 @@
         icon: iconUrl.trim() || undefined,
         role: "organizer",
       });
+      // Freshly-generated organizer keys follow their own event (§5.4 item 3).
+      if (session.freshLocalKey) {
+        await seedFollows(signer, created.eidPubkey).catch(() => {});
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
