@@ -30,7 +30,7 @@ import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 
 /**
  * Scan for ECK grants addressed to the user and fold them into the local key
@@ -38,7 +38,10 @@ import { fetchEvents } from "$lib/nostr/ndk.js";
  */
 export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
-  const wraps = (await fetchEvents({
+  // Relay-only read (no dexie cache in the loop): grants must not be missed —
+  // fetchEvents can EOSE-resolve before the cache adapter surfaces a wrap that
+  // already arrived from the relay (found via e2e, TEST-REPORT-2026-07-13).
+  const wraps = (await fetchEventsRelayOnly({
     kinds: [KIND_GIFT_WRAP],
     "#p": [pubkey],
     since: giftwrapSince(),

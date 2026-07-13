@@ -5,7 +5,7 @@
  * We sign events with the app's own signer (see signer/), then hand the already
  * signed event to NDK for publishing — NDK is our relay transport, not our signer.
  */
-import NDK, { NDKEvent, NDKRelaySet } from "@nostr-dev-kit/ndk";
+import NDK, { NDKEvent, NDKRelaySet, NDKSubscriptionCacheUsage } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
 import NDKCacheAdapterDexie from "@nostr-dev-kit/cache-dexie";
 import type { VerifiedEvent } from "nostr-tools/pure";
@@ -117,6 +117,24 @@ export async function fetchEvents(
   const set = await getNdk().fetchEvents(
     filters as unknown as NDKFilter | NDKFilter[],
     { closeOnEose: true },
+    relaySet(relays),
+  );
+  return [...set];
+}
+
+/**
+ * One-shot fetch that bypasses the dexie cache adapter entirely. Use for
+ * must-not-miss reads (gift-wrap grants): with the async cache adapter in the
+ * loop, fetchEvents can resolve on EOSE before a relay event that already
+ * arrived is surfaced — the grant then sits invisible until some later fetch.
+ */
+export async function fetchEventsRelayOnly(
+  filters: Filter | Filter[],
+  relays?: string[],
+): Promise<NDKEvent[]> {
+  const set = await getNdk().fetchEvents(
+    filters as unknown as NDKFilter | NDKFilter[],
+    { closeOnEose: true, cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY },
     relaySet(relays),
   );
   return [...set];

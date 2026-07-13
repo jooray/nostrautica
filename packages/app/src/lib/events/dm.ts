@@ -10,7 +10,7 @@ import { KIND_DM, KIND_GIFT_WRAP } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
 export interface DmMessage {
@@ -52,7 +52,8 @@ export async function sendDm(
  */
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
-  const wraps = (await fetchEvents({
+  // Relay-only: gift wraps must not be lost to the cache/EOSE race (see ndk.ts).
+  const wraps = (await fetchEventsRelayOnly({
     kinds: [KIND_GIFT_WRAP],
     "#p": [me],
     limit: 500,

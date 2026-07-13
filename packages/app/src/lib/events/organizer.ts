@@ -57,7 +57,7 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { signerWrap } from "./giftwrap.js";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
 export interface PendingRequest {
@@ -86,7 +86,8 @@ export async function fetchPending(
 ): Promise<PendingRequest[]> {
   if (!keys.einboxNsecHex) throw new Error("missing E_inbox key");
   const einboxSk = hexToBytes(keys.einboxNsecHex);
-  const wraps = (await fetchEvents(
+  // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
+  const wraps = (await fetchEventsRelayOnly(
     { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(einboxSk)], since: giftwrapSince() },
     ctx.config.relays,
   )) as unknown as GiftWrap[];
