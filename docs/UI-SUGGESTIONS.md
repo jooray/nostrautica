@@ -191,3 +191,74 @@ gradient echoed as a soft header wash on event pages.
 ## Observations from e2e runs
 
 <!-- Testers: append dated findings here. -->
+
+### 2026-07-13 — screenshot & docs pass (5 personas, Tier 1 + mock coordinator)
+
+Driven headless via Playwright against the local relay/blossom (`e2e/local-infra`)
+and a mock coordinator. Personas: Olga (organizer, desktop), Nina (newcomer,
+phone), Ivan (invited, phone), Nadia (existing Nostr user, desktop), Otto
+(outsider, desktop).
+
+**Blocker found (see `testing/TEST-REPORT-2026-07-13.md` BUG-1).** Approved
+attendees never receive their event-key grant, so the whole *inside-the-event*
+experience (roster, recording, matches, DMs) can't be reached by an attendee.
+The grant wrap reaches the browser over the wire (verified: 1 kind-1059 EVENT
+frame delivered) but the app's `receiveGrants` `fetchEvents(...closeOnEose)`
+resolves without it — an NDK browser cache/subscription race. This is the single
+highest-impact thing to fix; everything downstream of approval depends on it. A
+live `subscribe()` for grants (instead of a one-shot `fetchEvents`), or
+`cacheUsage: ONLY_RELAY` on that read, is the likely fix.
+
+**UX friction observed (smaller):**
+
+1. **Approval has no discoverable "you're in" moment for the attendee.** Even
+   setting the grant bug aside, the design leans entirely on the attendee
+   re-opening/polling the event page. When approval *does* land, there's no
+   push/notification; the join page's silent poll is the only signal. Consider a
+   clearer "refresh to check" affordance or a persistent "we'll let you know"
+   banner with a manual check button.
+
+2. **`06-pending` (admin) puts the invite-code QR block above the actual
+   pending-requests list.** When several requests are in, the organizer has to
+   scroll past a big QR card to reach "Approve all". Consider ordering: pending
+   requests first, invite generation below.
+
+3. **Revoke uses a native `confirm()`.** It's unstyleable, can't be
+   screenshotted for docs, and looks out of place against the app's own cards.
+   Replace with an in-page confirm (a small inline card with Cancel / Revoke),
+   which also lets you show the consequence copy in the app's voice.
+
+4. **`07-signin-options` on the Join page sits *below* the whole join form.** A
+   Nostr-native arriving at a join link scrolls past the entire newcomer form
+   (photo, name, skills…) before finding "Already on Nostr? Sign in". For the
+   join screen specifically, consider surfacing the sign-in entry nearer the top
+   for people who clearly already have an identity.
+
+5. **Photo upload silently no-ops if the Blossom server is unreachable.** In
+   testing, the strict CSP blocked the local http Blossom and the picker just did
+   nothing (the create-identity path swallows the upload error). A tiny inline
+   "couldn't upload your photo — you can add it later" would beat silence.
+
+6. **Event page member CTAs are a good implicit "you're in" state.** When an
+   attendee is approved, the event page shows "See who's here / People you should
+   meet / Record your intro". That reads clearly as membership and is a fine
+   surrogate for a dedicated approved screen — worth leaning into.
+
+**Things that worked well:** the create-event → success-checklist → admin flow
+is clean; invite codes with per-code QR are excellent; the **Event updates**
+composer + its render on the public event page (bold/list/link Markdown) is a
+genuinely nice feature and looks polished in both themes; the outsider privacy
+state ("No attendees visible… encrypted for approved attendees") is exactly
+right; every phone-viewport screen (412×915) held up with no horizontal scroll,
+reachable bottom nav, and truncated naddr/npub.
+
+**Update (same day):** the grant blocker is fixed and verified — the full
+5-persona loop now runs end-to-end (auto-approval → roster → intros → matches →
+DMs) and all remaining screenshots were captured. Two fixes were needed: the
+app's relay-only gift-wrap reads (`fetchEventsRelayOnly`) and a NIP-01
+per-filter-`limit` fix in the local test relay. One follow-up remains
+(TEST-REPORT-2026-07-13, BUG-1b): gift-wrap reads should pass an explicit relay
+set — without one, NDK's outbox relay-set calculation can make the fetch hang
+indefinitely when relay lists are unresolvable. The invite-link "You're in 🎉"
+moment, the 86%-match cards with per-person reasoning, and the cross-messenger
+DM thread all photograph beautifully — the product story lands.

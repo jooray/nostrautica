@@ -31,6 +31,7 @@ import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 
 /**
  * Scan for ECK grants addressed to the user and fold them into the local key
@@ -41,11 +42,16 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   // Relay-only read (no dexie cache in the loop): grants must not be missed —
   // fetchEvents can EOSE-resolve before the cache adapter surfaces a wrap that
   // already arrived from the relay (found via e2e, TEST-REPORT-2026-07-13).
-  const wraps = (await fetchEventsRelayOnly({
-    kinds: [KIND_GIFT_WRAP],
-    "#p": [pubkey],
-    since: giftwrapSince(),
-  })) as unknown as GiftWrap[];
+  // Explicit relay set: without one, NDK's outbox calculation can stall the
+  // fetch indefinitely when relay lists are unresolvable (BUG-1b).
+  const wraps = (await fetchEventsRelayOnly(
+    {
+      kinds: [KIND_GIFT_WRAP],
+      "#p": [pubkey],
+      since: giftwrapSince(),
+    },
+    DEFAULT_RELAYS,
+  )) as unknown as GiftWrap[];
 
   const coordinates = new Set<string>();
   for (const wrap of wraps) {

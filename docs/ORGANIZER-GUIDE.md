@@ -1,11 +1,5 @@
 # Nostrautica — Event Organizer Guide
 
-<!-- TODO(e2e): This is a skeleton produced ahead of testing. While running
-docs/E2E-TESTING-GUIDE.md: replace every placeholder image, rewrite steps to
-match the real UI, fill the FAQ with real friction, and remove all TODO
-markers. Voice: the reader is an event organizer with light technical
-comfort — explain *why* as well as *how*, but keep steps short. -->
-
 Nostrautica is an event app built around one idea: **the point of your event
 is who meets whom**. Attendees record short intro videos; an optional AI
 coordinator analyzes them and tells every attendee who they should talk to
@@ -18,7 +12,7 @@ and why. This guide takes you from nothing to a running event.
 3. Share the event — open link, invite codes, or both.
 4. Approve attendees (or let invite codes auto-approve them).
 5. Optionally attach an AI coordinator for matchmaking.
-6. Run the event: watch the roster, manage people.
+6. Post updates and run the event.
 
 Everything runs in your browser. There is no server to set up — the app
 stores event data, encrypted, on the open Nostr network. Your browser holds
@@ -27,120 +21,181 @@ identity when prompted).
 
 ## 1. Create your identity
 
-Open the app and create an identity (or sign in with an existing Nostr
-account if you have one — Nostrautica accounts *are* Nostr accounts).
+Open the app. On the welcome screen, type your name and tap **Create my
+identity** (you can add a photo too). No email, no password — the account is
+created instantly. If you already use Nostr, tap **Already on Nostr? Sign in**
+and use your key, browser extension, or remote signer instead.
+
+> **Tip:** you don't have to do this as a separate step — if you go straight to
+> creating an event while logged out, the app makes your organizer identity as
+> part of the same submit.
 
 When your identity is created you'll be shown a **backup card**. Do it now:
-copy the secret key somewhere safe (password manager). Anyone with that key
-*is* you; without it, a lost browser profile means a lost event.
+tap **Copy my secret key** and paste it somewhere safe (a password manager).
+Anyone with that key *is* you; without it, a lost browser profile means a lost
+event. "More ways to back up" offers an emailed recovery link or a
+password-protected file.
 
-![Key backup card](images/participant/03-backup.png)
-<!-- TODO(e2e): screenshot participant/03-backup -->
+![Key backup card](images/participant/03-backup-light.png)
 
 ## 2. Create the event
 
-Choose “Create an event” and fill in the form:
+Choose **Create an event** and fill in the form:
 
-![Event creation form](images/organizer/01-create-form.png)
-<!-- TODO(e2e): screenshot organizer/01-create-form -->
+![Event creation form](images/organizer/01-create-form-light.png)
 
-- **Title, summary, dates, location** — shown publicly to anyone with the link.
-- **Images** — an icon and a banner; optional, a generated design is used otherwise.
-- **Intro video length** — the per-attendee cap in seconds (default is fine).
-- **Approval mode** — how people get in:
+- **Title, summary, start/end, location** — shown publicly to anyone with the link.
+- **Approval** — how people get in:
   - *Manual review*: every request waits for your approval.
-  - *Invite codes only*: an invite link gets you in automatically; no other way in.
-  - *Invite + manual*: invite links auto-approve; people without a code wait
-    for you. **Recommended for most events.**
-- **AI matchmaking** — turn on if you plan to attach a coordinator (§5); you
-  can attach it later, but leave the setting on.
+  - *Invite codes only*: an invite link gets you in; no other way.
+  - *Invite codes + manual*: invite links auto-approve (with a coordinator
+    attached); people without a code wait for you. **Recommended for most events.**
+- **AI matchmaking** — set to *On* if you plan to attach a coordinator (§5).
+  You can attach the coordinator later; leave the setting on now.
+- **Advanced** (collapsed) — upload an event icon and banner (a design is
+  generated from the title otherwise) and set the intro-video length cap.
 
-After creating you'll get a **shareable link** for the event page.
+Note the copy under the form: **key rotation is forward-only** — anyone who
+ever held a decryption key can decrypt content that was published while that
+key was current. Revoking someone (§4) protects *future* content, not past.
 
-![Event created — share link](images/organizer/02-created.png)
-<!-- TODO(e2e): screenshot organizer/02-created -->
+After creating, you get a **shareable link** and a next-steps checklist.
+Capture the link — every attendee uses it.
 
-## 3. Share the event
+![Event created — share link and checklist](images/organizer/02-created-light.png)
 
-From the admin screen you have two kinds of links:
+## 3. Open the admin screen and share
 
-- **The open event link** — anyone can view the public event page and request
-  to join. Put it on your website or socials.
-- **Invite codes** — single-use links that auto-approve the holder (when a
-  coordinator is attached). Generate a batch, send one per person, or print
-  the QR codes. The code lives only in the link — treat each like a ticket.
+Tap **Open organizer admin**. This is your control panel: event updates,
+coordinator, co-organizers, invite codes, and join requests. Fresh event, no
+requests yet:
 
-![Invite codes](images/organizer/04-invites.png)
-<!-- TODO(e2e): screenshot organizer/04-invites -->
+![Admin overview, before requests](images/organizer/03-admin-empty-light.png)
+
+You have two kinds of links to share:
+
+- **The open event link** (`…#/e/<event>/join`, shown near the bottom with a
+  **Copy invite link** button) — anyone can view the public event page and
+  request to join. Put it on your site or socials.
+- **Invite codes** — single-use links that auto-approve the holder *when a
+  coordinator is attached*. Set a count and tap **Generate**; you get one link
+  + QR per code. Send one per person, or print the QR codes. The code rides the
+  URL fragment and never touches a server — treat each link like a ticket.
+
+![Generated invite codes with QR](images/organizer/04-invites-light.png)
 
 ## 4. Approve attendees
 
-The admin screen lists pending join requests — name, note, skills, and
-whether they used an invite.
+Join requests appear in the **Join requests** section — each shows the
+person's name, a short id, their skills, an **invite** badge if they used a
+code, and a 🎥 badge if they've recorded an intro. The "N pending requests ↓"
+button at the top jumps you there.
 
-![Pending requests](images/organizer/06-pending.png)
-<!-- TODO(e2e): screenshot organizer/06-pending -->
+![Pending join requests](images/organizer/06-pending-light.png)
 
-Approve the ones you want in; ignore or leave the rest. Approved attendees
-get access within seconds — the encrypted roster, other people's intro
+Tap **Approve** on the people you want in — or **Approve all (N)** when several
+are waiting. Approved people move to the **Approved** section. Each approved
+card has **Re-process** (re-publishes their directory entry / recomputes their
+matches) and **Revoke**.
+
+![Approved attendees](images/organizer/07-approved-light.png)
+
+Approved attendees get access to the encrypted roster, other people's intro
 videos, and (with a coordinator) their matches.
-
-![Approved attendees](images/organizer/07-approved.png)
-<!-- TODO(e2e): screenshot organizer/07-approved -->
 
 ### Removing someone
 
-Revoking an attendee cuts their access to everything published *from now
-on* — the event keys are rotated for everyone else automatically. What they
-already saw can't be unseen; revoke early if in doubt.
+Tap **Revoke** on an approved card. You'll get a confirmation explaining the
+consequence:
 
-![Revoke confirmation](images/organizer/08-revoke.png)
-<!-- TODO(e2e): screenshot organizer/08-revoke -->
+> *"Revoke {name}? They lose access to everything new. What they already saw
+> can't be taken back."*
+
+Confirming rotates the event key for everyone else automatically, so the
+revoked person can't decrypt anything published from that point on. What they
+already saw can't be unseen — revoke early if in doubt.
+
+![Approved card with the Revoke action](images/organizer/08-revoke-light.png)
 
 ## 5. Attach the AI coordinator (matchmaking)
 
 The coordinator is a small service that transcribes intro videos, builds a
 profile of each attendee, and computes who should meet whom. Without it, the
-event still fully works — roster, videos, follows — there are just no
-automatic matches and no invite auto-approval.
+event still fully works — roster, videos, follows — there are just no automatic
+matches, and invite links need your manual approval.
 
-You (or whoever runs your infrastructure) start the coordinator and it gives
-you its **public key (npub…)**. Paste that into the admin screen's
-coordinator section.
+You (or whoever runs your infrastructure) start the coordinator; it prints its
+**public key (npub…)**. Paste that into the admin **AI coordinator** section
+and tap **Attach coordinator**. You'll see it confirmed:
 
-![Coordinator attached](images/organizer/05-coordinator.png)
-<!-- TODO(e2e): screenshot organizer/05-coordinator -->
+![Coordinator attached](images/organizer/05-coordinator-light.png)
 
-<!-- TODO(e2e): link the coordinator operator setup (docker image, config,
-API key) — one sentence + pointer to the repo README, not a full ops guide. -->
+The coordinator only ever *reads* event content — it can never act as the event
+or approve people beyond the rules you set. Once attached, an **↻ Recompute all
+matches** button appears; use it after a burst of new attendees.
 
-The coordinator only ever sees event content — it cannot act as the event or
-change who's approved beyond the rules you set.
+> Running the coordinator is a separate, technical step (a small daemon that
+> needs `ffmpeg` and an LLM/STT provider key). See
+> [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml)
+> and the repo README. Point its relays at the same relay your event uses.
 
-## 6. During the event
+## 6. Post updates to your attendees
 
-- **Roster fills in live** — approved attendees appear as they join and their
-  match lists refresh as new intros are processed.
-- **Recompute matches** — after a burst of new attendees you can trigger a
-  full recompute from the admin screen.
-- **Co-organizers** — add another person's npub to give them full organizer
-  access from their own device. Also your safety net if your browser dies.
-  <!-- TODO(e2e): confirm exact co-organizer behavior observed -->
+Use the **Event updates** card at the top of admin to post announcements —
+"schedule is live", "venue change", "tonight's dinner is at…". Give it a title,
+write the body (**Markdown works** — headings, lists, links, bold), and tap
+**Publish update**. Published updates are listed below the composer with an
+**Edit** button.
+
+![Event updates composer](images/organizer/09-updates-composer-light.png)
+
+Updates render on the **public event page**, under "Updates from the
+organizer", so *anyone with the link* sees them — no need for attendees to be
+approved or even logged in. Technically they're standard Nostr long-form posts
+published under the event's identity, so they're visible in other Nostr readers
+too. Here's how a published update looks to a visitor on the event page:
+
+![Update shown on the event page](images/participant/02-event-page-light.png)
+
+## 7. During the event
+
+- **Roster fills in live** — approved attendees appear as they join; match
+  lists refresh as new intros are processed.
+- **Recompute matches** — after a rush of arrivals, tap **↻ Recompute all
+  matches** (coordinator required).
+- **Co-organizers** — in the **Co-organizers** card, add someone by their
+  npub to share full organizer control (edit event, approve, manage the
+  coordinator). Their keys are gift-wrapped to them; they get access next time
+  they open the event. This is also your safety net if your browser dies.
 - **Encourage intros early.** Matches only exist for people who recorded an
-  intro — the single best thing you can do for match quality is get everyone
-  to record before the event starts.
+  intro — the single best thing you can do for match quality is get everyone to
+  record before the event starts.
 
 ## Troubleshooting & FAQ
 
-<!-- TODO(e2e): fill from real friction found during the test run. Seed
-questions below — keep the ones that proved real, add what you hit. -->
+- **What do attendees see before they're approved?** Only the public event page
+  — title, summary, dates, location, and your posted updates. The roster,
+  videos, and matches are encrypted to approved attendees.
 
-- **A join request never showed up.** …
-- **An invite link didn't auto-approve.** (Is a coordinator attached and running?) …
-- **I opened the event on another device and there's no admin button.** (Organizer
-  keys live in the browser that created the event — add yourself as
-  co-organizer from the original device, or restore your identity backup.) …
-- **How do I project the match board / roster at the venue?** …
-- **What do attendees see before they're approved?** Only the public event
-  page — title, description, dates. Videos, roster, and matches are encrypted
-  to approved attendees.
+- **I opened the event on another device and there's no admin button.** The
+  organizer keys live in the browser that created the event. Either add yourself
+  as a **co-organizer** from the original device (using this device's npub), or
+  restore your identity backup (paste your secret key) on the new device.
+
+- **An invite link didn't auto-approve someone.** Auto-approval needs a
+  coordinator attached *and running*. Without one, invite requests still arrive
+  in your **Join requests** list — approve them there. (They'll carry an
+  **invite** badge.)
+
+- **A join request isn't showing up.** Tap **Refresh** in the admin header —
+  requests are fetched on demand. If it still doesn't appear, the attendee may
+  be on a flaky connection; ask them to reopen the event link and resubmit.
+
+- **How do I project the roster / match board at the venue?** Open the event's
+  attendee list on the projector's browser while logged in as an approved
+  identity (yourself). It's a normal page — full-screen it.
+
+- **Can I edit an event after creating it?** You can post updates and edit them
+  freely. Co-organizers can also manage the event. Core fields (title, dates)
+  aren't editable from this screen in the current build — post an update to
+  communicate changes.

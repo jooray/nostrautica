@@ -57,15 +57,24 @@ wss.on("connection", (ws) => {
     } else if (type === "REQ") {
       const [subId, ...filters] = rest;
       subs.get(ws)?.set(subId, filters);
-      let sent = 0;
-      const limit = Math.min(...filters.map((f) => f.limit ?? Infinity));
-      // newest first for limited queries, per convention
+      // NIP-01: `limit` applies PER FILTER, and the response is the union of
+      // all filters' matches (deduped). The old Math.min-across-filters logic
+      // let one `limit:1` filter in an NDK-grouped REQ starve every other
+      // filter — backdated gift-wrap grants were never returned (found via
+      // e2e, TEST-REPORT-2026-07-13).
       const ordered = [...events].sort((a, b) => b.created_at - a.created_at);
-      for (const ev of ordered) {
-        if (sent >= limit) break;
-        if (filters.some((f) => matches(ev, f))) {
-          ws.send(JSON.stringify(["EVENT", subId, ev]));
-          sent++;
+      const sentIds = new Set();
+      for (const f of filters) {
+        let n = 0;
+        const lim = f.limit ?? Infinity;
+        for (const ev of ordered) {
+          if (n >= lim) break;
+          if (!matches(ev, f)) continue;
+          n++;
+          if (!sentIds.has(ev.id)) {
+            sentIds.add(ev.id);
+            ws.send(JSON.stringify(["EVENT", subId, ev]));
+          }
         }
       }
       ws.send(JSON.stringify(["EOSE", subId]));

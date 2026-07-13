@@ -11,6 +11,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
 import { fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
 export interface DmMessage {
@@ -53,11 +54,16 @@ export async function sendDm(
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
   // Relay-only: gift wraps must not be lost to the cache/EOSE race (see ndk.ts).
-  const wraps = (await fetchEventsRelayOnly({
-    kinds: [KIND_GIFT_WRAP],
-    "#p": [me],
-    limit: 500,
-  })) as unknown as GiftWrap[];
+  // Explicit relay set: without one, NDK's outbox calculation can stall the
+  // fetch indefinitely when relay lists are unresolvable (BUG-1b).
+  const wraps = (await fetchEventsRelayOnly(
+    {
+      kinds: [KIND_GIFT_WRAP],
+      "#p": [me],
+      limit: 500,
+    },
+    DEFAULT_RELAYS,
+  )) as unknown as GiftWrap[];
 
   const byId = new Map<string, DmMessage>();
   for (const wrap of wraps) {
