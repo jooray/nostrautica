@@ -180,6 +180,16 @@
     }
   }
 
+  let approvingAll = $state(false);
+  async function approveAll() {
+    approvingAll = true;
+    try {
+      for (const req of pendingRequests) await approve(req);
+    } finally {
+      approvingAll = false;
+    }
+  }
+
   async function approve(req: PendingRequest) {
     if (!ctx || !session.signer) return;
     try {
@@ -199,7 +209,12 @@
   let revokedSet = $state<Set<string>>(new Set());
   async function revoke(req: PendingRequest) {
     if (!ctx || !session.signer) return;
-    if (!confirm(`Revoke ${req.name}? This rotates the event key (forward-only).`)) return;
+    if (
+      !confirm(
+        `Revoke ${req.name}? They lose access to everything new. What they already saw can't be taken back.`,
+      )
+    )
+      return;
     try {
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "revoke", { pubkey: req.attendeePubkey });
@@ -261,8 +276,10 @@
       <p class="muted">Coordinator attached ✓ Matchmaking will begin as attendees are processed.</p>
     {:else}
       <p class="muted">
-        Paste the coordinator's npub to enable AI matchmaking. It can read
-        event-encrypted content but cannot impersonate the event (spec §4.2).
+        A coordinator is a service that transcribes intro videos and computes who
+        should meet whom. Without one there are no matches, and invite links need
+        your manual approval. Whoever runs it gives you its npub — paste it here.
+        It can read event content but can never act as the event.
       </p>
       <input placeholder="npub1… (coordinator)" bind:value={coordinatorInput} />
       <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
@@ -319,6 +336,21 @@
       <button class="btn inline" style="flex:none" onclick={copyInviteLink}>
         {copiedLink ? "Copied ✓" : "Copy invite link"}
       </button>
+      {#if typeof navigator !== "undefined" && navigator.share}
+        <button
+          class="btn inline"
+          style="flex:none"
+          onclick={() =>
+            navigator
+              .share({
+                title: ctx?.title,
+                url: `${window.location.origin}${window.location.pathname}#/e/${naddr}/join`,
+              })
+              .catch(() => {})}
+        >
+          Share…
+        </button>
+      {/if}
     </div>
   {/if}
 
@@ -326,6 +358,10 @@
   <div class="stack">
     {#if pendingRequests.length === 0}
       <p class="muted">No pending requests.</p>
+    {:else if pendingRequests.length > 1}
+      <button class="btn" onclick={approveAll} disabled={approvingAll}>
+        {approvingAll ? "Approving…" : `Approve all (${pendingRequests.length})`}
+      </button>
     {/if}
     {#each pendingRequests as req (req.attendeePubkey)}
       <div class="card">

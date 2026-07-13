@@ -4,6 +4,7 @@
   // are tucked under "More ways to back up" for people who want them.
   import { session } from "$lib/signer/session.svelte.js";
   import { toNsec, toNcryptsec, mailtoBackup } from "$lib/signer/backup.js";
+  import { markBackedUp } from "$lib/stores/backup-nag.svelte.js";
 
   const sk = $derived(session.signer?.getSecretKey?.());
   const appBase = $derived(
@@ -18,6 +19,7 @@
     try {
       await navigator.clipboard.writeText(text);
       copied = label;
+      markBackedUp();
       setTimeout(() => (copied = null), 2000);
     } catch {
       copied = null;
@@ -31,6 +33,7 @@
 
   function downloadNcryptsec() {
     if (!ncryptsec) return;
+    markBackedUp();
     const blob = new Blob([ncryptsec], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -64,7 +67,9 @@
           A one-tap link to get back in on any device. Note: email isn't fully
           private, so this trades a little privacy for convenience.
         </p>
-        <a class="btn" href={mailtoBackup(appBase, sk)}>Email my recovery link</a>
+        <a class="btn" href={mailtoBackup(appBase, sk)} onclick={() => markBackedUp()}>
+          Email my recovery link
+        </a>
       </div>
       <div>
         <div class="field-label">Password-protected file</div>

@@ -73,27 +73,11 @@
     <div class="card warn"><strong>Couldn't log in.</strong> {error}</div>
   {/if}
 
-  <button
-    class="btn primary"
-    style="padding:0.9rem;font-size:1.05rem"
-    onclick={() => (showExisting = !showExisting)}
-  >
-    <NostrichIcon size={24} />
-    I'm already a Nostr user
-  </button>
-
-  {#if showExisting}
-    <SignInOptions onSignedIn={done} />
-  {/if}
-
-  <div class="or-divider">or</div>
-
+  <!-- Newcomers are the majority: identity creation is the primary path;
+       existing-Nostr-user sign-in is a quiet option below (UI-SUGGESTIONS #1). -->
   <div class="card">
     <h2>Create your identity</h2>
-    <p class="muted">
-      New to this? No problem — we'll set up a Nostr account for you. No password,
-      no jargon.
-    </p>
+    <p class="muted">No email, no password — your account is created instantly.</p>
     <div class="row" style="gap:0.75rem;align-items:center;margin-bottom:0.5rem">
       <label style="cursor:pointer;flex:none;margin:0">
         {#if picPreview}
@@ -111,4 +95,15 @@
       {busy ? "Creating…" : "Create my identity"}
     </button>
   </div>
+
+  <div class="or-divider">or</div>
+
+  <button class="btn" onclick={() => (showExisting = !showExisting)}>
+    <NostrichIcon size={20} />
+    Already on Nostr? Sign in
+  </button>
+
+  {#if showExisting}
+    <SignInOptions onSignedIn={done} />
+  {/if}
 {/if}

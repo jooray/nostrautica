@@ -32,15 +32,9 @@
     You're a Nostr user now
   </h1>
   <p>
-    Without doing anything crypto-y, you've created a <strong>real Nostr identity</strong> —
-    an account you fully own that isn't tied to this app or any company. It works
-    across a whole ecosystem of social apps, and no one can lock you out of it or
-    take it away.
-  </p>
-  <p class="muted">
-    The people you followed here, your profile, your posts — they all travel with
-    that identity. "Take it anywhere" is literal: open one of the apps below,
-    paste in your key, and you'll instantly see the feed of everyone you met.
+    You own a <strong>real Nostr identity</strong> — an account no company controls
+    and no one can take away. Your profile and the people you followed travel with
+    it into a whole ecosystem of apps.
   </p>
 
   <div class="card">

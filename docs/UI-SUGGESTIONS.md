@@ -7,6 +7,13 @@ Improvements to make Nostrautica easier for its three audiences — the
 [`E2E-TESTING-GUIDE.md`](E2E-TESTING-GUIDE.md): append what you observe,
 dated, at the bottom — don't rewrite existing entries.
 
+**Implementation status (2026-07-13):** items 1–4, 6, 8–10, 12–19, 21–22 are
+implemented on this branch (7 partially — friendly headline + muted detail,
+no collapsible raw error yet; 16 got the explainer but not coordinator
+liveness). Still open: 5 (state-aware record CTA), 11 (join-time video
+reuse), 20 (full i18n sweep), 23 (ongoing mobile testing), 24 (PWA install
+hint).
+
 Principles applied throughout: the most common action comes first and is the
 default; one primary action per screen; plain language over protocol
 language; less text (people don't read at events, on phones, in a hurry);

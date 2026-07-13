@@ -10,6 +10,8 @@
     uploadPublicImage,
   } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+  import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
+  import BackupCard from "$lib/components/BackupCard.svelte";
 
   let title = $state("");
   let summary = $state("");
@@ -27,6 +29,10 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let created = $state<CreatedEvent | null>(null);
+  // Logged-out organizers get an inline identity step instead of a login
+  // detour (UI-SUGGESTIONS #18) — the key is created on submit, like Join.
+  let organizerName = $state("");
+  let copiedShare = $state(false);
 
   // Live previews: uploaded image, else a generated default (both optional).
   const previewIcon = $derived(iconUrl.trim() || defaultEventIcon(title, title));
@@ -34,7 +40,11 @@
 
   async function onImageFile(e: Event, which: "icon" | "banner") {
     const file = (e.target as HTMLInputElement).files?.[0];
-    if (!file || !session.signer) return;
+    if (!file) return;
+    if (!session.signer) {
+      error = "Log in (or create the event first) to upload images — generated ones are used meanwhile.";
+      return;
+    }
     uploading = which;
     error = null;
     try {
@@ -51,20 +61,30 @@
 
   async function submit() {
     error = null;
-    if (!session.signer) {
-      router.go({ name: "login" });
-      return;
-    }
     if (!title.trim() || !startLocal) {
       error = "Title and start time are required.";
+      return;
+    }
+    if (!session.loggedIn && !organizerName.trim()) {
+      error = "Please enter your name.";
       return;
     }
     busy = true;
     try {
       await connectNdk();
-      const blindingKey = await deriveBlindingKey(session.signer);
+      if (!session.signer) {
+        await session.createLocalKey();
+        const signer = session.signer;
+        if (signer) {
+          await publishProfile(signer, { name: organizerName.trim() }).catch(() => {});
+          await ensureRelayList(signer).catch(() => {});
+        }
+      }
+      const signer = session.signer;
+      if (!signer) throw new Error("Couldn't create your identity — please retry.");
+      const blindingKey = await deriveBlindingKey(signer);
       created = await createEvent(
-        session.signer,
+        signer,
         {
           title: title.trim(),
           summary: summary.trim(),
@@ -104,21 +124,52 @@
       : "";
   }
   const shareLink = $derived(created ? `${appBase()}#/e/${created.naddr}` : "");
+
+  async function copyShare() {
+    await navigator.clipboard.writeText(shareLink);
+    copiedShare = true;
+    setTimeout(() => (copiedShare = false), 1500);
+  }
+  const canShare = typeof navigator !== "undefined" && !!navigator.share;
+  function shareNative() {
+    navigator.share({ title: title.trim(), url: shareLink }).catch(() => {});
+  }
 </script>
 
 <h1>Create an event</h1>
 
-{#if !session.loggedIn}
-  <div class="card">
-    <p>Log in first to create an event.</p>
-    <button class="btn primary" onclick={() => router.go({ name: "login" })}>Log in</button>
-  </div>
-{:else if created}
+{#if created}
   <div class="card">
     <h2>Event created 🎉</h2>
-    <p class="muted">Share this link with attendees:</p>
-    <p class="mono">{shareLink}</p>
-    <div class="stack" style="margin-top:0.75rem">
+    <!-- Next steps as a checklist, not a pile of equal buttons (UI-SUGGESTIONS #14). -->
+    <ol class="stack" style="margin:0.75rem 0 0;padding-left:1.25rem">
+      <li>
+        <strong>Share the event</strong>
+        <p class="mono" style="margin:0.25rem 0">{shareLink}</p>
+        <div class="row">
+          <button class="btn inline" onclick={copyShare}>
+            {copiedShare ? "Copied ✓" : "Copy link"}
+          </button>
+          {#if canShare}
+            <button class="btn inline" onclick={shareNative}>Share…</button>
+          {/if}
+        </div>
+      </li>
+      <li style="margin-top:0.75rem">
+        <strong>Optional: attach an AI coordinator</strong>
+        <p class="muted" style="margin:0.25rem 0">
+          Enables matchmaking and instant invite-link approval — done from the
+          admin screen, or skip it and approve people yourself.
+        </p>
+      </li>
+      <li style="margin-top:0.75rem">
+        <strong>Approve people as they ask to join</strong>
+        <p class="muted" style="margin:0.25rem 0">
+          Requests appear on the admin screen (invite links can skip this).
+        </p>
+      </li>
+    </ol>
+    <div class="stack" style="margin-top:1rem">
       <button
         class="btn primary"
         onclick={() => router.go({ name: "admin", naddr: created!.naddr })}
@@ -133,9 +184,25 @@
       </button>
     </div>
   </div>
+  {#if session.freshLocalKey}
+    <div class="card">
+      <h2>Back up your organizer identity</h2>
+      <p class="muted">This key controls your event — don't lose it.</p>
+      <BackupCard />
+    </div>
+  {/if}
 {:else}
   {#if error}<div class="card warn">{error}</div>{/if}
   <div class="card stack">
+    {#if !session.loggedIn}
+      <div>
+        <label for="on">Your name</label>
+        <input id="on" bind:value={organizerName} placeholder="How should attendees know you?" />
+        <p class="muted" style="margin:0.25rem 0 0">
+          Your organizer identity is created with the event — no signup needed.
+        </p>
+      </div>
+    {/if}
     <div>
       <label for="t">Title</label>
       <input id="t" bind:value={title} placeholder="Cypherpunk Assembly 2026" />
@@ -156,6 +223,10 @@
       <label for="loc">Location</label>
       <input id="loc" bind:value={locationStr} placeholder="Bratislava" />
     </div>
+    <!-- Rarely-changed options tucked away; title + date is enough (UI-SUGGESTIONS #13). -->
+    <details>
+      <summary class="muted" style="cursor:pointer">Advanced — images, video length</summary>
+      <div class="stack" style="margin-top:0.75rem">
     <div>
       <div class="field-label">Event images <span class="muted" style="font-weight:400">(both optional)</span></div>
       <div class="row" style="align-items:flex-start;gap:0.75rem">
@@ -187,6 +258,8 @@
       <label for="mv">Max intro video (seconds)</label>
       <input id="mv" type="number" bind:value={maxVideoSec} />
     </div>
+      </div>
+    </details>
     <div>
       <label for="approval">Approval</label>
       <select id="approval" bind:value={approval}>

@@ -43,7 +43,10 @@
 </script>
 
 {#if error}
-  <div class="card warn">{error}</div>
+  <div class="card warn">
+    <strong>Couldn't load this event.</strong>
+    <span class="muted">{error}</span>
+  </div>
 {:else if !ctx}
   <p class="muted">Loading event…</p>
 {:else}
@@ -54,9 +57,15 @@
     {#if ctx.location}· 📍 {ctx.location}{/if}
   </p>
   <div class="row" style="flex-wrap:wrap">
-    <span class="badge">approval: {ctx.config.approval}</span>
-    <span class="badge">matching: {ctx.config.matching}</span>
-    {#if ctx.config.coordinator}<span class="badge">AI coordinator attached</span>{/if}
+    <!-- Human labels, not raw config values (UI-SUGGESTIONS #3). -->
+    <span class="badge">
+      {ctx.config.approval === "invite"
+        ? "Invite only"
+        : ctx.config.approval === "manual"
+          ? "Organizer approval"
+          : "Invite or organizer approval"}
+    </span>
+    {#if ctx.config.matching === "on"}<span class="badge">AI matchmaking</span>{/if}
   </div>
 
   <div class="card stack">

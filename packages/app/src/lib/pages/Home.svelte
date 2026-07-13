@@ -6,6 +6,7 @@
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { listEventKeys } from "$lib/events/keystore.js";
   import { defaultEventIcon } from "$lib/media/image.js";
+  import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
 
   const events = $derived(recentEvents.list);
   const roleLabel = { organizer: "you organize", attendee: "joined", visitor: "viewed" };
@@ -47,6 +48,22 @@
   Nostrautica figures out who you should meet at an event — and explains why —
   from short intro videos and your public Nostr activity.
 </p>
+
+{#if session.loggedIn && session.signer?.method === "local" && !backupNag.done}
+  <!-- One gentle nudge until the key is backed up (UI-SUGGESTIONS #8). -->
+  <div class="card warn">
+    <strong>Back up your account</strong>
+    <p class="muted" style="margin:0.25rem 0 0.5rem">
+      Takes 30 seconds. Without it, losing this device means losing your account.
+    </p>
+    <div class="row">
+      <button class="btn inline primary" onclick={() => router.go({ name: "me" })}>
+        Back up now
+      </button>
+      <button class="btn inline" onclick={() => markBackedUp()}>I already saved it</button>
+    </div>
+  </div>
+{/if}
 
 {#if events.length}
   <h2>Your events</h2>

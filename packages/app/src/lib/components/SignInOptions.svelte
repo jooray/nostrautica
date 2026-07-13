@@ -10,6 +10,20 @@
 
   let { onSignedIn }: { onSignedIn?: () => void } = $props();
 
+  // Remember the last successful method and list it first next time
+  // (UI-SUGGESTIONS #9). Flex `order` keeps the markup static.
+  const LAST_KEY = "nostrautica:last-signin";
+  const last =
+    typeof localStorage !== "undefined" ? localStorage.getItem(LAST_KEY) : null;
+  const order = (method: string, dflt: number) => (last === method ? 0 : dflt);
+  function remember(method: string) {
+    try {
+      localStorage.setItem(LAST_KEY, method);
+    } catch {
+      /* private mode */
+    }
+  }
+
   let error = $state<string | null>(null);
   let busy = $state(false);
   let nc = $state<NostrConnectHandle | null>(null);
@@ -39,7 +53,11 @@
     }
   }
 
-  const loginNip07 = () => run(() => session.loginNip07());
+  const loginNip07 = () =>
+    run(async () => {
+      await session.loginNip07();
+      remember("nip07");
+    });
 
   const startNostrConnect = () =>
     run(async () => {
@@ -47,23 +65,28 @@
       const signer = await nc.connected;
       await session.loginNip46(signer);
       nc = null;
+      remember("nip46");
     });
 
   const pasteBunker = () =>
     run(async () => {
       const signer = await Nip46Signer.fromBunkerUri(pasteKey.trim());
       await session.loginNip46(signer);
+      remember("paste");
     });
 
   const importLocal = () =>
-    run(() => session.importLocalKey(pasteKey.trim(), pastePw || undefined));
+    run(async () => {
+      await session.importLocalKey(pasteKey.trim(), pastePw || undefined);
+      remember("paste");
+    });
 </script>
 
 <div class="card stack">
   {#if error}<div class="card warn" style="margin:0">{error}</div>{/if}
 
   {#if hasNip07()}
-    <div>
+    <div style="order:{order('nip07', 1)}">
       <div class="field-label">Browser extension</div>
       <button class="btn" onclick={loginNip07} disabled={busy}>
         Log in with extension (Alby, nos2x…)
@@ -71,7 +94,7 @@
     </div>
   {/if}
 
-  <div>
+  <div style="order:{order('nip46', 2)}">
     <div class="field-label">Remote signer</div>
     {#if nc}
       <p class="muted">Scan this with Amber, or open it directly on this device:</p>
@@ -93,7 +116,7 @@
     {/if}
   </div>
 
-  <div>
+  <div style="order:{order('paste', 3)}">
     <div class="field-label">Paste a key</div>
     <input
       placeholder="nsec1… / ncryptsec1… / bunker://…"
@@ -113,5 +136,8 @@
         </button>
       {/if}
     </div>
+    <p class="muted" style="margin:0.5rem 0 0">
+      On a shared device, a signer app or extension is safer than pasting your key.
+    </p>
   </div>
 </div>

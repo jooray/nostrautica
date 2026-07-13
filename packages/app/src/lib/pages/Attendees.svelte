@@ -73,7 +73,13 @@
   <p class="muted">Decrypting the roster…</p>
 {:else if entries.length === 0}
   <div class="card">
-    <p class="muted">No attendees visible yet. If you were just approved, refresh in a moment.</p>
+    <p class="muted">
+      No attendees visible. The list is encrypted for approved attendees — if you
+      haven't joined yet, that's why; if you were just approved, refresh in a moment.
+    </p>
+    <button class="btn" onclick={() => router.go({ name: "event", naddr })}>
+      Back to the event
+    </button>
   </div>
 {:else}
   <div class="row" style="justify-content:space-between">

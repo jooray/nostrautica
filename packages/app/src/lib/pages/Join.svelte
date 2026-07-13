@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -29,6 +29,8 @@
   let sent = $state(false);
   let approved = $state(false);
   let showSignIn = $state(false);
+  let destroyed = false;
+  onDestroy(() => (destroyed = true));
 
   // New-user (we generate the key) editable fields — these become the kind-0 profile.
   let newName = $state("");
@@ -140,13 +142,14 @@
       sent = true;
       recentEvents.record({ coordinate: ctx.coordinate, naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
-      // With an invite code, approval is usually instant — poll for the grant.
-      if (code) {
-        for (let i = 0; i < 10 && !approved; i++) {
-          await new Promise((r) => setTimeout(r, 1500));
-          await receiveGrants(signer).catch(() => {});
-          approved = await isApproved(ctx.coordinate);
-        }
+      // Keep polling for the grant while the page is open — invite codes are
+      // usually instant, manual approval can land minutes later, and the user
+      // shouldn't have to re-open the event to find out (UI-SUGGESTIONS #4).
+      const fast = code ? 10 : 0; // 1.5s cadence first, then relax to 5s
+      for (let i = 0; !approved && !destroyed; i++) {
+        await new Promise((r) => setTimeout(r, i < fast ? 1500 : 5000));
+        await receiveGrants(signer).catch(() => {});
+        approved = await isApproved(ctx.coordinate);
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -156,7 +159,12 @@
   }
 </script>
 
-{#if error}<div class="card warn">{error}</div>{/if}
+{#if error}
+  <div class="card warn">
+    <strong>Something went wrong.</strong>
+    <span class="muted">{error}</span>
+  </div>
+{/if}
 
 {#if !ctx}
   <p class="muted">Loading event…</p>
@@ -196,17 +204,6 @@
   <EventHeader {ctx} />
   <h1>Join {ctx.title}</h1>
 
-  {#if !session.loggedIn}
-    <button class="btn primary" style="padding:0.9rem;font-size:1.05rem" onclick={() => (showSignIn = !showSignIn)}>
-      <NostrichIcon size={24} />
-      Already a Nostr user? Sign in
-    </button>
-    {#if showSignIn}
-      <SignInOptions onSignedIn={() => (showSignIn = false)} />
-    {/if}
-    <div class="or-divider">or</div>
-  {/if}
-
   <div class="card stack">
     {#if session.loggedIn}
       <!-- Existing Nostr user: profile shown read-only from their kind-0. -->
@@ -228,11 +225,16 @@
             <p class="muted" style="margin:0">{existingAbout}</p>
           </div>
         {/if}
-        <p class="muted">From your Nostr profile — we won't change it.</p>
+        <p class="muted">
+          From your Nostr profile — we won't change it. To update it, edit it in
+          your Nostr app and it shows up here.
+        </p>
       {/if}
     {:else}
       <!-- New user: name + bio + photo become the public Nostr profile. -->
-      <p class="muted">This becomes your public Nostr profile.</p>
+      <p class="muted">
+        Name, photo and bio are public — everything else stays inside the event.
+      </p>
       <div class="row" style="gap:0.75rem;align-items:center">
         <label style="cursor:pointer;flex:none;margin:0">
           {#if newPicPreview}
@@ -249,13 +251,16 @@
         <input id="n" bind:value={newName} placeholder="How should people know you?" />
       </div>
       <div>
-        <label for="a">About you <span class="muted" style="font-weight:400">(public)</span></label>
+        <label for="a">About you <span class="muted" style="font-weight:400">(optional)</span></label>
         <textarea id="a" rows="3" bind:value={newAbout}></textarea>
       </div>
     {/if}
 
+    <p class="muted" style="margin:0.25rem 0 0">
+      The next two pick who you should meet — be concrete.
+    </p>
     <div>
-      <label for="sk">Skills (comma-separated)</label>
+      <label for="sk">Skills <span class="muted" style="font-weight:400">— separate with commas</span></label>
       <input id="sk" bind:value={skills} placeholder="cryptography, rust, design" />
     </div>
     <div>
@@ -270,4 +275,16 @@
       {busy ? "Sending…" : session.loggedIn ? "Send join request" : "Create identity & join"}
     </button>
   </div>
+
+  {#if !session.loggedIn}
+    <!-- Quiet path for Nostr natives; newcomers just fill the form (UI-SUGGESTIONS #1). -->
+    <div class="or-divider">or</div>
+    <button class="btn" onclick={() => (showSignIn = !showSignIn)}>
+      <NostrichIcon size={20} />
+      Already on Nostr? Sign in
+    </button>
+    {#if showSignIn}
+      <SignInOptions onSignedIn={() => (showSignIn = false)} />
+    {/if}
+  {/if}
 {/if}
