@@ -64,6 +64,10 @@ const blobSize = (f: FixtureKey) => 100 + ORDER.indexOf(f);
 
 interface Counters {
   nostrSummary: number;
+  /** One entry per batched match-scoring call: target role + candidate roles. */
+  batchCalls: { targetRole?: string; candidateRoles: (string | undefined)[] }[];
+  /** When set, the NEXT batch containing a candidate of this role omits that entry once. */
+  dropRoleOnce?: string;
 }
 
 function makeLlm(counters: Counters): MockLlm {
@@ -80,22 +84,39 @@ function makeLlm(counters: Counters): MockLlm {
         seeks: which === "crypto" ? ["designer", "programmer"] : ["collaborators"],
       };
     }
-    if (req.schemaName === "pair_score") {
-      const roles = (["cryptographer", "designer", "programmer", "musician"] as const).filter((r) =>
-        req.user.includes(r),
-      );
-      const complementary = new Set(roles).size >= 2;
-      return {
-        score: complementary ? 0.9 : 0.4,
-        similarity: complementary ? 0.4 : 0.85,
-        complementarity: complementary ? 0.95 : 0.2,
-        reasoning_for_a: complementary
-          ? `You (A) should meet them — complementary skills (${roles.join(" + ")}) fit this event.`
-          : "Similar backgrounds.",
-        reasoning_for_b: complementary
-          ? `You (B) should meet them — complementary skills (${roles.join(" + ")}) fit this event.`
-          : "Similar backgrounds.",
-      };
+    if (req.schemaName === "batch_score") {
+      // Batched scoring: ONE target + numbered candidates (spec §16.2). Detect the
+      // target's role and each candidate's role; different roles = complementary.
+      const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
+      const roleOf = (text: string) => ROLES.find((r) => text.includes(r));
+      const [, afterTarget = ""] = req.user.split("TARGET ATTENDEE:");
+      const [targetBlock = "", candsBlock = ""] = afterTarget.split("CANDIDATES:");
+      const targetRole = roleOf(targetBlock);
+      const chunks = candsBlock.split(/--- CANDIDATE (\d+) ---/).slice(1);
+      const call: Counters["batchCalls"][number] = { targetRole, candidateRoles: [] };
+      counters.batchCalls.push(call);
+      const matches = [];
+      for (let i = 0; i + 1 < chunks.length; i += 2) {
+        const index = Number(chunks[i]);
+        const role = roleOf(chunks[i + 1]!);
+        call.candidateRoles.push(role);
+        if (role && counters.dropRoleOnce === role) {
+          // Simulate the model skipping this candidate (partial batch failure).
+          counters.dropRoleOnce = undefined;
+          continue;
+        }
+        const complementary = !!role && !!targetRole && role !== targetRole;
+        matches.push({
+          index,
+          score: complementary ? 0.9 : 0.4,
+          similarity: complementary ? 0.4 : 0.85,
+          complementarity: complementary ? 0.95 : 0.2,
+          reasoning_for_target: complementary
+            ? `You should meet them — complementary skills (${targetRole} + ${role}) fit this event.`
+            : "Similar backgrounds.",
+        });
+      }
+      return { matches };
     }
     if (req.schemaName === "nostr_summary") {
       counters.nostrSummary++;
@@ -119,9 +140,11 @@ interface Harness {
   eck: Uint8Array;
   invites: Uint8Array[];
   nextInvite: number;
+  /** Mutable test clock — advance to let retry backoffs elapse. */
+  clock: { t: number };
 }
 
-async function setup(nostrContextN = 0): Promise<Harness> {
+async function setup(nostrContextN = 0, opts: { batchSize?: number } = {}): Promise<Harness> {
   const coordSk = generateSecretKey();
   const eidSk = generateSecretKey();
   const eidPubkey = getPublicKey(eidSk);
@@ -140,7 +163,7 @@ async function setup(nostrContextN = 0): Promise<Harness> {
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 1, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
   );
 
-  const counters: Counters = { nostrSummary: 0 };
+  const counters: Counters = { nostrSummary: 0, batchCalls: [] };
   const llm = makeLlm(counters);
   const stt = new MockStt({
     [String(blobSize("crypto"))]: FIXTURES.crypto.transcript,
@@ -150,6 +173,7 @@ async function setup(nostrContextN = 0): Promise<Harness> {
     default: "generic",
   });
 
+  const clock = { t: 1_700_000_000_000 };
   const coordinator = new Coordinator({
     store, transport, coordSk, llm, stt,
     sttModel: "mock",
@@ -157,7 +181,8 @@ async function setup(nostrContextN = 0): Promise<Harness> {
     matchModel: { provider: "mock", model: "mock-strong" },
     embedModel: { provider: "mock", model: "mock-embed" },
     defaultRelays: ["wss://test"],
-    now: () => 1_700_000_000_000,
+    batchSize: opts.batchSize,
+    now: () => clock.t,
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
     transcribe: async (descriptor) => {
@@ -173,7 +198,7 @@ async function setup(nostrContextN = 0): Promise<Harness> {
     coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"],
   });
 
-  return { coordinator, transport, store, llm, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0 };
+  return { coordinator, transport, store, llm, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
 }
 
 async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<string> {
@@ -257,6 +282,61 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     await h.coordinator.jobs.drain();
     const after = countPairs(h.store, h.coordinate);
     expect(after - before).toBe(3); // music vs the 3 existing
+  });
+
+  it("batched scoring groups pending pairs into ≤K-candidate calls (K boundary)", async () => {
+    const h = await setup(0, { batchSize: 2 });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await join(h, generateSecretKey(), "code");
+    await join(h, generateSecretKey(), "music");
+    await h.coordinator.jobs.drain();
+
+    // Every batched call is one target + at most K=2 candidates.
+    expect(h.counters.batchCalls.length).toBeGreaterThan(0);
+    for (const call of h.counters.batchCalls) {
+      expect(call.targetRole).toBeDefined();
+      expect(call.candidateRoles.length).toBeGreaterThanOrEqual(1);
+      expect(call.candidateRoles.length).toBeLessThanOrEqual(2);
+    }
+    // All 4×3 directions converge; still C(4,2)=6 pair rows; each direction scored
+    // exactly once (12 candidate slots across all batch calls, no re-billing).
+    expect(countPairs(h.store, h.coordinate)).toBe(6);
+    const slots = h.counters.batchCalls.reduce((n, c) => n + c.candidateRoles.length, 0);
+    expect(slots).toBe(12);
+  });
+
+  it("partial batch failure: good candidates persist, only the missing one is re-sent", async () => {
+    const h = await setup(0, { batchSize: 10 });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await join(h, generateSecretKey(), "music");
+    // The first batch that lists a musician candidate omits that entry once
+    // (model skipped a candidate). Other candidates in that batch must persist.
+    h.counters.dropRoleOnce = "musician";
+    await h.coordinator.jobs.drain();
+
+    // All 3×2 directions converge: the dropped direction was re-sent ALONE in a
+    // follow-up batch (its batch-mate was never re-billed).
+    expect(countPairs(h.store, h.coordinate)).toBe(3);
+    for (const row of allPairRows(h.store, h.coordinate)) {
+      expect(row.reasoning).not.toBe("");
+      expect(row.reasoning_b).not.toBeNull();
+    }
+    const soloRetries = h.counters.batchCalls.filter(
+      (c) => c.targetRole === "cryptographer" && c.candidateRoles.length === 1 && c.candidateRoles[0] === "musician",
+    );
+    expect(soloRetries).toHaveLength(1);
+    // 6 directions + exactly one re-sent (dropped) slot — nothing double-billed.
+    const slots = h.counters.batchCalls.reduce((n, c) => n + c.candidateRoles.length, 0);
+    expect(slots).toBe(6 + 1);
+
+    // The failed batch job's backoff retry is a no-op: everything already scored.
+    const callsBefore = h.counters.batchCalls.length;
+    h.clock.t += 60_000;
+    await h.coordinator.jobs.drain();
+    expect(h.counters.batchCalls.length).toBe(callsBefore);
+    expect(h.store.pendingJobCount()).toBe(0);
   });
 
   it("restart / re-delivery never re-bills STT or LLM (idempotent)", async () => {
@@ -351,6 +431,10 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
 
 function countPairs(store: Store, coordinate: string): number {
   return (store as any).db.prepare("SELECT COUNT(*) AS c FROM pairs WHERE coordinate = ?").get(coordinate).c;
+}
+
+function allPairRows(store: Store, coordinate: string): any[] {
+  return (store as any).db.prepare("SELECT * FROM pairs WHERE coordinate = ?").all(coordinate);
 }
 
 /** The published directory entry for blinded d that carries an ai_profile (if any). */

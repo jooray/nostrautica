@@ -112,6 +112,17 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration: directional scoring (batched matcher, spec §16.2). Each direction
+    // (a→b, b→a) is scored independently, so the a→b score/similarity/complementarity
+    // live in the base columns and the b→a values in the *_b columns. Older rows have
+    // NULL *_b columns; pairsFor() COALESCEs them back to the shared value.
+    for (const col of ["score_b", "similarity_b", "complementarity_b"]) {
+      try {
+        this.db.exec(`ALTER TABLE pairs ADD COLUMN ${col} REAL`);
+      } catch {
+        /* column already exists */
+      }
+    }
   }
 
   close(): void {
@@ -252,6 +263,10 @@ export class Store {
   }
 
   // ── pairs (cache by inputs hash) ──────────────────────────────────────────
+  // Scoring is DIRECTIONAL (spec §16.2, batched matcher): the from→to direction
+  // lives in the base columns when from is the lexically-smaller pubkey, else in
+  // the *_b columns. A row is created by whichever direction is scored first; the
+  // other direction fills its own columns later without clobbering.
   getPair(coordinate: string, a: string, b: string):
     | { inputs_hash: string; score: number; similarity: number; complementarity: number; reasoning: string }
     | undefined {
@@ -260,6 +275,30 @@ export class Store {
       .prepare("SELECT * FROM pairs WHERE coordinate = ? AND a = ? AND b = ?")
       .get(coordinate, x, y) as any;
   }
+
+  /**
+   * The stored state of the `from → to` direction: whether it has been scored for
+   * the given inputs_hash. Returns undefined if no row exists at all, and
+   * `scored:false` if a row exists (from the reverse direction) but this direction
+   * is still empty. Used by the matcher to select only unscored directed pairs.
+   */
+  getPairDirection(coordinate: string, from: string, to: string):
+    | { inputs_hash: string; scored: boolean; score: number; reasoning: string | null }
+    | undefined {
+    const [x, y] = from < to ? [from, to] : [to, from];
+    const row = this.db
+      .prepare("SELECT * FROM pairs WHERE coordinate = ? AND a = ? AND b = ?")
+      .get(coordinate, x, y) as any;
+    if (!row) return undefined;
+    const fromIsX = from === x;
+    const reasoning = fromIsX ? row.reasoning : row.reasoning_b;
+    const score = fromIsX ? row.score : (row.score_b ?? row.score);
+    // A NULL/empty directional reasoning means that direction was never scored (the
+    // row exists only because the reverse direction populated it).
+    const scored = reasoning != null && reasoning !== "";
+    return { inputs_hash: row.inputs_hash, scored, score, reasoning };
+  }
+
   putPair(row: {
     coordinate: string;
     a: string;
@@ -272,22 +311,90 @@ export class Store {
     reasoningForB: string; // addressed to row.b
     now: number;
   }): void {
-    const aFirst = row.a < row.b;
-    const [x, y] = aFirst ? [row.a, row.b] : [row.b, row.a];
-    // `reasoning` is addressed to x (the stored `a`); `reasoning_b` to y.
-    const reasoningX = aFirst ? row.reasoningForA : row.reasoningForB;
-    const reasoningY = aFirst ? row.reasoningForB : row.reasoningForA;
-    this.db
-      .prepare(
-        `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, reasoning_b, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(coordinate, a, b) DO UPDATE SET
-           inputs_hash = excluded.inputs_hash, score = excluded.score,
-           similarity = excluded.similarity, complementarity = excluded.complementarity,
-           reasoning = excluded.reasoning, reasoning_b = excluded.reasoning_b,
-           created_at = excluded.created_at`,
-      )
-      .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, reasoningX, reasoningY, row.now);
+    // Convenience: write both directions at once (pairwise path / tests). Uses the
+    // same directional columns as putPairDirection.
+    this.putPairDirection({
+      coordinate: row.coordinate,
+      from: row.a,
+      to: row.b,
+      inputsHash: row.inputsHash,
+      score: row.score,
+      similarity: row.similarity,
+      complementarity: row.complementarity,
+      reasoning: row.reasoningForA,
+      now: row.now,
+    });
+    this.putPairDirection({
+      coordinate: row.coordinate,
+      from: row.b,
+      to: row.a,
+      inputsHash: row.inputsHash,
+      score: row.score,
+      similarity: row.similarity,
+      complementarity: row.complementarity,
+      reasoning: row.reasoningForB,
+      now: row.now,
+    });
+  }
+
+  /**
+   * Persist ONE direction (from → to). Creates the pair row if absent and fills
+   * only this direction's score/similarity/complementarity/reasoning columns,
+   * preserving whatever the reverse direction already wrote. A changed inputs_hash
+   * resets the whole row (both directions must be re-scored).
+   */
+  putPairDirection(row: {
+    coordinate: string;
+    from: string;
+    to: string;
+    inputsHash: string;
+    score: number;
+    similarity: number;
+    complementarity: number;
+    reasoning: string;
+    now: number;
+  }): void {
+    const [x, y] = row.from < row.to ? [row.from, row.to] : [row.to, row.from];
+    const fromIsX = row.from === x;
+    const existing = this.db
+      .prepare("SELECT inputs_hash FROM pairs WHERE coordinate = ? AND a = ? AND b = ?")
+      .get(row.coordinate, x, y) as { inputs_hash: string } | undefined;
+    // Stale row (profile changed): drop it so both directions re-score cleanly.
+    if (existing && existing.inputs_hash !== row.inputsHash) {
+      this.db
+        .prepare("DELETE FROM pairs WHERE coordinate = ? AND a = ? AND b = ?")
+        .run(row.coordinate, x, y);
+    }
+    if (fromIsX) {
+      this.db
+        .prepare(
+          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(coordinate, a, b) DO UPDATE SET
+             inputs_hash = excluded.inputs_hash, score = excluded.score,
+             similarity = excluded.similarity, complementarity = excluded.complementarity,
+             reasoning = excluded.reasoning, created_at = excluded.created_at`,
+        )
+        .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, row.now);
+    } else {
+      // b→a direction: write the *_b columns. On INSERT the base (a→b) columns are
+      // not yet known — seed them so the NOT NULL constraints hold; the a→b batch
+      // overwrites them later.
+      this.db
+        .prepare(
+          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, score_b, similarity_b, complementarity_b, reasoning_b, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+           ON CONFLICT(coordinate, a, b) DO UPDATE SET
+             inputs_hash = excluded.inputs_hash, score_b = excluded.score_b,
+             similarity_b = excluded.similarity_b, complementarity_b = excluded.complementarity_b,
+             reasoning_b = excluded.reasoning_b, created_at = excluded.created_at`,
+        )
+        .run(
+          row.coordinate, x, y, row.inputsHash,
+          row.score, row.similarity, row.complementarity, // seed base cols for NOT NULL
+          row.score, row.similarity, row.complementarity, row.reasoning, row.now,
+        );
+    }
   }
   /** Drop all cached pair scores for an event (forces a full re-score). */
   clearPairs(coordinate: string): void {
@@ -301,13 +408,24 @@ export class Store {
     complementarity: number;
     reasoning: string;
   }[] {
-    return this.db
+    // Return pubkey's OWN directional view: when pubkey is the stored `a`, the base
+    // columns are its outbound (a→b) score/reasoning; when it is `b`, the *_b
+    // columns. Scores COALESCE to the shared value for legacy pairwise rows (which
+    // set reasoning_b but not score_b); reasoning must NOT fall back — a NULL
+    // reasoning_b means the b→a direction was never scored.
+    const rows = this.db
       .prepare(
-        `SELECT CASE WHEN a = ? THEN b ELSE a END AS other, score, similarity, complementarity,
-                CASE WHEN a = ? THEN reasoning ELSE COALESCE(reasoning_b, reasoning) END AS reasoning
+        `SELECT CASE WHEN a = ? THEN b ELSE a END AS other,
+                CASE WHEN a = ? THEN score ELSE COALESCE(score_b, score) END AS score,
+                CASE WHEN a = ? THEN similarity ELSE COALESCE(similarity_b, similarity) END AS similarity,
+                CASE WHEN a = ? THEN complementarity ELSE COALESCE(complementarity_b, complementarity) END AS complementarity,
+                CASE WHEN a = ? THEN reasoning ELSE reasoning_b END AS reasoning
          FROM pairs WHERE coordinate = ? AND (a = ? OR b = ?)`,
       )
-      .all(pubkey, pubkey, coordinate, pubkey, pubkey) as any;
+      .all(pubkey, pubkey, pubkey, pubkey, pubkey, coordinate, pubkey, pubkey) as any[];
+    // Only surface directions that have actually been scored (non-empty reasoning);
+    // a row seeded by the reverse direction has an empty/NULL value here.
+    return rows.filter((r) => r.reasoning != null && r.reasoning !== "");
   }
 
   // ── invite usage (first-come, single-use) ─────────────────────────────────

@@ -51,14 +51,17 @@ import { processAttendee } from "./pipeline/process.js";
 import type { NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
-  scorePair,
+  scoreBatch,
+  type BatchCandidate,
   type EventContextForScoring,
 } from "./matching/scoring.js";
 import {
   selectPairsToScore,
-  recordPairScore,
+  groupIntoBatches,
+  recordDirectedScore,
   buildMatchList,
   type AttendeeForMatching,
+  type CandidatePair,
 } from "./matching/matcher.js";
 import { DEFAULT_PREFILTER, type PrefilterConfig } from "./matching/prefilter.js";
 import {
@@ -82,6 +85,19 @@ function log(msg: string): void {
   console.log(`[${t}] ${msg}`);
 }
 
+/**
+ * Stable dedupe fragment for a batch job: a hash of the sorted candidate
+ * `b:inputsHash` pairs. Two enqueues covering the same target+candidate set (same
+ * inputs) collapse to one job, so a restart mid-recompute never double-bills.
+ */
+function batchDedupe(batch: { b: string; inputsHash: string }[]): string {
+  const canonical = batch
+    .map((p) => `${p.b}:${p.inputsHash}`)
+    .sort()
+    .join(",");
+  return sha256Hex(utf8ToBytes(canonical)).slice(0, 24);
+}
+
 export interface CoordinatorDeps {
   store: Store;
   transport: Transport;
@@ -95,6 +111,10 @@ export interface CoordinatorDeps {
   defaultRelays: string[];
   prefilter?: PrefilterConfig;
   topK?: number;
+  /** Candidates per batched match-scoring call (spec §16.2). Default 10. */
+  batchSize?: number;
+  /** Injectable RNG for deterministic candidate shuffling in tests. */
+  matchRng?: () => number;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /** Override the transcription stage (tests inject to skip Blossom/ffmpeg). */
   transcribe?: (descriptor: import("@nostrautica/protocol").MediaDescriptor) => Promise<string>;
@@ -118,6 +138,8 @@ export class Coordinator {
   private readonly now: () => number;
   private readonly prefilter: PrefilterConfig;
   private readonly topK: number;
+  private readonly batchSize: number;
+  private readonly matchRng: () => number;
   private readonly inviteChecker: InviteChecker;
   private events = new Map<string, EventState>();
   private closers: Array<() => void> = [];
@@ -127,6 +149,8 @@ export class Coordinator {
     this.coordPubkey = getPublicKey(deps.coordSk);
     this.prefilter = deps.prefilter ?? DEFAULT_PREFILTER;
     this.topK = deps.topK ?? 20;
+    this.batchSize = deps.batchSize ?? 10;
+    this.matchRng = deps.matchRng ?? Math.random;
     this.inviteChecker = new InviteChecker(deps.store);
     this.jobs = new JobRunner(deps.store, { now: this.now });
     this.registerJobHandlers();
@@ -136,7 +160,10 @@ export class Coordinator {
   private registerJobHandlers(): void {
     this.jobs.register("process_attendee", async (p, { enqueue }) => {
       await this.processAttendeeJob(p.coordinate, p.pubkey);
-      enqueue("match_recompute", `match:${p.coordinate}:${p.pubkey}`, {
+      // Key the recompute by the attendee's resulting profile hash: re-delivery of
+      // the same submission dedupes, a CHANGED profile gets a fresh recompute.
+      const hash = this.deps.store.getAttendee(p.coordinate, p.pubkey)?.profile_hash ?? "none";
+      enqueue("match_recompute", `match:${p.coordinate}:${p.pubkey}:${hash}`, {
         coordinate: p.coordinate,
         pubkey: p.pubkey,
       });
@@ -144,19 +171,56 @@ export class Coordinator {
 
     this.jobs.register("match_recompute", async (p, { enqueue }) => {
       const pairs = await this.selectPairs(p.coordinate, p.pubkey);
-      if (pairs.length) log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} new pair(s)`);
+      if (!pairs.length) return;
+      // Directions are scored from the target's side only (the host-voice reasoning
+      // is addressed to the batch target). Each candidate therefore needs its own
+      // candidate→target scoring: trigger a recompute for candidates whose reverse
+      // direction is still unscored. Keys are content-addressed by the pair's
+      // inputs_hash, so re-delivery dedupes and nothing loops (each pubkey gets at
+      // most one recompute job per pair-inputs version).
       for (const pair of pairs) {
-        enqueue("score_pair", `pair:${p.coordinate}:${pair.a}:${pair.b}:${pair.inputsHash}`, {
-          coordinate: p.coordinate,
-          ...pair,
-        });
+        const rev = this.deps.store.getPairDirection(p.coordinate, pair.b, pair.a);
+        if (!rev || rev.inputs_hash !== pair.inputsHash || !rev.scored) {
+          enqueue("match_recompute", `match:${p.coordinate}:${pair.b}:${pair.inputsHash}`, {
+            coordinate: p.coordinate,
+            pubkey: pair.b,
+          });
+        }
+      }
+      // Group the target's pending directed pairs into ≤K-candidate batches (one
+      // target + ≤K candidates per LLM call — spec §16.2). Batching is a transport
+      // optimization only: each batch job is deduped by its target+candidate-set
+      // hash, and results are written per directed pair keyed by inputs_hash.
+      const batches = groupIntoBatches(pairs, this.batchSize);
+      log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} directed pair(s) in ${batches.length} batch(es)`);
+      for (const batch of batches) {
+        const key = `batch:${p.coordinate}:${batch[0]!.a}:${batchDedupe(batch)}`;
+        enqueue("score_batch", key, { coordinate: p.coordinate, pairs: batch });
       }
     });
 
-    this.jobs.register("score_pair", async (p, { enqueue }) => {
-      await this.scorePairJob(p.coordinate, p.a, p.b, p.inputsHash);
-      enqueue("publish_matches", `pub:${p.coordinate}:${p.a}`, { coordinate: p.coordinate, pubkey: p.a });
-      enqueue("publish_matches", `pub:${p.coordinate}:${p.b}`, { coordinate: p.coordinate, pubkey: p.b });
+    this.jobs.register("score_batch", async (p, { enqueue }) => {
+      const pairs = p.pairs as CandidatePair[];
+      const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs);
+      // A directed write only changes the TARGET's list (the candidate's own view
+      // comes from their own batch), so only the target republishes. The key
+      // carries the scored set's content hash so new scores trigger a fresh
+      // publish while identical re-deliveries dedupe.
+      if (scored.length) {
+        const target = pairs[0]!.a;
+        enqueue("publish_matches", `pub:${p.coordinate}:${target}:${batchDedupe(scored)}`, {
+          coordinate: p.coordinate,
+          pubkey: target,
+        });
+      }
+      // Partial failure: the good candidates are already persisted (and their
+      // publish enqueued above — enqueues survive a handler throw). Throwing makes
+      // the runner retry THIS job with backoff; the retry re-selects only the
+      // still-unscored candidates, so finished pairs are never re-billed and one
+      // bad candidate never poisons its batch-mates.
+      if (missing > 0) {
+        throw new Error(`batch response missing ${missing} candidate(s); retrying unscored remainder`);
+      }
     });
 
     this.jobs.register("publish_matches", async (p) => {
@@ -471,20 +535,62 @@ export class Coordinator {
     roster.forEach((a, i) => (a.embedding = embeddings[i]));
   }
 
-  private async scorePairJob(coordinate: string, a: string, b: string, inputsHash: string): Promise<void> {
+  /**
+   * Score one batch (one target + ≤K candidates) in a single LLM call, writing each
+   * directed result per-pair. Returns the pairs actually scored this attempt plus
+   * how many candidates the model failed to return (missing/malformed entries).
+   *
+   * Idempotency: pairs already scored for their current inputs_hash are skipped, so
+   * a retried or re-delivered batch never re-bills a finished pair — the retry call
+   * contains only the unscored remainder.
+   */
+  private async scoreBatchJob(
+    coordinate: string,
+    pairs: CandidatePair[],
+  ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
-    if (!state) return;
-    const cached = this.deps.store.getPair(coordinate, a, b);
-    if (cached && cached.inputs_hash === inputsHash) return; // already scored (idempotent)
+    if (!state || pairs.length === 0) return { scored: [], missing: 0 };
+    const target = pairs[0]!.a;
+    const targetProfile = this.loadAiProfile(coordinate, target);
+    if (!targetProfile) return { scored: [], missing: 0 };
 
-    const aiA = this.loadAiProfile(coordinate, a);
-    const aiB = this.loadAiProfile(coordinate, b);
-    if (!aiA || !aiB) return;
-    const score = await scorePair(this.deps.llm, this.deps.matchModel.model, state.scoringCtx, aiA, aiB);
-    recordPairScore(this.deps.store, coordinate, { a, b, inputsHash }, score, this.now());
-    log(
-      `[match] ${short(a)} × ${short(b)} = ${score.score.toFixed(2)} (sim ${score.similarity.toFixed(2)}, comp ${score.complementarity.toFixed(2)})`,
+    // Score only pairs still pending for their current inputs_hash.
+    const todo = pairs.filter((p) => {
+      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
+      return !dir || dir.inputs_hash !== p.inputsHash || !dir.scored;
+    });
+
+    const candidates: BatchCandidate[] = [];
+    const pairById = new Map<string, CandidatePair>();
+    for (const p of todo) {
+      const profile = this.loadAiProfile(coordinate, p.b);
+      if (!profile) continue;
+      candidates.push({ id: p.b, profile });
+      pairById.set(p.b, p);
+    }
+    if (candidates.length === 0) return { scored: [], missing: 0 };
+
+    const { scores, missing } = await scoreBatch(
+      this.deps.llm,
+      this.deps.matchModel.model,
+      state.scoringCtx,
+      targetProfile,
+      candidates,
+      this.matchRng,
     );
+    const scored: CandidatePair[] = [];
+    for (const [candId, ds] of scores) {
+      const p = pairById.get(candId)!;
+      recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
+      scored.push(p);
+      log(
+        `[match] ${short(target)} → ${short(candId)} = ${ds.score.toFixed(2)} (sim ${ds.similarity.toFixed(2)}, comp ${ds.complementarity.toFixed(2)})`,
+      );
+    }
+    if (missing.length) {
+      log(`[match] ${short(target)} batch: ${missing.length} candidate(s) unparsed`);
+    }
+    return { scored, missing: missing.length };
   }
 
   private loadAiProfile(coordinate: string, pubkey: string) {

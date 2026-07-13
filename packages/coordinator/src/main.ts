@@ -5,7 +5,13 @@
  */
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
-import { loadConfig, resolveIdentity, veniceApiKey } from "./config.js";
+import {
+  loadConfig,
+  resolveIdentity,
+  veniceApiKey,
+  roleRequiresPrivate,
+  type CoordinatorConfig,
+} from "./config.js";
 import { Store } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
 import { Coordinator, type Transport } from "./coordinator.js";
@@ -15,6 +21,44 @@ import { VeniceLlm, VeniceStt } from "./providers/venice.js";
 import { RoutstrLlm } from "./providers/routstr.js";
 import { CashuPayment } from "./providers/cashu.js";
 import type { LlmProvider, SttProvider } from "./providers/types.js";
+
+/**
+ * Enforce the per-role privacy policy (spec §16.2) against the live GET /models
+ * list. A role whose model is listed as NOT private while the role requires
+ * private is a hard error; an unlisted model id is only a warning (ids are
+ * volatile per spec §15, and embedding models may be listed under another type).
+ */
+async function verifyModelPrivacy(llm: LlmProvider, config: CoordinatorConfig): Promise<void> {
+  let all;
+  try {
+    all = await llm.models();
+  } catch (err) {
+    console.warn(`[coordinator] could not verify model privacy (GET /models failed): ${err}`);
+    return;
+  }
+  const byId = new Map(all.map((m) => [m.id, m]));
+  for (const role of ["summary", "match", "embed"] as const) {
+    const ref = config.models[role];
+    if (ref.provider !== "venice") continue;
+    const info = byId.get(ref.model);
+    if (!info) {
+      console.warn(`[coordinator] models.${role} "${ref.model}" not found in GET /models — cannot verify privacy tier`);
+      continue;
+    }
+    const wantPrivate = roleRequiresPrivate(config, role);
+    if (wantPrivate && !info.private) {
+      throw new Error(
+        `models.${role} "${ref.model}" is not a Venice private/TEE-tier model. ` +
+          `Pick a private model, or explicitly accept the trade-off with models.${role}.require_private = false`,
+      );
+    }
+    if (!wantPrivate && !info.private) {
+      console.warn(
+        `[coordinator] models.${role} "${ref.model}" is NOT private-tier (require_private=false accepted): prompts leave the TEE boundary`,
+      );
+    }
+  }
+}
 
 async function main(): Promise<void> {
   const configPath = process.argv[2] ?? "coordinator.toml";
@@ -35,7 +79,10 @@ async function main(): Promise<void> {
     ? {
         payment: new ApiKeyPayment(apiKey),
         baseUrl: config.providers.venice?.base_url,
-        requirePrivate: config.providers.venice?.require_private ?? true,
+        // Privacy is enforced PER ROLE by verifyModelPrivacy() below (a role may
+        // relax it via models.<role>.require_private = false, spec §16.2), so the
+        // adapter must return the unfiltered list here.
+        requirePrivate: false,
       }
     : undefined;
 
@@ -56,6 +103,7 @@ async function main(): Promise<void> {
     if (!veniceOpts) throw new Error("No Venice API key and no Routstr node configured");
     llm = new VeniceLlm(veniceOpts);
     console.log("[coordinator] LLM: Venice");
+    await verifyModelPrivacy(llm, config);
   }
 
   const stt: SttProvider =
@@ -88,6 +136,7 @@ async function main(): Promise<void> {
       randomN: config.matching.prefilter_random,
     },
     topK: config.matching.top_k,
+    batchSize: config.matching.batch_size,
   });
 
   await coordinator.start();

@@ -10,7 +10,15 @@ import { decode } from "nostr-tools/nip19";
 import { decrypt as nip49Decrypt } from "nostr-tools/nip49";
 import { hexToBytes } from "@nostrautica/protocol";
 
-const modelRefSchema = z.object({ provider: z.string(), model: z.string() });
+// A model role may opt out of the provider's private-tier restriction (spec §16.2):
+// the matching-benchmark winner (deepseek-v4-flash) is not a Venice private model,
+// so `models.match.require_private = false` relaxes the filter for THAT role only.
+// Summary/STT keep the provider default (private). Omitting the field = provider default.
+const modelRefSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  require_private: z.boolean().optional(),
+});
 
 export const configSchema = z.object({
   identity: z
@@ -55,6 +63,8 @@ export const configSchema = z.object({
       prefilter_top_m: z.number().default(30),
       prefilter_random: z.number().default(10),
       top_k: z.number().default(20),
+      /** Candidates per batched match-scoring call (benchmark winner: K=10). */
+      batch_size: z.number().int().min(1).default(10),
     })
     .default({}),
 });
@@ -94,4 +104,17 @@ export function resolveIdentity(config: CoordinatorConfig): Uint8Array {
 export function veniceApiKey(config: CoordinatorConfig): string | undefined {
   const envVar = config.providers.venice?.api_key_env ?? "VENICE_API_KEY";
   return process.env[envVar];
+}
+
+export type ModelRole = "summary" | "match" | "embed";
+
+/**
+ * Effective privacy requirement for a model role: the per-role
+ * `models.<role>.require_private` override when set, else the provider-level
+ * `providers.venice.require_private` (default true — today's behavior).
+ */
+export function roleRequiresPrivate(config: CoordinatorConfig, role: ModelRole): boolean {
+  return (
+    config.models[role].require_private ?? config.providers.venice?.require_private ?? true
+  );
 }

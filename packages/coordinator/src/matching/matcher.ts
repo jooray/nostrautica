@@ -12,6 +12,7 @@ import type { Store } from "../store/db.js";
 import {
   pairInputsHash,
   type PairScore,
+  type DirectedScore,
 } from "./scoring.js";
 import { selectCandidates, type PrefilterConfig } from "./prefilter.js";
 
@@ -21,6 +22,11 @@ export interface AttendeeForMatching {
   embedding?: number[];
 }
 
+/**
+ * A DIRECTED pair to score: `a` is the target, `b` the candidate. The batched
+ * matcher produces the a→b reasoning (addressed to a); the b→a direction is a
+ * separate CandidatePair produced when b is the target of its own recompute.
+ */
 export interface CandidatePair {
   a: string;
   b: string;
@@ -63,12 +69,59 @@ export function selectPairsToScore(
     const otherHash = hashByPubkey.get(other);
     if (!otherHash) continue;
     const inputsHash = pairInputsHash(target.profileHash, otherHash);
-    const cached = store.getPair(coordinate, target.pubkey, other);
-    if (!cached || cached.inputs_hash !== inputsHash) {
+    // Directional idempotency: the target→other direction is pending unless a row
+    // exists for the current inputs_hash AND that direction has been scored (its
+    // reasoning is non-empty). A row seeded by the reverse (other→target) batch
+    // still leaves this direction to do.
+    const dir = store.getPairDirection(coordinate, target.pubkey, other);
+    if (!dir || dir.inputs_hash !== inputsHash || !dir.scored) {
       pairs.push({ a: target.pubkey, b: other, inputsHash });
     }
   }
   return pairs;
+}
+
+/**
+ * Split directed pairs into batches of at most `batchSize`. All pairs share the
+ * same target `a` (they come from one target's recompute), so a batch is one
+ * target + ≤K candidates — exactly the batched call shape. If a caller ever mixes
+ * targets, we still group by target defensively so each batch is single-target.
+ */
+export function groupIntoBatches(pairs: CandidatePair[], batchSize: number): CandidatePair[][] {
+  const byTarget = new Map<string, CandidatePair[]>();
+  for (const p of pairs) {
+    const list = byTarget.get(p.a) ?? [];
+    list.push(p);
+    byTarget.set(p.a, list);
+  }
+  const batches: CandidatePair[][] = [];
+  for (const list of byTarget.values()) {
+    for (let i = 0; i < list.length; i += batchSize) {
+      batches.push(list.slice(i, i + batchSize));
+    }
+  }
+  return batches;
+}
+
+/** Persist ONE directed score (a→b), addressed to a. Preserves the b→a direction. */
+export function recordDirectedScore(
+  store: Store,
+  coordinate: string,
+  pair: CandidatePair,
+  score: DirectedScore,
+  now: number,
+): void {
+  store.putPairDirection({
+    coordinate,
+    from: pair.a,
+    to: pair.b,
+    inputsHash: pair.inputsHash,
+    score: score.score,
+    similarity: score.similarity,
+    complementarity: score.complementarity,
+    reasoning: score.reasoning,
+    now,
+  });
 }
 
 /** Persist a computed pair score into the cache. */

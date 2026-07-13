@@ -1,13 +1,15 @@
 /**
- * Pair scoring (spec §9.3). The prompt takes both ai_profiles + event context and
- * returns strict-JSON {score, similarity, complementarity, reasoning}. Scoring
- * MUST explicitly reward complementarity (skills that complete each other for
- * this event's purpose), not just similarity.
+ * Pair scoring (spec §9.3, §16.2). Scoring is BATCHED and DIRECTIONAL: one LLM
+ * call scores ONE target attendee against ≤K candidates using the BP3 prompt from
+ * docs/MATCHING-BENCHMARK.md (rubric anchors + user-facing host-voice reasoning).
+ * Scoring MUST explicitly reward complementarity (skills that complete each other
+ * for this event's purpose), not just similarity.
  */
 import { sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
 
+/** A fully-scored pair, both directions at once (legacy pairwise rows / tests). */
 export interface PairScore {
   score: number;
   similarity: number;
@@ -17,55 +19,6 @@ export interface PairScore {
   /** Addressed to PERSON B ("you"), explaining why B should meet A. */
   reasoningForB: string;
 }
-
-/** Strict JSON schema for structured output (additionalProperties:false, all required). */
-export const PAIR_SCORE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["score", "similarity", "complementarity", "reasoning_for_a", "reasoning_for_b"],
-  properties: {
-    score: { type: "number", description: "0..1 overall how much they should meet" },
-    similarity: { type: "number", description: "0..1 shared interests/background" },
-    complementarity: {
-      type: "number",
-      description: "0..1 how much their skills complete each other for this event",
-    },
-    reasoning_for_a: {
-      type: "string",
-      description:
-        "Addressed to PERSON A as 'you', explaining why YOU (A) should meet B — reference A's own goals/skills and what B offers A. 1-2 sentences, specific, not generic.",
-    },
-    reasoning_for_b: {
-      type: "string",
-      description:
-        "Addressed to PERSON B as 'you', explaining why YOU (B) should meet A — reference B's own goals/skills and what A offers B. 1-2 sentences, specific, not generic.",
-    },
-  },
-} as const;
-
-interface RawPairScore {
-  score: number;
-  similarity: number;
-  complementarity: number;
-  reasoning_for_a: string;
-  reasoning_for_b: string;
-}
-
-export const PAIR_SYSTEM_PROMPT = [
-  "You are a conference matchmaker. Given two attendees' AI profiles and the event context,",
-  "score how valuable it would be for them to meet.",
-  "Reward COMPLEMENTARITY — skills/roles that complete each other for THIS event's purpose",
-  "(e.g. a cryptographer + a designer + a programmer at a cypherpunk event; a drummer + a",
-  "bassist + a singer at a music gathering) — at least as much as similarity. Two people who",
-  "are near-identical should score lower than two who fit together like puzzle pieces.",
-  "CRITICAL: score, similarity, and complementarity are each a DECIMAL FRACTION between",
-  "0.0 and 1.0 (e.g. 0.85). Never use a 0-10 or 0-100 scale.",
-  "Write TWO separate reasonings, each addressed to that person as \"you\": reasoning_for_a",
-  "tells PERSON A why THEY should meet B (grounded in A's own goals/skills and what B brings",
-  "A); reasoning_for_b tells PERSON B why THEY should meet A. They are NOT the same sentence",
-  "with names swapped — each speaks to that person's specific situation. Plain language,",
-  "specific, never a bare score.",
-].join(" ");
 
 /** Clamp to [0,1], rescaling values the model returned on a 0-10 / 0-100 scale. */
 function normalizeScore(v: number): number {
@@ -108,44 +61,193 @@ export interface EventContextForScoring {
   hashtags: string[];
 }
 
-/** Score one pair via the LLM (caller handles caching). */
-export async function scorePair(
+// ── Batched scoring (spec §9.3, §16.2) ────────────────────────────────────────
+// One call scores ONE target attendee against K candidates. The model returns a
+// per-candidate {similarity, complementarity, score, reasoning_for_target}, where
+// the reasoning is addressed to the TARGET ("you"). The reverse direction is
+// produced when the candidate is itself the target of its own batch. This is a
+// transport optimization only — results are written per directed pair, keyed by
+// inputs_hash, so idempotency and incremental re-scoring are unchanged.
+
+/** Directed score of one candidate FROM the target's point of view. */
+export interface DirectedScore {
+  score: number;
+  similarity: number;
+  complementarity: number;
+  /** Addressed to the TARGET as "you": why the target should meet this candidate. */
+  reasoning: string;
+}
+
+/**
+ * BP3 (docs/MATCHING-BENCHMARK.md appendix) — host-voice reasoning + rubric
+ * anchors. Verbatim: rubric anchors roughly double strong-vs-weak separation and
+ * the host-voice block makes the reasoning shippable (judged 4.53/5, near-zero
+ * meta-commentary). Do NOT paraphrase — the exact wording is load-bearing (the
+ * report notes colorful rubric phrases leak into output, so keep it drab).
+ */
+export const BATCH_SYSTEM_PROMPT = [
+  "You are a conference matchmaker for the event described below. You are given ONE target attendee",
+  "and a numbered list of candidate attendees. For EACH candidate, judge how valuable it would be",
+  "for the TARGET to meet them, considering what THIS event is for.",
+  "",
+  "Score three fields, each a DECIMAL between 0.0 and 1.0 (never 0-10 or 0-100):",
+  " • similarity: shared interests, background, or goals.",
+  " • complementarity: how much their skills/roles COMPLETE each other for this event — one has what",
+  "   the other needs (a founder needing a Rust dev + a Rust dev wanting a mission; a drummer + a",
+  "   bassist; powerful-but-unusable tech + a designer). This is the most important signal.",
+  " • score: overall value of the meeting. A meeting is high-value when one person's SEEKS is met by",
+  "   the other's OFFERS/skills (in either direction). Reward that fit heavily.",
+  "",
+  "Score anchors for `score`: 0.9-1.0 = a near-perfect mutual fit (each solves the other's stated need);",
+  " 0.7-0.85 = strong one-directional or clearly useful fit; 0.4-0.6 = plausible, some overlap but no",
+  " sharp need met; 0.15-0.35 = weak, only vague topical overlap; 0.0-0.1 = no real reason to meet.",
+  "",
+  "Scoring rules:",
+  " • Score each candidate INDEPENDENTLY on its own merits. Do not let an early strong candidate inflate",
+  "   later ones, or let a strong batch drag up a weak candidate. Use the FULL range — most candidates in",
+  "   a batch should NOT score high.",
+  " • Ground every judgement in the ACTUAL profile text. Never invent skills, goals, or facts.",
+  "",
+  "reasoning_for_target — THIS TEXT IS SHOWN DIRECTLY TO THE TARGET ATTENDEE. Write 1-2 sentences in",
+  "the voice of a good host introducing them to the candidate:",
+  ' • Second person, direct: "You should grab Elena — ...", "Ask him about ...".',
+  " • Name a CONCRETE thing to talk about or do together, drawn from both people's actual details.",
+  ' • ABSOLUTELY NO analytical framing: never say "this pair", "based on their profiles", "high',
+  '   complementarity", "scores", "match", or explain why a rating was given. No hedging boilerplate.',
+  'Example of GOOD: "You\'ve been hunting for a bassist — Sunny plays bass, she\'s new in town and dead',
+  'serious about joining a band; ask her what she\'d want your first setlist to sound like."',
+  'Example of BAD (never do this): "This pair has high complementarity because both are musicians',
+  'seeking bandmates, resulting in a strong match score."',
+  "",
+  "Return one entry per candidate, using the candidate's number as `index`. Score EVERY candidate exactly once.",
+].join("\n");
+
+/** Strict JSON schema: an object with a `matches` array, one entry per candidate. */
+export const BATCH_SCORE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["matches"],
+  properties: {
+    matches: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["index", "similarity", "complementarity", "score", "reasoning_for_target"],
+        properties: {
+          index: { type: "number", description: "the candidate number this entry scores" },
+          similarity: { type: "number" },
+          complementarity: { type: "number" },
+          score: { type: "number" },
+          reasoning_for_target: {
+            type: "string",
+            description:
+              "Addressed to the TARGET as 'you': a host-voice, 1-2 sentence hook for meeting this candidate. No analytical framing.",
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+interface RawBatchMatch {
+  index: number;
+  similarity: number;
+  complementarity: number;
+  score: number;
+  reasoning_for_target: string;
+}
+
+/** A candidate in a batch, tagged with the caller's stable id (pubkey). */
+export interface BatchCandidate {
+  id: string;
+  profile: AiProfile;
+}
+
+export interface BatchScoreResult {
+  /** Directed scores keyed by candidate id. Missing ids failed to parse and must be retried. */
+  scores: Map<string, DirectedScore>;
+  /** Candidate ids the model did not return a valid entry for. */
+  missing: string[];
+}
+
+/**
+ * Deterministic Fisher–Yates shuffle driven by an injectable rng. Batches shuffle
+ * candidate order to spread residual position bias (benchmark: corr 0.0–0.16 at
+ * K=10; deepseek-v4-flash −0.01).
+ */
+function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [a[i], a[j]] = [a[j]!, a[i]!];
+  }
+  return a;
+}
+
+/**
+ * Score one target against K candidates in a single LLM call. Per-candidate parse:
+ * a malformed/missing candidate is reported in `missing` and never poisons the rest
+ * of the batch (the caller retries it individually or in the next batch).
+ */
+export async function scoreBatch(
   llm: LlmProvider,
   model: string,
   event: EventContextForScoring,
-  a: AiProfile,
-  b: AiProfile,
-): Promise<PairScore> {
-  const user = [
+  target: AiProfile,
+  candidates: readonly BatchCandidate[],
+  rng: () => number = Math.random,
+): Promise<BatchScoreResult> {
+  const scores = new Map<string, DirectedScore>();
+  if (candidates.length === 0) return { scores, missing: [] };
+
+  // Shuffle to spread position bias; `index` (1-based) maps back to the candidate.
+  const ordered = shuffle(candidates, rng);
+  const eventBlock = [
     `EVENT: ${event.title}`,
     event.summary ? `ABOUT: ${event.summary}` : "",
     event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
-    "",
-    "PERSON A:",
-    profileText(a),
-    "",
-    "PERSON B:",
-    profileText(b),
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean);
 
-  const { value } = await llm.completeStructured<RawPairScore>({
-    system: PAIR_SYSTEM_PROMPT,
+  const user = [
+    ...eventBlock,
+    "",
+    "TARGET ATTENDEE:",
+    profileText(target),
+    "",
+    "CANDIDATES:",
+    ...ordered.map((c, i) => [`--- CANDIDATE ${i + 1} ---`, profileText(c.profile)].join("\n")),
+  ].join("\n");
+
+  const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
+    system: BATCH_SYSTEM_PROMPT,
     user,
-    schema: PAIR_SCORE_SCHEMA,
-    schemaName: "pair_score",
+    schema: BATCH_SCORE_SCHEMA,
+    schemaName: "batch_score",
     model,
     temperature: 0.3,
   });
-  // Defensively normalize — models don't reliably honor the 0..1 range.
-  return {
-    score: normalizeScore(value.score),
-    similarity: normalizeScore(value.similarity),
-    complementarity: normalizeScore(value.complementarity),
-    reasoningForA: value.reasoning_for_a,
-    reasoningForB: value.reasoning_for_b,
-  };
+
+  const matches = Array.isArray(value?.matches) ? value.matches : [];
+  const seen = new Set<number>();
+  for (const m of matches) {
+    const idx = Number(m?.index);
+    // 1-based index into `ordered`; ignore out-of-range / duplicate / malformed.
+    if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
+    if (seen.has(idx)) continue;
+    if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
+    seen.add(idx);
+    const cand = ordered[idx - 1]!;
+    scores.set(cand.id, {
+      score: normalizeScore(m.score),
+      similarity: normalizeScore(m.similarity),
+      complementarity: normalizeScore(m.complementarity),
+      reasoning: m.reasoning_for_target,
+    });
+  }
+
+  const missing = candidates.filter((c) => !scores.has(c.id)).map((c) => c.id);
+  return { scores, missing };
 }
 
 /** Cosine similarity between two equal-length vectors. */
