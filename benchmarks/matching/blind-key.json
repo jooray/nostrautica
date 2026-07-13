@@ -1,0 +1,677 @@
+[
+  {
+    "id": 0,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p01",
+    "candidate": "p02"
+  },
+  {
+    "id": 1,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p11",
+    "candidate": "p16"
+  },
+  {
+    "id": 2,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p05",
+    "candidate": "p16"
+  },
+  {
+    "id": 3,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p03",
+    "candidate": "p15"
+  },
+  {
+    "id": 4,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p07",
+    "candidate": "p16"
+  },
+  {
+    "id": 5,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p07",
+    "candidate": "p16"
+  },
+  {
+    "id": 6,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "medium",
+    "target": "p04",
+    "candidate": "p09"
+  },
+  {
+    "id": 7,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p19",
+    "candidate": "p08"
+  },
+  {
+    "id": 8,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "medium",
+    "target": "p09",
+    "candidate": "p04"
+  },
+  {
+    "id": 9,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p17",
+    "candidate": "p01"
+  },
+  {
+    "id": 10,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p08",
+    "candidate": "p13"
+  },
+  {
+    "id": 11,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p08",
+    "candidate": "p07"
+  },
+  {
+    "id": 12,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p02",
+    "candidate": "p01"
+  },
+  {
+    "id": 13,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p09",
+    "candidate": "p10"
+  },
+  {
+    "id": 14,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p06",
+    "candidate": "p15"
+  },
+  {
+    "id": 15,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "medium",
+    "target": "p12",
+    "candidate": "p17"
+  },
+  {
+    "id": 16,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "medium",
+    "target": "p10",
+    "candidate": "p15"
+  },
+  {
+    "id": 17,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p17",
+    "candidate": "p19"
+  },
+  {
+    "id": 18,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p05",
+    "candidate": "p06"
+  },
+  {
+    "id": 19,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "weak",
+    "target": "p12",
+    "candidate": "p13"
+  },
+  {
+    "id": 20,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "weak",
+    "target": "p12",
+    "candidate": "p16"
+  },
+  {
+    "id": 21,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "medium",
+    "target": "p14",
+    "candidate": "p07"
+  },
+  {
+    "id": 22,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p06",
+    "candidate": "p05"
+  },
+  {
+    "id": 23,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p07",
+    "candidate": "p08"
+  },
+  {
+    "id": 24,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p13",
+    "candidate": "p14"
+  },
+  {
+    "id": 25,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p12",
+    "candidate": "p11"
+  },
+  {
+    "id": 26,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "medium",
+    "target": "p14",
+    "candidate": "p07"
+  },
+  {
+    "id": 27,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p16",
+    "candidate": "p11"
+  },
+  {
+    "id": 28,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p04",
+    "candidate": "p05"
+  },
+  {
+    "id": 29,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p01",
+    "candidate": "p02"
+  },
+  {
+    "id": 30,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p04",
+    "candidate": "p09"
+  },
+  {
+    "id": 31,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p17",
+    "candidate": "p06"
+  },
+  {
+    "id": 32,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p07",
+    "candidate": "p16"
+  },
+  {
+    "id": 33,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p06",
+    "candidate": "p05"
+  },
+  {
+    "id": 34,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p16",
+    "candidate": "p07"
+  },
+  {
+    "id": 35,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p04",
+    "candidate": "p03"
+  },
+  {
+    "id": 36,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p15",
+    "candidate": "p03"
+  },
+  {
+    "id": 37,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p15",
+    "candidate": "p09"
+  },
+  {
+    "id": 38,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "weak",
+    "target": "p09",
+    "candidate": "p13"
+  },
+  {
+    "id": 39,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p15",
+    "candidate": "p03"
+  },
+  {
+    "id": 40,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p09",
+    "candidate": "p10"
+  },
+  {
+    "id": 41,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p04",
+    "candidate": "p03"
+  },
+  {
+    "id": 42,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p16",
+    "candidate": "p01"
+  },
+  {
+    "id": 43,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "weak",
+    "target": "p02",
+    "candidate": "p07"
+  },
+  {
+    "id": 44,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "medium",
+    "target": "p17",
+    "candidate": "p12"
+  },
+  {
+    "id": 45,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p08",
+    "candidate": "p19"
+  },
+  {
+    "id": 46,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p02",
+    "candidate": "p20"
+  },
+  {
+    "id": 47,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p07",
+    "candidate": "p14"
+  },
+  {
+    "id": 48,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p13",
+    "candidate": "p03"
+  },
+  {
+    "id": 49,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p05",
+    "candidate": "p06"
+  },
+  {
+    "id": 50,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p01",
+    "candidate": "p17"
+  },
+  {
+    "id": 51,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p17",
+    "candidate": "p01"
+  },
+  {
+    "id": 52,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "medium",
+    "target": "p11",
+    "candidate": "p17"
+  },
+  {
+    "id": 53,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p09",
+    "candidate": "p02"
+  },
+  {
+    "id": 54,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p16",
+    "candidate": "p07"
+  },
+  {
+    "id": 55,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p05",
+    "candidate": "p06"
+  },
+  {
+    "id": 56,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p09",
+    "candidate": "p15"
+  },
+  {
+    "id": 57,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p17",
+    "candidate": "p01"
+  },
+  {
+    "id": 58,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p05",
+    "candidate": "p06"
+  },
+  {
+    "id": 59,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p08",
+    "candidate": "p07"
+  },
+  {
+    "id": 60,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p02",
+    "candidate": "p20"
+  },
+  {
+    "id": 61,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p03",
+    "candidate": "p04"
+  },
+  {
+    "id": 62,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "medium",
+    "target": "p15",
+    "candidate": "p10"
+  },
+  {
+    "id": 63,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "weak",
+    "target": "p03",
+    "candidate": "p12"
+  },
+  {
+    "id": 64,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p15",
+    "candidate": "p09"
+  },
+  {
+    "id": 65,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "weak",
+    "target": "p06",
+    "candidate": "p09"
+  },
+  {
+    "id": 66,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p11",
+    "candidate": "p12"
+  },
+  {
+    "id": 67,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "strong",
+    "target": "p06",
+    "candidate": "p05"
+  },
+  {
+    "id": 68,
+    "model": "zai-org-glm-5-2",
+    "prompt": "P0",
+    "k": 1,
+    "label": "medium",
+    "target": "p18",
+    "candidate": "p11"
+  },
+  {
+    "id": 69,
+    "model": "zai-org-glm-5-2",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p07",
+    "candidate": "p15"
+  },
+  {
+    "id": 70,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP0",
+    "k": 10,
+    "label": "strong",
+    "target": "p10",
+    "candidate": "p09"
+  },
+  {
+    "id": 71,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "strong",
+    "target": "p13",
+    "candidate": "p14"
+  },
+  {
+    "id": 72,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p17",
+    "candidate": "p11"
+  },
+  {
+    "id": 73,
+    "model": "deepseek-v4-flash",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "weak",
+    "target": "p18",
+    "candidate": "p01"
+  },
+  {
+    "id": 74,
+    "model": "gemini-3-flash-preview",
+    "prompt": "BP3",
+    "k": 10,
+    "label": "medium",
+    "target": "p15",
+    "candidate": "p10"
+  }
+]

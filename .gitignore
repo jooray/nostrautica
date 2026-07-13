@@ -22,3 +22,4 @@ docs-site-build/
 
 # local notes, not for the repo
 CLAUDE.md
+benchmarks/matching/cache/

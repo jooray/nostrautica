@@ -1,0 +1,31 @@
+{
+  "_comment": "GROUND TRUTH — never shown to scoring models. strength: strong|medium|weak-negative. Pairs are unordered {a,b}. Every persona appears in >=1 strong or medium pair. Used to measure gold recall & rank correlation.",
+  "strong": [
+    { "a": "p01", "b": "p02", "why": "Non-technical funded founder seeking a Rust co-founder + bored senior Rust fintech engineer wanting a mission — exact mutual fit." },
+    { "a": "p03", "b": "p04", "why": "Documentary filmmaker needing source protection + whistleblower-defense lawyer wanting storytellers to loop him in early." },
+    { "a": "p05", "b": "p06", "why": "Drummer hunting a bassist to form a band + reliable bassist new in town wanting a drummer/band — classic rhythm-section fit." },
+    { "a": "p07", "b": "p08", "why": "Cryptographer with powerful-but-unusable ZK/MPC tech + product designer who makes scary crypto feel human." },
+    { "a": "p09", "b": "p10", "why": "Investigative journalist drowning in a leaked dataset (words person) + data scientist craving a meaningful messy dataset + domain partner." },
+    { "a": "p11", "b": "p12", "why": "Bitcoin self-custody educator who can't reach non-crypto people + trusted community organizer with underserved networks needing money tools." },
+    { "a": "p13", "b": "p14", "why": "Hardware hacker with great boards but weak firmware + embedded firmware engineer wanting to get back to secure hardware." },
+    { "a": "p15", "b": "p03", "why": "Privacy/deanonymization researcher offering realistic source-protection threat models + filmmaker who must keep sources safe." },
+    { "a": "p16", "b": "p07", "why": "Growth/GTM person seeking a great undistributed privacy product + cryptographer whose powerful tech nobody can use or has heard of." },
+    { "a": "p17", "b": "p01", "why": "Angel funding early first-time freedom-tech founders on censorship-resistant payments + exactly such a founder (Mara)." }
+  ],
+  "medium": [
+    { "a": "p17", "b": "p11", "why": "Angel investor in freedom tech + established bitcoin educator/builder; plausible funding/network fit though Casimir isn't a first-time founder." },
+    { "a": "p16", "b": "p11", "why": "Growth person + bitcoin educator with real content but limited reach; distribution help is plausible." },
+    { "a": "p15", "b": "p09", "why": "Threat-model/anonymity researcher + investigative journalist protecting sources; overlapping adversary knowledge." },
+    { "a": "p04", "b": "p09", "why": "Whistleblower lawyer + investigative journalist on financial crime; both handle high-risk sources/leaks." },
+    { "a": "p14", "b": "p07", "why": "Firmware engineer doing crypto implementations + cryptographer; could implement her protocols on-device." },
+    { "a": "p19", "b": "p11", "why": "Plain-language UX writer for scary security + bitcoin educator whose self-custody instructions terrify newcomers." },
+    { "a": "p19", "b": "p08", "why": "UX writer + product designer, both making security human; complementary craft on the same product." },
+    { "a": "p08", "b": "p13", "why": "Product designer + secure-hardware maker; a hardware wallet needs product/UX design." },
+    { "a": "p12", "b": "p17", "why": "Community organizer with real users + investor/mentor; possible support though Fatima isn't pitching a startup." },
+    { "a": "p10", "b": "p15", "why": "Data scientist doing graph/anomaly work + privacy researcher on traffic analysis; methodological overlap." },
+    { "a": "p16", "b": "p01", "why": "Growth person + funded founder building a product that will need distribution once built." },
+    { "a": "p20", "b": "p02", "why": "Veteran network engineer/mentor + senior engineer building resilient infra; war-stories/mentorship value." },
+    { "a": "p18", "b": "p11", "why": "Curious full-stack dev wanting a side project + bitcoin educator wanting help building approachable teaching tools for non-experts; a plausible low-stakes collaboration." }
+  ],
+  "weak_negatives_note": "All other pairs are intended WEAK. Notable clear non-matches used as stratified negatives include: p18 (aimless tourist) with almost everyone; p20 (retired beekeeper, no project) with most builders; p05/p06 (band) with the crypto/legal/journalism clusters; p03 (filmmaker) with p13/p14 (hardware); p01 (founder) with p05 (drummer)."
+}
