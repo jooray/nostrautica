@@ -24,6 +24,8 @@ import {
   KIND_KEY_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
+  KIND_MATCH_LIST,
+  KIND_MATCH_MATRIX,
   KIND_DELETION,
   giftwrapSince,
   unwrapRumor,
@@ -340,6 +342,42 @@ export async function addCoOrganizer(
     },
   });
   await publishOrQueue(wrap as any, ctx.config.relays);
+}
+
+/**
+ * Coordinator liveness (UI-SUGGESTIONS #16): the newest event the coordinator
+ * pubkey has authored for this event. A dead coordinator otherwise looks
+ * identical to a working one. Pure read — the coordinator signs roster/directory
+ * (31603/31604), match lists (31605), and match matrices (31606); the newest of
+ * any of those is its last sign of life. Returns undefined if it's authored
+ * nothing yet.
+ */
+export async function fetchCoordinatorLastSeen(
+  ctx: EventContext,
+): Promise<number | undefined> {
+  if (!ctx.config.coordinator) return undefined;
+  const { identifier } = splitCoordinate(ctx.coordinate);
+  const events = await fetchEvents(
+    {
+      kinds: [KIND_DIRECTORY_ENTRY, KIND_ROSTER, KIND_MATCH_LIST, KIND_MATCH_MATRIX],
+      authors: [ctx.config.coordinator],
+      "#a": [ctx.coordinate],
+    },
+    ctx.config.relays,
+  ).catch(() => []);
+  // Roster carries #d=identifier but per-attendee entries/matches use blinded d's;
+  // filtering by #a (the event coordinate) catches them all.
+  let newest = 0;
+  for (const e of events) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
+  // Fall back to the roster #d query in case a relay ignores #a on some kinds.
+  if (newest === 0) {
+    const roster = await fetchEvents(
+      { kinds: [KIND_ROSTER], authors: [ctx.config.coordinator], "#d": [identifier] },
+      ctx.config.relays,
+    ).catch(() => []);
+    for (const e of roster) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
+  }
+  return newest || undefined;
 }
 
 export interface GeneratedInvite {

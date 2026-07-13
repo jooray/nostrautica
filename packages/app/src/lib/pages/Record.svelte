@@ -15,9 +15,11 @@
     loadLibrary,
     prepareReuse,
   } from "$lib/media/submit.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
+  const kindLabel = $derived(talk ? t("record.kind.talk") : t("record.kind.intro"));
 
   let ctx = $state<EventContext | null>(null);
   let error = $state<string | null>(null);
@@ -64,7 +66,7 @@
         await videoEl.play().catch(() => {});
       }
     } catch (e) {
-      error = "Camera/microphone access is required to record. " + (e as Error).message;
+      error = t("record.error.camera", { reason: (e as Error).message });
     }
   }
 
@@ -148,32 +150,32 @@
 </script>
 
 {#if ctx}<EventHeader {ctx} compact link />{/if}
-<h1>{talk ? "Record a talk" : "Record your intro"}</h1>
+<h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
 
 {#if error}<div class="card warn">{error}</div>{/if}
 
 {#if done}
   <div class="card">
-    <p>Uploaded ✓ Your {kind} is encrypted and shared with this event's attendees.</p>
+    <p>{t("record.uploaded", { kind: kindLabel })}</p>
     <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
-      Back to event
+      {t("record.backToEvent")}
     </button>
   </div>
 {:else if !session.loggedIn}
   <div class="card">
-    <button class="btn primary" onclick={() => router.go({ name: "login" })}>Log in first</button>
+    <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("record.loginFirst")}</button>
   </div>
 {:else}
   {#if library.length > 0 && !recorded}
     <div class="card">
-      <h2>Reuse a previous video</h2>
-      <p class="muted">No re-upload needed — or make a fresh copy that isn't linkable across events.</p>
+      <h2>{t("record.reuse.title")}</h2>
+      <p class="muted">{t("record.reuse.body")}</p>
       {#each library as m (m.x)}
         <div class="row" style="justify-content:space-between;margin-top:0.5rem">
-          <span class="badge">{m.kind} · {m.duration ?? "?"}s</span>
+          <span class="badge">{m.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")} · {m.duration ?? "?"}s</span>
           <div class="row">
-            <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy}>Reuse</button>
-            <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy}>Fresh copy</button>
+            <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy}>{t("record.reuse.reuse")}</button>
+            <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy}>{t("record.reuse.fresh")}</button>
           </div>
         </div>
       {/each}
@@ -184,26 +186,26 @@
     {#if recorded}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video src={recorded.url} controls playsinline style="max-width:100%;border-radius:12px"></video>
-      <p class="muted">{recorded.durationSec}s recorded.</p>
+      <p class="muted">{t("record.recorded", { sec: recorded.durationSec })}</p>
       <div class="row">
-        <button class="btn" onclick={reRecord} disabled={busy}>Re-record</button>
+        <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
         <button class="btn primary" onclick={submitRecorded} disabled={busy}>
-          {busy ? "Uploading…" : "Use this"}
+          {busy ? t("record.uploading") : t("record.useThis")}
         </button>
       </div>
     {:else}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video bind:this={videoEl} playsinline muted style="max-width:100%;border-radius:12px;background:#000"></video>
       <p class="muted">
-        Limit: {maxSec}s. Recording hard-stops at the limit.
-        {#if recording}<strong> · {remaining}s left</strong>{/if}
+        {t("record.limit", { sec: maxSec })}
+        {#if recording}<strong>{t("record.timeLeft", { sec: remaining })}</strong>{/if}
       </p>
       {#if recording}
-        <button class="btn danger" onclick={stopRecording}>■ Stop</button>
+        <button class="btn danger" onclick={stopRecording}>{t("record.stop")}</button>
       {:else}
         <div class="row">
-          <button class="btn" onclick={enableCamera}>Enable camera</button>
-          <button class="btn primary" onclick={startRecording}>● Record</button>
+          <button class="btn" onclick={enableCamera}>{t("record.enableCamera")}</button>
+          <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
         </div>
       {/if}
     {/if}

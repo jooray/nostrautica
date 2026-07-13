@@ -1,6 +1,7 @@
 <script lang="ts">
   import { router } from "$lib/router/router.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   const route = $derived(router.route);
   function active(name: string) {
@@ -10,27 +11,27 @@
 
 <nav class="bottom-nav">
   <button class:active={active("home")} onclick={() => router.go({ name: "home" })}>
-    <span class="ico">🏠</span><span class="lbl">Events</span>
+    <span class="ico">🏠</span><span class="lbl">{t("nav.events")}</span>
   </button>
   <button class:active={active("create")} onclick={() => router.go({ name: "create" })}>
-    <span class="ico">＋</span><span class="lbl">Create</span>
+    <span class="ico">＋</span><span class="lbl">{t("nav.create")}</span>
   </button>
   {#if session.loggedIn}
     <button
       class:active={active("dm") || active("dmPeer")}
       onclick={() => router.go({ name: "dm" })}
     >
-      <span class="ico">💬</span><span class="lbl">Messages</span>
+      <span class="ico">💬</span><span class="lbl">{t("nav.messages")}</span>
     </button>
   {/if}
   <button
     class:active={active("me")}
     onclick={() => router.go({ name: session.loggedIn ? "me" : "login" })}
   >
-    <span class="ico">👤</span><span class="lbl">{session.loggedIn ? "Me" : "Log in"}</span>
+    <span class="ico">👤</span><span class="lbl">{session.loggedIn ? t("nav.me") : t("nav.login")}</span>
   </button>
   <button class:active={active("settings")} onclick={() => router.go({ name: "settings" })}>
-    <span class="ico">⚙</span><span class="lbl">Settings</span>
+    <span class="ico">⚙</span><span class="lbl">{t("nav.settings")}</span>
   </button>
 </nav>
 

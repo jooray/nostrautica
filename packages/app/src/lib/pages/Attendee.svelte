@@ -15,6 +15,7 @@
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import PostView from "$lib/components/PostView.svelte";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, npub }: { naddr: string; npub: string } = $props();
 
@@ -34,7 +35,7 @@
   onMount(async () => {
     try {
       const decoded = decode(npub);
-      if (decoded.type !== "npub") throw new Error("bad npub");
+      if (decoded.type !== "npub") throw new Error(t("attendee.error.badNpub"));
       pubkey = decoded.data;
       await connectNdk();
       ctx = await loadEventContext(naddr);
@@ -89,12 +90,12 @@
     settings = await setNote(session.signer, ctx, blindingKey, pubkey, noteDraft);
   }
 
-  const displayName = $derived(kind0?.name || entry?.profile.about?.slice(0, 40) || "Attendee");
+  const displayName = $derived(kind0?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"));
   const has = (list?: string[]) => !!list?.includes(pubkey);
 </script>
 
 <button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
-  ‹ Attendees
+  {t("attendee.back")}
 </button>
 
 {#if error}<div class="card warn">{error}</div>{/if}
@@ -107,8 +108,8 @@
     <div>
       <h1 style="margin:0">{displayName}</h1>
       <div class="row" style="flex-wrap:wrap">
-        {#if following}<span class="badge">You follow</span>{/if}
-        {#if followsYou}<span class="badge">Follows you</span>{/if}
+        {#if following}<span class="badge">{t("attendee.youFollow")}</span>{/if}
+        {#if followsYou}<span class="badge">{t("attendee.followsYou")}</span>{/if}
       </div>
     </div>
   </div>
@@ -130,44 +131,44 @@
   {/if}
 
   {#if entry?.profile.looking_for}
-    <p class="muted">Looking for: {entry.profile.looking_for}</p>
+    <p class="muted">{t("attendee.lookingFor", { value: entry.profile.looking_for })}</p>
   {/if}
 
   {#if entry?.ai_profile}
     <div class="card" style="background:var(--bg-elev2)">
-      <strong>AI summary</strong>
+      <strong>{t("attendee.aiSummary")}</strong>
       <p class="muted">{entry.ai_profile.summary}</p>
     </div>
   {/if}
 
   <div class="row">
     <button class="btn primary" onclick={follow} disabled={busy || following}>
-      {following ? "Following ✓" : busy ? "Following…" : "Follow"}
+      {following ? t("attendee.following") : busy ? t("attendee.followingBusy") : t("attendee.follow")}
     </button>
     <button
       class="btn"
       onclick={() =>
         session.loggedIn ? router.go({ name: "dmPeer", npub }) : router.go({ name: "login" })}
     >
-      💬 Message
+      {t("attendee.message")}
     </button>
   </div>
 </div>
 
 {#if settings}
   <div class="card stack">
-    <div class="field-label">Private (only you see this)</div>
+    <div class="field-label">{t("attendee.private")}</div>
     <div class="row" style="flex-wrap:wrap">
-      <button class="btn inline" class:primary={has(settings.favorites)} onclick={() => toggle("favorites")}>★ Favorite</button>
-      <button class="btn inline" class:primary={has(settings.want_to_meet)} onclick={() => toggle("want_to_meet")}>Want to meet</button>
-      <button class="btn inline" class:primary={has(settings.met)} onclick={() => toggle("met")}>Met ✓</button>
+      <button class="btn inline" class:primary={has(settings.favorites)} onclick={() => toggle("favorites")}>{t("attendee.favorite")}</button>
+      <button class="btn inline" class:primary={has(settings.want_to_meet)} onclick={() => toggle("want_to_meet")}>{t("attendee.wantToMeet")}</button>
+      <button class="btn inline" class:primary={has(settings.met)} onclick={() => toggle("met")}>{t("attendee.met")}</button>
     </div>
-    <textarea rows="2" placeholder="Private note…" bind:value={noteDraft} onblur={saveNote}></textarea>
+    <textarea rows="2" placeholder={t("attendee.note.placeholder")} bind:value={noteDraft} onblur={saveNote}></textarea>
   </div>
 {/if}
 
 {#if posts.length}
-  <h2>Recent posts</h2>
+  <h2>{t("attendee.recentPosts")}</h2>
   <div class="stack">
     {#each posts as p (p.id)}<PostView post={p} />{/each}
   </div>

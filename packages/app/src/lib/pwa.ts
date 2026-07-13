@@ -16,11 +16,16 @@
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - virtual module resolved by the PWA plugin
 import { registerSW } from "virtual:pwa-register";
+import { install } from "$lib/stores/install.svelte.js";
 
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 export function registerPwa(): void {
-  if (typeof window === "undefined" || !("serviceWorker" in navigator)) return;
+  if (typeof window === "undefined") return;
+  // Capture beforeinstallprompt early — it fires once, before any event page
+  // mounts (UI-SUGGESTIONS #24). Independent of service-worker support.
+  install.init();
+  if (!("serviceWorker" in navigator)) return;
 
   // Reload exactly once when a newly-activated worker takes control.
   let reloaded = false;

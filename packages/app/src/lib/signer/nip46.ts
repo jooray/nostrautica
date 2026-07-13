@@ -21,6 +21,7 @@ import {
 } from "nostr-tools/nip46";
 import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "./types.js";
+import { t } from "$lib/i18n/i18n.svelte.js";
 
 /** Serializable NIP-46 session for persistence across refreshes. */
 export interface Nip46Session {
@@ -63,8 +64,7 @@ const CONNECT_TIMEOUT_MS = 45_000;
 /** Shorter budget on app boot: a dead bunker must not wedge the shell. */
 const RESTORE_TIMEOUT_MS = 12_000;
 
-const TIMEOUT_MESSAGE =
-  "Your signer didn't respond — check it's online and try again.";
+const timeoutMessage = () => t("error.signerTimeout");
 
 /** A syntactically valid `bunker://` URI: 64-hex pubkey + at least one relay. */
 function looksLikeBunkerUri(input: string): boolean {
@@ -154,7 +154,7 @@ export class Nip46Signer implements AppSigner {
         bunker.connect(CLIENT_METADATA),
         RESTORE_TIMEOUT_MS,
         undefined,
-        TIMEOUT_MESSAGE,
+        timeoutMessage(),
       );
     } catch (e) {
       await bunker.close().catch(() => {});
@@ -196,7 +196,7 @@ export class Nip46Signer implements AppSigner {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const guarded = connected.finally(() => clearTimeout(timer)).catch((e) => {
       if (userCancelled) throw new Error("Cancelled");
-      throw controller.signal.aborted ? new Error(TIMEOUT_MESSAGE) : e;
+      throw controller.signal.aborted ? new Error(timeoutMessage()) : e;
     });
     const cancel = () => {
       userCancelled = true;
@@ -215,26 +215,26 @@ export class Nip46Signer implements AppSigner {
     abort?: AbortSignal,
   ): Promise<Nip46Signer> {
     if (!looksLikeBunkerUri(bunkerUri)) {
-      throw new Error("That doesn't look like a valid bunker link.");
+      throw new Error(t("error.badBunkerLink"));
     }
     const clientSk = generateSecretKey();
     const pointer = await parseBunkerInput(bunkerUri);
     if (!pointer || !pointer.relays.length) {
-      throw new Error("That doesn't look like a valid bunker link.");
+      throw new Error(t("error.badBunkerLink"));
     }
     let bunker: BunkerSigner;
     try {
       // Throws "bad point: is not on curve" for a valid-hex but off-curve pubkey.
       bunker = BunkerSigner.fromBunker(clientSk, pointer, { onauth: onAuth });
     } catch {
-      throw new Error("That doesn't look like a valid bunker link.");
+      throw new Error(t("error.badBunkerLink"));
     }
     try {
       await withTimeout(
         bunker.connect(CLIENT_METADATA),
         CONNECT_TIMEOUT_MS,
         abort,
-        TIMEOUT_MESSAGE,
+        timeoutMessage(),
       );
     } catch (e) {
       await bunker.close().catch(() => {});

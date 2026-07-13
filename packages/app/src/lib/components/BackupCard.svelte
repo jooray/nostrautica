@@ -5,6 +5,7 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { toNsec, toNcryptsec, mailtoBackup } from "$lib/signer/backup.js";
   import { markBackedUp } from "$lib/stores/backup-nag.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   const sk = $derived(session.signer?.getSecretKey?.());
   const appBase = $derived(
@@ -46,39 +47,36 @@
 
 {#if !sk}
   <p class="muted">
-    Your key lives in your signer — back it up there. Nothing to export here.
+    {t("backup.noKey")}
   </p>
 {:else}
   <button class="btn primary" onclick={() => copy(toNsec(sk), "key")}>
-    {copied === "key" ? "Copied ✓ — now paste it into a Nostr app" : "📋 Copy my secret key"}
+    {copied === "key" ? t("backup.copied") : t("backup.copyKey")}
   </button>
   <p class="muted" style="margin-top:0.5rem">
-    This is your private key. It's like your password — <strong>keep it secret</strong>,
-    anyone who has it controls your account. To use another Nostr app, choose
-    “log in with a key / nsec” there and paste this in.
+    {t("backup.warning.a")} <strong>{t("backup.warning.keepSecret")}</strong>{t("backup.warning.b")}
   </p>
 
   <details style="margin-top:0.5rem">
-    <summary class="muted" style="cursor:pointer">More ways to back up</summary>
+    <summary class="muted" style="cursor:pointer">{t("backup.more")}</summary>
     <div class="stack" style="margin-top:0.75rem">
       <div>
-        <div class="field-label">Email a recovery link to yourself</div>
+        <div class="field-label">{t("backup.email.title")}</div>
         <p class="muted">
-          A one-tap link to get back in on any device. Note: email isn't fully
-          private, so this trades a little privacy for convenience.
+          {t("backup.email.body")}
         </p>
         <a class="btn" href={mailtoBackup(appBase, sk)} onclick={() => markBackedUp()}>
-          Email my recovery link
+          {t("backup.email.button")}
         </a>
       </div>
       <div>
-        <div class="field-label">Password-protected file</div>
-        <input type="password" placeholder="Choose a passphrase" bind:value={pw} />
+        <div class="field-label">{t("backup.file.title")}</div>
+        <input type="password" placeholder={t("backup.file.placeholder")} bind:value={pw} />
         <div class="row" style="margin-top:0.5rem">
-          <button class="btn inline" onclick={exportNcryptsec} disabled={!pw}>Encrypt</button>
+          <button class="btn inline" onclick={exportNcryptsec} disabled={!pw}>{t("backup.file.encrypt")}</button>
           {#if ncryptsec}
-            <button class="btn inline" onclick={downloadNcryptsec}>Download</button>
-            <button class="btn inline" onclick={() => copy(ncryptsec!, "file")}>Copy</button>
+            <button class="btn inline" onclick={downloadNcryptsec}>{t("backup.file.download")}</button>
+            <button class="btn inline" onclick={() => copy(ncryptsec!, "file")}>{t("backup.file.copy")}</button>
           {/if}
         </div>
         {#if ncryptsec}<p class="mono">{ncryptsec}</p>{/if}

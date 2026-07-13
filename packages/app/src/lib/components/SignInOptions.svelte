@@ -7,6 +7,7 @@
   import { Nip46Signer, type NostrConnectHandle } from "$lib/signer/nip46.js";
   import { NIP46_RELAYS } from "$lib/nostr/relays.js";
   import QrCode from "$lib/components/QrCode.svelte";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { onSignedIn }: { onSignedIn?: () => void } = $props();
 
@@ -114,66 +115,66 @@
 
   {#if hasNip07()}
     <div style="order:{order('nip07', 1)}">
-      <div class="field-label">Browser extension</div>
+      <div class="field-label">{t("signin.extension")}</div>
       <button class="btn" onclick={loginNip07} disabled={busy}>
-        Log in with extension (Alby, nos2x…)
+        {t("signin.extension.button")}
       </button>
     </div>
   {/if}
 
   <div style="order:{order('nip46', 2)}">
-    <div class="field-label">Remote signer</div>
+    <div class="field-label">{t("signin.remote")}</div>
     {#if nc}
-      <p class="muted">Scan this with Amber, or open it directly on this device:</p>
+      <p class="muted">{t("signin.remote.scan")}</p>
       <QrCode data={nc.uri} />
       <!-- Tapping opens Amber (nostrconnect:// deep link) on the same device. -->
-      <a class="btn primary" href={nc.uri} style="margin-top:0.5rem">Open in Amber</a>
+      <a class="btn primary" href={nc.uri} style="margin-top:0.5rem">{t("signin.remote.openAmber")}</a>
       <div class="row" style="margin-top:0.5rem">
         <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{nc.uri}</span>
         <button class="btn inline" style="flex:none" onclick={copyUri}>
-          {copiedUri ? "Copied ✓" : "Copy"}
+          {copiedUri ? t("signin.remote.copied") : t("signin.remote.copy")}
         </button>
       </div>
-      <p class="muted" style="margin-top:0.5rem">Waiting for the signer to approve…</p>
+      <p class="muted" style="margin-top:0.5rem">{t("signin.remote.waiting")}</p>
       <button class="btn inline" style="margin-top:0.25rem" onclick={cancelNostrConnect}>
-        Cancel
+        {t("signin.remote.cancel")}
       </button>
     {:else}
-      <p class="muted" style="margin:0 0 0.5rem">such as Amber on Android, or Clave</p>
+      <p class="muted" style="margin:0 0 0.5rem">{t("signin.remote.hint")}</p>
       <button class="btn" onclick={startNostrConnect} disabled={busy}>
-        Connect with Remote Signer
+        {t("signin.remote.connect")}
       </button>
     {/if}
   </div>
 
   <div style="order:{order('paste', 3)}">
-    <div class="field-label">Paste a key</div>
+    <div class="field-label">{t("signin.paste")}</div>
     <input
-      placeholder="nsec1… / ncryptsec1… / bunker://…"
+      placeholder={t("signin.paste.placeholder")}
       bind:value={pasteKey}
       autocomplete="off"
       spellcheck="false"
     />
     {#if pasteKey.trim().startsWith("ncryptsec1")}
-      <input type="password" placeholder="Passphrase" bind:value={pastePw} />
+      <input type="password" placeholder={t("signin.paste.passphrase")} bind:value={pastePw} />
     {/if}
     <div class="row" style="margin-top:0.5rem">
       {#if looksLikeBunker}
-        <button class="btn" onclick={pasteBunker} disabled={busy}>Connect bunker</button>
+        <button class="btn" onclick={pasteBunker} disabled={busy}>{t("signin.paste.connectBunker")}</button>
       {:else}
         <button class="btn" onclick={importLocal} disabled={busy || !pasteKey.trim()}>
-          Import key
+          {t("signin.paste.import")}
         </button>
       {/if}
     </div>
     {#if bunkerConnecting}
-      <p class="muted" style="margin:0.5rem 0 0">Contacting your signer…</p>
+      <p class="muted" style="margin:0.5rem 0 0">{t("signin.paste.contacting")}</p>
       <button class="btn inline" style="margin-top:0.25rem" onclick={cancelBunker}>
-        Cancel
+        {t("signin.paste.cancel")}
       </button>
     {/if}
     <p class="muted" style="margin:0.5rem 0 0">
-      On a shared device, a signer app or extension is safer than pasting your key.
+      {t("signin.paste.saferHint")}
     </p>
   </div>
 </div>

@@ -13,6 +13,7 @@ import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { ONBOARDING_RELAY_LIST } from "$lib/nostr/relays.js";
 import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
+import { t } from "$lib/i18n/i18n.svelte.js";
 
 async function latest(kind: number, pubkey: string) {
   const events = await fetchEvents({ kinds: [kind], authors: [pubkey] });
@@ -72,10 +73,8 @@ export async function fetchFollowTags(signer: AppSigner): Promise<Tag[]> {
  */
 export async function followUser(signer: AppSigner, target: string): Promise<void> {
   const existing = await fetchFollowTags(signer);
-  if (!existing.some((t) => t[0] === "p")) {
-    throw new Error(
-      "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
-    );
+  if (!existing.some((tag) => tag[0] === "p")) {
+    throw new Error(t("error.followListGuard"));
   }
   const merged = mergeFollowTags(existing, [target]);
   const event = await signer.signEvent({
@@ -96,7 +95,7 @@ export async function followUser(signer: AppSigner, target: string): Promise<voi
  */
 export async function seedFollows(signer: AppSigner, eventPubkey: string): Promise<void> {
   const existing = await fetchFollowTags(signer);
-  if (existing.some((t) => t[0] === "p")) return;
+  if (existing.some((tag) => tag[0] === "p")) return;
   const event = await signer.signEvent({
     kind: KIND_CONTACTS,
     created_at: Math.floor(Date.now() / 1000),

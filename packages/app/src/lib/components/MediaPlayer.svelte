@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import type { MediaDescriptor } from "@nostrautica/protocol";
   import { resolveMediaUrl, releaseMediaUrl } from "$lib/media/playback.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { descriptor }: { descriptor: MediaDescriptor } = $props();
 
@@ -30,9 +31,9 @@
   <!-- svelte-ignore a11y_media_has_caption -->
   <video src={url} controls playsinline style="max-width:100%;border-radius:12px"></video>
 {:else if error}
-  <div class="card warn">Couldn't play video: {error}</div>
+  <div class="card warn">{t("media.playError", { reason: error })}</div>
 {:else}
   <button class="btn" onclick={load} disabled={loading}>
-    {loading ? "Decrypting…" : "▶ Play intro"}
+    {loading ? t("media.decrypting") : t("media.playIntro")}
   </button>
 {/if}

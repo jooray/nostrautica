@@ -9,8 +9,16 @@
   import { fetchDirectory, fetchMatches } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import type { MessageKey } from "$lib/i18n/messages.js";
 
   let { naddr }: { naddr: string } = $props();
+
+  const sortLabels: Record<"matches" | "follows" | "name", MessageKey> = {
+    matches: "attendees.sort.matches",
+    follows: "attendees.sort.follows",
+    name: "attendees.sort.name",
+  };
 
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let entries = $state<DirectoryEntryContent[]>([]);
@@ -65,28 +73,27 @@
 </script>
 
 {#if ctx}<EventHeader {ctx} compact link />{/if}
-<h1>Who's here</h1>
+<h1>{t("attendees.title")}</h1>
 
 {#if error}
   <div class="card warn">{error}</div>
 {:else if loading}
-  <p class="muted">Decrypting the roster…</p>
+  <p class="muted">{t("attendees.decrypting")}</p>
 {:else if entries.length === 0}
   <div class="card">
     <p class="muted">
-      No attendees visible. The list is encrypted for approved attendees — if you
-      haven't joined yet, that's why; if you were just approved, refresh in a moment.
+      {t("attendees.empty")}
     </p>
     <button class="btn" onclick={() => router.go({ name: "event", naddr })}>
-      Back to the event
+      {t("attendees.backToEvent")}
     </button>
   </div>
 {:else}
   <div class="row" style="justify-content:space-between">
-    <p class="muted">{entries.length} attendee{entries.length === 1 ? "" : "s"}</p>
+    <p class="muted">{tp("attendees.count", entries.length)}</p>
     <div class="row">
       {#each ["matches", "follows", "name"] as const as s (s)}
-        <button class="btn inline" class:primary={sortBy === s} onclick={() => (sortBy = s)}>{s}</button>
+        <button class="btn inline" class:primary={sortBy === s} onclick={() => (sortBy = s)}>{t(sortLabels[s])}</button>
       {/each}
     </div>
   </div>
@@ -101,7 +108,7 @@
             <strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{nameOf(e.pubkey, e.profile.about)}</strong>
             <div class="row" style="flex:none">
               {#if scores.has(e.pubkey)}<span class="badge">{Math.round(scores.get(e.pubkey)! * 100)}%</span>{/if}
-              {#if followSet.has(e.pubkey)}<span class="badge">following</span>{/if}
+              {#if followSet.has(e.pubkey)}<span class="badge">{t("attendees.following")}</span>{/if}
             </div>
           </div>
           {#if e.profile.about}<p class="muted" style="margin:0.15rem 0 0">{e.profile.about}</p>{/if}

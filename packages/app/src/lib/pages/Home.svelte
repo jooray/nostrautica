@@ -7,9 +7,14 @@
   import { listEventKeys } from "$lib/events/keystore.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
-  const roleLabel = { organizer: "you organize", attendee: "joined", visitor: "viewed" };
+  const roleLabel = {
+    organizer: "home.role.organizer",
+    attendee: "home.role.attendee",
+    visitor: "home.role.visitor",
+  } as const;
 
   /** A readable placeholder title from a coordinate's identifier. */
   function placeholderTitle(coordinate: string): string {
@@ -23,7 +28,7 @@
       .replace(/-[0-9a-f]{6,}$/i, "") // strip the random slug suffix
       .replace(/[-_]+/g, " ")
       .replace(/\b\w/g, (c) => c.toUpperCase())
-      .trim() || "Event";
+      .trim() || t("home.placeholderEvent");
   }
 
   // Backfill "My events" from the local key store — every event the user created
@@ -43,30 +48,29 @@
   });
 </script>
 
-<h1>Meet the right people</h1>
+<h1>{t("home.title")}</h1>
 <p class="muted">
-  Nostrautica figures out who you should meet at an event — and explains why —
-  from short intro videos and your public Nostr activity.
+  {t("home.intro")}
 </p>
 
 {#if session.loggedIn && session.signer?.method === "local" && !backupNag.done}
   <!-- One gentle nudge until the key is backed up (UI-SUGGESTIONS #8). -->
   <div class="card warn">
-    <strong>Back up your account</strong>
+    <strong>{t("home.backup.title")}</strong>
     <p class="muted" style="margin:0.25rem 0 0.5rem">
-      Takes 30 seconds. Without it, losing this device means losing your account.
+      {t("home.backup.body")}
     </p>
     <div class="row">
       <button class="btn inline primary" onclick={() => router.go({ name: "me" })}>
-        Back up now
+        {t("home.backup.now")}
       </button>
-      <button class="btn inline" onclick={() => markBackedUp()}>I already saved it</button>
+      <button class="btn inline" onclick={() => markBackedUp()}>{t("home.backup.saved")}</button>
     </div>
   </div>
 {/if}
 
 {#if events.length}
-  <h2>Your events</h2>
+  <h2>{t("home.yourEvents")}</h2>
   <div class="stack">
     {#each events as e (e.naddr)}
       <button
@@ -85,42 +89,42 @@
           <strong style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
             {e.title}
           </strong>
-          <span class="badge">{roleLabel[e.role]}</span>
+          <span class="badge">{t(roleLabel[e.role])}</span>
         </div>
         <span class="muted">›</span>
       </button>
     {/each}
   </div>
   <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
-    ＋ Create another event
+    {t("home.createAnother")}
   </button>
 {:else if !session.loggedIn}
   <div class="card">
-    <h2>Get started</h2>
-    <p class="muted">Open an event invite link, or create your own.</p>
+    <h2>{t("home.getStarted")}</h2>
+    <p class="muted">{t("home.getStarted.body")}</p>
     <button class="btn primary" onclick={() => router.go({ name: "login" })}>
-      Log in or create an identity
+      {t("home.loginOrCreate")}
     </button>
     <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
-      Create an event
+      {t("home.createEvent")}
     </button>
   </div>
 {:else}
   <div class="card">
-    <h2>No events yet</h2>
-    <p class="muted">Open an invite link to join an event, or create your own.</p>
+    <h2>{t("home.noEvents")}</h2>
+    <p class="muted">{t("home.noEvents.body")}</p>
     <button class="btn primary" onclick={() => router.go({ name: "create" })}>
-      Create an event
+      {t("home.createEvent")}
     </button>
   </div>
 {/if}
 
 <div class="card">
-  <h2>How it works</h2>
+  <h2>{t("home.how.title")}</h2>
   <ul class="muted">
-    <li>Record a short intro video (and optionally a talk).</li>
-    <li>Get matched with people whose skills complement yours.</li>
-    <li>Everything's encrypted to the event's attendees.</li>
-    <li>Leave with a real, portable Nostr profile.</li>
+    <li>{t("home.how.record")}</li>
+    <li>{t("home.how.matched")}</li>
+    <li>{t("home.how.encrypted")}</li>
+    <li>{t("home.how.portable")}</li>
   </ul>
 </div>

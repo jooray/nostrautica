@@ -13,6 +13,7 @@ import {
   type EventConfig,
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
+import { t } from "$lib/i18n/i18n.svelte.js";
 
 export interface EventContext {
   naddr: string;
@@ -47,7 +48,7 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
     decoded = naddrToCoordinate(naddr);
   } catch (e) {
     console.error("Bad event address:", JSON.stringify(naddr), e);
-    throw new Error("This event link looks invalid. Please reopen it from your invite or events list.");
+    throw new Error(t("error.badEventLink"));
   }
   const { coordinate, relays } = decoded;
   if (relays.length) addRelays(relays);

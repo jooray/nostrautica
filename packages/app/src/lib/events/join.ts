@@ -16,24 +16,29 @@ import {
   makeInviteProof,
   blindedD,
   type AttendeeProfile,
+  type MediaDescriptor,
 } from "@nostrautica/protocol";
 import { decode } from "nostr-tools/nip19";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { t } from "$lib/i18n/i18n.svelte.js";
 
 export interface JoinInput {
   name: string;
   message?: string;
   rsvpPublic?: boolean;
   profile?: AttendeeProfile;
+  /** Media reused from the library at join time (UI-SUGGESTIONS #11) — rides the
+   *  same 21601 + 31602 as the profile so there's no second racing submission. */
+  media?: MediaDescriptor[];
   inviteNsec?: string; // from #/e/:naddr/join?code=<invite-nsec>
 }
 
 function inviteSkFromCode(code: string): Uint8Array {
   const decoded = decode(code.trim());
-  if (decoded.type !== "nsec") throw new Error("Invite code must be an nsec");
+  if (decoded.type !== "nsec") throw new Error(t("error.inviteCode"));
   return decoded.data;
 }
 
@@ -73,12 +78,12 @@ export async function sendJoinRequest(
     }).then((w) => publishOrQueue(w as any, relays)),
   ];
 
-  // Optional profile submission (21601) — profile text only in the walking skeleton.
+  // Optional profile submission (21601) — profile text + any media reused at join.
   if (input.profile) {
     const submission = {
       v: 1,
       profile: input.profile,
-      media: [] as unknown[],
+      media: input.media ?? [],
     };
     wraps.push(
       signerWrap(signer, inboxPubkey, {
@@ -95,7 +100,7 @@ export async function sendJoinRequest(
     v: 1,
     a: ctx.coordinate,
     profile: input.profile,
-    media: [] as unknown[],
+    media: input.media ?? [],
   };
   const selfD = blindedD(blindingKey, ctx.coordinate, attendeePubkey);
   const selfCipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(selfContent));

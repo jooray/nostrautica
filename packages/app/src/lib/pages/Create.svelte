@@ -12,6 +12,7 @@
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { publishProfile, ensureRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let title = $state("");
   let summary = $state("");
@@ -42,7 +43,7 @@
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     if (!session.signer) {
-      error = "Log in (or create the event first) to upload images — generated ones are used meanwhile.";
+      error = t("create.error.loginToUpload");
       return;
     }
     uploading = which;
@@ -53,7 +54,7 @@
       if (which === "icon") iconUrl = url;
       else bannerUrl = url;
     } catch (err) {
-      error = "Image upload failed: " + (err instanceof Error ? err.message : String(err));
+      error = t("create.error.uploadFailed", { reason: err instanceof Error ? err.message : String(err) });
     } finally {
       uploading = null;
     }
@@ -62,11 +63,11 @@
   async function submit() {
     error = null;
     if (!title.trim() || !startLocal) {
-      error = "Title and start time are required.";
+      error = t("create.error.titleRequired");
       return;
     }
     if (!session.loggedIn && !organizerName.trim()) {
-      error = "Please enter your name.";
+      error = t("create.error.nameRequired");
       return;
     }
     busy = true;
@@ -81,7 +82,7 @@
         }
       }
       const signer = session.signer;
-      if (!signer) throw new Error("Couldn't create your identity — please retry.");
+      if (!signer) throw new Error(t("create.error.identityFailed"));
       const blindingKey = await deriveBlindingKey(signer);
       created = await createEvent(
         signer,
@@ -140,36 +141,35 @@
   }
 </script>
 
-<h1>Create an event</h1>
+<h1>{t("create.title")}</h1>
 
 {#if created}
   <div class="card">
-    <h2>Event created 🎉</h2>
+    <h2>{t("create.created")}</h2>
     <!-- Next steps as a checklist, not a pile of equal buttons (UI-SUGGESTIONS #14). -->
     <ol class="stack" style="margin:0.75rem 0 0;padding-left:1.25rem">
       <li>
-        <strong>Share the event</strong>
+        <strong>{t("create.step.share")}</strong>
         <p class="mono" style="margin:0.25rem 0">{shareLink}</p>
         <div class="row">
           <button class="btn inline" onclick={copyShare}>
-            {copiedShare ? "Copied ✓" : "Copy link"}
+            {copiedShare ? t("create.copied") : t("create.copyLink")}
           </button>
           {#if canShare}
-            <button class="btn inline" onclick={shareNative}>Share…</button>
+            <button class="btn inline" onclick={shareNative}>{t("create.share")}</button>
           {/if}
         </div>
       </li>
       <li style="margin-top:0.75rem">
-        <strong>Optional: attach an AI coordinator</strong>
+        <strong>{t("create.step.coordinator")}</strong>
         <p class="muted" style="margin:0.25rem 0">
-          Enables matchmaking and instant invite-link approval — done from the
-          admin screen, or skip it and approve people yourself.
+          {t("create.step.coordinator.body")}
         </p>
       </li>
       <li style="margin-top:0.75rem">
-        <strong>Approve people as they ask to join</strong>
+        <strong>{t("create.step.approve")}</strong>
         <p class="muted" style="margin:0.25rem 0">
-          Requests appear on the admin screen (invite links can skip this).
+          {t("create.step.approve.body")}
         </p>
       </li>
     </ol>
@@ -178,20 +178,20 @@
         class="btn primary"
         onclick={() => router.go({ name: "admin", naddr: created!.naddr })}
       >
-        Open organizer admin
+        {t("create.openAdmin")}
       </button>
       <button
         class="btn"
         onclick={() => router.go({ name: "event", naddr: created!.naddr })}
       >
-        View event page
+        {t("create.viewEvent")}
       </button>
     </div>
   </div>
   {#if session.freshLocalKey}
     <div class="card">
-      <h2>Back up your organizer identity</h2>
-      <p class="muted">This key controls your event — don't lose it.</p>
+      <h2>{t("create.backupOrganizer")}</h2>
+      <p class="muted">{t("create.backupOrganizer.body")}</p>
       <BackupCard />
     </div>
   {/if}
@@ -200,91 +200,90 @@
   <div class="card stack">
     {#if !session.loggedIn}
       <div>
-        <label for="on">Your name</label>
-        <input id="on" bind:value={organizerName} placeholder="How should attendees know you?" />
+        <label for="on">{t("create.organizerName")}</label>
+        <input id="on" bind:value={organizerName} placeholder={t("create.organizerName.placeholder")} />
         <p class="muted" style="margin:0.25rem 0 0">
-          Your organizer identity is created with the event — no signup needed.
+          {t("create.organizerName.body")}
         </p>
       </div>
     {/if}
     <div>
-      <label for="t">Title</label>
-      <input id="t" bind:value={title} placeholder="Cypherpunk Assembly 2026" />
+      <label for="t">{t("create.field.title")}</label>
+      <input id="t" bind:value={title} placeholder={t("create.field.title.placeholder")} />
     </div>
     <div>
-      <label for="s">Summary</label>
+      <label for="s">{t("create.field.summary")}</label>
       <textarea id="s" rows="3" bind:value={summary}></textarea>
     </div>
     <div>
-      <label for="st">Start</label>
+      <label for="st">{t("create.field.start")}</label>
       <input id="st" type="datetime-local" bind:value={startLocal} />
     </div>
     <div>
-      <label for="en">End</label>
+      <label for="en">{t("create.field.end")}</label>
       <input id="en" type="datetime-local" bind:value={endLocal} min={startLocal} />
     </div>
     <div>
-      <label for="loc">Location</label>
-      <input id="loc" bind:value={locationStr} placeholder="Bratislava" />
+      <label for="loc">{t("create.field.location")}</label>
+      <input id="loc" bind:value={locationStr} placeholder={t("create.field.location.placeholder")} />
     </div>
     <!-- Rarely-changed options tucked away; title + date is enough (UI-SUGGESTIONS #13). -->
     <details>
-      <summary class="muted" style="cursor:pointer">Advanced — images, video length</summary>
+      <summary class="muted" style="cursor:pointer">{t("create.advanced")}</summary>
       <div class="stack" style="margin-top:0.75rem">
     <div>
-      <div class="field-label">Event images <span class="muted" style="font-weight:400">(both optional)</span></div>
+      <div class="field-label">{t("create.field.images")} <span class="muted" style="font-weight:400">{t("create.field.images.optional")}</span></div>
       <div class="row" style="align-items:flex-start;gap:0.75rem">
         <div style="flex:none;text-align:center">
-          <img src={previewIcon} alt="event icon preview" style="width:64px;height:64px;border-radius:14px;object-fit:cover" />
+          <img src={previewIcon} alt={t("create.iconAlt")} style="width:64px;height:64px;border-radius:14px;object-fit:cover" />
           <div style="margin-top:0.35rem">
             <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
-              {uploading === "icon" ? "…" : "Icon"}
+              {uploading === "icon" ? "…" : t("create.icon")}
               <input type="file" accept="image/*" onchange={(e) => onImageFile(e, "icon")} style="display:none" />
             </label>
           </div>
         </div>
         <div style="flex:1">
-          <img src={previewBanner} alt="event banner preview" style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover" />
+          <img src={previewBanner} alt={t("create.bannerAlt")} style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover" />
           <div class="row" style="margin-top:0.35rem">
             <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
-              {uploading === "banner" ? "…" : "Banner"}
+              {uploading === "banner" ? "…" : t("create.banner")}
               <input type="file" accept="image/*" onchange={(e) => onImageFile(e, "banner")} style="display:none" />
             </label>
             {#if iconUrl || bannerUrl}
-              <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; }}>Reset</button>
+              <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; }}>{t("create.reset")}</button>
             {/if}
           </div>
         </div>
       </div>
-      <p class="muted">Generated from the title if you don't upload your own. Uploads go to a public Blossom server (Primal).</p>
+      <p class="muted">{t("create.images.body")}</p>
     </div>
     <div>
-      <label for="mv">Max intro video (seconds)</label>
+      <label for="mv">{t("create.field.maxVideo")}</label>
       <input id="mv" type="number" bind:value={maxVideoSec} />
     </div>
       </div>
     </details>
     <div>
-      <label for="approval">Approval</label>
+      <label for="approval">{t("create.field.approval")}</label>
       <select id="approval" bind:value={approval}>
-        <option value="manual">Manual review</option>
-        <option value="invite">Invite codes only</option>
-        <option value="manual+invite">Invite codes + manual</option>
+        <option value="manual">{t("create.approval.manual")}</option>
+        <option value="invite">{t("create.approval.invite")}</option>
+        <option value="manual+invite">{t("create.approval.both")}</option>
       </select>
     </div>
     <div>
-      <label for="match">AI matchmaking</label>
+      <label for="match">{t("create.field.matching")}</label>
       <select id="match" bind:value={matching}>
-        <option value="on">On (needs a coordinator)</option>
-        <option value="off">Off</option>
+        <option value="on">{t("create.matching.on")}</option>
+        <option value="off">{t("create.matching.off")}</option>
       </select>
     </div>
     <p class="muted">
-      Note: key rotation is forward-only — anyone who ever held a decryption key can
-      decrypt content published while it was current, forever (spec §4.2).
+      {t("create.rotationNote")}
     </p>
     <button class="btn primary" onclick={submit} disabled={busy}>
-      {busy ? "Creating…" : "Create event"}
+      {busy ? t("create.creating") : t("create.submit")}
     </button>
   </div>
 {/if}

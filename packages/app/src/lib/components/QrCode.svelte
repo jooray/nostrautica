@@ -1,5 +1,6 @@
 <script lang="ts">
   import QRCode from "qrcode";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { data, size = 220 }: { data: string; size?: number } = $props();
   let dataUrl = $state<string | null>(null);
@@ -21,9 +22,9 @@
 </script>
 
 {#if dataUrl}
-  <img src={dataUrl} alt="QR code" width={size} height={size} style="border-radius:8px" />
+  <img src={dataUrl} alt={t("qr.alt")} width={size} height={size} style="border-radius:8px" />
 {:else if error}
-  <p class="muted">Could not render QR: {error}</p>
+  <p class="muted">{t("qr.error", { reason: error })}</p>
 {:else}
-  <p class="muted">Generating QR…</p>
+  <p class="muted">{t("qr.generating")}</p>
 {/if}

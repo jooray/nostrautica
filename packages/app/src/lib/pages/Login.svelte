@@ -6,6 +6,7 @@
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let error = $state<string | null>(null);
   let busy = $state(false);
@@ -52,32 +53,31 @@
 </script>
 
 {#if session.loggedIn && session.freshLocalKey}
-  <h1>You're in 🎉</h1>
+  <h1>{t("login.youreIn")}</h1>
   <div class="card">
     <p class="muted">
-      A Nostr identity was just created for you. Back it up now so you never lose
-      access.
+      {t("login.created.body")}
     </p>
     <BackupCard />
-    <button class="btn primary" onclick={done} style="margin-top:0.75rem">Continue</button>
+    <button class="btn primary" onclick={done} style="margin-top:0.75rem">{t("login.continue")}</button>
   </div>
 {:else if session.loggedIn}
   <div class="card">
-    <p>You're already logged in.</p>
-    <button class="btn primary" onclick={done}>Continue</button>
+    <p>{t("login.alreadyLoggedIn")}</p>
+    <button class="btn primary" onclick={done}>{t("login.continue")}</button>
   </div>
 {:else}
-  <h1>Welcome</h1>
+  <h1>{t("login.welcome")}</h1>
 
   {#if error}
-    <div class="card warn"><strong>Couldn't log in.</strong> {error}</div>
+    <div class="card warn"><strong>{t("login.failed")}</strong> {error}</div>
   {/if}
 
   <!-- Newcomers are the majority: identity creation is the primary path;
        existing-Nostr-user sign-in is a quiet option below (UI-SUGGESTIONS #1). -->
   <div class="card">
-    <h2>Create your identity</h2>
-    <p class="muted">No email, no password — your account is created instantly.</p>
+    <h2>{t("login.createHeading")}</h2>
+    <p class="muted">{t("login.createSub")}</p>
     <div class="row" style="gap:0.75rem;align-items:center;margin-bottom:0.5rem">
       <label style="cursor:pointer;flex:none;margin:0">
         {#if picPreview}
@@ -87,20 +87,20 @@
         {/if}
         <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
       </label>
-      <div class="muted" style="font-size:0.85rem">Photo <span class="badge">public</span><br />tap to add</div>
+      <div class="muted" style="font-size:0.85rem">{t("login.photoAdd")} <span class="badge">{t("login.photoPublic")}</span><br />{t("login.photoTap")}</div>
     </div>
-    <label for="nm">Your name</label>
-    <input id="nm" bind:value={newName} placeholder="How should people know you?" />
+    <label for="nm">{t("login.yourName")}</label>
+    <input id="nm" bind:value={newName} placeholder={t("login.namePlaceholder")} />
     <button class="btn primary" style="margin-top:0.75rem" onclick={createNew} disabled={busy}>
-      {busy ? "Creating…" : "Create my identity"}
+      {busy ? t("login.creating") : t("login.createMyIdentity")}
     </button>
   </div>
 
-  <div class="or-divider">or</div>
+  <div class="or-divider">{t("login.or")}</div>
 
   <button class="btn" onclick={() => (showExisting = !showExisting)}>
     <NostrichIcon size={20} />
-    Already on Nostr? Sign in
+    {t("login.alreadyOnNostr")}
   </button>
 
   {#if showExisting}

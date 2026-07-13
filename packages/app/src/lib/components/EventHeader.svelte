@@ -5,6 +5,7 @@
   import type { EventContext } from "$lib/events/event-context.js";
   import { defaultEventBanner, defaultEventIcon } from "$lib/media/image.js";
   import { router } from "$lib/router/router.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   // `link` makes the header tap through to the event home (for sub-pages).
   let {
@@ -34,7 +35,7 @@
     <img class="icon" src={icon} alt="" />
     {#if !compact}<span class="title">{ctx.title}</span>{/if}
     {#if compact}<span class="title small">{ctx.title}</span>{/if}
-    {#if link}<span class="back-hint">Event ›</span>{/if}
+    {#if link}<span class="back-hint">{t("eventheader.link")}</span>{/if}
   </div>
 </svelte:element>
 

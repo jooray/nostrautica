@@ -8,6 +8,7 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { fetchDms, sendDm, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -79,7 +80,7 @@
     }
   }
 
-  const title = $derived(profile?.name || (peer ? npubEncode(peer).slice(0, 12) + "…" : "Chat"));
+  const title = $derived(profile?.name || (peer ? npubEncode(peer).slice(0, 12) + "…" : t("dmchat.title")));
   function fmt(at: number): string {
     return new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
@@ -87,11 +88,11 @@
 
 {#if !session.loggedIn}
   <div class="card">
-    <p>Log in to send messages.</p>
-    <button class="btn primary" onclick={() => router.go({ name: "login" })}>Log in</button>
+    <p>{t("dmchat.loginToSend")}</p>
+    <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("dmchat.login")}</button>
   </div>
 {:else if !peer}
-  <div class="card warn">Invalid profile link.</div>
+  <div class="card warn">{t("dmchat.invalidLink")}</div>
 {:else}
   <div class="row" style="gap:0.75rem;margin:1rem 0 0.5rem">
     {#if profile?.picture}
@@ -106,7 +107,7 @@
     <h1 style="margin:0;font-size:1.25rem">{title}</h1>
   </div>
   <p class="muted" style="margin:0 0 0.5rem">
-    End-to-end encrypted (NIP-17) — also readable in other Nostr messengers.
+    {t("dmchat.e2e")}
   </p>
 
   {#if error}
@@ -119,9 +120,9 @@
     style="height:50dvh;overflow-y:auto;display:flex;flex-direction:column;gap:0.5rem"
   >
     {#if loading}
-      <p class="muted">Decrypting…</p>
+      <p class="muted">{t("dmchat.decrypting")}</p>
     {:else if messages.length === 0}
-      <p class="muted">No messages yet — say hi.</p>
+      <p class="muted">{t("dmchat.empty")}</p>
     {/if}
     {#each messages as m (m.id)}
       <div
@@ -141,7 +142,7 @@
   <div class="row" style="align-items:flex-end">
     <textarea
       rows="2"
-      placeholder="Write a message…"
+      placeholder={t("dmchat.placeholder")}
       bind:value={draft}
       onkeydown={(e) => {
         if (e.key === "Enter" && !e.shiftKey) {
@@ -156,7 +157,7 @@
       onclick={send}
       disabled={sending || !draft.trim()}
     >
-      {sending ? "…" : "Send"}
+      {sending ? "…" : t("dmchat.send")}
     </button>
   </div>
 {/if}

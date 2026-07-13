@@ -1,12 +1,12 @@
 <script lang="ts">
   import { theme, type ThemePref } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
-  import { LOCALES, LOCALE_NAMES } from "$lib/i18n/messages.js";
+  import { LOCALES, LOCALE_NAMES, type MessageKey } from "$lib/i18n/messages.js";
 
-  const themeOptions: { value: ThemePref; label: string }[] = [
-    { value: "system", label: "System" },
-    { value: "light", label: "Light" },
-    { value: "dark", label: "Dark" },
+  const themeOptions: { value: ThemePref; label: MessageKey }[] = [
+    { value: "system", label: "settings.theme.system" },
+    { value: "light", label: "settings.theme.light" },
+    { value: "dark", label: "settings.theme.dark" },
   ];
 </script>
 
@@ -17,7 +17,7 @@
   <div class="row">
     {#each themeOptions as o (o.value)}
       <button class="btn inline" class:primary={theme.pref === o.value} onclick={() => theme.set(o.value)}>
-        {o.label}
+        {t(o.label)}
       </button>
     {/each}
   </div>

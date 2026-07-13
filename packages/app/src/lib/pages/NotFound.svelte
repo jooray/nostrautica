@@ -1,7 +1,8 @@
 <script lang="ts">
   import { router } from "$lib/router/router.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 </script>
 
-<h1>Not found</h1>
-<p class="muted">That page doesn't exist.</p>
-<button class="btn primary" onclick={() => router.go({ name: "home" })}>Go home</button>
+<h1>{t("notfound.title")}</h1>
+<p class="muted">{t("notfound.body")}</p>
+<button class="btn primary" onclick={() => router.go({ name: "home" })}>{t("notfound.home")}</button>

@@ -1,14 +1,15 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
-  import { fetchRoster } from "$lib/events/attendee.js";
+  import { fetchRoster, receiveGrants } from "$lib/events/attendee.js";
   import {
     fetchPending,
     approveAttendee,
     attachCoordinator,
+    fetchCoordinatorLastSeen,
     generateInvites,
     revokeAttendeeClient,
     sendAdminCommand,
@@ -25,6 +26,7 @@
     publishEventUpdate,
     type EventUpdate,
   } from "$lib/events/updates.js";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -37,6 +39,10 @@
   let error = $state<string | null>(null);
   let notOrganizer = $state(false);
   let copiedLink = $state(false);
+  let copiedNpub = $state(false);
+  let coordLastSeen = $state<number | undefined>(undefined);
+  let destroyed = false;
+  onDestroy(() => (destroyed = true));
 
   // Approved = anyone in the roster OR approved just now. Reading the roster makes
   // approval persist across refreshes (it's not just session state).
@@ -76,16 +82,69 @@
       keys = (await loadEventKeys(ctx.coordinate)) ?? null;
       if (!keys || keys.role !== "organizer") {
         notOrganizer = true;
+        // The organizer keys may arrive as a 21605 grant (co-organizer / hand-off
+        // to another device) — poll while the page is open so it unlocks without a
+        // manual reload (P2 recovery path). Same receiveGrants channel the app uses.
+        void pollForOrganizerGrant();
         return;
       }
       await refresh();
       await loadUpdates();
+      void refreshLiveness();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }
   });
+
+  async function pollForOrganizerGrant() {
+    if (!ctx || !session.signer) return;
+    while (notOrganizer && !destroyed) {
+      await new Promise((r) => setTimeout(r, 4000));
+      if (destroyed) return;
+      await receiveGrants(session.signer).catch(() => {});
+      const k = await loadEventKeys(ctx.coordinate);
+      if (k && k.role === "organizer") {
+        keys = k;
+        notOrganizer = false;
+        loading = true;
+        try {
+          await refresh();
+          await loadUpdates();
+          void refreshLiveness();
+        } finally {
+          loading = false;
+        }
+        return;
+      }
+    }
+  }
+
+  async function refreshLiveness() {
+    if (!ctx?.config.coordinator) return;
+    coordLastSeen = await fetchCoordinatorLastSeen(ctx).catch(() => undefined);
+  }
+
+  // Human "active 2 min ago" from a unix seconds timestamp.
+  function sinceLabel(unixSec: number): string {
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
+    if (s < 90) return t("admin.coord.justNow");
+    if (s < 3600) return t("admin.coord.minAgo", { n: Math.round(s / 60) });
+    if (s < 86400) return t("admin.coord.hAgo", { n: Math.round(s / 3600) });
+    return t("admin.coord.dAgo", { n: Math.round(s / 86400) });
+  }
+  const coordStale = $derived(
+    coordLastSeen !== undefined &&
+      Math.floor(Date.now() / 1000) - coordLastSeen > 3600,
+  );
+
+  async function copyMyNpub() {
+    if (!session.npub) return;
+    await navigator.clipboard.writeText(session.npub);
+    copiedNpub = true;
+    setTimeout(() => (copiedNpub = false), 1500);
+  }
 
   let coordinatorInput = $state("");
   let attaching = $state(false);
@@ -99,10 +158,10 @@
       let pubkey = coordinatorInput.trim();
       if (pubkey.startsWith("npub1")) {
         const decoded = decode(pubkey);
-        if (decoded.type !== "npub") throw new Error("bad npub");
+        if (decoded.type !== "npub") throw new Error(t("admin.error.badNpub"));
         pubkey = decoded.data;
       }
-      if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error("Enter an npub or 64-char hex pubkey");
+      if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error(t("admin.error.enterNpub"));
       await attachCoordinator(session.signer, ctx, pubkey);
       attached = true;
     } catch (e) {
@@ -123,10 +182,10 @@
       let pubkey = coOrgInput.trim();
       if (pubkey.startsWith("npub1")) {
         const decoded = decode(pubkey);
-        if (decoded.type !== "npub") throw new Error("bad npub");
+        if (decoded.type !== "npub") throw new Error(t("admin.error.badNpub"));
         pubkey = decoded.data;
       }
-      if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error("Enter an npub or 64-char hex pubkey");
+      if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error(t("admin.error.enterNpub"));
       await addCoOrganizer(session.signer, ctx, pubkey);
       coOrgAdded = true;
       coOrgInput = "";
@@ -213,14 +272,12 @@
   }
 
   let revokedSet = $state<Set<string>>(new Set());
+  // Inline, screenshotable revoke confirmation (no window.confirm) — the attendee
+  // card swaps to the consequence copy + Revoke/Keep while this holds a pubkey.
+  let confirmingRevoke = $state<string | null>(null);
   async function revoke(req: PendingRequest) {
     if (!ctx || !session.signer) return;
-    if (
-      !confirm(
-        `Revoke ${req.name}? They lose access to everything new. What they already saw can't be taken back.`,
-      )
-    )
-      return;
+    confirmingRevoke = null;
     try {
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "revoke", { pubkey: req.attendeePubkey });
@@ -283,10 +340,10 @@
   <EventHeader {ctx} compact link />
 {/if}
 <div class="row" style="justify-content:space-between;align-items:center">
-  <h1 style="margin:0">Organizer admin</h1>
+  <h1 style="margin:0">{t("admin.title")}</h1>
   {#if ctx}
     <button class="btn inline" onclick={() => router.go({ name: "event", naddr })}>
-      Done ✓
+      {t("admin.done")}
     </button>
   {/if}
 </div>
@@ -295,10 +352,24 @@
 
 {#if notOrganizer}
   <div class="card">
-    <p>You don't hold this event's organizer keys on this device.</p>
+    <p><strong>{t("admin.notOrganizer.title")}</strong></p>
+    <p class="muted">
+      {t("admin.notOrganizer.body")}
+    </p>
+    <div class="field-label">{t("admin.yourNpub")}</div>
+    <p class="mono">{session.npub}</p>
+    <button class="btn inline" onclick={copyMyNpub}>
+      {copiedNpub ? t("admin.copied") : t("admin.copyNpub")}
+    </button>
+    <ol class="muted" style="margin:0.75rem 0 0;padding-left:1.25rem">
+      <li>{t("admin.grant.step1")}</li>
+      <li>{t("admin.grant.step2")}</li>
+      <li>{t("admin.grant.step3")}</li>
+    </ol>
+    <p class="muted" style="margin-top:0.5rem">{t("admin.grant.waiting")}</p>
   </div>
 {:else if loading}
-  <p class="muted">Loading pending requests…</p>
+  <p class="muted">{t("admin.loading")}</p>
 {:else}
   <div class="row" style="justify-content:space-between">
     <button
@@ -306,22 +377,20 @@
       onclick={scrollToRequests}
       disabled={pendingRequests.length === 0}
     >
-      {pendingRequests.length} pending request{pendingRequests.length === 1 ? "" : "s"} ↓
+      {tp("admin.pending", pendingRequests.length)}
     </button>
-    <button class="btn inline" onclick={refresh}>Refresh</button>
+    <button class="btn inline" onclick={refresh}>{t("admin.refresh")}</button>
   </div>
 
   <div class="card">
-    <div class="field-label">Event updates</div>
+    <div class="field-label">{t("admin.updates.title")}</div>
     <p class="muted">
-      Announcements shown on the event page ("schedule posted", "venue change").
-      Markdown works. Published as standard Nostr long-form posts under the
-      event's identity.
+      {t("admin.updates.body")}
     </p>
-    <input placeholder="Title" bind:value={updTitle} />
+    <input placeholder={t("admin.updates.titlePlaceholder")} bind:value={updTitle} />
     <textarea
       rows="4"
-      placeholder="What's new? Markdown supported."
+      placeholder={t("admin.updates.contentPlaceholder")}
       bind:value={updContent}
       style="margin-top:0.5rem"
     ></textarea>
@@ -331,7 +400,7 @@
         onclick={publishUpdate}
         disabled={updBusy || !updTitle.trim() || !updContent.trim()}
       >
-        {updBusy ? "Publishing…" : updEditing ? "Save edit" : "Publish update"}
+        {updBusy ? t("admin.updates.publishing") : updEditing ? t("admin.updates.saveEdit") : t("admin.updates.publish")}
       </button>
       {#if updEditing}
         <button
@@ -342,7 +411,7 @@
             updContent = "";
           }}
         >
-          Cancel edit
+          {t("admin.updates.cancelEdit")}
         </button>
       {/if}
     </div>
@@ -357,7 +426,7 @@
               </span>
             </span>
             <button class="btn inline" style="flex:none" onclick={() => startEdit(u)}>
-              Edit
+              {t("admin.updates.edit")}
             </button>
           </div>
         {/each}
@@ -366,61 +435,65 @@
   </div>
 
   <div class="card">
-    <div class="field-label">AI coordinator</div>
+    <div class="field-label">{t("admin.coordinator.title")}</div>
     {#if ctx?.config.coordinator}
-      <p class="muted">Attached: <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
+      <p class="muted">{t("admin.coordinator.attached")} <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
+      <p class="muted" style="margin:0 0 0.5rem">
+        {#if coordLastSeen === undefined}
+          <span class="badge" class:warn={coordStale}>{t("admin.coordinator.noActivity")}</span>
+        {:else}
+          <span class="badge" class:warn={coordStale}>{sinceLabel(coordLastSeen)}</span>
+        {/if}
+        {#if coordStale}
+          <span style="color:var(--danger)">{t("admin.coordinator.stale")}</span>
+        {/if}
+      </p>
       <button class="btn inline" onclick={recomputeMatches} disabled={recomputing}>
-        {recomputing ? "Recomputing…" : "↻ Recompute all matches"}
+        {recomputing ? t("admin.coordinator.recomputing") : t("admin.coordinator.recompute")}
       </button>
     {:else if attached}
-      <p class="muted">Coordinator attached ✓ Matchmaking will begin as attendees are processed.</p>
+      <p class="muted">{t("admin.coordinator.attachedOk")}</p>
     {:else}
       <p class="muted">
-        A coordinator is a service that transcribes intro videos and computes who
-        should meet whom. Without one there are no matches, and invite links need
-        your manual approval. Whoever runs it gives you its npub — paste it here.
-        It can read event content but can never act as the event.
+        {t("admin.coordinator.body")}
       </p>
-      <input placeholder="npub1… (coordinator)" bind:value={coordinatorInput} />
+      <input placeholder={t("admin.coordinator.placeholder")} bind:value={coordinatorInput} />
       <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
-        {attaching ? "Attaching…" : "Attach coordinator"}
+        {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attach")}
       </button>
     {/if}
   </div>
 
   <div class="card">
-    <div class="field-label">Co-organizers</div>
+    <div class="field-label">{t("admin.coorg.title")}</div>
     <p class="muted">
-      Add someone by their npub to share full organizer control — they can edit the
-      event, approve attendees, and manage the coordinator. (Their keys are
-      gift-wrapped to them; they'll get access next time they open the event.)
+      {t("admin.coorg.body")}
     </p>
-    <input placeholder="npub1… (co-organizer)" bind:value={coOrgInput} />
+    <input placeholder={t("admin.coorg.placeholder")} bind:value={coOrgInput} />
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={addCoOrg} disabled={addingCoOrg || !coOrgInput.trim()}>
-        {addingCoOrg ? "Adding…" : "Add co-organizer"}
+        {addingCoOrg ? t("admin.coorg.adding") : t("admin.coorg.add")}
       </button>
-      {#if coOrgAdded}<span class="muted">Sent ✓</span>{/if}
+      {#if coOrgAdded}<span class="muted">{t("admin.coorg.sent")}</span>{/if}
     </div>
   </div>
 
   <div class="card">
-    <div class="field-label">Invite codes</div>
+    <div class="field-label">{t("admin.invites.title")}</div>
     <p class="muted">
-      Single-use links that auto-approve (with a coordinator). The code rides the
-      URL fragment and never touches a server.
+      {t("admin.invites.body")}
     </p>
     <div class="row">
       <input type="number" min="1" max="100" bind:value={inviteCount} style="max-width:5rem" />
       <button class="btn inline" onclick={makeInvites} disabled={generating}>
-        {generating ? "Generating…" : "Generate"}
+        {generating ? t("admin.invites.generating") : t("admin.invites.generate")}
       </button>
     </div>
     {#each invites as inv (inv.nsec)}
       <div class="card" style="background:var(--bg-elev2)">
         <div class="row" style="justify-content:space-between">
           <span class="badge">{inv.label}</span>
-          <button class="btn inline" onclick={() => copyLink(inv.link)}>Copy link</button>
+          <button class="btn inline" onclick={() => copyLink(inv.link)}>{t("admin.invites.copyLink")}</button>
         </div>
         <QrCode data={inv.link} size={140} />
         <p class="mono">{inv.link}</p>
@@ -434,7 +507,7 @@
         >{window.location.origin + window.location.pathname}#/e/{naddr}/join</span
       >
       <button class="btn inline" style="flex:none" onclick={copyInviteLink}>
-        {copiedLink ? "Copied ✓" : "Copy invite link"}
+        {copiedLink ? t("admin.inviteLink.copied") : t("admin.inviteLink.copy")}
       </button>
       {#if typeof navigator !== "undefined" && navigator.share}
         <button
@@ -448,53 +521,66 @@
               })
               .catch(() => {})}
         >
-          Share…
+          {t("admin.share")}
         </button>
       {/if}
     </div>
   {/if}
 
-  <h2 id="join-requests">Join requests</h2>
+  <h2 id="join-requests">{t("admin.requests.title")}</h2>
   <div class="stack">
     {#if pendingRequests.length === 0}
-      <p class="muted">No pending requests.</p>
+      <p class="muted">{t("admin.requests.none")}</p>
     {:else if pendingRequests.length > 1}
       <button class="btn" onclick={approveAll} disabled={approvingAll}>
-        {approvingAll ? "Approving…" : `Approve all (${pendingRequests.length})`}
+        {approvingAll ? t("admin.requests.approving") : t("admin.requests.approveAll", { n: pendingRequests.length })}
       </button>
     {/if}
     {#each pendingRequests as req (req.attendeePubkey)}
       <div class="card">
         <strong>{req.name}</strong>
         <span class="badge">{short(req.attendeePubkey)}</span>
-        {#if req.invite}<span class="badge">invite</span>{/if}
+        {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
         {#if req.message}<p class="muted">{req.message}</p>{/if}
         {#if req.profile?.skills?.length}
           <div class="row" style="flex-wrap:wrap">
             {#each req.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
           </div>
         {/if}
-        {#if req.media?.length}<span class="badge">🎥 {req.media.length} video</span>{/if}
-        <button class="btn primary" onclick={() => approve(req)}>Approve</button>
+        {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
+        <button class="btn primary" onclick={() => approve(req)}>{t("admin.requests.approve")}</button>
       </div>
     {/each}
   </div>
 
   {#if approvedRequests.length}
-    <h2>Approved ({approvedRequests.length})</h2>
+    <h2>{t("admin.approved.title", { n: approvedRequests.length })}</h2>
     <div class="stack">
       {#each approvedRequests as req (req.attendeePubkey)}
         <div class="card">
           <strong>{req.name}</strong>
           <span class="badge">{short(req.attendeePubkey)}</span>
-          {#if req.media?.length}<span class="badge">🎥 {req.media.length} video</span>{/if}
+          {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
           {#if revokedSet.has(req.attendeePubkey)}
-            <p class="muted">Revoked ✓ (event key rotated)</p>
-          {:else}
-            <p class="muted">Approved ✓</p>
+            <p class="muted">{t("admin.revoked")}</p>
+          {:else if confirmingRevoke === req.attendeePubkey}
+            <p class="muted" style="margin:0.25rem 0">
+              {t("admin.revoke.confirm")}
+            </p>
             <div class="row">
-              <button class="btn inline" onclick={() => reprocess(req)}>Re-process</button>
-              <button class="btn inline danger" onclick={() => revoke(req)}>Revoke</button>
+              <button class="btn inline danger" onclick={() => revoke(req)}>{t("admin.revoke.revoke")}</button>
+              <button class="btn inline" onclick={() => (confirmingRevoke = null)}>{t("admin.revoke.keep")}</button>
+            </div>
+          {:else}
+            <p class="muted">{t("admin.approvedTag")}</p>
+            <div class="row">
+              <button class="btn inline" onclick={() => reprocess(req)}>{t("admin.reprocess")}</button>
+              <button
+                class="btn inline danger"
+                onclick={() => (confirmingRevoke = req.attendeePubkey)}
+              >
+                {t("admin.revoke.revoke")}
+              </button>
             </div>
           {/if}
         </div>
