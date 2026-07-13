@@ -53,6 +53,7 @@ const SECTIONS = [
     docs: [
       { file: "E2E-TESTING-GUIDE.md", title: "End-to-End Testing Guide" },
       { file: "UI-SUGGESTIONS.md", title: "UI Suggestions" },
+      { file: "MATCHING-BENCHMARK.md", title: "Matching Benchmark (models & prompts)" },
     ],
   },
 ];
