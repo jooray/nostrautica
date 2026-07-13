@@ -5,7 +5,7 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { hasNip07 } from "$lib/signer/nip07.js";
   import { Nip46Signer, type NostrConnectHandle } from "$lib/signer/nip46.js";
-  import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+  import { NIP46_RELAYS } from "$lib/nostr/relays.js";
   import QrCode from "$lib/components/QrCode.svelte";
 
   let { onSignedIn }: { onSignedIn?: () => void } = $props();
@@ -30,6 +30,9 @@
   let pasteKey = $state("");
   let pastePw = $state("");
   let copiedUri = $state(false);
+  // In-flight bunker:// connect: a progress note + a working Cancel.
+  let bunkerConnecting = $state(false);
+  let bunkerAbort: AbortController | null = null;
 
   async function copyUri() {
     if (!nc) return;
@@ -47,7 +50,9 @@
       await fn();
       onSignedIn?.();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      const msg = e instanceof Error ? e.message : String(e);
+      // A user-initiated Cancel isn't an error — just reset the form quietly.
+      error = msg === "Cancelled" ? null : msg;
     } finally {
       busy = false;
     }
@@ -61,19 +66,41 @@
 
   const startNostrConnect = () =>
     run(async () => {
-      nc = Nip46Signer.startNostrConnect(DEFAULT_RELAYS);
-      const signer = await nc.connected;
-      await session.loginNip46(signer);
-      nc = null;
-      remember("nip46");
+      const handle = Nip46Signer.startNostrConnect(NIP46_RELAYS);
+      nc = handle;
+      try {
+        const signer = await handle.connected;
+        await session.loginNip46(signer);
+        remember("nip46");
+      } finally {
+        nc = null;
+      }
     });
+
+  function cancelNostrConnect() {
+    nc?.cancel();
+  }
 
   const pasteBunker = () =>
     run(async () => {
-      const signer = await Nip46Signer.fromBunkerUri(pasteKey.trim());
-      await session.loginNip46(signer);
-      remember("paste");
+      bunkerAbort = new AbortController();
+      bunkerConnecting = true;
+      try {
+        const signer = await Nip46Signer.fromBunkerUri(
+          pasteKey.trim(),
+          bunkerAbort.signal,
+        );
+        await session.loginNip46(signer);
+        remember("paste");
+      } finally {
+        bunkerConnecting = false;
+        bunkerAbort = null;
+      }
     });
+
+  function cancelBunker() {
+    bunkerAbort?.abort();
+  }
 
   const importLocal = () =>
     run(async () => {
@@ -108,6 +135,9 @@
         </button>
       </div>
       <p class="muted" style="margin-top:0.5rem">Waiting for the signer to approve…</p>
+      <button class="btn inline" style="margin-top:0.25rem" onclick={cancelNostrConnect}>
+        Cancel
+      </button>
     {:else}
       <p class="muted" style="margin:0 0 0.5rem">such as Amber on Android, or Clave</p>
       <button class="btn" onclick={startNostrConnect} disabled={busy}>
@@ -136,6 +166,12 @@
         </button>
       {/if}
     </div>
+    {#if bunkerConnecting}
+      <p class="muted" style="margin:0.5rem 0 0">Contacting your signer…</p>
+      <button class="btn inline" style="margin-top:0.25rem" onclick={cancelBunker}>
+        Cancel
+      </button>
+    {/if}
     <p class="muted" style="margin:0.5rem 0 0">
       On a shared device, a signer app or extension is safer than pasting your key.
     </p>

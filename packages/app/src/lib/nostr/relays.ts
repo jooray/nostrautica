@@ -27,6 +27,19 @@ export const DEFAULT_RELAYS = ENV_RELAYS ?? [
 /** Read-oriented relay included in defaults for discovery breadth. */
 export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://relay.nostr.band"];
 
+/**
+ * Relays advertised in the `nostrconnect://` URI (NIP-46). Dedicated signer
+ * relays handle the ephemeral kind-24133 traffic without the rate limits
+ * general-purpose relays impose; `relay.nsec.app` is the de-facto signer relay
+ * (nsec.app / Amber / nostrconnect.org). We pair it with a widely-reachable
+ * general relay as a fallback since relay.nsec.app has had EU flakiness.
+ * Honors VITE_NOSTRAUTICA_RELAYS so local e2e keeps working.
+ */
+export const NIP46_RELAYS = ENV_RELAYS ?? [
+  "wss://relay.nsec.app",
+  "wss://relay.primal.net",
+];
+
 /** Fallback Blossom servers when an event/user configures none (spec §11). */
 export const DEFAULT_BLOSSOM_SERVERS = ENV_BLOSSOM ?? [
   "https://blossom.primal.net",

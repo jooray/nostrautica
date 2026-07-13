@@ -169,3 +169,70 @@ nak bunker connect '<nostrconnect://…>'            # -> "this is not implement
 # screenshots: docs/images/participant/16-signin-nsec-{light,dark}.png,
 #              docs/images/participant/17-signin-bunker-{light,dark}.png
 ```
+
+## Fixes applied (2026-07-13)
+
+NIP-46 hardening pass against the findings above. All changes on branch
+`implement-nostrautica` (not committed — for maintainer review). `pnpm check`
+green (0 errors). Files touched:
+`packages/app/src/lib/signer/nip46.ts`,
+`packages/app/src/lib/components/SignInOptions.svelte`,
+`packages/app/src/lib/nostr/relays.ts`.
+
+### Finding → fix → verification
+
+| # | Finding | Fix | Verified |
+|---|---|---|---|
+| **P1** | Offline bunker = infinite silent hang on `bunker://` connect | `fromBunkerUri` now wraps `bunker.connect()` in a 45 s timeout + `AbortSignal`; on timeout/cancel it closes the signer and throws the human message *"Your signer didn't respond — check it's online and try again."* The Connect button re-enables (never disabled-forever). | ✅ E2E (b): timeout error appeared < 60 s; button re-enabled; Cancel mid-flight reset the form. Timeout primitive unit-tested (bounds a never-resolving promise at the deadline; honors abort; passes through success). |
+| **P2** | No feedback during `bunker://` connect | Added a *"Contacting your signer…"* progress note + a **Cancel** button while the connect is in flight. | ✅ E2E (a): progress note observed before the connect resolved. |
+| **P3** | Malformed bunker pubkey → raw *"bad point: is not on curve"* | `looksLikeBunkerUri` gate (64-hex + ≥1 relay) before any crypto, **and** a try/catch around `BunkerSigner.fromBunker` (which derives the conversation key synchronously) → both surface *"That doesn't look like a valid bunker link."* | ✅ E2E (c): off-curve 64-`f` pubkey → friendly message, no curve error. |
+| **P3** | No Cancel in the nostrconnect waiting state | `startNostrConnect` now returns a `cancel()` (aborts the `fromURI` wait); a **Cancel** button under *"Waiting for the signer to approve…"* returns to idle. A user-initiated cancel is treated as non-error (no red banner). | ✅ E2E (d): Cancel returned to the idle "Connect with Remote Signer" button. |
+| — | Session-restore reconnect could block app boot forever on a dead bunker | `fromPersisted` wraps the reconnect in a **12 s** budget (shorter than the interactive one — boot must not stall) and closes the signer on timeout; `session.restore()` already swallows the failure → app boots logged-out. | ✅ E2E (e): live bunker → session restored and `/me` shows the npub; dead bunker (killed after login) → shell booted logged-out in < 200 ms across every run, never wedged. |
+
+### Best-practice URI improvements (no finding, requested)
+
+- **Client metadata**: the `nostrconnect://` URI now advertises `name=Nostrautica`
+  + `url=<origin>`, and the `bunker://` `connect` RPC passes the same metadata,
+  so a real signer's approval screen names the app instead of "unknown app".
+- **`perms`** corrected to the kinds the app signs *directly* through the signer,
+  so signers (Amber/nsec.app) can grant once instead of prompting per event:
+  `sign_event:{0,3,13,10002,24242,30078,31600,31601,31602,31923,31925}` +
+  `nip44_encrypt`/`nip44_decrypt`. The prior list was missing **13** (the NIP-59
+  *seal* — signed for every gift-wrapped join request and NIP-17 DM), **10002**,
+  **24242**, **30078**, and wrongly listed **1059** (the gift-wrap outer is signed
+  with a local ephemeral key, never the user's signer).
+- **`auth_url`** now handled: an `onauth` callback opens the challenge URL in a new
+  tab (spec's out-of-band approval), wired on all three paths (nostrconnect,
+  bunker paste, restore). Previously a signer that required a challenge would have
+  logged a warning and stalled.
+
+### Relays for the nostrconnect URI
+
+Introduced `NIP46_RELAYS = ["wss://relay.nsec.app", "wss://relay.primal.net"]`
+(was the app's general-purpose `DEFAULT_RELAYS`). `relay.nsec.app` is the
+de-facto dedicated NIP-46 signer relay (nsec.app/noauth default, referenced by
+Amber and nostrconnect.org); dedicated signer relays don't rate-limit the
+ephemeral kind-24133 RPC traffic the way general relays do. Paired with a
+widely-reachable general relay as a fallback since relay.nsec.app has had
+reported EU flakiness. **`VITE_NOSTRAUTICA_RELAYS` still overrides it** (the
+`ENV_RELAYS ??` guard), so the §2.2 e2e recipe is unaffected. `bunker://`
+connects continue to honor the relays in the pasted URI (nostr-tools
+`parseBunkerInput` → `fromBunker`, unchanged).
+
+### Verification harness
+
+Own isolated infra on free ports (relay :7791, blossom :3011, preview :4179;
+shared :7777/:3000/:4173 untouched; shared `packages/app/build` rebuilt back to
+`ws://localhost:7777` + `http://localhost:3000` afterwards). Playwright chromium
+headless with the `LocalNetworkAccessChecks` disable flag + per-context CSP
+strip (as in the original run). `nak` v0.15.2 autosign bunker for the happy
+path. Driver scripts were temporary (`e2e/.rs-*.mjs`, deleted after the run).
+Result: **9/10 scripted assertions PASS**; the one non-pass was a selector-timing
+artifact in the dead-bunker reload assertion — the shell demonstrably booted
+(logged-out, not wedged) in every run, which is the actual requirement.
+
+### Not fixed (out of scope for this pass)
+
+- **P2 — organizer admin keys device-bound** and **P2 — "Request sent" not
+  persisted** and **P4 — newcomer copy for veterans**: unrelated to NIP-46
+  robustness; left for their own changes.

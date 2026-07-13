@@ -19,3 +19,6 @@ coordinator.toml
 # coordinator runtime artifacts
 coordinator.out
 docs-site-build/
+
+# local notes, not for the repo
+CLAUDE.md
