@@ -13,11 +13,13 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 test.describe(RELAY_UP ? "walking skeleton" : "walking skeleton (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay");
 
-  async function newUser(context: BrowserContext) {
+  async function newUser(context: BrowserContext, name: string) {
     const page = await context.newPage();
     await page.goto("/#/login");
-    await page.getByRole("button", { name: /create an identity/i }).click();
-    await page.getByRole("button", { name: /continue/i }).click();
+    // The login screen renders the create-identity form directly (name + button).
+    await page.getByLabel(/your name/i).fill(name);
+    await page.getByRole("button", { name: /create my identity/i }).click();
+    await expect(page.getByText(/you're in/i)).toBeVisible();
     return page;
   }
 
@@ -25,7 +27,7 @@ test.describe(RELAY_UP ? "walking skeleton" : "walking skeleton (needs relay —
     const organizerCtx = await browser.newContext();
     const attendeeCtx = await browser.newContext();
 
-    const organizer = await newUser(organizerCtx);
+    const organizer = await newUser(organizerCtx, "Olga Organizer");
     await organizer.goto("/#/create");
     await organizer.getByLabel("Title").fill("E2E Assembly");
     await organizer.getByLabel("Start").fill("2026-09-01T10:00");
@@ -37,24 +39,29 @@ test.describe(RELAY_UP ? "walking skeleton" : "walking skeleton (needs relay —
     const naddr = shareLink.match(/#\/e\/([^/\s]+)/)?.[1];
     expect(naddr).toBeTruthy();
 
-    const attendee = await newUser(attendeeCtx);
+    // A logged-in attendee's name comes read-only from their kind-0 profile —
+    // the join form has no name field for them.
+    const attendee = await newUser(attendeeCtx, "Attendee One");
     await attendee.goto(`/#/e/${naddr}/join`);
-    await attendee.getByLabel(/display name/i).fill("Attendee One");
     await attendee.getByRole("button", { name: /send join request/i }).click();
     await expect(attendee.getByText(/request sent/i)).toBeVisible();
 
-    // Organizer approves.
+    // Organizer approves. Match the per-card "Approved ✓" (the section header
+    // "Approved" alone can appear before the grant publish finishes).
     await organizer.goto(`/#/e/${naddr}/admin`);
     await organizer.getByRole("button", { name: /^approve$/i }).first().click();
-    await expect(organizer.getByText(/approved/i)).toBeVisible();
+    await expect(organizer.getByText(/approved ✓/i)).toBeVisible({ timeout: 20_000 });
 
-    // Both approved parties see the attendee in the roster.
+    // The event page runs the receiveGrants poll — visit it first so the roster
+    // decrypts (going straight to /attendees races the one-shot grant fetch).
+    await attendee.goto(`/#/e/${naddr}`);
+    await expect(attendee.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
     await attendee.goto(`/#/e/${naddr}/attendees`);
     await expect(attendee.getByText("Attendee One")).toBeVisible({ timeout: 15_000 });
 
     // An outsider cannot see the roster (no ECK).
     const outsiderCtx = await browser.newContext();
-    const outsider = await newUser(outsiderCtx);
+    const outsider = await newUser(outsiderCtx, "Otto Outsider");
     await outsider.goto(`/#/e/${naddr}/attendees`);
     await expect(outsider.getByText(/no attendees visible/i)).toBeVisible();
   });

@@ -1,0 +1,34 @@
+import { chromium } from "@playwright/test";
+const ARGS = ["--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults"];
+const browser = await chromium.launch({ args: ARGS });
+const ctx = await browser.newContext();
+const page = await ctx.newPage();
+page.on("console", (m) => { if (m.type() === "error") console.log("PAGE ERR:", m.text().slice(0, 150)); });
+await page.goto("http://localhost:4173/#/login");
+await page.getByLabel(/your name/i).fill("Probe User");
+await page.getByRole("button", { name: /create my identity/i }).click();
+await page.getByText(/you're in/i).waitFor();
+// Create an event as the same user so we have a naddr
+await page.goto("http://localhost:4173/#/create");
+await page.getByLabel("Title").fill("Probe Event");
+await page.getByLabel("Start").fill("2026-09-01T10:00");
+await page.getByRole("button", { name: /create event/i }).click();
+await page.getByText(/event created/i).waitFor();
+const link = await page.locator(".mono").first().innerText();
+const naddr = link.match(/#\/e\/([^/\s]+)/)?.[1];
+// Second context = attendee
+const ctx2 = await browser.newContext();
+const p2 = await ctx2.newPage();
+p2.on("console", (m) => { if (m.type() === "error") console.log("ATT ERR:", m.text().slice(0, 150)); });
+await p2.goto("http://localhost:4173/#/login");
+await p2.getByLabel(/your name/i).fill("Attendee Probe");
+await p2.getByRole("button", { name: /create my identity/i }).click();
+await p2.getByText(/you're in/i).waitFor();
+await p2.goto(`http://localhost:4173/#/e/${naddr}/join`);
+await p2.waitForTimeout(6000);
+const btn = p2.getByRole("button", { name: /send join request/i });
+console.log("button count:", await btn.count());
+if (await btn.count()) console.log("disabled:", await btn.isDisabled());
+console.log("fetching-profile note visible:", await p2.getByText(/fetching your nostr profile/i).isVisible().catch(() => false));
+console.log("body excerpt:", (await p2.locator(".app-shell").innerText()).replace(/\n+/g, " | ").slice(0, 400));
+await browser.close();

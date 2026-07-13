@@ -9,15 +9,18 @@ test("loads and creates a local identity with a backup card", async ({ page }) =
   await expect(page.getByText("Meet the right people")).toBeVisible();
 
   await page.goto("/#/login");
-  await page.getByRole("button", { name: /create an identity/i }).click();
+  await page.getByLabel(/your name/i).fill("Smoke Tester");
+  await page.getByRole("button", { name: /create my identity/i }).click();
 
-  // The "you're in" backup nag appears with the not-confidential warning.
+  // The "you're in" backup nag appears; the email option sits under the
+  // collapsed "more ways" details.
   await expect(page.getByText(/back it up now/i)).toBeVisible();
-  await expect(page.getByText(/email is not confidential/i)).toBeVisible();
+  await page.getByText(/more ways to back up/i).click();
+  await expect(page.getByText(/email isn't fully private/i)).toBeVisible();
 
   // The hand-off screen shows a portable npub.
   await page.goto("/#/me");
-  await expect(page.getByText(/your nostr profile is ready/i)).toBeVisible();
+  await expect(page.getByText(/you're a nostr user now/i)).toBeVisible();
   await expect(page.getByText(/^npub1/)).toBeVisible();
 });
 

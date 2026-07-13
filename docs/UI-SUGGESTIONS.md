@@ -7,12 +7,11 @@ Improvements to make Nostrautica easier for its three audiences — the
 [`E2E-TESTING-GUIDE.md`](E2E-TESTING-GUIDE.md): append what you observe,
 dated, at the bottom — don't rewrite existing entries.
 
-**Implementation status (2026-07-13):** items 1–4, 6, 8–10, 12–19, 21–22 are
+**Implementation status (2026-07-14):** items 1–6, 8–22, 24 are
 implemented on this branch (7 partially — friendly headline + muted detail,
-no collapsible raw error yet; 16 got the explainer but not coordinator
-liveness). Still open: 5 (state-aware record CTA), 11 (join-time video
-reuse), 20 (full i18n sweep), 23 (ongoing mobile testing), 24 (PWA install
-hint).
+no collapsible raw error yet; 16 now complete including coordinator
+liveness; 20 now complete — see below). Still open: 23 (ongoing mobile
+testing).
 
 Principles applied throughout: the most common action comes first and is the
 default; one primary action per screen; plain language over protocol
@@ -126,6 +125,12 @@ works one-handed on a phone.
     (Join, Admin, Me, BackupCard, SignInOptions…) is hardcoded English — a
     Slovak user gets a mixed-language UI. Move all user-facing strings into
     the catalog; the e2e language check (S1) will show the gaps.
+    **Done (2026-07-14):** all user-facing copy across pages, components, and
+    lib error/status messages is now in the typed catalog (~250 keys per
+    locale) with full Slovak translations. `t()` gained `{name}` interpolation
+    and `tp()` adds Slovak 3-form pluralization (1 / 2–4 / 5+). Switching to
+    Slovenčina translates the entire app — verified by screenshot pass; the en
+    e2e specs still pass unchanged. Evidence: `docs/images/app/settings-sk.png`.
 21. **Empty/denied states should explain and direct.** Outsider on the
     attendee list gets a bare “no attendees visible”; say why and what to do
     (“The attendee list is encrypted for approved attendees. Join the event
@@ -262,3 +267,46 @@ set — without one, NDK's outbox relay-set calculation can make the fetch hang
 indefinitely when relay lists are unresolvable. The invite-link "You're in 🎉"
 moment, the 86%-match cards with per-person reasoning, and the cross-messenger
 DM thread all photograph beautifully — the product story lands.
+
+### 2026-07-14 — UX-fixes pass (items 5, 11, 16, 24 + revoke confirm) — resolved
+
+All driven end-to-end against the local stack (relay :7777, blossom :3000,
+preview :4173) with a scripted Playwright run (23 assertions; 22 passed in the
+full run, the one flake — first revoke click after approve on a loaded 2-core
+host — was re-verified instantly in an isolated repro and in the screenshot
+run).
+
+- **#5 state-aware record CTA** — implemented. EventHome's primary for an
+  approved attendee is **Record your intro** (+ a "Matches come from intros"
+  nudge) until the 31602 self-copy carries an intro; then primary reverts to
+  **People you should meet** with record demoted. Verified both states across
+  reloads.
+- **#11 join-time video reuse** — implemented, the real thing (not the
+  deep-link fallback). A signed-in user with a library intro gets a "Use your
+  previous intro?" card in the join form (Reuse / Fresh copy / I'll record a
+  new one) wired to the same `prepareReuse` Record.svelte uses. The prepared
+  descriptor rides the join request's own 21601 + 31602 (`sendJoinRequest`
+  gained a `media` field — a second racing submission would lose same-second
+  latest-wins ties, found during verification). The library stores descriptors
+  without a source-event label, so the card says "your previous intro" rather
+  than naming the source event. Verified: organizer sees "🎥 1 video" on the
+  request; the attendee's event-2 self-copy carries the intro (matches becomes
+  primary without re-recording).
+- **#16 coordinator liveness** — completed. Admin shows a last-seen badge next
+  to "Attached:" derived from the newest coordinator-authored event for this
+  event (31603/31604/31605/31606 by `#a`, roster-`#d` fallback): "active just
+  now" / "active N min ago" / "last seen N h/d ago" / "no activity yet", with
+  a warning tint + "looks stale — is it still running?" beyond 1 h. Pure read,
+  no protocol change.
+- **#24 PWA install hint** — implemented. One-time dismissable card on the
+  event page for approved attendees; `beforeinstallprompt` is captured at boot
+  (Chrome/Android → native prompt on tap), iOS Safari gets share-sheet
+  instructions; dismissal persists in localStorage; never rendered in
+  standalone display-mode.
+- **e2e observation #3 (native `confirm()` on revoke)** — resolved. Revoke now
+  swaps the attendee card to an inline confirmation ("They lose access to
+  everything new. What they already saw can't be taken back." [Revoke] [Keep])
+  — theme-consistent and screenshotable. Figures re-captured:
+  `images/organizer/08-revoke-{light,dark}.png` and
+  `images/participant/05-request-sent-{light,dark}.png` (the waiting state now
+  persists across reloads and offers a quiet "Send the request again").

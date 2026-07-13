@@ -29,8 +29,19 @@ docker compose -f docker/docker-compose.yml up -d   # strfry relay :7777, blosso
 
 pnpm install
 pnpm --filter @nostrautica/protocol build
+# Point the app at the local infra AND relax the CSP for plain-scheme localhost
+# (ws:/http: are otherwise blocked). PUBLIC_CSP_EXTRA_CONNECT is needed at BUILD
+# time and again for `preview` (it SSRs the shell per request).
+VITE_NOSTRAUTICA_RELAYS=ws://localhost:7777 \
+VITE_NOSTRAUTICA_BLOSSOM=http://localhost:3000 \
+PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" \
 pnpm --filter @nostrautica/app build
+PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" \
 pnpm --filter @nostrautica/app preview --port 4173 --strictPort   # the app under test
+
+No docker? `node e2e/local-infra/relay.mjs` + `node e2e/local-infra/blossom.mjs`
+stand in for the compose services (in-memory), and `nak serve` gives real-relay
+semantics when needed.
 ```
 
 - App URL: `http://localhost:4173` (override with `NOSTRAUTICA_URL`).

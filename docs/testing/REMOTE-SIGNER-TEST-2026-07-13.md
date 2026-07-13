@@ -236,3 +236,18 @@ artifact in the dead-bunker reload assertion — the shell demonstrably booted
 - **P2 — organizer admin keys device-bound** and **P2 — "Request sent" not
   persisted** and **P4 — newcomer copy for veterans**: unrelated to NIP-46
   robustness; left for their own changes.
+
+## Fixes applied (2026-07-14) — the three findings deferred above
+
+UX pass on branch `implement-nostrautica` (not committed). `packages/app`
+lint/typecheck/tests green. Files:
+`packages/app/src/lib/pages/{Admin,Join,EventHome,Me}.svelte`,
+`packages/app/src/lib/events/{organizer,join}.ts`,
+`packages/app/src/lib/stores/join-sent.svelte.ts` (new). Each verified
+end-to-end with a scripted Playwright run against the local stack.
+
+| Finding | Fix | Verified |
+|---|---|---|
+| **P2 — organizer admin keys device-bound** | The "You don't hold this event's organizer keys on this device" state is now a real recovery path: it explains that organizer keys live on the creating device, shows the user's own npub with a copy button and step-by-step instructions ("On the device you created the event with, open Admin → Co-organizers and add this npub"), and **polls for the incoming 21605 organizer grant** (same `receiveGrants` channel co-organizers use) so the page unlocks in place — no reload. | ✅ E2E: fresh context signed in with the organizer's nsec showed the recovery card (own npub + instructions + "Waiting for the grant…"); after the original device added that npub under Co-organizers, the second context's admin page unlocked automatically within seconds. |
+| **P2 — "Request sent" not persisted** | New per-event join marker (`nostrautica:join-sent` in localStorage, keyed by event coordinate, timestamped), set on submit. On reload the Join page restores the waiting state (and resumes the grant poll); EventHome shows "Request sent — waiting for approval" instead of the Join CTA. The marker clears when approval lands, and a quiet "Send the request again" link covers the stuck case (clears the marker, returns to the form). | ✅ E2E: reloaded Join page showed the waiting state, not the pristine form; EventHome showed the pending state with no Join CTA; after approval both pages flipped to member state. |
+| **P4 — "You're a Nostr user now" for veterans** | `/me` now keys off how the identity got here. Full onboarding payoff only for a key created *this session* (`session.freshLocalKey`); everyone else gets a compact "Your Nostr profile" page (npub + copy, "Signed in via …" note, logout). The keystore doesn't record generated-vs-imported, so local-key users on a later visit get a middle ground: backup card kept, onboarding pitch dropped. nip07/nip46 sessions get no backup section — just the "your key lives in your signer" note. | ✅ E2E: same-session fresh key → "You're a Nostr user now"; after reload (local key) → "Your Nostr profile" + backup card, no pitch. nip46 path not re-driven (no bunker in this run) — it takes the same non-local branch as the verified imported-nsec case, minus the backup card. |
