@@ -132,15 +132,48 @@ off into `UI-SUGGESTIONS.md` with a screenshot.
 
 ### 2.2 Simulating the sign-in methods
 
-- **Paste key (nsec)** — fully testable headless; generate a keypair with
-  `nostr-tools` (or reuse one printed by a previous run) and paste it. This is
-  the representative “existing Nostr user” path.
+- **Paste key (nsec)** — fully testable headless. Seed a complete “existing
+  Nostr user” persona with `nak` (github.com/fiatjaf/nak; verified with
+  v0.15.2) against the local relay, then paste the nsec into the app:
+
+  ```sh
+  R=ws://localhost:7777
+  SK=$(nak key generate)
+  echo $SK | nak encode nsec        # ← paste this into "Paste a key"
+  nak key public $SK                # pubkey, for other personas' follow lists
+  nak event -k 0 --sec $SK -c '{"name":"Nadia","about":"…","picture":"https://api.dicebear.com/9.x/avataaars/png?seed=Nadia"}' $R
+  nak event -k 3 --sec $SK -p <followed-pubkey-hex> $R   # non-empty follows
+  ```
+
+  (An https picture URL keeps the shipped `img-src` CSP happy.)
 - **NIP-07 extension** — no real extension in headless Chromium. Either skip
   (note as untested), or inject a `window.nostr` shim via an init script that
   signs with a fixed test key; then the “Log in with extension” button appears
   and can be exercised.
-- **NIP-46 remote signer (Amber/Clave)** — needs a phone; out of scope for the
-  automated run. Verify only that the option renders a QR + copyable URI.
+- **NIP-46 remote signer, `bunker://` paste** — fully testable headless with
+  `nak bunker` as an **auto-signing** daemon (no phone needed):
+
+  ```sh
+  nak bunker --sec <hex-or-nsec> ws://localhost:7777
+  # prints: bunker://<pubkey>?relay=…&secret=XXXX
+  ```
+
+  Paste the printed URI into the app's “Paste a key” field → **Connect
+  bunker**. The `secret` in the URI auto-authorizes the connecting client and
+  every subsequent request (`sign_event`, `nip44_encrypt`/`decrypt`) is
+  answered without any prompt. ⚠ nak rotates the secret after each successful
+  connect — each printed URI is single-use, so copy the *latest* printed URI
+  per client (or pre-authorize a known client key with `-k
+  <client-pubkey-hex>`). This exercises the full remote-sign surface: join
+  gift-wraps, grant unwrapping, roster decrypt, follows, NIP-17 DMs — see
+  `testing/REMOTE-SIGNER-TEST-2026-07-13.md` for measured results.
+- **NIP-46 `nostrconnect://` QR flow** — `nak bunker connect <uri>` is a stub
+  in nak ≤ 0.15.2 (“this is not implemented yet”), so nak cannot consume the
+  app's QR. Verify the option renders a QR + copyable URI + waiting state; to
+  drive the handshake itself use a phone with Amber, or a small scripted
+  signer (nostr-tools: subscribe kind-24133 for your pubkey, publish the URI's
+  `secret` as the first response, then serve
+  `get_public_key`/`sign_event`/`nip44_*`).
 
 ---
 
@@ -224,6 +257,9 @@ screenshot; names refer to the checklist in §5.
    (name/bio/photo prefilled from Nostr, with a note it won't be changed);
    only event-specific fields (skills, looking-for) editable.
 3. Send the join request.
+4. *(Optional variant)* Re-run Nadia via the `bunker://` remote-signer path
+   using the `nak bunker` recipe in §2.2 — same expectations, but every
+   signature/encryption round-trips through the signer daemon.
 
 ### S6 — Olga: approvals & roster
 
