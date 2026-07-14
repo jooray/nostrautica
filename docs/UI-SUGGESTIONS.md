@@ -20,7 +20,11 @@ works one-handed on a phone.
 
 ## For the newcomer (majority of attendees)
 
-1. **Flip the emphasis on the Login and Join screens.** Both currently lead
+1. **Flip the emphasis on the Login and Join screens.** *(Revised 2026-07-14 by
+   maintainer decision: Nostr users are first-class citizens — the "Already on
+   Nostr? Sign in" button is now purple/primary and placed FIRST on both
+   screens, with the newcomer form fully visible right below the divider. Both
+   audiences get a zero-scroll path.)* Both currently lead
    with a large primary “I'm already a Nostr user” / “Already a Nostr user?
    Sign in” button, with identity creation below the fold of attention.
    Newcomers are the majority; make **Create my identity** (Login) and the

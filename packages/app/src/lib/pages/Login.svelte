@@ -73,8 +73,20 @@
     <div class="card warn"><strong>{t("login.failed")}</strong> {error}</div>
   {/if}
 
-  <!-- Newcomers are the majority: identity creation is the primary path;
-       existing-Nostr-user sign-in is a quiet option below (UI-SUGGESTIONS #1). -->
+  <!-- Nostr users are first-class citizens: their purple sign-in comes first,
+       so they never read through the newcomer form (maintainer decision,
+       revising UI-SUGGESTIONS #1). Newcomers get the full form right below. -->
+  <button class="btn primary" onclick={() => (showExisting = !showExisting)}>
+    <NostrichIcon size={20} />
+    {t("login.alreadyOnNostr")}
+  </button>
+
+  {#if showExisting}
+    <SignInOptions onSignedIn={done} />
+  {/if}
+
+  <div class="or-divider">{t("login.or")}</div>
+
   <div class="card">
     <h2>{t("login.createHeading")}</h2>
     <p class="muted">{t("login.createSub")}</p>
@@ -96,14 +108,4 @@
     </button>
   </div>
 
-  <div class="or-divider">{t("login.or")}</div>
-
-  <button class="btn" onclick={() => (showExisting = !showExisting)}>
-    <NostrichIcon size={20} />
-    {t("login.alreadyOnNostr")}
-  </button>
-
-  {#if showExisting}
-    <SignInOptions onSignedIn={done} />
-  {/if}
 {/if}

@@ -293,6 +293,19 @@
   <EventHeader {ctx} />
   <h1>{t("join.title", { title: ctx.title })}</h1>
 
+  {#if !session.loggedIn}
+    <!-- Nostr users are first-class: purple sign-in first, no form-reading
+         needed (maintainer decision, revising UI-SUGGESTIONS #1). -->
+    <button class="btn primary" onclick={() => (showSignIn = !showSignIn)}>
+      <NostrichIcon size={20} />
+      {t("join.alreadyOnNostr")}
+    </button>
+    {#if showSignIn}
+      <SignInOptions onSignedIn={() => (showSignIn = false)} />
+    {/if}
+    <div class="or-divider">{t("join.or")}</div>
+  {/if}
+
   <div class="card stack">
     {#if session.loggedIn}
       <!-- Existing Nostr user: profile shown read-only from their kind-0. -->
@@ -390,15 +403,4 @@
     </button>
   </div>
 
-  {#if !session.loggedIn}
-    <!-- Quiet path for Nostr natives; newcomers just fill the form (UI-SUGGESTIONS #1). -->
-    <div class="or-divider">{t("join.or")}</div>
-    <button class="btn" onclick={() => (showSignIn = !showSignIn)}>
-      <NostrichIcon size={20} />
-      {t("join.alreadyOnNostr")}
-    </button>
-    {#if showSignIn}
-      <SignInOptions onSignedIn={() => (showSignIn = false)} />
-    {/if}
-  {/if}
 {/if}
