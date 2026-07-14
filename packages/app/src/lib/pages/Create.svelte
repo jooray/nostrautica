@@ -12,6 +12,7 @@
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { publishProfile, ensureRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
+  import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let title = $state("");
@@ -26,6 +27,7 @@
   let matching = $state<"on" | "off">("on");
   let matchVisibility = $state<"pair" | "event">("pair");
   let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
+  let lang = $state<string>("en"); // ISO 639-1 event language (default English)
 
   let busy = $state(false);
   let error = $state<string | null>(null);
@@ -102,6 +104,7 @@
           matchVisibility,
           approval,
           nostrContext: 100,
+          lang,
         },
         blindingKey,
       );
@@ -226,6 +229,11 @@
     <div>
       <label for="loc">{t("create.field.location")}</label>
       <input id="loc" bind:value={locationStr} placeholder={t("create.field.location.placeholder")} />
+    </div>
+    <div>
+      <label for="lang">{t("create.field.language")}</label>
+      <LanguagePicker id="lang" bind:value={lang} />
+      <p class="muted" style="margin:0.25rem 0 0">{t("create.field.language.body")}</p>
     </div>
     <!-- Rarely-changed options tucked away; title + date is enough (UI-SUGGESTIONS #13). -->
     <details>

@@ -35,6 +35,40 @@ describe("plural categories", () => {
   });
 });
 
+describe("event-language adoption (spec §7.1)", () => {
+  it("adopts an available event language when the user has NO explicit choice", () => {
+    i18n.locale = "en";
+    i18n.explicit = false;
+    i18n.adoptEventLang("sk");
+    expect(i18n.locale).toBe("sk");
+    i18n.locale = "en";
+  });
+
+  it("ignores the event language once the user has explicitly chosen", () => {
+    i18n.explicit = true;
+    i18n.locale = "en";
+    i18n.adoptEventLang("sk");
+    expect(i18n.locale).toBe("en");
+    i18n.explicit = false;
+  });
+
+  it("ignores unavailable languages and falls back to the current locale", () => {
+    i18n.explicit = false;
+    i18n.locale = "en";
+    i18n.adoptEventLang("de"); // no de catalog today
+    expect(i18n.locale).toBe("en");
+  });
+
+  it("set() marks the choice explicit so it wins thereafter", () => {
+    i18n.explicit = false;
+    i18n.set("en");
+    expect(i18n.explicit).toBe(true);
+    i18n.adoptEventLang("sk");
+    expect(i18n.locale).toBe("en");
+    i18n.explicit = false;
+  });
+});
+
 describe("i18n plural resolution", () => {
   it("picks the count-appropriate form with {n}", () => {
     i18n.set("en");

@@ -47,11 +47,34 @@ describe("event config (kind 31600)", () => {
       approval: "manual+invite" as const,
       eck: 1,
       nostrContext: 100,
+      lang: "sk" as const,
     };
     const built = buildEventConfig(cfg);
     expect(built.kind).toBe(31600);
+    expect(built.tags).toContainEqual(["lang", "sk"]);
     const parsed = parseEventConfig(pubkey, built.tags);
     expect(parsed).toEqual(cfg);
+  });
+
+  it("omits the lang tag for the default (en) but parses it back", () => {
+    const cfg = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: [],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "off" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+    };
+    const built = buildEventConfig(cfg);
+    expect(built.tags.find((t) => t[0] === "lang")).toBeUndefined();
+    expect(parseEventConfig(pubkey, built.tags).lang).toBe("en");
   });
 
   it("defaults sensibly when tags are missing", () => {

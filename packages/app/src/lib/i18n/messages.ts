@@ -130,6 +130,9 @@ export const messages = {
     "create.field.end": "End",
     "create.field.location": "Location",
     "create.field.location.placeholder": "Bratislava",
+    "create.field.language": "Event language",
+    "create.field.language.body":
+      "Sets the attendee interface and the language of AI match reasoning and profile summaries. Attendees can still write in any language.",
     "create.advanced": "Advanced — images, video length",
     "create.field.images": "Event images",
     "create.field.images.optional": "(both optional)",
@@ -300,6 +303,14 @@ export const messages = {
     "attendee.recentPosts": "Recent posts",
     "attendee.name": "Attendee",
     "attendee.error.badNpub": "bad npub",
+    "attendee.translated": "Translated",
+    "attendee.showOriginal": "show original",
+    "attendee.showTranslation": "show translation",
+
+    // Language picker
+    "lang.label": "Language",
+    "lang.searchPlaceholder": "Search a language…",
+    "lang.noResults": "No languages found",
 
     // Matches
     "matches.title": "People you should meet",
@@ -616,6 +627,9 @@ export const messages = {
     "create.field.end": "Koniec",
     "create.field.location": "Miesto",
     "create.field.location.placeholder": "Bratislava",
+    "create.field.language": "Jazyk podujatia",
+    "create.field.language.body":
+      "Nastaví rozhranie pre účastníkov a jazyk odôvodnení AI párovania aj profilových zhrnutí. Účastníci môžu naďalej písať v ľubovoľnom jazyku.",
     "create.advanced": "Rozšírené — obrázky, dĺžka videa",
     "create.field.images": "Obrázky podujatia",
     "create.field.images.optional": "(oba voliteľné)",
@@ -790,6 +804,14 @@ export const messages = {
     "attendee.recentPosts": "Nedávne príspevky",
     "attendee.name": "Účastník",
     "attendee.error.badNpub": "neplatný npub",
+    "attendee.translated": "Preložené",
+    "attendee.showOriginal": "zobraziť originál",
+    "attendee.showTranslation": "zobraziť preklad",
+
+    // Language picker
+    "lang.label": "Jazyk",
+    "lang.searchPlaceholder": "Vyhľadať jazyk…",
+    "lang.noResults": "Žiadny jazyk sa nenašiel",
 
     // Matches
     "matches.title": "Ľudia, ktorých by ste mali stretnúť",

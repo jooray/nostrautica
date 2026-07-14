@@ -56,6 +56,13 @@ export const configSchema = z.object({
     summary: modelRefSchema,
     match: modelRefSchema,
     embed: modelRefSchema,
+    // Translates user-authored profile fields into the event language (spec §7.1).
+    // Default gemini-3-flash-preview (a Venice model id, see benchmarks/matching);
+    // it sees user content, so it inherits the provider's require_private by default.
+    translate: modelRefSchema.default({
+      provider: "venice",
+      model: "gemini-3-flash-preview",
+    }),
   }),
   matching: z
     .object({
@@ -106,7 +113,7 @@ export function veniceApiKey(config: CoordinatorConfig): string | undefined {
   return process.env[envVar];
 }
 
-export type ModelRole = "summary" | "match" | "embed";
+export type ModelRole = "summary" | "match" | "embed" | "translate";
 
 /**
  * Effective privacy requirement for a model role: the per-role

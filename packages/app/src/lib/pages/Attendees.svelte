@@ -9,7 +9,7 @@
   import { fetchDirectory, fetchMatches } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
-  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -70,6 +70,17 @@
   function open(pubkey: string) {
     router.go({ name: "attendee", naddr, npub: npubEncode(pubkey) });
   }
+
+  // Show the coordinator-published translation of an attendee's bio/skills when the
+  // viewer reads the event language and the author wrote in a different one. Cards
+  // show it inline (the per-field toggle lives on the attendee detail page).
+  const tr = (e: DirectoryEntryContent) => {
+    const x = e.ai_profile?.translations;
+    return x && x.lang === i18n.locale ? x : undefined;
+  };
+  const cardAbout = (e: DirectoryEntryContent) => tr(e)?.about || e.profile.about;
+  const cardSkills = (e: DirectoryEntryContent) =>
+    tr(e)?.skills?.length ? tr(e)!.skills! : e.profile.skills;
 </script>
 
 {#if ctx}<EventHeader {ctx} compact link />{/if}
@@ -111,10 +122,10 @@
               {#if followSet.has(e.pubkey)}<span class="badge">{t("attendees.following")}</span>{/if}
             </div>
           </div>
-          {#if e.profile.about}<p class="muted" style="margin:0.15rem 0 0">{e.profile.about}</p>{/if}
-          {#if e.profile.skills.length}
+          {#if cardAbout(e)}<p class="muted" style="margin:0.15rem 0 0">{cardAbout(e)}</p>{/if}
+          {#if cardSkills(e).length}
             <div class="row" style="flex-wrap:wrap;margin-top:0.35rem">
-              {#each e.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+              {#each cardSkills(e) as s (s)}<span class="badge">{s}</span>{/each}
             </div>
           {/if}
           {#if e.ai_profile}<p class="muted" style="margin-top:0.35rem">{e.ai_profile.summary}</p>{/if}

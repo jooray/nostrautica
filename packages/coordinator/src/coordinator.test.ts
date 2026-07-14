@@ -64,15 +64,50 @@ const blobSize = (f: FixtureKey) => 100 + ORDER.indexOf(f);
 
 interface Counters {
   nostrSummary: number;
-  /** One entry per batched match-scoring call: target role + candidate roles. */
+  /** One entry per FORWARD batched match-scoring call: target role + candidate roles. */
   batchCalls: { targetRole?: string; candidateRoles: (string | undefined)[] }[];
+  /** One entry per REVERSE batched call: shared-candidate role + target roles. */
+  reverseCalls: { sharedRole?: string; targetRoles: (string | undefined)[] }[];
   /** When set, the NEXT batch containing a candidate of this role omits that entry once. */
   dropRoleOnce?: string;
+  /** How many profile-translation calls the pipeline made. */
+  translateCalls: number;
+}
+
+const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
+const roleOf = (text: string) => ROLES.find((r) => text.includes(r));
+
+/** Shared match-scoring: complementary (different roles) → high, else low. An
+ *  "(updated)" profile in EITHER block nudges the score so a re-recorded intro
+ *  produces a visibly different match list. */
+function scoreEntry(index: number, aRole?: string, bRole?: string, updated = false) {
+  const complementary = !!aRole && !!bRole && aRole !== bRole;
+  const base = complementary ? 0.9 : 0.4;
+  return {
+    index,
+    score: updated ? Math.min(1, base + 0.05) : base,
+    similarity: complementary ? 0.4 : 0.85,
+    complementarity: complementary ? 0.95 : 0.2,
+    reasoning_for_target: complementary
+      ? `You should meet them — complementary skills (${aRole} + ${bRole}) fit this event.${updated ? " (updated)" : ""}`
+      : "Similar backgrounds.",
+  };
 }
 
 function makeLlm(counters: Counters): MockLlm {
   return new MockLlm((req) => {
     if (req.schemaName === "ai_profile") {
+      // A re-recorded intro (marker "CHANGED-INTRO") yields a DIFFERENT ai_profile
+      // so its profile_hash changes — exercises recompute-on-change.
+      if (req.user.includes("CHANGED-INTRO")) {
+        return {
+          summary: "cryptographer profile (updated)",
+          skills: ["zk", "cryptography", "halo2"],
+          interests: ["cryptographer", "recursion"],
+          offers: ["zk", "halo2"],
+          seeks: ["designer", "programmer"],
+        };
+      }
       const which = ORDER.find((k) => req.user.includes(FIXTURES[k].transcript)) ?? "code";
       const f = FIXTURES[which];
       const usedNostr = req.user.includes("PUBLIC NOSTR ACTIVITY");
@@ -85,38 +120,67 @@ function makeLlm(counters: Counters): MockLlm {
       };
     }
     if (req.schemaName === "batch_score") {
-      // Batched scoring: ONE target + numbered candidates (spec §16.2). Detect the
-      // target's role and each candidate's role; different roles = complementary.
-      const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
-      const roleOf = (text: string) => ROLES.find((r) => text.includes(r));
+      // Forward batched scoring: ONE target + numbered candidates (spec §16.2).
       const [, afterTarget = ""] = req.user.split("TARGET ATTENDEE:");
       const [targetBlock = "", candsBlock = ""] = afterTarget.split("CANDIDATES:");
       const targetRole = roleOf(targetBlock);
       const chunks = candsBlock.split(/--- CANDIDATE (\d+) ---/).slice(1);
+      const targetUpdated = targetBlock.includes("(updated)");
       const call: Counters["batchCalls"][number] = { targetRole, candidateRoles: [] };
       counters.batchCalls.push(call);
       const matches = [];
       for (let i = 0; i + 1 < chunks.length; i += 2) {
         const index = Number(chunks[i]);
-        const role = roleOf(chunks[i + 1]!);
+        const chunk = chunks[i + 1]!;
+        const role = roleOf(chunk);
         call.candidateRoles.push(role);
         if (role && counters.dropRoleOnce === role) {
           // Simulate the model skipping this candidate (partial batch failure).
           counters.dropRoleOnce = undefined;
           continue;
         }
-        const complementary = !!role && !!targetRole && role !== targetRole;
-        matches.push({
-          index,
-          score: complementary ? 0.9 : 0.4,
-          similarity: complementary ? 0.4 : 0.85,
-          complementarity: complementary ? 0.95 : 0.2,
-          reasoning_for_target: complementary
-            ? `You should meet them — complementary skills (${targetRole} + ${role}) fit this event.`
-            : "Similar backgrounds.",
-        });
+        matches.push(scoreEntry(index, targetRole, role, targetUpdated || chunk.includes("(updated)")));
       }
       return { matches };
+    }
+    if (req.schemaName === "reverse_batch_score") {
+      // Reverse batched scoring: ONE shared candidate + numbered targets (§16.2).
+      const [, afterShared = ""] = req.user.split("SHARED PERSON (the one each target below would meet):");
+      const [sharedBlock = "", targetsBlock = ""] = afterShared.split("TARGET ATTENDEES:");
+      const sharedRole = roleOf(sharedBlock);
+      const chunks = targetsBlock.split(/--- TARGET (\d+) ---/).slice(1);
+      const sharedUpdated = sharedBlock.includes("(updated)");
+      const call: Counters["reverseCalls"][number] = { sharedRole, targetRoles: [] };
+      counters.reverseCalls.push(call);
+      const matches = [];
+      for (let i = 0; i + 1 < chunks.length; i += 2) {
+        const index = Number(chunks[i]);
+        const chunk = chunks[i + 1]!;
+        const role = roleOf(chunk);
+        call.targetRoles.push(role);
+        // reasoning addressed to the TARGET about meeting the shared person.
+        matches.push(scoreEntry(index, role, sharedRole, sharedUpdated || chunk.includes("(updated)")));
+      }
+      return { matches };
+    }
+    if (req.schemaName === "profile_translation") {
+      counters.translateCalls++;
+      // Fixtures are English. If the target (event) language is English too, nothing
+      // to translate; otherwise return a marked translation of each supplied field.
+      const targetIsEn = /TARGET LANGUAGE: English \(en\)/.test(req.user);
+      if (targetIsEn) return { source_lang: "en", needs_translation: false };
+      const grab = (label: string) =>
+        req.user.match(new RegExp(`${label}: (.*)`))?.[1]?.trim() ?? "";
+      const about = grab("About");
+      const looking = grab("Looking for");
+      const skills = grab("Skills");
+      return {
+        source_lang: "en",
+        needs_translation: true,
+        ...(about ? { about: `[sk] ${about}` } : {}),
+        ...(looking ? { looking_for: `[sk] ${looking}` } : {}),
+        ...(skills ? { skills: skills.split(", ").filter(Boolean).map((s) => `[sk] ${s}`) } : {}),
+      };
     }
     if (req.schemaName === "nostr_summary") {
       counters.nostrSummary++;
@@ -144,7 +208,7 @@ interface Harness {
   clock: { t: number };
 }
 
-async function setup(nostrContextN = 0, opts: { batchSize?: number } = {}): Promise<Harness> {
+async function setup(nostrContextN = 0, opts: { batchSize?: number; lang?: string } = {}): Promise<Harness> {
   const coordSk = generateSecretKey();
   const eidSk = generateSecretKey();
   const eidPubkey = getPublicKey(eidSk);
@@ -159,11 +223,11 @@ async function setup(nostrContextN = 0, opts: { batchSize?: number } = {}): Prom
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["nostr_context", String(nostrContextN)], ["match_visibility", "pair"]], content: "", id: "e2", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["nostr_context", String(nostrContextN)], ["match_visibility", "pair"], ...(opts.lang ? [["lang", opts.lang]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 1, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
   );
 
-  const counters: Counters = { nostrSummary: 0, batchCalls: [] };
+  const counters: Counters = { nostrSummary: 0, batchCalls: [], reverseCalls: [], translateCalls: 0 };
   const llm = makeLlm(counters);
   const stt = new MockStt({
     [String(blobSize("crypto"))]: FIXTURES.crypto.transcript,
@@ -180,6 +244,7 @@ async function setup(nostrContextN = 0, opts: { batchSize?: number } = {}): Prom
     summaryModel: { provider: "mock", model: "mock-cheap" },
     matchModel: { provider: "mock", model: "mock-strong" },
     embedModel: { provider: "mock", model: "mock-embed" },
+    translateModel: { provider: "mock", model: "mock-cheap" },
     defaultRelays: ["wss://test"],
     batchSize: opts.batchSize,
     now: () => clock.t,
@@ -234,6 +299,33 @@ async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Pr
   await h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any);
   await h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
   return attendeePubkey;
+}
+
+/** Re-record an already-joined attendee's intro: a NEW media blob (new sha256) →
+ *  re-transcription → a changed ai_profile (transcript carries "CHANGED-INTRO"). */
+async function resubmitIntro(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<void> {
+  const f = FIXTURES[fixture];
+  const inboxPk = getPublicKey(h.einboxSk);
+  const newSize = 900 + ORDER.indexOf(fixture);
+  h.stt.setTranscript(String(newSize), `CHANGED-INTRO ${f.transcript}`);
+  const subWrap = wrapRumor(attendeeSk, inboxPk, {
+    kind: KIND_PROFILE_SUBMISSION,
+    content: {
+      v: 1,
+      profile: { about: f.about, skills: f.skills, looking_for: "", links: [] },
+      media: [{
+        kind: "intro", url: ["https://blob/x2"],
+        x: String(9).repeat(64).slice(0, 63) + String(ORDER.indexOf(fixture)),
+        ox: "c".repeat(64),
+        size: newSize, m: "video/webm",
+        "encryption-algorithm": "aes-gcm",
+        "decryption-key": bytesToBase64(new Uint8Array(32)),
+        "decryption-nonce": bytesToBase64(new Uint8Array(12)),
+      }],
+    },
+    tags: [["a", h.coordinate]],
+  });
+  await h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
 }
 
 describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
@@ -292,18 +384,26 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     await join(h, generateSecretKey(), "music");
     await h.coordinator.jobs.drain();
 
-    // Every batched call is one target + at most K=2 candidates.
+    // Every FORWARD batched call is one target + at most K=2 candidates.
     expect(h.counters.batchCalls.length).toBeGreaterThan(0);
     for (const call of h.counters.batchCalls) {
       expect(call.targetRole).toBeDefined();
       expect(call.candidateRoles.length).toBeGreaterThanOrEqual(1);
       expect(call.candidateRoles.length).toBeLessThanOrEqual(2);
     }
+    // Every REVERSE batched call is one shared candidate + at most K=2 targets — the
+    // reverse-batch variant keeps the reverse direction batched too (no tiny calls).
+    for (const call of h.counters.reverseCalls) {
+      expect(call.sharedRole).toBeDefined();
+      expect(call.targetRoles.length).toBeGreaterThanOrEqual(1);
+      expect(call.targetRoles.length).toBeLessThanOrEqual(2);
+    }
     // All 4×3 directions converge; still C(4,2)=6 pair rows; each direction scored
-    // exactly once (12 candidate slots across all batch calls, no re-billing).
+    // exactly once (12 directed slots across forward+reverse calls, no re-billing).
     expect(countPairs(h.store, h.coordinate)).toBe(6);
-    const slots = h.counters.batchCalls.reduce((n, c) => n + c.candidateRoles.length, 0);
-    expect(slots).toBe(12);
+    const fwd = h.counters.batchCalls.reduce((n, c) => n + c.candidateRoles.length, 0);
+    const rev = h.counters.reverseCalls.reduce((n, c) => n + c.targetRoles.length, 0);
+    expect(fwd + rev).toBe(12);
   });
 
   it("partial batch failure: good candidates persist, only the missing one is re-sent", async () => {
@@ -323,13 +423,14 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
       expect(row.reasoning).not.toBe("");
       expect(row.reasoning_b).not.toBeNull();
     }
-    const soloRetries = h.counters.batchCalls.filter(
-      (c) => c.targetRole === "cryptographer" && c.candidateRoles.length === 1 && c.candidateRoles[0] === "musician",
-    );
-    expect(soloRetries).toHaveLength(1);
-    // 6 directions + exactly one re-sent (dropped) slot — nothing double-billed.
-    const slots = h.counters.batchCalls.reduce((n, c) => n + c.candidateRoles.length, 0);
-    expect(slots).toBe(6 + 1);
+    // The dropped crypto→music direction is recovered without poisoning its
+    // batch-mates: either the batch retry re-sends it, or (as here) music's own
+    // recompute scores it via the reverse batch first. Either way every direction
+    // lands. Across forward+reverse we see exactly 6 directed slots + 1 redundant
+    // (the dropped slot), never more — nothing is double-billed.
+    const fwd = h.counters.batchCalls.reduce((n, c) => n + c.candidateRoles.length, 0);
+    const rev = h.counters.reverseCalls.reduce((n, c) => n + c.targetRoles.length, 0);
+    expect(fwd + rev).toBe(6 + 1);
 
     // The failed batch job's backoff retry is a no-op: everything already scored.
     const callsBefore = h.counters.batchCalls.length;
@@ -427,6 +528,85 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Forward-only: the removed attendee holds only v1 → cannot read v2 content.
     expect(() => eckDecrypt(h.eck, newestRoster.content)).toThrow();
   });
+
+  it("re-recording an intro re-processes only the changed attendee's pairs, batched, and republishes fresh match lists", async () => {
+    const h = await setup(0, { batchSize: 10 });
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designPk = await join(h, generateSecretKey(), "design");
+    const codePk = await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+
+    // Snapshot: pair rows keyed by (a,b), and the cryptographer's latest match list.
+    const rowsBefore = new Map(allPairRows(h.store, h.coordinate).map((r) => [`${r.a}|${r.b}`, r]));
+    expect(rowsBefore.size).toBe(3); // C(3,2)
+    const cryptoD = blindedD(h.eck, h.coordinate, cryptoPk);
+    const listBefore = latestMatchList(h.transport, cryptoSk, getPublicKey(h.coordSk), cryptoD);
+    const pairKey = (x: string, y: string) => (x < y ? `${x}|${y}` : `${y}|${x}`);
+    const designCodeKey = pairKey(designPk, codePk);
+    const designCodeBefore = rowsBefore.get(designCodeKey)!;
+
+    // Re-record ONLY the cryptographer's intro; a fresh ai_profile → new profile_hash.
+    const fwdBefore = h.counters.batchCalls.length;
+    const revBefore = h.counters.reverseCalls.length;
+    await resubmitIntro(h, cryptoSk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // (a) SCOPE: the design↔code pair (which does NOT involve crypto) is untouched —
+    //     same inputs_hash, same reasoning, no rescore.
+    const rowsAfter = new Map(allPairRows(h.store, h.coordinate).map((r) => [`${r.a}|${r.b}`, r]));
+    const designCodeAfter = rowsAfter.get(designCodeKey)!;
+    expect(designCodeAfter.inputs_hash).toBe(designCodeBefore.inputs_hash);
+    expect(designCodeAfter.reasoning).toBe(designCodeBefore.reasoning);
+    expect(designCodeAfter.reasoning_b).toBe(designCodeBefore.reasoning_b);
+
+    // (b) BOTH directions of crypto's pairs are invalidated + rescored: the pair's
+    //     inputs_hash changed (new profile_hash) and both reasoning sides re-set.
+    for (const other of [designPk, codePk]) {
+      const before = rowsBefore.get(pairKey(cryptoPk, other))!;
+      const after = rowsAfter.get(pairKey(cryptoPk, other))!;
+      expect(after.inputs_hash).not.toBe(before.inputs_hash);
+      expect(after.reasoning).not.toBe("");
+      expect(after.reasoning_b).not.toBeNull();
+      expect(after.reasoning_b).not.toBe("");
+    }
+
+    // (c) BATCHED, not a shower of tiny calls: the changed→others forward direction
+    //     is one batch; the reverse (others→changed) is one shared-candidate batch.
+    const fwdNew = h.counters.batchCalls.slice(fwdBefore);
+    const revNew = h.counters.reverseCalls.slice(revBefore);
+    // The forward recompute for crypto scores {design,code} in a single batch.
+    expect(fwdNew.some((c) => c.targetRole === "cryptographer" && c.candidateRoles.length === 2)).toBe(true);
+    // The reverse direction {design,code}→crypto is one shared-candidate batch (2 targets),
+    // NOT two single-target calls.
+    const cryptoReverse = revNew.filter((c) => c.sharedRole === "cryptographer");
+    expect(cryptoReverse.length).toBe(1);
+    expect(cryptoReverse[0]!.targetRoles.length).toBe(2);
+
+    // (d) The cryptographer's republished 31605 differs from before (fresh content).
+    const listAfter = latestMatchList(h.transport, cryptoSk, getPublicKey(h.coordSk), cryptoD);
+    expect(listAfter).not.toBeUndefined();
+    expect(JSON.stringify(listAfter!.matches)).not.toBe(JSON.stringify(listBefore!.matches));
+  });
+
+  it("a Slovak event scores match reasoning in Slovak and translates non-Slovak user fields", async () => {
+    const h = await setup(0, { lang: "sk" });
+    const cryptoPk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    // The match-scoring prompt carried the Slovak output-language instruction.
+    const scoringReq = h.llm.lastBySchema("batch_score");
+    expect(scoringReq?.system).toContain("Slovak (sk)");
+    // The directory entry carries a translation of the (English) user fields, and
+    // the ORIGINAL profile fields are untouched.
+    const d = blindedD(h.eck, h.coordinate, cryptoPk);
+    const entry = latestDirectoryWithAi(h.transport, h.eck, d);
+    expect(entry?.profile.about).toBe("cryptographer"); // original preserved
+    expect(entry?.ai_profile?.translations?.lang).toBe("sk");
+    expect(entry?.ai_profile?.translations?.about).toBe("[sk] cryptographer");
+    expect(entry?.ai_profile?.translations?.skills).toContain("[sk] zk");
+  });
 });
 
 function countPairs(store: Store, coordinate: string): number {
@@ -435,6 +615,14 @@ function countPairs(store: Store, coordinate: string): number {
 
 function allPairRows(store: Store, coordinate: string): any[] {
   return (store as any).db.prepare("SELECT * FROM pairs WHERE coordinate = ?").all(coordinate);
+}
+
+/** The newest 31605 match list for blinded d, decrypted by the reader. */
+function latestMatchList(transport: FakeTransport, readerSk: Uint8Array, coordPk: string, d: string) {
+  const lists = transport.published
+    .filter((e) => e.kind === KIND_MATCH_LIST && e.tags.find((t) => t[0] === "d")?.[1] === d)
+    .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(readerSk, coordPk, e.content))));
+  return lists[lists.length - 1];
 }
 
 /** The published directory entry for blinded d that carries an ai_profile (if any). */

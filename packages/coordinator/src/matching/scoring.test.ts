@@ -3,7 +3,10 @@ import type { AiProfile } from "@nostrautica/protocol";
 import { MockLlm } from "../providers/mock.js";
 import {
   scoreBatch,
+  scoreReverseBatch,
+  languageInstruction,
   BATCH_SYSTEM_PROMPT,
+  REVERSE_BATCH_SYSTEM_PROMPT,
   BATCH_SCORE_SCHEMA,
   type BatchCandidate,
   type EventContextForScoring,
@@ -13,6 +16,7 @@ const EVENT: EventContextForScoring = {
   title: "Cypherpunk Assembly",
   summary: "Freedom tech builders meetup",
   hashtags: ["cypherpunk", "privacy"],
+  lang: "en",
 };
 
 function profile(name: string): AiProfile {
@@ -137,6 +141,96 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
     const { scores, missing } = await scoreBatch(llm, "m", EVENT, profile("t"), []);
     expect(scores.size).toBe(0);
     expect(missing).toEqual([]);
+    expect(llm.completeCalls).toBe(0);
+  });
+});
+
+describe("per-event output language (spec §7.1/§9.3)", () => {
+  it("en events get NO language instruction (BP3 unchanged, no default-en phrasing)", () => {
+    expect(languageInstruction("en")).toBe("");
+    expect(languageInstruction("EN")).toBe("");
+    expect(BATCH_SYSTEM_PROMPT).not.toContain("OUTPUT LANGUAGE");
+  });
+
+  it("a non-en event appends an explicit output-language instruction to the prompt", async () => {
+    let seen: { system: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreBatch(llm, "m", { ...EVENT, lang: "sk" }, profile("t"), candidates(2));
+    // BP3 stays verbatim, the language block is appended.
+    expect(seen!.system).toContain(BATCH_SYSTEM_PROMPT);
+    expect(seen!.system).toContain("OUTPUT LANGUAGE:");
+    expect(seen!.system).toContain("write every");
+    expect(seen!.system).toContain("Slovak (sk)");
+    // Never assumes the input language.
+    expect(seen!.system).toContain("may be written in any language");
+  });
+
+  it("names the language from its ISO code (e.g. cs → Czech)", () => {
+    expect(languageInstruction("cs")).toContain("Czech (cs)");
+  });
+});
+
+describe("reverse batched scoring (spec §16.2 reverse variant)", () => {
+  /** Mock scoring K targets against one shared person; reasoning names the target. */
+  function reverseEchoLlm(): MockLlm {
+    return new MockLlm((req) => {
+      const matches = [];
+      for (const m of req.user.matchAll(/--- TARGET (\d+) ---\nSummary: (\S+) summary/g)) {
+        matches.push({
+          index: Number(m[1]),
+          similarity: 0.4,
+          complementarity: 0.8,
+          score: 0.7,
+          reasoning_for_target: `You should meet the shared person, ${m[2]}.`,
+        });
+      }
+      return { matches };
+    });
+  }
+
+  it("uses the mirror BP3 prompt (shared candidate + K targets), same anchors/voice", () => {
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("0.9-1.0 = a near-perfect mutual fit");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("THIS TEXT IS SHOWN DIRECTLY TO THE TARGET ATTENDEE");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("ABSOLUTELY NO analytical framing");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("ONE shared person");
+  });
+
+  it("scores every target against the shared person and maps indices back", async () => {
+    const targets = candidates(4);
+    const { scores, missing } = await scoreReverseBatch(
+      reverseEchoLlm(),
+      "m",
+      EVENT,
+      profile("shared"),
+      targets,
+      () => 0,
+    );
+    expect(missing).toEqual([]);
+    for (const t of targets) {
+      expect(scores.get(t.id)!.reasoning).toContain(`meet the shared person, ${t.id}`);
+    }
+  });
+
+  it("carries the shared-person block + numbered targets, and the language block", async () => {
+    let seen: { system: string; user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", { ...EVENT, lang: "sk" }, profile("shared"), candidates(2));
+    expect(seen!.user).toContain("SHARED PERSON");
+    expect(seen!.user).toContain("Summary: shared summary");
+    expect(seen!.user).toContain("--- TARGET 1 ---");
+    expect(seen!.system).toContain("Slovak (sk)");
+  });
+
+  it("empty target list short-circuits without an LLM call", async () => {
+    const llm = reverseEchoLlm();
+    const { scores } = await scoreReverseBatch(llm, "m", EVENT, profile("s"), []);
+    expect(scores.size).toBe(0);
     expect(llm.completeCalls).toBe(0);
   });
 });

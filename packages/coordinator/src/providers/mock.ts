@@ -15,6 +15,11 @@ export class MockStt implements SttProvider {
   calls = 0;
   constructor(private readonly transcripts: Record<string, string> = {}) {}
 
+  /** Register a transcript for a given blob byte-length (tests: a new recording). */
+  setTranscript(sizeKey: string, text: string): void {
+    this.transcripts[sizeKey] = text;
+  }
+
   async capabilities() {
     return { models: ["mock"], maxUploadBytes: 25 * 1024 * 1024 };
   }
@@ -31,9 +36,16 @@ export class MockLlm implements LlmProvider {
   readonly id = "mock";
   completeCalls = 0;
   embedCalls = 0;
+  /** Every completeStructured request seen, for prompt assertions in tests. */
+  requests: { system: string; user: string; schemaName: string }[] = [];
   constructor(
     private readonly handler: (req: { system: string; user: string; schemaName: string }) => unknown,
   ) {}
+
+  /** The most recent request for a given schemaName (test helper). */
+  lastBySchema(schemaName: string) {
+    return [...this.requests].reverse().find((r) => r.schemaName === schemaName);
+  }
 
   async models(): Promise<ModelInfo[]> {
     return [
@@ -51,6 +63,7 @@ export class MockLlm implements LlmProvider {
     model: string;
   }): Promise<{ value: T; usage: TokenUsage }> {
     this.completeCalls++;
+    this.requests.push({ system: req.system, user: req.user, schemaName: req.schemaName });
     return {
       value: this.handler(req) as T,
       usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },

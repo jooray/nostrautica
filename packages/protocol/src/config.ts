@@ -23,6 +23,7 @@ export interface EventConfig {
   approval: Approval;
   eck: number; // current ECK version
   nostrContext: number; // N public events per attendee to summarize; 0 = off
+  lang: string; // ISO 639-1 event language (attendee UI + AI output); default "en"
 }
 
 export interface EventConfigTags {
@@ -50,7 +51,17 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
   tags.push(["approval", cfg.approval]);
   tags.push(["eck", String(cfg.eck)]);
   tags.push(["nostr_context", String(cfg.nostrContext)]);
+  // Language is a single lowercased ISO 639-1 code; "en" is the implicit default,
+  // so only emit the tag when it differs (keeps existing en events byte-identical).
+  const lang = normalizeLang(cfg.lang);
+  if (lang !== "en") tags.push(["lang", lang]);
   return { kind: KIND_EVENT_CONFIG, tags, content: "" };
+}
+
+/** Normalize a language value to a bare lowercased ISO 639-1 base code. */
+function normalizeLang(lang: string | undefined): string {
+  const base = (lang ?? "en").trim().toLowerCase().split(/[-_]/)[0];
+  return /^[a-z]{2}$/.test(base ?? "") ? base! : "en";
 }
 
 function first(tags: string[][], name: string): string | undefined {
@@ -85,6 +96,7 @@ export function parseEventConfig(
     approval,
     eck: Number(first(tags, "eck") ?? "1"),
     nostrContext: Number(first(tags, "nostr_context") ?? "0"),
+    lang: normalizeLang(first(tags, "lang")),
   };
 }
 

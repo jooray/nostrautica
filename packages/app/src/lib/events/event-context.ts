@@ -13,7 +13,7 @@ import {
   type EventConfig,
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
-import { t } from "$lib/i18n/i18n.svelte.js";
+import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 
 export interface EventContext {
   naddr: string;
@@ -65,6 +65,10 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
   const config = parseEventConfig(pubkey, configEvent.tags);
   // Pull in the event's own home relays for subsequent operations.
   if (config.relays.length) addRelays(config.relays);
+  // The UI follows the event's language for this session unless the user has made
+  // an explicit choice in Settings (spec §7.1). Cached-context re-entry is fine —
+  // adoptEventLang is a no-op once an explicit choice exists.
+  i18n.adoptEventLang(config.lang);
 
   // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.
   const profileEvent = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];

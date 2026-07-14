@@ -52,6 +52,7 @@ import type { NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
   scoreBatch,
+  scoreReverseBatch,
   type BatchCandidate,
   type EventContextForScoring,
 } from "./matching/scoring.js";
@@ -108,6 +109,7 @@ export interface CoordinatorDeps {
   summaryModel: ModelRef;
   matchModel: ModelRef;
   embedModel: ModelRef;
+  translateModel: ModelRef;
   defaultRelays: string[];
   prefilter?: PrefilterConfig;
   topK?: number;
@@ -129,6 +131,7 @@ interface EventState {
   configRelays: string[];
   nostrContextN: number;
   matchVisibility: "pair" | "event";
+  lang: string;
   scoringCtx: EventContextForScoring;
 }
 
@@ -172,30 +175,39 @@ export class Coordinator {
     this.jobs.register("match_recompute", async (p, { enqueue }) => {
       const pairs = await this.selectPairs(p.coordinate, p.pubkey);
       if (!pairs.length) return;
-      // Directions are scored from the target's side only (the host-voice reasoning
-      // is addressed to the batch target). Each candidate therefore needs its own
-      // candidate→target scoring: trigger a recompute for candidates whose reverse
-      // direction is still unscored. Keys are content-addressed by the pair's
-      // inputs_hash, so re-delivery dedupes and nothing loops (each pubkey gets at
-      // most one recompute job per pair-inputs version).
-      for (const pair of pairs) {
-        const rev = this.deps.store.getPairDirection(p.coordinate, pair.b, pair.a);
-        if (!rev || rev.inputs_hash !== pair.inputsHash || !rev.scored) {
-          enqueue("match_recompute", `match:${p.coordinate}:${pair.b}:${pair.inputsHash}`, {
-            coordinate: p.coordinate,
-            pubkey: pair.b,
-          });
-        }
-      }
+      // FORWARD direction (p.pubkey → others): one target + ≤K candidates per call.
       // Group the target's pending directed pairs into ≤K-candidate batches (one
       // target + ≤K candidates per LLM call — spec §16.2). Batching is a transport
       // optimization only: each batch job is deduped by its target+candidate-set
       // hash, and results are written per directed pair keyed by inputs_hash.
       const batches = groupIntoBatches(pairs, this.batchSize);
-      log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} directed pair(s) in ${batches.length} batch(es)`);
+      log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} forward pair(s) in ${batches.length} batch(es)`);
       for (const batch of batches) {
         const key = `batch:${p.coordinate}:${batch[0]!.a}:${batchDedupe(batch)}`;
         enqueue("score_batch", key, { coordinate: p.coordinate, pairs: batch });
+      }
+
+      // REVERSE direction (others → p.pubkey): each other is a distinct TARGET with
+      // exactly ONE pending candidate (p.pubkey). Enqueuing a per-other recompute
+      // would degrade to N−1 single-candidate calls. Instead we batch by the SHARED
+      // candidate: one call scores ≤K targets against p.pubkey (spec §16.2 reverse
+      // variant). Reverse pairs are `{a: other, b: p.pubkey}` — same inputs_hash, so
+      // idempotency and content-addressed publish keys are unchanged.
+      const reverse: CandidatePair[] = [];
+      for (const pair of pairs) {
+        const rev = this.deps.store.getPairDirection(p.coordinate, pair.b, pair.a);
+        if (!rev || rev.inputs_hash !== pair.inputsHash || !rev.scored) {
+          reverse.push({ a: pair.b, b: pair.a, inputsHash: pair.inputsHash });
+        }
+      }
+      for (let i = 0; i < reverse.length; i += this.batchSize) {
+        const batch = reverse.slice(i, i + this.batchSize);
+        // Dedupe by shared candidate + the target set — a re-delivery collapses.
+        const key = `rbatch:${p.coordinate}:${p.pubkey}:${batchDedupe(batch.map((r) => ({ b: r.a, inputsHash: r.inputsHash })))}`;
+        enqueue("score_reverse_batch", key, { coordinate: p.coordinate, pairs: batch });
+      }
+      if (reverse.length) {
+        log(`[match] reverse: ${reverse.length} target(s) → ${short(p.pubkey)} in ${Math.ceil(reverse.length / this.batchSize)} batch(es)`);
       }
     });
 
@@ -220,6 +232,28 @@ export class Coordinator {
       // bad candidate never poisons its batch-mates.
       if (missing > 0) {
         throw new Error(`batch response missing ${missing} candidate(s); retrying unscored remainder`);
+      }
+    });
+
+    this.jobs.register("score_reverse_batch", async (p, { enqueue }) => {
+      const pairs = p.pairs as CandidatePair[];
+      const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs);
+      // Each reverse pair {a: other, b: shared} writes the OTHER's directed row, so
+      // every distinct target republishes its own list. Group scored pairs by target.
+      const byTarget = new Map<string, CandidatePair[]>();
+      for (const pr of scored) {
+        const list = byTarget.get(pr.a) ?? [];
+        list.push(pr);
+        byTarget.set(pr.a, list);
+      }
+      for (const [target, list] of byTarget) {
+        enqueue("publish_matches", `pub:${p.coordinate}:${target}:${batchDedupe(list.map((r) => ({ b: r.b, inputsHash: r.inputsHash })))}`, {
+          coordinate: p.coordinate,
+          pubkey: target,
+        });
+      }
+      if (missing > 0) {
+        throw new Error(`reverse batch missing ${missing} target(s); retrying unscored remainder`);
       }
     });
 
@@ -264,15 +298,17 @@ export class Coordinator {
       configRelays: relays,
       nostrContextN: config?.nostrContext ?? 0,
       matchVisibility: config?.matchVisibility ?? "pair",
+      lang: config?.lang ?? "en",
       scoringCtx: {
         title: evtEvent?.tags.find((t) => t[0] === "title")?.[1] ?? "the event",
         summary: evtEvent?.tags.find((t) => t[0] === "summary")?.[1] ?? "",
         hashtags: (evtEvent?.tags ?? []).filter((t) => t[0] === "t").map((t) => t[1]!),
+        lang: config?.lang ?? "en",
       },
     };
     this.events.set(grant.coordinate, state);
     log(
-      `[install] event "${state.scoringCtx.title}" installed — nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}`,
+      `[install] event "${state.scoringCtx.title}" installed — nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}`,
     );
     log(`          coordinate ${grant.coordinate}`);
     // Subscribe to this event's E_inbox NOW (not only at startup), so an install
@@ -487,10 +523,12 @@ export class Coordinator {
         llm: this.deps.llm,
         summaryModel: this.deps.summaryModel,
         matchModel: this.deps.matchModel,
+        translateModel: this.deps.translateModel,
         fetchBlob: this.deps.fetchBlob,
         transcribe: this.deps.transcribe,
         fetchNostrContext: (pk, n) => this.fetchNostrContext(state, pk, n),
         nostrContextN: state.nostrContextN,
+        lang: state.lang,
         now: this.now,
       },
       { pubkey, profile, media },
@@ -589,6 +627,61 @@ export class Coordinator {
     }
     if (missing.length) {
       log(`[match] ${short(target)} batch: ${missing.length} candidate(s) unparsed`);
+    }
+    return { scored, missing: missing.length };
+  }
+
+  /**
+   * Reverse batch: score ≤K targets against ONE shared candidate in a single call
+   * (spec §16.2 reverse variant). Each pair is `{a: target, b: shared}`; the shared
+   * candidate is the same for every pair in the batch. Same per-pair idempotency,
+   * same directed-row writes — only the call shape differs from the forward batch.
+   */
+  private async scoreReverseBatchJob(
+    coordinate: string,
+    pairs: CandidatePair[],
+  ): Promise<{ scored: CandidatePair[]; missing: number }> {
+    const state = this.events.get(coordinate);
+    if (!state || pairs.length === 0) return { scored: [], missing: 0 };
+    const shared = pairs[0]!.b; // shared candidate for every pair in this batch
+    const sharedProfile = this.loadAiProfile(coordinate, shared);
+    if (!sharedProfile) return { scored: [], missing: 0 };
+
+    // Score only pairs still pending for their current inputs_hash.
+    const todo = pairs.filter((p) => {
+      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
+      return !dir || dir.inputs_hash !== p.inputsHash || !dir.scored;
+    });
+
+    const targets: BatchCandidate[] = [];
+    const pairByTarget = new Map<string, CandidatePair>();
+    for (const p of todo) {
+      const profile = this.loadAiProfile(coordinate, p.a);
+      if (!profile) continue;
+      targets.push({ id: p.a, profile });
+      pairByTarget.set(p.a, p);
+    }
+    if (targets.length === 0) return { scored: [], missing: 0 };
+
+    const { scores, missing } = await scoreReverseBatch(
+      this.deps.llm,
+      this.deps.matchModel.model,
+      state.scoringCtx,
+      sharedProfile,
+      targets,
+      this.matchRng,
+    );
+    const scored: CandidatePair[] = [];
+    for (const [targetId, ds] of scores) {
+      const p = pairByTarget.get(targetId)!;
+      recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
+      scored.push(p);
+      log(
+        `[match] ${short(targetId)} → ${short(shared)} = ${ds.score.toFixed(2)} (reverse batch)`,
+      );
+    }
+    if (missing.length) {
+      log(`[match] reverse batch for ${short(shared)}: ${missing.length} target(s) unparsed`);
     }
     return { scored, missing: missing.length };
   }

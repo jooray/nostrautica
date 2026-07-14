@@ -44,6 +44,7 @@ export interface CreateEventInput {
   matchVisibility: MatchVisibility;
   approval: Approval;
   nostrContext: number;
+  lang?: string; // ISO 639-1 event language; default "en"
   relays?: string[];
   blossom?: string[];
 }
@@ -126,6 +127,7 @@ export async function createEvent(
     approval: input.approval,
     eck: 1,
     nostrContext: input.nostrContext,
+    lang: input.lang ?? "en",
   });
   const event31600 = finalizeEvent(
     {

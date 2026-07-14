@@ -37,7 +37,7 @@ async function verifyModelPrivacy(llm: LlmProvider, config: CoordinatorConfig): 
     return;
   }
   const byId = new Map(all.map((m) => [m.id, m]));
-  for (const role of ["summary", "match", "embed"] as const) {
+  for (const role of ["summary", "match", "embed", "translate"] as const) {
     const ref = config.models[role];
     if (ref.provider !== "venice") continue;
     const info = byId.get(ref.model);
@@ -129,6 +129,7 @@ async function main(): Promise<void> {
     summaryModel: config.models.summary,
     matchModel: config.models.match,
     embedModel: config.models.embed,
+    translateModel: config.models.translate,
     defaultRelays: config.relays.default,
     prefilter: {
       threshold: config.matching.prefilter_threshold,

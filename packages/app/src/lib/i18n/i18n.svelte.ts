@@ -44,12 +44,17 @@ function interpolate(template: string, params?: Record<string, string | number>)
 
 class I18n {
   locale = $state<Locale>("en");
+  /** True once the user has EXPLICITLY picked a language on the Settings page. An
+   *  explicit choice is persisted (STORAGE_KEY present) and always wins over any
+   *  event-driven default. */
+  explicit = $state(false);
 
   init(): void {
     if (typeof localStorage !== "undefined") {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved && (LOCALES as string[]).includes(saved)) {
         this.locale = saved as Locale;
+        this.explicit = true;
         return;
       }
     }
@@ -58,8 +63,24 @@ class I18n {
 
   set(locale: Locale): void {
     this.locale = locale;
+    this.explicit = true;
     if (typeof localStorage !== "undefined") localStorage.setItem(STORAGE_KEY, locale);
     if (typeof document !== "undefined") document.documentElement.lang = locale;
+  }
+
+  /**
+   * Adopt an event's language for the session (spec §7.1). Called on event-scoped
+   * pages: if the user hasn't made an explicit choice and the event's language maps
+   * to an available catalog locale, switch to it WITHOUT writing the explicit-choice
+   * key — so leaving the event (or a later explicit Settings choice) still works.
+   * No-op when the user has an explicit choice or the language isn't available.
+   */
+  adoptEventLang(lang: string | undefined): void {
+    if (this.explicit || !lang) return;
+    const base = lang.slice(0, 2).toLowerCase();
+    if (!(LOCALES as string[]).includes(base)) return;
+    this.locale = base as Locale;
+    if (typeof document !== "undefined") document.documentElement.lang = base;
   }
 
   raw(key: MessageKey): string {

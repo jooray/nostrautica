@@ -76,6 +76,12 @@ for. Hit **■ Stop** (it also stops itself at the time limit), watch it back,
 and tap **Use this** — or **Re-record** until you're happy. Nobody outside this
 event's attendees can ever see it.
 
+**Use whatever language you like.** Record your intro and write your profile in
+the language you're most comfortable in — it doesn't have to match the event's
+language. The app writes your matches and summaries in the event's language, and
+if your bio is in a different language it shows everyone a translation with your
+original one tap away ("show original"). So just be yourself in your own words.
+
 ![Recording your intro](images/participant/09-record-light.png)
 
 ## 4. See who's here

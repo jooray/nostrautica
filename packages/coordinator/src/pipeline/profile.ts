@@ -8,6 +8,7 @@
 import {
   sha256Hex,
   utf8ToBytes,
+  languageName,
   type AiProfile,
   type AttendeeProfile,
 } from "@nostrautica/protocol";
@@ -33,10 +34,28 @@ const PROFILE_SYSTEM = [
   "Be specific and grounded in the inputs; do not invent. Return strict JSON.",
 ].join(" ");
 
+/**
+ * Output-language instruction for the profile summary (attendee-facing, spec §9.3).
+ * The self-described profile and transcripts may be in any language; the summary
+ * is written in the event language regardless. Empty for English events.
+ */
+export function profileLanguageInstruction(lang: string): string {
+  const base = (lang || "en").toLowerCase();
+  if (base === "en") return "";
+  const name = languageName(base);
+  return (
+    ` The inputs may be in any language. Regardless of the input language, write the` +
+    ` "summary" field in ${name} (${base}); keep skills/interests/offers/seeks as concise` +
+    ` ${name} terms too.`
+  );
+}
+
 export interface ProfileInputs {
   transcripts: string[];
   profile: AttendeeProfile;
   nostrSummary?: string;
+  /** Event language (ISO 639-1); the summary is written in it. Default "en". */
+  lang?: string;
 }
 
 /** Deterministic hash of all profile inputs (for the profiles cache). */
@@ -63,7 +82,7 @@ export async function buildAiProfile(
     .join("\n\n");
 
   const { value } = await llm.completeStructured<AiProfile>({
-    system: PROFILE_SYSTEM,
+    system: PROFILE_SYSTEM + profileLanguageInstruction(inputs.lang ?? "en"),
     user,
     schema: AI_PROFILE_SCHEMA,
     schemaName: "ai_profile",
@@ -71,6 +90,101 @@ export async function buildAiProfile(
     temperature: 0.2,
   });
   return value;
+}
+
+// ── User-field translation (spec §7.1, §9.3) ─────────────────────────────────
+// User-AUTHORED directory fields (about, looking_for, skills) are shown verbatim
+// to attendees. When their language differs from the event language, the
+// coordinator additionally publishes a translation so a same-language audience
+// can read them — the ORIGINAL fields are never modified. A single call both
+// detects the source language and, only if it differs, returns the translation.
+
+export const PROFILE_TRANSLATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["source_lang", "needs_translation"],
+  properties: {
+    source_lang: {
+      type: "string",
+      description: "ISO 639-1 code of the language the user's fields are written in",
+    },
+    needs_translation: {
+      type: "boolean",
+      description: "true only if source_lang differs from the target event language",
+    },
+    about: { type: "string", description: "the About text translated into the target language" },
+    looking_for: { type: "string", description: "Looking-for text translated into the target language" },
+    skills: {
+      type: "array",
+      items: { type: "string" },
+      description: "skills translated into the target language",
+    },
+  },
+} as const;
+
+interface RawTranslation {
+  source_lang?: string;
+  needs_translation?: boolean;
+  about?: string;
+  looking_for?: string;
+  skills?: string[];
+}
+
+export interface TranslationInput {
+  about: string;
+  looking_for: string;
+  skills: string[];
+}
+
+/**
+ * Detect the source language of the user's authored fields and, if it differs
+ * from `targetLang`, translate them. Returns undefined when the source already
+ * matches the target (or nothing to translate). Uses the dedicated translate
+ * model. Idempotency is handled by the caller (part of the attendee-processing
+ * job, keyed by the profile inputs hash).
+ */
+export async function translateProfileFields(
+  llm: LlmProvider,
+  translateModel: ModelRef,
+  targetLang: string,
+  fields: TranslationInput,
+): Promise<AiProfile["translations"] | undefined> {
+  const base = (targetLang || "en").toLowerCase();
+  const hasContent =
+    fields.about.trim() || fields.looking_for.trim() || fields.skills.length > 0;
+  if (!hasContent) return undefined;
+  const targetName = languageName(base);
+
+  const user = [
+    `TARGET LANGUAGE: ${targetName} (${base})`,
+    "USER-AUTHORED FIELDS:",
+    `About: ${fields.about}`,
+    `Looking for: ${fields.looking_for}`,
+    `Skills: ${fields.skills.join(", ")}`,
+  ].join("\n");
+
+  const { value } = await llm.completeStructured<RawTranslation>({
+    system:
+      `Detect the language of the user-authored fields. If it is already ${targetName} (${base}), set` +
+      ` needs_translation=false and omit the translated fields. Otherwise set needs_translation=true and` +
+      ` translate each non-empty field into ${targetName} (${base}), preserving meaning and proper nouns.` +
+      " Return strict JSON.",
+    user,
+    schema: PROFILE_TRANSLATION_SCHEMA,
+    schemaName: "profile_translation",
+    model: translateModel.model,
+    temperature: 0.1,
+  });
+
+  if (!value?.needs_translation) return undefined;
+  const out: NonNullable<AiProfile["translations"]> = { lang: base };
+  if (fields.about.trim() && value.about) out.about = value.about;
+  if (fields.looking_for.trim() && value.looking_for) out.looking_for = value.looking_for;
+  if (fields.skills.length && Array.isArray(value.skills) && value.skills.length)
+    out.skills = value.skills;
+  // If detection said "translate" but produced nothing usable, skip.
+  if (!out.about && !out.looking_for && !out.skills) return undefined;
+  return out;
 }
 
 // ── Nostr-context summary (spec §9.2) ────────────────────────────────────────
@@ -90,10 +204,11 @@ export interface NostrPost {
   created_at: number;
 }
 
-/** Hash of the nostr-context inputs (pubkey + the posts fed in). */
-export function nostrInputsHash(pubkey: string, posts: NostrPost[]): string {
+/** Hash of the nostr-context inputs (pubkey + the posts fed in + output language). */
+export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en"): string {
   const canonical = JSON.stringify({
     pubkey,
+    lang: (lang || "en").toLowerCase(),
     ids: posts.map((p) => `${p.kind}:${p.created_at}:${p.content.slice(0, 40)}`),
   });
   return sha256Hex(utf8ToBytes(canonical));
@@ -108,15 +223,22 @@ export async function summarizeNostr(
   summaryModel: ModelRef,
   pubkey: string,
   posts: NostrPost[],
+  lang = "en",
 ): Promise<string | undefined> {
   if (posts.length === 0) return undefined;
   const user = [
     "Recent public posts by this person (newest first):",
     ...posts.slice(0, 100).map((p) => `- ${p.content.replace(/\s+/g, " ").slice(0, 300)}`),
   ].join("\n");
+  const base = (lang || "en").toLowerCase();
+  const langNote =
+    base === "en"
+      ? ""
+      : ` The posts may be in any language; write the summary in ${languageName(base)} (${base}).`;
   const { value } = await llm.completeStructured<{ summary: string }>({
     system:
-      "Summarize what this person is interested in and works on, based on their public posts. 2-3 sentences.",
+      "Summarize what this person is interested in and works on, based on their public posts. 2-3 sentences." +
+      langNote,
     user,
     schema: NOSTR_SUMMARY_SCHEMA,
     schemaName: "nostr_summary",

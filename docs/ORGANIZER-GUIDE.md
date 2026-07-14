@@ -50,10 +50,34 @@ Choose **Create an event** and fill in the form:
   - *Invite codes only*: an invite link gets you in; no other way.
   - *Invite codes + manual*: invite links auto-approve (with a coordinator
     attached); people without a code wait for you. **Recommended for most events.**
+- **Event language** — see below.
 - **AI matchmaking** — set to *On* if you plan to attach a coordinator (§5).
   You can attach the coordinator later; leave the setting on now.
 - **Advanced** (collapsed) — upload an event icon and banner (a design is
   generated from the title otherwise) and set the intro-video length cap.
+
+### Event language
+
+Pick the language your event runs in. Start typing to search — by language name
+in your own language *or* by its two-letter code (type "slov" or "sk" to find
+Slovak). Your own language, the ones your browser prefers, and English/Slovak/
+Czech are pinned to the top; everything else follows alphabetically.
+
+![Choosing the event language](images/organizer/10-language-picker-light.png)
+
+The language does three things. It sets the **default interface language** for
+attendees who open your event (they can still switch it in Settings). It sets the
+language the AI writes in: **match reasoning and profile summaries are always in
+your event language**, no matter what language each attendee actually speaks or
+records in — someone can record their intro in English at a Slovak event and
+everyone still reads why-you-should-meet-them in Slovak. And when an attendee
+writes their bio in a different language, the coordinator **publishes a
+translation into your event language** so the rest of the room can read it — the
+person's original text is always kept and shown too. English is the default; leave
+it as-is for an English event.
+
+(You never have to re-run anything for this: when an attendee updates their intro,
+the system automatically recomputes only the matches that person is part of.)
 
 Note the copy under the form: **key rotation is forward-only** — anyone who
 ever held a decryption key can decrypt content that was published while that

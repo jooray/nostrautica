@@ -17,6 +17,7 @@ import {
   buildAiProfile,
   summarizeNostr,
   nostrInputsHash,
+  translateProfileFields,
   type NostrPost,
 } from "./profile.js";
 
@@ -27,12 +28,15 @@ export interface ProcessDeps {
   llm: LlmProvider;
   summaryModel: ModelRef;
   matchModel: ModelRef;
+  translateModel: ModelRef;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /** Override the transcription stage (tests inject to skip real Blossom/ffmpeg). */
   transcribe?: (descriptor: MediaDescriptor) => Promise<string>;
   /** Fetch the attendee's kind-0 + last N public posts (resolved reposts). */
   fetchNostrContext: (pubkey: string, n: number) => Promise<NostrPost[]>;
   nostrContextN: number;
+  /** Event language (ISO 639-1). AI output is written in it; user fields translated into it. */
+  lang: string;
   now?: () => number;
 }
 
@@ -63,26 +67,46 @@ export async function processAttendee(
     if (text) transcripts.push(text);
   }
 
-  // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash.
+  // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash
+  //    (the hash includes the output language, so a lang change re-summarizes).
   let nostrSummary: string | undefined;
   if (deps.nostrContextN > 0) {
     const posts = await deps.fetchNostrContext(input.pubkey, deps.nostrContextN);
     if (posts.length > 0) {
-      const inputsHash = nostrInputsHash(input.pubkey, posts);
+      const inputsHash = nostrInputsHash(input.pubkey, posts, deps.lang);
       const cached = deps.store.getSummary(input.pubkey, inputsHash);
       if (cached !== undefined) {
         nostrSummary = cached;
       } else {
-        nostrSummary = await summarizeNostr(deps.llm, deps.summaryModel, input.pubkey, posts);
+        nostrSummary = await summarizeNostr(
+          deps.llm,
+          deps.summaryModel,
+          input.pubkey,
+          posts,
+          deps.lang,
+        );
         if (nostrSummary) deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now());
       }
     }
   }
 
-  // 3. Build the ai_profile from transcripts + profile + nostr summary.
-  return buildAiProfile(deps.llm, deps.matchModel, {
+  // 3. Build the ai_profile from transcripts + profile + nostr summary (in the
+  //    event language).
+  const aiProfile = await buildAiProfile(deps.llm, deps.matchModel, {
     transcripts,
     profile: input.profile,
     nostrSummary,
+    lang: deps.lang,
   });
+
+  // 4. If the user's authored fields aren't already in the event language, publish
+  //    a translation alongside (never mutating the originals). Part of this job, so
+  //    it's covered by the same inputs-hash idempotency — no separate billing loop.
+  const translations = await translateProfileFields(deps.llm, deps.translateModel, deps.lang, {
+    about: input.profile.about,
+    looking_for: input.profile.looking_for,
+    skills: input.profile.skills,
+  });
+  if (translations) aiProfile.translations = translations;
+  return aiProfile;
 }

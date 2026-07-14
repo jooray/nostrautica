@@ -15,7 +15,7 @@
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import PostView from "$lib/components/PostView.svelte";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, npub }: { naddr: string; npub: string } = $props();
 
@@ -92,6 +92,24 @@
 
   const displayName = $derived(kind0?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"));
   const has = (list?: string[]) => !!list?.includes(pubkey);
+
+  // A coordinator-published translation of the user's authored fields into the
+  // event language. Offer it when the viewer reads that language and the author
+  // wrote in a different one. The original is always one tap away.
+  const translation = $derived(entry?.ai_profile?.translations);
+  const canTranslate = $derived(!!translation && translation.lang === i18n.locale);
+  // Default to the translated view when it's available (attendee reads event lang).
+  let showTranslated = $state(true);
+  const useTranslated = $derived(canTranslate && showTranslated);
+  const aboutText = $derived(
+    (useTranslated && translation?.about) || entry?.profile.about || kind0?.about || "",
+  );
+  const lookingForText = $derived(
+    (useTranslated && translation?.looking_for) || entry?.profile.looking_for || "",
+  );
+  const skillList = $derived(
+    (useTranslated && translation?.skills?.length ? translation.skills : entry?.profile.skills) ?? [],
+  );
 </script>
 
 <button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
@@ -114,8 +132,17 @@
     </div>
   </div>
 
-  {#if kind0?.about || entry?.profile.about}
-    <p style="margin-top:0.75rem">{entry?.profile.about || kind0?.about}</p>
+  {#if canTranslate}
+    <div class="row" style="margin-top:0.5rem;align-items:baseline;gap:0.4rem">
+      {#if useTranslated}<span class="badge">{t("attendee.translated")}</span>{/if}
+      <button class="linklike" onclick={() => (showTranslated = !showTranslated)}>
+        {useTranslated ? t("attendee.showOriginal") : t("attendee.showTranslation")}
+      </button>
+    </div>
+  {/if}
+
+  {#if aboutText}
+    <p style="margin-top:0.75rem">{aboutText}</p>
   {/if}
 
   {#if entry?.media?.length}
@@ -124,14 +151,14 @@
     {/each}
   {/if}
 
-  {#if entry?.profile.skills?.length}
+  {#if skillList.length}
     <div class="row" style="flex-wrap:wrap">
-      {#each entry.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+      {#each skillList as s (s)}<span class="badge">{s}</span>{/each}
     </div>
   {/if}
 
-  {#if entry?.profile.looking_for}
-    <p class="muted">{t("attendee.lookingFor", { value: entry.profile.looking_for })}</p>
+  {#if lookingForText}
+    <p class="muted">{t("attendee.lookingFor", { value: lookingForText })}</p>
   {/if}
 
   {#if entry?.ai_profile}
@@ -173,3 +200,18 @@
     {#each posts as p (p.id)}<PostView post={p} />{/each}
   </div>
 {/if}
+
+<style>
+  .linklike {
+    width: auto;
+    min-height: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+</style>

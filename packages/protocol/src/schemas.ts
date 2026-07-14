@@ -36,12 +36,25 @@ export const attendeeProfileSchema = z.object({
 });
 export type AttendeeProfile = z.infer<typeof attendeeProfileSchema>;
 
+// Coordinator-published translation of the USER-authored profile fields into the
+// event language, shown when the viewer reads the event language and the source
+// text was written in a different one. Never overwrites the user's originals.
+export const profileTranslationSchema = z.object({
+  lang: z.string(), // target (event) language, ISO 639-1
+  about: z.string().optional(),
+  looking_for: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+});
+export type ProfileTranslation = z.infer<typeof profileTranslationSchema>;
+
 export const aiProfileSchema = z.object({
   summary: z.string(),
   skills: z.array(z.string()),
   interests: z.array(z.string()),
   offers: z.array(z.string()),
   seeks: z.array(z.string()),
+  // Present when the attendee's own profile language differs from the event's.
+  translations: profileTranslationSchema.optional(),
 });
 export type AiProfile = z.infer<typeof aiProfileSchema>;
 

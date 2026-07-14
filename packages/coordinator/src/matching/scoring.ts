@@ -5,7 +5,7 @@
  * Scoring MUST explicitly reward complementarity (skills that complete each other
  * for this event's purpose), not just similarity.
  */
-import { sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
+import { sha256Hex, utf8ToBytes, languageName } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
 
@@ -59,6 +59,27 @@ export interface EventContextForScoring {
   title: string;
   summary: string;
   hashtags: string[];
+  /** Event language (ISO 639-1). Reasoning is written in this language. */
+  lang: string;
+}
+
+/**
+ * Output-language instruction appended to a scoring prompt (spec §9.3). BP3 is
+ * benchmark-validated and must not be reworded, so this is a separate trailing
+ * block. For English events it is empty (no stray "write in English" phrasing).
+ * Attendee inputs may be in ANY language — the model must translate as needed.
+ */
+export function languageInstruction(lang: string): string {
+  const base = (lang || "en").toLowerCase();
+  if (base === "en") return "";
+  const name = languageName(base);
+  return [
+    "",
+    "OUTPUT LANGUAGE:",
+    "The attendee profiles below may be written in any language (English profiles at a",
+    `${name}-language event are normal). Regardless of the input language, write every`,
+    `reasoning string in ${name} (${base}). All other JSON fields (scores) are unchanged.`,
+  ].join("\n");
 }
 
 // ── Batched scoring (spec §9.3, §16.2) ────────────────────────────────────────
@@ -220,7 +241,7 @@ export async function scoreBatch(
   ].join("\n");
 
   const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
-    system: BATCH_SYSTEM_PROMPT,
+    system: BATCH_SYSTEM_PROMPT + languageInstruction(event.lang),
     user,
     schema: BATCH_SCORE_SCHEMA,
     schemaName: "batch_score",
@@ -247,6 +268,113 @@ export async function scoreBatch(
   }
 
   const missing = candidates.filter((c) => !scores.has(c.id)).map((c) => c.id);
+  return { scores, missing };
+}
+
+// ── Reverse-batch scoring (spec §16.2) ────────────────────────────────────────
+// When ONE attendee changes, the forward direction (changed→others) batches
+// cleanly, but the reverse (each other→changed) is N−1 targets with a single
+// pending candidate each — naive grouping degrades to N−1 one-candidate calls.
+// This variant inverts the shape: ONE shared candidate + K targets per call,
+// "for each of these people, why should THEY meet the shared person". It mirrors
+// BP3 (same rubric anchors, host voice, grounding, language) so scores stay
+// comparable — only the loop direction differs. Output is per-TARGET, addressed
+// to that target ("you").
+
+/** BP3 mirror: score K targets against ONE shared candidate, per-target reasoning. */
+export const REVERSE_BATCH_SYSTEM_PROMPT = [
+  "You are a conference matchmaker for the event described below. You are given ONE shared person",
+  "and a numbered list of target attendees. For EACH target, judge how valuable it would be",
+  "for that TARGET to meet the shared person, considering what THIS event is for.",
+  "",
+  "Score three fields, each a DECIMAL between 0.0 and 1.0 (never 0-10 or 0-100):",
+  " • similarity: shared interests, background, or goals.",
+  " • complementarity: how much their skills/roles COMPLETE each other for this event — one has what",
+  "   the other needs (a founder needing a Rust dev + a Rust dev wanting a mission; a drummer + a",
+  "   bassist; powerful-but-unusable tech + a designer). This is the most important signal.",
+  " • score: overall value of the meeting. A meeting is high-value when one person's SEEKS is met by",
+  "   the other's OFFERS/skills (in either direction). Reward that fit heavily.",
+  "",
+  "Score anchors for `score`: 0.9-1.0 = a near-perfect mutual fit (each solves the other's stated need);",
+  " 0.7-0.85 = strong one-directional or clearly useful fit; 0.4-0.6 = plausible, some overlap but no",
+  " sharp need met; 0.15-0.35 = weak, only vague topical overlap; 0.0-0.1 = no real reason to meet.",
+  "",
+  "Scoring rules:",
+  " • Score each target INDEPENDENTLY on its own merits. Do not let an early strong target inflate",
+  "   later ones, or let a strong batch drag up a weak target. Use the FULL range — most targets in",
+  "   a batch should NOT score high.",
+  " • Ground every judgement in the ACTUAL profile text. Never invent skills, goals, or facts.",
+  "",
+  "reasoning_for_target — THIS TEXT IS SHOWN DIRECTLY TO THE TARGET ATTENDEE. Write 1-2 sentences in",
+  "the voice of a good host introducing them to the shared person:",
+  ' • Second person, direct: "You should grab Elena — ...", "Ask him about ...".',
+  " • Name a CONCRETE thing to talk about or do together, drawn from both people's actual details.",
+  ' • ABSOLUTELY NO analytical framing: never say "this pair", "based on their profiles", "high',
+  '   complementarity", "scores", "match", or explain why a rating was given. No hedging boilerplate.',
+  "",
+  "Return one entry per target, using the target's number as `index`. Score EVERY target exactly once.",
+].join("\n");
+
+/**
+ * Score K targets against one shared candidate in a single call. `targets` carry
+ * the caller's stable id (the target pubkey); the returned map is keyed by that
+ * id, each score addressed to that target ("you should meet the shared person").
+ */
+export async function scoreReverseBatch(
+  llm: LlmProvider,
+  model: string,
+  event: EventContextForScoring,
+  shared: AiProfile,
+  targets: readonly BatchCandidate[],
+  rng: () => number = Math.random,
+): Promise<BatchScoreResult> {
+  const scores = new Map<string, DirectedScore>();
+  if (targets.length === 0) return { scores, missing: [] };
+
+  const ordered = shuffle(targets, rng);
+  const eventBlock = [
+    `EVENT: ${event.title}`,
+    event.summary ? `ABOUT: ${event.summary}` : "",
+    event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
+  ].filter(Boolean);
+
+  const user = [
+    ...eventBlock,
+    "",
+    "SHARED PERSON (the one each target below would meet):",
+    profileText(shared),
+    "",
+    "TARGET ATTENDEES:",
+    ...ordered.map((c, i) => [`--- TARGET ${i + 1} ---`, profileText(c.profile)].join("\n")),
+  ].join("\n");
+
+  const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
+    system: REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(event.lang),
+    user,
+    schema: BATCH_SCORE_SCHEMA,
+    schemaName: "reverse_batch_score",
+    model,
+    temperature: 0.3,
+  });
+
+  const matches = Array.isArray(value?.matches) ? value.matches : [];
+  const seen = new Set<number>();
+  for (const m of matches) {
+    const idx = Number(m?.index);
+    if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
+    if (seen.has(idx)) continue;
+    if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
+    seen.add(idx);
+    const tgt = ordered[idx - 1]!;
+    scores.set(tgt.id, {
+      score: normalizeScore(m.score),
+      similarity: normalizeScore(m.similarity),
+      complementarity: normalizeScore(m.complementarity),
+      reasoning: m.reasoning_for_target,
+    });
+  }
+
+  const missing = targets.filter((t) => !scores.has(t.id)).map((t) => t.id);
   return { scores, missing };
 }
 
