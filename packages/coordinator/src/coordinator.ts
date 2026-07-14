@@ -342,6 +342,15 @@ export class Coordinator {
 
     if (rumor.kind === KIND_COORDINATOR_GRANT) {
       const grant = coordinatorGrantContentSchema.parse(JSON.parse(rumor.content));
+      // Authenticate the install (ENCRYPTION-AND-PRIVACY.md F2): the grant must be
+      // sealed by the event's E_id — rumor.pubkey is the verified seal author —
+      // exactly the check 21604 admin commands already get. Otherwise anyone with
+      // a plausible-looking payload could "install" an event and pick its relays.
+      const eidPubkey = parseCoordinate(grant.a).pubkey;
+      if (rumor.pubkey !== eidPubkey) {
+        log(`[install] REJECTED 21603 for ${grant.a}: seal author ${short(rumor.pubkey)} is not E_id ${short(eidPubkey)}`);
+        return;
+      }
       await this.installEvent({
         coordinate: grant.a,
         inboxSkHex: grant.inbox_nsec,

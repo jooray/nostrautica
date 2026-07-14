@@ -41,6 +41,9 @@ export const KIND_DIRECTORY_ENTRY = 31603; // Directory Entry (ECK)
 export const KIND_ROSTER = 31604; // Roster index (ECK)
 export const KIND_MATCH_LIST = 31605; // per-attendee Match List (nip44 → recipient)
 export const KIND_MATCH_MATRIX = 31606; // event-wide Match Matrix (ECK, opt-in)
+export const KIND_MEMBERS_POST = 31607; // Members-only Event Post (ECK, random d)
+export const KIND_EVENT_PAGE = 31608; // Event Page — menu + layout (d = event-d)
+export const KIND_EVENT_THEME = 31609; // Event Theme — raw CSS (d = event-d)
 
 // ── Custom gift-wrap rumor kinds (21600–21604) ──────────────────────────────
 export const KIND_JOIN_REQUEST = 21600; // → E_inbox

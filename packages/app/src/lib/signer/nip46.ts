@@ -18,6 +18,7 @@ import {
   BunkerSigner,
   createNostrConnectURI,
   parseBunkerInput,
+  type BunkerPointer,
 } from "nostr-tools/nip46";
 import { SimplePool } from "nostr-tools/pool";
 import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
@@ -28,6 +29,21 @@ import { t } from "$lib/i18n/i18n.svelte.js";
 export interface Nip46Session {
   clientSkHex: string;
   bunker: { pubkey: string; relays: string[]; secret?: string };
+  /**
+   * The USER pubkey this session was established for (distinct from the
+   * remote-signer pubkey in `bunker.pubkey`). Checked on restore so a hostile
+   * or identity-switched bunker can't silently swap which user the app is.
+   * Optional: pre-upgrade sessions lack it — accepted once, then backfilled.
+   */
+  userPubkey?: string;
+}
+
+/** Restore found the bunker answering for a DIFFERENT user than persisted. */
+export class Nip46IdentityMismatchError extends Error {
+  constructor() {
+    super("NIP-46 restore: bunker returned a different user pubkey");
+    this.name = "Nip46IdentityMismatchError";
+  }
 }
 
 /**
@@ -70,6 +86,8 @@ const CONNECT_TIMEOUT_MS = 45_000;
 const NOSTRCONNECT_TIMEOUT_MS = 120_000;
 /** Shorter budget on app boot: a dead bunker must not wedge the shell. */
 const RESTORE_TIMEOUT_MS = 12_000;
+/** Courtesy `logout` RPC budget — not every signer answers it; don't stall logout. */
+const LOGOUT_TIMEOUT_MS = 3_000;
 
 /**
  * Pool for the NIP-46 RPC transport. Kind-24133 replies are EPHEMERAL — a
@@ -184,11 +202,41 @@ export interface NostrConnectHandle {
 }
 
 /**
+ * The sign-in UI registers here so a popup-blocked `auth_url` can be surfaced
+ * as a tappable link (mobile browsers block `window.open` outside a user
+ * gesture, and auth_url arrives asynchronously). Returns an unsubscribe fn.
+ */
+type AuthUrlListener = (url: string) => void;
+const authUrlListeners = new Set<AuthUrlListener>();
+export function onNip46AuthUrl(listener: AuthUrlListener): () => void {
+  authUrlListeners.add(listener);
+  return () => {
+    authUrlListeners.delete(listener);
+  };
+}
+
+/**
  * Handle a remote signer's `auth_url` challenge: open the URL so the user can
  * approve out of band. The RPC then completes on the same request id.
+ *
+ * `window.open` is the fast path; when it's blocked (returns null / throws —
+ * typical on mobile since this runs outside a user gesture) the URL is handed
+ * to any registered UI listener to render as a real tappable link.
  */
 function onAuth(url: string): void {
-  if (typeof window !== "undefined") window.open(url, "_blank", "noopener");
+  if (typeof window === "undefined") return;
+  let popup: Window | null = null;
+  try {
+    // No "noopener" in the features string: with it, window.open returns null
+    // even on SUCCESS, which would defeat blocked-popup detection. Severing
+    // the opener by hand gives the same protection (the new tab starts as
+    // same-origin about:blank, so the assignment is allowed).
+    popup = window.open(url, "_blank");
+    if (popup) popup.opener = null;
+  } catch {
+    popup = null;
+  }
+  if (!popup) for (const listener of authUrlListeners) listener(url);
 }
 
 export class Nip46Signer implements AppSigner {
@@ -198,41 +246,71 @@ export class Nip46Signer implements AppSigner {
   private constructor(
     private readonly bunker: BunkerSigner,
     private readonly clientSk: Uint8Array,
+    /**
+     * Our own copy of the bunker pointer, captured at construction. Session
+     * persistence serializes from THIS — never from nostr-tools' internal
+     * state, so a library refactor can't silently break restore.
+     */
+    private readonly bp: BunkerPointer,
     private readonly pool?: SimplePool,
   ) {}
 
   /** Serialize the session so it can be restored after a refresh (spec §5.3). */
-  serialize(): Nip46Session | null {
-    const bp = (this.bunker as any).bp;
-    if (!bp?.pubkey || !bp?.relays) return null;
+  serialize(): Nip46Session {
     return {
       clientSkHex: bytesToHex(this.clientSk),
-      bunker: { pubkey: bp.pubkey, relays: bp.relays, secret: bp.secret },
+      bunker: {
+        pubkey: this.bp.pubkey,
+        relays: this.bp.relays,
+        secret: this.bp.secret ?? undefined,
+      },
+      userPubkey: this.pk ?? undefined,
     };
   }
 
   /** Reconnect a persisted NIP-46 session (same client key → same Amber connection). */
   static async fromPersisted(session: Nip46Session): Promise<Nip46Signer> {
     const clientSk = hexToBytes(session.clientSkHex);
+    const pointer: BunkerPointer = {
+      pubkey: session.bunker.pubkey,
+      relays: session.bunker.relays,
+      secret: session.bunker.secret ?? null,
+    };
     const pool = makePool();
-    const bunker = BunkerSigner.fromBunker(clientSk, session.bunker as any, {
+    const bunker = BunkerSigner.fromBunker(clientSk, pointer, {
       onauth: onAuth,
       pool,
     });
     // Bounded so a dead bunker can't block app boot forever (spec §5.3).
+    // connectWithRecovery: a PWA resuming from background hits the same
+    // lost-ack gap on restore as on first connect.
     try {
       await withTimeout(
-        bunker.connect(CLIENT_METADATA),
+        connectWithRecovery(bunker),
         RESTORE_TIMEOUT_MS,
         undefined,
         timeoutMessage(),
       );
+      // Identity check: never trust that the reconnected bunker still answers
+      // for the same user. A session without `userPubkey` is pre-upgrade —
+      // accepted once; session.restore() backfills it immediately after.
+      const pk = await withTimeout(
+        bunker.getPublicKey(),
+        RESTORE_TIMEOUT_MS,
+        undefined,
+        timeoutMessage(),
+      );
+      if (session.userPubkey && pk !== session.userPubkey) {
+        throw new Nip46IdentityMismatchError();
+      }
+      const signer = new Nip46Signer(bunker, clientSk, pointer, pool);
+      signer.pk = pk;
+      return signer;
     } catch (e) {
       await bunker.close().catch(() => {});
       pool.destroy();
       throw e;
     }
-    return new Nip46Signer(bunker, clientSk, pool);
   }
 
   /**
@@ -275,7 +353,14 @@ export class Nip46Signer implements AppSigner {
       uri,
       { onauth: onAuth, pool },
       controller.signal,
-    ).then((bunker) => new Nip46Signer(bunker, clientSk, pool));
+    ).then((bunker) => {
+      // Capture the pointer into our own field NOW. The remote-signer pubkey
+      // is only known from the signer's connect reply, so it can't be built
+      // ahead of time — but `bp` is typed public API here, so a nostr-tools
+      // rename is a compile error, not a silent persistence break.
+      const pointer: BunkerPointer = { pubkey: bunker.bp.pubkey, relays, secret };
+      return new Nip46Signer(bunker, clientSk, pointer, pool);
+    });
     // Independent timeout: fromURI's own budget is 5 min; fail sooner + friendly.
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const guarded = connected
@@ -333,7 +418,7 @@ export class Nip46Signer implements AppSigner {
       pool.destroy();
       throw e;
     }
-    return new Nip46Signer(bunker, clientSk, pool);
+    return new Nip46Signer(bunker, clientSk, pointer, pool);
   }
 
   async getPublicKey(): Promise<string> {
@@ -354,8 +439,29 @@ export class Nip46Signer implements AppSigner {
     return this.bunker.nip44Decrypt(counterpartyPubkey, ciphertext);
   }
 
+  /**
+   * Tear down the transport. Tries a courtesy NIP-46 `logout` RPC first
+   * (nostr-tools' BunkerSigner.logout sends it, then closes the local side);
+   * bounded because not every signer answers it. Always destroys the dedicated
+   * pool so `enableReconnect` stops re-opening sockets to the signer relays.
+   * Never throws — local logout must complete regardless of network state.
+   */
   async close(): Promise<void> {
-    await this.bunker.close();
-    this.pool?.destroy();
+    try {
+      await withTimeout(
+        this.bunker.logout(),
+        LOGOUT_TIMEOUT_MS,
+        undefined,
+        "logout RPC timed out",
+      );
+    } catch {
+      // Courtesy call failed or timed out — still close the local side.
+      await this.bunker.close().catch(() => {});
+    }
+    try {
+      this.pool?.destroy();
+    } catch {
+      /* already destroyed */
+    }
   }
 }

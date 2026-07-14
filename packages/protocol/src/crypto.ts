@@ -49,6 +49,15 @@ export function generateEck(): Uint8Array {
 
 export function eckEncrypt(eck: Uint8Array, plaintext: string): string {
   if (eck.length !== 32) throw new Error("ECK must be 32 bytes");
+  // Classic NIP-44 v2 caps a payload at 65,535 plaintext bytes (spec §7.4).
+  // Newer nostr-tools accepts larger extended-prefix payloads, but emitting one
+  // would break every classic NIP-44 decrypter — enforce the ceiling ourselves.
+  const bytes = utf8ToBytes(plaintext).length;
+  if (bytes > 65_535) {
+    throw new Error(
+      `NIP-44 plaintext is ${bytes} bytes — the ceiling is 65535`,
+    );
+  }
   return nip44v2.encrypt(plaintext, eck);
 }
 

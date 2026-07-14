@@ -7,8 +7,20 @@
  * keyed by a content hash of its inputs, so the DB is a cache/queue whose loss
  * re-costs money but can never corrupt correctness: a wiped DB re-derives
  * everything from relays + providers.
+ *
+ * Key material at rest (ENCRYPTION-AND-PRIVACY.md F1): the per-event secrets the
+ * coordinator custodies (`inbox_nsec`, `eck_json`) are encrypted with NIP-44
+ * self-encryption under the coordinator's own identity key before they touch
+ * SQLite, and transparently decrypted on read. Encrypted values carry the
+ * `nip44:` prefix (plaintext hex/JSON can never start with that, so detection is
+ * unambiguous). On startup any legacy plaintext rows are re-encrypted in place —
+ * one-way, idempotent, logged.
  */
 import { DatabaseSync } from "node:sqlite";
+import { selfEncrypt, selfDecrypt } from "@nostrautica/protocol";
+
+/** Prefix marking a column value as NIP-44-encrypted under the identity key. */
+const ENC_PREFIX = "nip44:";
 
 export type JobState = "pending" | "running" | "done" | "poison";
 
@@ -101,8 +113,11 @@ CREATE TABLE IF NOT EXISTS seen_rumors (
 
 export class Store {
   private db: DatabaseSync;
+  /** Coordinator identity secret; when set, event-key columns are encrypted at rest. */
+  private readonly identitySk?: Uint8Array;
 
-  constructor(path = ":memory:") {
+  constructor(path = ":memory:", identitySk?: Uint8Array) {
+    this.identitySk = identitySk;
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec(SCHEMA);
@@ -123,10 +138,54 @@ export class Store {
         /* column already exists */
       }
     }
+    // Migration (F1): encrypt any legacy plaintext event-key rows in place.
+    if (this.identitySk) this.encryptPlaintextKeyRows();
   }
 
   close(): void {
     this.db.close();
+  }
+
+  // ── at-rest protection of event-key columns (F1) ──────────────────────────
+  /** Encrypt a sensitive column value for storage (no-op without an identity key). */
+  private protect(value: string): string {
+    if (!this.identitySk) return value;
+    return ENC_PREFIX + selfEncrypt(this.identitySk, value);
+  }
+
+  /** Decrypt a sensitive column value read from storage (plaintext passes through). */
+  private reveal(value: string): string {
+    if (!value.startsWith(ENC_PREFIX)) return value; // legacy plaintext row
+    if (!this.identitySk) {
+      throw new Error("store holds encrypted event keys but no identity key was provided");
+    }
+    return selfDecrypt(this.identitySk, value.slice(ENC_PREFIX.length));
+  }
+
+  /**
+   * One-way, idempotent startup migration: any events row whose `inbox_nsec` /
+   * `eck_json` is still plaintext is re-encrypted in place. Already-encrypted
+   * rows are left untouched, so running this on every startup is safe.
+   */
+  private encryptPlaintextKeyRows(): void {
+    const rows = this.db
+      .prepare("SELECT coordinate, inbox_nsec, eck_json FROM events")
+      .all() as { coordinate: string; inbox_nsec: string; eck_json: string }[];
+    let migrated = 0;
+    for (const row of rows) {
+      if (row.inbox_nsec.startsWith(ENC_PREFIX) && row.eck_json.startsWith(ENC_PREFIX)) continue;
+      this.db
+        .prepare("UPDATE events SET inbox_nsec = ?, eck_json = ? WHERE coordinate = ?")
+        .run(
+          this.protect(this.reveal(row.inbox_nsec)),
+          this.protect(this.reveal(row.eck_json)),
+          row.coordinate,
+        );
+      migrated++;
+    }
+    if (migrated > 0) {
+      console.log(`[store] migrated ${migrated} plaintext event-key row(s) to at-rest encryption`);
+    }
   }
 
   // ── rumor dedupe ──────────────────────────────────────────────────────────
@@ -160,17 +219,29 @@ export class Store {
            config_relays = excluded.config_relays,
            updated_at = excluded.updated_at`,
       )
-      .run(row.coordinate, row.configJson, row.inboxNsec, row.eckJson, row.configRelays, row.now);
+      .run(
+        row.coordinate,
+        row.configJson,
+        this.protect(row.inboxNsec),
+        this.protect(row.eckJson),
+        row.configRelays,
+        row.now,
+      );
   }
 
   getEvent(coordinate: string):
     | { coordinate: string; config_json: string; inbox_nsec: string; eck_json: string; config_relays: string }
     | undefined {
-    return this.db.prepare("SELECT * FROM events WHERE coordinate = ?").get(coordinate) as any;
+    const row = this.db.prepare("SELECT * FROM events WHERE coordinate = ?").get(coordinate) as any;
+    if (!row) return undefined;
+    return { ...row, inbox_nsec: this.reveal(row.inbox_nsec), eck_json: this.reveal(row.eck_json) };
   }
 
   allEvents(): { coordinate: string; inbox_nsec: string; config_relays: string }[] {
-    return this.db.prepare("SELECT coordinate, inbox_nsec, config_relays FROM events").all() as any;
+    const rows = this.db
+      .prepare("SELECT coordinate, inbox_nsec, config_relays FROM events")
+      .all() as any[];
+    return rows.map((r) => ({ ...r, inbox_nsec: this.reveal(r.inbox_nsec) }));
   }
 
   // ── attendees ─────────────────────────────────────────────────────────────

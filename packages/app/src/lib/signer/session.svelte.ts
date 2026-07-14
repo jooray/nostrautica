@@ -7,7 +7,11 @@ import { npubEncode } from "nostr-tools/nip19";
 import type { AppSigner } from "./types.js";
 import { LocalSigner } from "./local.js";
 import { Nip07Signer, hasNip07 } from "./nip07.js";
-import { Nip46Signer, type Nip46Session } from "./nip46.js";
+import {
+  Nip46Signer,
+  Nip46IdentityMismatchError,
+  type Nip46Session,
+} from "./nip46.js";
 import { importCredential } from "./backup.js";
 import {
   saveLocalKey,
@@ -60,9 +64,18 @@ class Session {
         try {
           const signer = await Nip46Signer.fromPersisted(persisted);
           await this.adopt(signer);
+          // Re-persist: backfills `userPubkey` for pre-upgrade sessions so the
+          // identity check applies from the next restore onwards.
+          await saveNip46Session(signer.serialize());
           return true;
-        } catch {
-          // Signer offline / revoked — fall back to logged-out.
+        } catch (e) {
+          // A bunker answering for a DIFFERENT user is invalid for good —
+          // clear it so it is never retried. Transient failures (signer
+          // offline) keep the session for the next boot.
+          if (e instanceof Nip46IdentityMismatchError) {
+            await clearKeystore().catch(() => {});
+          }
+          // Fall back to logged-out.
           return false;
         }
       }
@@ -78,10 +91,9 @@ class Session {
 
   async loginNip46(signer: Nip46Signer): Promise<void> {
     await this.adopt(signer);
-    // Persist the bunker session so the user stays logged in across refreshes.
-    const session = signer.serialize();
-    if (session) await saveNip46Session(session);
-    else await saveLoginMethod("nip46");
+    // Persist the bunker session (incl. the expected user pubkey — adopt()
+    // just cached it) so the user stays logged in across refreshes.
+    await saveNip46Session(signer.serialize());
   }
 
   /** Generate a brand-new local key (normie default), persist it, log in. */
@@ -102,6 +114,15 @@ class Session {
   }
 
   async logout(): Promise<void> {
+    // Close the signer's transport first: the NIP-46 pool auto-reconnects, so
+    // just dropping the reference keeps re-opening sockets to the signer
+    // relays until reload. Defensive: local logout completes even if the
+    // teardown throws (Nip46Signer.close is itself bounded and non-throwing).
+    try {
+      await this.signer?.close?.();
+    } catch {
+      /* transport teardown failed — proceed with local logout */
+    }
     await clearKeystore();
     this.signer = null;
     this.pubkey = null;

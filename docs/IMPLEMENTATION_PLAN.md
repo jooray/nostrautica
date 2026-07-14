@@ -229,6 +229,26 @@ All phases **P0–P6 are implemented** (monorepo `packages/protocol`, `packages/
 - **Scoped batched recompute** (spec §9.3): a re-recorded intro invalidates only the changed attendee's pairs (both directions, by `inputs_hash`); unrelated pairs are untouched. Forward (changed→others) batches as one target + ≤K candidates; reverse (others→changed) uses a mirror **reverse-batch** prompt (one shared candidate + ≤K targets) so it stays batched. **Call-count, 1 changed attendee, N=50, K=10:** forward ⌈49/10⌉ = 5 calls, reverse ⌈49/10⌉ = 5 calls — vs. 49 single-candidate calls under naive per-other recompute. Affected 31605 lists republish under content-addressed keys.
 - **Tests**: protocol config round-trips `lang` (+ default-omit); scoring tests assert the language block for a non-en event and its absence for en, plus the reverse-batch prompt/mapping; a coordinator mock-provider test drives a re-recorded intro end to end (scope: unrelated pair untouched, both changed directions rescored + batched, 31605s republished with fresh content); a Slovak-event test asserts Slovak scoring instruction + published translation with originals preserved; i18n tests cover explicit-vs-adopted locale. `pnpm check` green.
 
+### P9 — Event customization (spec §7.4) — PLANNED, size: L
+
+Design decisions locked 2026-07-14 (owner): full custom CSS (no token-only mode); two visibility levels (public / members-only, no public teasers); one custom Event Page kind with mixed public+encrypted items (no Nostree mirror in v1); extend the hand-rolled escape-first markdown renderer (no library).
+
+Build order (each step lands independently):
+1. **Protocol:** `kinds.ts` +31607/31608/31609; zod schemas — encrypted post payload (`title/summary?/image?/published_at/author?/content`), event-page content (public `sections` + ECK-encrypted `private {menu, sections}` with `pos` merge indexes), theme (raw CSS ≤ 32 KB); merge helper for public+private menu/sections; unit round-trips incl. wrong-key and >65,535-byte NIP-44 rejection.
+2. **Markdown/editor:** extend `social/markdown.ts` (images, fenced code blocks, tables, nested lists — escape-first invariant preserved, regression-test `<script>`/`onerror` payloads); `PostEditor` component (title/summary/image fields, textarea + preview tab, byte counter with 60 KB members-only cap) replacing the Admin updates textarea.
+3. **Posts:** publish/edit 31607 (random stable `d`, current-ECK encrypt, `eck` tag, `published_at` preserved inside ciphertext); visibility radio at creation only; `#/e/:naddr/posts` (filters: source event/attendees/both × visibility public/members/both; attendees source = roster ∩ 30023 with `#a` = coordinate) and `#/e/:naddr/posts/:d` (resolves 30023-by-d then 31607-by-d; lock + join prompt without ECK).
+4. **Event Page:** Admin menu & layout manager; link picker (event posts public+encrypted with latest-by-`d` awareness, or plain URL) emitting `https:`/`nostr:naddr` targets; EventHome renders 31608 menu + sections with default-layout fallback when absent.
+5. **Theme:** 31609 publish with live-preview CSS editor in Admin; app-side injector — single `<style data-event-theme>` mounted on entering `#/e/<naddr>` routes, removed on leave, never on login/settings/backup/DM routes; 32 KB cap enforced both ends.
+
+Acceptance:
+- e2e (three contexts): organizer publishes one public + one members-only post, a menu with one public and one members-only item, sections, and CSS. Member sees merged menu, both posts, themed page; visitor sees public post + public menu item only, themed page, and a lock + join prompt on the members-only naddr; nothing members-only decryptable from captured relay traffic.
+- Revocation extension of the P6 rotation test: revoked attendee still reads pre-rotation 31607s but not post-rotation edits/new posts.
+- Editor rejects a >60 KB members-only body with a readable message; renderer regression tests stay green (no raw HTML ever).
+- Theme style element present on event routes, absent on `#/settings`, gone after navigating away; a second event's theme never bleeds in.
+- An attendee-authored public 30023 tagged `["a", <coordinate>]` (published via `nak`) appears in the attendees feed for both member and visitor.
+
+Gotchas (this phase): 31600 `content` must stay untouched (theme lives in 31609 precisely because config republish rebuilds from tags); readers select the ECK version from the `eck` tag — never assume current; the posts route must dedupe by `d` keeping highest `created_at` across BOTH kinds; menu `pos` indexes refer to the merged list (test interleaving).
+
 ### Remaining / manual-verification items
 - Playwright e2e specs are scaffolded (`e2e/`); the full-loop specs run against the dockerized relay + Blossom (`docker/docker-compose.yml`) and are gated behind `NOSTRAUTICA_E2E_RELAY`.
 - nsite deploy (`nsyte`) is wired in CI but the primary reference deploy currently targets a classic static host (nginx). On that host `sw.js` is served with a long `max-age`; PWA updates still work because the SW update check bypasses the HTTP cache, but serving `sw.js`/`index.html` as `no-cache` (spec §10.2) is preferred.

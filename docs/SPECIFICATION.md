@@ -337,6 +337,68 @@ content(nip44→recipient): {"v":1, "computed_at":<unix>, "matches":[
 - `d = "nostrautica:ev:<blinded>"` — per event: `{"v":1,"favorites":[…],"want_to_meet":[…],"met":[…],"notes":{<pubkey>:"…"}}`.
 - `d = "nostrautica:eventkeys:<blinded>"` (organizer) — `E_id`/`E_inbox` nsecs + ECK versions backup.
 
+### 7.4 Event page customization — theme, menu & layout, members-only posts (author `E_id`)
+
+Three further addressable kinds complete the reserved block (31607–31609). **Everything "official" an event publishes is signed by `E_id`** — posts, menu, theme. This is deliberate:
+
+- The **ECK must never sign anything** — it is shared with every attendee, so an ECK-signed "official post" could be forged by any of them.
+- **Organizers' personal keys stay out of event publishing** — the event's voice is separate from anyone's personal account.
+- `E_id` is already a per-event keypair whose nsec is held by the creator and distributed to co-organizers via the 21605 grant (§7.2) — exactly the "event account encrypted to the organizers' npubs" this feature needs, at zero new mechanism. (Consequence, accepted: co-organizers are indistinguishable from the creator and irrevocable, §7.2.)
+
+**Visibility model — two levels, chosen per item at creation:**
+
+- **Public** — a plain Nostr event, readable by anyone including other Nostr clients.
+- **Members-only** — content encrypted under the ECK (§6.3) with **all metadata (title, summary, image) inside the ciphertext** and an opaque random `d`. There are no public teasers: a non-attendee learns only that E_id-authored events of this kind exist (count/timing metadata — same acceptance as §6.6). The canonical use case: a public post carries the schedule without full names or the precise location; a members-only post carries the full version.
+
+**kind 30023 — public event posts** — unchanged (§7.1 "Event updates"): cleartext `title`/`summary`/`image`/`published_at` tags, markdown content, same-`d` republish = edit.
+
+**kind 31607 — Members-only Event Post**
+```
+tags: ["d", <random-32-hex, chosen at creation, stable across edits>], ["v","1"], ["eck", <version>]
+content(ECK): {"v":1, "title":"…", "summary":"…"?, "image":"…"?,
+               "published_at":<unix>, "author":<organizer-pubkey-hex>?,
+               "content":"<markdown>"}
+```
+- No `a` tag and no cleartext metadata; discovery is by query `{kinds:[31607], authors:[E_id]}` (E_id is per-event, so the author fully scopes it). The `d` is random — unlike 31603/31605 nobody needs to *derive* this address, so no blinding construction is needed.
+- **Edits:** republish the same `d`; the body is re-encrypted under the ECK version current at edit time (named by the `eck` tag; readers hold all versions via their 21602 grant); `published_at` inside the ciphertext is preserved. After a revocation rotation, old posts are **not** re-encrypted (the removed attendee already read them — §4.2 revocation honesty); edits and new posts simply use the new version, so a removed attendee can locate a post they knew but cannot read anything written after their removal.
+- **Size:** NIP-44 caps a single payload at 65,535 plaintext bytes — the editor enforces ≤ 60,000 bytes of markdown (also safely under relay event-size caps, plan gotcha #9). Oversize = reject at the editor with a readable error; chunking is out of scope for v1.
+- An `naddr` to a 31607 behaves like any addressable event; a client without the ECK renders a lock + join prompt in place of the content.
+- Markdown (both kinds) renders through the app's escape-first renderer, extended with images, fenced code blocks, tables and nested lists — never raw HTML.
+- Visibility is fixed at creation. v1 offers no public↔members switch (a public post's revisions live on relays forever; the honest workaround is NIP-09 delete + repost, both best-effort).
+
+**kind 31608 — Event Page (menu + layout)** (`d` = event-d)
+```
+tags: ["d", <event-d>], ["a", <coordinate>], ["v","1"], ["eck", <version>]?
+      ["r", <target>, <label>] …          // PUBLIC menu items, in display order
+content: {"v":1,
+  "sections":  [ <section>, … ],          // public layout, in order
+  "private":   "<ECK ciphertext of {\"v\":1,
+                 \"menu\":[{\"label\":…, \"target\":…, \"pos\":<int>}, …],
+                 \"sections\":[{…, \"pos\":<int>}, …]}>"   // members-only additions
+}
+```
+- **Menu.** Public items are Nostree-shaped `r` tags (target + human label — matches the NIP-51 bookmark-set idiom, kind 30003 with labeled `r` tags, without claiming to *be* one). Members-only items live in the encrypted `private.menu`, each with a `pos` index into the merged list; members interleave them client-side, visitors render the `r` tags alone. A **target** is one of:
+  - a plain `https:` URL (dinner menu, venue site, …),
+  - `nostr:naddr…` → a public 30023 (naddr carries event-relay hints),
+  - `nostr:naddr…` → a members-only 31607 (locks for non-members).
+  The composer offers a **picker aware of the event's posts** (public and encrypted, latest-by-`d` semantics) alongside a free URL field.
+- **Layout.** `sections` composes the event home below the header, in order. v1 section types:
+  - `{"type":"posts", "source":"event"|"attendees"|"both", "visibility":"public"|"members"|"both"}` — the blog feed. `event` = E_id-authored (30023 ∪ 31607); `attendees` = public 30023 authored by roster pubkeys carrying `["a", <coordinate>]` (the standard NIP-23 way for attendees to tag their own long-form to the event); `visibility` filters plain vs ECK-encrypted. Everyone sees only what they can decrypt regardless of config.
+  - `{"type":"pinned", "refs":[<naddr>, …]}` — explicitly pinned posts, rendered prominently.
+  - `{"type":"attendees"}` — roster preview (renders only for members).
+  - Members-only sections go in `private.sections` with `pos`, merged like menu items.
+  - No 31608 published → the default layout (the pre-customization event home).
+
+**kind 31609 — Event Theme** (`d` = event-d)
+```
+tags: ["d", <event-d>], ["a", <coordinate>], ["v","1"]
+content: <raw CSS, ≤ 32 KB>
+```
+- **Public** — branding applies to visitors too.
+- Applied by injecting a single `<style data-event-theme>` element **only while a route under `#/e/<naddr>` is active**, removed on leaving the event; never active on login, settings, key-backup or DM routes.
+- Deliberately *not* stored in 31600 `content`: 31600 is rebuilt from parsed tags and republished by config flows (e.g. coordinator attach), which would silently drop a content payload.
+- **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages — where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed, and no key material is ever rendered on themed routes.
+
 ## 8. Flows
 
 **Create event.** Organizer client: generate `E_id`, `E_inbox`, ECK v1 → publish kind 0 for `E_id` (event name/logo) → publish 31923 + 31600 (signed `E_id`) → self-encrypt key backup (30078) → optionally generate invites (31601) → optionally attach coordinator: add `coordinator` tag to 31600 + gift-wrap 21603.
@@ -358,6 +420,12 @@ content(nip44→recipient): {"v":1, "computed_at":<unix>, "matches":[
 **Direct messages.** Attendee opens a person's profile → Message → NIP-17 conversation view (kind-14 rumor, sealed, double-wrapped: one 1059 to the recipient, one to self). Inbox = subscribe 1059 p-tagging own pubkey → unwrap → keep kind 14 → group by peer, order by rumor `created_at`. Works before/during/after the event and with any NIP-17 client.
 
 **Event updates (organizer).** Admin composes title + markdown → publish kind 30023 signed by `E_id` (`d` stable per update; same `d` = edit, `published_at` preserved). Event page fetches 30023 by author `E_id`, dedupes by `d` (highest `created_at` wins), renders newest-first.
+
+**Publish event post (§7.4).** Admin composer: title/summary/image + markdown with preview → visibility chosen at creation: **public** → 30023 (as above); **members-only** → 31607 (all metadata inside the ECK ciphertext, random stable `d`, `eck` tag = current version). Edit = republish same `d` (members-only re-encrypted under the current ECK). The editor enforces the 60 KB members-only ceiling.
+
+**Customize event page (§7.4).** Admin → *Appearance*: CSS editor with live preview → publish 31609. Admin → *Menu & layout*: manage menu items (label + target via the post-aware picker or a URL field; per-item public/members-only toggle) and home sections (type + filters + order, per-section visibility) → publish 31608 (public parts in tags/cleartext JSON, members-only parts ECK-encrypted in `private`). All signed `E_id`.
+
+**Read posts.** `#/e/<naddr>/posts` lists posts with filter controls mirroring the section config — source: event-official / attendees / both; visibility: public / members-only / both. Members-only posts decrypt with the granted ECK (version per the `eck` tag); an naddr link to a 31607 without the key renders a lock + join prompt. Attendees put their own writing in the feed by tagging a public 30023 with `["a", <coordinate>]` from any NIP-23 client.
 
 **Revoke attendee.** Organizer sends 21604 `revoke` (or does it client-side without coordinator): delete 31603 (NIP-09), rotate ECK, re-grant 21602 to remaining attendees, republish roster + future content under new ECK.
 
@@ -491,7 +559,7 @@ Installation is protocol-level (21603 grant + 31600 `coordinator` tag) — no pe
 
 - SvelteKit, Svelte 5 (runes), `adapter-static` with a single fallback page; **hash-based routing** via a thin hash-router layer (single catch-all route; `location.hash` parsed into a route store; pages under `src/lib/pages/`). Reason: nsite gateways serve the SPA fallback with HTTP **status 404**, which breaks history-API deep links for anything status-sensitive; hash routes sidestep it entirely and work on every static host.
 - `@nostr-dev-kit/ndk` v3 + `@nostr-dev-kit/cache-dexie` (IndexedDB cache) + `@nostr-dev-kit/svelte`. Relay set = app defaults ∪ event 31600 relays ∪ user 10002.
-- Routes: `#/` (my events + discover), `#/login`, `#/create`, `#/e/:naddr` (event home), `#/e/:naddr/join?code=…`, `#/e/:naddr/record`, `#/e/:naddr/attendees`, `#/e/:naddr/attendees/:npub`, `#/e/:naddr/matches`, `#/e/:naddr/admin`, `#/me`, `#/settings`.
+- Routes: `#/` (my events + discover), `#/login`, `#/create`, `#/e/:naddr` (event home), `#/e/:naddr/join?code=…`, `#/e/:naddr/record`, `#/e/:naddr/attendees`, `#/e/:naddr/attendees/:npub`, `#/e/:naddr/matches`, `#/e/:naddr/posts`, `#/e/:naddr/posts/:d`, `#/e/:naddr/admin`, `#/me`, `#/settings`.
 
 ### 10.2 PWA & auto-update (never stuck on an old version)
 
@@ -539,6 +607,9 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 - **Match feedback loop:** thumbs up/down (private, 30078) fed into future recomputes.
 - **Multi-organizer roles:** scoped grants (approve-only vs full key custody).
 - **Chunked media encryption:** streaming playback + >25 MB robustness.
+- **Attendee-authored members-only posts:** 31607 signed by attendee keys needs a *blinded* event linkage for discovery (a cleartext `a` tag would publicly tie the author to the event) — deferred; v1 members-only posts are E_id-only (§7.4).
+- **Nostree mirror:** optionally republish the public menu items as a real NIP-51 kind 30003 bookmark set for interop with list clients.
+- **Per-event group chat:** see `GROUP-CHAT-FEASIBILITY.md` (ECK-encrypted chat now, Marmot/MLS opt-in later).
 
 ## 14. Security & threat model summary
 

@@ -25,7 +25,36 @@
   import { joinSentAt, markJoinSent, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
-  let { naddr, code }: { naddr: string; code?: string } = $props();
+  let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
+
+  // The invite code is a full nsec riding the URL fragment. Consume it into
+  // memory and strip it from the URL + history immediately, mirroring the
+  // login-nsec handling in consumeNsecFromHash (spec §5.2, §14). A reload
+  // mid-join simply lands on the normal join screen — the code is gone by design.
+  let code = $state(codeParam);
+  $effect(() => {
+    if (codeParam) {
+      code = codeParam;
+      stripInviteCodeFromUrl();
+    }
+  });
+
+  function stripInviteCodeFromUrl(): void {
+    if (typeof window === "undefined") return;
+    const hash = window.location.hash;
+    const qIndex = hash.indexOf("?");
+    if (qIndex < 0) return;
+    const params = new URLSearchParams(hash.slice(qIndex + 1));
+    if (params.get("code") === null) return;
+    params.delete("code");
+    const path = hash.slice(0, qIndex);
+    const rest = params.toString();
+    window.history.replaceState(null, "", rest ? `${path}?${rest}` : path);
+    // Keep the router's in-memory route consistent so back()/stack navigation
+    // never rebuilds a URL carrying the secret.
+    const route = router.route;
+    if (route.name === "join") route.code = undefined;
+  }
 
   // Render instantly from cache (e.g. arriving from the event page), refresh after.
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);

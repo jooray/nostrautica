@@ -18,6 +18,7 @@ import {
   KIND_MATCH_LIST,
   KIND_DIRECTORY_ENTRY,
   KIND_ADMIN_COMMAND,
+  KIND_COORDINATOR_GRANT,
   KIND_DELETION,
   directoryEntryContentSchema,
   matchListContentSchema,
@@ -219,7 +220,9 @@ async function setup(nostrContextN = 0, opts: { batchSize?: number; lang?: strin
   const eckVersions: EckVersion[] = [{ id: 1, key: bytesToBase64(eck) }];
   const invites = Array.from({ length: 6 }, () => generateSecretKey());
 
-  const store = new Store();
+  // Pass the identity key so the whole pipeline runs against at-rest-encrypted
+  // event-key columns (F1) — exactly like production.
+  const store = new Store(":memory:", coordSk);
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
@@ -587,6 +590,56 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const listAfter = latestMatchList(h.transport, cryptoSk, getPublicKey(h.coordSk), cryptoD);
     expect(listAfter).not.toBeUndefined();
     expect(JSON.stringify(listAfter!.matches)).not.toBe(JSON.stringify(listBefore!.matches));
+  });
+
+  it("rejects a 21603 install grant whose seal author is not E_id, accepts the genuine one (F2)", async () => {
+    const h = await setup();
+    // A second event the coordinator has never seen.
+    const eid2Sk = generateSecretKey();
+    const coordinate2 = makeCoordinate(getPublicKey(eid2Sk), "second-event");
+    const grantContent = {
+      v: 1,
+      a: coordinate2,
+      inbox_nsec: bytesToHex(generateSecretKey()),
+      eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+      config_relays: ["wss://test"],
+    };
+
+    // Forged install: a well-formed grant sealed by an arbitrary key. The seal
+    // author (rumor.pubkey) is not the coordinate's E_id → must be dropped.
+    const attackerSk = generateSecretKey();
+    const forged = wrapRumor(attackerSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: grantContent,
+    });
+    await h.coordinator.handleCoordinatorWrap(forged as any);
+    expect(h.store.getEvent(coordinate2)).toBeUndefined();
+
+    // Genuine install: same payload sealed by E_id → installed.
+    const genuine = wrapRumor(eid2Sk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: grantContent,
+    });
+    await h.coordinator.handleCoordinatorWrap(genuine as any);
+    const row = h.store.getEvent(coordinate2);
+    expect(row).toBeDefined();
+    expect(row!.inbox_nsec).toBe(grantContent.inbox_nsec);
+  });
+
+  it("stores event keys encrypted at rest, transparently decrypted on read (F1)", async () => {
+    const h = await setup();
+    // The public read path returns plaintext…
+    const row = h.store.getEvent(h.coordinate);
+    expect(row?.inbox_nsec).toBe(bytesToHex(h.einboxSk));
+    expect(JSON.parse(row!.eck_json)[0].key).toBe(bytesToBase64(h.eck));
+    // …but the raw SQLite columns hold NIP-44 ciphertext, not the secrets.
+    const raw = (h.store as any).db
+      .prepare("SELECT inbox_nsec, eck_json FROM events WHERE coordinate = ?")
+      .get(h.coordinate);
+    expect(raw.inbox_nsec.startsWith("nip44:")).toBe(true);
+    expect(raw.eck_json.startsWith("nip44:")).toBe(true);
+    expect(raw.inbox_nsec).not.toContain(bytesToHex(h.einboxSk));
+    expect(raw.eck_json).not.toContain(bytesToBase64(h.eck));
   });
 
   it("a Slovak event scores match reasoning in Slovak and translates non-Slovak user fields", async () => {

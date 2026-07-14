@@ -199,6 +199,74 @@ export const matchMatrixContentSchema = z.object({
 });
 export type MatchMatrixContent = z.infer<typeof matchMatrixContentSchema>;
 
+// ── 31607 Members-only Event Post content (ECK ciphertext, spec §7.4) ────────
+// ALL metadata lives inside the ciphertext — no public teasers. `published_at`
+// is set on first publish and preserved across edits; `author` is an optional
+// organizer attribution.
+export const membersPostContentSchema = z.object({
+  v: version,
+  title: z.string(),
+  summary: z.string().optional(),
+  image: z.string().optional(),
+  published_at: z.number().int(),
+  author: hex32.optional(),
+  content: z.string(), // markdown
+});
+export type MembersPostContent = z.infer<typeof membersPostContentSchema>;
+
+// ── 31608 Event Page content (menu + layout, spec §7.4) ──────────────────────
+// Public menu items live in `r` tags; public layout in `sections`; members-only
+// additions in the ECK-encrypted `private` string, each with a `pos` index into
+// the client-side merged list.
+export const postsSectionSchema = z.object({
+  type: z.literal("posts"),
+  source: z.enum(["event", "attendees", "both"]),
+  visibility: z.enum(["public", "members", "both"]),
+});
+export const pinnedSectionSchema = z.object({
+  type: z.literal("pinned"),
+  refs: z.array(z.string()), // naddr refs
+});
+export const attendeesSectionSchema = z.object({
+  type: z.literal("attendees"), // roster preview — renders only for members
+});
+export const eventPageSectionSchema = z.discriminatedUnion("type", [
+  postsSectionSchema,
+  pinnedSectionSchema,
+  attendeesSectionSchema,
+]);
+export type EventPageSection = z.infer<typeof eventPageSectionSchema>;
+
+export const menuItemSchema = z.object({
+  label: z.string(),
+  target: z.string(), // https: URL or nostr:naddr…
+});
+export type MenuItem = z.infer<typeof menuItemSchema>;
+
+const pos = z.number().int().nonnegative();
+
+export const eventPagePrivateSchema = z.object({
+  v: version,
+  menu: z.array(menuItemSchema.extend({ pos })).default([]),
+  sections: z
+    .array(
+      z.discriminatedUnion("type", [
+        postsSectionSchema.extend({ pos }),
+        pinnedSectionSchema.extend({ pos }),
+        attendeesSectionSchema.extend({ pos }),
+      ]),
+    )
+    .default([]),
+});
+export type EventPagePrivate = z.infer<typeof eventPagePrivateSchema>;
+
+export const eventPageContentSchema = z.object({
+  v: version,
+  sections: z.array(eventPageSectionSchema).default([]),
+  private: z.string().optional(), // ECK ciphertext of eventPagePrivateSchema
+});
+export type EventPageContent = z.infer<typeof eventPageContentSchema>;
+
 // ── 30078 user-private settings ──────────────────────────────────────────────
 export const userSettingsSchema = z.object({
   v: version,

@@ -35,4 +35,11 @@ export interface AppSigner {
    * Callers that need it must handle its absence (or require a local key).
    */
   getSecretKey?(): Uint8Array;
+
+  /**
+   * Tear down any live transport (NIP-46 keeps a dedicated auto-reconnecting
+   * relay pool). Optional: local and NIP-07 signers hold no connections.
+   * Implementations must not throw.
+   */
+  close?(): Promise<void>;
 }

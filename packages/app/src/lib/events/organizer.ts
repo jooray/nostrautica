@@ -550,9 +550,13 @@ export async function revokeAttendeeClient(
  * `coordinator` tag (signed by E_id) and gift-wrap a Coordinator Grant (21603)
  * carrying the E_inbox secret + ECK so it can read submissions. Installation is
  * protocol-level — no per-event server config.
+ *
+ * The grant is sealed by E_id (like 21604 admin commands): the coordinator
+ * authenticates the install by matching the seal author against the coordinate's
+ * E_id pubkey (spec §7.2, ENCRYPTION-AND-PRIVACY.md F2).
  */
 export async function attachCoordinator(
-  organizer: AppSigner,
+  _organizer: AppSigner,
   ctx: EventContext,
   coordinatorPubkey: string,
 ): Promise<void> {
@@ -575,8 +579,9 @@ export async function attachCoordinator(
     eidSk,
   );
 
-  // 2. Gift-wrap the Coordinator Grant (21603), sealed by the organizer.
-  const grantWrap = await signerWrap(organizer, coordinatorPubkey, {
+  // 2. Gift-wrap the Coordinator Grant (21603), sealed by E_id so the
+  //    coordinator can authenticate the install against the coordinate (F2).
+  const grantWrap = wrapRumor(eidSk, coordinatorPubkey, {
     kind: KIND_COORDINATOR_GRANT,
     content: {
       v: 1,

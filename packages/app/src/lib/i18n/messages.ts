@@ -92,6 +92,9 @@ export const messages = {
     "signin.remote.cancel": "Cancel",
     "signin.remote.hint": "such as Amber on Android, or Clave",
     "signin.remote.connect": "Connect with Remote Signer",
+    "signin.remote.authRequired":
+      "Your signer asks you to approve this request on its website:",
+    "signin.remote.openAuth": "Open approval page",
     "signin.paste": "Paste a key",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Passphrase",
@@ -589,6 +592,9 @@ export const messages = {
     "signin.remote.cancel": "Zrušiť",
     "signin.remote.hint": "napríklad Amber na Androide, alebo Clave",
     "signin.remote.connect": "Pripojiť vzdialený podpisovač",
+    "signin.remote.authRequired":
+      "Váš podpisovač žiada o schválenie tejto požiadavky na svojej stránke:",
+    "signin.remote.openAuth": "Otvoriť schvaľovaciu stránku",
     "signin.paste": "Vložiť kľúč",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Heslo",

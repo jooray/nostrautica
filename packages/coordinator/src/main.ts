@@ -116,7 +116,9 @@ async function main(): Promise<void> {
           throw new Error("local-whisper STT not built in this daemon (set stt.provider = venice-stt)");
         })();
 
-  const store = new Store(dbPath);
+  // Event keys (E_inbox nsec, ECKs) are encrypted at rest under the coordinator
+  // identity key; legacy plaintext rows are migrated in place on first start.
+  const store = new Store(dbPath, coordSk);
   const client = new NostrClient(config.relays.default);
 
   const coordinator = new Coordinator({

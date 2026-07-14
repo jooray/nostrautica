@@ -4,7 +4,11 @@
   // pages. Calls `onSignedIn` once a session is established.
   import { session } from "$lib/signer/session.svelte.js";
   import { hasNip07 } from "$lib/signer/nip07.js";
-  import { Nip46Signer, type NostrConnectHandle } from "$lib/signer/nip46.js";
+  import {
+    Nip46Signer,
+    onNip46AuthUrl,
+    type NostrConnectHandle,
+  } from "$lib/signer/nip46.js";
   import { NIP46_RELAYS } from "$lib/nostr/relays.js";
   import QrCode from "$lib/components/QrCode.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -39,6 +43,12 @@
   // in that gap. If we return to the foreground still waiting, offer a retry
   // (fresh URI) after a short grace period.
   let ncHint = $state(false);
+  // A remote signer's auth_url challenge opens via window.open (fast path),
+  // but mobile browsers block that outside a user gesture. The blocked URL
+  // lands here and is rendered as a tappable link instead.
+  let authUrl = $state<string | null>(null);
+
+  $effect(() => onNip46AuthUrl((url) => (authUrl = url)));
 
   $effect(() => {
     if (!nc) {
@@ -73,6 +83,7 @@
 
   async function run(fn: () => Promise<void>) {
     error = null;
+    authUrl = null;
     busy = true;
     try {
       await fn();
@@ -83,6 +94,8 @@
       error = msg === "Cancelled" ? null : msg;
     } finally {
       busy = false;
+      // The auth link only makes sense while its attempt is still pending.
+      authUrl = null;
     }
   }
 
@@ -139,6 +152,22 @@
 
 <div class="card stack">
   {#if error}<div class="card warn" style="margin:0">{error}</div>{/if}
+
+  {#if authUrl}
+    <!-- Popup-blocked auth_url: give the user a real tap to open it. -->
+    <div class="card warn" style="margin:0">
+      <p style="margin:0">{t("signin.remote.authRequired")}</p>
+      <a
+        class="btn primary"
+        href={authUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        style="margin-top:0.5rem"
+      >
+        {t("signin.remote.openAuth")}
+      </a>
+    </div>
+  {/if}
 
   {#if hasNip07()}
     <div style="order:{order('nip07', 1)}">
