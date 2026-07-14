@@ -86,6 +86,9 @@ export const messages = {
     "signin.remote.copy": "Copy",
     "signin.remote.copied": "Copied ✓",
     "signin.remote.waiting": "Waiting for the signer to approve…",
+    "signin.remote.staleHint":
+      "Didn't get the approval? Keep this tab open while approving, or retry with a fresh code.",
+    "signin.remote.retry": "Retry",
     "signin.remote.cancel": "Cancel",
     "signin.remote.hint": "such as Amber on Android, or Clave",
     "signin.remote.connect": "Connect with Remote Signer",
@@ -569,6 +572,9 @@ export const messages = {
     "signin.remote.copy": "Kopírovať",
     "signin.remote.copied": "Skopírované ✓",
     "signin.remote.waiting": "Čaká sa na schválenie podpisovačom…",
+    "signin.remote.staleHint":
+      "Neprišlo schválenie? Nechajte túto kartu otvorenú počas schvaľovania, alebo to skúste znova s novým kódom.",
+    "signin.remote.retry": "Skúsiť znova",
     "signin.remote.cancel": "Zrušiť",
     "signin.remote.hint": "napríklad Amber na Androide, alebo Clave",
     "signin.remote.connect": "Pripojiť vzdialený podpisovač",

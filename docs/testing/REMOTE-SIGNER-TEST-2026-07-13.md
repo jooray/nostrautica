@@ -251,3 +251,67 @@ end-to-end with a scripted Playwright run against the local stack.
 | **P2 — organizer admin keys device-bound** | The "You don't hold this event's organizer keys on this device" state is now a real recovery path: it explains that organizer keys live on the creating device, shows the user's own npub with a copy button and step-by-step instructions ("On the device you created the event with, open Admin → Co-organizers and add this npub"), and **polls for the incoming 21605 organizer grant** (same `receiveGrants` channel co-organizers use) so the page unlocks in place — no reload. | ✅ E2E: fresh context signed in with the organizer's nsec showed the recovery card (own npub + instructions + "Waiting for the grant…"); after the original device added that npub under Co-organizers, the second context's admin page unlocked automatically within seconds. |
 | **P2 — "Request sent" not persisted** | New per-event join marker (`nostrautica:join-sent` in localStorage, keyed by event coordinate, timestamped), set on submit. On reload the Join page restores the waiting state (and resumes the grant poll); EventHome shows "Request sent — waiting for approval" instead of the Join CTA. The marker clears when approval lands, and a quiet "Send the request again" link covers the stuck case (clears the marker, returns to the form). | ✅ E2E: reloaded Join page showed the waiting state, not the pristine form; EventHome showed the pending state with no Join CTA; after approval both pages flipped to member state. |
 | **P4 — "You're a Nostr user now" for veterans** | `/me` now keys off how the identity got here. Full onboarding payoff only for a key created *this session* (`session.freshLocalKey`); everyone else gets a compact "Your Nostr profile" page (npub + copy, "Signed in via …" note, logout). The keystore doesn't record generated-vs-imported, so local-key users on a later visit get a middle ground: backup card kept, onboarding pitch dropped. nip07/nip46 sessions get no backup section — just the "your key lives in your signer" note. | ✅ E2E: same-session fresh key → "You're a Nostr user now"; after reload (local key) → "Your Nostr profile" + backup card, no pitch. nip46 path not re-driven (no bunker in this run) — it takes the same non-local branch as the verified imported-nsec case, minus the backup card. |
+
+## Addendum (2026-07-14): mobile field failure — lost ephemeral reply
+
+### Field failure
+
+Maintainer's real-phone Amber test: after approving in Amber, the app never
+logs in — the wait just runs into the timeout.
+
+### Root cause — CONFIRMED
+
+Kind-24133 RPC events are **ephemeral** (20000–29999 range): relays don't
+store them, and the `BunkerSigner` subscription filter carries `limit: 0`, so
+a missed reply is never replayed either. The reply exists only for sockets
+open at publish time. On mobile, tapping "Open in Amber" backgrounds the
+browser tab; the browser throttles/kills the websocket exactly when Amber
+publishes its response → the approval is lost forever. Two compounding
+deficiencies in nostr-tools' defaults (verified in the 2.23.9 source):
+`SimplePool` ships with `enableReconnect: false` (socket close silently kills
+the subscription, no resubscribe) and no keepalive (`enablePing` off), so an
+idle waiting socket also gets reaped by mobile radios/proxies. Reproduced
+deterministically (see verification): with the signer's reply frame dropped in
+transit, the pre-fix code waits until timeout in 100 % of runs.
+
+### Fixes
+
+| Area | Change |
+|---|---|
+| Transport | All NIP-46 `BunkerSigner`s now get a dedicated `SimplePool({ enableReconnect: true, enablePing: true })` — auto-reconnect + resubscribe on socket close, keepalive ping (browser fallback: dummy REQ every 29 s, dead socket detected in 20 s) so idle waits aren't reaped. The pool is destroyed on cancel/timeout/close so failed attempts don't leak reconnecting sockets. |
+| `bunker://` recovery | `connectWithRecovery`: on `visibilitychange`→visible while the connect is still pending, re-send `connect` (client-initiated, safe to repeat) **and** probe with `ping`. The ping is what confirms a connect whose ack was lost — verified against nak, which rotates the single-use secret server-side, so the re-sent connect alone fails while ping answers. Sending also forces an immediate pool reconnect instead of waiting out the ~10 s backoff. A first-attempt failure while the tab is hidden is held (not surfaced) so recovery gets its chance, still bounded by the 45 s timeout. |
+| `nostrconnect://` recovery | The signer initiates, so a lost reply can't be re-requested. On foreground-return still-waiting (3 s grace): visible hint “Didn't get the approval? Keep this tab open while approving, or retry with a fresh code.” + **Retry** that regenerates the URI (new client key + secret). Wait budget raised to 120 s (human-paced flow, tab-switch included); Cancel unchanged. Signers generally publish the response once and move on — the client must not rely on signer-side retries, and this one no longer does. |
+| Relays | `NIP46_RELAYS` = `wss://relay.nsec.app` + `wss://relay.damus.io` + `wss://relay.primal.net` (maintainer's requested set). To be clear: **redundancy only helps while our sockets are open** — three relays don't save a reply published while the tab was backgrounded; the reconnect + foreground-recovery logic above is the real fix. `VITE_NOSTRAUTICA_RELAYS` still overrides. |
+| Subscription-open race | Audited: `fromURI`/`fromBunker` queue the REQ at call time and the QR renders the same tick, vs. a human scan seconds later — no practical race. The dangerous gap was the missing resubscribe-on-close, fixed above. |
+
+Files: `packages/app/src/lib/signer/nip46.ts`,
+`packages/app/src/lib/components/SignInOptions.svelte` (+ hint/retry i18n keys
+in `i18n/messages.ts`), `packages/app/src/lib/nostr/relays.ts`.
+
+### Verification (2026-07-14, headless)
+
+Own infra: relay `:7791`, **frame-level lossy WS proxy** `:7799` (control
+endpoint toggles dropping server→client EVENT frames / hard-terminating
+sockets — deterministic reproduction of “reply published while our socket was
+down”), blossom `:3011`, preview `:4179` built with
+`VITE_NOSTRAUTICA_RELAYS=ws://localhost:7799`. Foreground-return simulated by
+dispatching `visibilitychange`. Temp drivers `e2e/.rs-*.mjs`, deleted after
+the run.
+
+Gap scenarios — **7/7 PASS**:
+
+| Scenario | Result |
+|---|---|
+| GAP-1 `bunker://`: nak's connect ack dropped in transit → still pending (proves the failure mode) | ✅ |
+| GAP-1 sockets hard-terminated (“backgrounded”), then foreground return → re-send + ping probe → **login completes** | ✅ |
+| GAP-1 `/me` shows npub after recovery | ✅ |
+| GAP-2 `nostrconnect://`: scripted signer's approval reply dropped → still waiting | ✅ |
+| GAP-2 foreground return → retry hint appears after the 3 s grace | ✅ |
+| GAP-2 Retry regenerates a fresh `nostrconnect://` URI | ✅ |
+| GAP-2 fresh approval against the new URI → login completes | ✅ |
+
+Happy-path regression (previous suite re-run through the proxy, lossy off):
+malformed→friendly; nostrconnect cancel→idle without error banner or
+premature hint; bunker connect + progress; `/me` npub; live restore;
+offline-bunker Cancel; offline-bunker timeout <60 s; button re-enabled —
+**8/8 PASS**. `pnpm check` green (0 errors).

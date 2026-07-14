@@ -34,6 +34,33 @@
   // In-flight bunker:// connect: a progress note + a working Cancel.
   let bunkerConnecting = $state(false);
   let bunkerAbort: AbortController | null = null;
+  // Mobile field failure: opening the signer app backgrounds this tab and its
+  // sockets, and the signer's approval reply (ephemeral kind 24133) can be lost
+  // in that gap. If we return to the foreground still waiting, offer a retry
+  // (fresh URI) after a short grace period.
+  let ncHint = $state(false);
+
+  $effect(() => {
+    if (!nc) {
+      ncHint = false;
+      return;
+    }
+    const onVis = () => {
+      if (document.visibilityState !== "visible") return;
+      setTimeout(() => {
+        if (nc) ncHint = true;
+      }, 3000);
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  });
+
+  async function retryNostrConnect() {
+    nc?.cancel();
+    // Let the cancelled attempt unwind (its run() resets busy/nc) first.
+    await new Promise((r) => setTimeout(r, 50));
+    startNostrConnect();
+  }
 
   async function copyUri() {
     if (!nc) return;
@@ -136,6 +163,12 @@
         </button>
       </div>
       <p class="muted" style="margin-top:0.5rem">{t("signin.remote.waiting")}</p>
+      {#if ncHint}
+        <p class="muted" style="margin-top:0.25rem">{t("signin.remote.staleHint")}</p>
+        <button class="btn inline" style="margin-top:0.25rem" onclick={retryNostrConnect}>
+          {t("signin.remote.retry")}
+        </button>
+      {/if}
       <button class="btn inline" style="margin-top:0.25rem" onclick={cancelNostrConnect}>
         {t("signin.remote.cancel")}
       </button>

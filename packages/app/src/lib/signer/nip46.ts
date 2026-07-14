@@ -19,6 +19,7 @@ import {
   createNostrConnectURI,
   parseBunkerInput,
 } from "nostr-tools/nip46";
+import { SimplePool } from "nostr-tools/pool";
 import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "./types.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
@@ -61,8 +62,25 @@ const CLIENT_METADATA = {
 
 /** How long to wait for a signer to answer a `bunker://` connect before giving up. */
 const CONNECT_TIMEOUT_MS = 45_000;
+/**
+ * The nostrconnect QR wait is human-paced (open signer app, approve, switch
+ * back — often with this tab backgrounded in between), so it gets a longer
+ * budget than the machine-paced bunker connect. Cancel is always available.
+ */
+const NOSTRCONNECT_TIMEOUT_MS = 120_000;
 /** Shorter budget on app boot: a dead bunker must not wedge the shell. */
 const RESTORE_TIMEOUT_MS = 12_000;
+
+/**
+ * Pool for the NIP-46 RPC transport. Kind-24133 replies are EPHEMERAL — a
+ * reply published while our socket is down is lost forever, and mobile
+ * browsers throttle/drop sockets the moment the tab is backgrounded behind the
+ * signer app. So the socket is treated as hostile: auto-reconnect + resubscribe
+ * on close, and a keepalive ping so idle sockets aren't reaped by mobile radios
+ * or proxies while we wait for the user to approve. nostr-tools' default pool
+ * does neither (`enableReconnect` and `enablePing` are both off by default).
+ */
+const makePool = () => new SimplePool({ enableReconnect: true, enablePing: true });
 
 const timeoutMessage = () => t("error.signerTimeout");
 
@@ -106,6 +124,56 @@ function withTimeout<T>(
   });
 }
 
+/**
+ * `connect` with lost-ack recovery. If the tab was backgrounded (user approving
+ * in the signer app) when the signer published its ack, the ephemeral reply is
+ * gone for good — it can't be re-fetched after reconnecting. On return to
+ * foreground, while still pending, re-send `connect` (client-initiated, safe to
+ * repeat) and probe with `ping`: the ping answers if the signer already
+ * authorized us and only the ack was lost (some bunkers, e.g. nak, rotate the
+ * connect secret after first use, so a re-sent connect alone can fail even
+ * though we ARE connected). Sending also forces the pool to re-open any dropped
+ * socket immediately instead of waiting out the reconnect backoff. Failures of
+ * recovery attempts are ignored; only the first attempt's error is surfaced.
+ */
+function connectWithRecovery(bunker: BunkerSigner): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+      fn();
+    };
+    const onVisible =
+      typeof document === "undefined"
+        ? null
+        : () => {
+            if (settled || document.visibilityState !== "visible") return;
+            bunker.connect(CLIENT_METADATA).then(
+              () => settle(resolve),
+              () => {},
+            );
+            bunker.ping().then(
+              () => settle(resolve),
+              () => {},
+            );
+          };
+    if (onVisible) document.addEventListener("visibilitychange", onVisible);
+    bunker.connect(CLIENT_METADATA).then(
+      () => settle(resolve),
+      (e) => {
+        // A failure while backgrounded is most likely the throttled socket
+        // itself — stay pending and let the foreground recovery decide (the
+        // caller's overall timeout still bounds the wait).
+        if (typeof document !== "undefined" && document.visibilityState === "hidden")
+          return;
+        settle(() => reject(e instanceof Error ? e : new Error(String(e))));
+      },
+    );
+  });
+}
+
 export interface NostrConnectHandle {
   /** The `nostrconnect://` URI to render as QR / deep link. */
   uri: string;
@@ -130,6 +198,7 @@ export class Nip46Signer implements AppSigner {
   private constructor(
     private readonly bunker: BunkerSigner,
     private readonly clientSk: Uint8Array,
+    private readonly pool?: SimplePool,
   ) {}
 
   /** Serialize the session so it can be restored after a refresh (spec §5.3). */
@@ -145,8 +214,10 @@ export class Nip46Signer implements AppSigner {
   /** Reconnect a persisted NIP-46 session (same client key → same Amber connection). */
   static async fromPersisted(session: Nip46Session): Promise<Nip46Signer> {
     const clientSk = hexToBytes(session.clientSkHex);
+    const pool = makePool();
     const bunker = BunkerSigner.fromBunker(clientSk, session.bunker as any, {
       onauth: onAuth,
+      pool,
     });
     // Bounded so a dead bunker can't block app boot forever (spec §5.3).
     try {
@@ -158,9 +229,10 @@ export class Nip46Signer implements AppSigner {
       );
     } catch (e) {
       await bunker.close().catch(() => {});
+      pool.destroy();
       throw e;
     }
-    return new Nip46Signer(bunker, clientSk);
+    return new Nip46Signer(bunker, clientSk, pool);
   }
 
   /**
@@ -170,7 +242,7 @@ export class Nip46Signer implements AppSigner {
    */
   static startNostrConnect(
     relays: string[],
-    timeoutMs = CONNECT_TIMEOUT_MS,
+    timeoutMs = NOSTRCONNECT_TIMEOUT_MS,
   ): NostrConnectHandle {
     const clientSk = generateSecretKey();
     const secret = crypto.randomUUID().replace(/-/g, "");
@@ -186,18 +258,36 @@ export class Nip46Signer implements AppSigner {
     // Both the timeout and the user's Cancel abort the same wait; this flag lets
     // us map the resulting rejection to the right message.
     let userCancelled = false;
+    const pool = makePool();
+    // On return to foreground, force an immediate reconnect of any dropped
+    // socket instead of waiting out the pool's backoff — the signer may be
+    // about to publish (or re-publish) its ephemeral reply.
+    const onVisible =
+      typeof document === "undefined"
+        ? null
+        : () => {
+            if (document.visibilityState !== "visible") return;
+            for (const url of relays) void pool.ensureRelay(url).catch(() => {});
+          };
+    if (onVisible) document.addEventListener("visibilitychange", onVisible);
     const connected = BunkerSigner.fromURI(
       clientSk,
       uri,
-      { onauth: onAuth },
+      { onauth: onAuth, pool },
       controller.signal,
-    ).then((bunker) => new Nip46Signer(bunker, clientSk));
+    ).then((bunker) => new Nip46Signer(bunker, clientSk, pool));
     // Independent timeout: fromURI's own budget is 5 min; fail sooner + friendly.
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const guarded = connected.finally(() => clearTimeout(timer)).catch((e) => {
-      if (userCancelled) throw new Error("Cancelled");
-      throw controller.signal.aborted ? new Error(timeoutMessage()) : e;
-    });
+    const guarded = connected
+      .finally(() => {
+        clearTimeout(timer);
+        if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+      })
+      .catch((e) => {
+        pool.destroy();
+        if (userCancelled) throw new Error("Cancelled");
+        throw controller.signal.aborted ? new Error(timeoutMessage()) : e;
+      });
     const cancel = () => {
       userCancelled = true;
       controller.abort();
@@ -222,25 +312,28 @@ export class Nip46Signer implements AppSigner {
     if (!pointer || !pointer.relays.length) {
       throw new Error(t("error.badBunkerLink"));
     }
+    const pool = makePool();
     let bunker: BunkerSigner;
     try {
       // Throws "bad point: is not on curve" for a valid-hex but off-curve pubkey.
-      bunker = BunkerSigner.fromBunker(clientSk, pointer, { onauth: onAuth });
+      bunker = BunkerSigner.fromBunker(clientSk, pointer, { onauth: onAuth, pool });
     } catch {
+      pool.destroy();
       throw new Error(t("error.badBunkerLink"));
     }
     try {
       await withTimeout(
-        bunker.connect(CLIENT_METADATA),
+        connectWithRecovery(bunker),
         CONNECT_TIMEOUT_MS,
         abort,
         timeoutMessage(),
       );
     } catch (e) {
       await bunker.close().catch(() => {});
+      pool.destroy();
       throw e;
     }
-    return new Nip46Signer(bunker, clientSk);
+    return new Nip46Signer(bunker, clientSk, pool);
   }
 
   async getPublicKey(): Promise<string> {
@@ -263,5 +356,6 @@ export class Nip46Signer implements AppSigner {
 
   async close(): Promise<void> {
     await this.bunker.close();
+    this.pool?.destroy();
   }
 }

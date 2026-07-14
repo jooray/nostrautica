@@ -31,12 +31,15 @@ export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://relay.nostr.band"];
  * Relays advertised in the `nostrconnect://` URI (NIP-46). Dedicated signer
  * relays handle the ephemeral kind-24133 traffic without the rate limits
  * general-purpose relays impose; `relay.nsec.app` is the de-facto signer relay
- * (nsec.app / Amber / nostrconnect.org). We pair it with a widely-reachable
- * general relay as a fallback since relay.nsec.app has had EU flakiness.
+ * (nsec.app / Amber / nostrconnect.org). Two widely-reachable general relays
+ * add redundancy (relay.nsec.app has had EU flakiness) — but note redundancy
+ * only helps while our sockets are open; the pool's reconnect + foreground
+ * recovery in signer/nip46.ts is what covers backgrounded-tab drops.
  * Honors VITE_NOSTRAUTICA_RELAYS so local e2e keeps working.
  */
 export const NIP46_RELAYS = ENV_RELAYS ?? [
   "wss://relay.nsec.app",
+  "wss://relay.damus.io",
   "wss://relay.primal.net",
 ];
 
