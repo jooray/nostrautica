@@ -60,7 +60,6 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
-import { signerWrap } from "./giftwrap.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
@@ -190,15 +189,18 @@ export async function approveAttendee(
   const eidSk = hexToBytes(keys.eidNsecHex);
   const eckBytes = base64ToBytes(eck.key);
 
-  // 1. Key grant (21602) → attendee, sealed by the organizer.
+  // 1. Key grant (21602) → attendee, sealed by E_id — the grant comes from the
+  // event authority, and the attendee's C2 authentication requires the seal author
+  // to be E_id (or the coordinator). Sealing with the organizer's personal key
+  // would be rejected as forged (the no-coordinator approval path).
   const grant = {
     v: 1,
     a: ctx.coordinate,
     role,
     eck: keys.eck,
-    granted_by: await organizer.getPublicKey(),
+    granted_by: getPublicKey(eidSk),
   };
-  const grantWrap = await signerWrap(organizer, req.attendeePubkey, {
+  const grantWrap = wrapRumor(eidSk, req.attendeePubkey, {
     kind: KIND_KEY_GRANT,
     content: grant,
   });
@@ -331,7 +333,10 @@ export async function addCoOrganizer(
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
     throw new Error("organizer keys not available on this device");
   }
-  const wrap = await signerWrap(organizer, coOrganizerPubkey, {
+  const eidSk = hexToBytes(keys.eidNsecHex);
+  // Sealed by E_id: the recipient's C2 authentication of a 21605 organizer grant
+  // requires the seal author to be E_id (authenticateOrganizerGrant).
+  const wrap = wrapRumor(eidSk, coOrganizerPubkey, {
     kind: KIND_ORGANIZER_GRANT,
     content: {
       v: 1,
@@ -340,7 +345,7 @@ export async function addCoOrganizer(
       einbox_nsec: keys.einboxNsecHex,
       eck: keys.eck,
       config_relays: ctx.config.relays,
-      granted_by: await organizer.getPublicKey(),
+      granted_by: getPublicKey(eidSk),
     },
   });
   await publishOrQueue(wrap as any, ctx.config.relays);
@@ -529,15 +534,16 @@ export async function revokeAttendeeClient(
       pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
     }
 
-    // Re-grant the new ECK set (all versions) to this attendee.
-    const grantWrap = await signerWrap(organizer, a.pubkey, {
+    // Re-grant the new ECK set (all versions) to this attendee — sealed by E_id
+    // so C2 authentication accepts it.
+    const grantWrap = wrapRumor(eidSk, a.pubkey, {
       kind: KIND_KEY_GRANT,
       content: {
         v: 1,
         a: ctx.coordinate,
         role: a.role,
         eck: keys.eck,
-        granted_by: await organizer.getPublicKey(),
+        granted_by: getPublicKey(eidSk),
       },
     });
     pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
