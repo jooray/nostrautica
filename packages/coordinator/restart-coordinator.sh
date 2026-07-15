@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Rebuild and restart the Nostrautica coordinator from this dev checkout (which is
-# at the pushed commit — pushes originate here). Called by the deploy post-receive
-# hook and safe to run by hand. Local/deploy file, not in git (like run-coordinator.sh).
+# Rebuild and restart the Nostrautica coordinator. The deploy post-receive hook
+# rsyncs the repo source to the coordinator host (nostrautica@jl.bednar.io) and
+# runs this over SSH; also safe to run by hand there.
+#
+# PATH must find pnpm, which on that host is user-local (~/.npm-global/bin — the
+# distro node RPM ships no corepack), while /usr/bin (ffmpeg) comes from the
+# inherited login PATH. The linuxbrew entry is harmless where it doesn't exist.
 #
 # Build happens BEFORE the old instance is stopped, so a failing build leaves the
 # running coordinator untouched.
 set -uo pipefail
-export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+export PATH="$HOME/.npm-global/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
 
 ROOT="$HOME/nostrautica"
 COORD="$ROOT/packages/coordinator"
