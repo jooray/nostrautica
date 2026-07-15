@@ -4,13 +4,41 @@
   import { resolveMediaUrl, releaseMediaUrl } from "$lib/media/playback.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
-  let { descriptor, transcript }: { descriptor: MediaDescriptor; transcript?: MediaTranscript } =
-    $props();
+  let {
+    descriptor,
+    transcript,
+    // Watch-progress hooks (spec F2.4). Optional: intros pass neither. `resumeAt`
+    // seeks the media there once it loads; `onProgress` reports the play position.
+    resumeAt = 0,
+    onProgress,
+  }: {
+    descriptor: MediaDescriptor;
+    transcript?: MediaTranscript;
+    resumeAt?: number;
+    onProgress?: (seconds: number) => void;
+  } = $props();
 
   let url = $state<string | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
   let showTranscript = $state(false);
+  let mediaEl = $state<HTMLMediaElement | null>(null);
+  let lastReport = 0;
+
+  function onLoadedMeta() {
+    if (resumeAt > 0 && mediaEl && resumeAt < mediaEl.duration - 1) {
+      mediaEl.currentTime = resumeAt;
+    }
+  }
+  function onTimeUpdate() {
+    if (!onProgress || !mediaEl) return;
+    const now = mediaEl.currentTime;
+    // Throttle to ~once every 5s of playback so we don't thrash storage.
+    if (Math.abs(now - lastReport) >= 5) {
+      lastReport = now;
+      onProgress(now);
+    }
+  }
 
   // Audio intros (spec F1) play through <audio>; video through <video>. There are
   // no timed caption tracks yet (VTT is a phase-2 follow-up), so the published
@@ -36,10 +64,25 @@
 
 {#if url}
   {#if isAudio}
-    <audio src={url} controls style="width:100%"></audio>
+    <audio
+      bind:this={mediaEl}
+      src={url}
+      controls
+      style="width:100%"
+      onloadedmetadata={onLoadedMeta}
+      ontimeupdate={onTimeUpdate}
+    ></audio>
   {:else}
     <!-- svelte-ignore a11y_media_has_caption -->
-    <video src={url} controls playsinline style="max-width:100%;border-radius:12px"></video>
+    <video
+      bind:this={mediaEl}
+      src={url}
+      controls
+      playsinline
+      style="max-width:100%;border-radius:12px"
+      onloadedmetadata={onLoadedMeta}
+      ontimeupdate={onTimeUpdate}
+    ></video>
   {/if}
 {:else if error}
   <div class="card warn">{t("media.playError", { reason: error })}</div>

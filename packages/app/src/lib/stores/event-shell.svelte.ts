@@ -43,6 +43,18 @@ class EventShell {
       this.ctx.config.matching === "on"
     );
   }
+  /**
+   * Talks destination (spec F2). Gated exactly like showMatches: members-only, and
+   * only when the organizer enabled talks (`talks !== "off"`). A normal (talks-off)
+   * event never shows the Talks tab or any talk step.
+   */
+  get showTalks(): boolean {
+    return this.isMember && !!this.ctx && this.ctx.config.talks !== "off";
+  }
+  /** In "prerecord-first" mode Talks is featured before People in the nav order. */
+  get talksFirst(): boolean {
+    return this.ctx?.config.talks === "prerecord-first";
+  }
 
   /**
    * Reconcile the shell with the current event naddr. Call from a layout $effect

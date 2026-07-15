@@ -17,6 +17,8 @@ import {
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_PROFILE_CORRECTION,
+  KIND_TALK_SUBMISSION,
+  KIND_TALK,
   KIND_DIRECTORY_ENTRY,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
@@ -40,15 +42,19 @@ import {
   coordinatorGrantContentSchema,
   adminCommandContentSchema,
   profileCorrectionContentSchema,
+  talkSubmissionContentSchema,
   AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
   type EckVersion,
   type EventConfig,
+  type TalksMode,
   type AttendeeProfile,
   type MediaDescriptor,
   type MediaTranscript,
   type ProfileCorrectionContent,
+  type TalkSubmissionContent,
+  type TalkContent,
   type AiProfile,
   type RosterContent,
   type MatchMatrixContent,
@@ -82,8 +88,11 @@ import {
   buildMatchMatrix,
   buildKeyGrant,
   buildCoordinatorStatus,
+  buildTalkEntry,
+  talkBlindedD,
   type PublishKeys,
 } from "./nostr/publisher.js";
+import { transcribeMedia } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef } from "./providers/types.js";
 
 /** Minimal transport the coordinator needs (NostrClient satisfies it). */
@@ -151,6 +160,8 @@ interface EventState {
   /** Whether AI matching runs for this event (audit H4). "off" disables all AI stages. */
   matching: "on" | "off";
   matchVisibility: "pair" | "event";
+  /** Prerecorded-talks journey mode (spec F2). "off" ⇒ talk submissions are ignored. */
+  talks: TalksMode;
   /** Blossom origins media may be fetched from (audit C3 allowlist). Empty = derive from media urls, IP-guarded. */
   blossomOrigins: string[];
   lang: string;
@@ -293,6 +304,14 @@ export class Coordinator {
     this.jobs.register("publish_matches", async (p) => {
       await this.publishMatchesJob(p.coordinate, p.pubkey);
     });
+
+    // Transcribe a submitted talk (spec F2). Reuses the intro transcription pipeline
+    // unchanged (audio.ts segments long talks). The transcript is stored on the talk
+    // row (published on the 31610 at talk_publish time) and folded into the speaker's
+    // ai_profile so the talk feeds matching (§9.2).
+    this.jobs.register("process_talk", async (p) => {
+      await this.processTalkJob(p.coordinate, p.pubkey, p.talkD as string);
+    });
   }
 
   // ── install (21603) ────────────────────────────────────────────────────────
@@ -341,6 +360,7 @@ export class Coordinator {
       nostrContextN: config?.nostrContext ?? 0,
       matching: config?.matching ?? "off",
       matchVisibility: config?.matchVisibility ?? "pair",
+      talks: config?.talks ?? "off",
       blossomOrigins: config?.blossom ?? [],
       lang: config?.lang ?? "en",
       scoringCtx: {
@@ -354,7 +374,7 @@ export class Coordinator {
     };
     this.events.set(grant.coordinate, state);
     log(
-      `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}`,
+      `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}, talks=${state.talks}`,
     );
     log(`          coordinate ${grant.coordinate}`);
     // Subscribe to this event's E_inbox NOW (not only at startup), so an install
@@ -445,7 +465,55 @@ export class Coordinator {
       // attendee may only correct THEIR OWN profile (audit U9). There is no subject
       // field to spoof: a correction always applies to the sender's own entry.
       await this.handleCorrection(state, rumor.pubkey, content);
+    } else if (rumor.kind === KIND_TALK_SUBMISSION) {
+      const content = talkSubmissionContentSchema.parse(JSON.parse(rumor.content));
+      // The speaker is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor.
+      await this.handleTalkSubmission(state, rumor.pubkey, content);
     }
+  }
+
+  /**
+   * Store a submitted (or edited) talk (spec F2). Ignored entirely when talks are
+   * off for this event, or when the sender isn't an approved member — talks are a
+   * members-only surface. The talk lands as 'pending' (needs organizer moderation);
+   * a process_talk job transcribes it in the background. The previously published
+   * 31610 (if any) stays live until the organizer publishes the new revision.
+   */
+  private async handleTalkSubmission(
+    state: EventState,
+    pubkey: string,
+    content: TalkSubmissionContent,
+  ): Promise<void> {
+    if (content.a !== state.coordinate) return;
+    if (state.talks === "off") {
+      log(`[talk] ignored from ${short(pubkey)}: talks are off for this event`);
+      return;
+    }
+    const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
+    if (!attendee || attendee.status !== "approved") {
+      log(`[talk] ignored from ${short(pubkey)}: not an approved attendee`);
+      return;
+    }
+    this.deps.store.upsertTalk({
+      coordinate: state.coordinate,
+      pubkey,
+      talkD: content.talk_d,
+      title: content.title,
+      description: content.description,
+      speakersJson: JSON.stringify(content.speakers),
+      mediaJson: JSON.stringify(content.media),
+      lang: state.lang,
+      revision: content.revision,
+      mediaX: content.media.x,
+      now: this.now(),
+    });
+    log(`[talk] "${content.title}" from ${short(pubkey)} (rev ${content.revision}) → pending moderation`);
+    // Transcribe in the background (keyed by media x so a re-delivery dedupes).
+    this.jobs.enqueue(
+      "process_talk",
+      `talk:${state.coordinate}:${pubkey}:${content.talk_d}:${content.media.x}`,
+      { coordinate: state.coordinate, pubkey, talkD: content.talk_d },
+    );
   }
 
   /**
@@ -665,7 +733,11 @@ export class Coordinator {
     const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Capture the source revision this AI run is derived from (audit Q10).
     const sourceRevision = attendee.source_revision ?? this.sourceRevision(attendee.profile_json ?? "");
-    log(`[pipeline] ${short(pubkey)}: transcribe ${media.length} media${introText ? " + text intro" : ""} → nostr-context → ai_profile…`);
+    // Fold the speaker's talk transcripts into their ai_profile (spec §9.2, F2) so a
+    // prerecorded talk feeds matching "as today". Only when talks are enabled.
+    const extraTranscripts =
+      state.talks !== "off" ? this.deps.store.talkTranscriptsForSpeaker(coordinate, pubkey) : [];
+    log(`[pipeline] ${short(pubkey)}: transcribe ${media.length} media${introText ? " + text intro" : ""}${extraTranscripts.length ? ` + ${extraTranscripts.length} talk transcript(s)` : ""} → nostr-context → ai_profile…`);
 
     const { aiProfile, transcripts } = await processAttendee(
       {
@@ -685,7 +757,7 @@ export class Coordinator {
         lang: state.lang,
         now: this.now,
       },
-      { pubkey, profile, media, introText },
+      { pubkey, profile, media, introText, extraTranscripts },
     );
 
     this.deps.store.upsertAttendee({
@@ -701,6 +773,129 @@ export class Coordinator {
     });
     await this.publishDirectory(state, pubkey);
     log(`[pipeline] ${short(pubkey)} ai_profile ready — skills: ${aiProfile.skills.slice(0, 4).join(", ")}`);
+  }
+
+  /**
+   * Transcribe a submitted talk (spec F2). Reuses the intro transcription pipeline
+   * (audio.ts segments long talks). The transcript is stored on the talk row for
+   * publication on the 31610 and — when matching is on — folded into the speaker's
+   * ai_profile via a reprocess so the talk feeds matching (§9.2). If the talk is
+   * already published, re-publish it with the fresh transcript.
+   */
+  private async processTalkJob(coordinate: string, pubkey: string, talkD: string): Promise<void> {
+    const state = this.events.get(coordinate);
+    if (!state) return;
+    const talk = this.deps.store.getTalk(coordinate, pubkey, talkD);
+    if (!talk) return;
+    const media = JSON.parse(talk.media_json) as MediaDescriptor;
+    const transcribe =
+      this.deps.transcribe ??
+      ((d: MediaDescriptor) =>
+        transcribeMedia(
+          {
+            store: this.deps.store,
+            stt: this.deps.stt,
+            sttModel: this.deps.sttModel,
+            fetchBlob: this.deps.fetchBlob,
+            blossomOrigins: state.blossomOrigins,
+            maxMediaBytes: this.deps.maxMediaBytes,
+            now: this.now,
+          },
+          d,
+        ));
+    let transcript: MediaTranscript | undefined;
+    const r = await transcribe(media);
+    const text = typeof r === "string" ? r : r.text;
+    const detected = typeof r === "string" ? undefined : r.lang;
+    if (text) {
+      transcript = {
+        x: media.x,
+        text,
+        lang: detected ?? (state.lang || "en").toLowerCase(),
+        source: "stt",
+        updated_at: this.now(),
+      };
+      this.deps.store.setTalkTranscript(coordinate, pubkey, talkD, JSON.stringify(transcript), this.now());
+      log(`[talk] transcribed "${talk.title}" for ${short(pubkey)}`);
+    }
+    // If this talk is already published, refresh its 31610 with the new transcript.
+    if (talk.status === "published") await this.publishTalk(state, pubkey, talkD);
+    // Feed matching (§9.2): reprocess the speaker so the talk contributes to their
+    // ai_profile. Keyed by the talk media x so re-delivery dedupes but a new
+    // recording re-runs. Only when matching is on and they have a submitted profile.
+    if (state.matching === "on" && this.deps.store.getAttendee(coordinate, pubkey)?.profile_json) {
+      this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:talk:${media.x}`, {
+        coordinate,
+        pubkey,
+      });
+    }
+  }
+
+  /**
+   * Publish (or refresh) a talk's 31610 entry under the ECK (spec F2). Sets status
+   * 'published'. The blinded `d` is stable per (speaker, talk_d), so a new revision
+   * replaces the previous entry in place — the last published talk stays watchable
+   * until this succeeds.
+   */
+  private async publishTalk(state: EventState, pubkey: string, talkD: string): Promise<void> {
+    const talk = this.deps.store.getTalk(state.coordinate, pubkey, talkD);
+    if (!talk) return;
+    const media = JSON.parse(talk.media_json) as MediaDescriptor;
+    const transcript = talk.transcript_json
+      ? (JSON.parse(talk.transcript_json) as MediaTranscript)
+      : undefined;
+    const speakers = (() => {
+      try {
+        return JSON.parse(talk.speakers_json) as string[];
+      } catch {
+        return [];
+      }
+    })();
+    const publishedAt =
+      talk.published_at > 0 ? talk.published_at : Math.floor(this.now() / 1000);
+    const content: TalkContent = {
+      v: 1,
+      pubkey,
+      talk_d: talkD,
+      title: talk.title,
+      description: talk.description,
+      speakers,
+      media,
+      ...(transcript ? { transcript } : {}),
+      lang: talk.lang,
+      revision: talk.revision,
+      status: "published",
+      published_at: publishedAt,
+    };
+    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, content);
+    await this.deps.transport.publish(event, state.configRelays);
+    this.deps.store.setTalkStatus(state.coordinate, pubkey, talkD, "published", publishedAt, this.now());
+    log(`[talk] published 31610 "${talk.title}" for ${short(pubkey)} (rev ${talk.revision})`);
+  }
+
+  /**
+   * Reject a talk (spec F2): mark it rejected and delete any published 31610 so it
+   * stops being watchable. NIP-09 addressable deletion at the talk's blinded d.
+   */
+  private async rejectTalk(state: EventState, pubkey: string, talkD: string): Promise<void> {
+    const talk = this.deps.store.getTalk(state.coordinate, pubkey, talkD);
+    if (!talk) return;
+    if (talk.status === "published") {
+      const { bytes } = this.currentEck(state);
+      const d = talkBlindedD(bytes, state.coordinate, pubkey, talkD);
+      const deletion = finalizeEvent(
+        {
+          kind: KIND_DELETION,
+          created_at: Math.floor(this.now() / 1000),
+          tags: [["a", `${KIND_TALK}:${this.coordPubkey}:${d}`], ["k", String(KIND_TALK)]],
+          content: "talk rejected",
+        },
+        this.deps.coordSk,
+      );
+      await this.deps.transport.publish(deletion, state.configRelays);
+    }
+    this.deps.store.setTalkStatus(state.coordinate, pubkey, talkD, "rejected", 0, this.now());
+    log(`[talk] rejected "${talk.title}" for ${short(pubkey)}`);
   }
 
   private buildMatchingRoster(coordinate: string): AttendeeForMatching[] {
@@ -906,7 +1101,7 @@ export class Coordinator {
   private async handleAdmin(
     from: string,
     coordinate: string,
-    cmd: "approve" | "recompute" | "reprocess" | "revoke",
+    cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject",
     args: Record<string, unknown>,
   ): Promise<void> {
     const state = this.events.get(coordinate);
@@ -943,6 +1138,16 @@ export class Coordinator {
     } else if (cmd === "revoke") {
       const pubkey = String(args.pubkey ?? "");
       if (pubkey) await this.revokeAttendee(state, pubkey);
+    } else if (cmd === "talk_publish") {
+      // Moderate a submitted talk: publish its 31610 (spec F2). No-op if talks are off.
+      if (state.talks === "off") return;
+      const pubkey = String(args.pubkey ?? "");
+      const talkD = String(args.talk_d ?? "");
+      if (pubkey && talkD) await this.publishTalk(state, pubkey, talkD);
+    } else if (cmd === "talk_reject") {
+      const pubkey = String(args.pubkey ?? "");
+      const talkD = String(args.talk_d ?? "");
+      if (pubkey && talkD) await this.rejectTalk(state, pubkey, talkD);
     }
   }
 
@@ -1158,6 +1363,7 @@ export class Coordinator {
     }
     state.matching = config.matching;
     state.matchVisibility = config.matchVisibility;
+    state.talks = config.talks;
     state.lang = config.lang;
     state.scoringCtx = { ...state.scoringCtx, lang: config.lang };
     state.nostrContextN = config.nostrContext;

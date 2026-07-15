@@ -44,6 +44,7 @@ function makeConfig(
     eck: 1,
     nostrContext: 0,
     lang: "en",
+    talks: "off",
   };
 }
 

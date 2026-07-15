@@ -14,12 +14,22 @@
     loadLibrary,
     prepareReuse,
   } from "$lib/media/submit.js";
+  import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
   const kindLabel = $derived(talk ? t("record.kind.talk") : t("record.kind.intro"));
+
+  // Talk metadata (spec F2). A talk is submitted via a 21609 rumor (not the 21601
+  // intro path) carrying title + description + the talk media. Editing an existing
+  // talk reuses its `talk_d` and bumps the revision.
+  let talkTitle = $state("");
+  let talkDescription = $state("");
+  let talkId = $state("");
+  let talkRevision = $state(0);
+  let editingTalk = $state(false);
 
   // Intro composer mode (spec F1.4). One recording engine (`VideoCapture`) serves
   // both video and audio; text bypasses capture/upload entirely. Feature 2 reuses
@@ -58,6 +68,19 @@
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
+      // Editing an existing talk (handed off from TalkDetail): prefill + reuse id.
+      if (talk) {
+        const draft = takeTalkEditDraft();
+        if (draft) {
+          editingTalk = true;
+          talkId = draft.talkId;
+          talkTitle = draft.title;
+          talkDescription = draft.description;
+          talkRevision = draft.revision + 1;
+        } else {
+          talkId = newTalkId();
+        }
+      }
       if (session.signer) {
         const bk = await deriveBlindingKey(session.signer);
         library = await loadLibrary(session.signer, bk);
@@ -267,6 +290,19 @@
   }
 
   async function finishSubmitMedia(descriptor: MediaDescriptor) {
+    // A talk goes to the coordinator via a dedicated 21609 rumor (spec F2), NOT the
+    // 21601 intro path — it carries title/description and is moderated separately.
+    if (talk) {
+      await submitTalk(session.signer!, ctx!, {
+        talkId,
+        title: talkTitle.trim(),
+        description: talkDescription.trim(),
+        media: descriptor,
+        revision: talkRevision,
+      });
+      finish();
+      return;
+    }
     const signer = session.signer!;
     const bk = await deriveBlindingKey(signer);
     const self = await loadSelfCopy(signer, ctx!, bk);
@@ -286,7 +322,9 @@
     done = true;
   }
 
-  const canSubmit = $derived(disclosureAck && !busy);
+  // Talks require a title (and always media — the text mode is intro-only).
+  const canSubmit = $derived(disclosureAck && !busy && (!talk || talkTitle.trim().length > 0));
+  const talksOff = $derived(talk && !!ctx && ctx.config.talks === "off");
 </script>
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
@@ -304,14 +342,37 @@
   <div class="card">
     <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("record.loginFirst")}</button>
   </div>
+{:else if talksOff}
+  <!-- Deep-link guard: talks are off for this event, so there's no talk step. -->
+  <div class="card" role="status">
+    <p class="muted">{t("talks.disabled")}</p>
+    <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>{t("record.backToEvent")}</button>
+  </div>
 {:else}
-  <!-- Mode tabs: video · audio · text (spec F1.4). -->
+  {#if talk}
+    <!-- Talk metadata (spec F2): title + description ride in the 21609 submission. -->
+    <div class="card stack">
+      {#if editingTalk}<p class="muted" style="margin:0">{t("talks.editing")}</p>{/if}
+      <div>
+        <label for="talk-title">{t("talks.field.title")}</label>
+        <input id="talk-title" bind:value={talkTitle} maxlength="200" placeholder={t("talks.field.title.placeholder")} />
+      </div>
+      <div>
+        <label for="talk-desc">{t("talks.field.description")}</label>
+        <textarea id="talk-desc" rows="3" maxlength="2000" bind:value={talkDescription}></textarea>
+      </div>
+    </div>
+  {/if}
+
+  <!-- Mode tabs: video · audio · text (spec F1.4). Talks are media-only (no text). -->
   <div class="card">
     <div class="field-label" id="mode-label">{t("record.mode.label")}</div>
     <div class="row" role="tablist" aria-labelledby="mode-label" style="flex-wrap:wrap">
       <button class="btn inline" role="tab" aria-selected={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
       <button class="btn inline" role="tab" aria-selected={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
-      <button class="btn inline" role="tab" aria-selected={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
+      {#if !talk}
+        <button class="btn inline" role="tab" aria-selected={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
+      {/if}
     </div>
   </div>
 
@@ -344,7 +405,7 @@
     </label>
   </div>
 
-  {#if mode !== "text" && library.length > 0 && !recorded}
+  {#if !talk && mode !== "text" && library.length > 0 && !recorded}
     <div class="card">
       <h2>{t("record.reuse.title")}</h2>
       <p class="muted">{t("record.reuse.body")}</p>

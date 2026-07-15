@@ -8,6 +8,13 @@ import { makeCoordinate } from "./coordinate.js";
 
 export type Approval = "manual" | "invite" | "manual+invite";
 export type MatchVisibility = "pair" | "event";
+/**
+ * Prerecorded-talks journey mode (spec F2, audit U11):
+ *  - "off" (default, tag OMITTED) — no Talks nav, no talk step; normal event.
+ *  - "on" — Talks destination + submission/watch available.
+ *  - "prerecord-first" — Talks featured before People (watch ahead, meet at venue).
+ */
+export type TalksMode = "off" | "on" | "prerecord-first";
 
 export interface EventConfig {
   d: string;
@@ -24,6 +31,7 @@ export interface EventConfig {
   eck: number; // current ECK version
   nostrContext: number; // N public events per attendee to summarize; 0 = off
   lang: string; // ISO 639-1 event language (attendee UI + AI output); default "en"
+  talks: TalksMode; // prerecorded-talks journey (spec F2); default "off" (tag omitted)
 }
 
 export interface EventConfigTags {
@@ -55,6 +63,10 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
   // so only emit the tag when it differs (keeps existing en events byte-identical).
   const lang = normalizeLang(cfg.lang);
   if (lang !== "en") tags.push(["lang", lang]);
+  // Talks mode: "off" is the implicit default, so only emit the tag when talks are
+  // enabled — normal (talks-off) events stay byte-identical. Localized here so it
+  // composes with the upcoming Marmot `chat` tag (same three edit sites).
+  if (cfg.talks && cfg.talks !== "off") tags.push(["talks", cfg.talks]);
   return { kind: KIND_EVENT_CONFIG, tags, content: "" };
 }
 
@@ -73,6 +85,7 @@ function all(tags: string[][], name: string): string[] {
 
 const APPROVALS: Approval[] = ["manual", "invite", "manual+invite"];
 const VISIBILITIES: MatchVisibility[] = ["pair", "event"];
+const TALKS_MODES: TalksMode[] = ["off", "on", "prerecord-first"];
 
 /**
  * Parse a positive-integer tag value with a default (Q7). An absent, non-numeric,
@@ -112,6 +125,12 @@ export function parseEventConfig(
   const matchVisibility: MatchVisibility = VISIBILITIES.includes(visRaw as MatchVisibility)
     ? (visRaw as MatchVisibility)
     : "pair";
+  // An absent or unrecognized talks tag falls back to "off" (default): a normal
+  // event with no talks tag parses exactly as a talks-off event.
+  const talksRaw = first(tags, "talks");
+  const talks: TalksMode = TALKS_MODES.includes(talksRaw as TalksMode)
+    ? (talksRaw as TalksMode)
+    : "off";
   return {
     d,
     eidPubkey,
@@ -127,6 +146,7 @@ export function parseEventConfig(
     eck: Math.max(1, intTag(tags, "eck", 1)),
     nostrContext: intTag(tags, "nostr_context", 0),
     lang: normalizeLang(first(tags, "lang")),
+    talks,
   };
 }
 

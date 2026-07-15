@@ -19,6 +19,16 @@
   }
 </script>
 
+{#snippet talksTab()}
+  <button
+    aria-current={active("talks", "talk") ? "page" : undefined}
+    class:active={active("talks", "talk")}
+    onclick={() => router.go({ name: "talks", naddr })}
+  >
+    <span class="ico"><Icon name="talks" size={24} /></span><span class="lbl">{t("nav.talks")}</span>
+  </button>
+{/snippet}
+
 <nav class="event-nav" aria-label={t("nav.eventPrimary")}>
   <button
     aria-current={active("event", "join") ? "page" : undefined}
@@ -27,6 +37,9 @@
   >
     <span class="ico"><Icon name="compass" size={24} /></span><span class="lbl">{t("nav.overview")}</span>
   </button>
+
+  <!-- In "prerecord-first" mode Talks is featured before People (watch ahead). -->
+  {#if eventShell.showTalks && eventShell.talksFirst}{@render talksTab()}{/if}
 
   {#if eventShell.showPeople}
     <button
@@ -37,6 +50,8 @@
       <span class="ico"><Icon name="people" size={24} /></span><span class="lbl">{t("nav.people")}</span>
     </button>
   {/if}
+
+  {#if eventShell.showTalks && !eventShell.talksFirst}{@render talksTab()}{/if}
 
   {#if eventShell.showMatches}
     <button

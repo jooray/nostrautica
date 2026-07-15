@@ -233,10 +233,65 @@ export type CoordinatorGrantContent = z.infer<
 export const adminCommandContentSchema = z.object({
   v: version,
   a: z.string(),
-  cmd: z.enum(["approve", "recompute", "reprocess", "revoke"]),
+  // talk_publish / talk_reject moderate a submitted talk (F2, audit U11); args
+  // carry { pubkey, talk_d }.
+  cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject"]),
   args: z.record(z.unknown()).default({}),
 });
 export type AdminCommandContent = z.infer<typeof adminCommandContentSchema>;
+
+// ── Talk (spec F2, audit U11) ────────────────────────────────────────────────
+// Upper bounds on talk metadata (kept small — the media carries the talk itself).
+export const MAX_TALK_TITLE = 200;
+export const MAX_TALK_DESC = 2000;
+
+export const talkStatusSchema = z.enum(["pending", "published", "rejected"]);
+export type TalkStatus = z.infer<typeof talkStatusSchema>;
+
+// ── 21609 Talk Submission rumor content (attendee → E_inbox) ─────────────────
+// A speaker submits (or edits) a prerecorded talk. `talk_d` is a stable id the
+// speaker chooses once; editing resubmits with the SAME talk_d and a bumped
+// `revision`, so the coordinator replaces the previous talk in place. The media is
+// a normal kind:"talk" descriptor (longer clip, max_talk_sec + pipeline segmentation).
+export const talkSubmissionContentSchema = z
+  .object({
+    v: version,
+    a: z.string(), // coordinate
+    talk_d: z.string().min(1).max(64), // stable per-speaker talk id (edit = same id)
+    title: z.string().min(1).max(MAX_TALK_TITLE),
+    description: z.string().max(MAX_TALK_DESC).default(""),
+    speakers: z.array(hex32).default([]), // co-speakers; the submitter is implicit
+    media: mediaDescriptorSchema,
+    revision: z.number().int().nonnegative().default(0),
+  })
+  .strict()
+  .refine((v) => v.media.kind === "talk", "talk submission media must be kind:'talk'");
+export type TalkSubmissionContent = z.infer<typeof talkSubmissionContentSchema>;
+
+// ── 31610 Talk content (ECK) ─────────────────────────────────────────────────
+// Authored by the coordinator (or the organizer's E_id when there's no coordinator)
+// under the ECK, so only members can discover/watch. Discovery = query
+// {kinds:[31610], authors:[coordinator], "#a":[coordinate]}; the `d` is blinded per
+// talk. `status` supports organizer moderation; `revision` supports editing (the
+// last published talk stays watchable until a new revision publishes).
+export const talkContentSchema = z
+  .object({
+    v: version,
+    pubkey: hex32, // speaker (submitter)
+    talk_d: z.string().min(1).max(64),
+    title: z.string().min(1).max(MAX_TALK_TITLE),
+    description: z.string().max(MAX_TALK_DESC).default(""),
+    speakers: z.array(hex32).default([]),
+    media: mediaDescriptorSchema,
+    // Reuses F1's transcript sub-schema: the nonvisual consumption path for talks.
+    transcript: mediaTranscriptSchema.optional(),
+    lang: z.string(),
+    revision: z.number().int().nonnegative(),
+    status: talkStatusSchema,
+    published_at: z.number().int(),
+  })
+  .refine((v) => v.media.kind === "talk", "talk media must be kind:'talk'");
+export type TalkContent = z.infer<typeof talkContentSchema>;
 
 // ── 21605 Organizer Grant rumor content (co-organizer, full key custody) ─────
 export const organizerGrantContentSchema = z.object({

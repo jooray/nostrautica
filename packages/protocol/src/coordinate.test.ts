@@ -48,10 +48,12 @@ describe("event config (kind 31600)", () => {
       eck: 1,
       nostrContext: 100,
       lang: "sk" as const,
+      talks: "prerecord-first" as const,
     };
     const built = buildEventConfig(cfg);
     expect(built.kind).toBe(31600);
     expect(built.tags).toContainEqual(["lang", "sk"]);
+    expect(built.tags).toContainEqual(["talks", "prerecord-first"]);
     const parsed = parseEventConfig(pubkey, built.tags);
     expect(parsed).toEqual(cfg);
   });
@@ -71,10 +73,41 @@ describe("event config (kind 31600)", () => {
       eck: 1,
       nostrContext: 0,
       lang: "en",
+      talks: "off" as const,
     };
     const built = buildEventConfig(cfg);
     expect(built.tags.find((t) => t[0] === "lang")).toBeUndefined();
     expect(parseEventConfig(pubkey, built.tags).lang).toBe("en");
+  });
+
+  it("omits the talks tag when off (default) but round-trips on/prerecord-first", () => {
+    const base = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: [],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "off" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+    };
+    // off → tag omitted, parses back to "off"
+    const offBuilt = buildEventConfig({ ...base, talks: "off" });
+    expect(offBuilt.tags.find((t) => t[0] === "talks")).toBeUndefined();
+    expect(parseEventConfig(pubkey, offBuilt.tags).talks).toBe("off");
+    // a config with NO talks tag at all parses as "off" (normal event unchanged)
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)]]).talks).toBe("off");
+    // on → emitted + parsed
+    const onBuilt = buildEventConfig({ ...base, talks: "on" });
+    expect(onBuilt.tags).toContainEqual(["talks", "on"]);
+    expect(parseEventConfig(pubkey, onBuilt.tags).talks).toBe("on");
+    // an unrecognized talks value degrades to "off" (never throws)
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)], ["talks", "bogus"]]).talks).toBe("off");
   });
 
   it("defaults sensibly when tags are missing", () => {

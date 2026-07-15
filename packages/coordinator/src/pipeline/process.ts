@@ -57,6 +57,12 @@ export interface ProcessInput {
   media: MediaDescriptor[];
   /** A plain-text intro (spec F1). Feeds the ai_profile directly — no STT. */
   introText?: string;
+  /**
+   * Extra transcript texts folded into the ai_profile (spec §9.2, F2): a speaker's
+   * prerecorded-talk transcripts, so a talk contributes to matching "as today".
+   * Already transcribed (by process_talk) — no STT here, no MediaTranscript published.
+   */
+  extraTranscripts?: string[];
 }
 
 /** The ai_profile plus the transcripts to publish on the directory entry (F1). */
@@ -120,6 +126,13 @@ export async function processAttendee(
   // no media blob, so it is not a MediaTranscript on the entry).
   const introText = input.introText?.trim();
   if (introText) transcripts.push(introText);
+  // Talk transcripts (spec §9.2, F2): fed into the profile model like an intro
+  // transcript so a speaker's talks contribute to matching. Not published as
+  // MediaTranscripts here — they live on the talk's own 31610 entry.
+  for (const extra of input.extraTranscripts ?? []) {
+    const t = extra.trim();
+    if (t) transcripts.push(t);
+  }
 
   // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash
   //    (the hash includes the output language, so a lang change re-summarizes).

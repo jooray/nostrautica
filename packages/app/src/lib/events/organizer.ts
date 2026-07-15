@@ -43,6 +43,7 @@ import {
   inviteHash,
   buildEventConfig,
   wrapRumor,
+  type TalksMode,
   KIND_INVITE_LIST,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
@@ -555,6 +556,34 @@ export async function revokeAttendeeClient(
  * authenticates the install by matching the seal author against the coordinate's
  * E_id pubkey (spec §7.2, ENCRYPTION-AND-PRIVACY.md F2).
  */
+/**
+ * Republish the event's 31600 config with changed fields (signed by E_id). Used by
+ * Admin to flip live-editable settings like the prerecorded-talks mode (spec F2).
+ * Every other field is preserved from `ctx.config`, so a talks-off event's config
+ * stays byte-identical except for the one changed tag.
+ */
+export async function updateEventConfig(
+  ctx: EventContext,
+  changes: Partial<{ talks: TalksMode; maxTalkSec: number }>,
+): Promise<void> {
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
+    throw new Error("organizer E_id key not available");
+  }
+  const eidSk = hexToBytes(keys.eidNsecHex);
+  const built = buildEventConfig({ ...ctx.config, ...changes });
+  const configEvent = finalizeEvent(
+    {
+      kind: built.kind,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: built.tags,
+      content: built.content,
+    },
+    eidSk,
+  );
+  await publishOrQueue(configEvent, ctx.config.relays);
+}
+
 export async function attachCoordinator(
   _organizer: AppSigner,
   ctx: EventContext,

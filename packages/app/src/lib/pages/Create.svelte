@@ -24,6 +24,8 @@
   let bannerUrl = $state("");
   let uploading = $state<"icon" | "banner" | null>(null);
   let maxVideoSec = $state(90);
+  let maxTalkSec = $state(900);
+  let talks = $state<"off" | "on" | "prerecord-first">("off");
   let matching = $state<"on" | "off">("on");
   let matchVisibility = $state<"pair" | "event">("pair");
   let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
@@ -100,12 +102,13 @@
           icon: iconUrl.trim() || undefined,
           banner: bannerUrl.trim() || undefined,
           maxVideoSec,
-          maxTalkSec: 900,
+          maxTalkSec,
           matching,
           matchVisibility,
           approval,
           nostrContext: 100,
           lang,
+          talks,
         },
         blindingKey,
       );
@@ -288,6 +291,21 @@
         <option value="off">{t("create.matching.off")}</option>
       </select>
     </div>
+    <div>
+      <label for="talks">{t("create.field.talks")}</label>
+      <select id="talks" bind:value={talks}>
+        <option value="off">{t("create.talks.off")}</option>
+        <option value="on">{t("create.talks.on")}</option>
+        <option value="prerecord-first">{t("create.talks.prerecordFirst")}</option>
+      </select>
+      <p class="muted" style="margin:0.25rem 0 0">{t("create.field.talks.body")}</p>
+    </div>
+    {#if talks !== "off"}
+      <div>
+        <label for="mt">{t("create.field.maxTalk")}</label>
+        <input id="mt" type="number" bind:value={maxTalkSec} />
+      </div>
+    {/if}
     <p class="muted">
       {t("create.rotationNote")}
     </p>

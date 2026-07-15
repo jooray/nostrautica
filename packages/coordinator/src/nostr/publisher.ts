@@ -13,8 +13,10 @@ import {
   KIND_MATCH_MATRIX,
   KIND_KEY_GRANT,
   KIND_COORDINATOR_STATUS,
+  KIND_TALK,
   eckEncrypt,
   blindedD,
+  blindedDLiteral,
   nip44Encrypt,
   wrapRumor,
   parseCoordinate,
@@ -24,6 +26,7 @@ import {
   type MatchListContent,
   type MatchMatrixContent,
   type CoordinatorStatusContent,
+  type TalkContent,
 } from "@nostrautica/protocol";
 
 export interface PublishKeys {
@@ -115,6 +118,39 @@ export function buildMatchMatrix(
       created_at: Math.floor(Date.now() / 1000),
       tags: [
         ["d", identifier],
+        ["a", coordinate],
+        ["eck", String(keys.eckId)],
+        ["v", "1"],
+      ],
+      content: eckEncrypt(keys.eck, JSON.stringify(content)),
+    },
+    keys.coordSk,
+  );
+}
+
+/**
+ * The blinded `d` for a talk (spec F2). Deterministic from the ECK + coordinate +
+ * speaker + the speaker-chosen `talk_d`, so the coordinator and every member client
+ * derive the same address. A bumped revision keeps the same `d` (replaceable), so a
+ * new publish replaces the last one in place.
+ */
+export function talkBlindedD(eck: Uint8Array, coordinate: string, pubkey: string, talkD: string): string {
+  return blindedDLiteral(eck, `talk|${coordinate}|${pubkey}|${talkD}`);
+}
+
+/** kind 31610 Talk (ECK, blinded d per talk). Members-only, like the directory. */
+export function buildTalkEntry(
+  keys: PublishKeys,
+  coordinate: string,
+  content: TalkContent,
+): NostrEvent {
+  const d = talkBlindedD(keys.eck, coordinate, content.pubkey, content.talk_d);
+  return finalizeEvent(
+    {
+      kind: KIND_TALK,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["d", d],
         ["a", coordinate],
         ["eck", String(keys.eckId)],
         ["v", "1"],

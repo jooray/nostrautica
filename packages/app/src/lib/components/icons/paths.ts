@@ -17,6 +17,9 @@ export const ICONS = {
   constellation:
     '<path d="M5 17l5-5 4 3 5-7"/><circle cx="5" cy="17" r="1.6" fill="currentColor"/><circle cx="10" cy="12" r="1.6" fill="currentColor"/><circle cx="14" cy="15" r="1.6" fill="currentColor"/><circle cx="19" cy="8" r="1.9" fill="currentColor"/>',
   horn: '<path d="M4 11l13-6v14L4 13z"/><path d="M4 11v2a2 2 0 0 0 2 2h1"/><path d="M20 9v6"/>',
+  // Talks (F2): a play triangle in a screen — monochrome, no calendar/clock.
+  talks:
+    '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M10 8.5l4.5 2.5L10 13.5z" fill="currentColor" fill-opacity="0.25"/><path d="M8 20h8"/>',
   // Global nav + brand
   star: '<path d="M12 3C12.4 9 15 11.6 21 12C15 12.4 12.4 15 12 21C11.6 15 9 12.4 3 12C9 11.6 11.6 9 12 3Z" fill="currentColor" fill-opacity="0.25"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',

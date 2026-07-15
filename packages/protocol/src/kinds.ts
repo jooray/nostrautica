@@ -1,14 +1,16 @@
 /**
  * Nostr event kind constants used across Nostrautica (spec §7).
  *
- * Custom kinds occupy the addressable block 31600–31609 and the gift-wrap
- * "rumor" block 21600–21608 (21607 reserved for Marmot chat). Rumor kinds sit in
+ * Custom kinds occupy the addressable block 31600–31610 and the gift-wrap
+ * "rumor" block 21600–21609 (21607 reserved for Marmot chat). Rumor kinds sit in
  * the ephemeral range on purpose:
  * rumors are never published as signed events, and a leaked one won't be stored
  * by relays.
  *
  * NOTE (spec §15): 31600–31609 / 21600–21604 were unassigned in the NIPs registry
- * as of 2026-07. Re-check before first public release.
+ * as of 2026-07. 31610 (Talk, F2) extends PAST the originally-reserved 31600–31609
+ * block and 21609 (Talk Submission) past 21608 — re-check the NIPs registry for
+ * both before first public release.
  */
 
 // ── Reused standard kinds ────────────────────────────────────────────────────
@@ -47,6 +49,8 @@ export const KIND_MATCH_MATRIX = 31606; // event-wide Match Matrix (ECK, opt-in)
 export const KIND_MEMBERS_POST = 31607; // Members-only Event Post (ECK, random d)
 export const KIND_EVENT_PAGE = 31608; // Event Page — menu + layout (d = event-d)
 export const KIND_EVENT_THEME = 31609; // Event Theme — raw CSS (d = event-d)
+// 31610 extends past the reserved 31600–31609 block (see NOTE above; NIPs re-check).
+export const KIND_TALK = 31610; // Talk (ECK) — a prerecorded talk, blinded d per talk (F2)
 
 // ── Custom gift-wrap rumor kinds (21600–21604) ──────────────────────────────
 export const KIND_JOIN_REQUEST = 21600; // → E_inbox
@@ -58,6 +62,7 @@ export const KIND_ORGANIZER_GRANT = 21605; // → co-organizer (E_id + E_inbox +
 export const KIND_COORDINATOR_STATUS = 21606; // coordinator → organizer (poison/health, Q12)
 // 21607 is RESERVED for the upcoming Marmot group-chat feature — do not reuse it.
 export const KIND_PROFILE_CORRECTION = 21608; // attendee → E_inbox (correct/hide own ai_profile, F3)
+export const KIND_TALK_SUBMISSION = 21609; // attendee → E_inbox (submit/edit a prerecorded talk, F2)
 
 /** Rumor kinds — the set of kinds ever delivered inside a NIP-59 gift wrap. */
 export const RUMOR_KINDS = [
@@ -70,6 +75,7 @@ export const RUMOR_KINDS = [
   KIND_ORGANIZER_GRANT,
   KIND_COORDINATOR_STATUS,
   KIND_PROFILE_CORRECTION,
+  KIND_TALK_SUBMISSION,
 ] as const;
 
 export type RumorKind = (typeof RUMOR_KINDS)[number];

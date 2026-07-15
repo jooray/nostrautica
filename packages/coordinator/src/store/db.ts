@@ -75,6 +75,23 @@ export interface AttendeeRow {
   updated_at: number;
 }
 
+/** A stored talk row (spec F2, audit U11). */
+export interface TalkRow {
+  coordinate: string;
+  pubkey: string;
+  talk_d: string;
+  title: string;
+  description: string;
+  speakers_json: string;
+  media_json: string;
+  transcript_json: string | null;
+  lang: string;
+  revision: number;
+  status: "pending" | "published" | "rejected";
+  published_at: number;
+  updated_at: number;
+}
+
 /** A poisoned/cleared job surfaced to the organizer (audit Q12). */
 export interface JobStatusRow {
   coordinate: string;
@@ -195,6 +212,26 @@ CREATE TABLE IF NOT EXISTS pipeline_artifacts (
   output_json TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (stage, inputs_hash)
+);
+-- Prerecorded talks (spec F2, audit U11). One row per (coordinate, speaker, talk_d).
+-- media_json is the kind:"talk" descriptor; transcript_json is filled by process_talk;
+-- status drives organizer moderation (pending → published/rejected); revision supports
+-- editing (a bumped revision replaces the previous 31610 at publish time).
+CREATE TABLE IF NOT EXISTS talks (
+  coordinate TEXT NOT NULL,
+  pubkey TEXT NOT NULL,
+  talk_d TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  speakers_json TEXT NOT NULL DEFAULT '[]',
+  media_json TEXT NOT NULL,
+  transcript_json TEXT,
+  lang TEXT NOT NULL DEFAULT 'en',
+  revision INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending',
+  published_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (coordinate, pubkey, talk_d)
 );
 -- Poisoned/cleared pipeline jobs surfaced to the organizer (audit Q12). One row
 -- per (coordinate, stage, pubkey); a later success clears it.
@@ -474,6 +511,109 @@ export class Store {
         "INSERT OR REPLACE INTO nostr_summaries (pubkey, inputs_hash, summary, created_at) VALUES (?, ?, ?, ?)",
       )
       .run(pubkey, inputsHash, summary, now);
+  }
+
+  // ── talks (spec F2) ───────────────────────────────────────────────────────
+  /**
+   * Insert or update a submitted talk. A (re)submission carries the current
+   * metadata + media and resets status to 'pending' (needs moderation) — the
+   * previously published 31610 stays live on relays until a new talk_publish
+   * replaces it. The transcript is preserved unless the media hash changed.
+   */
+  upsertTalk(row: {
+    coordinate: string;
+    pubkey: string;
+    talkD: string;
+    title: string;
+    description: string;
+    speakersJson: string;
+    mediaJson: string;
+    lang: string;
+    revision: number;
+    /** New media sha256 (x); when it differs from the stored one the transcript is dropped. */
+    mediaX: string;
+    now: number;
+  }): void {
+    const existing = this.getTalk(row.coordinate, row.pubkey, row.talkD);
+    let keepTranscript: string | null = existing?.transcript_json ?? null;
+    if (existing) {
+      try {
+        const prevX = (JSON.parse(existing.media_json) as { x?: string }).x;
+        if (prevX !== row.mediaX) keepTranscript = null; // re-recorded talk → stale transcript
+      } catch {
+        keepTranscript = null;
+      }
+    }
+    this.db
+      .prepare(
+        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, status, published_at, updated_at)
+         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
+         ON CONFLICT(coordinate, pubkey, talk_d) DO UPDATE SET
+           title = excluded.title,
+           description = excluded.description,
+           speakers_json = excluded.speakers_json,
+           media_json = excluded.media_json,
+           transcript_json = excluded.transcript_json,
+           lang = excluded.lang,
+           revision = excluded.revision,
+           status = 'pending',
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        pubkey: row.pubkey,
+        talkD: row.talkD,
+        title: row.title,
+        description: row.description,
+        speakersJson: row.speakersJson,
+        mediaJson: row.mediaJson,
+        transcriptJson: keepTranscript,
+        lang: row.lang,
+        revision: row.revision,
+        now: row.now,
+      });
+  }
+
+  getTalk(coordinate: string, pubkey: string, talkD: string): TalkRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM talks WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
+      .get(coordinate, pubkey, talkD) as TalkRow | undefined;
+  }
+
+  setTalkTranscript(coordinate: string, pubkey: string, talkD: string, transcriptJson: string, now: number): void {
+    this.db
+      .prepare("UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
+      .run(transcriptJson, now, coordinate, pubkey, talkD);
+  }
+
+  setTalkStatus(
+    coordinate: string,
+    pubkey: string,
+    talkD: string,
+    status: "pending" | "published" | "rejected",
+    publishedAt: number,
+    now: number,
+  ): void {
+    this.db
+      .prepare("UPDATE talks SET status = ?, published_at = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
+      .run(status, publishedAt, now, coordinate, pubkey, talkD);
+  }
+
+  /** Transcript texts of a speaker's talks (spec §9.2): fed into their ai_profile. */
+  talkTranscriptsForSpeaker(coordinate: string, pubkey: string): string[] {
+    const rows = this.db
+      .prepare("SELECT transcript_json FROM talks WHERE coordinate = ? AND pubkey = ? AND transcript_json IS NOT NULL")
+      .all(coordinate, pubkey) as { transcript_json: string }[];
+    const out: string[] = [];
+    for (const r of rows) {
+      try {
+        const tr = JSON.parse(r.transcript_json) as { text?: string };
+        if (tr.text) out.push(tr.text);
+      } catch {
+        /* skip malformed */
+      }
+    }
+    return out;
   }
 
   // ── pairs (cache by inputs hash) ──────────────────────────────────────────

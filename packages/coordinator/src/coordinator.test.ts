@@ -22,7 +22,10 @@ import {
   KIND_COORDINATOR_GRANT,
   KIND_COORDINATOR_STATUS,
   KIND_PROFILE_CORRECTION,
+  KIND_TALK,
+  KIND_TALK_SUBMISSION,
   KIND_DELETION,
+  talkContentSchema,
   directoryEntryContentSchema,
   matchListContentSchema,
   matchMatrixContentSchema,
@@ -221,6 +224,7 @@ async function setup(
     lang?: string;
     matchVisibility?: "pair" | "event";
     matching?: "on" | "off";
+    talks?: "off" | "on" | "prerecord-first";
     failTranscribe?: boolean;
   } = {},
 ): Promise<Harness> {
@@ -240,7 +244,7 @@ async function setup(
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.lang ? [["lang", opts.lang]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 1, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
   );
 
@@ -1138,3 +1142,160 @@ function latestDirectoryWithAi(transport: FakeTransport, eck: Uint8Array, d: str
     .map((e) => directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
   return candidates.reverse().find((c) => c.ai_profile) ?? candidates[0];
 }
+
+// ── F2: prerecorded talks journey (audit U11) ─────────────────────────────────
+/** A kind:"talk" media descriptor with a given size/hash. */
+function talkMedia(size: number, x: string) {
+  return {
+    kind: "talk" as const,
+    url: ["https://blob/" + x],
+    x,
+    ox: "b".repeat(64),
+    size,
+    m: "video/webm",
+    "encryption-algorithm": "aes-gcm" as const,
+    "decryption-key": bytesToBase64(new Uint8Array(32)),
+    "decryption-nonce": bytesToBase64(new Uint8Array(12)),
+  };
+}
+
+/** Submit (or edit) a talk via a 21609 rumor to E_inbox. */
+async function submitTalk(
+  h: Harness,
+  speakerSk: Uint8Array,
+  args: { talkD: string; title: string; description?: string; media: any; revision?: number },
+): Promise<void> {
+  const inboxPk = getPublicKey(h.einboxSk);
+  const wrap = wrapRumor(speakerSk, inboxPk, {
+    kind: KIND_TALK_SUBMISSION,
+    content: {
+      v: 1,
+      a: h.coordinate,
+      talk_d: args.talkD,
+      title: args.title,
+      description: args.description ?? "",
+      speakers: [],
+      media: args.media,
+      revision: args.revision ?? 0,
+    },
+    tags: [["a", h.coordinate]],
+  });
+  await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+}
+
+/** Send an organizer admin command (sealed by E_id). The `_n` nonce keeps two
+ *  otherwise-identical commands from colliding on rumor id under the fixed test
+ *  clock (production `created_at` varies); handleAdmin ignores unknown args. */
+let adminNonce = 0;
+async function admin(h: Harness, cmd: string, args: Record<string, unknown>): Promise<void> {
+  const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+    kind: KIND_ADMIN_COMMAND,
+    content: { v: 1, a: h.coordinate, cmd, args: { ...args, _n: adminNonce++ } },
+  });
+  await h.coordinator.handleCoordinatorWrap(wrap as any);
+}
+
+/** Every published 31610 talk entry (decrypted). */
+function publishedTalks(h: Harness) {
+  return h.transport.published
+    .filter((e) => e.kind === KIND_TALK)
+    .map((e) => talkContentSchema.parse(JSON.parse(eckDecrypt(h.eck, e.content))));
+}
+
+describe("F2 — prerecorded talks journey (U11)", () => {
+  it("talks=off: a talk submission is ignored and never publishes", async () => {
+    const h = await setup(0, { talks: "off" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Zero-knowledge proofs", media: talkMedia(700, "aa".repeat(32)) });
+    await h.coordinator.jobs.drain();
+    expect(h.store.getTalk(h.coordinate, pk, "t1")).toBeUndefined();
+    // Even an (erroneous) publish command produces no 31610 when talks are off.
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    expect(publishedTalks(h)).toHaveLength(0);
+  });
+
+  it("talks=on: a submitted talk is pending until the organizer publishes it", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = "bb".repeat(32);
+    h.stt.setTranscript("700", "In this talk I explain zk-SNARKs from first principles.");
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Zero-knowledge proofs", description: "A gentle intro", media: talkMedia(700, x) });
+    await h.coordinator.jobs.drain();
+    // Stored, transcribed, but NOT published (pending moderation).
+    const row = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row.status).toBe("pending");
+    expect(row.transcript_json).toBeTruthy();
+    expect(publishedTalks(h)).toHaveLength(0);
+    // Organizer publishes → a 31610 appears, carrying title + transcript.
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    const talks = publishedTalks(h);
+    expect(talks).toHaveLength(1);
+    expect(talks[0]!.title).toBe("Zero-knowledge proofs");
+    expect(talks[0]!.status).toBe("published");
+    expect(talks[0]!.media.kind).toBe("talk");
+    expect(talks[0]!.transcript?.text).toContain("zk-SNARKs");
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.status).toBe("published");
+  });
+
+  it("only an approved attendee may submit a talk", async () => {
+    const h = await setup(0, { talks: "on" });
+    const strangerSk = generateSecretKey();
+    // Never joined → not approved.
+    await submitTalk(h, strangerSk, { talkD: "t1", title: "Spam", media: talkMedia(700, "cc".repeat(32)) });
+    await h.coordinator.jobs.drain();
+    expect(h.store.getTalk(h.coordinate, getPublicKey(strangerSk), "t1")).toBeUndefined();
+  });
+
+  it("talk_reject deletes a published talk and marks it rejected", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Talk", media: talkMedia(700, "dd".repeat(32)) });
+    await h.coordinator.jobs.drain();
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    expect(publishedTalks(h)).toHaveLength(1);
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t1" });
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.status).toBe("rejected");
+    // A NIP-09 deletion for the talk kind was published.
+    expect(h.transport.published.some((e) => e.kind === KIND_DELETION && e.tags.some((t) => t[0] === "k" && t[1] === String(KIND_TALK)))).toBe(true);
+  });
+
+  it("editing a talk bumps the revision and re-publishes in place", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "First cut", media: talkMedia(700, "ee".repeat(32)), revision: 0 });
+    await h.coordinator.jobs.drain();
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    // Edit: same talk_d, new media, bumped revision → back to pending.
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Revised cut", media: talkMedia(710, "ff".repeat(32)), revision: 1 });
+    await h.coordinator.jobs.drain();
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.status).toBe("pending");
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    const talks = publishedTalks(h);
+    const last = talks[talks.length - 1]!;
+    expect(last.title).toBe("Revised cut");
+    expect(last.revision).toBe(1);
+    expect(last.talk_d).toBe("t1"); // same address — replaced in place
+  });
+
+  it("a talk transcript feeds the speaker's ai_profile (§9.2)", async () => {
+    const h = await setup(0, { talks: "on", matching: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = "1a".repeat(32);
+    h.stt.setTranscript("650", "My talk covers homomorphic encryption and secure MPC.");
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "MPC talk", media: talkMedia(650, x) });
+    await h.coordinator.jobs.drain();
+    // The reprocess folds the talk transcript in — the ai_profile is regenerated.
+    const attendee = h.store.getAttendee(h.coordinate, pk)!;
+    expect(attendee.ai_profile_json).toBeTruthy();
+  });
+});

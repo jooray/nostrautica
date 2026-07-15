@@ -21,6 +21,7 @@ import {
   blindedD,
   type Approval,
   type MatchVisibility,
+  type TalksMode,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -45,6 +46,7 @@ export interface CreateEventInput {
   approval: Approval;
   nostrContext: number;
   lang?: string; // ISO 639-1 event language; default "en"
+  talks?: TalksMode; // prerecorded-talks journey (spec F2); default "off"
   relays?: string[];
   blossom?: string[];
 }
@@ -128,6 +130,7 @@ export async function createEvent(
     eck: 1,
     nostrContext: input.nostrContext,
     lang: input.lang ?? "en",
+    talks: input.talks ?? "off",
   });
   const event31600 = finalizeEvent(
     {
