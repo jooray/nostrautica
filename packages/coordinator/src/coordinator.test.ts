@@ -21,6 +21,7 @@ import {
   KIND_ADMIN_COMMAND,
   KIND_COORDINATOR_GRANT,
   KIND_COORDINATOR_STATUS,
+  KIND_PROFILE_CORRECTION,
   KIND_DELETION,
   directoryEntryContentSchema,
   matchListContentSchema,
@@ -461,6 +462,109 @@ describe("F1 — text/audio intro branch + transcript publish (A1)", () => {
     expect(entry.transcripts).toHaveLength(1);
     expect(entry.transcripts![0]!.x).not.toBe(oldX); // only the current blob's transcript
     expect(entry.transcripts![0]!.x).toBe(entry.media[0]!.x);
+  });
+});
+
+describe("F3 — ai_profile correction / hide (U9)", () => {
+  /** Send a 21608 profile correction from `attendeeSk` to E_inbox. */
+  async function sendCorrection(
+    h: Harness,
+    attendeeSk: Uint8Array,
+    content: Record<string, unknown>,
+  ): Promise<void> {
+    const inboxPk = getPublicKey(h.einboxSk);
+    const wrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 1, a: h.coordinate, ...content },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+  }
+
+  it("an override replaces named ai_profile fields and flags ai_profile_edited", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, pk);
+    expect(latestDirectory(h.transport, h.eck, d).ai_profile).toBeDefined();
+
+    await sendCorrection(h, sk, { overrides: { summary: "I build hardware wallets, not apps." } });
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.ai_profile!.summary).toBe("I build hardware wallets, not apps.");
+    expect(entry.ai_profile_edited).toBe(true);
+    // Authored identity fields are untouched by a correction.
+    expect(entry.profile.about).toBe(FIXTURES.crypto.about);
+  });
+
+  it("hidden:true publishes the entry WITHOUT an ai_profile (authored fallback)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, pk);
+
+    await sendCorrection(h, sk, { hidden: true });
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.ai_profile).toBeUndefined();
+    expect(entry.ai_profile_edited).toBeUndefined(); // hiding is not advertised
+    expect(entry.profile.about).toBe(FIXTURES.crypto.about); // authored profile still there
+  });
+
+  it("hidden_fields blanks specific generated fields", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, pk);
+
+    await sendCorrection(h, sk, { hidden_fields: ["interests", "seeks"] });
+    const ai = latestDirectory(h.transport, h.eck, d).ai_profile!;
+    expect(ai.interests).toEqual([]);
+    expect(ai.seeks).toEqual([]);
+    expect(ai.summary.length).toBeGreaterThan(0); // untouched field survives
+  });
+
+  it("a forged correction (wrong seal author) cannot alter another attendee's entry", async () => {
+    const h = await setup();
+    const victimSk = generateSecretKey();
+    const victimPk = await join(h, victimSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, victimPk);
+    const before = latestDirectory(h.transport, h.eck, d).ai_profile!.summary;
+
+    // An attacker who is NOT an approved attendee sends a correction. It is sealed
+    // by the attacker's key (unwrapRumor binds rumor.pubkey to the seal author), so
+    // it can only ever apply to the attacker's OWN entry — never the victim's.
+    const attackerSk = generateSecretKey();
+    await sendCorrection(h, attackerSk, { hidden: true });
+    const after = latestDirectory(h.transport, h.eck, d).ai_profile!.summary;
+    expect(after).toBe(before); // victim's ai_profile untouched
+  });
+
+  it("a correction SURVIVES a reprocess (re-applied on top of a fresh ai_profile)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, pk);
+
+    await sendCorrection(h, sk, { overrides: { summary: "Corrected once, kept forever." } });
+    expect(latestDirectory(h.transport, h.eck, d).ai_profile!.summary).toBe("Corrected once, kept forever.");
+
+    // Force a full reprocess: regenerates the ai_profile from inputs (artifact cache),
+    // then re-publishes. The stored correction is NOT baked into the cached artifact,
+    // so it is re-applied at publish time.
+    const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 1, a: h.coordinate, cmd: "reprocess", args: { pubkey: pk } },
+    });
+    await h.coordinator.handleCoordinatorWrap(adminWrap as any);
+    await h.coordinator.jobs.drain();
+
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.ai_profile!.summary).toBe("Corrected once, kept forever.");
+    expect(entry.ai_profile_edited).toBe(true);
   });
 });
 

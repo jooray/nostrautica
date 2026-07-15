@@ -68,6 +68,10 @@ export interface AttendeeRow {
   // Published transcripts (audit A1, spec F1): MediaTranscript[] JSON, one entry
   // per STT-transcribed media blob, surfaced on the directory entry.
   transcripts_json: string | null;
+  // Attendee's ai_profile correction/hide (F3, audit U9): ProfileCorrectionContent
+  // JSON. Authoritative until the attendee changes it, and re-applied at publish
+  // time on top of a freshly generated ai_profile — so it SURVIVES reprocessing.
+  correction_json: string | null;
   updated_at: number;
 }
 
@@ -107,6 +111,7 @@ CREATE TABLE IF NOT EXISTS attendees (
   source_revision TEXT,
   ai_source_revision TEXT,
   transcripts_json TEXT,
+  correction_json TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -244,7 +249,8 @@ export class Store {
     }
     // Migration (Q10): revision-tracking columns on older attendee rows.
     // Migration (F1): transcripts_json on attendees; lang on transcripts.
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT"]) {
+    // Migration (F3): correction_json on attendees (ai_profile correction/hide).
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT"]) {
       try {
         this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
       } catch {
@@ -381,13 +387,14 @@ export class Store {
     sourceRevision?: string | null;
     aiSourceRevision?: string | null;
     transcriptsJson?: string | null;
+    correctionJson?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
@@ -397,6 +404,7 @@ export class Store {
            source_revision = COALESCE(:sourceRevision, attendees.source_revision),
            ai_source_revision = COALESCE(:aiSourceRevision, attendees.ai_source_revision),
            transcripts_json = COALESCE(:transcriptsJson, attendees.transcripts_json),
+           correction_json = COALESCE(:correctionJson, attendees.correction_json),
            updated_at = :now`,
       )
       .run({
@@ -410,6 +418,7 @@ export class Store {
         sourceRevision: row.sourceRevision ?? null,
         aiSourceRevision: row.aiSourceRevision ?? null,
         transcriptsJson: row.transcriptsJson ?? null,
+        correctionJson: row.correctionJson ?? null,
         now: row.now,
       });
   }

@@ -2,7 +2,8 @@
  * Nostr event kind constants used across Nostrautica (spec §7).
  *
  * Custom kinds occupy the addressable block 31600–31609 and the gift-wrap
- * "rumor" block 21600–21604. Rumor kinds sit in the ephemeral range on purpose:
+ * "rumor" block 21600–21608 (21607 reserved for Marmot chat). Rumor kinds sit in
+ * the ephemeral range on purpose:
  * rumors are never published as signed events, and a leaked one won't be stored
  * by relays.
  *
@@ -55,6 +56,8 @@ export const KIND_COORDINATOR_GRANT = 21603; // → coordinator
 export const KIND_ADMIN_COMMAND = 21604; // organizer → coordinator
 export const KIND_ORGANIZER_GRANT = 21605; // → co-organizer (E_id + E_inbox + ECK)
 export const KIND_COORDINATOR_STATUS = 21606; // coordinator → organizer (poison/health, Q12)
+// 21607 is RESERVED for the upcoming Marmot group-chat feature — do not reuse it.
+export const KIND_PROFILE_CORRECTION = 21608; // attendee → E_inbox (correct/hide own ai_profile, F3)
 
 /** Rumor kinds — the set of kinds ever delivered inside a NIP-59 gift wrap. */
 export const RUMOR_KINDS = [
@@ -66,6 +69,7 @@ export const RUMOR_KINDS = [
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
   KIND_COORDINATOR_STATUS,
+  KIND_PROFILE_CORRECTION,
 ] as const;
 
 export type RumorKind = (typeof RUMOR_KINDS)[number];

@@ -158,6 +158,46 @@ export type ProfileSubmissionContent = z.infer<
   typeof profileSubmissionContentSchema
 >;
 
+// ── 21608 Profile Correction rumor content (F3, audit U9) ────────────────────
+// An attendee corrects, hides specific fields of, or hides entirely the
+// coordinator-generated ai_profile on their OWN directory entry. Sent gift-wrapped
+// to E_inbox (same path as a 21601 submission); the coordinator binds the seal
+// author to the subject (unwrapRumor), so an attendee can only correct THEIR OWN
+// profile. The correction lives in the coordinator's DB (not the content-addressed
+// artifact cache), so it SURVIVES reprocessing: a freshly generated ai_profile has
+// the stored correction re-applied at publish time.
+
+/** The ai_profile fields an attendee may override (F3). Authored identity fields
+ *  (about/skills/looking_for/links) are never touched by a correction. */
+export const AI_PROFILE_FIELDS = ["summary", "skills", "interests", "offers", "seeks"] as const;
+export type AiProfileField = (typeof AI_PROFILE_FIELDS)[number];
+
+/** Per-field overrides of the generated ai_profile. */
+export const aiProfileOverrideSchema = z.object({
+  summary: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+  interests: z.array(z.string()).optional(),
+  offers: z.array(z.string()).optional(),
+  seeks: z.array(z.string()).optional(),
+});
+export type AiProfileOverride = z.infer<typeof aiProfileOverrideSchema>;
+
+export const profileCorrectionContentSchema = z.object({
+  v: version,
+  a: z.string(), // coordinate this correction applies to
+  // Replace named ai_profile fields with the attendee's own text/lists.
+  overrides: aiProfileOverrideSchema.optional(),
+  // true = publish the directory entry with NO ai_profile (self-authored fallback).
+  hidden: z.boolean().optional(),
+  // Blank specific generated fields (rather than override them).
+  hidden_fields: z.array(z.enum(AI_PROFILE_FIELDS)).optional(),
+  // Optional "this is inaccurate" note to the organizer. Minimally carried — the
+  // owner deferred a full report-to-organizer flow (audit U10), so it is just a
+  // free-text string with no elaborate handling here.
+  report: z.string().max(MAX_INTRO_TEXT).optional(),
+});
+export type ProfileCorrectionContent = z.infer<typeof profileCorrectionContentSchema>;
+
 // ── 21602 Key Grant rumor content ────────────────────────────────────────────
 export const eckVersionSchema = z.object({
   id: z.number().int().positive(),
@@ -227,6 +267,9 @@ export const directoryEntryContentSchema = z
     profile: attendeeProfileSchema,
     media: z.array(mediaDescriptorSchema).default([]),
     ai_profile: aiProfileSchema.optional(), // appears when processing completes
+    // Set when the subject corrected/hid fields of the generated ai_profile (F3):
+    // viewers can be shown a subtle "edited by attendee" marker.
+    ai_profile_edited: z.boolean().optional(),
     // Published transcripts (audit A1): the nonvisual consumption path. Each ties
     // to a media blob by `x`; the refine below rejects any that don't reference
     // live media, so a re-record (new `x`) can't surface a stale transcript.

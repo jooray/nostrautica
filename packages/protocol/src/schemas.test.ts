@@ -16,6 +16,7 @@ import {
   eventKeysBackupSchema,
   coordinatorStatusContentSchema,
   mediaTranscriptSchema,
+  profileCorrectionContentSchema,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -325,4 +326,47 @@ describe("F1 — intro_text + MediaTranscript on 21601 / 31603", () => {
     expect(parsed.intro_text).toBe("text only");
     expect(parsed.transcripts).toBeUndefined();
   });
+});
+
+describe("F3 — profile correction (21608) + ai_profile_edited on 31603", () => {
+  const coordinate = "31600:" + hex + ":cypherpunk";
+
+  it("a field-override correction round-trips", () =>
+    roundTrips(profileCorrectionContentSchema, {
+      v: 1,
+      a: coordinate,
+      overrides: { summary: "I actually build hardware, not software.", skills: ["soldering"] },
+    }));
+
+  it("a hide-everything correction round-trips", () =>
+    roundTrips(profileCorrectionContentSchema, { v: 1, a: coordinate, hidden: true }));
+
+  it("hidden_fields + report round-trip", () =>
+    roundTrips(profileCorrectionContentSchema, {
+      v: 1,
+      a: coordinate,
+      hidden_fields: ["interests", "seeks"],
+      report: "The AI invented interests I never mentioned.",
+    }));
+
+  it("rejects an unknown ai_profile field in hidden_fields", () =>
+    expect(() =>
+      profileCorrectionContentSchema.parse({ v: 1, a: coordinate, hidden_fields: ["about"] }),
+    ).toThrow());
+
+  it("caps the report length at MAX_INTRO_TEXT", () =>
+    expect(() =>
+      profileCorrectionContentSchema.parse({ v: 1, a: coordinate, report: "x".repeat(2001) }),
+    ).toThrow());
+
+  it("31603 directory entry round-trips with ai_profile_edited", () =>
+    roundTrips(directoryEntryContentSchema, {
+      v: 1,
+      pubkey: hex,
+      profile: { about: "x", skills: [], looking_for: "", links: [] },
+      media: [],
+      ai_profile: { summary: "s", skills: [], interests: [], offers: [], seeks: [] },
+      ai_profile_edited: true,
+      updated_at: 1_700_000_000,
+    }));
 });

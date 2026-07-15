@@ -19,6 +19,9 @@
   type Row = { icon: IconName; label: string; go: Route };
   const rows = $derived.by(() => {
     const list: Row[] = [];
+    if (eventShell.isMember) {
+      list.push({ icon: "person", label: t("profile.mine.title"), go: { name: "myProfile", naddr } });
+    }
     if (session.loggedIn) {
       list.push({ icon: "chat", label: t("nav.messages"), go: { name: "dm" } });
     }

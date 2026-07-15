@@ -19,6 +19,7 @@ export type Route =
   | { name: "attendees"; naddr: string }
   | { name: "attendee"; naddr: string; npub: string }
   | { name: "matches"; naddr: string }
+  | { name: "myProfile"; naddr: string }
   | { name: "admin"; naddr: string }
   | { name: "posts"; naddr: string }
   | { name: "post"; naddr: string; d: string }
@@ -72,6 +73,8 @@ export function parseHash(hash: string): Route {
           return { name: "record", naddr, talk: query.get("talk") === "1" };
         case "matches":
           return { name: "matches", naddr };
+        case "profile":
+          return { name: "myProfile", naddr };
         case "more":
           return { name: "eventMore", naddr };
         case "admin":
@@ -124,6 +127,8 @@ export function buildHash(route: Route): string {
       return `#/e/${route.naddr}/attendees/${route.npub}`;
     case "matches":
       return `#/e/${route.naddr}/matches`;
+    case "myProfile":
+      return `#/e/${route.naddr}/profile`;
     case "eventMore":
       return `#/e/${route.naddr}/more`;
     case "admin":
@@ -165,6 +170,7 @@ export function eventNaddr(route: Route): string | undefined {
     case "attendees":
     case "attendee":
     case "matches":
+    case "myProfile":
     case "admin":
     case "posts":
     case "post":

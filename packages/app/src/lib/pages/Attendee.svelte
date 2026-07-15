@@ -203,8 +203,21 @@
 
   {#if entry?.ai_profile}
     <div class="card" style="background:var(--bg-elev2)">
-      <strong>{t("attendee.aiSummary")}</strong>
-      <p class="muted">{entry.ai_profile.summary}</p>
+      <div class="row" style="justify-content:space-between;align-items:baseline;gap:0.4rem">
+        <strong>{t("attendee.aiSummary")}</strong>
+        {#if entry.ai_profile_edited}<span class="badge">{t("attendee.aiEdited")}</span>{/if}
+      </div>
+      {#if entry.ai_profile.summary}<p class="muted">{entry.ai_profile.summary}</p>{/if}
+      {#each [["interests", entry.ai_profile.interests], ["offers", entry.ai_profile.offers], ["seeks", entry.ai_profile.seeks]] as const as [key, items] (key)}
+        {#if items?.length}
+          <div class="airow">
+            <span class="muted small">{t(`profile.field.${key}`)}</span>
+            <div class="row" style="flex-wrap:wrap">
+              {#each items as it (it)}<span class="badge">{it}</span>{/each}
+            </div>
+          </div>
+        {/if}
+      {/each}
     </div>
   {/if}
 
@@ -258,6 +271,15 @@
 {/if}
 
 <style>
+  .small {
+    font-size: 0.8rem;
+  }
+  .airow {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-top: 0.5rem;
+  }
   .linklike {
     width: auto;
     min-height: 0;

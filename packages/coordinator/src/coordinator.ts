@@ -16,6 +16,7 @@ import {
   KIND_PROFILE_SUBMISSION,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
+  KIND_PROFILE_CORRECTION,
   KIND_DIRECTORY_ENTRY,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
@@ -38,6 +39,8 @@ import {
   profileSubmissionContentSchema,
   coordinatorGrantContentSchema,
   adminCommandContentSchema,
+  profileCorrectionContentSchema,
+  AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
   type EckVersion,
@@ -45,6 +48,8 @@ import {
   type AttendeeProfile,
   type MediaDescriptor,
   type MediaTranscript,
+  type ProfileCorrectionContent,
+  type AiProfile,
   type RosterContent,
   type MatchMatrixContent,
 } from "@nostrautica/protocol";
@@ -434,7 +439,49 @@ export class Coordinator {
       const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
       log(`[submission] from ${short(rumor.pubkey)} — ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
       await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text);
+    } else if (rumor.kind === KIND_PROFILE_CORRECTION) {
+      const content = profileCorrectionContentSchema.parse(JSON.parse(rumor.content));
+      // The subject is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor — an
+      // attendee may only correct THEIR OWN profile (audit U9). There is no subject
+      // field to spoof: a correction always applies to the sender's own entry.
+      await this.handleCorrection(state, rumor.pubkey, content);
     }
+  }
+
+  /**
+   * Store and apply an attendee's ai_profile correction/hide (F3, audit U9). Only
+   * an approved member may correct their own already-published entry. The correction
+   * is persisted in `attendees.correction_json` (NOT the content-addressed artifact
+   * cache) so it survives reprocessing — `publishDirectory` re-applies it on every
+   * publish, including after a fresh ai_profile is generated.
+   */
+  private async handleCorrection(
+    state: EventState,
+    pubkey: string,
+    content: ProfileCorrectionContent,
+  ): Promise<void> {
+    if (content.a !== state.coordinate) return; // correction for a different event
+    const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
+    if (!attendee || attendee.status !== "approved") {
+      log(`[correction] ignored from ${short(pubkey)}: not an approved attendee`);
+      return;
+    }
+    this.deps.store.upsertAttendee({
+      coordinate: state.coordinate,
+      pubkey,
+      correctionJson: JSON.stringify(content),
+      now: this.now(),
+    });
+    const kind = content.hidden
+      ? "hide"
+      : content.overrides || content.hidden_fields
+        ? "override"
+        : "reset";
+    // The report field is minimally carried (owner deferred a full report flow):
+    // just note it, no moderation queue.
+    if (content.report) log(`[correction] ${short(pubkey)} attached an inaccuracy report`);
+    log(`[correction] ${kind} applied for ${short(pubkey)}`);
+    await this.publishDirectory(state, pubkey);
   }
 
   private async handleJoin(
@@ -560,7 +607,14 @@ export class Coordinator {
     const aiFresh =
       attendee?.ai_profile_json &&
       (!attendee.source_revision || attendee.ai_source_revision === attendee.source_revision);
-    const aiProfile = aiFresh ? JSON.parse(attendee!.ai_profile_json!) : undefined;
+    const generatedAi: AiProfile | undefined = aiFresh ? JSON.parse(attendee!.ai_profile_json!) : undefined;
+    // Apply the attendee's correction/hide (F3) on top of the freshly generated
+    // ai_profile. The correction lives in correction_json (not the artifact cache),
+    // so it is re-applied here on EVERY publish — it survives a reprocess/recompute.
+    const correction: ProfileCorrectionContent | undefined = attendee?.correction_json
+      ? JSON.parse(attendee.correction_json)
+      : undefined;
+    const { aiProfile, edited } = applyCorrection(generatedAi, correction);
     // Published transcripts (audit A1): the nonvisual consumption path. Keep only
     // transcripts whose media is still present — a re-record changes `x`, so an old
     // transcript is silently dropped (also enforced by the 31603 schema refine).
@@ -575,6 +629,7 @@ export class Coordinator {
       profile,
       media,
       ...(aiProfile ? { ai_profile: aiProfile } : {}),
+      ...(edited ? { ai_profile_edited: true } : {}),
       ...(transcripts.length ? { transcripts } : {}),
       ...(introText ? { intro_text: introText } : {}),
       updated_at: Math.floor(this.now() / 1000),
@@ -1186,6 +1241,40 @@ export class Coordinator {
 
 function blindedDFor(eck: Uint8Array, coordinate: string, pubkey: string): string {
   return blindedD(eck, coordinate, pubkey);
+}
+
+/**
+ * Apply an attendee's ai_profile correction (F3, audit U9) to the freshly
+ * generated profile at publish time. Pure — the generated profile and the stored
+ * correction are inputs; the returned `aiProfile` is what goes on the 31603.
+ *
+ *  - `hidden: true` → publish NO ai_profile (the entry falls back to the authored
+ *    profile); NOT flagged as edited, so hiding is not advertised to viewers.
+ *  - `overrides` → replace named fields with the attendee's own text/lists.
+ *  - `hidden_fields` → blank named fields (summary→"", arrays→[]).
+ * Authored identity fields (about/skills/looking_for/links) are never touched.
+ */
+function applyCorrection(
+  generated: AiProfile | undefined,
+  correction: ProfileCorrectionContent | undefined,
+): { aiProfile: AiProfile | undefined; edited: boolean } {
+  if (!generated || !correction) return { aiProfile: generated, edited: false };
+  if (correction.hidden) return { aiProfile: undefined, edited: false };
+  let aiProfile: AiProfile = generated;
+  let edited = false;
+  if (correction.overrides && Object.keys(correction.overrides).length > 0) {
+    aiProfile = { ...aiProfile, ...correction.overrides };
+    edited = true;
+  }
+  if (correction.hidden_fields && correction.hidden_fields.length > 0) {
+    aiProfile = { ...aiProfile };
+    for (const f of correction.hidden_fields) {
+      if (!AI_PROFILE_FIELDS.includes(f)) continue;
+      (aiProfile as any)[f] = f === "summary" ? "" : [];
+    }
+    edited = true;
+  }
+  return { aiProfile, edited };
 }
 
 /**
