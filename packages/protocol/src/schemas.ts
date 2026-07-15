@@ -70,6 +70,28 @@ export const mediaDescriptorDraftSchema = mediaDescriptorSchema
   .extend({ url: z.array(z.string()) })
   .strict();
 
+// ── Media transcript (spec §9.2, audit A1) ───────────────────────────────────
+// A transcript tied to a specific media blob by its ciphertext hash `x`. The
+// coordinator publishes these on the directory entry so a deaf/screen-reader
+// attendee has a nonvisual path to any intro. `.strict()`: a transcript is read
+// off a relay and rendered as trusted text, so an unexpected field is rejected.
+// Because `x` is content-addressed, re-recording an intro changes `x` and orphans
+// the old transcript — the directory-entry schema below validates that every
+// transcript still references live media (stale transcripts are dropped).
+export const mediaTranscriptSchema = z
+  .object({
+    x: hex32, // the media descriptor's `x` this transcript belongs to
+    text: z.string(),
+    lang: z.string(), // ISO-639-1 detected by STT, or the authored source language
+    source: z.enum(["stt", "authored"]),
+    updated_at: z.number().int(),
+  })
+  .strict();
+export type MediaTranscript = z.infer<typeof mediaTranscriptSchema>;
+
+/** Upper bound on a text intro / authored transcript (spec F1, ~2000 chars). */
+export const MAX_INTRO_TEXT = 2000;
+
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
   about: z.string().default(""),
@@ -127,6 +149,10 @@ export const profileSubmissionContentSchema = z.object({
   v: version,
   profile: attendeeProfileSchema,
   media: z.array(mediaDescriptorSchema).default([]),
+  // A plain-text intro (spec F1): an alternative to an audio/video intro for
+  // attendees who can't/won't record. Feeds the ai_profile like a transcript,
+  // but has NO media blob. Bounded so it can't bloat the encrypted submission.
+  intro_text: z.string().max(MAX_INTRO_TEXT).optional(),
 });
 export type ProfileSubmissionContent = z.infer<
   typeof profileSubmissionContentSchema
@@ -194,14 +220,34 @@ export const myProfileContentSchema = z.object({
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 
 // ── 31603 Directory Entry content (ECK) ──────────────────────────────────────
-export const directoryEntryContentSchema = z.object({
-  v: version,
-  pubkey: hex32,
-  profile: attendeeProfileSchema,
-  media: z.array(mediaDescriptorSchema).default([]),
-  ai_profile: aiProfileSchema.optional(), // appears when processing completes
-  updated_at: z.number().int(),
-});
+export const directoryEntryContentSchema = z
+  .object({
+    v: version,
+    pubkey: hex32,
+    profile: attendeeProfileSchema,
+    media: z.array(mediaDescriptorSchema).default([]),
+    ai_profile: aiProfileSchema.optional(), // appears when processing completes
+    // Published transcripts (audit A1): the nonvisual consumption path. Each ties
+    // to a media blob by `x`; the refine below rejects any that don't reference
+    // live media, so a re-record (new `x`) can't surface a stale transcript.
+    transcripts: z.array(mediaTranscriptSchema).optional(),
+    // Echoes the authored text intro (spec F1) for display when there's no blob.
+    intro_text: z.string().max(MAX_INTRO_TEXT).optional(),
+    updated_at: z.number().int(),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.transcripts) return;
+    const live = new Set(val.media.map((m) => m.x));
+    val.transcripts.forEach((tr, i) => {
+      if (!live.has(tr.x)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["transcripts", i, "x"],
+          message: "transcript.x must reference a media descriptor in this entry",
+        });
+      }
+    });
+  });
 export type DirectoryEntryContent = z.infer<typeof directoryEntryContentSchema>;
 
 // ── 31604 Roster content (ECK) ───────────────────────────────────────────────

@@ -65,6 +65,9 @@ export interface AttendeeRow {
   profile_hash: string | null;
   source_revision: string | null;
   ai_source_revision: string | null;
+  // Published transcripts (audit A1, spec F1): MediaTranscript[] JSON, one entry
+  // per STT-transcribed media blob, surfaced on the directory entry.
+  transcripts_json: string | null;
   updated_at: number;
 }
 
@@ -103,6 +106,7 @@ CREATE TABLE IF NOT EXISTS attendees (
   -- so a new submission never publishes authored fields beside a stale AI profile.
   source_revision TEXT,
   ai_source_revision TEXT,
+  transcripts_json TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -130,6 +134,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE TABLE IF NOT EXISTS transcripts (
   blob_sha256 TEXT PRIMARY KEY,
   text TEXT NOT NULL,
+  lang TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS nostr_summaries (
@@ -238,12 +243,18 @@ export class Store {
       }
     }
     // Migration (Q10): revision-tracking columns on older attendee rows.
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT"]) {
+    // Migration (F1): transcripts_json on attendees; lang on transcripts.
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT"]) {
       try {
         this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
       } catch {
         /* column already exists */
       }
+    }
+    try {
+      this.db.exec("ALTER TABLE transcripts ADD COLUMN lang TEXT");
+    } catch {
+      /* column already exists */
     }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
@@ -369,13 +380,14 @@ export class Store {
     profileHash?: string | null;
     sourceRevision?: string | null;
     aiSourceRevision?: string | null;
+    transcriptsJson?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
@@ -384,6 +396,7 @@ export class Store {
            profile_hash = COALESCE(:profileHash, attendees.profile_hash),
            source_revision = COALESCE(:sourceRevision, attendees.source_revision),
            ai_source_revision = COALESCE(:aiSourceRevision, attendees.ai_source_revision),
+           transcripts_json = COALESCE(:transcriptsJson, attendees.transcripts_json),
            updated_at = :now`,
       )
       .run({
@@ -396,6 +409,7 @@ export class Store {
         profileHash: row.profileHash ?? null,
         sourceRevision: row.sourceRevision ?? null,
         aiSourceRevision: row.aiSourceRevision ?? null,
+        transcriptsJson: row.transcriptsJson ?? null,
         now: row.now,
       });
   }
@@ -426,10 +440,16 @@ export class Store {
       .get(blobSha256) as { text: string } | undefined;
     return row?.text;
   }
-  putTranscript(blobSha256: string, text: string, now: number): void {
+  /** Transcript text + STT-detected language (spec F1), for publishing on 31603. */
+  getTranscriptRow(blobSha256: string): { text: string; lang: string | null } | undefined {
+    return this.db
+      .prepare("SELECT text, lang FROM transcripts WHERE blob_sha256 = ?")
+      .get(blobSha256) as { text: string; lang: string | null } | undefined;
+  }
+  putTranscript(blobSha256: string, text: string, now: number, lang?: string): void {
     this.db
-      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, created_at) VALUES (?, ?, ?)")
-      .run(blobSha256, text, now);
+      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
+      .run(blobSha256, text, lang ?? null, now);
   }
 
   // ── nostr summaries (cache by pubkey + inputs hash) ───────────────────────

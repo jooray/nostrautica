@@ -175,9 +175,19 @@
     <p style="margin-top:0.75rem">{aboutText}</p>
   {/if}
 
+  {#if entry?.intro_text}
+    <!-- Text intro (spec F1): the primary content when there's no recording. -->
+    <div class="card" style="background:var(--bg-elev2);margin:0.75rem 0">
+      <strong>{t("attendee.textIntro")}</strong>
+      <p style="margin:0.35rem 0 0;white-space:pre-wrap">{entry.intro_text}</p>
+    </div>
+  {/if}
+
   {#if entry?.media?.length}
     {#each entry.media.filter((m) => m.kind === "intro") as m (m.x)}
-      <div style="margin:0.75rem 0"><MediaPlayer descriptor={m} /></div>
+      <div style="margin:0.75rem 0">
+        <MediaPlayer descriptor={m} transcript={entry.transcripts?.find((tr) => tr.x === m.x)} />
+      </div>
     {/each}
   {/if}
 

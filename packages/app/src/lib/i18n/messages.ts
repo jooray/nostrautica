@@ -372,6 +372,7 @@ export const messages = {
     "attendee.followsYou": "Follows you",
     "attendee.lookingFor": "Looking for: {value}",
     "attendee.aiSummary": "AI summary",
+    "attendee.textIntro": "Intro",
     "attendee.following": "Following ✓",
     "attendee.followingBusy": "Following…",
     "attendee.follow": "Follow",
@@ -462,6 +463,11 @@ export const messages = {
     "media.playError": "Couldn't play video: {reason}",
     "media.decrypting": "Decrypting…",
     "media.playIntro": "▶ Play intro",
+    "media.playAudio": "▶ Play audio intro",
+    "media.showTranscript": "Show transcript",
+    "media.hideTranscript": "Hide transcript",
+    "media.transcript.machine": "Machine-generated transcript",
+    "media.captionsUnavailable": "Captions unavailable",
 
     // QR code
     "qr.alt": "QR code",
@@ -726,6 +732,27 @@ export const messages = {
     "record.disclosure.confirm":
       "I understand the coordinator and its listed processing providers will process this intro.",
     "record.disclosure.confirmNoCoord": "I understand this intro is shared with this event's attendees.",
+    "record.disclosure.confirmText":
+      "I understand the coordinator and its AI provider will process this text to build my profile and matches.",
+    "record.disclosure.textProviders":
+      "Its configured AI provider receives your text to build your profile and matches. Nothing is recorded or transcribed — no audio leaves your device.",
+
+    // Tabbed intro composer (F1.4): video · audio · text
+    "record.mode.label": "How would you like to introduce yourself?",
+    "record.mode.video": "Video",
+    "record.mode.audio": "Audio",
+    "record.mode.text": "Text",
+    "record.audio.hint": "Record a short spoken intro — no camera needed.",
+    "record.audio.enableMic": "Enable microphone",
+    "record.audio.record": "● Record audio",
+    "record.micLevel": "Microphone level",
+    "record.error.mic": "Microphone access is required to record audio. {reason}",
+    "record.chooseFile": "Choose a file",
+    "record.text.title": "Write your intro",
+    "record.text.hint": "Type your intro instead of recording — it feeds your matches just like a spoken one.",
+    "record.text.placeholder": "Tell other attendees who you are, what you do, and who you'd like to meet…",
+    "record.text.count": "{n} / {max}",
+    "record.text.submit": "Use this intro",
   },
   sk: {
     // App shell / nav
@@ -1094,6 +1121,7 @@ export const messages = {
     "attendee.followsYou": "Sleduje vás",
     "attendee.lookingFor": "Hľadá: {value}",
     "attendee.aiSummary": "AI zhrnutie",
+    "attendee.textIntro": "Predstavenie",
     "attendee.following": "Sledované ✓",
     "attendee.followingBusy": "Sleduje sa…",
     "attendee.follow": "Sledovať",
@@ -1186,6 +1214,11 @@ export const messages = {
     "media.playError": "Video sa nepodarilo prehrať: {reason}",
     "media.decrypting": "Dešifruje sa…",
     "media.playIntro": "▶ Prehrať predstavenie",
+    "media.playAudio": "▶ Prehrať zvukové predstavenie",
+    "media.showTranscript": "Zobraziť prepis",
+    "media.hideTranscript": "Skryť prepis",
+    "media.transcript.machine": "Strojovo vygenerovaný prepis",
+    "media.captionsUnavailable": "Titulky nie sú k dispozícii",
 
     // QR code
     "qr.alt": "QR kód",
@@ -1454,6 +1487,27 @@ export const messages = {
     "record.disclosure.confirm":
       "Rozumiem, že koordinátor a jeho uvedení poskytovatelia spracovania toto predstavenie spracujú.",
     "record.disclosure.confirmNoCoord": "Rozumiem, že toto predstavenie sa zdieľa s účastníkmi tohto podujatia.",
+    "record.disclosure.confirmText":
+      "Rozumiem, že koordinátor a jeho AI poskytovateľ spracujú tento text, aby vytvorili môj profil a spojenia.",
+    "record.disclosure.textProviders":
+      "Jeho nakonfigurovaný AI poskytovateľ dostane váš text, aby vytvoril váš profil a spojenia. Nič sa nenahráva ani neprepisuje — z vášho zariadenia neodchádza žiadny zvuk.",
+
+    // Tabbed intro composer (F1.4): video · audio · text
+    "record.mode.label": "Ako sa chcete predstaviť?",
+    "record.mode.video": "Video",
+    "record.mode.audio": "Zvuk",
+    "record.mode.text": "Text",
+    "record.audio.hint": "Nahrajte krátke hovorené predstavenie — kamera nie je potrebná.",
+    "record.audio.enableMic": "Povoliť mikrofón",
+    "record.audio.record": "● Nahrať zvuk",
+    "record.micLevel": "Úroveň mikrofónu",
+    "record.error.mic": "Na nahrávanie zvuku je potrebný prístup k mikrofónu. {reason}",
+    "record.chooseFile": "Vybrať súbor",
+    "record.text.title": "Napíšte svoje predstavenie",
+    "record.text.hint": "Namiesto nahrávania napíšte predstavenie — do spojení vstupuje rovnako ako hovorené.",
+    "record.text.placeholder": "Povedzte ostatným účastníkom, kto ste, čo robíte a koho by ste chceli stretnúť…",
+    "record.text.count": "{n} / {max}",
+    "record.text.submit": "Použiť toto predstavenie",
   },
 } as const;
 

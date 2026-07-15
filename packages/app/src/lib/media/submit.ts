@@ -104,24 +104,34 @@ export async function submitProfileAndMedia(
     profile: AttendeeProfile;
     media: MediaDescriptor[];
     blindingKey: Uint8Array;
+    /** A plain-text intro (spec F1). Written into 21601 + the 31602 self-copy. */
+    introText?: string;
   },
 ): Promise<void> {
   const attendeePubkey = await signer.getPublicKey();
+  const introText = args.introText?.trim() || undefined;
 
   // 21601 → E_inbox (gift-wrapped).
-  const submission = { v: 1, profile: args.profile, media: args.media };
+  const submission = {
+    v: 1,
+    profile: args.profile,
+    media: args.media,
+    ...(introText ? { intro_text: introText } : {}),
+  };
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_PROFILE_SUBMISSION,
     content: submission,
     tags: [["a", ctx.coordinate]],
   });
 
-  // 31602 self-copy (blinded d over the self-conversation key).
+  // 31602 self-copy (blinded d over the self-conversation key). Keeps the
+  // attendee's own device holding their authored text intro too.
   const selfContent = {
     v: 1,
     a: ctx.coordinate,
     profile: args.profile,
     media: args.media,
+    ...(introText ? { intro_text: introText } : {}),
   };
   const selfCipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(selfContent));
   const selfEvent = await signer.signEvent({
@@ -203,7 +213,9 @@ export async function loadSelfCopy(
   signer: AppSigner,
   ctx: EventContext,
   blindingKey: Uint8Array,
-): Promise<{ profile?: AttendeeProfile; media: MediaDescriptor[] } | undefined> {
+): Promise<
+  { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string } | undefined
+> {
   const pubkey = await signer.getPublicKey();
   const d = blindedD(blindingKey, ctx.coordinate, pubkey);
   const events = await fetchEvents({
@@ -215,8 +227,12 @@ export async function loadSelfCopy(
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
-    const parsed = JSON.parse(json) as { profile?: AttendeeProfile; media?: MediaDescriptor[] };
-    return { profile: parsed.profile, media: parsed.media ?? [] };
+    const parsed = JSON.parse(json) as {
+      profile?: AttendeeProfile;
+      media?: MediaDescriptor[];
+      intro_text?: string;
+    };
+    return { profile: parsed.profile, media: parsed.media ?? [], introText: parsed.intro_text };
   } catch {
     return undefined;
   }

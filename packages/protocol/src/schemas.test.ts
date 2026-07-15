@@ -15,6 +15,7 @@ import {
   perEventSettingsSchema,
   eventKeysBackupSchema,
   coordinatorStatusContentSchema,
+  mediaTranscriptSchema,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -250,5 +251,78 @@ describe("schema validation rejects malformed payloads", () => {
       retryable: false,
       at: 1_700_000_000,
     });
+  });
+});
+
+// ── F1: text/audio intro alternatives + transcript surfacing ─────────────────
+describe("F1 — intro_text + MediaTranscript on 21601 / 31603", () => {
+  const transcript = {
+    x: hex,
+    text: "Hi, I build privacy tools.",
+    lang: "en",
+    source: "stt" as const,
+    updated_at: 1_700_000_000,
+  };
+
+  it("21601 submission round-trips with a text intro (no media)", () =>
+    roundTrips(profileSubmissionContentSchema, {
+      v: 1,
+      profile: { about: "dev", skills: ["rust"], looking_for: "cofounder", links: [] },
+      media: [],
+      intro_text: "I write Rust and care about privacy. Looking to meet designers.",
+    }));
+
+  it("21601 submission caps intro_text at MAX_INTRO_TEXT", () =>
+    expect(() =>
+      profileSubmissionContentSchema.parse({
+        v: 1,
+        profile: { about: "", skills: [], looking_for: "", links: [] },
+        media: [],
+        intro_text: "x".repeat(2001),
+      }),
+    ).toThrow());
+
+  it("MediaTranscript round-trips and is strict", () => {
+    roundTrips(mediaTranscriptSchema, transcript);
+    expect(() => mediaTranscriptSchema.parse({ ...transcript, evil: 1 })).toThrow();
+    expect(() => mediaTranscriptSchema.parse({ ...transcript, source: "guess" })).toThrow();
+  });
+
+  it("31603 directory entry round-trips with transcripts + intro_text", () =>
+    roundTrips(directoryEntryContentSchema, {
+      v: 1,
+      pubkey: hex,
+      profile: { about: "x", skills: [], looking_for: "", links: [] },
+      media: [descriptor], // descriptor.x === hex, matching transcript.x
+      transcripts: [transcript],
+      intro_text: "typed intro",
+      updated_at: 1_700_000_000,
+    }));
+
+  it("31603 rejects a transcript whose x doesn't match any live media (stale drop)", () => {
+    expect(() =>
+      directoryEntryContentSchema.parse({
+        v: 1,
+        pubkey: hex,
+        profile: { about: "x", skills: [], looking_for: "", links: [] },
+        media: [descriptor], // x === hex
+        transcripts: [{ ...transcript, x: "c".repeat(64) }], // orphaned (media replaced)
+        updated_at: 1_700_000_000,
+      }),
+    ).toThrow();
+  });
+
+  it("31603 accepts a transcript once its media is present again (re-record)", () => {
+    // A text-only entry (no media) may carry intro_text but no transcripts.
+    const parsed = directoryEntryContentSchema.parse({
+      v: 1,
+      pubkey: hex,
+      profile: { about: "x", skills: [], looking_for: "", links: [] },
+      media: [],
+      intro_text: "text only",
+      updated_at: 1_700_000_000,
+    });
+    expect(parsed.intro_text).toBe("text only");
+    expect(parsed.transcripts).toBeUndefined();
   });
 });

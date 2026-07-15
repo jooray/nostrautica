@@ -73,7 +73,9 @@ class ReadinessStore {
         try {
           const bk = await deriveBlindingKey(signer);
           const self = await loadSelfCopy(signer, ctx, bk);
-          hasIntro = (self?.media ?? []).some((m) => m.kind === "intro");
+          // An intro can be a recording (media kind "intro") OR a text intro (F1).
+          hasIntro =
+            (self?.media ?? []).some((m) => m.kind === "intro") || !!self?.introText?.trim();
         } catch {
           hasIntro = undefined; // couldn't tell — model shows "Checking status"
         }

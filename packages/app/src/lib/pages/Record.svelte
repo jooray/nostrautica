@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import type { MediaDescriptor } from "@nostrautica/protocol";
+  import { MAX_INTRO_TEXT, type MediaDescriptor } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -14,14 +14,21 @@
     loadLibrary,
     prepareReuse,
   } from "$lib/media/submit.js";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
   const kindLabel = $derived(talk ? t("record.kind.talk") : t("record.kind.intro"));
 
+  // Intro composer mode (spec F1.4). One recording engine (`VideoCapture`) serves
+  // both video and audio; text bypasses capture/upload entirely. Feature 2 reuses
+  // this same composer for talks via the `talk` prop.
+  type Mode = "video" | "audio" | "text";
+  let mode = $state<Mode>("video");
+
   let ctx = $state<EventContext | null>(null);
-  let error = $state<string | null>(null);
+  let error = $state<unknown>(null);
   let videoEl = $state<HTMLVideoElement | null>(null);
   let stream: MediaStream | null = null;
   let capture: VideoCapture | null = null;
@@ -32,12 +39,20 @@
   let busy = $state(false);
   let done = $state(false);
   let library = $state<MediaDescriptor[]>([]);
+  let textIntro = $state("");
+
+  // Live mic level (0..1) for the audio meter; driven by a Web Audio analyser.
+  let micLevel = $state(0);
+  let audioCtx: AudioContext | null = null;
+  let meterRaf: number | null = null;
+
   // Pre-submit disclosure (H10): the intro must not leave the device until the
   // user acknowledges who processes it. Blocks every submit path below.
   let disclosureAck = $state(false);
   const hasCoordinator = $derived(!!ctx?.config.coordinator);
 
   const maxSec = $derived(ctx ? (talk ? ctx.config.maxTalkSec : ctx.config.maxVideoSec) : 90);
+  const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
 
   onMount(async () => {
     try {
@@ -46,37 +61,102 @@
       if (session.signer) {
         const bk = await deriveBlindingKey(session.signer);
         library = await loadLibrary(session.signer, bk);
+        const self = await loadSelfCopy(session.signer, ctx, bk);
+        if (self?.introText) textIntro = self.introText;
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = e;
     }
   });
 
-  onDestroy(() => stopStream());
+  onDestroy(() => teardown());
+
+  function stopMeter() {
+    if (meterRaf !== null) cancelAnimationFrame(meterRaf);
+    meterRaf = null;
+    audioCtx?.close().catch(() => {});
+    audioCtx = null;
+    micLevel = 0;
+  }
 
   function stopStream() {
-    stream?.getTracks().forEach((t) => t.stop());
+    stopMeter();
+    stream?.getTracks().forEach((tr) => tr.stop());
     stream = null;
+  }
+
+  function teardown() {
+    stopStream();
+    if (recorded) URL.revokeObjectURL(recorded.url);
+  }
+
+  /** Switch composer mode, tearing down any live capture/preview first. */
+  function switchMode(m: Mode) {
+    if (m === mode) return;
+    capture?.stop();
+    recording = false;
+    stopStream();
+    if (recorded) URL.revokeObjectURL(recorded.url);
+    recorded = null;
+    error = null;
+    mode = m;
+  }
+
+  // Drive the mic meter off the live audio track (audio + video modes).
+  function startMeter(src: MediaStream) {
+    try {
+      const AC = window.AudioContext ?? (window as any).webkitAudioContext;
+      if (!AC) return;
+      audioCtx = new AC();
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      audioCtx.createMediaStreamSource(src).connect(analyser);
+      const buf = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        analyser.getByteTimeDomainData(buf);
+        let peak = 0;
+        for (const v of buf) peak = Math.max(peak, Math.abs(v - 128));
+        micLevel = Math.min(1, peak / 128);
+        meterRaf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch {
+      /* meter is best-effort; recording still works without it */
+    }
   }
 
   async function enableCamera() {
     error = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user" },
+        audio: true,
+      });
       if (videoEl) {
         videoEl.srcObject = stream;
         videoEl.muted = true;
         await videoEl.play().catch(() => {});
       }
+      startMeter(stream);
     } catch (e) {
-      error = t("record.error.camera", { reason: (e as Error).message });
+      error = new Error(t("record.error.camera", { reason: (e as Error).message }));
+    }
+  }
+
+  async function enableMic() {
+    error = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      startMeter(stream);
+    } catch (e) {
+      error = new Error(t("record.error.mic", { reason: (e as Error).message }));
     }
   }
 
   async function startRecording() {
-    if (!stream) await enableCamera();
+    if (!stream) await (mode === "audio" ? enableMic() : enableCamera());
     if (!stream) return;
-    capture = new VideoCapture();
+    capture = new VideoCapture(mode === "audio" ? "audio" : "video");
     recording = true;
     remaining = maxSec;
     try {
@@ -87,9 +167,10 @@
         url: URL.createObjectURL(result.blob),
         durationSec: result.durationSec,
       };
+      stopMeter();
     } catch (e) {
       recording = false;
-      error = (e as Error).message;
+      error = e;
     }
   }
 
@@ -102,12 +183,36 @@
     recorded = null;
   }
 
+  /** File fallback (audit P2.8): use an existing clip instead of recording. */
+  async function chooseFile(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    stopStream();
+    const url = URL.createObjectURL(file);
+    let durationSec = 0;
+    try {
+      durationSec = await readDuration(url, mode === "audio");
+    } catch {
+      /* duration is optional */
+    }
+    recorded = { blob: file, url, durationSec };
+  }
+
+  function readDuration(url: string, audio: boolean): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const el = document.createElement(audio ? "audio" : "video");
+      el.preload = "metadata";
+      el.onloadedmetadata = () => resolve(Math.round(el.duration) || 0);
+      el.onerror = () => reject(new Error("metadata"));
+      el.src = url;
+    });
+  }
+
   async function submitRecorded() {
     if (!ctx || !session.signer || !recorded) return;
     busy = true;
     error = null;
     try {
-      const bk = await deriveBlindingKey(session.signer);
       const descriptor = await uploadMedia(
         session.signer,
         ctx,
@@ -115,9 +220,33 @@
         kind,
         recorded.durationSec,
       );
-      await finishSubmit(descriptor);
+      await finishSubmitMedia(descriptor);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = e;
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function submitText() {
+    if (!ctx || !session.signer || !textIntro.trim()) return;
+    busy = true;
+    error = null;
+    try {
+      const signer = session.signer;
+      const bk = await deriveBlindingKey(signer);
+      const self = await loadSelfCopy(signer, ctx, bk);
+      // A text intro replaces any recorded intro of this kind (drops its media).
+      const media = (self?.media ?? []).filter((m) => m.kind !== kind);
+      await submitProfileAndMedia(signer, ctx, {
+        profile: self?.profile ?? { about: "", skills: [], looking_for: "", links: [] },
+        media,
+        blindingKey: bk,
+        introText: textIntro.trim(),
+      });
+      finish();
+    } catch (e) {
+      error = e;
     } finally {
       busy = false;
     }
@@ -129,32 +258,40 @@
     error = null;
     try {
       const prepared = await prepareReuse(session.signer, ctx, descriptor, fresh);
-      await finishSubmit(prepared);
+      await finishSubmitMedia(prepared);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = e;
     } finally {
       busy = false;
     }
   }
 
-  async function finishSubmit(descriptor: MediaDescriptor) {
+  async function finishSubmitMedia(descriptor: MediaDescriptor) {
     const signer = session.signer!;
     const bk = await deriveBlindingKey(signer);
     const self = await loadSelfCopy(signer, ctx!, bk);
+    // Replace the existing intro of the same kind; keep other kinds (e.g. talks).
+    // A recording supersedes any prior text intro (introText omitted below).
     const existingMedia = (self?.media ?? []).filter((m) => m.kind !== descriptor.kind);
     await submitProfileAndMedia(signer, ctx!, {
       profile: self?.profile ?? { about: "", skills: [], looking_for: "", links: [] },
       media: [...existingMedia, descriptor],
       blindingKey: bk,
     });
+    finish();
+  }
+
+  function finish() {
     stopStream();
     done = true;
   }
+
+  const canSubmit = $derived(disclosureAck && !busy);
 </script>
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
 
-{#if error}<div class="card warn">{error}</div>{/if}
+{#if error}<ErrorState {error} />{/if}
 
 {#if done}
   <div class="card" role="status">
@@ -168,14 +305,25 @@
     <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("record.loginFirst")}</button>
   </div>
 {:else}
-  <!-- What is shared, and with whom, before anything leaves the device (H10). -->
+  <!-- Mode tabs: video · audio · text (spec F1.4). -->
+  <div class="card">
+    <div class="field-label" id="mode-label">{t("record.mode.label")}</div>
+    <div class="row" role="tablist" aria-labelledby="mode-label" style="flex-wrap:wrap">
+      <button class="btn inline" role="tab" aria-selected={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
+      <button class="btn inline" role="tab" aria-selected={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
+      <button class="btn inline" role="tab" aria-selected={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
+    </div>
+  </div>
+
+  <!-- What is shared, and with whom, before anything leaves the device (H10).
+       The text mode drops the audio/transcription bullet: nothing is recorded. -->
   <div class="card" style="background:var(--bg-elev2)">
     <strong>{t("record.disclosure.title")}</strong>
     <ul class="muted" style="margin:0.5rem 0;padding-left:1.1rem;line-height:1.5">
       <li>{t("record.disclosure.attendees")}</li>
       {#if hasCoordinator}
         <li>{t("record.disclosure.coordinator")}</li>
-        <li>{t("record.disclosure.providers")}</li>
+        <li>{mode === "text" ? t("record.disclosure.textProviders") : t("record.disclosure.providers")}</li>
       {/if}
     </ul>
     <label class="row" style="align-items:flex-start;gap:0.5rem;font-weight:400">
@@ -184,11 +332,19 @@
         bind:checked={disclosureAck}
         style="width:auto;min-height:0;flex:none;margin-top:0.2rem"
       />
-      <span>{hasCoordinator ? t("record.disclosure.confirm") : t("record.disclosure.confirmNoCoord")}</span>
+      <span>
+        {#if !hasCoordinator}
+          {t("record.disclosure.confirmNoCoord")}
+        {:else if mode === "text"}
+          {t("record.disclosure.confirmText")}
+        {:else}
+          {t("record.disclosure.confirm")}
+        {/if}
+      </span>
     </label>
   </div>
 
-  {#if library.length > 0 && !recorded}
+  {#if mode !== "text" && library.length > 0 && !recorded}
     <div class="card">
       <h2>{t("record.reuse.title")}</h2>
       <p class="muted">{t("record.reuse.body")}</p>
@@ -196,40 +352,112 @@
         <div class="row" style="justify-content:space-between;margin-top:0.5rem">
           <span class="badge">{m.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")} · {m.duration ?? "?"}s</span>
           <div class="row">
-            <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy || !disclosureAck}>{t("record.reuse.reuse")}</button>
-            <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy || !disclosureAck}>{t("record.reuse.fresh")}</button>
+            <button class="btn inline" onclick={() => reuse(m, false)} disabled={!canSubmit}>{t("record.reuse.reuse")}</button>
+            <button class="btn inline" onclick={() => reuse(m, true)} disabled={!canSubmit}>{t("record.reuse.fresh")}</button>
           </div>
         </div>
       {/each}
     </div>
   {/if}
 
-  <div class="card">
-    {#if recorded}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video src={recorded.url} controls playsinline style="max-width:100%;border-radius:12px"></video>
-      <p class="muted">{t("record.recorded", { sec: recorded.durationSec })}</p>
-      <div class="row">
-        <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
-        <button class="btn primary" onclick={submitRecorded} disabled={busy || !disclosureAck}>
-          {busy ? t("record.uploading") : t("record.useThis")}
-        </button>
-      </div>
-    {:else}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video bind:this={videoEl} playsinline muted style="max-width:100%;border-radius:12px;background:#000"></video>
-      <p class="muted" role="status" aria-live="polite">
-        {t("record.limit", { sec: maxSec })}
-        {#if recording}<strong>{t("record.timeLeft", { sec: remaining })}</strong>{/if}
+  {#if mode === "text"}
+    <div class="card">
+      <h2>{t("record.text.title")}</h2>
+      <p class="muted">{t("record.text.hint")}</p>
+      <textarea
+        rows="6"
+        maxlength={MAX_INTRO_TEXT}
+        placeholder={t("record.text.placeholder")}
+        bind:value={textIntro}
+        aria-label={t("record.text.title")}
+      ></textarea>
+      <p class="muted" style="text-align:right;font-size:0.8rem" aria-live="polite">
+        {t("record.text.count", { n: textIntro.length, max: MAX_INTRO_TEXT })}
       </p>
-      {#if recording}
-        <button class="btn danger" onclick={stopRecording}>{t("record.stop")}</button>
-      {:else}
+      <button
+        class="btn primary"
+        onclick={submitText}
+        disabled={!canSubmit || !textIntro.trim() || textLeft < 0}
+      >
+        {busy ? t("record.uploading") : t("record.text.submit")}
+      </button>
+    </div>
+  {:else}
+    <div class="card">
+      {#if recorded}
+        {#if mode === "audio"}
+          <audio src={recorded.url} controls style="width:100%"></audio>
+        {:else}
+          <!-- svelte-ignore a11y_media_has_caption -->
+          <video src={recorded.url} controls playsinline style="max-width:100%;border-radius:12px"></video>
+        {/if}
+        <p class="muted">{t("record.recorded", { sec: recorded.durationSec })}</p>
         <div class="row">
-          <button class="btn" onclick={enableCamera}>{t("record.enableCamera")}</button>
-          <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
+          <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
+          <button class="btn primary" onclick={submitRecorded} disabled={!canSubmit}>
+            {busy ? t("record.uploading") : t("record.useThis")}
+          </button>
         </div>
+      {:else}
+        {#if mode === "audio"}
+          <p class="muted">{t("record.audio.hint")}</p>
+          <!-- Live mic meter (audit P2.8): shows the microphone is working. -->
+          <div
+            class="meter"
+            role="meter"
+            aria-label={t("record.micLevel")}
+            aria-valuenow={Math.round(micLevel * 100)}
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <div class="meter-fill" style="width:{Math.round(micLevel * 100)}%"></div>
+          </div>
+        {:else}
+          <!-- svelte-ignore a11y_media_has_caption -->
+          <video bind:this={videoEl} playsinline muted style="max-width:100%;border-radius:12px;background:#000"></video>
+        {/if}
+        <p class="muted" role="status" aria-live="polite">
+          {t("record.limit", { sec: maxSec })}
+          {#if recording}<strong>{t("record.timeLeft", { sec: remaining })}</strong>{/if}
+        </p>
+        {#if recording}
+          <button class="btn danger" onclick={stopRecording}>{t("record.stop")}</button>
+        {:else}
+          <div class="row" style="flex-wrap:wrap">
+            {#if mode === "audio"}
+              <button class="btn" onclick={enableMic}>{t("record.audio.enableMic")}</button>
+              <button class="btn primary" onclick={startRecording}>{t("record.audio.record")}</button>
+            {:else}
+              <button class="btn" onclick={enableCamera}>{t("record.enableCamera")}</button>
+              <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
+            {/if}
+            <label class="btn" style="cursor:pointer">
+              {t("record.chooseFile")}
+              <input
+                type="file"
+                accept={mode === "audio" ? "audio/*" : "video/*"}
+                onchange={chooseFile}
+                style="display:none"
+              />
+            </label>
+          </div>
+        {/if}
       {/if}
-    {/if}
-  </div>
+    </div>
+  {/if}
 {/if}
+
+<style>
+  .meter {
+    height: 10px;
+    border-radius: 6px;
+    background: var(--bg-elev2);
+    overflow: hidden;
+    margin: 0.5rem 0;
+  }
+  .meter-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 80ms linear;
+  }
+</style>

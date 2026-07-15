@@ -44,6 +44,7 @@ import {
   type EventConfig,
   type AttendeeProfile,
   type MediaDescriptor,
+  type MediaTranscript,
   type RosterContent,
   type MatchMatrixContent,
 } from "@nostrautica/protocol";
@@ -124,8 +125,11 @@ export interface CoordinatorDeps {
   /** Injectable RNG for deterministic candidate shuffling in tests. */
   matchRng?: () => number;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
-  /** Override the transcription stage (tests inject to skip Blossom/ffmpeg). */
-  transcribe?: (descriptor: import("@nostrautica/protocol").MediaDescriptor) => Promise<string>;
+  /** Override the transcription stage (tests inject to skip Blossom/ffmpeg).
+   *  May return text only, or a {@link TranscriptResult} with a detected language. */
+  transcribe?: (
+    descriptor: MediaDescriptor,
+  ) => Promise<string | import("./pipeline/transcribe.js").TranscriptResult>;
   /** Max media bytes to download per blob (audit C3). */
   maxMediaBytes?: number;
   now?: () => number;
@@ -428,8 +432,8 @@ export class Coordinator {
       await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name);
     } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
       const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
-      log(`[submission] from ${short(rumor.pubkey)} — ${content.media.length} media, ${content.profile.skills.length} skills`);
-      await this.handleSubmission(state, rumor.pubkey, content.profile, content.media);
+      log(`[submission] from ${short(rumor.pubkey)} — ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
+      await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text);
     }
   }
 
@@ -474,11 +478,13 @@ export class Coordinator {
     pubkey: string,
     profile: AttendeeProfile,
     media: MediaDescriptor[],
+    introText?: string,
   ): Promise<void> {
-    // Store the profile with its media descriptors stashed for the pipeline, and
-    // record the source revision (hash of the authored submission, audit Q10) so a
-    // directory entry never surfaces a stale ai_profile beside changed fields.
-    const profileJson = JSON.stringify({ ...profile, __media: media });
+    // Store the profile with its media descriptors + text intro stashed for the
+    // pipeline, and record the source revision (hash of the authored submission,
+    // audit Q10) so a directory entry never surfaces a stale ai_profile beside
+    // changed fields. `__intro_text` carries a text intro (F1) with no blob.
+    const profileJson = JSON.stringify({ ...profile, __media: media, __intro_text: introText });
     this.deps.store.upsertAttendee({
       coordinate: state.coordinate,
       pubkey,
@@ -531,7 +537,7 @@ export class Coordinator {
 
   private parseStoredProfile(
     attendee: import("./store/db.js").AttendeeRow | undefined,
-  ): { profile: AttendeeProfile; media: MediaDescriptor[] } {
+  ): { profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string } {
     const raw = attendee?.profile_json ? JSON.parse(attendee.profile_json) : {};
     const media = (raw.__media ?? []) as MediaDescriptor[];
     const profile: AttendeeProfile = {
@@ -540,12 +546,13 @@ export class Coordinator {
       looking_for: raw.looking_for ?? "",
       links: raw.links ?? [],
     };
-    return { profile, media };
+    const introText = typeof raw.__intro_text === "string" && raw.__intro_text ? raw.__intro_text : undefined;
+    return { profile, media, introText };
   }
 
   private async publishDirectory(state: EventState, pubkey: string): Promise<void> {
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
-    const { profile, media } = this.parseStoredProfile(attendee);
+    const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Revision guard (audit Q10): only surface ai_profile when it was derived from
     // the CURRENT authored submission. After a resubmission the entry publishes the
     // fresh authored fields immediately but omits the now-stale AI profile until the
@@ -554,12 +561,22 @@ export class Coordinator {
       attendee?.ai_profile_json &&
       (!attendee.source_revision || attendee.ai_source_revision === attendee.source_revision);
     const aiProfile = aiFresh ? JSON.parse(attendee!.ai_profile_json!) : undefined;
+    // Published transcripts (audit A1): the nonvisual consumption path. Keep only
+    // transcripts whose media is still present — a re-record changes `x`, so an old
+    // transcript is silently dropped (also enforced by the 31603 schema refine).
+    const liveHashes = new Set(media.map((m) => m.x));
+    const storedTranscripts = attendee?.transcripts_json
+      ? (JSON.parse(attendee.transcripts_json) as MediaTranscript[])
+      : [];
+    const transcripts = storedTranscripts.filter((tr) => liveHashes.has(tr.x));
     const entry = buildDirectoryEntry(this.publishKeys(state), state.coordinate, {
       v: 1,
       pubkey,
       profile,
       media,
       ...(aiProfile ? { ai_profile: aiProfile } : {}),
+      ...(transcripts.length ? { transcripts } : {}),
+      ...(introText ? { intro_text: introText } : {}),
       updated_at: Math.floor(this.now() / 1000),
     });
     await this.deps.transport.publish(entry, state.configRelays);
@@ -590,12 +607,12 @@ export class Coordinator {
     if (state.matching === "off") return;
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     if (!attendee) return;
-    const { profile, media } = this.parseStoredProfile(attendee);
+    const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Capture the source revision this AI run is derived from (audit Q10).
     const sourceRevision = attendee.source_revision ?? this.sourceRevision(attendee.profile_json ?? "");
-    log(`[pipeline] ${short(pubkey)}: transcribe ${media.length} media → nostr-context → ai_profile…`);
+    log(`[pipeline] ${short(pubkey)}: transcribe ${media.length} media${introText ? " + text intro" : ""} → nostr-context → ai_profile…`);
 
-    const aiProfile = await processAttendee(
+    const { aiProfile, transcripts } = await processAttendee(
       {
         store: this.deps.store,
         stt: this.deps.stt,
@@ -613,7 +630,7 @@ export class Coordinator {
         lang: state.lang,
         now: this.now,
       },
-      { pubkey, profile, media },
+      { pubkey, profile, media, introText },
     );
 
     this.deps.store.upsertAttendee({
@@ -622,6 +639,9 @@ export class Coordinator {
       aiProfileJson: JSON.stringify(aiProfile),
       profileHash: profileHash(aiProfile),
       aiSourceRevision: sourceRevision,
+      // Always write the fresh set (may be "[]") so a re-record overwrites stale
+      // transcripts rather than leaving old ones via COALESCE.
+      transcriptsJson: JSON.stringify(transcripts),
       now: this.now(),
     });
     await this.publishDirectory(state, pubkey);

@@ -65,17 +65,24 @@ export interface TranscribeDeps {
   now?: () => number;
 }
 
+/** A transcript plus the STT-detected source language (spec F1, audit A1). */
+export interface TranscriptResult {
+  text: string;
+  lang?: string;
+}
+
 /**
  * Transcribe one media descriptor, using and updating the transcript cache.
- * Returns the transcript text.
+ * Returns the transcript text and the STT-detected language (when the provider
+ * reports one) so the coordinator can publish a language-tagged transcript.
  */
 export async function transcribeMedia(
   deps: TranscribeDeps,
   descriptor: MediaDescriptor,
-): Promise<string> {
+): Promise<TranscriptResult> {
   const now = deps.now ?? (() => Date.now());
-  const cached = deps.store.getTranscript(descriptor.x);
-  if (cached !== undefined) return cached;
+  const cached = deps.store.getTranscriptRow(descriptor.x);
+  if (cached !== undefined) return { text: cached.text, lang: cached.lang ?? undefined };
 
   const download =
     deps.fetchBlob ??
@@ -88,14 +95,16 @@ export async function transcribeMedia(
   const segments = await extractAudioSegments(plaintext, descriptor.m, caps.maxUploadBytes);
 
   const parts: string[] = [];
+  let lang: string | undefined;
   for (const seg of segments) {
-    const { text } = await deps.stt.transcribe(
+    const { text, language } = await deps.stt.transcribe(
       { data: seg.data, mime: seg.mime },
       { model: deps.sttModel },
     );
     parts.push(text);
+    if (!lang && language) lang = language; // first segment that reports a language
   }
   const transcript = parts.join(" ").trim();
-  deps.store.putTranscript(descriptor.x, transcript, now());
-  return transcript;
+  deps.store.putTranscript(descriptor.x, transcript, now(), lang);
+  return { text: transcript, lang };
 }

@@ -1,20 +1,33 @@
 /**
- * MediaRecorder capture (spec §10.3). mimeType ladder prefers Safari-friendly
- * mp4/avc1, then vp9/webm, then plain webm. A hard-stop timer enforces the
- * per-event length limit; a tick callback drives the visible countdown.
+ * MediaRecorder capture (spec §10.3, F1). A single capture engine drives both the
+ * video and audio-only intro paths (and, reused unchanged, Feature 2's talk
+ * recording): pass the capture kind and it picks the right mimeType ladder. A
+ * hard-stop timer enforces the per-event length limit; a tick callback drives the
+ * visible countdown. The engine is deliberately UI-free so any composer can reuse it.
  */
 
-const MIME_LADDER = [
+export type CaptureKind = "video" | "audio";
+
+const VIDEO_MIME_LADDER = [
   "video/mp4;codecs=avc1",
   "video/webm;codecs=vp9,opus",
   "video/webm;codecs=vp8,opus",
   "video/webm",
 ];
 
-/** Pick the first supported recording mimeType, or "" to let the UA decide. */
-export function pickMimeType(): string {
+// Audio-only ladder (F1): Opus first for size/quality, mp4/aac for Safari.
+const AUDIO_MIME_LADDER = [
+  "audio/webm;codecs=opus",
+  "audio/ogg;codecs=opus",
+  "audio/mp4",
+  "audio/webm",
+];
+
+/** Pick the first supported recording mimeType for `kind`, or "" (let the UA decide). */
+export function pickMimeType(kind: CaptureKind = "video"): string {
   if (typeof MediaRecorder === "undefined") return "";
-  for (const m of MIME_LADDER) {
+  const ladder = kind === "audio" ? AUDIO_MIME_LADDER : VIDEO_MIME_LADDER;
+  for (const m of ladder) {
     if (MediaRecorder.isTypeSupported(m)) return m;
   }
   return "";
@@ -32,7 +45,14 @@ export class VideoCapture {
   private startMs = 0;
   private hardStopTimer: ReturnType<typeof setTimeout> | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
-  readonly mime = pickMimeType();
+  readonly mime: string;
+  private readonly kind: CaptureKind;
+
+  /** `kind` selects the mimeType ladder ("video" default; "audio" for audio intros). */
+  constructor(kind: CaptureKind = "video") {
+    this.kind = kind;
+    this.mime = pickMimeType(kind);
+  }
 
   /**
    * Start recording `stream`, hard-stopping at `maxSec`. `onTick(remaining)` fires
@@ -60,7 +80,8 @@ export class VideoCapture {
       rec.onstop = () => {
         this.cleanupTimers();
         const durationSec = Math.round((Date.now() - this.startMs) / 1000);
-        const type = this.mime || this.chunks[0]?.type || "video/webm";
+        const fallback = this.kind === "audio" ? "audio/webm" : "video/webm";
+        const type = this.mime || this.chunks[0]?.type || fallback;
         resolve({ blob: new Blob(this.chunks, { type }), mime: type, durationSec });
       };
 

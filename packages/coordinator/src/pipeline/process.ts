@@ -9,10 +9,10 @@
  * Blob and Nostr-context fetching are injected so this is unit-testable with
  * fixtures and mock providers.
  */
-import type { AiProfile, AttendeeProfile, MediaDescriptor } from "@nostrautica/protocol";
+import type { AiProfile, AttendeeProfile, MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
 import type { LlmProvider, SttProvider, ModelRef } from "../providers/types.js";
 import type { Store } from "../store/db.js";
-import { transcribeMedia } from "./transcribe.js";
+import { transcribeMedia, type TranscriptResult } from "./transcribe.js";
 import {
   buildAiProfile,
   summarizeNostr,
@@ -33,8 +33,12 @@ export interface ProcessDeps {
   matchModel: ModelRef;
   translateModel: ModelRef;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
-  /** Override the transcription stage (tests inject to skip real Blossom/ffmpeg). */
-  transcribe?: (descriptor: MediaDescriptor) => Promise<string>;
+  /**
+   * Override the transcription stage (tests inject to skip real Blossom/ffmpeg).
+   * May return a bare string (text only) or a {@link TranscriptResult} carrying the
+   * STT-detected language.
+   */
+  transcribe?: (descriptor: MediaDescriptor) => Promise<string | TranscriptResult>;
   /** Blossom origins media may be fetched from (audit C3 allowlist). */
   blossomOrigins?: string[];
   /** Max media bytes per blob download (audit C3). */
@@ -51,19 +55,37 @@ export interface ProcessInput {
   pubkey: string;
   profile: AttendeeProfile;
   media: MediaDescriptor[];
+  /** A plain-text intro (spec F1). Feeds the ai_profile directly — no STT. */
+  introText?: string;
 }
 
-/** Run the full profile pipeline for one attendee and return their ai_profile. */
+/** The ai_profile plus the transcripts to publish on the directory entry (F1). */
+export interface ProcessResult {
+  aiProfile: AiProfile;
+  /** One per STT-transcribed media blob, tied to the blob by `x` (audit A1). */
+  transcripts: MediaTranscript[];
+}
+
+/** Run the full profile pipeline for one attendee (spec §9.2, F1 branch).
+ *
+ * Three intro shapes converge here:
+ *  - video → today's path: fetch blob → ffmpeg-extract audio → STT → transcript.
+ *  - audio → same downloader/STT (ffmpeg normalizes any mime; no video decode).
+ *  - text  → `introText` IS the transcript; STT is skipped entirely.
+ * All three feed `buildAiProfile`, so a text-only attendee (media:[]) still gets
+ * an ai_profile. STT-derived transcripts are also returned for publication.
+ */
 export async function processAttendee(
   deps: ProcessDeps,
   input: ProcessInput,
-): Promise<AiProfile> {
+): Promise<ProcessResult> {
   const now = deps.now ?? (() => Date.now());
 
-  // 1. Transcribe each media blob (cached by blob sha256).
+  // 1. Transcribe each media blob (cached by blob sha256). Text intros carry no
+  //    blob, so they never reach this loop — the authored text is appended below.
   const transcribe =
     deps.transcribe ??
-    ((descriptor) =>
+    ((descriptor: MediaDescriptor) =>
       transcribeMedia(
         {
           store: deps.store,
@@ -76,11 +98,28 @@ export async function processAttendee(
         },
         descriptor,
       ));
-  const transcripts: string[] = [];
+  const transcripts: string[] = []; // text fed into buildAiProfile
+  const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
-    const text = await transcribe(descriptor);
-    if (text) transcripts.push(text);
+    const r = await transcribe(descriptor);
+    const text = typeof r === "string" ? r : r.text;
+    const detected = typeof r === "string" ? undefined : r.lang;
+    if (text) {
+      transcripts.push(text);
+      published.push({
+        x: descriptor.x,
+        text,
+        lang: detected ?? (deps.lang || "en").toLowerCase(),
+        source: "stt",
+        updated_at: now(),
+      });
+    }
   }
+  // A text intro is its own transcript (source "authored"): fed to the profile
+  // model like an STT transcript, but surfaced to readers via `intro_text` (it has
+  // no media blob, so it is not a MediaTranscript on the entry).
+  const introText = input.introText?.trim();
+  if (introText) transcripts.push(introText);
 
   // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash
   //    (the hash includes the output language, so a lang change re-summarizes).
@@ -149,5 +188,5 @@ export async function processAttendee(
     });
   }
   if (translations) aiProfile.translations = translations;
-  return aiProfile;
+  return { aiProfile, transcripts: published };
 }

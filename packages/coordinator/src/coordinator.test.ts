@@ -345,6 +345,125 @@ async function resubmitIntro(h: Harness, attendeeSk: Uint8Array, fixture: Fixtur
   await h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
 }
 
+/** Join + submit an arbitrary intro shape (F1: text-only, audio, or video). */
+async function joinCustom(
+  h: Harness,
+  attendeeSk: Uint8Array,
+  about: string,
+  skills: string[],
+  opts: { media?: any[]; introText?: string } = {},
+): Promise<string> {
+  const attendeePubkey = getPublicKey(attendeeSk);
+  const inboxPk = getPublicKey(h.einboxSk);
+  const inviteSk = h.invites[h.nextInvite++]!;
+  const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
+  const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+    kind: KIND_JOIN_REQUEST,
+    content: { v: 1, name: about, message: "", rsvp_public: false },
+    tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+  });
+  const subWrap = wrapRumor(attendeeSk, inboxPk, {
+    kind: KIND_PROFILE_SUBMISSION,
+    content: {
+      v: 1,
+      profile: { about, skills, looking_for: "", links: [] },
+      media: opts.media ?? [],
+      ...(opts.introText ? { intro_text: opts.introText } : {}),
+    },
+    tags: [["a", h.coordinate]],
+  });
+  await h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any);
+  await h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
+  return attendeePubkey;
+}
+
+/** A media descriptor for an audio/video blob of a given byte length and hash. */
+function mediaDesc(sizeKey: number, x: string, mime: string) {
+  return {
+    kind: "intro" as const,
+    url: ["https://blob/" + x],
+    x,
+    ox: "b".repeat(64),
+    size: sizeKey,
+    m: mime,
+    "encryption-algorithm": "aes-gcm" as const,
+    "decryption-key": bytesToBase64(new Uint8Array(32)),
+    "decryption-nonce": bytesToBase64(new Uint8Array(12)),
+  };
+}
+
+/** The most recent 31603 directory entry for blinded d (with or without ai). */
+function latestDirectory(transport: FakeTransport, eck: Uint8Array, d: string) {
+  const entries = transport.published
+    .filter((e) => e.kind === KIND_DIRECTORY_ENTRY && e.tags.find((t) => t[0] === "d")?.[1] === d)
+    .map((e) => directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
+  return entries[entries.length - 1];
+}
+
+describe("F1 — text/audio intro branch + transcript publish (A1)", () => {
+  it("a text intro produces an ai_profile with NO STT call, and echoes intro_text on 31603", async () => {
+    const h = await setup();
+    const sttBefore = h.stt.calls;
+    const pk = await joinCustom(h, generateSecretKey(), "designer", ["figma"], {
+      introText: "I design privacy-respecting interfaces and mentor newcomers.",
+    });
+    await h.coordinator.jobs.drain();
+    expect(h.stt.calls).toBe(sttBefore); // text skips STT entirely
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.intro_text).toContain("privacy-respecting");
+    expect(entry.media).toHaveLength(0);
+    expect(entry.transcripts ?? []).toHaveLength(0); // no blob → no MediaTranscript
+    expect(entry.ai_profile).toBeDefined(); // derived from the text intro
+  });
+
+  it("an audio intro runs STT and publishes a transcript tied to the blob (A1)", async () => {
+    const h = await setup();
+    const x = "a1".repeat(32);
+    h.stt.setTranscript("500", "I produce ambient music and record field sounds.");
+    const pk = await joinCustom(h, generateSecretKey(), "musician", ["audio"], {
+      media: [mediaDesc(500, x, "audio/ogg")],
+    });
+    await h.coordinator.jobs.drain();
+    expect(h.stt.calls).toBeGreaterThan(0);
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.transcripts).toHaveLength(1);
+    const tr = entry.transcripts![0]!;
+    expect(tr.x).toBe(x);
+    expect(tr.source).toBe("stt");
+    expect(tr.text).toContain("ambient music");
+    expect(tr.lang).toBe("en"); // falls back to the event language
+  });
+
+  it("a video intro publishes a machine transcript on the directory entry (A1)", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.transcripts?.length).toBe(1);
+    expect(entry.transcripts![0]!.source).toBe("stt");
+    expect(entry.transcripts![0]!.text).toBe(FIXTURES.crypto.transcript);
+  });
+
+  it("re-recording drops the stale transcript (new blob x) from the entry", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const oldX = latestDirectory(h.transport, h.eck, d).transcripts![0]!.x;
+
+    await resubmitIntro(h, sk, "crypto"); // new media blob → new x
+    await h.coordinator.jobs.drain();
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.transcripts).toHaveLength(1);
+    expect(entry.transcripts![0]!.x).not.toBe(oldX); // only the current blob's transcript
+    expect(entry.transcripts![0]!.x).toBe(entry.media[0]!.x);
+  });
+});
+
 describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
   it("3 complementary attendees each get a ranked 31605 with complementarity reasoning", async () => {
     const h = await setup();

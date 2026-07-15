@@ -1,14 +1,21 @@
 <script lang="ts">
   import { onDestroy } from "svelte";
-  import type { MediaDescriptor } from "@nostrautica/protocol";
+  import type { MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
   import { resolveMediaUrl, releaseMediaUrl } from "$lib/media/playback.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
-  let { descriptor }: { descriptor: MediaDescriptor } = $props();
+  let { descriptor, transcript }: { descriptor: MediaDescriptor; transcript?: MediaTranscript } =
+    $props();
 
   let url = $state<string | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
+  let showTranscript = $state(false);
+
+  // Audio intros (spec F1) play through <audio>; video through <video>. There are
+  // no timed caption tracks yet (VTT is a phase-2 follow-up), so the published
+  // transcript below is the nonvisual consumption path (audit A1).
+  const isAudio = $derived(descriptor.m.startsWith("audio/"));
 
   async function load() {
     loading = true;
@@ -28,12 +35,55 @@
 </script>
 
 {#if url}
-  <!-- svelte-ignore a11y_media_has_caption -->
-  <video src={url} controls playsinline style="max-width:100%;border-radius:12px"></video>
+  {#if isAudio}
+    <audio src={url} controls style="width:100%"></audio>
+  {:else}
+    <!-- svelte-ignore a11y_media_has_caption -->
+    <video src={url} controls playsinline style="max-width:100%;border-radius:12px"></video>
+  {/if}
 {:else if error}
   <div class="card warn">{t("media.playError", { reason: error })}</div>
 {:else}
   <button class="btn" onclick={load} disabled={loading}>
-    {loading ? t("media.decrypting") : t("media.playIntro")}
+    {loading ? t("media.decrypting") : isAudio ? t("media.playAudio") : t("media.playIntro")}
   </button>
 {/if}
+
+<!-- Nonvisual consumption path (audit A1): a real, screen-reader-readable
+     transcript. Truthful status when none is available — no suppressed warnings. -->
+<div class="transcript" style="margin-top:0.4rem">
+  {#if transcript?.text}
+    <button
+      class="linklike"
+      aria-expanded={showTranscript}
+      onclick={() => (showTranscript = !showTranscript)}
+    >
+      {showTranscript ? t("media.hideTranscript") : t("media.showTranscript")}
+    </button>
+    {#if showTranscript}
+      <div class="card" style="background:var(--bg-elev2);margin-top:0.4rem">
+        {#if transcript.source === "stt"}
+          <p class="muted" style="margin:0 0 0.35rem;font-size:0.8rem">{t("media.transcript.machine")}</p>
+        {/if}
+        <p style="margin:0;white-space:pre-wrap" lang={transcript.lang}>{transcript.text}</p>
+      </div>
+    {/if}
+  {:else}
+    <span class="muted" style="font-size:0.8rem">{t("media.captionsUnavailable")}</span>
+  {/if}
+</div>
+
+<style>
+  .linklike {
+    width: auto;
+    min-height: 0;
+    padding: 0;
+    border: none;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.85rem;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+</style>
