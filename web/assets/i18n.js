@@ -239,8 +239,8 @@
       "privacy.row4_who": "Vždy len vy",
       "privacy.note": "Koordinátor vie dešifrovať obsah na úrovni podujatia — musí, aby zvládol prepis. Je to infraštruktúra, ktorú si vybral organizátor, a appka ju menuje otvorene skôr, než nahráte čo i len slovo.",
 
-      "cta.title": "Naplánujte si kurz.",
-      "cta.subtitle": "Či už podujatie organizujete, alebo naň idete, ďalší rozhovor, na ktorom bude záležať, je vzdialený jedno krátke video.",
+      "cta.title": "Vydajte sa na cestu.",
+      "cta.subtitle": "Či už podujatie organizujete, alebo naň idete, ďalší rozhovor, na ktorom naozaj záleží, začína jedným krátkym videom.",
       "cta.primary": "Vytvoriť podujatie",
       "cta.secondary": "Prihlásiť sa cez pozvánku",
 
@@ -367,8 +367,8 @@
       "privacy.row4_who": "Vždy jen vy",
       "privacy.note": "Koordinátor umí dešifrovat obsah na úrovni akce — musí, aby zvládl přepis. Je to infrastruktura, kterou si vybral organizátor, a appka ji jmenuje otevřeně dřív, než nahrajete jediné slovo.",
 
-      "cta.title": "Naplánujte si kurz.",
-      "cta.subtitle": "Ať už akci organizujete, nebo na ni jdete, další rozhovor, na kterém bude záležet, je vzdálený jedno krátké video.",
+      "cta.title": "Vydejte se na cestu.",
+      "cta.subtitle": "Ať už akci organizujete, nebo na ni jdete, další rozhovor, na kterém opravdu záleží, začíná jedním krátkým videem.",
       "cta.primary": "Vytvořit akci",
       "cta.secondary": "Přihlásit se přes pozvánku",
 
