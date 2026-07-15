@@ -1,0 +1,54 @@
+/** @module @category Client - Proposals */
+import { appDataUpdateProposalType, } from "ts-mls";
+import { adminPolicyEntry, encryptedMediaEntry, groupAvatarUrlEntry, groupProfileEntry, messageRetentionEntry, nostrRoutingEntry, } from "../../../core/components/index.js";
+/** Wraps a component entry in a full-replacement `app_data_update` proposal. */
+function componentUpdate(entry) {
+    return {
+        proposalType: appDataUpdateProposalType,
+        appDataUpdate: {
+            componentId: entry.componentId,
+            operation: "update",
+            update: entry.data,
+        },
+    };
+}
+/**
+ * Builds `app_data_update` proposals that update a group's app-component
+ * metadata. Each changed component is re-encoded in full (matching the default
+ * last-update-wins merge), so unchanged fields are read from the current group
+ * view. Touches only the components whose fields are present in `metadata`.
+ */
+export function proposeUpdateMetadata(metadata) {
+    return async ({ groupData }) => {
+        const proposals = [];
+        if (metadata.name !== undefined || metadata.description !== undefined) {
+            proposals.push(componentUpdate(groupProfileEntry({
+                name: metadata.name ?? groupData.name,
+                description: metadata.description ?? groupData.description,
+            })));
+        }
+        if (metadata.adminPubkeys !== undefined) {
+            proposals.push(componentUpdate(adminPolicyEntry(metadata.adminPubkeys)));
+        }
+        if (metadata.relays !== undefined || metadata.nostrGroupId !== undefined) {
+            const nostrGroupId = metadata.nostrGroupId ?? groupData.nostrGroupId;
+            if (!nostrGroupId)
+                throw new Error("Cannot update nostr routing: the group has no nostr group id");
+            proposals.push(componentUpdate(nostrRoutingEntry({
+                nostrGroupId,
+                relays: metadata.relays ?? groupData.relays,
+            })));
+        }
+        if (metadata.avatarUrl !== undefined) {
+            proposals.push(componentUpdate(groupAvatarUrlEntry({ url: metadata.avatarUrl })));
+        }
+        if (metadata.encryptedMedia !== undefined) {
+            proposals.push(componentUpdate(encryptedMediaEntry(metadata.encryptedMedia)));
+        }
+        if (metadata.messageRetention !== undefined) {
+            proposals.push(componentUpdate(messageRetentionEntry(metadata.messageRetention)));
+        }
+        return proposals;
+    };
+}
+//# sourceMappingURL=update-metadata.js.map

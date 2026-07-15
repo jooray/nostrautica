@@ -42,7 +42,7 @@ describe("Q9 — buildAiProfile validates provider output", () => {
 
   it("rejects output missing a required field", async () => {
     // `seeks` omitted — a downstream consumer would otherwise crash on undefined.
-    const { seeks, ...broken } = goodProfile;
+    const { seeks: _seeks, ...broken } = goodProfile;
     const llm = new MockLlm(() => broken);
     await expect(
       buildAiProfile(llm, matchModel, { transcripts: [], profile: attendee }),
@@ -64,7 +64,7 @@ describe("Q9 — buildAiProfile validates provider output", () => {
   });
 
   it("contract error carries sanitized diagnostics (paths, not attendee text)", async () => {
-    const { summary, ...broken } = goodProfile;
+    const { summary: _summary, ...broken } = goodProfile;
     const llm = new MockLlm(() => broken);
     try {
       await buildAiProfile(llm, matchModel, {

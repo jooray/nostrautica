@@ -1,0 +1,27 @@
+import { Decoder } from "./codec/tlsDecoder.js";
+import { Encoder } from "./codec/tlsEncoder.js";
+import { Proposal } from "./proposal.js";
+/** @public */
+export declare const proposalOrRefTypes: {
+    readonly proposal: 1;
+    readonly reference: 2;
+};
+type ProposalOrRefTypeName = keyof typeof proposalOrRefTypes;
+type ProposalOrRefTypeValue = (typeof proposalOrRefTypes)[ProposalOrRefTypeName];
+export declare const proposalOrRefTypeEncoder: Encoder<ProposalOrRefTypeValue>;
+export declare const proposalOrRefTypeDecoder: Decoder<ProposalOrRefTypeValue>;
+/** @public */
+export interface ProposalOrRefProposal {
+    proposalOrRefType: typeof proposalOrRefTypes.proposal;
+    proposal: Proposal;
+}
+/** @public */
+export interface ProposalOrRefProposalRef {
+    proposalOrRefType: typeof proposalOrRefTypes.reference;
+    reference: Uint8Array;
+}
+/** @public */
+export type ProposalOrRef = ProposalOrRefProposal | ProposalOrRefProposalRef;
+export declare const proposalOrRefEncoder: Encoder<ProposalOrRef>;
+export declare const proposalOrRefDecoder: Decoder<ProposalOrRef>;
+export {};

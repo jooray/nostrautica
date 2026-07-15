@@ -17,6 +17,7 @@ import {
   coordinatorStatusContentSchema,
   mediaTranscriptSchema,
   profileCorrectionContentSchema,
+  chatKeyAttestationContentSchema,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -126,6 +127,52 @@ describe("every §7 payload round-trips through JSON", () => {
       eck_current: 1,
       attendees: [{ pubkey: hex, d: "deadbeef", role: "attendee" }],
     }));
+
+  it("31604 roster carries an optional Marmot chat_pubkey (§4.4)", () =>
+    roundTrips(rosterContentSchema, {
+      v: 1,
+      eck_current: 2,
+      attendees: [
+        { pubkey: hex, d: "deadbeef", role: "attendee", chat_pubkey: "b".repeat(64) },
+        { pubkey: "c".repeat(64), d: "cafe", role: "organizer" }, // no chat key
+      ],
+    }));
+
+  it("21607 chat-key attestation round-trips (add + revoke)", () => {
+    roundTrips(chatKeyAttestationContentSchema, {
+      v: 1,
+      a: "31923:" + hex + ":ev",
+      op: "add",
+      chat_pubkey: "b".repeat(64),
+      client_id: "device-1",
+    });
+    roundTrips(chatKeyAttestationContentSchema, {
+      v: 1,
+      a: "31923:" + hex + ":ev",
+      op: "revoke",
+      chat_pubkey: "b".repeat(64),
+    });
+  });
+
+  it("21607 rejects an unknown op and an unexpected field (strict)", () => {
+    expect(() =>
+      chatKeyAttestationContentSchema.parse({
+        v: 1,
+        a: "31923:" + hex + ":ev",
+        op: "delete", // not add/revoke
+        chat_pubkey: "b".repeat(64),
+      }),
+    ).toThrow();
+    expect(() =>
+      chatKeyAttestationContentSchema.parse({
+        v: 1,
+        a: "31923:" + hex + ":ev",
+        op: "add",
+        chat_pubkey: "b".repeat(64),
+        rogue: true, // strict → rejected
+      }),
+    ).toThrow();
+  });
 
   it("31605 match list", () =>
     roundTrips(matchListContentSchema, {

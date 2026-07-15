@@ -348,7 +348,29 @@ export const directoryEntryContentSchema = z
   });
 export type DirectoryEntryContent = z.infer<typeof directoryEntryContentSchema>;
 
+// ── 21607 Chat-key Attestation rumor content (Marmot §3.3) ───────────────────
+// Binds an app-generated chat *device* key to an account, for NIP-46/NIP-07 users
+// who cannot raw-sign the mandatory MLS account-identity-proof with their account
+// key. Gift-wrapped attendee → coordinator, sealed (kind 13) by the *account* key,
+// so the coordinator authenticates the binding exactly as it authenticates a 21600
+// join (seal author = the enrolled account npub). `op:"revoke"` (lost device) tells
+// the coordinator to remove that chat key's leaves and stop re-adding it.
+export const chatKeyAttestationContentSchema = z
+  .object({
+    v: version,
+    a: z.string(), // coordinate this attestation applies to
+    op: z.enum(["add", "revoke"]),
+    chat_pubkey: hex32, // the app-generated chat device key (MLS account identity)
+    client_id: z.string().optional(), // stable per-device 30443 slot id
+  })
+  .strict();
+export type ChatKeyAttestationContent = z.infer<typeof chatKeyAttestationContentSchema>;
+
 // ── 31604 Roster content (ECK) ───────────────────────────────────────────────
+// `chat_pubkey` (Marmot §4.4, additive — old clients ignore it): for NIP-46/NIP-07
+// attendees whose MLS identity is a separate chat device key, this maps the chat
+// npub back to the account so the chat UI can render members as people. Absent for
+// local-key attendees (their account key IS the chat identity).
 export const rosterContentSchema = z.object({
   v: version,
   eck_current: z.number().int().positive(),
@@ -357,6 +379,7 @@ export const rosterContentSchema = z.object({
       pubkey: hex32,
       d: z.string(), // entry's blinded d
       role: z.enum(["attendee", "organizer"]),
+      chat_pubkey: hex32.optional(), // Marmot chat device key, when distinct (§4.4)
     }),
   ),
 });

@@ -16,6 +16,18 @@ export type MatchVisibility = "pair" | "event";
  */
 export type TalksMode = "off" | "on" | "prerecord-first";
 
+/**
+ * Per-event group-chat backend (spec MARMOT-GROUP-CHAT §1.3). The only defined
+ * value is `"marmot"` (MLS over Nostr); the field is an array for forward-compat
+ * so a future backend can be added without a structural change. An empty array =
+ * chat disabled (the `chat` tag is omitted entirely, keeping non-chat events
+ * byte-identical). `chat=marmot` is only *operative* when the event also has a
+ * `coordinator` (the MLS admin bot); parse keeps the value regardless, but the app
+ * and coordinator treat a coordinator-less `chat` as absent.
+ */
+export type ChatBackend = "marmot";
+const CHAT_BACKENDS: ChatBackend[] = ["marmot"];
+
 export interface EventConfig {
   d: string;
   eidPubkey: string; // author of the config (E_id)
@@ -32,6 +44,7 @@ export interface EventConfig {
   nostrContext: number; // N public events per attendee to summarize; 0 = off
   lang: string; // ISO 639-1 event language (attendee UI + AI output); default "en"
   talks: TalksMode; // prerecorded-talks journey (spec F2); default "off" (tag omitted)
+  chat: ChatBackend[]; // group-chat backends (Marmot §1.3); default [] (tag omitted)
 }
 
 export interface EventConfigTags {
@@ -67,6 +80,13 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
   // enabled — normal (talks-off) events stay byte-identical. Localized here so it
   // composes with the upcoming Marmot `chat` tag (same three edit sites).
   if (cfg.talks && cfg.talks !== "off") tags.push(["talks", cfg.talks]);
+  // Chat backends: one ["chat", <backend>] tag per enabled backend, omitted
+  // entirely when none — so a chat-off event stays byte-identical. Localized here
+  // with `talks` and `lang` (same three edit sites) so a coordinator config-rebuild
+  // round-trip never silently drops it (see event-page.ts warning).
+  for (const backend of cfg.chat ?? []) {
+    if (CHAT_BACKENDS.includes(backend)) tags.push(["chat", backend]);
+  }
   return { kind: KIND_EVENT_CONFIG, tags, content: "" };
 }
 
@@ -131,6 +151,14 @@ export function parseEventConfig(
   const talks: TalksMode = TALKS_MODES.includes(talksRaw as TalksMode)
     ? (talksRaw as TalksMode)
     : "off";
+  // Collect every `chat` tag, keep the known backends (dropping unknown values and
+  // duplicates), preserving first-seen order. An absent tag yields [] (chat off).
+  const chat: ChatBackend[] = [];
+  for (const backend of all(tags, "chat")) {
+    if (CHAT_BACKENDS.includes(backend as ChatBackend) && !chat.includes(backend as ChatBackend)) {
+      chat.push(backend as ChatBackend);
+    }
+  }
   return {
     d,
     eidPubkey,
@@ -147,10 +175,21 @@ export function parseEventConfig(
     nostrContext: intTag(tags, "nostr_context", 0),
     lang: normalizeLang(first(tags, "lang")),
     talks,
+    chat,
   };
 }
 
 /** The event coordinate for a parsed config. */
 export function configCoordinate(cfg: EventConfig): string {
   return makeCoordinate(cfg.eidPubkey, cfg.d);
+}
+
+/**
+ * Whether Marmot group chat is *operative* for this event (spec §1.3): the `chat`
+ * config must list `"marmot"` AND the event must have a coordinator (the MLS admin
+ * bot). A `chat=marmot` config with no coordinator is parsed but treated as absent
+ * by both the app and the coordinator.
+ */
+export function isMarmotChatEnabled(cfg: EventConfig): boolean {
+  return !!cfg.coordinator && cfg.chat.includes("marmot");
 }

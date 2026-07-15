@@ -45,6 +45,7 @@ function makeConfig(
     nostrContext: 0,
     lang: "en",
     talks: "off",
+    chat: [],
   };
 }
 

@@ -2,8 +2,8 @@
  * Nostr event kind constants used across Nostrautica (spec §7).
  *
  * Custom kinds occupy the addressable block 31600–31610 and the gift-wrap
- * "rumor" block 21600–21609 (21607 reserved for Marmot chat). Rumor kinds sit in
- * the ephemeral range on purpose:
+ * "rumor" block 21600–21609 (21607 = Marmot chat-key attestation). Rumor kinds sit
+ * in the ephemeral range on purpose:
  * rumors are never published as signed events, and a leaked one won't be stored
  * by relays.
  *
@@ -60,7 +60,11 @@ export const KIND_COORDINATOR_GRANT = 21603; // → coordinator
 export const KIND_ADMIN_COMMAND = 21604; // organizer → coordinator
 export const KIND_ORGANIZER_GRANT = 21605; // → co-organizer (E_id + E_inbox + ECK)
 export const KIND_COORDINATOR_STATUS = 21606; // coordinator → organizer (poison/health, Q12)
-// 21607 is RESERVED for the upcoming Marmot group-chat feature — do not reuse it.
+// Marmot group chat (MARMOT-GROUP-CHAT §3.3): a chat-key attestation binds an
+// app-generated chat device key to an account (for NIP-46/NIP-07 users, who cannot
+// raw-sign the MLS identity proof). Gift-wrapped attendee → coordinator, sealed by
+// the account key. Local-key accounts don't need it (they sign the proof directly).
+export const KIND_CHAT_KEY_ATTESTATION = 21607;
 export const KIND_PROFILE_CORRECTION = 21608; // attendee → E_inbox (correct/hide own ai_profile, F3)
 export const KIND_TALK_SUBMISSION = 21609; // attendee → E_inbox (submit/edit a prerecorded talk, F2)
 
@@ -74,6 +78,7 @@ export const RUMOR_KINDS = [
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
   KIND_COORDINATOR_STATUS,
+  KIND_CHAT_KEY_ATTESTATION,
   KIND_PROFILE_CORRECTION,
   KIND_TALK_SUBMISSION,
 ] as const;

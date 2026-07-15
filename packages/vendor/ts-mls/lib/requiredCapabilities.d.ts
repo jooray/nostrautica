@@ -1,0 +1,11 @@
+import { Encoder } from "./codec/tlsEncoder.js";
+import { Decoder } from "./codec/tlsDecoder.js";
+/** @public */
+export interface RequiredCapabilities {
+    extensionTypes: number[];
+    proposalTypes: number[];
+    credentialTypes: number[];
+}
+export declare const requiredCapabilitiesEncoder: Encoder<RequiredCapabilities>;
+export declare const requiredCapabilitiesDecoder: Decoder<RequiredCapabilities>;
+export declare function requiredCapabilitiesEqual(a: RequiredCapabilities, b: RequiredCapabilities): boolean;

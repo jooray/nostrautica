@@ -1,6 +1,8 @@
 # Marmot group chat — specification and implementation plan
 
-Status: **specification + phased plan, 2026-07-15. Not built.** Successor to the analysis in
+Status: **specification + phased plan. Build in progress (2026-07-15): Phase 1 complete, the
+Phase-2 packaging gate resolved + store adapter landed; Phases 2 (remainder)–5 pending — see
+§8.** Successor to the analysis in
 [GROUP-CHAT-FEASIBILITY.md](GROUP-CHAT-FEASIBILITY.md) (read it first for the option analysis
 and the multi-client reasoning; this document fixes the design and turns it into buildable
 phases). Cross-reference stub: SPECIFICATION.md §7.5.
@@ -42,10 +44,18 @@ Marmot exists in two published shapes and they disagree on the key-package kind:
 
 We implement **Marmot v2**: the current `marmot-protocol/marmot` spec explicitly lists `443`
 and `10051` as *removed legacy kinds* (`transports/AGENTS.md`), and marmot-ts publishes
-kind 30443 (`ADDRESSABLE_KEY_PACKAGE_KIND`, `src/core/protocol.ts:27`) with read-compat for
-legacy 443. Whitenoise tracks the same v2 line via darkmatter/MDK. The stale NIP-EE snapshot
-is a documentation hazard, not an implementation choice — anyone still emitting bare 443 is
-behind the spec they claim to implement. We do not publish 443.
+kind 30443 (`ADDRESSABLE_KEY_PACKAGE_KIND`, `core/protocol.ts`). Whitenoise tracks the same
+v2 line via darkmatter/MDK. The stale NIP-EE snapshot is a documentation hazard, not an
+implementation choice — anyone still emitting bare 443 is behind the spec they claim to
+implement. We do not publish 443.
+
+**Correction (verified against the vendored library, 2026-07-15):** marmot-ts 0.6.0 — the
+version we integrate — is **30443-only and has NO read-compat for legacy 443**. There is no
+`KEY_PACKAGE_KIND = 443` constant and no acceptance of a 443 event anywhere in the build; a
+peer still publishing bare 443 is simply *invisible* to us (and to Whitenoise/MDK, which
+track the same line). This supersedes the earlier "read-compat for legacy 443" wording, which
+described npm's older published 0.5.1 — and 0.5.1 is unusable here for a different reason:
+it lacks the mandatory `marmot.account-identity-proof.v1` leaf (see §2, Packaging).
 
 ### 1.2 Event kinds used (all external — no new Nostrautica kinds except one rumor)
 
@@ -165,6 +175,45 @@ entirely absent (we don't need it — §5); MIP-05 push absent (mobile clients' 
 
 Pinning policy: exact-version pin; treat every upgrade as a mini-audit (alpha, API churn).
 Vendoring only as a last resort and only as a stopgap while an upstream PR lands.
+
+### 2.1 Packaging decision (Phase 2 gate — RESOLVED, 2026-07-15)
+
+Investigated all three candidates against the two hard requirements — emits **30443**, and
+carries the mandatory **`marmot.account-identity-proof.v1`** leaf (§3):
+
+| Candidate | 30443? | identity-proof leaf? | installs under `--frozen-lockfile`? |
+|---|---|---|---|
+| npm `@internet-privacy/marmot-ts@0.5.1` (published) | ✅ (emits 30443, reads 443 too) | ❌ **absent** — no `accountProofSigner`, no proof leaf | ✅ |
+| git master `0.6.0` (`2f60dbb`) as a submodule/path dep | ✅ (30443-only) | ✅ | ❌ depends on an **unpublished ts-mls fork** (`hzrd149/ts-mls` @ `2ca5c43`, branch `marmot-required-ext`) via a `./ts-mls` path dep + git submodule — a deploy-hook `pnpm install --frozen-lockfile` cannot resolve it, and the submodule needs a separate init+build |
+| **VENDORED 0.6.0 (chosen)** | ✅ | ✅ | ✅ |
+
+0.5.1 is out (no identity-proof leaf ⇒ not wire-compatible with current Whitenoise/MDK).
+0.6.0-via-submodule is out (won't survive the deploy hook). **Decision: vendor the *built*
+0.6.0 into the workspace**, plus its unpublished ts-mls fork, as two committed workspace
+packages — no submodule, no build step at install time:
+
+- `packages/vendor/ts-mls/` — `name: "ts-mls"`, the compiled `hzrd149/ts-mls @ 2ca5c43`
+  (`marmot-required-ext`, v2.0.0-rc.14). Its deps are all published (`@hpke/core`,
+  `@noble/*`, and the full HPKE/`@noble/post-quantum` ciphersuite catalog ts-mls lazily
+  `import()`s — Rollup must resolve every string-literal dynamic import at build time even
+  though Marmot uses only `MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519`).
+- `packages/vendor/marmot-ts/` — `name: "@internet-privacy/marmot-ts"` v0.6.0, the compiled
+  master. Deps all published (`applesauce-*`, `@noble/*`, `@scure/base`, `debug`,
+  `eventemitter3`) + `ts-mls: workspace:*`.
+- Built output is committed under **`lib/`** (not `dist/`, which the repo `.gitignore`
+  excludes at every level) with the exports map rewritten `dist→lib`. A `"./lib/*"` wildcard
+  export is added so upstream-unexported symbols can be deep-imported (see the `U`-register /
+  `proposeRemoveUser` workaround). Sourcemaps and `.tsbuildinfo` are stripped.
+
+`app` and `coordinator` depend on `@internet-privacy/marmot-ts: workspace:*`. **Verified in
+this environment:** `pnpm install --frozen-lockfile` succeeds; Node resolves the client,
+core, and the `proposeRemoveUser` deep-import; the constant `ADDRESSABLE_KEY_PACKAGE_KIND`
+reads **30443**; and a **real SvelteKit/Vite production build** (`pnpm --filter
+@nostrautica/app build`) bundles marmot-ts+ts-mls into a single lazy chunk (~221 kB gzipped,
+loaded only on `chat=marmot` events) and completes green. This closes the one Phase-0 spike
+condition that was left unverified. Upgrade path when upstream publishes a self-contained
+0.6.x+ (or the ts-mls fork lands on npm): drop the two vendor packages, pin the published
+version, re-audit.
 
 ---
 
@@ -428,7 +477,17 @@ via re-add; measured bundle size recorded. **Go/no-go gate for everything below.
 build/bundler friction found here → `UPSTREAM issue/PR to marmot-ts` (likely candidates:
 package export maps, submodule build, IndexedDB adapter).
 
-### Phase 1 — protocol plumbing (~3 days)
+### Phase 1 — protocol plumbing (~3 days) — ✅ IMPLEMENTED 2026-07-15
+
+`config.ts`: `EventConfig.chat: ChatBackend[]` (`ChatBackend = "marmot"`), emitted as
+`["chat","marmot"]` tags (omitted when empty, so chat-off events stay byte-identical),
+localized alongside `talks`/`lang` in both build and parse; unknown backends dropped,
+duplicates de-duped; `isMarmotChatEnabled(cfg)` enforces the coordinator-required rule.
+`kinds.ts`: `KIND_CHAT_KEY_ATTESTATION = 21607` added to `RUMOR_KINDS`. `schemas.ts`:
+`chatKeyAttestationContentSchema` (strict; `op: add|revoke`) + additive optional
+`chat_pubkey` on `rosterContentSchema`. Round-trip + validation tests added (protocol suite
+90→96). App/coordinator construction sites (`create.ts` + input type) updated for the new
+required field; whole tree green.
 
 Files: `packages/protocol/src/config.ts` (+ tests), `packages/protocol/src/kinds.ts`
 (`KIND_CHAT_KEY_ATTESTATION = 21607`, extend `RUMOR_KINDS`), `packages/protocol/src/schemas.ts`
@@ -436,7 +495,22 @@ Files: `packages/protocol/src/config.ts` (+ tests), `packages/protocol/src/kinds
 **Acceptance**: `chat` tag round-trips build→parse→build byte-identically; 21607 validates;
 unknown `chat` values are dropped; `pnpm check` green. No behavior anywhere yet.
 
-### Phase 2 — app `chat/marmot` module (~2 weeks)
+### Phase 2 — app `chat/marmot` module (~2 weeks) — ◐ STARTED (store adapter + build gate done)
+
+Done so far: the **packaging gate** (§2.1) and the **store adapter** `stores.ts` — a
+storage-agnostic `GenericKeyValueStore<T>` over a tiny `MarmotKvBackend`, with an
+`IndexedDbKvBackend` (bounded prefix-range scans) for production and an `InMemoryKvBackend`
+for tests; per-identity + per-namespace key scoping (`group-state`/`key-package`/
+`invites`/`rewind`); `makeMarmotStores(backend, identity)` returns the four typed stores the
+`MarmotClient` needs. 7 conformance tests (isolation, namespace-scoped `clear`/`keys`,
+structured-clone-by-value, `Uint8Array` fidelity) run in the node env without an IndexedDB
+shim. A trivial `marmot-probe.ts` (client + `ADDRESSABLE_KEY_PACKAGE_KIND` + deep-imported
+`proposeRemoveUser`), lazy-loaded from `+layout.ts`, keeps the marmot chunk in the build
+graph and is the seed for the real lazy loader.
+**Still to do:** `network.ts` (NDK `NostrNetworkInterface`), `identity.ts` (local-key vs
+chat-device-key resolution + `accountProofSigner` + chat-key kind-0 + keystore/backup),
+`attest.ts` (21607 build/send), `client.ts` (MarmotClient lifecycle, key-package/10050/10002
+ensure-published, invite listen, join, heal), `messages.ts`, and `eventShell.showChat`.
 
 New `packages/app/src/lib/chat/` (all lazy-loaded): `stores.ts` (Dexie
 `GenericKeyValueStore` ×4, per-identity namespacing — written as an upstreamable adapter:
@@ -504,8 +578,8 @@ label kept until marmot-ts reaches a version its authors call production-ready.
 | U3 | NIP-46 spec + Amber | raw BIP-340 digest-signing method → native remote-signer membership |
 | U4 | marmot-protocol | delegated device-key attestation component (retires our 21607) |
 | U5 | marmot-ts | m8 welcome-recipient binding / m9 445 sig-before-decrypt, if encountered |
-| U6 | marmot-ts | bundler/browser-build fixes surfaced by Phase 0 |
-| U7 | marmot-ts | headless admin-bot ergonomics (batch invite, leaf GC helpers) if the coordinator needs them |
+| U6 | marmot-ts | bundler/browser-build fixes surfaced by Phase 0. **Concrete, found while vendoring 0.6.0:** (a) publish a self-contained release that does NOT depend on an unpublished ts-mls fork via a git-submodule path dep — either land the `marmot-required-ext` ts-mls changes on npm or bundle them, so `pnpm install --frozen-lockfile` works with no submodule; (b) ts-mls declares the whole HPKE/PQ ciphersuite catalog as *peerDependencies* but `import()`s them by string literal, forcing every bundler to resolve all of them even for the single Marmot ciphersuite — mark the unused ones truly optional or lazy-guard them. |
+| U7 | marmot-ts | headless admin-bot ergonomics (batch invite, leaf GC helpers) if the coordinator needs them. **Also:** export `proposeRemoveUser` from the package export map (today it lives at `client/group/proposals/remove-member.js`, unexported — we reach it via a `./lib/*` wildcard on the vendored package); and flatten its array-action result in the engine's `extraProposals` resolver (per the Phase-0 spike, the raw proposals must currently be resolved and spread by hand). |
 
 ---
 

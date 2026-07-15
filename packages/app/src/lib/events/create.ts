@@ -22,6 +22,7 @@ import {
   type Approval,
   type MatchVisibility,
   type TalksMode,
+  type ChatBackend,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -47,6 +48,7 @@ export interface CreateEventInput {
   nostrContext: number;
   lang?: string; // ISO 639-1 event language; default "en"
   talks?: TalksMode; // prerecorded-talks journey (spec F2); default "off"
+  chat?: ChatBackend[]; // group-chat backends (Marmot); default [] (chat off)
   relays?: string[];
   blossom?: string[];
 }
@@ -131,6 +133,7 @@ export async function createEvent(
     nostrContext: input.nostrContext,
     lang: input.lang ?? "en",
     talks: input.talks ?? "off",
+    chat: input.chat ?? [],
   });
   const event31600 = finalizeEvent(
     {

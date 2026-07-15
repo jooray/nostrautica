@@ -5,7 +5,7 @@ import {
   coordinateToNaddr,
   naddrToCoordinate,
 } from "./coordinate.js";
-import { buildEventConfig, parseEventConfig } from "./config.js";
+import { buildEventConfig, parseEventConfig, isMarmotChatEnabled } from "./config.js";
 
 const pubkey = "a".repeat(64);
 
@@ -49,11 +49,13 @@ describe("event config (kind 31600)", () => {
       nostrContext: 100,
       lang: "sk" as const,
       talks: "prerecord-first" as const,
+      chat: ["marmot" as const],
     };
     const built = buildEventConfig(cfg);
     expect(built.kind).toBe(31600);
     expect(built.tags).toContainEqual(["lang", "sk"]);
     expect(built.tags).toContainEqual(["talks", "prerecord-first"]);
+    expect(built.tags).toContainEqual(["chat", "marmot"]);
     const parsed = parseEventConfig(pubkey, built.tags);
     expect(parsed).toEqual(cfg);
   });
@@ -74,6 +76,7 @@ describe("event config (kind 31600)", () => {
       nostrContext: 0,
       lang: "en",
       talks: "off" as const,
+      chat: [],
     };
     const built = buildEventConfig(cfg);
     expect(built.tags.find((t) => t[0] === "lang")).toBeUndefined();
@@ -95,6 +98,7 @@ describe("event config (kind 31600)", () => {
       eck: 1,
       nostrContext: 0,
       lang: "en",
+      chat: [] as ("marmot")[],
     };
     // off → tag omitted, parses back to "off"
     const offBuilt = buildEventConfig({ ...base, talks: "off" });
@@ -108,6 +112,73 @@ describe("event config (kind 31600)", () => {
     expect(parseEventConfig(pubkey, onBuilt.tags).talks).toBe("on");
     // an unrecognized talks value degrades to "off" (never throws)
     expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)], ["talks", "bogus"]]).talks).toBe("off");
+  });
+
+  it("omits the chat tag when off (default) but round-trips marmot", () => {
+    const base = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      coordinator: "c".repeat(64),
+      relays: [],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "off" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+      talks: "off" as const,
+    };
+    // chat off → tag omitted, parses back to []
+    const offBuilt = buildEventConfig({ ...base, chat: [] });
+    expect(offBuilt.tags.find((t) => t[0] === "chat")).toBeUndefined();
+    expect(parseEventConfig(pubkey, offBuilt.tags).chat).toEqual([]);
+    // a config with NO chat tag parses as [] (normal event unchanged)
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)]]).chat).toEqual([]);
+    // marmot → emitted + parsed
+    const onBuilt = buildEventConfig({ ...base, chat: ["marmot"] });
+    expect(onBuilt.tags).toContainEqual(["chat", "marmot"]);
+    expect(parseEventConfig(pubkey, onBuilt.tags).chat).toEqual(["marmot"]);
+  });
+
+  it("drops unknown chat values and de-duplicates known ones", () => {
+    // unknown backend → dropped (never surfaced), keeps the known one once
+    const parsed = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["chat", "signal"], // unknown backend
+      ["chat", "marmot"],
+      ["chat", "marmot"], // duplicate
+    ]);
+    expect(parsed.chat).toEqual(["marmot"]);
+  });
+
+  it("isMarmotChatEnabled requires both the chat tag and a coordinator", () => {
+    const withCoord = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["coordinator", "c".repeat(64)],
+      ["chat", "marmot"],
+    ]);
+    expect(isMarmotChatEnabled(withCoord)).toBe(true);
+    // chat=marmot but no coordinator → parsed (kept) but NOT operative
+    const noCoord = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["chat", "marmot"],
+    ]);
+    expect(noCoord.chat).toEqual(["marmot"]);
+    expect(isMarmotChatEnabled(noCoord)).toBe(false);
+    // coordinator but no chat → not operative
+    const noChat = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["coordinator", "c".repeat(64)],
+    ]);
+    expect(isMarmotChatEnabled(noChat)).toBe(false);
   });
 
   it("defaults sensibly when tags are missing", () => {

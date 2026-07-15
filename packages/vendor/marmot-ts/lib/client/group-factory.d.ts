@@ -1,0 +1,51 @@
+/** @module @category Client - Group Manager */
+import { EventSigner } from "applesauce-core";
+import { CiphersuiteName, CryptoProvider } from "ts-mls";
+import type { SerializedClientState } from "../core/client-state.js";
+import type { ConvergencePolicy } from "../core/convergence.js";
+import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
+import type { AuditContextOptions, AuditSink } from "../audit/index.js";
+import type { AccountIdentityProofSigner } from "../core/account-identity-proof.js";
+import { SimpleGroupOptions } from "../core/group.js";
+import type { GenericKeyValueStore } from "../utils/key-value.js";
+import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactory, MarmotGroup } from "./group/marmot-group.js";
+import type { NostrNetworkInterface } from "./nostr-interface.js";
+/** Options accepted by {@link GroupFactory}. */
+export type GroupFactoryOptions<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> = {
+    store: GenericKeyValueStore<SerializedClientState>;
+    /** Dedicated store for the per-group rewind-history blob (optional). */
+    rewindStore?: GenericKeyValueStore<Uint8Array>;
+    signer: EventSigner;
+    network: NostrNetworkInterface;
+    /** Optional forensic audit sink inherited by new groups. */
+    audit?: AuditSink;
+    /** Required when `audit` is set; contains stable engine/account/session metadata. */
+    auditContext?: AuditContextOptions;
+    cryptoProvider?: CryptoProvider;
+    accountProofSigner?: AccountIdentityProofSigner;
+    historyFactory?: GroupHistoryFactory<THistory>;
+    mediaFactory?: GroupMediaFactory<TMedia>;
+    /** Convergence policy applied to newly created/imported groups. */
+    convergencePolicy?: ConvergencePolicy;
+    /** Ingestion-pool tuning applied to newly created/imported groups. */
+    ingestionPool?: IngestionPoolOptions;
+};
+export type CreateGroupOptions = SimpleGroupOptions & {
+    ciphersuite?: CiphersuiteName;
+};
+/**
+ * Builds new {@link MarmotGroup} instances. Isolates the only consumers of the
+ * account-identity-proof signer and the ciphersuite implementation — i.e. the
+ * native-sensitive group-creation seam (darkmatter's `do_create_group`). The
+ * factory only constructs and persists; caching/eventing is the registry's job.
+ */
+export declare class GroupFactory<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> {
+    #private;
+    constructor(options: GroupFactoryOptions<THistory, TMedia>);
+    /**
+     * Creates and persists a new simple group with the manager's signer as the
+     * sole initial admin. The returned group is saved but not cached — the
+     * caller (registry/manager) tracks it and emits the `created` event.
+     */
+    create(name: string, options?: CreateGroupOptions): Promise<MarmotGroup<THistory, TMedia>>;
+}

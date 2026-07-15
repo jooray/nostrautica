@@ -1,0 +1,12 @@
+import { Encoder } from "./codec/tlsEncoder.js";
+import { Decoder } from "./codec/tlsDecoder.js";
+/** @public */
+export interface Capabilities {
+    versions: number[];
+    ciphersuites: number[];
+    extensions: number[];
+    proposals: number[];
+    credentials: number[];
+}
+export declare const capabilitiesEncoder: Encoder<Capabilities>;
+export declare const capabilitiesDecoder: Decoder<Capabilities>;
