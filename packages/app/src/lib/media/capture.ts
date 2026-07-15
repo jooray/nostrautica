@@ -55,15 +55,19 @@ export class VideoCapture {
   }
 
   /**
-   * Start recording `stream`, hard-stopping at `maxSec`. `onTick(remaining)` fires
-   * ~every 250ms with the seconds remaining (for the countdown). Resolves with the
-   * recording when it stops (either via stop() or the hard-stop).
+   * Start recording `stream`, hard-stopping at `maxSec`. Pass `0` (or omit —
+   * defaults to unlimited) for an event with no length cap: no hard-stop timer is
+   * armed and the recording runs until `stop()` is called. `onTick(elapsed)` fires
+   * ~every 250ms — the seconds *remaining* for a capped recording, or the seconds
+   * *elapsed* (counting up) when unlimited, so the UI always has something to show.
+   * Resolves with the recording when it stops (either via stop() or the hard-stop).
    */
   start(
     stream: MediaStream,
     maxSec: number,
-    onTick?: (remainingSec: number) => void,
+    onTick?: (remainingOrElapsedSec: number) => void,
   ): Promise<CaptureResult> {
+    const unlimited = !maxSec || maxSec <= 0;
     this.chunks = [];
     this.recorder = new MediaRecorder(
       stream,
@@ -86,11 +90,13 @@ export class VideoCapture {
       };
 
       rec.start(250);
-      this.hardStopTimer = setTimeout(() => this.stop(), maxSec * 1000);
+      if (!unlimited) {
+        this.hardStopTimer = setTimeout(() => this.stop(), maxSec * 1000);
+      }
       if (onTick) {
         this.tickTimer = setInterval(() => {
           const elapsed = (Date.now() - this.startMs) / 1000;
-          onTick(Math.max(0, Math.ceil(maxSec - elapsed)));
+          onTick(unlimited ? Math.floor(elapsed) : Math.max(0, Math.ceil(maxSec - elapsed)));
         }, 250);
       }
     });

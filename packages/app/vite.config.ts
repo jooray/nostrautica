@@ -13,6 +13,12 @@ export default defineConfig({
       workbox: {
         cleanupOutdatedCaches: true,
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest,woff2}"],
+        // Base-aware SPA navigation fallback. After BASE_PATH moved the app under
+        // /app, the default `/` is no longer in the precache (every entry is
+        // /app/…), so workbox threw `non-precached-url: /` when binding the nav
+        // handler. Point it at the precached base index (directoryIndex resolves
+        // /app/ → /app/index.html).
+        navigateFallback: (process.env.BASE_PATH || "") + "/",
       },
       manifest: {
         name: "Nostrautica",

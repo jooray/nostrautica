@@ -47,6 +47,7 @@
     type MergedSection,
   } from "@nostrautica/protocol";
   import PostEditor from "$lib/components/PostEditor.svelte";
+  import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -1189,10 +1190,9 @@
       {t("chat.toggle.label")} <span class="badge">{t("chat.toggle.experimental")}</span>
     </div>
     <p class="muted">{t("chat.toggle.help")}</p>
-    <label class="check">
-      <input type="checkbox" bind:checked={chatEnabled} disabled={!ctx?.config.coordinator} />
+    <ToggleSwitch bind:checked={chatEnabled} disabled={!ctx?.config.coordinator}>
       {t("chat.toggle.label")}
-    </label>
+    </ToggleSwitch>
     {#if !ctx?.config.coordinator}
       <p class="muted" style="margin-top:0.35rem">{t("chat.toggle.needsCoordinator")}</p>
     {/if}
