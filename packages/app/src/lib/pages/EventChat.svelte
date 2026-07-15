@@ -55,12 +55,19 @@
         if (messages.some((x) => x.id === m.id)) return;
         messages = [...messages, m].sort((a, b) => a.createdAt - b.createdAt);
       };
+      // The coordinator adds us (and delivers the welcome) after we publish our key
+      // package, so the join usually lands seconds after start(). React to it: when
+      // a group appears we leave "setup" and enable composing. Without this the view
+      // stays on "Setting up your secure chat…" forever even once joined (gap G-3).
+      chat.onStateChange = () => {
+        if (phase === "setup") void syncPhase();
+      };
       await chat.ensurePublished();
       await chat.start();
       // If a welcome hasn't arrived yet the group list is empty — stay in "setup"
-      // messaging until the coordinator adds us and the first welcome lands.
-      const gid = await chat.nostrGroupId();
-      phase = gid ? "ready" : "setup";
+      // messaging until the coordinator adds us and the first welcome lands (then
+      // onStateChange flips us to "ready").
+      await syncPhase();
     } catch (e) {
       error = e;
       phase = "unavailable";
@@ -68,6 +75,13 @@
   });
 
   onDestroy(() => chat?.dispose());
+
+  // Flip to "ready" once we've joined a group (a nostr_group_id exists).
+  async function syncPhase() {
+    if (!chat) return;
+    const gid = await chat.nostrGroupId();
+    if (gid) phase = "ready";
+  }
 
   async function send() {
     const text = draft.trim();

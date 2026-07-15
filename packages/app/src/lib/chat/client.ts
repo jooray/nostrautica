@@ -47,6 +47,9 @@ export class MarmotChat {
   private readonly accountSigner: AppSigner;
   private connection?: { unsubscribe(): void };
   private inviteSub?: { unsubscribe(): void };
+  private onInviteDecrypted?: () => void;
+  /** Serializes the startup join and every welcome-driven join so two runs don't race the same welcome. */
+  private joining?: Promise<void>;
   private readonly boundGroups = new Set<string>();
   onMessage?: ChatMessageHandler;
   onStateChange?: () => void;
@@ -136,17 +139,57 @@ export class MarmotChat {
    * state listeners. Safe to call after {@link ensurePublished}.
    */
   async start(): Promise<void> {
+    // Keep a live 445 auto-connection for every joined group — including groups we
+    // join LATER from a welcome that arrives after startup. `connectAll` tracks the
+    // manager's `joined` event, so a late join auto-subscribes to its 445 traffic.
+    // Installed first so no group (present or future) is missed.
+    this.connection = this.client.groups.connectAll();
+    // A welcome that arrives after this point is ingested + decrypted by `listen()`
+    // into the invite store's "unread" slot, but marmot never *joins* on its own —
+    // the app must drive `joinGroupFromWelcome`. The coordinator adds us seconds
+    // (or longer) after we publish our key package, so the welcome almost always
+    // lands after the initial `joinPending()`; without reacting to it here the
+    // member decrypts the welcome and then sits forever, never joining (gap G-3).
+    // Drive the join off every `decrypted` event to cover that late-arrival case.
+    this.onInviteDecrypted = () => {
+      void this.joinPendingAndBind().catch((err) => console.warn("marmot: join-on-welcome failed", err));
+    };
+    this.client.invites.on("decrypted", this.onInviteDecrypted);
     // Listen for gift-wrapped welcomes on our inbox relays.
     this.inviteSub = await this.client.invites.listen(this.relays);
-    await this.joinPending();
-    // Subscribe to 445 traffic for all joined groups and bind listeners.
-    await this.bindAllGroups();
-    this.connection = this.client.groups.connectAll();
+    // Join + bind anything already waiting (welcome delivered before we started).
+    await this.joinPendingAndBind();
+  }
+
+  /**
+   * Join every pending welcome and bind listeners on the resulting groups.
+   * Serialized so the startup call and each `decrypted`-driven call cannot race to
+   * join the same welcome; fires {@link onStateChange} when a new group appears so
+   * the UI leaves its "setting up" state.
+   */
+  private async joinPendingAndBind(): Promise<void> {
+    const prev = this.joining ?? Promise.resolve();
+    this.joining = prev
+      .catch(() => {})
+      .then(async () => {
+        const before = this.boundGroups.size;
+        await this.joinPending();
+        await this.bindAllGroups();
+        if (this.boundGroups.size !== before) this.onStateChange?.();
+      });
+    await this.joining;
   }
 
   /** Join any welcome we hold the key package for. */
   async joinPending(): Promise<void> {
-    const unread = await this.client.invites.decryptGiftWraps().catch(() => []);
+    // Move any received gift wraps to "unread" (idempotent), then join every
+    // *unread* welcome we still hold the key package for. We iterate `getUnread()`
+    // rather than trusting `decryptGiftWraps()`'s return value: a welcome the
+    // `listen()` subscription already decrypted lives in "unread" but would not be
+    // in a later `decryptGiftWraps()` result, so keying off the return value would
+    // silently skip exactly the late-arriving welcome this path exists to join.
+    await this.client.invites.decryptGiftWraps().catch(() => []);
+    const unread = await this.client.invites.getUnread().catch(() => []);
     for (const invite of unread) {
       try {
         const joinable = await this.client.canJoinInvite(invite);
@@ -218,6 +261,8 @@ export class MarmotChat {
 
   /** Release live resources (subscriptions/timers). Call on unmount. */
   dispose(): void {
+    if (this.onInviteDecrypted) this.client.invites.off("decrypted", this.onInviteDecrypted);
+    this.onInviteDecrypted = undefined;
     this.connection?.unsubscribe();
     this.inviteSub?.unsubscribe();
     this.connection = undefined;
