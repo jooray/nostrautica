@@ -44,6 +44,7 @@ import {
   buildEventConfig,
   wrapRumor,
   type TalksMode,
+  type ChatBackend,
   KIND_INVITE_LIST,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
@@ -564,7 +565,7 @@ export async function revokeAttendeeClient(
  */
 export async function updateEventConfig(
   ctx: EventContext,
-  changes: Partial<{ talks: TalksMode; maxTalkSec: number }>,
+  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[] }>,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {

@@ -27,6 +27,7 @@
   let maxTalkSec = $state(900);
   let talks = $state<"off" | "on" | "prerecord-first">("off");
   let matching = $state<"on" | "off">("on");
+  let chatEnabled = $state(false); // Marmot group chat (experimental); operative once a coordinator is attached
   let matchVisibility = $state<"pair" | "event">("pair");
   let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
   let lang = $state<string>("en"); // ISO 639-1 event language (default English)
@@ -109,6 +110,7 @@
           nostrContext: 100,
           lang,
           talks,
+          chat: chatEnabled ? ["marmot"] : [],
         },
         blindingKey,
       );
@@ -306,6 +308,17 @@
         <input id="mt" type="number" bind:value={maxTalkSec} />
       </div>
     {/if}
+    <div>
+      <label class="check">
+        <input type="checkbox" bind:checked={chatEnabled} />
+        {t("chat.toggle.label")}
+        <span class="pill">{t("chat.toggle.experimental")}</span>
+      </label>
+      <p class="muted" style="margin:0.25rem 0 0">{t("chat.toggle.help")}</p>
+      {#if chatEnabled}
+        <p class="muted" style="margin:0.25rem 0 0">{t("chat.toggle.needsCoordinator")}</p>
+      {/if}
+    </div>
     <p class="muted">
       {t("create.rotationNote")}
     </p>

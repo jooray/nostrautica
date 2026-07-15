@@ -22,6 +22,11 @@
     if (eventShell.isMember) {
       list.push({ icon: "person", label: t("profile.mine.title"), go: { name: "myProfile", naddr } });
     }
+    // When Matches AND Chat are both in the nav, Updates collapses off the bar
+    // (EventNav §7) — surface it here so it stays reachable.
+    if (eventShell.showMatches && eventShell.showChat) {
+      list.push({ icon: "horn", label: t("nav.updates"), go: { name: "posts", naddr } });
+    }
     if (session.loggedIn) {
       list.push({ icon: "chat", label: t("nav.messages"), go: { name: "dm" } });
     }

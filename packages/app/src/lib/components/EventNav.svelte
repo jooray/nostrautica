@@ -17,6 +17,10 @@
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
+  // The bar holds Overview · People · Matches · Chat · Updates · More. When both
+  // Matches AND Chat are visible the bar is full, so Updates collapses into the
+  // More menu (MARMOT-GROUP-CHAT §7) to keep tap targets comfortable.
+  const collapseUpdates = $derived(eventShell.showMatches && eventShell.showChat);
 </script>
 
 {#snippet talksTab()}
@@ -63,13 +67,25 @@
     </button>
   {/if}
 
-  <button
-    aria-current={active("posts", "post") ? "page" : undefined}
-    class:active={active("posts", "post")}
-    onclick={() => router.go({ name: "posts", naddr })}
-  >
-    <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
-  </button>
+  {#if eventShell.showChat}
+    <button
+      aria-current={active("chat") ? "page" : undefined}
+      class:active={active("chat")}
+      onclick={() => router.go({ name: "chat", naddr })}
+    >
+      <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.chat")}</span>
+    </button>
+  {/if}
+
+  {#if !collapseUpdates}
+    <button
+      aria-current={active("posts", "post") ? "page" : undefined}
+      class:active={active("posts", "post")}
+      onclick={() => router.go({ name: "posts", naddr })}
+    >
+      <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
+    </button>
+  {/if}
 
   <button
     aria-current={active("eventMore") ? "page" : undefined}

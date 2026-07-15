@@ -19,6 +19,7 @@ describe("parseHash", () => {
     ["#/e/naddr1xyz/attendees", { name: "attendees", naddr: "naddr1xyz" }],
     ["#/e/naddr1xyz/attendees/npub1abc", { name: "attendee", naddr: "naddr1xyz", npub: "npub1abc" }],
     ["#/e/naddr1xyz/matches", { name: "matches", naddr: "naddr1xyz" }],
+    ["#/e/naddr1xyz/chat", { name: "chat", naddr: "naddr1xyz" }],
     ["#/e/naddr1xyz/talks", { name: "talks", naddr: "naddr1xyz" }],
     ["#/e/naddr1xyz/talks/tk1", { name: "talk", naddr: "naddr1xyz", d: "tk1" }],
     ["#/e/naddr1xyz/admin", { name: "admin", naddr: "naddr1xyz" }],

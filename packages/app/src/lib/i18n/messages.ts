@@ -694,6 +694,7 @@ export const messages = {
     "nav.overview": "Overview",
     "nav.people": "People",
     "nav.matches": "Matches",
+    "nav.chat": "Chat",
     "nav.talks": "Talks",
     "nav.updates": "Updates",
     "nav.more": "More",
@@ -705,6 +706,35 @@ export const messages = {
     "more.eventPrivacy.body":
       "How this event handles matching and your data is explained on the join screen.",
     "more.eventPrivacy.link": "Review privacy details",
+
+    // Marmot group chat (experimental)
+    "chat.title": "Group chat",
+    "chat.experimental": "Experimental",
+    "chat.disclosure.body":
+      "This chat is end-to-end encrypted (MLS/Marmot). The event coordinator operates and can read it, and each device sees only messages sent after it joined.",
+    "chat.setup": "Setting up your secure chat… you'll join once the coordinator adds you.",
+    "chat.empty": "No messages yet. Say hello.",
+    "chat.compose.placeholder": "Message",
+    "chat.send": "Send",
+    "chat.unavailable": "Group chat isn't available for this event, or you're not a member yet.",
+    "chat.backToEvent": "Back to event",
+    "chat.handoff.title": "Take this chat to your phone",
+    "chat.handoff.body":
+      "Install Whitenoise, sign in with the key below, and this chat appears with push notifications. History starts from when your phone joins.",
+    "chat.handoff.chatKeyNote":
+      "This is a chat-only key generated for this app — not your main account key. It only unlocks your Marmot chats.",
+    "chat.handoff.reveal": "Show my chat key",
+    "chat.handoff.hide": "Hide",
+    "chat.handoff.copy": "Copy key",
+    "chat.handoff.secretWarning":
+      "Anyone with this key can read and post as you in your chats. Only scan it into your own device.",
+
+    // Create / Admin: group-chat toggle
+    "chat.toggle.label": "Group chat (Marmot)",
+    "chat.toggle.experimental": "Experimental",
+    "chat.toggle.help":
+      "Adds an end-to-end-encrypted group chat for members. Requires a coordinator; the coordinator can read the chat.",
+    "chat.toggle.needsCoordinator": "Add a coordinator to enable group chat.",
 
     // Per-route document titles (A2)
     "title.home": "Nostrautica",
@@ -718,6 +748,7 @@ export const messages = {
     "title.attendees": "Who's here",
     "title.attendee": "Attendee",
     "title.matches": "Your matches",
+    "title.chat": "Group chat",
     "title.talks": "Talks",
     "title.talk": "Talk",
     "title.myProfile": "My event profile",
@@ -1512,6 +1543,7 @@ export const messages = {
     "nav.overview": "Prehľad",
     "nav.people": "Ľudia",
     "nav.matches": "Spojenia",
+    "nav.chat": "Chat",
     "nav.talks": "Prednášky",
     "nav.updates": "Novinky",
     "nav.more": "Viac",
@@ -1522,6 +1554,33 @@ export const messages = {
     "more.eventPrivacy": "Súkromie podujatia",
     "more.eventPrivacy.body":
       "Ako toto podujatie spracúva párovanie a vaše údaje, je vysvetlené na obrazovke pripojenia.",
+    // Marmot skupinový chat (experimentálne)
+    "chat.title": "Skupinový chat",
+    "chat.experimental": "Experimentálne",
+    "chat.disclosure.body":
+      "Tento chat je end-to-end šifrovaný (MLS/Marmot). Koordinátor podujatia ho prevádzkuje a môže ho čítať a každé zariadenie vidí len správy odoslané po tom, ako sa pripojilo.",
+    "chat.setup": "Nastavujeme váš zabezpečený chat… pripojíte sa, keď vás koordinátor pridá.",
+    "chat.empty": "Zatiaľ žiadne správy. Pozdravte sa.",
+    "chat.compose.placeholder": "Správa",
+    "chat.send": "Odoslať",
+    "chat.unavailable": "Skupinový chat nie je pre toto podujatie dostupný, alebo ešte nie ste členom.",
+    "chat.backToEvent": "Späť na podujatie",
+    "chat.handoff.title": "Vezmite si tento chat do telefónu",
+    "chat.handoff.body":
+      "Nainštalujte Whitenoise, prihláste sa kľúčom nižšie a tento chat sa zobrazí s upozorneniami. História začína od chvíle, keď sa telefón pripojí.",
+    "chat.handoff.chatKeyNote":
+      "Toto je kľúč len pre chat vygenerovaný touto aplikáciou — nie je to hlavný kľúč vášho účtu. Odomyká iba vaše Marmot chaty.",
+    "chat.handoff.reveal": "Zobraziť môj kľúč pre chat",
+    "chat.handoff.hide": "Skryť",
+    "chat.handoff.copy": "Kopírovať kľúč",
+    "chat.handoff.secretWarning":
+      "Ktokoľvek s týmto kľúčom môže čítať a písať vo vašich chatoch ako vy. Naskenujte ho len do vlastného zariadenia.",
+    // Vytvorenie / Správa: prepínač skupinového chatu
+    "chat.toggle.label": "Skupinový chat (Marmot)",
+    "chat.toggle.experimental": "Experimentálne",
+    "chat.toggle.help":
+      "Pridá end-to-end šifrovaný skupinový chat pre členov. Vyžaduje koordinátora; koordinátor môže chat čítať.",
+    "chat.toggle.needsCoordinator": "Pre povolenie skupinového chatu pridajte koordinátora.",
     "more.eventPrivacy.link": "Zobraziť podrobnosti o súkromí",
 
     // Per-route document titles (A2)
@@ -1536,6 +1595,7 @@ export const messages = {
     "title.attendees": "Kto je tu",
     "title.attendee": "Účastník",
     "title.matches": "Vaše spojenia",
+    "title.chat": "Skupinový chat",
     "title.talks": "Prednášky",
     "title.talk": "Prednáška",
     "title.myProfile": "Môj profil na podujatí",

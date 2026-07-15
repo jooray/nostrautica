@@ -1,7 +1,8 @@
 # Marmot group chat — specification and implementation plan
 
-Status: **specification + phased plan. Build in progress (2026-07-15): Phase 1 complete, the
-Phase-2 packaging gate resolved + store adapter landed; Phases 2 (remainder)–5 pending — see
+Status: **specification + phased plan. Build in progress (2026-07-15): Phases 1, 2 (app side),
+and 4 (UI) implemented and green; packaging resolved (§2.1). Phase 3 (coordinator admin bot)
+in parallel; Phase 5 (live e2e + hardening) and full send/receive verification pending — see
 §8.** Successor to the analysis in
 [GROUP-CHAT-FEASIBILITY.md](GROUP-CHAT-FEASIBILITY.md) (read it first for the option analysis
 and the multi-client reasoning; this document fixes the design and turns it into buildable
@@ -495,24 +496,38 @@ Files: `packages/protocol/src/config.ts` (+ tests), `packages/protocol/src/kinds
 **Acceptance**: `chat` tag round-trips build→parse→build byte-identically; 21607 validates;
 unknown `chat` values are dropped; `pnpm check` green. No behavior anywhere yet.
 
-### Phase 2 — app `chat/marmot` module (~2 weeks) — ◐ STARTED (store adapter + build gate done)
+### Phase 2 — app `chat/marmot` module (~2 weeks) — ✅ IMPLEMENTED (app side; needs live verification)
 
-Done so far: the **packaging gate** (§2.1) and the **store adapter** `stores.ts` — a
-storage-agnostic `GenericKeyValueStore<T>` over a tiny `MarmotKvBackend`, with an
-`IndexedDbKvBackend` (bounded prefix-range scans) for production and an `InMemoryKvBackend`
-for tests; per-identity + per-namespace key scoping (`group-state`/`key-package`/
-`invites`/`rewind`); `makeMarmotStores(backend, identity)` returns the four typed stores the
-`MarmotClient` needs. 7 conformance tests (isolation, namespace-scoped `clear`/`keys`,
-structured-clone-by-value, `Uint8Array` fidelity) run in the node env without an IndexedDB
-shim. A trivial `marmot-probe.ts` (client + `ADDRESSABLE_KEY_PACKAGE_KIND` + deep-imported
-`proposeRemoveUser`), lazy-loaded from `+layout.ts`, keeps the marmot chunk in the build
-graph and is the seed for the real lazy loader.
-**Still to do:** `network.ts` (NDK `NostrNetworkInterface`), `identity.ts` (local-key vs
-chat-device-key resolution + `accountProofSigner` + chat-key kind-0 + keystore/backup),
-`attest.ts` (21607 build/send), `client.ts` (MarmotClient lifecycle, key-package/10050/10002
-ensure-published, invite listen, join, heal), `messages.ts`, and `eventShell.showChat`.
+`packages/app/src/lib/chat/`, all lazy-loaded behind EventChat's dynamic `import()`:
+- `stores.ts` — storage-agnostic `GenericKeyValueStore<T>` over a tiny `MarmotKvBackend`;
+  `IndexedDbKvBackend` (bounded prefix-range scans) for production, `InMemoryKvBackend` for
+  tests; per-identity + per-namespace scoping; `makeMarmotStores(backend, identity)` →
+  the four typed stores. (7 conformance tests.)
+- `identity.ts` — chat-identity resolution (§3): local-key accounts use the account key;
+  NIP-46/NIP-07 accounts generate + persist a chat **device key** in IndexedDB. Uniform
+  `accountProofSigner = signAccountIdentityProof(req, sk)`; `eventSignerFromKey` builds the
+  applesauce-shaped signer; `buildChatKeyProfile` publishes the "(chat)" kind-0. (7 tests.)
+- `attest.ts` — kind-21607 build + gift-wrap to the coordinator, sealed by the account key
+  (`signerWrap`); `verifyChatKeyAttestation` for the receiving side. (5 tests.)
+- `network.ts` — `NostrNetworkInterface` over the app's NDK pool (publish/request/
+  subscription for 30443/1059/445 + `getUserInboxRelays` via 10050).
+- `messages.ts` — kind-9 rumor ↔ `ChatMessage` mapping via marmot's real
+  `createChatRumor`/`serializeApplicationRumor`/`deserializeApplicationData` codec, incl. the
+  id-integrity round-trip. (4 tests.)
+- `client.ts` — `MarmotChat` wrapper: identity+stores+network wiring, `ensurePublished`
+  (10050 + 10002 + 30443 key package + 21607 attestation), invite listen, `joinPending`,
+  `connectAll` 445 subscription, `send`, `healIfEvicted`, `leaveAll`. Includes the
+  `proposeRemoveUser` deep-import + `resolveRemoveUserProposals` array-flatten workaround
+  (admin/co-admin path; the app member side only `leaveAll`s).
+- `eventShell.showChat` = member ∧ `isMarmotChatEnabled(config)`.
 
-New `packages/app/src/lib/chat/` (all lazy-loaded): `stores.ts` (Dexie
+**Signer round-trips per message = 0** (445 signed by a throwaway key, inner rumor unsigned) —
+the send path uses `client.groups.send`, never `signEvent`. **Needs live verification:**
+end-to-end send/receive requires a real relay + the coordinator admin bot (Phase 3), which
+is not runnable in the build environment; the integration is written to the verified
+marmot-ts API surface.
+
+Original file plan (for reference): `packages/app/src/lib/chat/` (all lazy-loaded): `stores.ts` (Dexie
 `GenericKeyValueStore` ×4, per-identity namespacing — written as an upstreamable adapter:
 `UPSTREAM PR to marmot-ts /extra`), `network.ts` (NDK adapter incl. `getUserInboxRelays` via
 10050 lookup), `identity.ts` (chat-identity resolution: local account key vs generated chat
@@ -544,9 +559,21 @@ cannot read the next epoch; a second key package from the same account gets auto
 (multi-device); config toggle mid-event backfills all approved attendees; coordinator
 restart resumes group operation from SQLite alone.
 
-### Phase 4 — UI (~1.5 weeks)
+### Phase 4 — UI (~1.5 weeks) — ✅ IMPLEMENTED
 
-Files: `router/routes.ts` (+`chat` route), `EventNav.svelte` (+tab, collapse rule),
+Landed: `#/e/:naddr/chat` route (`routes.ts` + `eventNaddr` + `routes.test.ts`); a gated
+**Chat** tab in `EventNav.svelte` (shown on `eventShell.showChat`; when both Matches and Chat
+show, Updates collapses into More, with a fallback row in `EventMore.svelte`); `EventChat.svelte`
+(lazy-loads the `chat/client` stack, message list with day separators + own/other bubbles,
+compose with Enter-to-send, "Setting up…" state, the coordinator-read disclosure, and the
+experimental badge); `ChatHandoffCard.svelte` (reveal + nsec QR for Whitenoise, with the
+chat-only-key note for device-key accounts); the **Create** toggle (`chat=marmot`, with a
+needs-a-coordinator note) and the **Admin** toggle (enabled only with a coordinator, via the
+extended `updateEventConfig`). en+sk i18n added (`nav.chat`, `title.chat`, `chat.*`). The
+alpha/experimental label is carried in the page header, the nav-adjacent badge, and both
+toggles.
+
+Original file plan (for reference): `router/routes.ts` (+`chat` route), `EventNav.svelte` (+tab, collapse rule),
 `EventMore.svelte` (fallback row), new `pages/EventChat.svelte` + components (list, composer,
 pending state, reactions/edits rendering, unread watermark badge), Create/Admin toggle +
 disclosure copy, hand-off card (chat settings + event-end screen), i18n (en+sk).

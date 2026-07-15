@@ -8,6 +8,7 @@
  * navigation never clobbers the current event. Reads from cache first so tab
  * gating almost never flashes.
  */
+import { isMarmotChatEnabled } from "@nostrautica/protocol";
 import {
   loadEventContext,
   cachedEventContext,
@@ -54,6 +55,14 @@ class EventShell {
   /** In "prerecord-first" mode Talks is featured before People in the nav order. */
   get talksFirst(): boolean {
     return this.ctx?.config.talks === "prerecord-first";
+  }
+  /**
+   * Marmot group chat (MARMOT-GROUP-CHAT §7). Members-only, and only when the
+   * event has `chat=marmot` AND a coordinator (the MLS admin bot) — a
+   * coordinator-less chat tag is treated as absent. Non-members never see it.
+   */
+  get showChat(): boolean {
+    return this.isMember && !!this.ctx && isMarmotChatEnabled(this.ctx.config);
   }
 
   /**

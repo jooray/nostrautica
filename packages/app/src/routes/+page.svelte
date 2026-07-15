@@ -13,6 +13,7 @@
   import Attendees from "$lib/pages/Attendees.svelte";
   import Attendee from "$lib/pages/Attendee.svelte";
   import Matches from "$lib/pages/Matches.svelte";
+  import EventChat from "$lib/pages/EventChat.svelte";
   import Talks from "$lib/pages/Talks.svelte";
   import TalkDetail from "$lib/pages/TalkDetail.svelte";
   import MyProfile from "$lib/pages/MyProfile.svelte";
@@ -49,6 +50,8 @@
   {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
 {:else if route.name === "matches"}
   {#key route.naddr}<Matches naddr={route.naddr} />{/key}
+{:else if route.name === "chat"}
+  {#key route.naddr}<EventChat naddr={route.naddr} />{/key}
 {:else if route.name === "talks"}
   {#key route.naddr}<Talks naddr={route.naddr} />{/key}
 {:else if route.name === "talk"}
