@@ -92,6 +92,25 @@ export interface TalkRow {
   updated_at: number;
 }
 
+/** An MLS group the coordinator administers for a chat-enabled event (§4.3). */
+export interface MarmotGroupRow {
+  coordinate: string;
+  mls_group_id: string;
+  nostr_group_id: string;
+  created_at: number;
+  status: "active" | "frozen";
+}
+
+/** An authenticated account⇄chat-key binding from a 21607 attestation (§3.3). */
+export interface MarmotChatKeyRow {
+  coordinate: string;
+  account_pubkey: string;
+  chat_pubkey: string;
+  client_id: string | null;
+  status: "active" | "revoked";
+  updated_at: number;
+}
+
 /** A poisoned/cleared job surfaced to the organizer (audit Q12). */
 export interface JobStatusRow {
   coordinate: string;
@@ -245,6 +264,52 @@ CREATE TABLE IF NOT EXISTS job_status (
   retryable INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, stage, pubkey)
+);
+-- ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────────
+-- The coordinator is the MLS admin bot: it owns one group per chat-enabled event
+-- and holds unlosable MLS state (§4.3 breaks the "DB loss only re-costs money"
+-- property — losing these rows orphans the group's only admin). Every secret-
+-- bearing column is at-rest-encrypted under the coordinator identity key exactly
+-- like inbox_nsec/eck_json (the protect/reveal NIP-44 scheme).
+
+-- One MLS group per chat-enabled event. mls_group_id is marmot's internal group
+-- handle (hex); nostr_group_id is the random 32-byte routing id (hex, the 445 h tag).
+CREATE TABLE IF NOT EXISTS marmot_groups (
+  coordinate TEXT PRIMARY KEY,
+  mls_group_id TEXT NOT NULL,
+  nostr_group_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'   -- 'active' | 'frozen' (chat tag removed §9 Q4)
+);
+-- The MarmotClient's GenericKeyValueStore namespaces (group state / key-package
+-- private material / invites / rewind), one physical row per (namespace,key). The
+-- v blob is at-rest-encrypted — it holds MLS private key material and group
+-- secrets, the same secret class as inbox_nsec.
+CREATE TABLE IF NOT EXISTS marmot_kv (
+  namespace TEXT NOT NULL,
+  k TEXT NOT NULL,
+  v TEXT NOT NULL,               -- serialized value, NIP-44-encrypted at rest
+  PRIMARY KEY (namespace, k)
+);
+-- account_pubkey ⇄ chat_pubkey bindings from authenticated kind-21607 attestations
+-- (§3.3). A local-key attendee has no row (their account key IS the chat identity);
+-- NIP-46/NIP-07 attendees have one row per attested device key. status='revoked'
+-- (21607 op:revoke or account revoke) drops the key from the authorized add set.
+CREATE TABLE IF NOT EXISTS marmot_chat_keys (
+  coordinate TEXT NOT NULL,
+  account_pubkey TEXT NOT NULL,
+  chat_pubkey TEXT NOT NULL,
+  client_id TEXT,
+  status TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (coordinate, chat_pubkey)
+);
+-- Idempotency ledger for consumed key packages (§4.2): a 30443 event id is added
+-- to a group exactly once, so a re-delivered key package never re-invites.
+CREATE TABLE IF NOT EXISTS marmot_consumed_kps (
+  coordinate TEXT NOT NULL,
+  kp_event_id TEXT NOT NULL,
+  PRIMARY KEY (coordinate, kp_event_id)
 );
 `;
 
@@ -1038,5 +1103,159 @@ export class Store {
     return this.db
       .prepare("SELECT * FROM job_status WHERE coordinate = ? AND state = 'poison'")
       .all(coordinate) as any;
+  }
+
+  // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────
+  // The coordinator's MLS admin state. All secret-bearing values (the marmot_kv
+  // `v` blobs) reuse the same at-rest NIP-44 protection as the event-key columns.
+
+  /** Record (or update) the group created for a chat-enabled event. */
+  upsertMarmotGroup(row: {
+    coordinate: string;
+    mlsGroupId: string;
+    nostrGroupId: string;
+    status?: "active" | "frozen";
+    now: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO marmot_groups (coordinate, mls_group_id, nostr_group_id, created_at, status)
+         VALUES (:coordinate, :mlsGroupId, :nostrGroupId, :now, COALESCE(:status, 'active'))
+         ON CONFLICT(coordinate) DO UPDATE SET
+           mls_group_id = excluded.mls_group_id,
+           nostr_group_id = excluded.nostr_group_id,
+           status = COALESCE(:status, marmot_groups.status)`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        mlsGroupId: row.mlsGroupId,
+        nostrGroupId: row.nostrGroupId,
+        status: row.status ?? null,
+        now: row.now,
+      });
+  }
+
+  getMarmotGroup(coordinate: string): MarmotGroupRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM marmot_groups WHERE coordinate = ?")
+      .get(coordinate) as MarmotGroupRow | undefined;
+  }
+
+  allMarmotGroups(): MarmotGroupRow[] {
+    return this.db.prepare("SELECT * FROM marmot_groups").all() as unknown as MarmotGroupRow[];
+  }
+
+  setMarmotGroupStatus(coordinate: string, status: "active" | "frozen"): void {
+    this.db.prepare("UPDATE marmot_groups SET status = ? WHERE coordinate = ?").run(status, coordinate);
+  }
+
+  // ── marmot_kv: the MarmotClient's key/value stores, encrypted at rest ───────
+  /** Read a namespaced value (decrypted); undefined if absent. */
+  marmotKvGet(namespace: string, key: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT v FROM marmot_kv WHERE namespace = ? AND k = ?")
+      .get(namespace, key) as { v: string } | undefined;
+    return row ? this.reveal(row.v) : undefined;
+  }
+
+  /** Write a namespaced value (encrypted at rest). */
+  marmotKvSet(namespace: string, key: string, value: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO marmot_kv (namespace, k, v) VALUES (?, ?, ?)
+         ON CONFLICT(namespace, k) DO UPDATE SET v = excluded.v`,
+      )
+      .run(namespace, key, this.protect(value));
+  }
+
+  marmotKvDelete(namespace: string, key: string): void {
+    this.db.prepare("DELETE FROM marmot_kv WHERE namespace = ? AND k = ?").run(namespace, key);
+  }
+
+  /** All keys in a namespace (for the store's `keys()`/`clear()`). */
+  marmotKvKeys(namespace: string): string[] {
+    const rows = this.db
+      .prepare("SELECT k FROM marmot_kv WHERE namespace = ?")
+      .all(namespace) as { k: string }[];
+    return rows.map((r) => r.k);
+  }
+
+  marmotKvClear(namespace: string): void {
+    this.db.prepare("DELETE FROM marmot_kv WHERE namespace = ?").run(namespace);
+  }
+
+  // ── marmot_chat_keys: authenticated account⇄chat-key bindings (§3.3) ────────
+  /** Record an authenticated chat-key attestation (op:add). Idempotent per key. */
+  upsertChatKey(row: {
+    coordinate: string;
+    accountPubkey: string;
+    chatPubkey: string;
+    clientId?: string | null;
+    status?: "active" | "revoked";
+    now: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, status, updated_at)
+         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, COALESCE(:status, 'active'), :now)
+         ON CONFLICT(coordinate, chat_pubkey) DO UPDATE SET
+           account_pubkey = excluded.account_pubkey,
+           client_id = COALESCE(excluded.client_id, marmot_chat_keys.client_id),
+           status = COALESCE(:status, marmot_chat_keys.status),
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        accountPubkey: row.accountPubkey,
+        chatPubkey: row.chatPubkey,
+        clientId: row.clientId ?? null,
+        status: row.status ?? null,
+        now: row.now,
+      });
+  }
+
+  getChatKey(coordinate: string, chatPubkey: string): MarmotChatKeyRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM marmot_chat_keys WHERE coordinate = ? AND chat_pubkey = ?")
+      .get(coordinate, chatPubkey) as MarmotChatKeyRow | undefined;
+  }
+
+  /** All attested chat keys for one account in an event (any status). */
+  chatKeysForAccount(coordinate: string, accountPubkey: string): MarmotChatKeyRow[] {
+    return this.db
+      .prepare("SELECT * FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?")
+      .all(coordinate, accountPubkey) as unknown as MarmotChatKeyRow[];
+  }
+
+  /** Every active chat key in an event (the authorized-author set for the 30443 watcher). */
+  activeChatKeys(coordinate: string): MarmotChatKeyRow[] {
+    return this.db
+      .prepare("SELECT * FROM marmot_chat_keys WHERE coordinate = ? AND status = 'active'")
+      .all(coordinate) as unknown as MarmotChatKeyRow[];
+  }
+
+  setChatKeyStatus(coordinate: string, chatPubkey: string, status: "active" | "revoked", now: number): void {
+    this.db
+      .prepare("UPDATE marmot_chat_keys SET status = ?, updated_at = ? WHERE coordinate = ? AND chat_pubkey = ?")
+      .run(status, now, coordinate, chatPubkey);
+  }
+
+  // ── marmot_consumed_kps: key-package add idempotency (§4.2) ─────────────────
+  /** Returns true if this key-package event id is new (and records it); false if consumed. */
+  markKpConsumed(coordinate: string, kpEventId: string): boolean {
+    const existing = this.db
+      .prepare("SELECT 1 FROM marmot_consumed_kps WHERE coordinate = ? AND kp_event_id = ?")
+      .get(coordinate, kpEventId);
+    if (existing) return false;
+    this.db
+      .prepare("INSERT INTO marmot_consumed_kps (coordinate, kp_event_id) VALUES (?, ?)")
+      .run(coordinate, kpEventId);
+    return true;
+  }
+
+  isKpConsumed(coordinate: string, kpEventId: string): boolean {
+    return !!this.db
+      .prepare("SELECT 1 FROM marmot_consumed_kps WHERE coordinate = ? AND kp_event_id = ?")
+      .get(coordinate, kpEventId);
   }
 }

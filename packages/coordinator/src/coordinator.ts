@@ -43,6 +43,9 @@ import {
   adminCommandContentSchema,
   profileCorrectionContentSchema,
   talkSubmissionContentSchema,
+  chatKeyAttestationContentSchema,
+  KIND_CHAT_KEY_ATTESTATION,
+  isMarmotChatEnabled,
   AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
@@ -94,6 +97,12 @@ import {
 } from "./nostr/publisher.js";
 import { transcribeMedia } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef } from "./providers/types.js";
+import { MarmotAdmin } from "./chat/admin.js";
+import type { ChatMls } from "./chat/mls.js";
+
+/** Marmot v2 wire kinds (MARMOT-GROUP-CHAT §1.2): addressable key package + group msg. */
+const KIND_KEY_PACKAGE = 30443;
+const KIND_GROUP_MESSAGE = 445;
 
 /** Minimal transport the coordinator needs (NostrClient satisfies it). */
 export interface Transport {
@@ -146,6 +155,13 @@ export interface CoordinatorDeps {
   ) => Promise<string | import("./pipeline/transcribe.js").TranscriptResult>;
   /** Max media bytes to download per blob (audit C3). */
   maxMediaBytes?: number;
+  /**
+   * The MLS layer for the Marmot group-chat admin bot (§4). When provided, the
+   * coordinator runs as the group's admin: it creates a group per chat-enabled
+   * event, adds approved attendees' chat identities, and removes them on revoke.
+   * Omitted ⇒ chat is entirely inert (the pre-Marmot behavior).
+   */
+  chatMls?: ChatMls;
   now?: () => number;
 }
 
@@ -165,6 +181,8 @@ interface EventState {
   /** Blossom origins media may be fetched from (audit C3 allowlist). Empty = derive from media urls, IP-guarded. */
   blossomOrigins: string[];
   lang: string;
+  /** Whether Marmot group chat is operative for this event (§1.3). */
+  chat: boolean;
   scoringCtx: EventContextForScoring;
   /** Newest applied 31600 config event id + timestamp (audit H5 replaceable ordering). */
   configEventId?: string;
@@ -180,6 +198,8 @@ export class Coordinator {
   private readonly batchSize: number;
   private readonly matchRng: () => number;
   private readonly inviteChecker: InviteChecker;
+  /** The Marmot admin bot (§4), present only when a chat MLS layer is configured. */
+  private readonly marmot?: MarmotAdmin;
   private events = new Map<string, EventState>();
   private closers: Array<() => void> = [];
 
@@ -191,6 +211,15 @@ export class Coordinator {
     this.batchSize = deps.batchSize ?? 10;
     this.matchRng = deps.matchRng ?? Math.random;
     this.inviteChecker = new InviteChecker(deps.store);
+    if (deps.chatMls) {
+      this.marmot = new MarmotAdmin({
+        store: deps.store,
+        mls: deps.chatMls,
+        now: this.now,
+        fetchKeyPackages: (coordinate, authors) => this.fetchKeyPackages(coordinate, authors),
+        log,
+      });
+    }
     this.jobs = new JobRunner(deps.store, {
       now: this.now,
       // A poisoned job is surfaced to the organizer (audit Q12): persist a status
@@ -363,6 +392,7 @@ export class Coordinator {
       talks: config?.talks ?? "off",
       blossomOrigins: config?.blossom ?? [],
       lang: config?.lang ?? "en",
+      chat: config ? isMarmotChatEnabled(config) : false,
       scoringCtx: {
         title: evtEvent?.tags.find((t) => t[0] === "title")?.[1] ?? "the event",
         summary: evtEvent?.tags.find((t) => t[0] === "summary")?.[1] ?? "",
@@ -386,6 +416,9 @@ export class Coordinator {
     this.subscribeEventInbox(state, since);
     // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
     this.subscribeEventConfig(state);
+    // Marmot group chat (§4): only chat-enabled events with a coordinator do any
+    // work here — a chat-off event stays completely inert (no group, no watcher).
+    if (state.chat) await this.ensureChat(state);
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -435,6 +468,14 @@ export class Coordinator {
       const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
       log(`[admin] "${cmd.cmd}" from organizer ${short(rumor.pubkey)}`);
       await this.handleAdmin(rumor.pubkey, cmd.a, cmd.cmd, cmd.args);
+    } else if (rumor.kind === KIND_CHAT_KEY_ATTESTATION) {
+      // Marmot chat-key attestation (§3.3). rumor.pubkey is the SEAL AUTHOR bound by
+      // unwrapRumor — i.e. the attendee's own account key sealing the binding. The
+      // admin authenticates it against the enrolled-attendee set before recording.
+      if (!this.marmot) return;
+      const content = chatKeyAttestationContentSchema.parse(JSON.parse(rumor.content));
+      log(`[chat] 21607 ${content.op} from ${short(rumor.pubkey)} for ${content.a}`);
+      await this.marmot.handleAttestation(content.a, rumor.pubkey, content);
     }
   }
 
@@ -647,6 +688,12 @@ export class Coordinator {
     // nothing to transcribe/profile until then). Directory text is already visible.
     if (this.deps.store.getAttendee(state.coordinate, attendeePubkey)?.profile_json) {
       this.enqueueProcess(state.coordinate, attendeePubkey);
+    }
+    // Marmot (§4.2): add the newly-approved attendee's chat identities to the group.
+    if (state.chat && this.marmot) {
+      await this.marmot.syncMember(state.coordinate, attendeePubkey).catch((e) =>
+        log(`[chat] syncMember failed for ${short(attendeePubkey)}: ${e instanceof Error ? e.message : e}`),
+      );
     }
   }
 
@@ -1213,6 +1260,13 @@ export class Coordinator {
     if (state.matching === "on" && state.matchVisibility === "event") {
       await this.publishMatrix(state, removedPubkey);
     }
+    // 6. Marmot (§4.2): MLS-Remove the attendee's account key + every attested chat
+    //    key. An MLS Remove is real PCS for the chat — stronger than the ECK rotation.
+    if (state.chat && this.marmot) {
+      await this.marmot.handleRevoke(state.coordinate, removedPubkey).catch((e) =>
+        log(`[chat] handleRevoke failed for ${short(removedPubkey)}: ${e instanceof Error ? e.message : e}`),
+      );
+    }
   }
 
   // ── context fetch ───────────────────────────────────────────────────────────
@@ -1243,6 +1297,61 @@ export class Coordinator {
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, n)
       .map((e) => ({ kind: e.kind, content: e.content, created_at: e.created_at }));
+  }
+
+  // ── Marmot group chat (§4) ─────────────────────────────────────────────────
+  private subscribedChat = new Set<string>();
+
+  /** Fetch kind-30443 key packages authored by the given chat identities (§4.2). */
+  private async fetchKeyPackages(coordinate: string, authors: string[]): Promise<NostrEvent[]> {
+    const state = this.events.get(coordinate);
+    if (!state || authors.length === 0) return [];
+    return this.deps.transport.fetch({ kinds: [KIND_KEY_PACKAGE], authors }, state.configRelays);
+  }
+
+  /**
+   * Bring up the group + its subscriptions for a chat-enabled event: create (or
+   * reuse) the MLS group, backfill all currently-approved attendees, and start the
+   * 30443 key-package watcher + 445 ingest loop. Idempotent.
+   */
+  private async ensureChat(state: EventState): Promise<void> {
+    if (!this.marmot) return;
+    await this.marmot.ensureGroup({
+      coordinate: state.coordinate,
+      name: state.scoringCtx.title,
+      description: state.scoringCtx.summary,
+      relays: state.configRelays,
+    });
+    await this.marmot.backfillApproved(state.coordinate);
+    this.subscribeChat(state);
+  }
+
+  /** Subscribe to 30443 key packages (add/heal) and 445 group traffic (ingest). */
+  private subscribeChat(state: EventState): void {
+    if (!this.marmot) return;
+    if (this.subscribedChat.has(state.coordinate)) return; // idempotent
+    this.subscribedChat.add(state.coordinate);
+    // 30443 watcher: the in-handler authentication (approved attendee's authorized
+    // chat identity) is the gate, so a broad kind filter on the event relays is safe
+    // and needs no re-subscription as the author set changes on approve/attest.
+    const kpCloser = (this.deps.transport as any).subscribe?.(
+      { kinds: [KIND_KEY_PACKAGE] },
+      (e: NostrEvent) => void this.marmot!.handleKeyPackageEvent(state.coordinate, e as any).catch(() => {}),
+      state.configRelays,
+    );
+    if (kpCloser) this.closers.push(kpCloser);
+    // 445 ingest: the coordinator is a silent member; ingesting keeps its leaf
+    // converged and drives self_remove auto-commits. Routed by the group's random `h`.
+    const group = this.deps.store.getMarmotGroup(state.coordinate);
+    if (group) {
+      const msgCloser = (this.deps.transport as any).subscribe?.(
+        { kinds: [KIND_GROUP_MESSAGE], "#h": [group.nostr_group_id] },
+        (e: NostrEvent) => void this.marmot!.ingest(state.coordinate, [e as any]).catch(() => {}),
+        state.configRelays,
+      );
+      if (msgCloser) this.closers.push(msgCloser);
+    }
+    log(`[chat] watching 30443 + 445 for "${state.scoringCtx.title}"`);
   }
 
   // ── event loop ──────────────────────────────────────────────────────────────
@@ -1346,6 +1455,7 @@ export class Coordinator {
       lang: state.lang,
       nostrContextN: state.nostrContextN,
       relays: state.configRelays,
+      chat: state.chat,
     };
 
     // Apply to persisted config + in-memory state.
@@ -1369,6 +1479,7 @@ export class Coordinator {
     state.nostrContextN = config.nostrContext;
     state.blossomOrigins = config.blossom;
     state.configRelays = relays;
+    state.chat = isMarmotChatEnabled(config);
     state.configEventId = event.id;
     state.configCreatedAt = event.created_at;
     log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
@@ -1389,6 +1500,12 @@ export class Coordinator {
     if (prev.matchVisibility !== state.matchVisibility) {
       if (state.matching === "on" && state.matchVisibility === "event") await this.publishMatrix(state);
       else if (prev.matchVisibility === "event") await this.deleteMatrix(state);
+    }
+    // Marmot chat toggled (§4.1, §9 Q4): turned on ⇒ create group + backfill all
+    // approved attendees + watch; turned off ⇒ freeze (stop adds; group lives on).
+    if (this.marmot && prev.chat !== state.chat) {
+      if (state.chat) await this.ensureChat(state);
+      else this.marmot.freeze(coordinate);
     }
   }
 

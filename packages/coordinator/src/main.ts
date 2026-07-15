@@ -20,6 +20,8 @@ import { VeniceLlm, VeniceStt } from "./providers/venice.js";
 import { RoutstrLlm } from "./providers/routstr.js";
 import { CashuPayment } from "./providers/cashu.js";
 import type { LlmProvider, SttProvider } from "./providers/types.js";
+import { makeChatNetwork } from "./chat/network.js";
+import { createMarmotClientMls } from "./chat/mls.js";
 
 async function main(): Promise<void> {
   const configPath = process.argv[2] ?? "coordinator.toml";
@@ -87,6 +89,16 @@ async function main(): Promise<void> {
 
   const client = new NostrClient(config.relays.default);
 
+  // Marmot group-chat admin bot (§4): a MarmotClient run off coordSk with its MLS
+  // state in encrypted SQLite. Constructed unconditionally, but wholly inert on
+  // events without `chat=marmot` (no group is created and no watcher subscribed).
+  const chatNetwork = makeChatNetwork({
+    transport: client as unknown as import("./chat/network.js").ChatNetworkTransport,
+    defaultRelays: config.relays.default,
+  });
+  const { mls: chatMls } = createMarmotClientMls({ store, coordSk, network: chatNetwork });
+  await chatMls.loadAll().catch((e) => console.warn("[chat] loadAll failed:", e));
+
   const coordinator = new Coordinator({
     store,
     transport: client as unknown as Transport,
@@ -106,6 +118,7 @@ async function main(): Promise<void> {
     },
     topK: config.matching.top_k,
     batchSize: config.matching.batch_size,
+    chatMls,
   });
 
   await coordinator.start();
