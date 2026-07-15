@@ -1,4 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Store } from "../store/db.js";
 import { JobRunner } from "./jobs.js";
 
@@ -65,5 +68,98 @@ describe("JobRunner (spec §9.2)", () => {
     runner.enqueue("a", "a-key", {});
     await runner.drain();
     expect(order).toEqual(["a", "b"]);
+  });
+
+  it("surfaces a poison via the onPoison callback (Q12)", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const poisoned: any[] = [];
+    const runner = new JobRunner(store, {
+      now: clock.now, maxAttempts: 1, baseBackoffMs: 1,
+      onPoison: (info) => poisoned.push(info),
+    });
+    runner.register("boom", async () => {
+      throw new Error("output failed the ai_profile contract");
+    });
+    runner.enqueue("boom", "k", { coordinate: "c", pubkey: "p" });
+    await runner.drain();
+    expect(poisoned).toHaveLength(1);
+    expect(poisoned[0]).toMatchObject({ type: "boom", attempts: 1 });
+    expect(poisoned[0].payload).toEqual({ coordinate: "c", pubkey: "p" });
+  });
+});
+
+describe("job leases and crash recovery (audit H1)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDbPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-jobs-"));
+    tmpDirs.push(dir);
+    return join(dir, "jobs.sqlite");
+  }
+
+  it("a job claimed but not completed (crash) is recovered after its lease expires", async () => {
+    const path = tmpDbPath();
+
+    // First process: claim a job under a lease, then "crash" (never complete).
+    const s1 = new Store(path);
+    s1.enqueueJob("work", "k1", { n: 1 });
+    const claimed = s1.claimNextJob(1000, "worker-A", 60_000);
+    expect(claimed?.state).toBe("running");
+    // Still counted, but no worker can complete it — it's leased to the dead worker.
+    expect(s1.pendingJobCount()).toBe(1);
+    s1.close();
+
+    // Second process reopens the SAME on-disk DB after the lease has expired.
+    const s2 = new Store(path);
+    const clock = fixedClock(1000 + 61_000);
+    let ran = 0;
+    const runner = new JobRunner(s2, { now: clock.now });
+    runner.register("work", async () => {
+      ran++;
+    });
+    // Startup sweep reclaims the stranded lease, then the job runs to completion.
+    expect(runner.recoverStrandedJobs()).toBe(1);
+    await runner.drain();
+    expect(ran).toBe(1);
+    expect(s2.pendingJobCount()).toBe(0);
+    s2.close();
+  });
+
+  it("claimNextJob reclaims an expired-running job even without an explicit sweep", async () => {
+    const store = new Store();
+    store.enqueueJob("work", "k", {});
+    store.claimNextJob(1000, "A", 5000); // leased to A until 6000
+    // Before expiry: nothing new is claimable.
+    expect(store.claimNextJob(2000, "B", 5000)).toBeUndefined();
+    // After expiry: B can take it over.
+    const taken = store.claimNextJob(7000, "B", 5000);
+    expect(taken?.worker_token).toBe("B");
+  });
+
+  it("a stale lease owner cannot overwrite the new owner's result", () => {
+    const store = new Store();
+    store.enqueueJob("work", "k", {});
+    const a = store.claimNextJob(1000, "A", 1000)!;
+    // A's lease expires; B re-claims.
+    const b = store.claimNextJob(3000, "B", 1000)!;
+    expect(b.id).toBe(a.id);
+    // A finishing late must NOT complete the job it lost.
+    expect(store.completeJob(a.id, "A")).toBe(false);
+    // B legitimately completes it.
+    expect(store.completeJob(b.id, "B")).toBe(true);
+    expect(store.pendingJobCount()).toBe(0);
+  });
+
+  it("lease expiry / recovery does not consume a retry attempt", () => {
+    const store = new Store();
+    store.enqueueJob("work", "k", {});
+    const c = store.claimNextJob(1000, "A", 1000)!;
+    expect(c.attempts).toBe(0);
+    store.reclaimExpiredLeases(3000); // A crashed
+    const c2 = store.claimNextJob(3000, "B", 1000)!;
+    expect(c2.attempts).toBe(0); // still zero — no retry burned by the crash
   });
 });

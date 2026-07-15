@@ -5,14 +5,36 @@
  *
  * Every step is cached by an input hash so a restart never re-bills.
  */
+import { z } from "zod";
 import {
   sha256Hex,
   utf8ToBytes,
   languageName,
+  aiProfileSchema,
   type AiProfile,
   type AttendeeProfile,
 } from "@nostrautica/protocol";
 import type { LlmProvider, ModelRef } from "../providers/types.js";
+
+// ── Provider-output response schemas (audit finding Q9) ──────────────────────
+// The model's raw JSON is validated at the provider boundary before it can enter
+// storage or publication. The AI profile reuses the shared protocol schema; the
+// translation/summary responses have their own local shapes.
+
+/** The AI never emits `translations` itself (the caller adds it), so validate the
+ *  core fields with the shared schema — extra keys are stripped, missing/wrong
+ *  types throw a ProviderContractError → retry/poison. */
+const aiProfileResponseSchema = aiProfileSchema;
+
+const translationResponseSchema = z.object({
+  source_lang: z.string(),
+  needs_translation: z.boolean(),
+  about: z.string().optional(),
+  looking_for: z.string().optional(),
+  skills: z.array(z.string()).optional(),
+});
+
+const nostrSummaryResponseSchema = z.object({ summary: z.string() });
 
 export const AI_PROFILE_SCHEMA = {
   type: "object",
@@ -58,12 +80,34 @@ export interface ProfileInputs {
   lang?: string;
 }
 
-/** Deterministic hash of all profile inputs (for the profiles cache). */
-export function profileInputsHash(inputs: ProfileInputs): string {
+/**
+ * Deterministic hash of all profile inputs plus the provider/model/language that
+ * produce the artifact (audit H7). Any material change — transcript, authored
+ * profile, nostr summary, event language, or the model doing the work — yields a
+ * new key, so a rerun with identical inputs reuses the cached artifact (no rebill)
+ * while a changed input always recomputes.
+ */
+export function profileInputsHash(inputs: ProfileInputs, modelKey = ""): string {
   const canonical = JSON.stringify({
     t: inputs.transcripts,
     p: inputs.profile,
     n: inputs.nostrSummary ?? "",
+    lang: (inputs.lang ?? "en").toLowerCase(),
+    m: modelKey,
+    schema: "ai_profile.v1",
+  });
+  return sha256Hex(utf8ToBytes(canonical));
+}
+
+/** Deterministic hash for the translation artifact (audit H7). */
+export function translationInputsHash(fields: TranslationInput, targetLang: string, modelKey = ""): string {
+  const canonical = JSON.stringify({
+    about: fields.about,
+    looking_for: fields.looking_for,
+    skills: fields.skills,
+    lang: (targetLang || "en").toLowerCase(),
+    m: modelKey,
+    schema: "profile_translation.v1",
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -88,6 +132,7 @@ export async function buildAiProfile(
     schemaName: "ai_profile",
     model: matchModel.model,
     temperature: 0.2,
+    validate: (raw) => aiProfileResponseSchema.parse(raw),
   });
   return value;
 }
@@ -174,6 +219,7 @@ export async function translateProfileFields(
     schemaName: "profile_translation",
     model: translateModel.model,
     temperature: 0.1,
+    validate: (raw): RawTranslation => translationResponseSchema.parse(raw),
   });
 
   if (!value?.needs_translation) return undefined;
@@ -244,6 +290,7 @@ export async function summarizeNostr(
     schemaName: "nostr_summary",
     model: summaryModel.model,
     temperature: 0.3,
+    validate: (raw) => nostrSummaryResponseSchema.parse(raw),
   });
   return value.summary;
 }

@@ -5,9 +5,23 @@
  * Scoring MUST explicitly reward complementarity (skills that complete each other
  * for this event's purpose), not just similarity.
  */
+import { z } from "zod";
 import { sha256Hex, utf8ToBytes, languageName } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
+
+/**
+ * Lenient envelope validation for batch-score output (audit finding Q9). This
+ * only asserts the response is an object whose `matches` (when present) is an
+ * array of objects — a non-JSON-object response, or `matches` that isn't an
+ * array, is rejected at the provider boundary → retry/poison. Per-candidate
+ * fields stay deliberately tolerant below (a single bad row must not poison the
+ * whole batch: `normalizeScore` coerces and out-of-range/duplicate rows are
+ * skipped), so the item shape is intentionally loose here.
+ */
+const batchScoreResponseSchema = z
+  .object({ matches: z.array(z.record(z.unknown())).optional() })
+  .passthrough();
 
 /** A fully-scored pair, both directions at once (legacy pairwise rows / tests). */
 export interface PairScore {
@@ -247,6 +261,7 @@ export async function scoreBatch(
     schemaName: "batch_score",
     model,
     temperature: 0.3,
+    validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
@@ -355,6 +370,7 @@ export async function scoreReverseBatch(
     schemaName: "reverse_batch_score",
     model,
     temperature: 0.3,
+    validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];

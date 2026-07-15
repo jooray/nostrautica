@@ -8,21 +8,34 @@ import { decryptMedia, sha256Hex, type MediaDescriptor } from "@nostrautica/prot
 import type { SttProvider } from "../providers/types.js";
 import type { Store } from "../store/db.js";
 import { extractAudioSegments } from "./audio.js";
+import { safeFetch, SafeFetchError } from "../net/safe-fetch.js";
 
-/** Download ciphertext from the first reachable mirror, verifying the hash. */
+/** Default hard ceiling on a downloaded media blob (audit C3). */
+export const DEFAULT_MAX_MEDIA_BYTES = 200 * 1024 * 1024;
+
+export interface BlobFetchOptions {
+  /** Blossom origins the coordinator may fetch from (empty = any public https host). */
+  allowedOrigins?: string[];
+  maxBytes?: number;
+}
+
+/**
+ * Download ciphertext from the first reachable mirror, verifying the hash. Uses
+ * the SSRF/DoS-guarded downloader (audit C3): https-only, Blossom-origin
+ * allowlist, private-IP rejection, redirect cap, timeout, and streamed byte cap.
+ * A policy rejection is a permanent failure (do not retry other mirrors past a
+ * hard block); a transient network/DNS failure falls through to the next mirror.
+ */
 export async function fetchBlob(
   urls: string[],
   expectedSha256: string,
+  opts: BlobFetchOptions = {},
 ): Promise<Uint8Array> {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_MEDIA_BYTES;
   let lastErr: unknown;
   for (const url of urls) {
     try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        lastErr = new Error(`${res.status} from ${url}`);
-        continue;
-      }
-      const bytes = new Uint8Array(await res.arrayBuffer());
+      const bytes = await safeFetch(url, { allowedOrigins: opts.allowedOrigins, maxBytes });
       if (sha256Hex(bytes) !== expectedSha256) {
         lastErr = new Error(`hash mismatch from ${url}`);
         continue;
@@ -30,6 +43,10 @@ export async function fetchBlob(
       return bytes;
     } catch (e) {
       lastErr = e;
+      // A non-retryable policy rejection on ONE mirror doesn't necessarily doom the
+      // others (a different mirror may be an allowlisted host), so keep trying —
+      // but never widen the target set beyond the descriptor's declared urls.
+      if (e instanceof SafeFetchError && !e.retryable) continue;
     }
   }
   throw new Error(`could not fetch blob ${expectedSha256}: ${lastErr}`);
@@ -41,6 +58,10 @@ export interface TranscribeDeps {
   sttModel: string;
   /** Injectable for tests; defaults to a real Blossom fetch. */
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
+  /** Blossom origins media may be fetched from (audit C3 allowlist). */
+  blossomOrigins?: string[];
+  /** Max media bytes per blob download (audit C3). */
+  maxMediaBytes?: number;
   now?: () => number;
 }
 
@@ -56,7 +77,10 @@ export async function transcribeMedia(
   const cached = deps.store.getTranscript(descriptor.x);
   if (cached !== undefined) return cached;
 
-  const download = deps.fetchBlob ?? fetchBlob;
+  const download =
+    deps.fetchBlob ??
+    ((urls: string[], sha: string) =>
+      fetchBlob(urls, sha, { allowedOrigins: deps.blossomOrigins, maxBytes: deps.maxMediaBytes }));
   const ciphertext = await download(descriptor.url, descriptor.x);
   const plaintext = await decryptMedia(descriptor, ciphertext);
 

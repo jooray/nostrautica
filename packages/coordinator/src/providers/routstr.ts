@@ -9,6 +9,7 @@
  * are separately configurable.
  */
 import type { LlmProvider, ModelInfo, PaymentStrategy, TokenUsage } from "./types.js";
+import { ProviderContractError, validateProviderValue } from "./types.js";
 
 export interface RoutstrOptions {
   nodeUrl: string; // e.g. https://api.routstr.com/v1
@@ -49,6 +50,7 @@ export class RoutstrLlm implements LlmProvider {
     model: string;
     temperature?: number;
     maxTokens?: number;
+    validate?: (raw: unknown) => T;
   }): Promise<{ value: T; usage: TokenUsage }> {
     const headers = {
       "Content-Type": "application/json",
@@ -76,9 +78,21 @@ export class RoutstrLlm implements LlmProvider {
     // Change proofs (if any) come back in response headers — settle the wallet.
     await this.opts.payment.settle(res.headers);
     const content = body.choices?.[0]?.message?.content;
-    if (typeof content !== "string") throw new Error("Routstr returned no content");
+    if (typeof content !== "string") {
+      throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      throw new ProviderContractError(this.id, req.schemaName, req.model, "output was not valid JSON");
+    }
     return {
-      value: JSON.parse(content) as T,
+      value: validateProviderValue<T>(
+        parsed,
+        { provider: this.id, schemaName: req.schemaName, model: req.model },
+        req.validate,
+      ),
       usage: {
         promptTokens: body.usage?.prompt_tokens ?? 0,
         completionTokens: body.usage?.completion_tokens ?? 0,

@@ -17,6 +17,8 @@ import {
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_DIRECTORY_ENTRY,
+  KIND_MATCH_MATRIX,
+  KIND_EVENT_CONFIG,
   KIND_DELETION,
   KIND_NOTE,
   KIND_REPOST,
@@ -39,9 +41,11 @@ import {
   parseEventConfig,
   parseCoordinate,
   type EckVersion,
+  type EventConfig,
   type AttendeeProfile,
   type MediaDescriptor,
   type RosterContent,
+  type MatchMatrixContent,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
@@ -69,7 +73,9 @@ import {
   buildDirectoryEntry,
   buildRoster,
   buildMatchListEvent,
+  buildMatchMatrix,
   buildKeyGrant,
+  buildCoordinatorStatus,
   type PublishKeys,
 } from "./nostr/publisher.js";
 import type { LlmProvider, SttProvider, ModelRef } from "./providers/types.js";
@@ -120,19 +126,29 @@ export interface CoordinatorDeps {
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /** Override the transcription stage (tests inject to skip Blossom/ffmpeg). */
   transcribe?: (descriptor: import("@nostrautica/protocol").MediaDescriptor) => Promise<string>;
+  /** Max media bytes to download per blob (audit C3). */
+  maxMediaBytes?: number;
   now?: () => number;
 }
 
 interface EventState {
   coordinate: string;
+  identifier: string;
   eidPubkey: string;
   inboxSk: Uint8Array;
   eck: EckVersion[];
   configRelays: string[];
   nostrContextN: number;
+  /** Whether AI matching runs for this event (audit H4). "off" disables all AI stages. */
+  matching: "on" | "off";
   matchVisibility: "pair" | "event";
+  /** Blossom origins media may be fetched from (audit C3 allowlist). Empty = derive from media urls, IP-guarded. */
+  blossomOrigins: string[];
   lang: string;
   scoringCtx: EventContextForScoring;
+  /** Newest applied 31600 config event id + timestamp (audit H5 replaceable ordering). */
+  configEventId?: string;
+  configCreatedAt: number;
 }
 
 export class Coordinator {
@@ -155,7 +171,12 @@ export class Coordinator {
     this.batchSize = deps.batchSize ?? 10;
     this.matchRng = deps.matchRng ?? Math.random;
     this.inviteChecker = new InviteChecker(deps.store);
-    this.jobs = new JobRunner(deps.store, { now: this.now });
+    this.jobs = new JobRunner(deps.store, {
+      now: this.now,
+      // A poisoned job is surfaced to the organizer (audit Q12): persist a status
+      // row and gift-wrap a 21606 status to E_id so it's visible without server logs.
+      onPoison: (info) => void this.surfacePoison(info).catch(() => {}),
+    });
     this.registerJobHandlers();
   }
 
@@ -173,6 +194,9 @@ export class Coordinator {
     });
 
     this.jobs.register("match_recompute", async (p, { enqueue }) => {
+      // Re-check config at execution (audit H4): matching may have been turned off
+      // after this job was queued — exit before any embedding/scoring provider call.
+      if (this.events.get(p.coordinate)?.matching === "off") return;
       const pairs = await this.selectPairs(p.coordinate, p.pubkey);
       if (!pairs.length) return;
       // FORWARD direction (p.pubkey → others): one target + ≤K candidates per call.
@@ -268,13 +292,21 @@ export class Coordinator {
     inboxSkHex: string;
     eck: EckVersion[];
     configRelays: string[];
+    /**
+     * Backfill window for the E_inbox subscription (audit H2). "full" (a fresh
+     * install of a never-before-seen event) scans the entire history so join
+     * requests/submissions published days before the coordinator attached are not
+     * missed; "recent" (a restart of an already-installed event) keeps the 3-day
+     * live-overlap window. Default "recent".
+     */
+    backfill?: "full" | "recent";
   }): Promise<void> {
-    const { pubkey: eidPubkey } = parseCoordinate(grant.coordinate);
+    const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     const relays = grant.configRelays.length ? grant.configRelays : this.deps.defaultRelays;
 
     // Load public config + event details for scoring context.
     const cfgEvents = await this.deps.transport.fetch(
-      { kinds: [31600, 31923], authors: [eidPubkey], "#d": [parseCoordinate(grant.coordinate).identifier] },
+      { kinds: [31600, 31923], authors: [eidPubkey], "#d": [identifier] },
       relays,
     );
     const cfgEvent = cfgEvents.find((e) => e.kind === 31600);
@@ -292,12 +324,15 @@ export class Coordinator {
 
     const state: EventState = {
       coordinate: grant.coordinate,
+      identifier,
       eidPubkey,
       inboxSk: hexToBytes(grant.inboxSkHex),
       eck: grant.eck,
       configRelays: relays,
       nostrContextN: config?.nostrContext ?? 0,
+      matching: config?.matching ?? "off",
       matchVisibility: config?.matchVisibility ?? "pair",
+      blossomOrigins: config?.blossom ?? [],
       lang: config?.lang ?? "en",
       scoringCtx: {
         title: evtEvent?.tags.find((t) => t[0] === "title")?.[1] ?? "the event",
@@ -305,17 +340,23 @@ export class Coordinator {
         hashtags: (evtEvent?.tags ?? []).filter((t) => t[0] === "t").map((t) => t[1]!),
         lang: config?.lang ?? "en",
       },
+      configEventId: cfgEvent?.id,
+      configCreatedAt: cfgEvent?.created_at ?? 0,
     };
     this.events.set(grant.coordinate, state);
     log(
-      `[install] event "${state.scoringCtx.title}" installed — nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}`,
+      `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}`,
     );
     log(`          coordinate ${grant.coordinate}`);
     // Subscribe to this event's E_inbox NOW (not only at startup), so an install
     // received while the daemon is already running starts receiving join requests
-    // + submissions immediately — including any published before it was attached
-    // (the subscription backfills with since = now − 3d).
-    this.subscribeEventInbox(state);
+    // + submissions immediately. A FRESH install backfills the full history (since=0)
+    // so requests/submissions older than the 3-day live window are still recovered
+    // (audit H2); a restart of a known event keeps the 3-day overlap.
+    const since = grant.backfill === "full" ? 0 : giftwrapSince(Math.floor(this.now() / 1000));
+    this.subscribeEventInbox(state, since);
+    // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
+    this.subscribeEventConfig(state);
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -351,11 +392,15 @@ export class Coordinator {
         log(`[install] REJECTED 21603 for ${grant.a}: seal author ${short(rumor.pubkey)} is not E_id ${short(eidPubkey)}`);
         return;
       }
+      // Fresh install (event unknown to the store) → full-history backfill so
+      // join requests/submissions older than 3 days are not missed (audit H2).
+      const known = this.deps.store.getEvent(grant.a) !== undefined;
       await this.installEvent({
         coordinate: grant.a,
         inboxSkHex: grant.inbox_nsec,
         eck: grant.eck,
         configRelays: grant.config_relays,
+        backfill: known ? "recent" : "full",
       });
     } else if (rumor.kind === KIND_ADMIN_COMMAND) {
       const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
@@ -430,11 +475,15 @@ export class Coordinator {
     profile: AttendeeProfile,
     media: MediaDescriptor[],
   ): Promise<void> {
-    // Store the profile with its media descriptors stashed for the pipeline.
+    // Store the profile with its media descriptors stashed for the pipeline, and
+    // record the source revision (hash of the authored submission, audit Q10) so a
+    // directory entry never surfaces a stale ai_profile beside changed fields.
+    const profileJson = JSON.stringify({ ...profile, __media: media });
     this.deps.store.upsertAttendee({
       coordinate: state.coordinate,
       pubkey,
-      profileJson: JSON.stringify({ ...profile, __media: media }),
+      profileJson,
+      sourceRevision: this.sourceRevision(profileJson),
       now: this.now(),
     });
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
@@ -444,12 +493,20 @@ export class Coordinator {
     }
   }
 
+  /** Stable revision id for an authored submission (audit Q10). */
+  private sourceRevision(profileJson: string): string {
+    return sha256Hex(utf8ToBytes(profileJson)).slice(0, 16);
+  }
+
   /**
    * Enqueue the AI pipeline for an attendee, keyed by a hash of their current
    * profile+media so a changed submission reprocesses while re-delivery of the
-   * same submission is deduped (never re-billed).
+   * same submission is deduped (never re-billed). Skipped when matching is OFF
+   * (audit H4): no transcript/summary/profile/embedding/scoring work — and thus
+   * no provider billing — for an event that disabled AI matching.
    */
   private enqueueProcess(coordinate: string, pubkey: string): void {
+    if (this.events.get(coordinate)?.matching === "off") return;
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     const version = sha256Hex(utf8ToBytes(attendee?.profile_json ?? "")).slice(0, 16);
     this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:${version}`, {
@@ -472,7 +529,9 @@ export class Coordinator {
     }
   }
 
-  private parseStoredProfile(attendee: any): { profile: AttendeeProfile; media: MediaDescriptor[] } {
+  private parseStoredProfile(
+    attendee: import("./store/db.js").AttendeeRow | undefined,
+  ): { profile: AttendeeProfile; media: MediaDescriptor[] } {
     const raw = attendee?.profile_json ? JSON.parse(attendee.profile_json) : {};
     const media = (raw.__media ?? []) as MediaDescriptor[];
     const profile: AttendeeProfile = {
@@ -487,7 +546,14 @@ export class Coordinator {
   private async publishDirectory(state: EventState, pubkey: string): Promise<void> {
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
     const { profile, media } = this.parseStoredProfile(attendee);
-    const aiProfile = attendee?.ai_profile_json ? JSON.parse(attendee.ai_profile_json) : undefined;
+    // Revision guard (audit Q10): only surface ai_profile when it was derived from
+    // the CURRENT authored submission. After a resubmission the entry publishes the
+    // fresh authored fields immediately but omits the now-stale AI profile until the
+    // pipeline re-derives it — never pairing new source text with old AI output.
+    const aiFresh =
+      attendee?.ai_profile_json &&
+      (!attendee.source_revision || attendee.ai_source_revision === attendee.source_revision);
+    const aiProfile = aiFresh ? JSON.parse(attendee!.ai_profile_json!) : undefined;
     const entry = buildDirectoryEntry(this.publishKeys(state), state.coordinate, {
       v: 1,
       pubkey,
@@ -519,9 +585,14 @@ export class Coordinator {
   private async processAttendeeJob(coordinate: string, pubkey: string): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state) return;
+    // Re-check config at execution time (audit H4): a job queued while matching was
+    // ON must not call any provider if matching has since been turned OFF.
+    if (state.matching === "off") return;
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     if (!attendee) return;
     const { profile, media } = this.parseStoredProfile(attendee);
+    // Capture the source revision this AI run is derived from (audit Q10).
+    const sourceRevision = attendee.source_revision ?? this.sourceRevision(attendee.profile_json ?? "");
     log(`[pipeline] ${short(pubkey)}: transcribe ${media.length} media → nostr-context → ai_profile…`);
 
     const aiProfile = await processAttendee(
@@ -535,6 +606,8 @@ export class Coordinator {
         translateModel: this.deps.translateModel,
         fetchBlob: this.deps.fetchBlob,
         transcribe: this.deps.transcribe,
+        blossomOrigins: state.blossomOrigins,
+        maxMediaBytes: this.deps.maxMediaBytes,
         fetchNostrContext: (pk, n) => this.fetchNostrContext(state, pk, n),
         nostrContextN: state.nostrContextN,
         lang: state.lang,
@@ -548,6 +621,7 @@ export class Coordinator {
       pubkey,
       aiProfileJson: JSON.stringify(aiProfile),
       profileHash: profileHash(aiProfile),
+      aiSourceRevision: sourceRevision,
       now: this.now(),
     });
     await this.publishDirectory(state, pubkey);
@@ -596,7 +670,7 @@ export class Coordinator {
     pairs: CandidatePair[],
   ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
-    if (!state || pairs.length === 0) return { scored: [], missing: 0 };
+    if (!state || state.matching === "off" || pairs.length === 0) return { scored: [], missing: 0 };
     const target = pairs[0]!.a;
     const targetProfile = this.loadAiProfile(coordinate, target);
     if (!targetProfile) return { scored: [], missing: 0 };
@@ -651,7 +725,7 @@ export class Coordinator {
     pairs: CandidatePair[],
   ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
-    if (!state || pairs.length === 0) return { scored: [], missing: 0 };
+    if (!state || state.matching === "off" || pairs.length === 0) return { scored: [], missing: 0 };
     const shared = pairs[0]!.b; // shared candidate for every pair in this batch
     const sharedProfile = this.loadAiProfile(coordinate, shared);
     if (!sharedProfile) return { scored: [], missing: 0 };
@@ -702,12 +776,55 @@ export class Coordinator {
 
   private async publishMatchesJob(coordinate: string, pubkey: string): Promise<void> {
     const state = this.events.get(coordinate);
-    if (!state) return;
+    if (!state || state.matching === "off") return; // never publish lists when matching is off (H4)
     const list = buildMatchList(this.deps.store, coordinate, pubkey, this.topK, Math.floor(this.now() / 1000));
     if (list.matches.length === 0) return;
     const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, list);
     await this.deps.transport.publish(event, state.configRelays);
     log(`[match] published list for ${short(pubkey)} — ${list.matches.length} match(es)`);
+    // Publish the event-wide matrix (31606) only when visibility is "event" (H4).
+    if (state.matchVisibility === "event") await this.publishMatrix(state);
+  }
+
+  /**
+   * Publish/refresh the kind 31606 match matrix (audit H4). Scores only, under the
+   * ECK, for events whose visibility is "event". Built from cached pair scores —
+   * no provider calls — so a rotation or a visibility flip re-publishes cheaply.
+   * `exclude` drops a revoked attendee's pairs before encryption.
+   */
+  private async publishMatrix(state: EventState, exclude?: string): Promise<void> {
+    const approved = new Set(this.deps.store.approvedAttendees(state.coordinate).map((a) => a.pubkey));
+    if (exclude) approved.delete(exclude);
+    const seen = new Set<string>();
+    const pairs: MatchMatrixContent["pairs"] = [];
+    for (const pk of approved) {
+      for (const row of this.deps.store.pairsFor(state.coordinate, pk)) {
+        if (!approved.has(row.other)) continue;
+        const key = pk < row.other ? `${pk}|${row.other}` : `${row.other}|${pk}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const [a, b] = pk < row.other ? [pk, row.other] : [row.other, pk];
+        pairs.push({ a, b, score: row.score });
+      }
+    }
+    const content: MatchMatrixContent = { v: 1, computed_at: Math.floor(this.now() / 1000), pairs };
+    const event = buildMatchMatrix(this.publishKeys(state), state.coordinate, content);
+    await this.deps.transport.publish(event, state.configRelays);
+    log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
+  }
+
+  /** Delete the published 31606 matrix (visibility changed away from "event", H4/H5). */
+  private async deleteMatrix(state: EventState): Promise<void> {
+    const deletion = finalizeEvent(
+      {
+        kind: KIND_DELETION,
+        created_at: Math.floor(this.now() / 1000),
+        tags: [["a", `${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`], ["k", String(KIND_MATCH_MATRIX)]],
+        content: "match_visibility changed",
+      },
+      this.deps.coordSk,
+    );
+    await this.deps.transport.publish(deletion, state.configRelays);
   }
 
   // ── admin commands (21604) ─────────────────────────────────────────────────
@@ -788,13 +905,34 @@ export class Coordinator {
       });
     }
 
-    // 3. Re-grant the new ECK to every remaining attendee and republish content.
+    // 3. Drop every cached pair that involves the removed attendee so remaining
+    //    lists/matrix don't reference them after rotation (audit H3).
+    this.deps.store.clearPairsInvolving(state.coordinate, removedPubkey);
+
+    // 4. Re-grant the new ECK to every remaining attendee and republish content:
+    //    directory + roster AND their match list under the new blinded `d`. The
+    //    blinded `d` derives from the rotated ECK, so without this republish every
+    //    remaining attendee would compute a new address with no match list there
+    //    and their matches would vanish (audit H3). Rebuilt from cached scores —
+    //    zero embedding/LLM provider calls.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
       const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
       await this.deps.transport.publish(grant, state.configRelays);
       await this.publishDirectory(state, a.pubkey);
+      if (state.matching === "on") {
+        const list = buildMatchList(this.deps.store, state.coordinate, a.pubkey, this.topK, Math.floor(this.now() / 1000));
+        if (list.matches.length > 0) {
+          const event = buildMatchListEvent(this.publishKeys(state), state.coordinate, a.pubkey, list);
+          await this.deps.transport.publish(event, state.configRelays);
+        }
+      }
     }
     await this.publishRoster(state);
+    // 5. Republish the event matrix under the new ECK (visibility=event), excluding
+    //    the removed attendee; otherwise it stays encrypted under the old ECK.
+    if (state.matching === "on" && state.matchVisibility === "event") {
+      await this.publishMatrix(state, removedPubkey);
+    }
   }
 
   // ── context fetch ───────────────────────────────────────────────────────────
@@ -830,13 +968,20 @@ export class Coordinator {
   // ── event loop ──────────────────────────────────────────────────────────────
   /** Subscribe to the coordinator inbox and all installed events; run jobs. */
   async start(): Promise<void> {
-    // Restore installed events from the store.
+    // Recover any job stranded `running` by a previous crash (audit H1): its lease
+    // is expired, so reset it to claimable before the loop begins.
+    const reclaimed = this.jobs.recoverStrandedJobs();
+    if (reclaimed > 0) log(`[jobs] recovered ${reclaimed} stranded job(s) from a previous run`);
+
+    // Restore installed events from the store. Already-known events use the 3-day
+    // live-overlap window (backfill "recent"); H2's full backfill is for fresh installs.
     for (const row of this.deps.store.allEvents()) {
       await this.installEvent({
         coordinate: row.coordinate,
         inboxSkHex: row.inbox_nsec,
         eck: this.eckFromStore(row.coordinate),
         configRelays: JSON.parse(row.config_relays),
+        backfill: "recent",
       });
     }
 
@@ -847,6 +992,7 @@ export class Coordinator {
   }
 
   private subscribedInboxes = new Set<string>();
+  private subscribedConfigs = new Set<string>();
 
   private eckFromStore(coordinate: string): EckVersion[] {
     const row = this.deps.store.getEvent(coordinate);
@@ -861,16 +1007,145 @@ export class Coordinator {
     ) ?? (() => {});
   }
 
-  private subscribeEventInbox(state: EventState): void {
+  private subscribeEventInbox(state: EventState, since: number): void {
     if (this.subscribedInboxes.has(state.coordinate)) return; // idempotent
     this.subscribedInboxes.add(state.coordinate);
     const closer = (this.deps.transport as any).subscribe?.(
-      { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(state.inboxSk)], since: giftwrapSince() },
+      { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(state.inboxSk)], since },
       (e: NostrEvent) => void this.handleInboxWrap(state.coordinate, e as unknown as GiftWrap).catch(() => {}),
       state.configRelays,
     );
     if (closer) this.closers.push(closer);
-    log(`[sub] listening on E_inbox for ${state.scoringCtx.title}`);
+    log(`[sub] listening on E_inbox for ${state.scoringCtx.title} (since=${since})`);
+  }
+
+  /**
+   * Subscribe to the event's live 31600 config (audit H5), so relay/matching/
+   * visibility/language changes take effect without a restart or reinstall.
+   */
+  private subscribeEventConfig(state: EventState): void {
+    if (this.subscribedConfigs.has(state.coordinate)) return; // idempotent
+    this.subscribedConfigs.add(state.coordinate);
+    const closer = (this.deps.transport as any).subscribe?.(
+      { kinds: [KIND_EVENT_CONFIG], authors: [state.eidPubkey], "#d": [state.identifier] },
+      (e: NostrEvent) => void this.handleConfigUpdate(state.coordinate, e).catch(() => {}),
+      state.configRelays,
+    );
+    if (closer) this.closers.push(closer);
+  }
+
+  /**
+   * Apply a live 31600 config update (audit H5). Only an event authored by this
+   * event's E_id, matching its `d`, and strictly newer than the applied config is
+   * accepted (replaceable-event ordering); stale/forged/wrong-`d` events are
+   * ignored. Diffs drive effects: matching/visibility (H4), relay handover, and
+   * language/context invalidation.
+   */
+  async handleConfigUpdate(coordinate: string, event: NostrEvent): Promise<void> {
+    const state = this.events.get(coordinate);
+    if (!state) return;
+    if (event.kind !== KIND_EVENT_CONFIG) return;
+    if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
+    const d = event.tags.find((t) => t[0] === "d")?.[1];
+    if (d !== state.identifier) return; // wrong event
+    // Replaceable ordering: ignore an older-or-equal config than the one applied.
+    if (event.created_at < state.configCreatedAt) return;
+    if (event.created_at === state.configCreatedAt && state.configEventId && event.id <= state.configEventId) return;
+
+    let config: EventConfig;
+    try {
+      config = parseEventConfig(state.eidPubkey, event.tags);
+    } catch {
+      log(`[config] ignored malformed 31600 for ${short(state.eidPubkey)}`);
+      return;
+    }
+
+    const prev = {
+      matching: state.matching,
+      matchVisibility: state.matchVisibility,
+      lang: state.lang,
+      nostrContextN: state.nostrContextN,
+      relays: state.configRelays,
+    };
+
+    // Apply to persisted config + in-memory state.
+    const relays = config.relays.length ? config.relays : state.configRelays;
+    const eventRow = this.deps.store.getEvent(coordinate);
+    if (eventRow) {
+      this.deps.store.upsertEvent({
+        coordinate,
+        configJson: JSON.stringify(config),
+        inboxNsec: eventRow.inbox_nsec,
+        eckJson: eventRow.eck_json,
+        configRelays: JSON.stringify(relays),
+        now: this.now(),
+      });
+    }
+    state.matching = config.matching;
+    state.matchVisibility = config.matchVisibility;
+    state.lang = config.lang;
+    state.scoringCtx = { ...state.scoringCtx, lang: config.lang };
+    state.nostrContextN = config.nostrContext;
+    state.blossomOrigins = config.blossom;
+    state.configRelays = relays;
+    state.configEventId = event.id;
+    state.configCreatedAt = event.created_at;
+    log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
+
+    // Effects.
+    // Language/context change invalidates derived AI content → recompute (if on).
+    const derivedChanged = prev.lang !== state.lang || prev.nostrContextN !== state.nostrContextN;
+    // Matching turned on (from off): enqueue processing for approved attendees.
+    const matchingTurnedOn = prev.matching === "off" && state.matching === "on";
+    if (state.matching === "on" && (matchingTurnedOn || derivedChanged)) {
+      for (const a of this.deps.store.approvedAttendees(coordinate)) {
+        if (a.role !== "organizer" && this.deps.store.getAttendee(coordinate, a.pubkey)?.profile_json) {
+          this.enqueueProcess(coordinate, a.pubkey);
+        }
+      }
+    }
+    // Visibility changed to/from "event": publish or delete the 31606 matrix (H4).
+    if (prev.matchVisibility !== state.matchVisibility) {
+      if (state.matching === "on" && state.matchVisibility === "event") await this.publishMatrix(state);
+      else if (prev.matchVisibility === "event") await this.deleteMatrix(state);
+    }
+  }
+
+  /**
+   * Surface a poisoned job to the organizer (audit Q12): persist a status row and
+   * gift-wrap a 21606 status to E_id so it's visible from the Admin UI (app-side)
+   * without server logs. `error_category` is a sanitized class, never attendee text.
+   */
+  private async surfacePoison(info: import("./pipeline/jobs.js").PoisonInfo): Promise<void> {
+    const coordinate = typeof info.payload?.coordinate === "string" ? info.payload.coordinate : undefined;
+    if (!coordinate) return;
+    const state = this.events.get(coordinate);
+    if (!state) return;
+    const pubkey = typeof info.payload?.pubkey === "string" ? info.payload.pubkey : null;
+    const category = errorCategory(info.error);
+    this.deps.store.recordJobStatus({
+      coordinate,
+      stage: info.type,
+      pubkey,
+      state: "poison",
+      attempts: info.attempts,
+      error_category: category,
+      retryable: 1,
+      updated_at: this.now(),
+    });
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 1,
+      a: coordinate,
+      ...(pubkey ? { pubkey } : {}),
+      stage: info.type,
+      state: "poison",
+      attempts: info.attempts,
+      error_category: category,
+      retryable: true,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, state.configRelays);
+    log(`[status] surfaced poisoned ${info.type} for ${pubkey ? short(pubkey) : coordinate} to organizer`);
   }
 
   stop(): void {
@@ -891,4 +1166,18 @@ export class Coordinator {
 
 function blindedDFor(eck: Uint8Array, coordinate: string, pubkey: string): string {
   return blindedD(eck, coordinate, pubkey);
+}
+
+/**
+ * Map a job's error message to a coarse, sanitized category for organizer-visible
+ * status (audit Q12). Never returns attendee text or prompts — only a class.
+ */
+function errorCategory(msg: string): string {
+  const m = msg.toLowerCase();
+  if (m.includes("contract")) return "provider_contract";
+  if (m.includes("hash mismatch")) return "media_integrity";
+  if (m.includes("fetch") || m.includes("blossom") || m.includes("network") || m.includes("timeout")) return "media_fetch";
+  if (m.includes("ffmpeg") || m.includes("audio")) return "media_processing";
+  if (m.includes("no handler")) return "internal";
+  return "processing_error";
 }

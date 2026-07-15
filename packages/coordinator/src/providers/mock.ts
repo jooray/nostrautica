@@ -9,6 +9,7 @@ import type {
   ModelInfo,
   TokenUsage,
 } from "./types.js";
+import { validateProviderValue } from "./types.js";
 
 export class MockStt implements SttProvider {
   readonly id = "mock-stt";
@@ -61,11 +62,18 @@ export class MockLlm implements LlmProvider {
     schema: object;
     schemaName: string;
     model: string;
+    validate?: (raw: unknown) => T;
   }): Promise<{ value: T; usage: TokenUsage }> {
     this.completeCalls++;
     this.requests.push({ system: req.system, user: req.user, schemaName: req.schemaName });
+    // Run mock output through the same contract validation as real providers
+    // (audit Q9: "validate mock provider output too so tests exercise the contract").
     return {
-      value: this.handler(req) as T,
+      value: validateProviderValue<T>(
+        this.handler(req),
+        { provider: this.id, schemaName: req.schemaName, model: req.model ?? "mock" },
+        req.validate,
+      ),
       usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
     };
   }

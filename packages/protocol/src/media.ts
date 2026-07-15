@@ -10,7 +10,7 @@ import {
   bytesToBase64,
   base64ToBytes,
 } from "./crypto.js";
-import { mediaDescriptorSchema, type MediaDescriptor } from "./schemas.js";
+import { mediaDescriptorDraftSchema, type MediaDescriptor } from "./schemas.js";
 
 export interface EncryptMediaInput {
   kind: "intro" | "talk";
@@ -32,7 +32,9 @@ export async function encryptMedia(
   const { ciphertext, key, nonce } = await aesGcmEncrypt(input.data);
   const descriptor: MediaDescriptor = {
     kind: input.kind,
-    url: input.urls.length ? input.urls : ["about:blank"],
+    // May be empty pre-upload; the caller fills real https URLs after BUD-02/04
+    // and re-validates against the strict schema.
+    url: input.urls,
     x: sha256Hex(ciphertext),
     ox: sha256Hex(input.data),
     size: ciphertext.length,
@@ -42,7 +44,7 @@ export async function encryptMedia(
     "decryption-key": bytesToBase64(key),
     "decryption-nonce": bytesToBase64(nonce),
   };
-  return { ciphertext, descriptor: mediaDescriptorSchema.parse(descriptor) };
+  return { ciphertext, descriptor: mediaDescriptorDraftSchema.parse(descriptor) as MediaDescriptor };
 }
 
 /**

@@ -8,10 +8,11 @@
  * Consumers must subscribe with `since = now − 3 days` (timestamp randomization
  * overlap) and dedupe by rumor id — see `giftwrapSince`.
  */
-import { wrapEvent, unwrapEvent } from "nostr-tools/nip59";
+import { wrapEvent } from "nostr-tools/nip59";
 import { getPublicKey } from "nostr-tools/pure";
 import type { RumorKind } from "./kinds.js";
-import { KIND_GIFT_WRAP } from "./kinds.js";
+import { KIND_GIFT_WRAP, KIND_SEAL } from "./kinds.js";
+import { nip44Decrypt } from "./crypto.js";
 
 /** An unsigned rumor event (has id + pubkey, never a signature). */
 export interface Rumor {
@@ -73,12 +74,24 @@ export function wrapRumor(
 /**
  * Unwrap a gift wrap addressed to `recipientSk`, returning the inner rumor.
  * Throws if the wrap is not decryptable by this key.
+ *
+ * Unlike nostr-tools' `unwrapEvent`, this enforces the NIP-59 author binding:
+ * `rumor.pubkey` must equal the seal's author. The seal author is authenticated
+ * by the NIP-44 decryption itself (the ciphertext only decrypts under
+ * ECDH(recipientSk, seal.pubkey), which the sealer can only compute with
+ * seal.pubkey's secret key), so after this check `rumor.pubkey` is trustworthy —
+ * the 21603/21604 `seal-author == E_id` checks depend on it (mirrors the app's
+ * `signerUnwrap`).
  */
 export function unwrapRumor(wrap: GiftWrap, recipientSk: Uint8Array): Rumor {
   if (wrap.kind !== KIND_GIFT_WRAP) {
     throw new Error(`not a gift wrap (kind ${wrap.kind})`);
   }
-  return unwrapEvent(wrap as any, recipientSk) as Rumor;
+  const seal = JSON.parse(nip44Decrypt(recipientSk, wrap.pubkey, wrap.content));
+  if (seal.kind !== KIND_SEAL) throw new Error("inner event is not a seal");
+  const rumor = JSON.parse(nip44Decrypt(recipientSk, seal.pubkey, seal.content)) as Rumor;
+  if (rumor.pubkey !== seal.pubkey) throw new Error("rumor/seal author mismatch");
+  return rumor;
 }
 
 /** Parse a rumor's JSON content into a typed value (caller validates with zod). */

@@ -16,14 +16,18 @@ import {
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
   KIND_MATCH_LIST,
+  KIND_MATCH_MATRIX,
   KIND_DIRECTORY_ENTRY,
   KIND_ADMIN_COMMAND,
   KIND_COORDINATOR_GRANT,
+  KIND_COORDINATOR_STATUS,
   KIND_DELETION,
   directoryEntryContentSchema,
   matchListContentSchema,
+  matchMatrixContentSchema,
   rosterContentSchema,
   keyGrantContentSchema,
+  coordinatorStatusContentSchema,
   unwrapRumor,
   type EckVersion,
 } from "@nostrautica/protocol";
@@ -209,7 +213,16 @@ interface Harness {
   clock: { t: number };
 }
 
-async function setup(nostrContextN = 0, opts: { batchSize?: number; lang?: string } = {}): Promise<Harness> {
+async function setup(
+  nostrContextN = 0,
+  opts: {
+    batchSize?: number;
+    lang?: string;
+    matchVisibility?: "pair" | "event";
+    matching?: "on" | "off";
+    failTranscribe?: boolean;
+  } = {},
+): Promise<Harness> {
   const coordSk = generateSecretKey();
   const eidSk = generateSecretKey();
   const eidPubkey = getPublicKey(eidSk);
@@ -226,7 +239,7 @@ async function setup(nostrContextN = 0, opts: { batchSize?: number; lang?: strin
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["nostr_context", String(nostrContextN)], ["match_visibility", "pair"], ...(opts.lang ? [["lang", opts.lang]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.lang ? [["lang", opts.lang]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 1, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
   );
 
@@ -254,6 +267,7 @@ async function setup(nostrContextN = 0, opts: { batchSize?: number; lang?: strin
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
     transcribe: async (descriptor) => {
+      if (opts.failTranscribe) throw new Error("could not fetch blob (simulated)");
       const cached = store.getTranscript(descriptor.x);
       if (cached !== undefined) return cached;
       const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" });
@@ -660,10 +674,226 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     expect(entry?.ai_profile?.translations?.about).toBe("[sk] cryptographer");
     expect(entry?.ai_profile?.translations?.skills).toContain("[sk] zk");
   });
+
+  // ── H4: matching=off is honored; 31606 matrix published for visibility=event ─
+  it("matching=off runs no AI pipeline and publishes no match lists/matrix (H4)", async () => {
+    const h = await setup(100, { matching: "off" });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    // No provider was ever called; no match jobs remained.
+    expect(h.stt.calls).toBe(0);
+    expect(h.llm.completeCalls).toBe(0);
+    expect(h.llm.embedCalls).toBe(0);
+    expect(h.store.pendingJobCount()).toBe(0);
+    // No 31605 match lists, no 31606 matrix.
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_LIST)).toBe(false);
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+    // …but the authored directory entry (no ai_profile) and roster still publish.
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const dir = h.transport.published.filter(
+      (e) => e.kind === KIND_DIRECTORY_ENTRY && e.tags.find((t) => t[0] === "d")?.[1] === d,
+    );
+    expect(dir.length).toBeGreaterThan(0);
+    const entry = directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(h.eck, dir[dir.length - 1]!.content)));
+    expect(entry.profile.about).toBe("cryptographer"); // fixture's `about`
+    expect(entry.ai_profile).toBeUndefined();
+  });
+
+  it("publishes the 31606 matrix (scores only) when match_visibility=event (H4)", async () => {
+    const h = await setup(0, { matchVisibility: "event" });
+    const cryptoPk = await join(h, generateSecretKey(), "crypto");
+    const designPk = await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    const matrices = h.transport.published.filter((e) => e.kind === KIND_MATCH_MATRIX);
+    expect(matrices.length).toBeGreaterThan(0);
+    const matrix = matchMatrixContentSchema.parse(JSON.parse(eckDecrypt(h.eck, matrices[matrices.length - 1]!.content)));
+    // One pair (crypto↔design), scores only, both members present.
+    expect(matrix.pairs.length).toBe(1);
+    const pair = matrix.pairs[0]!;
+    expect([pair.a, pair.b].sort()).toEqual([cryptoPk, designPk].sort());
+    expect(typeof pair.score).toBe("number");
+  });
+
+  // ── H3: rotation republishes match lists + matrix under the new ECK ──────────
+  it("revocation republishes remaining attendees' match lists + matrix under the new d, excluding the revoked (H3)", async () => {
+    const h = await setup(0, { matchVisibility: "event" });
+    const cryptoSk = generateSecretKey();
+    const designSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designPk = await join(h, designSk, "design");
+    await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+    const llmBefore = h.llm.completeCalls;
+    const publishedBefore = h.transport.published.length;
+
+    // Revoke the cryptographer.
+    const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 1, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
+    });
+    await h.coordinator.handleCoordinatorWrap(adminWrap as any);
+    await h.coordinator.jobs.drain();
+
+    const after = h.transport.published.slice(publishedBefore);
+    // Rotation re-encrypts cached scores — NO provider calls.
+    expect(h.llm.completeCalls).toBe(llmBefore);
+
+    // Recover the new ECK v2 from design's re-grant.
+    const grant = after
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, designSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r)
+      .map((r) => keyGrantContentSchema.parse(JSON.parse(r.content)))
+      .find((g) => g.eck.some((v) => v.id === 2))!;
+    const eckV2 = base64ToBytes(grant.eck.find((v) => v.id === 2)!.key);
+
+    // design's match list is republished under the NEW blinded d (over eck v2) and
+    // no longer references the revoked cryptographer.
+    const designV2D = blindedD(eckV2, h.coordinate, designPk);
+    const designList = after
+      .filter((e) => e.kind === KIND_MATCH_LIST && e.tags.find((t) => t[0] === "d")?.[1] === designV2D)
+      .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(designSk, getPublicKey(h.coordSk), e.content))));
+    expect(designList.length).toBeGreaterThan(0);
+    const newest = designList[designList.length - 1]!;
+    expect(newest.matches.map((m) => m.pubkey)).not.toContain(cryptoPk);
+
+    // The 31606 matrix is republished under eck v2 excluding any crypto pair.
+    const matrices = after.filter((e) => e.kind === KIND_MATCH_MATRIX);
+    expect(matrices.length).toBeGreaterThan(0);
+    const matrix = matchMatrixContentSchema.parse(JSON.parse(eckDecrypt(eckV2, matrices[matrices.length - 1]!.content)));
+    for (const p of matrix.pairs) {
+      expect(p.a).not.toBe(cryptoPk);
+      expect(p.b).not.toBe(cryptoPk);
+    }
+  });
+
+  // ── H5: live 31600 config subscription drives a config refresh ───────────────
+  it("applies a live 31600 update: visibility pair→event publishes the matrix (H5)", async () => {
+    const h = await setup(0, { matchVisibility: "pair" });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+
+    // A newer signed 31600 flips visibility to "event".
+    const eidPubkey = getPublicKey(h.eidSk);
+    const newer = {
+      kind: 31600, pubkey: eidPubkey, created_at: 100,
+      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      content: "", id: "cfg-2", sig: "",
+    } as any;
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    await h.coordinator.jobs.drain();
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
+  });
+
+  it("ignores a stale or wrong-author 31600 update (H5)", async () => {
+    const h = await setup(0, { matchVisibility: "pair" });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    // Wrong author (not E_id) → ignored.
+    const attacker = generateSecretKey();
+    await h.coordinator.handleConfigUpdate(h.coordinate, {
+      kind: 31600, pubkey: getPublicKey(attacker), created_at: 100,
+      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      content: "", id: "forged", sig: "",
+    } as any);
+    // Older-than-applied (created_at < install's 1) → ignored.
+    await h.coordinator.handleConfigUpdate(h.coordinate, {
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 0,
+      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      content: "", id: "stale", sig: "",
+    } as any);
+    await h.coordinator.jobs.drain();
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+  });
+
+  // ── H7: a reprocess reuses content-addressed artifacts (no re-bill) ──────────
+  it("reprocessing an unchanged submission re-bills no profile/translation model call (H7)", async () => {
+    const h = await setup(0, { lang: "sk" }); // sk forces a translation call the first time
+    const cryptoPk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    // The ai_profile + translation artifacts were persisted (content-addressed).
+    expect(artifactCount(h.store, "ai_profile")).toBeGreaterThan(0);
+    expect(artifactCount(h.store, "translation")).toBeGreaterThan(0);
+    const llmBefore = h.llm.completeCalls;
+    const sttBefore = h.stt.calls;
+
+    // Manual reprocess (fresh dedupe key → the job DOES run) must hit the caches.
+    const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 1, a: h.coordinate, cmd: "reprocess", args: { pubkey: cryptoPk } },
+    });
+    await h.coordinator.handleCoordinatorWrap(adminWrap as any);
+    await h.coordinator.jobs.drain();
+    expect(h.llm.completeCalls).toBe(llmBefore); // no profile/translation re-bill
+    expect(h.stt.calls).toBe(sttBefore); // transcript cache too
+  });
+
+  // ── Q10: a changed submission never publishes a stale ai_profile ─────────────
+  it("a resubmission omits the stale ai_profile until reprocessing catches up (Q10)", async () => {
+    const h = await setup(0, { batchSize: 10 });
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const d = blindedD(h.eck, h.coordinate, cryptoPk);
+    expect(latestDirectoryWithAi(h.transport, h.eck, d)?.ai_profile).toBeDefined();
+
+    // Re-record the intro but DON'T drain yet: the entry published synchronously by
+    // handleSubmission must carry the new authored fields with NO stale ai_profile.
+    const beforeResubmit = h.transport.published.length;
+    await resubmitIntro(h, cryptoSk, "crypto");
+    const justPublished = h.transport.published
+      .slice(beforeResubmit)
+      .filter((e) => e.kind === KIND_DIRECTORY_ENTRY && e.tags.find((t) => t[0] === "d")?.[1] === d)
+      .map((e) => directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(h.eck, e.content))));
+    expect(justPublished.length).toBeGreaterThan(0);
+    expect(justPublished[justPublished.length - 1]!.ai_profile).toBeUndefined();
+
+    // After reprocessing, the fresh ai_profile reappears (derived from the new source).
+    await h.coordinator.jobs.drain();
+    expect(latestDirectoryWithAi(h.transport, h.eck, d)?.ai_profile?.summary).toContain("updated");
+  });
+
+  // ── Q12: a poisoned job is surfaced to the organizer via a 21606 gift wrap ───
+  it("surfaces a poisoned job to the organizer (21606 + status row) (Q12)", async () => {
+    const h = await setup(0, { failTranscribe: true });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    // Exhaust the retry/backoff schedule so the process job poisons.
+    for (let i = 0; i < 8; i++) {
+      await h.coordinator.jobs.drain();
+      h.clock.t += 120_000;
+    }
+    // A 21606 coordinator-status gift wrap was published to E_id and decodes.
+    const statuses = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
+    expect(statuses.length).toBeGreaterThan(0);
+    const s = statuses[statuses.length - 1]!;
+    expect(s.state).toBe("poison");
+    expect(s.stage).toBe("process_attendee");
+    expect(s.pubkey).toBe(pk);
+    expect(s.error_category).not.toContain("crypto"); // sanitized, no attendee text
+    // A queryable status row is recorded for the Admin UI (app-side follow-up).
+    expect(h.store.poisonStatuses(h.coordinate).length).toBeGreaterThan(0);
+  });
 });
 
 function countPairs(store: Store, coordinate: string): number {
   return (store as any).db.prepare("SELECT COUNT(*) AS c FROM pairs WHERE coordinate = ?").get(coordinate).c;
+}
+
+function artifactCount(store: Store, stage: string): number {
+  return (store as any).db.prepare("SELECT COUNT(*) AS c FROM pipeline_artifacts WHERE stage = ?").get(stage).c;
 }
 
 function allPairRows(store: Store, coordinate: string): any[] {

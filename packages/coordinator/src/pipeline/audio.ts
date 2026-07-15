@@ -10,27 +10,83 @@ import { mkdtemp, writeFile, readFile, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** Hard limits for attacker-controlled media (audit C3). */
+export const FFMPEG_TIMEOUT_MS = 120_000; // wall-clock kill for a hung/adversarial input
+export const MAX_INPUT_DURATION_SEC = 2 * 60 * 60; // cap decoded duration (codec-bomb guard)
+
 /** Verify ffmpeg is available (called at startup). */
 export async function verifyFfmpeg(): Promise<void> {
   await run("ffmpeg", ["-version"]);
 }
 
-function run(cmd: string, args: string[], input?: Uint8Array): Promise<{ stdout: Buffer }> {
+/**
+ * Spawn a subprocess with NO shell, its own process group, a wall-clock kill timer,
+ * and a captured-output cap (audit C3). On timeout the whole group is terminated so
+ * an ffmpeg child can't outlive the parent. stdin is never a TTY (`detached` + we
+ * close it) so ffmpeg can't block waiting on input.
+ */
+function run(
+  cmd: string,
+  args: string[],
+  opts: { input?: Uint8Array; timeoutMs?: number; maxOutputBytes?: number } = {},
+): Promise<{ stdout: Buffer }> {
+  const timeoutMs = opts.timeoutMs ?? FFMPEG_TIMEOUT_MS;
+  const maxOutputBytes = opts.maxOutputBytes ?? 64 * 1024 * 1024;
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, args);
+    // detached → child becomes a group leader; killing -pid kills the whole group.
+    const child = spawn(cmd, args, { detached: true, stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
-    child.stdout.on("data", (d) => out.push(d));
+    let outLen = 0;
+    let settled = false;
+    const kill = () => {
+      try {
+        if (child.pid) process.kill(-child.pid, "SIGKILL");
+      } catch {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      kill();
+      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.stdout.on("data", (d: Buffer) => {
+      outLen += d.length;
+      if (outLen > maxOutputBytes) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        kill();
+        reject(new Error(`${cmd} output exceeded ${maxOutputBytes} bytes`));
+        return;
+      }
+      out.push(d);
+    });
     child.stderr.on("data", (d) => err.push(d));
-    child.on("error", reject);
+    child.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(e);
+    });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       if (code === 0) resolve({ stdout: Buffer.concat(out) });
       else reject(new Error(`${cmd} exited ${code}: ${Buffer.concat(err).toString().slice(-500)}`));
     });
-    if (input) {
-      child.stdin.write(input);
-      child.stdin.end();
+    if (opts.input) {
+      child.stdin.write(opts.input);
     }
+    child.stdin.end();
   });
 }
 
@@ -54,10 +110,11 @@ export async function extractAudioSegments(
     const inPath = join(dir, `in.${ext}`);
     await writeFile(inPath, media);
 
-    // First pass: whole-file audio to mono 16 kHz Opus.
+    // First pass: whole-file audio to mono 16 kHz Opus. `-nostdin` and a decoded-
+    // duration cap (`-t`) guard against adversarial/endless inputs (audit C3).
     const wholePath = join(dir, "audio.ogg");
     await run("ffmpeg", [
-      "-y", "-i", inPath,
+      "-nostdin", "-y", "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       wholePath,
@@ -73,7 +130,7 @@ export async function extractAudioSegments(
     const secPerSegment = Math.max(30, Math.floor((maxBytes * 0.8) / 2048));
     const segPattern = join(dir, "seg-%03d.ogg");
     await run("ffmpeg", [
-      "-y", "-i", inPath,
+      "-nostdin", "-y", "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       "-f", "segment", "-segment_time", String(secPerSegment),

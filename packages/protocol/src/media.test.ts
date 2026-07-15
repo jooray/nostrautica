@@ -30,6 +30,27 @@ describe("media descriptor + AES-GCM (spec §6.2)", () => {
     expect(back).toEqual(data);
   });
 
+  it("encrypts with no URLs yet (pre-upload) and validates once URLs are filled", async () => {
+    // The real submit flow encrypts BEFORE upload, so URLs are unknown here.
+    // This must NOT throw (regression: the https-only tightening previously made
+    // the placeholder URL fail validation, breaking every intro submission).
+    const data = crypto.getRandomValues(new Uint8Array(512));
+    const { descriptor } = await encryptMedia({
+      kind: "intro",
+      data,
+      mime: "video/webm",
+      urls: [],
+    });
+    expect(descriptor.url).toEqual([]);
+    // A draft with no URLs is not yet a valid finalized descriptor…
+    expect(() => mediaDescriptorSchema.parse(descriptor)).toThrow();
+    // …but once the caller fills real https URLs it validates.
+    const finalized = mediaDescriptorSchema.parse({ ...descriptor, url: [sampleUrl] });
+    expect(finalized.url).toEqual([sampleUrl]);
+    // A non-https URL is still rejected (C3 SSRF guard intact).
+    expect(() => mediaDescriptorSchema.parse({ ...descriptor, url: ["about:blank"] })).toThrow();
+  });
+
   it("rejects a ciphertext whose hash does not match x", async () => {
     const { ciphertext, descriptor } = await encryptMedia({
       kind: "intro",

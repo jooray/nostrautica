@@ -17,9 +17,12 @@ import {
   buildAiProfile,
   summarizeNostr,
   nostrInputsHash,
+  profileInputsHash,
+  translationInputsHash,
   translateProfileFields,
   type NostrPost,
 } from "./profile.js";
+import type { AiProfile as AiProfileType } from "@nostrautica/protocol";
 
 export interface ProcessDeps {
   store: Store;
@@ -32,6 +35,10 @@ export interface ProcessDeps {
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /** Override the transcription stage (tests inject to skip real Blossom/ffmpeg). */
   transcribe?: (descriptor: MediaDescriptor) => Promise<string>;
+  /** Blossom origins media may be fetched from (audit C3 allowlist). */
+  blossomOrigins?: string[];
+  /** Max media bytes per blob download (audit C3). */
+  maxMediaBytes?: number;
   /** Fetch the attendee's kind-0 + last N public posts (resolved reposts). */
   fetchNostrContext: (pubkey: string, n: number) => Promise<NostrPost[]>;
   nostrContextN: number;
@@ -58,7 +65,15 @@ export async function processAttendee(
     deps.transcribe ??
     ((descriptor) =>
       transcribeMedia(
-        { store: deps.store, stt: deps.stt, sttModel: deps.sttModel, fetchBlob: deps.fetchBlob, now },
+        {
+          store: deps.store,
+          stt: deps.stt,
+          sttModel: deps.sttModel,
+          fetchBlob: deps.fetchBlob,
+          blossomOrigins: deps.blossomOrigins,
+          maxMediaBytes: deps.maxMediaBytes,
+          now,
+        },
         descriptor,
       ));
   const transcripts: string[] = [];
@@ -91,22 +106,48 @@ export async function processAttendee(
   }
 
   // 3. Build the ai_profile from transcripts + profile + nostr summary (in the
-  //    event language).
-  const aiProfile = await buildAiProfile(deps.llm, deps.matchModel, {
-    transcripts,
-    profile: input.profile,
-    nostrSummary,
-    lang: deps.lang,
-  });
+  //    event language), content-addressed (audit H7): a crash between generating the
+  //    profile and publishing/translating it never re-bills the model — the finished
+  //    artifact is looked up by its stage + canonical-input hash on retry.
+  const profileInputs = { transcripts, profile: input.profile, nostrSummary, lang: deps.lang };
+  const profileModelKey = `${deps.matchModel.provider}:${deps.matchModel.model}`;
+  const profileKey = profileInputsHash(profileInputs, profileModelKey);
+  let aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
+  if (!aiProfile) {
+    aiProfile = await buildAiProfile(deps.llm, deps.matchModel, profileInputs);
+    deps.store.putArtifact({
+      stage: "ai_profile",
+      inputsHash: profileKey,
+      provider: deps.matchModel.provider,
+      model: deps.matchModel.model,
+      output: aiProfile,
+      now: now(),
+    });
+  }
 
   // 4. If the user's authored fields aren't already in the event language, publish
-  //    a translation alongside (never mutating the originals). Part of this job, so
-  //    it's covered by the same inputs-hash idempotency — no separate billing loop.
-  const translations = await translateProfileFields(deps.llm, deps.translateModel, deps.lang, {
+  //    a translation alongside (never mutating the originals). Independently
+  //    content-addressed (audit H7) so a re-run reuses it; a cached `null` records
+  //    "already in the target language, nothing to translate".
+  const trFields = {
     about: input.profile.about,
     looking_for: input.profile.looking_for,
     skills: input.profile.skills,
-  });
+  };
+  const trModelKey = `${deps.translateModel.provider}:${deps.translateModel.model}`;
+  const trKey = translationInputsHash(trFields, deps.lang, trModelKey);
+  let translations = deps.store.getArtifact("translation", trKey) as AiProfileType["translations"] | null | undefined;
+  if (translations === undefined) {
+    translations = (await translateProfileFields(deps.llm, deps.translateModel, deps.lang, trFields)) ?? null;
+    deps.store.putArtifact({
+      stage: "translation",
+      inputsHash: trKey,
+      provider: deps.translateModel.provider,
+      model: deps.translateModel.model,
+      output: translations,
+      now: now(),
+    });
+  }
   if (translations) aiProfile.translations = translations;
   return aiProfile;
 }

@@ -12,6 +12,7 @@ import type {
   PaymentStrategy,
   TokenUsage,
 } from "./types.js";
+import { ProviderContractError, validateProviderValue } from "./types.js";
 
 const DEFAULT_BASE = "https://api.venice.ai/api/v1";
 /** Venice STT hard limit: 25 MB (spec §9.4, §3.7). */
@@ -61,6 +62,7 @@ export class VeniceLlm implements LlmProvider {
     model: string;
     temperature?: number;
     maxTokens?: number;
+    validate?: (raw: unknown) => T;
   }): Promise<{ value: T; usage: TokenUsage }> {
     const res = await fetch(`${this.base}/chat/completions`, {
       method: "POST",
@@ -94,9 +96,21 @@ export class VeniceLlm implements LlmProvider {
     const body = (await res.json()) as any;
     await this.opts.payment.settle(res.headers);
     const content = body.choices?.[0]?.message?.content;
-    if (typeof content !== "string") throw new Error("Venice returned no content");
+    if (typeof content !== "string") {
+      throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch {
+      throw new ProviderContractError(this.id, req.schemaName, req.model, "output was not valid JSON");
+    }
     return {
-      value: JSON.parse(content) as T,
+      value: validateProviderValue<T>(
+        parsed,
+        { provider: this.id, schemaName: req.schemaName, model: req.model },
+        req.validate,
+      ),
       usage: {
         promptTokens: body.usage?.prompt_tokens ?? 0,
         completionTokens: body.usage?.completion_tokens ?? 0,
@@ -113,7 +127,23 @@ export class VeniceLlm implements LlmProvider {
     });
     if (!res.ok) throw new Error(`Venice embeddings failed: ${res.status}`);
     const body = (await res.json()) as { data?: { embedding: number[] }[] };
-    return (body.data ?? []).map((d) => d.embedding);
+    const embedModel = model ?? "text-embedding-bge-m3";
+    return (body.data ?? []).map((d, i) => {
+      const emb = d?.embedding;
+      if (
+        !Array.isArray(emb) ||
+        emb.length === 0 ||
+        !emb.every((x) => typeof x === "number" && Number.isFinite(x))
+      ) {
+        throw new ProviderContractError(
+          this.id,
+          "embeddings",
+          embedModel,
+          `row ${i}: malformed embedding vector`,
+        );
+      }
+      return emb;
+    });
   }
 }
 
@@ -153,7 +183,13 @@ export class VeniceStt implements SttProvider {
       body: form,
     });
     if (!res.ok) throw new Error(`Venice STT failed: ${res.status} ${await res.text()}`);
-    const body = (await res.json()) as { text?: string; language?: string };
-    return { text: body.text ?? "", language: body.language };
+    const body = (await res.json()) as { text?: unknown; language?: unknown };
+    if (body.text !== undefined && typeof body.text !== "string") {
+      throw new ProviderContractError(this.id, "stt", opts?.model ?? "openai/whisper-large-v3", "text was not a string");
+    }
+    return {
+      text: typeof body.text === "string" ? body.text : "",
+      language: typeof body.language === "string" ? body.language : undefined,
+    };
   }
 }

@@ -24,6 +24,21 @@ const ENC_PREFIX = "nip44:";
 
 export type JobState = "pending" | "running" | "done" | "poison";
 
+/** A Cashu payment reservation in the durable journal (audit finding H8). */
+export type CashuJournalState = "in_flight" | "settled" | "ambiguous";
+export interface CashuJournalRow {
+  request_id: string;
+  mint: string;
+  state: CashuJournalState;
+  amount: number;
+  /** Proofs reserved for and sent to the provider (decrypted). */
+  sent_proofs: unknown[];
+  /** Change proofs banked at settle, if any (decrypted). */
+  change_proofs: unknown[] | null;
+  created_at: number;
+  updated_at: number;
+}
+
 export interface JobRow {
   id: number;
   type: string;
@@ -33,6 +48,36 @@ export interface JobRow {
   attempts: number;
   next_run_at: number;
   last_error: string | null;
+  /** Lease bookkeeping (audit H1): NULL until first claimed. */
+  claimed_at: number | null;
+  lease_until: number | null;
+  worker_token: string | null;
+}
+
+/** A stored attendee row (audit Q11: typed instead of `any` at the pipeline boundary). */
+export interface AttendeeRow {
+  coordinate: string;
+  pubkey: string;
+  role: string;
+  status: string;
+  profile_json: string | null;
+  ai_profile_json: string | null;
+  profile_hash: string | null;
+  source_revision: string | null;
+  ai_source_revision: string | null;
+  updated_at: number;
+}
+
+/** A poisoned/cleared job surfaced to the organizer (audit Q12). */
+export interface JobStatusRow {
+  coordinate: string;
+  stage: string;
+  pubkey: string | null;
+  state: "poison" | "cleared";
+  attempts: number;
+  error_category: string;
+  retryable: number;
+  updated_at: number;
 }
 
 const SCHEMA = `
@@ -52,6 +97,12 @@ CREATE TABLE IF NOT EXISTS attendees (
   profile_json TEXT,
   ai_profile_json TEXT,
   profile_hash TEXT,
+  -- Revision consistency (audit Q10): source_revision hashes the current authored
+  -- submission; ai_source_revision records which submission the stored ai_profile
+  -- was derived from. A directory entry only surfaces ai_profile when they match,
+  -- so a new submission never publishes authored fields beside a stale AI profile.
+  source_revision TEXT,
+  ai_source_revision TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -71,7 +122,10 @@ CREATE TABLE IF NOT EXISTS jobs (
   state TEXT NOT NULL DEFAULT 'pending',
   attempts INTEGER NOT NULL DEFAULT 0,
   next_run_at INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT
+  last_error TEXT,
+  claimed_at INTEGER,
+  lease_until INTEGER,
+  worker_token TEXT
 );
 CREATE TABLE IF NOT EXISTS transcripts (
   blob_sha256 TEXT PRIMARY KEY,
@@ -109,6 +163,42 @@ CREATE TABLE IF NOT EXISTS seen_rumors (
   rumor_id TEXT PRIMARY KEY,
   seen_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS cashu_journal (
+  request_id TEXT PRIMARY KEY,
+  mint TEXT NOT NULL,
+  state TEXT NOT NULL,           -- 'in_flight' | 'settled' | 'ambiguous'
+  amount INTEGER NOT NULL,
+  sent_proofs TEXT NOT NULL,     -- JSON array of the proofs reserved & sent (may be encrypted)
+  change_proofs TEXT,            -- JSON array of change proofs banked at settle (may be encrypted)
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+-- Expensive derived artifacts, content-addressed by stage + canonical-input hash
+-- (audit H7). A crash between generating a profile/translation and publishing it
+-- never re-bills the model: the finished artifact is looked up by its input hash.
+-- output_json may be at-rest-encrypted (it holds attendee-derived text).
+CREATE TABLE IF NOT EXISTS pipeline_artifacts (
+  stage TEXT NOT NULL,
+  inputs_hash TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  output_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (stage, inputs_hash)
+);
+-- Poisoned/cleared pipeline jobs surfaced to the organizer (audit Q12). One row
+-- per (coordinate, stage, pubkey); a later success clears it.
+CREATE TABLE IF NOT EXISTS job_status (
+  coordinate TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  pubkey TEXT,
+  state TEXT NOT NULL,           -- 'poison' | 'cleared'
+  attempts INTEGER NOT NULL,
+  error_category TEXT NOT NULL,
+  retryable INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (coordinate, stage, pubkey)
+);
 `;
 
 export class Store {
@@ -138,6 +228,24 @@ export class Store {
         /* column already exists */
       }
     }
+    // Migration (H1): job-lease columns on older DBs. Must run BEFORE the lease
+    // index is created (the index references lease_until).
+    for (const col of ["claimed_at INTEGER", "lease_until INTEGER", "worker_token TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
+    // Migration (Q10): revision-tracking columns on older attendee rows.
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
   }
@@ -259,19 +367,23 @@ export class Store {
     profileJson?: string | null;
     aiProfileJson?: string | null;
     profileHash?: string | null;
+    sourceRevision?: string | null;
+    aiSourceRevision?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
            profile_json = COALESCE(:profileJson, attendees.profile_json),
            ai_profile_json = COALESCE(:aiProfileJson, attendees.ai_profile_json),
            profile_hash = COALESCE(:profileHash, attendees.profile_hash),
+           source_revision = COALESCE(:sourceRevision, attendees.source_revision),
+           ai_source_revision = COALESCE(:aiSourceRevision, attendees.ai_source_revision),
            updated_at = :now`,
       )
       .run({
@@ -282,14 +394,16 @@ export class Store {
         profileJson: row.profileJson ?? null,
         aiProfileJson: row.aiProfileJson ?? null,
         profileHash: row.profileHash ?? null,
+        sourceRevision: row.sourceRevision ?? null,
+        aiSourceRevision: row.aiSourceRevision ?? null,
         now: row.now,
       });
   }
 
-  getAttendee(coordinate: string, pubkey: string): any {
+  getAttendee(coordinate: string, pubkey: string): AttendeeRow | undefined {
     return this.db
       .prepare("SELECT * FROM attendees WHERE coordinate = ? AND pubkey = ?")
-      .get(coordinate, pubkey);
+      .get(coordinate, pubkey) as AttendeeRow | undefined;
   }
 
   approvedAttendees(coordinate: string): {
@@ -472,6 +586,13 @@ export class Store {
     this.db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(coordinate);
   }
 
+  /** Drop every cached pair involving `pubkey` (audit H3: exclude a revoked attendee). */
+  clearPairsInvolving(coordinate: string, pubkey: string): void {
+    this.db
+      .prepare("DELETE FROM pairs WHERE coordinate = ? AND (a = ? OR b = ?)")
+      .run(coordinate, pubkey, pubkey);
+  }
+
   pairsFor(coordinate: string, pubkey: string): {
     other: string;
     score: number;
@@ -522,25 +643,90 @@ export class Store {
       .run(type, dedupeKey, JSON.stringify(payload));
   }
 
-  claimNextJob(now: number): JobRow | undefined {
-    const row = this.db
+  /**
+   * Atomically claim the next runnable job under a lease (audit H1). A job is
+   * runnable when it is `pending` (and its backoff `next_run_at` has elapsed) OR
+   * `running` with an expired lease — the latter is how a job stranded by a crash
+   * is recovered without human intervention. The claimer stamps its own random
+   * `worker_token` + a `lease_until`; only that token may later complete/retry the
+   * job, so a worker that lost its lease (a slow job whose lease expired and was
+   * re-claimed elsewhere) can never overwrite the new owner's result.
+   *
+   * Runs in a `BEGIN IMMEDIATE` transaction so two workers (or processes) never
+   * claim the same row. Attempts are NOT incremented here — lease expiry or a
+   * crash must not consume a retry; only a classified failure (`failJob`) does.
+   */
+  claimNextJob(now: number, workerToken: string, leaseMs = 5 * 60_000): JobRow | undefined {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT * FROM jobs
+             WHERE (state = 'pending' AND next_run_at <= ?)
+                OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
+             ORDER BY id LIMIT 1`,
+        )
+        .get(now, now) as JobRow | undefined;
+      if (!row) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+      this.db
+        .prepare(
+          "UPDATE jobs SET state = 'running', claimed_at = ?, lease_until = ?, worker_token = ? WHERE id = ?",
+        )
+        .run(now, now + leaseMs, workerToken, row.id);
+      this.db.exec("COMMIT");
+      return { ...row, state: "running", claimed_at: now, lease_until: now + leaseMs, worker_token: workerToken };
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* no active txn */
+      }
+      throw e;
+    }
+  }
+
+  /** Extend a held lease (audit H1 heartbeat). No-op if the token no longer owns it. */
+  heartbeatJob(id: number, workerToken: string, leaseUntil: number): boolean {
+    const info = this.db
+      .prepare("UPDATE jobs SET lease_until = ? WHERE id = ? AND worker_token = ? AND state = 'running'")
+      .run(leaseUntil, id, workerToken);
+    return info.changes > 0;
+  }
+
+  /** Complete a job — only the lease owner may (audit H1). Returns false if lost. */
+  completeJob(id: number, workerToken?: string): boolean {
+    const info = workerToken
+      ? this.db.prepare("UPDATE jobs SET state = 'done', worker_token = NULL, lease_until = NULL WHERE id = ? AND worker_token = ?").run(id, workerToken)
+      : this.db.prepare("UPDATE jobs SET state = 'done', worker_token = NULL, lease_until = NULL WHERE id = ?").run(id);
+    return info.changes > 0;
+  }
+
+  /** Fail a job (retry or poison) — only the lease owner may (audit H1). */
+  failJob(id: number, attempts: number, nextRunAt: number, error: string, poison: boolean, workerToken?: string): boolean {
+    const sql = "UPDATE jobs SET state = ?, attempts = ?, next_run_at = ?, last_error = ?, worker_token = NULL, lease_until = NULL WHERE id = ?"
+      + (workerToken ? " AND worker_token = ?" : "");
+    const args: unknown[] = [poison ? "poison" : "pending", attempts, nextRunAt, error, id];
+    if (workerToken) args.push(workerToken);
+    const info = (this.db.prepare(sql).run(...(args as any)));
+    return info.changes > 0;
+  }
+
+  /**
+   * Reset jobs whose lease expired back to `pending` (audit H1 startup/periodic
+   * sweep). `claimNextJob` already treats an expired-running job as claimable, so
+   * this is mainly to make recovery prompt and observable at startup. Returns the
+   * number of jobs reclaimed.
+   */
+  reclaimExpiredLeases(now: number): number {
+    const info = this.db
       .prepare(
-        "SELECT * FROM jobs WHERE state = 'pending' AND next_run_at <= ? ORDER BY id LIMIT 1",
+        "UPDATE jobs SET state = 'pending', worker_token = NULL, lease_until = NULL WHERE state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?",
       )
-      .get(now) as JobRow | undefined;
-    if (!row) return undefined;
-    this.db.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(row.id);
-    return row;
-  }
-
-  completeJob(id: number): void {
-    this.db.prepare("UPDATE jobs SET state = 'done' WHERE id = ?").run(id);
-  }
-
-  failJob(id: number, attempts: number, nextRunAt: number, error: string, poison: boolean): void {
-    this.db
-      .prepare("UPDATE jobs SET state = ?, attempts = ?, next_run_at = ?, last_error = ? WHERE id = ?")
-      .run(poison ? "poison" : "pending", attempts, nextRunAt, error, id);
+      .run(now);
+    return Number(info.changes);
   }
 
   pendingJobCount(): number {
@@ -548,5 +734,140 @@ export class Store {
   }
   poisonJobs(): JobRow[] {
     return this.db.prepare("SELECT * FROM jobs WHERE state = 'poison'").all() as any;
+  }
+
+  // ── Cashu payment journal (audit finding H8) ──────────────────────────────
+  // Cashu proofs are bearer money. `CashuPayment` used to remove the sent proofs
+  // from its wallet file and only bank the change in settle(); a crash between the
+  // two lost the proofs. This journal durably records each reservation so a
+  // restart can account for every proof: reserved-but-unsettled proofs are
+  // recoverable (quarantined as `ambiguous`, never re-added to the wallet — so no
+  // double-spend), and banked change survives the crash. Proof JSON reuses the
+  // same at-rest NIP-44 protection as the event-key columns when an identity key
+  // is configured.
+
+  /**
+   * Durably reserve the proofs sent to a provider for `requestId`, in one txn,
+   * before they leave the wallet. Idempotent on `requestId` (a stable id across
+   * provider retries never reserves twice). Returns true if a new row was written.
+   */
+  cashuReserve(requestId: string, mint: string, amount: number, sentProofs: unknown[], now = Date.now()): boolean {
+    const existing = this.db
+      .prepare("SELECT 1 FROM cashu_journal WHERE request_id = ?")
+      .get(requestId);
+    if (existing) return false;
+    this.db
+      .prepare(
+        "INSERT INTO cashu_journal (request_id, mint, state, amount, sent_proofs, change_proofs, created_at, updated_at) VALUES (?, ?, 'in_flight', ?, ?, NULL, ?, ?)",
+      )
+      .run(requestId, mint, amount, this.protect(JSON.stringify(sentProofs)), now, now);
+    return true;
+  }
+
+  /**
+   * Mark a reservation settled and bank its change proofs (the provider accepted
+   * the payment). Idempotent: settling an already-settled request is a no-op.
+   */
+  cashuSettle(requestId: string, changeProofs: unknown[], now = Date.now()): void {
+    const row = this.db
+      .prepare("SELECT state FROM cashu_journal WHERE request_id = ?")
+      .get(requestId) as { state: string } | undefined;
+    if (!row || row.state === "settled") return;
+    this.db
+      .prepare("UPDATE cashu_journal SET state = 'settled', change_proofs = ?, updated_at = ? WHERE request_id = ?")
+      .run(this.protect(JSON.stringify(changeProofs)), now, requestId);
+  }
+
+  /** Quarantine a reservation whose outcome is unknown (crash/timeout post-send). */
+  cashuMarkAmbiguous(requestId: string, now = Date.now()): void {
+    this.db
+      .prepare("UPDATE cashu_journal SET state = 'ambiguous', updated_at = ? WHERE request_id = ? AND state = 'in_flight'")
+      .run(now, requestId);
+  }
+
+  private rowToCashuEntry(row: any): CashuJournalRow {
+    return {
+      request_id: row.request_id,
+      mint: row.mint,
+      state: row.state,
+      amount: row.amount,
+      sent_proofs: JSON.parse(this.reveal(row.sent_proofs)),
+      change_proofs: row.change_proofs == null ? null : JSON.parse(this.reveal(row.change_proofs)),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  cashuJournalEntry(requestId: string): CashuJournalRow | undefined {
+    const row = this.db.prepare("SELECT * FROM cashu_journal WHERE request_id = ?").get(requestId);
+    return row ? this.rowToCashuEntry(row) : undefined;
+  }
+
+  /** Non-terminal reservations (in_flight/ambiguous) for startup reconciliation. */
+  cashuNonterminal(): CashuJournalRow[] {
+    return (this.db
+      .prepare("SELECT * FROM cashu_journal WHERE state != 'settled' ORDER BY created_at")
+      .all() as any[]).map((r) => this.rowToCashuEntry(r));
+  }
+
+  // ── content-addressed pipeline artifacts (audit H7) ───────────────────────
+  /**
+   * Look up a completed artifact by stage + inputs hash. The stored output_json is
+   * at-rest-encrypted (it holds attendee-derived text) and revealed transparently.
+   */
+  getArtifact(stage: string, inputsHash: string): unknown | undefined {
+    const row = this.db
+      .prepare("SELECT output_json FROM pipeline_artifacts WHERE stage = ? AND inputs_hash = ?")
+      .get(stage, inputsHash) as { output_json: string } | undefined;
+    if (!row) return undefined;
+    return JSON.parse(this.reveal(row.output_json));
+  }
+
+  /**
+   * Persist a completed artifact keyed by stage + inputs hash (insert-or-ignore so
+   * concurrent duplicate jobs converge on one artifact rather than re-billing).
+   */
+  putArtifact(row: {
+    stage: string;
+    inputsHash: string;
+    provider: string;
+    model: string;
+    output: unknown;
+    now: number;
+  }): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO pipeline_artifacts (stage, inputs_hash, provider, model, output_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(row.stage, row.inputsHash, row.provider, row.model, this.protect(JSON.stringify(row.output)), row.now);
+  }
+
+  // ── organizer-visible job status (audit Q12) ──────────────────────────────
+  recordJobStatus(row: JobStatusRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO job_status (coordinate, stage, pubkey, state, attempts, error_category, retryable, updated_at)
+         VALUES (:coordinate, :stage, :pubkey, :state, :attempts, :error_category, :retryable, :updated_at)
+         ON CONFLICT(coordinate, stage, pubkey) DO UPDATE SET
+           state = excluded.state, attempts = excluded.attempts,
+           error_category = excluded.error_category, retryable = excluded.retryable,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        stage: row.stage,
+        pubkey: row.pubkey ?? null,
+        state: row.state,
+        attempts: row.attempts,
+        error_category: row.error_category,
+        retryable: row.retryable,
+        updated_at: row.updated_at,
+      });
+  }
+
+  poisonStatuses(coordinate: string): JobStatusRow[] {
+    return this.db
+      .prepare("SELECT * FROM job_status WHERE coordinate = ? AND state = 'poison'")
+      .all(coordinate) as any;
   }
 }

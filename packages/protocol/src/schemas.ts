@@ -12,20 +12,63 @@ const version = z.literal(1).or(z.number().int().positive()); // accept v1; forw
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/i, "expected 32-byte hex");
 const base64 = z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, "expected base64");
 
+/**
+ * Byte length a canonical base64 string decodes to, or -1 if the string is not a
+ * whole number of base64 quanta. Length-only (no decode) so it works identically
+ * in the browser and in Node.
+ */
+function decodedByteLength(s: string): number {
+  if (s.length === 0 || s.length % 4 !== 0) return -1;
+  const pad = s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0;
+  return (s.length / 4) * 3 - pad;
+}
+
+/** base64 that decodes to exactly `nBytes` (Q6: crypto-material length validation). */
+function base64Bytes(nBytes: number, label: string) {
+  return base64.refine((s) => decodedByteLength(s) === nBytes, `expected ${nBytes}-byte base64 (${label})`);
+}
+
+/** An https: URL (C3: block non-https media/fetch targets at the boundary). */
+const httpsUrl = z
+  .string()
+  .url()
+  .refine((u) => {
+    try {
+      return new URL(u).protocol === "https:";
+    } catch {
+      return false;
+    }
+  }, "must be an https URL");
+
 // ── Media descriptor (spec §6.2) ─────────────────────────────────────────────
-export const mediaDescriptorSchema = z.object({
-  kind: z.enum(["intro", "talk"]),
-  url: z.array(z.string().url()).min(1),
-  x: hex32, // sha256 of ciphertext
-  ox: hex32, // sha256 of plaintext
-  size: z.number().int().nonnegative(),
-  m: z.string(), // mime type
-  duration: z.number().nonnegative().optional(),
-  "encryption-algorithm": z.literal("aes-gcm"),
-  "decryption-key": base64, // 32 bytes b64
-  "decryption-nonce": base64, // 12 bytes b64
-});
+// `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an
+// unexpected field is rejected rather than silently ignored. Key/nonce lengths are
+// validated (C3) so a malformed descriptor can't reach the crypto layer.
+export const mediaDescriptorSchema = z
+  .object({
+    kind: z.enum(["intro", "talk"]),
+    url: z.array(httpsUrl).min(1),
+    x: hex32, // sha256 of ciphertext
+    ox: hex32, // sha256 of plaintext
+    size: z.number().int().nonnegative(),
+    m: z.string(), // mime type
+    duration: z.number().nonnegative().optional(),
+    "encryption-algorithm": z.literal("aes-gcm"),
+    "decryption-key": base64Bytes(32, "decryption-key"), // 32 bytes b64
+    "decryption-nonce": base64Bytes(12, "decryption-nonce"), // 12 bytes b64
+  })
+  .strict();
 export type MediaDescriptor = z.infer<typeof mediaDescriptorSchema>;
+
+// Pre-upload draft: identical to mediaDescriptorSchema but `url` may be empty,
+// because the Blossom https URLs are only known AFTER the ciphertext is uploaded.
+// `encryptMedia` validates this draft at encrypt time; the finalized descriptor
+// (real https URLs filled in) is validated against the strict schema at upload
+// time. Without this, encrypting an intro throws on the placeholder URL before a
+// single byte is uploaded.
+export const mediaDescriptorDraftSchema = mediaDescriptorSchema
+  .extend({ url: z.array(z.string()) })
+  .strict();
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
@@ -92,9 +135,12 @@ export type ProfileSubmissionContent = z.infer<
 // ── 21602 Key Grant rumor content ────────────────────────────────────────────
 export const eckVersionSchema = z.object({
   id: z.number().int().positive(),
-  key: base64, // 32 bytes b64
+  key: base64Bytes(32, "eck"), // 32 bytes b64
 });
 export type EckVersion = z.infer<typeof eckVersionSchema>;
+
+/** A 32-byte secret key in hex (E_id / E_inbox nsec fields, Q6). */
+const secretKeyHex = hex32;
 
 export const keyGrantContentSchema = z.object({
   v: version,
@@ -109,7 +155,7 @@ export type KeyGrantContent = z.infer<typeof keyGrantContentSchema>;
 export const coordinatorGrantContentSchema = z.object({
   v: version,
   a: z.string(),
-  inbox_nsec: z.string(), // hex privkey of E_inbox
+  inbox_nsec: secretKeyHex, // hex privkey of E_inbox
   eck: z.array(eckVersionSchema),
   config_relays: z.array(z.string()),
 });
@@ -130,8 +176,8 @@ export type AdminCommandContent = z.infer<typeof adminCommandContentSchema>;
 export const organizerGrantContentSchema = z.object({
   v: version,
   a: z.string(), // coordinate
-  eid_nsec: z.string(), // E_id secret (hex) — lets a co-organizer edit the event
-  einbox_nsec: z.string(), // E_inbox secret (hex) — read submissions + approve
+  eid_nsec: secretKeyHex, // E_id secret (hex) — lets a co-organizer edit the event
+  einbox_nsec: secretKeyHex, // E_inbox secret (hex) — read submissions + approve
   eck: z.array(eckVersionSchema),
   config_relays: z.array(z.string()),
   granted_by: hex32,
@@ -287,11 +333,28 @@ export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 
 export const eventKeysBackupSchema = z.object({
   v: version,
-  eid_nsec: z.string(),
-  einbox_nsec: z.string(),
+  eid_nsec: secretKeyHex,
+  einbox_nsec: secretKeyHex,
   eck: z.array(eckVersionSchema),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
+
+// ── 21606 Coordinator Status rumor content (poison surfacing, audit Q12) ─────
+// When a pipeline job exhausts its retries the coordinator gift-wraps this to the
+// organizer (E_id) so a poisoned job is visible without server logs. The Admin UI
+// half is app-side. `error_category` is a sanitized class, never attendee text.
+export const coordinatorStatusContentSchema = z.object({
+  v: version,
+  a: z.string(), // coordinate
+  pubkey: hex32.optional(), // affected attendee, when the job is attendee-scoped
+  stage: z.string(), // job type (e.g. "process_attendee")
+  state: z.enum(["poison", "cleared"]),
+  attempts: z.number().int().nonnegative(),
+  error_category: z.string(), // sanitized category, no prompts/attendee text
+  retryable: z.boolean(),
+  at: z.number().int(),
+});
+export type CoordinatorStatusContent = z.infer<typeof coordinatorStatusContentSchema>;
 
 /** Parse-and-validate helper that throws a descriptive error on mismatch. */
 export function parsePayload<T>(schema: z.ZodType<T>, raw: unknown): T {

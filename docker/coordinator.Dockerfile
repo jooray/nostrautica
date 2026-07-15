@@ -1,5 +1,7 @@
 # Coordinator daemon image (spec §11): node + ffmpeg, single process + SQLite volume.
-FROM node:22-bookworm-slim
+# Pinned to an exact Node 22 LTS (audit Q14): one Node major everywhere, no mutable
+# base tags. Node 22.5+ is required for the built-in node:sqlite store (see README).
+FROM node:22.14.0-bookworm-slim
 
 # ffmpeg + ffprobe are required (audio extraction, spec §9.2). whisper.cpp is
 # optional (local-whisper STT) and not installed here by default.

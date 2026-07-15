@@ -14,6 +14,7 @@ import {
   matchMatrixContentSchema,
   perEventSettingsSchema,
   eventKeysBackupSchema,
+  coordinatorStatusContentSchema,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -185,5 +186,69 @@ describe("schema validation rejects malformed payloads", () => {
     const parsed = joinRequestContentSchema.parse({ v: 1, name: "Bob" });
     expect(parsed.message).toBe("");
     expect(parsed.rsvp_public).toBe(false);
+  });
+
+  // ── Q6/Q7: tightened crypto-material + boundary validation ────────────────
+  it("rejects a non-https media URL (C3)", () => {
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, url: ["http://blossom.example/x.bin"] }),
+    ).toThrow();
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, url: ["file:///etc/passwd"] }),
+    ).toThrow();
+  });
+
+  it("rejects a decryption key/nonce of the wrong decoded length (Q6)", () => {
+    // 31-byte key (b64 of 31 bytes) and a 16-byte nonce are both wrong.
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, "decryption-key": "A".repeat(42) + "==" }),
+    ).toThrow();
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, "decryption-nonce": b64_32 }),
+    ).toThrow();
+  });
+
+  it("rejects an unknown extra field on the strict media descriptor (Q6)", () => {
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, evil: "surprise" }),
+    ).toThrow();
+  });
+
+  it("rejects an ECK key that is not 32 decoded bytes (Q6)", () => {
+    expect(() =>
+      keyGrantContentSchema.parse({
+        v: 1,
+        a: "31923:" + hex + ":ev",
+        role: "attendee",
+        eck: [{ id: 1, key: "A".repeat(4) }], // 3 bytes
+        granted_by: hex,
+      }),
+    ).toThrow();
+  });
+
+  it("rejects a non-hex inbox_nsec on the coordinator grant (Q6)", () => {
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 1,
+        a: "31923:" + hex + ":ev",
+        inbox_nsec: "not-a-hex-secret-key",
+        eck: [{ id: 1, key: b64_32 }],
+        config_relays: ["wss://relay.example"],
+      }),
+    ).toThrow();
+  });
+
+  it("round-trips the 21606 coordinator status payload (Q12)", () => {
+    roundTrips(coordinatorStatusContentSchema, {
+      v: 1,
+      a: "31923:" + hex + ":ev",
+      pubkey: hex,
+      stage: "process_attendee",
+      state: "poison",
+      attempts: 5,
+      error_category: "provider_contract",
+      retryable: false,
+      at: 1_700_000_000,
+    });
   });
 });

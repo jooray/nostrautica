@@ -5,27 +5,44 @@
  * its input hash and writes results into content-addressed caches, a restart
  * mid-pipeline never re-bills (IMPLEMENTATION_PLAN §3.11).
  */
+import { randomUUID } from "node:crypto";
 import type { Store, JobRow } from "../store/db.js";
 
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn }) => Promise<void>;
 export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => void;
 
+/** A poisoned job, surfaced so the coordinator can notify the organizer (Q12). */
+export interface PoisonInfo {
+  type: string;
+  payload: any;
+  attempts: number;
+  error: string;
+}
+
 export interface JobRunnerOptions {
   maxAttempts?: number;
   baseBackoffMs?: number;
+  /** Lease duration for a claimed job (audit H1). Default 5 minutes. */
+  leaseMs?: number;
   now?: () => number;
+  /** Called when a job exhausts its retries and enters the poison state (Q12). */
+  onPoison?: (info: PoisonInfo) => void;
 }
 
 export class JobRunner {
   private handlers = new Map<string, JobHandler>();
   private readonly maxAttempts: number;
   private readonly baseBackoffMs: number;
+  private readonly leaseMs: number;
   private readonly now: () => number;
+  private readonly onPoison?: (info: PoisonInfo) => void;
 
   constructor(private readonly store: Store, opts: JobRunnerOptions = {}) {
     this.maxAttempts = opts.maxAttempts ?? 5;
     this.baseBackoffMs = opts.baseBackoffMs ?? 1000;
+    this.leaseMs = opts.leaseMs ?? 5 * 60_000;
     this.now = opts.now ?? (() => Date.now());
+    this.onPoison = opts.onPoison;
   }
 
   register(type: string, handler: JobHandler): void {
@@ -36,11 +53,17 @@ export class JobRunner {
     this.store.enqueueJob(type, dedupeKey, payload);
   }
 
-  /** Run one claimable job. Returns true if a job was processed, false if idle. */
+  /** Reclaim leases stranded by a crash (audit H1). Call at startup + periodically. */
+  recoverStrandedJobs(): number {
+    return this.store.reclaimExpiredLeases(this.now());
+  }
+
+  /** Run one claimable job under a fresh lease. Returns true if a job was processed. */
   async runOne(): Promise<boolean> {
-    const job = this.store.claimNextJob(this.now());
+    const token = randomUUID();
+    const job = this.store.claimNextJob(this.now(), token, this.leaseMs);
     if (!job) return false;
-    await this.execute(job);
+    await this.execute(job, token);
     return true;
   }
 
@@ -51,17 +74,19 @@ export class JobRunner {
     }
   }
 
-  private async execute(job: JobRow): Promise<void> {
+  private async execute(job: JobRow, token: string): Promise<void> {
     const handler = this.handlers.get(job.type);
     if (!handler) {
-      this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true);
+      this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true, token);
       return;
     }
     try {
       await handler(JSON.parse(job.payload), {
         enqueue: (t, k, p) => this.enqueue(t, k, p),
       });
-      this.store.completeJob(job.id);
+      // If our lease expired and another worker took over, completeJob affects 0
+      // rows — we discard our result rather than clobber the new owner's state.
+      this.store.completeJob(job.id, token);
     } catch (err) {
       const attempts = job.attempts + 1;
       const poison = attempts >= this.maxAttempts;
@@ -71,13 +96,20 @@ export class JobRunner {
       console.warn(
         `[${t}] [job] ${job.type} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts})`}: ${msg.slice(0, 160)}`,
       );
-      this.store.failJob(
-        job.id,
-        attempts,
-        this.now() + backoff,
-        err instanceof Error ? err.message : String(err),
-        poison,
-      );
+      const owned = this.store.failJob(job.id, attempts, this.now() + backoff, msg, poison, token);
+      // Only surface the poison if we still owned the lease (a stale worker whose
+      // lease was stolen must not fire a duplicate organizer notification).
+      if (poison && owned && this.onPoison) {
+        this.onPoison({ type: job.type, payload: safeParse(job.payload), attempts, error: msg });
+      }
     }
+  }
+}
+
+function safeParse(s: string): any {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return {};
   }
 }

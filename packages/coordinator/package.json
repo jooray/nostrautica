@@ -4,6 +4,9 @@
   "description": "Nostrautica coordinator — headless Nostr client: STT, AI profiles, matchmaking.",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
   "bin": {
     "nostrautica-coordinator": "./dist/main.js"
   },

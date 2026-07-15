@@ -20,6 +20,8 @@ export const KIND_SEAL = 13; // NIP-59 seal
 export const KIND_DM = 14; // NIP-17 private direct message (rumor only, never signed)
 export const KIND_LONGFORM = 30023; // NIP-23 long-form content
 export const KIND_RELAY_LIST = 10002; // NIP-65 relay list metadata
+export const KIND_DM_RELAY_LIST = 10050; // NIP-17 DM relay list (where to receive gift-wrapped DMs)
+export const KIND_MUTE_LIST = 10000; // NIP-51 mute list
 export const KIND_BLOSSOM_SERVERS = 10063; // BUD-03 user server list
 export const KIND_GIFT_WRAP = 1059; // NIP-59 gift wrap
 export const KIND_APP_DATA = 30078; // NIP-78 arbitrary app data
@@ -52,6 +54,7 @@ export const KIND_KEY_GRANT = 21602; // → attendee
 export const KIND_COORDINATOR_GRANT = 21603; // → coordinator
 export const KIND_ADMIN_COMMAND = 21604; // organizer → coordinator
 export const KIND_ORGANIZER_GRANT = 21605; // → co-organizer (E_id + E_inbox + ECK)
+export const KIND_COORDINATOR_STATUS = 21606; // coordinator → organizer (poison/health, Q12)
 
 /** Rumor kinds — the set of kinds ever delivered inside a NIP-59 gift wrap. */
 export const RUMOR_KINDS = [
@@ -62,6 +65,7 @@ export const RUMOR_KINDS = [
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
+  KIND_COORDINATOR_STATUS,
 ] as const;
 
 export type RumorKind = (typeof RUMOR_KINDS)[number];

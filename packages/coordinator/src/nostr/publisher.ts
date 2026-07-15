@@ -12,6 +12,7 @@ import {
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_KEY_GRANT,
+  KIND_COORDINATOR_STATUS,
   eckEncrypt,
   blindedD,
   nip44Encrypt,
@@ -22,6 +23,7 @@ import {
   type RosterContent,
   type MatchListContent,
   type MatchMatrixContent,
+  type CoordinatorStatusContent,
 } from "@nostrautica/protocol";
 
 export interface PublishKeys {
@@ -121,6 +123,18 @@ export function buildMatchMatrix(
     },
     keys.coordSk,
   );
+}
+
+/** kind 21606 coordinator status → organizer (E_id), gift-wrapped (audit Q12). */
+export function buildCoordinatorStatus(
+  coordSk: Uint8Array,
+  eidPubkey: string,
+  content: CoordinatorStatusContent,
+): NostrEvent {
+  return wrapRumor(coordSk, eidPubkey, {
+    kind: KIND_COORDINATOR_STATUS,
+    content,
+  }) as unknown as NostrEvent;
 }
 
 /** kind 21602 ECK grant → attendee, gift-wrapped and sealed by the coordinator. */

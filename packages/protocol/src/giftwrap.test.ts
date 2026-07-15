@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "nostr-tools/pure";
+import { nip44Encrypt } from "./crypto.js";
 import {
   wrapRumor,
   unwrapRumor,
@@ -45,6 +46,39 @@ describe("gift wrap (NIP-59)", () => {
       content: { v: 1, name: "x" },
     });
     expect(() => unwrapRumor(wrap, generateSecretKey())).toThrow();
+  });
+
+  it("rejects a rumor whose claimed author differs from the seal author (NIP-59 binding)", () => {
+    // An attacker seals with their OWN key but writes someone else's pubkey into
+    // the rumor (e.g. an event's E_id, to forge a 21603/21604). The seal author is
+    // authenticated by NIP-44 decryption; the rumor's pubkey field is not — so
+    // unwrapRumor must enforce rumor.pubkey === seal.pubkey.
+    const attackerSk = generateSecretKey();
+    const victimPk = getPublicKey(generateSecretKey()); // impersonation target
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+
+    // Build the forged rumor + seal + wrap by hand (wrapRumor derives the rumor
+    // author from the sealing key, so a forger has to go around it — as here).
+    const forgedRumor = {
+      pubkey: victimPk, // lie: claims the victim authored it
+      created_at: 1,
+      kind: KIND_JOIN_REQUEST,
+      tags: [],
+      content: JSON.stringify({ v: 1, name: "mallory" }),
+    };
+    const rumorWithId = { ...forgedRumor, id: getEventHash(forgedRumor) };
+    const seal = finalizeEvent(
+      { kind: KIND_SEAL, created_at: 1, tags: [], content: nip44Encrypt(attackerSk, recipientPk, JSON.stringify(rumorWithId)) },
+      attackerSk,
+    );
+    const otSk = generateSecretKey();
+    const wrap = finalizeEvent(
+      { kind: KIND_GIFT_WRAP, created_at: 1, tags: [["p", recipientPk]], content: nip44Encrypt(otSk, recipientPk, JSON.stringify(seal)) },
+      otSk,
+    );
+
+    expect(() => unwrapRumor(wrap as any, recipientSk)).toThrow(/author mismatch/);
   });
 
   it("randomizes wrap timestamp into the past (within 2 days)", () => {

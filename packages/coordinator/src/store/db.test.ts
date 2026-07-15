@@ -130,3 +130,45 @@ describe("Store at-rest key encryption (F1)", () => {
     keyless.close();
   });
 });
+
+describe("pipeline artifacts + job status (audit H7 / Q12)", () => {
+  it("content-addresses an artifact and encrypts its output at rest (H7)", () => {
+    const sk = generateSecretKey();
+    const store = new Store(":memory:", sk);
+    const output = { summary: "sensitive attendee portrait", skills: ["zk"] };
+    store.putArtifact({ stage: "ai_profile", inputsHash: "hash-1", provider: "venice", model: "m", output, now: 1 });
+
+    // Read path returns the plaintext object…
+    expect(store.getArtifact("ai_profile", "hash-1")).toEqual(output);
+    expect(store.getArtifact("ai_profile", "missing")).toBeUndefined();
+    // …but the raw column holds NIP-44 ciphertext, not the attendee text.
+    const raw = (store as any).db
+      .prepare("SELECT output_json FROM pipeline_artifacts WHERE stage = ? AND inputs_hash = ?")
+      .get("ai_profile", "hash-1") as { output_json: string };
+    expect(raw.output_json.startsWith("nip44:")).toBe(true);
+    expect(raw.output_json).not.toContain("sensitive");
+
+    // insert-or-ignore: a duplicate key does not overwrite (concurrent-dup safety).
+    store.putArtifact({ stage: "ai_profile", inputsHash: "hash-1", provider: "venice", model: "m", output: { summary: "changed" }, now: 2 });
+    expect(store.getArtifact("ai_profile", "hash-1")).toEqual(output);
+    store.close();
+  });
+
+  it("records and queries organizer-visible poison status (Q12)", () => {
+    const store = new Store();
+    store.recordJobStatus({
+      coordinate: "31923:aaaa:ev", stage: "process_attendee", pubkey: "b".repeat(64),
+      state: "poison", attempts: 5, error_category: "media_fetch", retryable: 1, updated_at: 10,
+    });
+    const rows = store.poisonStatuses("31923:aaaa:ev");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ stage: "process_attendee", state: "poison", error_category: "media_fetch" });
+    // A later success clears it (upsert on the same key).
+    store.recordJobStatus({
+      coordinate: "31923:aaaa:ev", stage: "process_attendee", pubkey: "b".repeat(64),
+      state: "cleared", attempts: 5, error_category: "media_fetch", retryable: 0, updated_at: 20,
+    });
+    expect(store.poisonStatuses("31923:aaaa:ev")).toHaveLength(0);
+    store.close();
+  });
+});

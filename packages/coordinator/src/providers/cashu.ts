@@ -8,6 +8,7 @@
  * Wallet state is persisted to a JSON file (proofs). The operator experience:
  * fund the coordinator with Cashu tokens, pick a node + model, done.
  */
+import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import {
   CashuMint,
@@ -17,6 +18,7 @@ import {
   type Proof,
 } from "@cashu/cashu-ts";
 import type { PaymentStrategy } from "./types.js";
+import type { Store } from "../store/db.js";
 
 interface WalletFile {
   mint: string;
@@ -30,11 +32,20 @@ export interface CashuPaymentOptions {
   defaultAmountSats?: number;
   /** Balance mode sends the whole token as a Bearer key instead of per-request. */
   mode?: "stateless" | "balance";
+  /**
+   * Durable payment journal (audit finding H8). When provided, every reservation
+   * is recorded before its proofs leave the wallet, so a crash between send and
+   * settle can never silently lose or double-spend proofs. Omit only in balance
+   * mode, where the whole token is a long-lived Bearer key (no per-request change).
+   */
+  journal?: Store;
 }
 
 export class CashuPayment implements PaymentStrategy {
   private wallet: CashuWallet;
   private loaded = false;
+  /** The reservation awaiting settle() for this in-flight request, if any. */
+  private pendingRequestId?: string;
 
   constructor(private readonly opts: CashuPaymentOptions) {
     this.wallet = new CashuWallet(new CashuMint(opts.mintUrl));
@@ -64,6 +75,16 @@ export class CashuPayment implements PaymentStrategy {
 
     // Select proofs worth `amount`; keep the change locally.
     const { keep, send } = await this.wallet.send(amount, file.proofs);
+
+    // Durably journal the reservation BEFORE the proofs leave the wallet, so a
+    // crash before settle() leaves an accountable `in_flight` record instead of a
+    // silent loss (audit H8). Balance mode reuses one long-lived token, so there's
+    // no per-request change to journal.
+    if (this.opts.journal && this.opts.mode !== "balance") {
+      const requestId = randomUUID();
+      this.opts.journal.cashuReserve(requestId, this.opts.mintUrl, amount, send);
+      this.pendingRequestId = requestId;
+    }
     file.proofs = keep;
     this.save(file);
 
@@ -74,18 +95,52 @@ export class CashuPayment implements PaymentStrategy {
   }
 
   async settle(responseHeaders: Headers): Promise<void> {
+    // settle() is only reached after the provider accepted the payment (res.ok),
+    // so the reserved proofs are now spent; bank any returned change.
+    const requestId = this.pendingRequestId;
+    this.pendingRequestId = undefined;
     const changeToken = responseHeaders.get("X-Cashu");
-    if (!changeToken) return;
-    await this.ensureLoaded();
-    try {
-      const decoded = getDecodedToken(changeToken);
-      const received = await this.wallet.receive(decoded);
-      const file = this.load();
-      file.proofs = [...file.proofs, ...received];
-      this.save(file);
-    } catch {
-      // Malformed / already-spent change — nothing to bank.
+
+    let banked: Proof[] = [];
+    if (changeToken) {
+      await this.ensureLoaded();
+      try {
+        const decoded = getDecodedToken(changeToken);
+        banked = await this.wallet.receive(decoded);
+        const file = this.load();
+        file.proofs = [...file.proofs, ...banked];
+        this.save(file);
+      } catch {
+        // Malformed / already-spent change — nothing to bank.
+        banked = [];
+      }
     }
+    // Close out the journal reservation (request completed). Records the banked
+    // change so it survives a later crash even though it's already in the wallet.
+    if (requestId && this.opts.journal) {
+      this.opts.journal.cashuSettle(requestId, banked);
+    }
+  }
+
+  /**
+   * Reconcile the journal after a restart (audit H8): any reservation still
+   * `in_flight` was interrupted between send and settle. We can't know locally
+   * whether the mint spent the proofs, so quarantine it as `ambiguous` — the
+   * proofs are neither lost (they stay recorded in the journal) nor re-added to
+   * the wallet (no double-spend). An operator/mint check can later resolve them.
+   * Returns the number of reservations quarantined.
+   */
+  reconcileJournal(): number {
+    if (!this.opts.journal) return 0;
+    const pending = this.opts.journal.cashuNonterminal();
+    let quarantined = 0;
+    for (const entry of pending) {
+      if (entry.state === "in_flight") {
+        this.opts.journal.cashuMarkAmbiguous(entry.request_id);
+        quarantined++;
+      }
+    }
+    return quarantined;
   }
 
   /** Import a Cashu token to fund the wallet (operator top-up). */

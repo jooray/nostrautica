@@ -88,4 +88,30 @@ describe("event config (kind 31600)", () => {
     expect(parsed.nostrContext).toBe(0);
     expect(parsed.coordinator).toBeUndefined();
   });
+
+  // ── Q7: malformed config degrades to defaults, never NaN / bad enums ────────
+  it("clamps out-of-range enums to their documented defaults", () => {
+    const parsed = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["approval", "everyone"], // not a valid Approval
+      ["match_visibility", "world"], // not a valid MatchVisibility
+    ]);
+    expect(parsed.approval).toBe("manual");
+    expect(parsed.matchVisibility).toBe("pair");
+  });
+
+  it("falls back to defaults for non-numeric / negative numeric tags (never NaN)", () => {
+    const parsed = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["max_video_sec", "not-a-number"],
+      ["nostr_context", "-5"],
+      ["eck", "0"],
+    ]);
+    expect(parsed.maxVideoSec).toBe(90);
+    expect(Number.isNaN(parsed.maxVideoSec)).toBe(false);
+    expect(parsed.nostrContext).toBe(0);
+    expect(parsed.eck).toBe(1); // clamped to a valid ≥1 version
+  });
 });
