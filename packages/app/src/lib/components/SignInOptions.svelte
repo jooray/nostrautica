@@ -12,6 +12,7 @@
   import { NIP46_RELAYS } from "$lib/nostr/relays.js";
   import QrCode from "$lib/components/QrCode.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { onMount } from "svelte";
 
   let { onSignedIn }: { onSignedIn?: () => void } = $props();
 
@@ -121,6 +122,14 @@
   function cancelNostrConnect() {
     nc?.cancel();
   }
+
+  // Show the remote-signer QR immediately — no extra "Connect" click. Start
+  // nostrconnect on mount (it subscribes to all NIP46_RELAYS in parallel) and
+  // tear it down if the user leaves without connecting.
+  onMount(() => {
+    if (!nc) startNostrConnect();
+    return () => nc?.cancel();
+  });
 
   const pasteBunker = () =>
     run(async () => {

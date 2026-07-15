@@ -5,7 +5,7 @@ import {
   coordinateToNaddr,
   naddrToCoordinate,
 } from "./coordinate.js";
-import { buildEventConfig, parseEventConfig, isMarmotChatEnabled } from "./config.js";
+import { buildEventConfig, parseEventConfig, isMarmotChatEnabled, UNLIMITED_SEC } from "./config.js";
 
 const pubkey = "a".repeat(64);
 
@@ -203,6 +203,40 @@ describe("event config (kind 31600)", () => {
     ]);
     expect(parsed.approval).toBe("manual");
     expect(parsed.matchVisibility).toBe("pair");
+  });
+
+  it("round-trips 0 (UNLIMITED_SEC) for max_video_sec / max_talk_sec distinctly from an absent tag", () => {
+    const base = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: [],
+      blossom: [],
+      matching: "off" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+      talks: "off" as const,
+      chat: [] as ("marmot")[],
+    };
+    // Explicit 0 → tag emitted as "0" → parses back to 0 (unlimited), not the default.
+    const unlimited = buildEventConfig({ ...base, maxVideoSec: UNLIMITED_SEC, maxTalkSec: UNLIMITED_SEC });
+    expect(unlimited.tags).toContainEqual(["max_video_sec", "0"]);
+    expect(unlimited.tags).toContainEqual(["max_talk_sec", "0"]);
+    const parsedUnlimited = parseEventConfig(pubkey, unlimited.tags);
+    expect(parsedUnlimited.maxVideoSec).toBe(UNLIMITED_SEC);
+    expect(parsedUnlimited.maxTalkSec).toBe(UNLIMITED_SEC);
+    // An event with the tag entirely absent (legacy/backward-compat) still falls
+    // back to the spec defaults, NOT unlimited — omission and "0" mean different things.
+    const legacy = parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)]]);
+    expect(legacy.maxVideoSec).toBe(90);
+    expect(legacy.maxTalkSec).toBe(900);
+    // A normal capped event (90/900) still round-trips exactly as before.
+    const capped = buildEventConfig({ ...base, maxVideoSec: 90, maxTalkSec: 900 });
+    expect(parseEventConfig(pubkey, capped.tags).maxVideoSec).toBe(90);
+    expect(parseEventConfig(pubkey, capped.tags).maxTalkSec).toBe(900);
   });
 
   it("falls back to defaults for non-numeric / negative numeric tags (never NaN)", () => {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import { MAX_INTRO_TEXT, type MediaDescriptor } from "@nostrautica/protocol";
+  import { MAX_INTRO_TEXT, UNLIMITED_SEC, type MediaDescriptor } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -62,6 +62,8 @@
   const hasCoordinator = $derived(!!ctx?.config.coordinator);
 
   const maxSec = $derived(ctx ? (talk ? ctx.config.maxTalkSec : ctx.config.maxVideoSec) : 90);
+  // UNLIMITED_SEC (0) means the organizer set no length cap: no hard-stop, no countdown.
+  const unlimited = $derived(maxSec === UNLIMITED_SEC);
   const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
 
   onMount(async () => {
@@ -181,7 +183,9 @@
     if (!stream) return;
     capture = new VideoCapture(mode === "audio" ? "audio" : "video");
     recording = true;
-    remaining = maxSec;
+    // `remaining` is seconds-left for a capped event; for an unlimited event
+    // capture.start() instead counts elapsed seconds up from 0 (no hard-stop).
+    remaining = 0;
     try {
       const result = await capture.start(stream, maxSec, (r) => (remaining = r));
       recording = false;
@@ -478,8 +482,10 @@
           <video bind:this={videoEl} playsinline muted style="max-width:100%;border-radius:12px;background:#000"></video>
         {/if}
         <p class="muted" role="status" aria-live="polite">
-          {t("record.limit", { sec: maxSec })}
-          {#if recording}<strong>{t("record.timeLeft", { sec: remaining })}</strong>{/if}
+          {unlimited ? t("record.limit.unlimited") : t("record.limit", { sec: maxSec })}
+          {#if recording}
+            <strong>{unlimited ? t("record.elapsed", { sec: remaining }) : t("record.timeLeft", { sec: remaining })}</strong>
+          {/if}
         </p>
         {#if recording}
           <button class="btn danger" onclick={stopRecording}>{t("record.stop")}</button>

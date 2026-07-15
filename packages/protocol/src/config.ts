@@ -6,6 +6,16 @@
 import { KIND_EVENT_CONFIG } from "./kinds.js";
 import { makeCoordinate } from "./coordinate.js";
 
+/**
+ * Sentinel for "no length cap" on `max_video_sec`/`max_talk_sec` (recorder UI
+ * "unlimited" option). Chosen over omitting the tag so an organizer can
+ * explicitly *remove* a cap on an event that previously had one (an omitted
+ * tag instead falls back to the 90/900 spec default via `intTag`). Existing
+ * events with 90/900 keep working unchanged; only an explicit "0" means
+ * unlimited.
+ */
+export const UNLIMITED_SEC = 0;
+
 export type Approval = "manual" | "invite" | "manual+invite";
 export type MatchVisibility = "pair" | "event";
 /**
@@ -35,7 +45,9 @@ export interface EventConfig {
   coordinator?: string; // coordinator pubkey hex (absent = no coordinator)
   relays: string[];
   blossom: string[];
+  /** Seconds; 0 means unlimited (no hard cap). Defaults to 90 when the tag is absent. */
   maxVideoSec: number;
+  /** Seconds; 0 means unlimited (no hard cap). Defaults to 900 when the tag is absent. */
   maxTalkSec: number;
   matching: "on" | "off";
   matchVisibility: MatchVisibility;
@@ -166,6 +178,8 @@ export function parseEventConfig(
     coordinator: first(tags, "coordinator"),
     relays: all(tags, "relay"),
     blossom: all(tags, "blossom"),
+    // 0 is a valid parsed value (UNLIMITED_SEC) — intTag only falls back to the
+    // default when the tag is absent/non-numeric/negative, never for 0 itself.
     maxVideoSec: intTag(tags, "max_video_sec", 90),
     maxTalkSec: intTag(tags, "max_talk_sec", 900),
     matching: first(tags, "matching") === "on" ? "on" : "off",

@@ -57,6 +57,7 @@
   this={link ? "button" : "div"}
   class="evt-head"
   class:compact
+  class:has-banner={hasBanner}
   class:tappable={link}
   onclick={go}
   role={link ? "link" : undefined}
@@ -148,6 +149,20 @@
     align-items: center;
     gap: 0.6rem;
     padding: 0.6rem 0.85rem;
+  }
+  /* Give a real banner image room to be seen — anchor the title to the bottom over
+     the scrim. Only when a banner is set; generated-gradient headers stay compact. */
+  .evt-head.has-banner .inner {
+    min-height: 120px;
+  }
+  .evt-head.has-banner:not(.compact) .inner {
+    min-height: 176px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
+  .compact.has-banner .inner {
+    align-items: flex-end;
   }
   /* When a banner backs the header, drop a scrim so text stays legible. */
   .inner.on-banner {

@@ -38,9 +38,13 @@ export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://relay.nostr.band"];
  * Honors VITE_NOSTRAUTICA_RELAYS so local e2e keeps working.
  */
 export const NIP46_RELAYS = ENV_RELAYS ?? [
-  "wss://relay.nsec.app",
+  // Subscribed in parallel (SimplePool) — the signer publishes its reply to all
+  // of them, so any one working relay is enough; a failed socket (e.g. the
+  // often-flaky relay.nsec.app, kept for signers that default to it) is harmless.
   "wss://relay.damus.io",
   "wss://relay.primal.net",
+  "wss://nos.lol",
+  "wss://relay.nsec.app",
 ];
 
 /** Fallback Blossom servers when an event/user configures none (spec §11). */

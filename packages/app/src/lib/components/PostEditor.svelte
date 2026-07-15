@@ -148,12 +148,51 @@
   }
   .radio {
     display: flex;
-    align-items: baseline;
-    gap: 0.5rem;
-    margin: 0.25rem 0;
+    align-items: flex-start;
+    gap: 0.6rem;
+    margin: 0.5rem 0;
+    cursor: pointer;
   }
-  .radio input {
-    width: auto;
+  /* The global `input` rule styles every input as a 44px-tall field; reset the
+     radio to a real custom control so it doesn't blow the row layout apart. */
+  .radio input[type="radio"] {
+    appearance: none;
+    -webkit-appearance: none;
+    flex: none;
+    width: 18px;
+    height: 18px;
+    min-height: 0;
+    margin: 1px 0 0;
+    padding: 0;
+    border: 2px solid var(--border);
+    border-radius: 50%;
+    background: var(--bg);
+    display: grid;
+    place-content: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+  }
+  .radio input[type="radio"]::before {
+    content: "";
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--accent-bg);
+    transform: scale(0);
+    transition: transform 0.12s ease;
+  }
+  .radio input[type="radio"]:checked {
+    border-color: var(--accent-bg);
+  }
+  .radio input[type="radio"]:checked::before {
+    transform: scale(1);
+  }
+  .radio input[type="radio"]:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .visibility[disabled] {
+    opacity: 0.6;
   }
   .tabs {
     align-items: center;

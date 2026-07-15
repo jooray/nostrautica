@@ -13,6 +13,8 @@
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
+  import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
+  import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let title = $state("");
@@ -23,8 +25,13 @@
   let iconUrl = $state("");
   let bannerUrl = $state("");
   let uploading = $state<"icon" | "banner" | null>(null);
-  let maxVideoSec = $state(90);
-  let maxTalkSec = $state(900);
+  // Entered in minutes in the UI; the wire protocol (max_video_sec/max_talk_sec)
+  // stays seconds (spec defaults 90/900 = 1.5/15 minutes). UNLIMITED_SEC (0) means
+  // no cap — represented here by the "No limit" checkboxes rather than a value.
+  let maxVideoMinutes = $state(1.5);
+  let maxVideoUnlimited = $state(false);
+  let maxTalkMinutes = $state(15);
+  let maxTalkUnlimited = $state(false);
   let talks = $state<"off" | "on" | "prerecord-first">("off");
   let matching = $state<"on" | "off">("on");
   let chatEnabled = $state(false); // Marmot group chat (experimental); operative once a coordinator is attached
@@ -71,6 +78,10 @@
       error = t("create.error.titleRequired");
       return;
     }
+    if (endLocal && startLocal && new Date(endLocal).getTime() <= new Date(startLocal).getTime()) {
+      error = t("create.error.endBeforeStart");
+      return;
+    }
     if (!session.loggedIn && !organizerName.trim()) {
       error = t("create.error.nameRequired");
       return;
@@ -102,8 +113,8 @@
           // attendee UI falls back to generated gradients for display.
           icon: iconUrl.trim() || undefined,
           banner: bannerUrl.trim() || undefined,
-          maxVideoSec,
-          maxTalkSec,
+          maxVideoSec: maxVideoUnlimited ? UNLIMITED_SEC : Math.max(1, Math.round(maxVideoMinutes * 60)),
+          maxTalkSec: maxTalkUnlimited ? UNLIMITED_SEC : Math.max(1, Math.round(maxTalkMinutes * 60)),
           matching,
           matchVisibility,
           approval,
@@ -148,6 +159,11 @@
   function shareNative() {
     navigator.share({ title: title.trim(), url: shareLink }).catch(() => {});
   }
+
+  // Inline end-before-start hint (submit() also hard-blocks this — see there).
+  const endBeforeStart = $derived(
+    !!endLocal && !!startLocal && new Date(endLocal).getTime() <= new Date(startLocal).getTime(),
+  );
 </script>
 
 <h1>{t("create.title")}</h1>
@@ -224,13 +240,25 @@
       <label for="s">{t("create.field.summary")}</label>
       <textarea id="s" rows="3" bind:value={summary}></textarea>
     </div>
-    <div>
-      <label for="st">{t("create.field.start")}</label>
-      <input id="st" type="datetime-local" bind:value={startLocal} />
-    </div>
-    <div>
-      <label for="en">{t("create.field.end")}</label>
-      <input id="en" type="datetime-local" bind:value={endLocal} min={startLocal} />
+    <div class="row" style="gap:0.75rem;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <label for="st">{t("create.field.start")}</label>
+        <input id="st" type="datetime-local" class="datetime-input" bind:value={startLocal} />
+      </div>
+      <div style="flex:1;min-width:180px">
+        <label for="en">{t("create.field.end")}</label>
+        <input
+          id="en"
+          type="datetime-local"
+          class="datetime-input"
+          bind:value={endLocal}
+          min={startLocal}
+          aria-invalid={endBeforeStart}
+        />
+        {#if endBeforeStart}
+          <p class="muted" style="margin:0.25rem 0 0;color:var(--danger)">{t("create.error.endBeforeStart")}</p>
+        {/if}
+      </div>
     </div>
     <div>
       <label for="loc">{t("create.field.location")}</label>
@@ -274,7 +302,18 @@
     </div>
     <div>
       <label for="mv">{t("create.field.maxVideo")}</label>
-      <input id="mv" type="number" bind:value={maxVideoSec} />
+      <div class="row" style="gap:0.75rem;align-items:center;flex-wrap:wrap">
+        <input
+          id="mv"
+          type="number"
+          min="0.5"
+          step="0.5"
+          style="flex:1;min-width:100px"
+          bind:value={maxVideoMinutes}
+          disabled={maxVideoUnlimited}
+        />
+        <ToggleSwitch bind:checked={maxVideoUnlimited}>{t("create.field.noLimit")}</ToggleSwitch>
+      </div>
     </div>
       </div>
     </details>
@@ -305,15 +344,25 @@
     {#if talks !== "off"}
       <div>
         <label for="mt">{t("create.field.maxTalk")}</label>
-        <input id="mt" type="number" bind:value={maxTalkSec} />
+        <div class="row" style="gap:0.75rem;align-items:center;flex-wrap:wrap">
+          <input
+            id="mt"
+            type="number"
+            min="0.5"
+            step="0.5"
+            style="flex:1;min-width:100px"
+            bind:value={maxTalkMinutes}
+            disabled={maxTalkUnlimited}
+          />
+          <ToggleSwitch bind:checked={maxTalkUnlimited}>{t("create.field.noLimit")}</ToggleSwitch>
+        </div>
       </div>
     {/if}
     <div>
-      <label class="check">
-        <input type="checkbox" bind:checked={chatEnabled} />
+      <ToggleSwitch bind:checked={chatEnabled}>
         {t("chat.toggle.label")}
-        <span class="pill">{t("chat.toggle.experimental")}</span>
-      </label>
+        <span class="badge">{t("chat.toggle.experimental")}</span>
+      </ToggleSwitch>
       <p class="muted" style="margin:0.25rem 0 0">{t("chat.toggle.help")}</p>
       {#if chatEnabled}
         <p class="muted" style="margin:0.25rem 0 0">{t("chat.toggle.needsCoordinator")}</p>
@@ -327,3 +376,16 @@
     </button>
   </div>
 {/if}
+
+<style>
+  /* Native datetime-local picker (start/end, spec §16 NIP-52): the calendar/clock
+     icon already follows the theme via color-scheme (app.css), this just gives it
+     the same hover affordance as other interactive inputs. */
+  .datetime-input::-webkit-calendar-picker-indicator {
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .datetime-input::-webkit-calendar-picker-indicator:hover {
+    background-color: var(--accent-soft);
+  }
+</style>
