@@ -23,3 +23,7 @@ docs-site-build/
 # local notes, not for the repo
 CLAUDE.md
 benchmarks/matching/cache/
+
+# scratch design assets — kept local, never committed
+landing-mockups/
+logo-prompts.txt

@@ -717,6 +717,8 @@ export const messages = {
     "chat.disclosure.body":
       "This chat is end-to-end encrypted (MLS/Marmot). The event coordinator operates and can read it, and each device sees only messages sent after it joined.",
     "chat.setup": "Setting up your secure chat… you'll join once the coordinator adds you.",
+    "chat.setupSlow": "This is taking longer than usual. The coordinator may be catching up — you can keep waiting or try again.",
+    "chat.retry": "Try again",
     "chat.empty": "No messages yet. Say hello.",
     "chat.compose.placeholder": "Message",
     "chat.send": "Send",
@@ -1581,6 +1583,8 @@ export const messages = {
     "chat.disclosure.body":
       "Tento chat je end-to-end šifrovaný (MLS/Marmot). Koordinátor podujatia ho prevádzkuje a môže ho čítať a každé zariadenie vidí len správy odoslané po tom, ako sa pripojilo.",
     "chat.setup": "Nastavujeme váš zabezpečený chat… pripojíte sa, keď vás koordinátor pridá.",
+    "chat.setupSlow": "Trvá to dlhšie než zvyčajne. Koordinátor to možno ešte dobieha — môžete počkať alebo to skúsiť znova.",
+    "chat.retry": "Skúsiť znova",
     "chat.empty": "Zatiaľ žiadne správy. Pozdravte sa.",
     "chat.compose.placeholder": "Správa",
     "chat.send": "Odoslať",

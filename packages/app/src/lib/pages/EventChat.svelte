@@ -39,6 +39,11 @@
   // without deep-proxying the class instance.
   let chat = $state.raw<MarmotChat | undefined>(undefined);
   let chatPubkey = $state<string | undefined>(undefined);
+  // Setup usually completes within seconds (member publishes key package →
+  // coordinator adds them → welcome lands). If it's still spinning after a grace
+  // period the coordinator may be slow/asleep or a socket dropped — surface a
+  // gentle hint + a Try again that re-runs the handshake (no page reload).
+  let setupSlow = $state(false);
 
   onMount(async () => {
     try {
@@ -131,6 +136,28 @@
     if (gid) phase = "ready";
   }
 
+  // Show the "taking longer than usual" hint if we're still in setup after a
+  // grace period; clear it whenever we leave setup. Reruns cleanly on retry.
+  $effect(() => {
+    if (phase !== "setup") {
+      setupSlow = false;
+      return;
+    }
+    const id = setTimeout(() => (setupSlow = true), 25000);
+    return () => clearTimeout(id);
+  });
+
+  // Re-run the handshake without reloading the page: tear down the half-open
+  // session and start fresh. Republishes the key package so the coordinator gets
+  // another chance to add us, and reopens the subscription sockets.
+  async function retryChat() {
+    setupSlow = false;
+    chat?.dispose();
+    chat = undefined;
+    chatPubkey = undefined;
+    await startChat();
+  }
+
   async function send() {
     const text = draft.trim();
     if (!text || !chat || sending) return;
@@ -194,6 +221,12 @@
       <div class="empty">
         {#if phase === "setup"}
           <p class="muted">{t("chat.setup")}</p>
+          {#if setupSlow}
+            <p class="muted" style="margin-top:0.5rem">{t("chat.setupSlow")}</p>
+            <button class="btn inline" style="margin-top:0.25rem" onclick={retryChat}>
+              {t("chat.retry")}
+            </button>
+          {/if}
         {:else}
           <p class="muted">{t("chat.empty")}</p>
         {/if}
