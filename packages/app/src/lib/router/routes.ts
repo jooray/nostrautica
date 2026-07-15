@@ -20,6 +20,9 @@ export type Route =
   | { name: "attendee"; naddr: string; npub: string }
   | { name: "matches"; naddr: string }
   | { name: "admin"; naddr: string }
+  | { name: "posts"; naddr: string }
+  | { name: "post"; naddr: string; d: string }
+  | { name: "eventMore"; naddr: string }
   | { name: "dm" }
   | { name: "dmPeer"; npub: string }
   | { name: "notFound"; hash: string };
@@ -69,8 +72,14 @@ export function parseHash(hash: string): Route {
           return { name: "record", naddr, talk: query.get("talk") === "1" };
         case "matches":
           return { name: "matches", naddr };
+        case "more":
+          return { name: "eventMore", naddr };
         case "admin":
           return { name: "admin", naddr };
+        case "posts": {
+          const d = segments[3];
+          return d ? { name: "post", naddr, d } : { name: "posts", naddr };
+        }
         case "attendees": {
           const npub = segments[3];
           return npub
@@ -115,13 +124,53 @@ export function buildHash(route: Route): string {
       return `#/e/${route.naddr}/attendees/${route.npub}`;
     case "matches":
       return `#/e/${route.naddr}/matches`;
+    case "eventMore":
+      return `#/e/${route.naddr}/more`;
     case "admin":
       return `#/e/${route.naddr}/admin`;
+    case "posts":
+      return `#/e/${route.naddr}/posts`;
+    case "post":
+      return `#/e/${route.naddr}/posts/${route.d}`;
     case "dm":
       return "#/dm";
     case "dmPeer":
       return `#/dm/${route.npub}`;
     case "notFound":
       return route.hash;
+  }
+}
+
+/**
+ * Localized document-title message key for a route (audit finding A2). The layout
+ * sets `document.title` and announces this on every navigation so screen-reader
+ * users get one useful route-change signal and each tab has a meaningful title.
+ * Keys resolve through the i18n catalog; the layout appends the brand suffix.
+ */
+export function routeTitleKey(route: Route): string {
+  return `title.${route.name}`;
+}
+
+/**
+ * The event an `#/e/<naddr>` route belongs to, or undefined for non-event
+ * routes (home, login, settings, key-backup, DM, …). The theme injector keys
+ * off this: a 31609 style element exists ONLY while this returns an naddr, and
+ * a change of naddr swaps the theme so a second event's CSS never bleeds in.
+ */
+export function eventNaddr(route: Route): string | undefined {
+  switch (route.name) {
+    case "event":
+    case "join":
+    case "record":
+    case "attendees":
+    case "attendee":
+    case "matches":
+    case "admin":
+    case "posts":
+    case "post":
+    case "eventMore":
+      return route.naddr;
+    default:
+      return undefined;
   }
 }

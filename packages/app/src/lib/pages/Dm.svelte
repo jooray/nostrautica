@@ -7,17 +7,24 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { fetchDms, threadsOf, type DmThread } from "$lib/events/dm.js";
   import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { mutes } from "$lib/stores/mutes.svelte.js";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import Avatar from "$lib/components/Avatar.svelte";
 
   let threads = $state<DmThread[]>([]);
   let profiles = $state<Map<string, ProfileMeta>>(new Map());
   let loading = $state(true);
-  let error = $state<string | null>(null);
+  let error = $state<unknown>(null);
   let timer: ReturnType<typeof setInterval> | undefined;
+
+  // Muted peers drop out of the thread list (U10).
+  const visibleThreads = $derived(threads.filter((th) => !mutes.isMuted(th.peer)));
 
   async function refresh() {
     if (!session.signer) return;
     try {
+      void mutes.load(session.signer);
       const msgs = await fetchDms(session.signer);
       threads = threadsOf(msgs);
       const missing = threads.map((t) => t.peer).filter((p) => !profiles.has(p));
@@ -25,8 +32,9 @@
         const fetched = await fetchProfiles(missing);
         profiles = new Map([...profiles, ...fetched]);
       }
+      error = null;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = e;
     } finally {
       loading = false;
     }
@@ -59,14 +67,11 @@
     <p>{t("dm.loginToSee")}</p>
     <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("dm.login")}</button>
   </div>
-{:else if error}
-  <div class="card warn">
-    <strong>{t("dm.loadFailed")}</strong>
-    <span class="muted">{error}</span>
-  </div>
+{:else if error && threads.length === 0}
+  <ErrorState {error} onRetry={refresh} retrying={loading} />
 {:else if loading}
   <p class="muted">{t("dm.decrypting")}</p>
-{:else if threads.length === 0}
+{:else if visibleThreads.length === 0}
   <div class="card">
     <p class="muted">
       {t("dm.empty")}
@@ -74,21 +79,13 @@
   </div>
 {:else}
   <div class="stack">
-    {#each threads as thread (thread.peer)}
+    {#each visibleThreads as thread (thread.peer)}
       <button
         class="card row"
         style="text-align:left;cursor:pointer;gap:0.75rem;align-items:center;margin:0"
         onclick={() => router.go({ name: "dmPeer", npub: npubEncode(thread.peer) })}
       >
-        {#if profiles.get(thread.peer)?.picture}
-          <img
-            src={profiles.get(thread.peer)?.picture}
-            alt=""
-            width="44"
-            height="44"
-            style="border-radius:50%;object-fit:cover;flex:none"
-          />
-        {/if}
+        <Avatar pubkey={thread.peer} name={nameOf(thread.peer)} picture={profiles.get(thread.peer)?.picture} size={44} />
         <div style="flex:1;min-width:0">
           <div class="row" style="justify-content:space-between">
             <strong>{nameOf(thread.peer)}</strong>

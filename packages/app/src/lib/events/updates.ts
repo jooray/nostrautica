@@ -17,6 +17,8 @@ import type { EventContext } from "./event-context.js";
 export interface EventUpdate {
   d: string;
   title: string;
+  summary?: string; // optional cleartext teaser tag (spec §7.4 public posts)
+  image?: string; // optional cleartext header-image tag
   content: string; // markdown
   publishedAt: number; // first-publish time (ordering)
   editedAt: number; // created_at of the winning revision
@@ -42,6 +44,8 @@ export async function fetchEventUpdates(coordinate: string): Promise<EventUpdate
     .map(([d, e]) => ({
       d,
       title: tag(e.tags, "title") ?? "Update",
+      summary: tag(e.tags, "summary"),
+      image: tag(e.tags, "image"),
       content: e.content,
       publishedAt: Number(tag(e.tags, "published_at")) || e.created_at || 0,
       editedAt: e.created_at ?? 0,
@@ -55,27 +59,45 @@ export async function fetchEventUpdates(coordinate: string): Promise<EventUpdate
  */
 export async function publishEventUpdate(
   ctx: EventContext,
-  input: { d?: string; title: string; content: string; publishedAt?: number },
+  input: {
+    d?: string;
+    title: string;
+    summary?: string;
+    image?: string;
+    content: string;
+    publishedAt?: number;
+  },
 ): Promise<EventUpdate> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const now = Math.floor(Date.now() / 1000);
   const d = input.d ?? `update-${now.toString(36)}`;
   const publishedAt = input.publishedAt ?? now;
+  const tags = [
+    ["d", d],
+    ["title", input.title],
+    ["published_at", String(publishedAt)],
+    ["a", ctx.coordinate], // ties the update to the event for NIP-23 clients
+  ];
+  if (input.summary) tags.push(["summary", input.summary]);
+  if (input.image) tags.push(["image", input.image]);
   const event = finalizeEvent(
     {
       kind: KIND_LONGFORM,
       created_at: now,
-      tags: [
-        ["d", d],
-        ["title", input.title],
-        ["published_at", String(publishedAt)],
-        ["a", ctx.coordinate], // ties the update to the event for NIP-23 clients
-      ],
+      tags,
       content: input.content,
     },
     hexToBytes(keys.eidNsecHex),
   );
   await publishOrQueue(event, ctx.config.relays);
-  return { d, title: input.title, content: input.content, publishedAt, editedAt: now };
+  return {
+    d,
+    title: input.title,
+    summary: input.summary,
+    image: input.image,
+    content: input.content,
+    publishedAt,
+    editedAt: now,
+  };
 }

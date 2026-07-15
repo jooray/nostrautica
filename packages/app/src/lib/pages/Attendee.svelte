@@ -13,9 +13,12 @@
   import { fetchFollowersOf, fetchRecentPosts, type RecentPost } from "$lib/events/social.js";
   import { loadPerEventSettings, toggleSetting, setNote } from "$lib/events/settings.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
+  import { mutes } from "$lib/stores/mutes.svelte.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import PostView from "$lib/components/PostView.svelte";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
+  import Avatar from "$lib/components/Avatar.svelte";
 
   let { naddr, npub }: { naddr: string; npub: string } = $props();
 
@@ -30,7 +33,10 @@
   let blindingKey: Uint8Array | null = null;
   let noteDraft = $state("");
   let busy = $state(false);
-  let error = $state<string | null>(null);
+  let error = $state<unknown>(null);
+  let confirmMute = $state(false);
+  let showAnyway = $state(false);
+  const muted = $derived(!!pubkey && mutes.isMuted(pubkey));
 
   onMount(async () => {
     try {
@@ -55,6 +61,7 @@
       entry = dirEntry ?? null;
       posts = recent;
       if (session.signer) {
+        void mutes.load(session.signer);
         const me = await session.signer.getPublicKey();
         following = isFollowing(await fetchFollowTags(session.signer), pubkey);
         followsYou = (await fetchFollowersOf(me, [pubkey])).has(pubkey);
@@ -90,6 +97,21 @@
     settings = await setNote(session.signer, ctx, blindingKey, pubkey, noteDraft);
   }
 
+  async function toggleMute() {
+    if (!session.signer) return router.go({ name: "login" });
+    busy = true;
+    error = null;
+    try {
+      await mutes.toggle(session.signer, pubkey);
+      confirmMute = false;
+      showAnyway = false;
+    } catch (e) {
+      error = e;
+    } finally {
+      busy = false;
+    }
+  }
+
   const displayName = $derived(kind0?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"));
   const has = (list?: string[]) => !!list?.includes(pubkey);
 
@@ -116,13 +138,21 @@
   {t("attendee.back")}
 </button>
 
-{#if error}<div class="card warn">{error}</div>{/if}
+{#if error}<ErrorState {error} />{/if}
 
+{#if muted && !showAnyway}
+  <div class="card" role="status">
+    <strong>{t("attendee.muted.title")}</strong>
+    <p class="muted">{t("mute.confirm")}</p>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn primary" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
+      <button class="btn" onclick={() => (showAnyway = true)}>{t("attendee.showAnyway")}</button>
+    </div>
+  </div>
+{:else}
 <div class="card">
   <div class="row">
-    {#if kind0?.picture}
-      <img src={kind0.picture} alt="" width="56" height="56" style="border-radius:50%" />
-    {/if}
+    <Avatar {pubkey} name={displayName} picture={kind0?.picture} size={56} />
     <div>
       <h1 style="margin:0">{displayName}</h1>
       <div class="row" style="flex-wrap:wrap">
@@ -168,7 +198,7 @@
     </div>
   {/if}
 
-  <div class="row">
+  <div class="row" style="flex-wrap:wrap">
     <button class="btn primary" onclick={follow} disabled={busy || following}>
       {following ? t("attendee.following") : busy ? t("attendee.followingBusy") : t("attendee.follow")}
     </button>
@@ -179,16 +209,31 @@
     >
       {t("attendee.message")}
     </button>
+    {#if muted}
+      <button class="btn" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
+    {:else}
+      <button class="btn danger" onclick={() => (confirmMute = !confirmMute)} disabled={busy}>{t("attendee.mute")}</button>
+    {/if}
   </div>
+
+  {#if confirmMute && !muted}
+    <div class="card warn" style="margin-top:0.5rem">
+      <p class="muted">{t("mute.confirm")}</p>
+      <div class="row">
+        <button class="btn danger" onclick={toggleMute} disabled={busy}>{t("attendee.mute")}</button>
+        <button class="btn" onclick={() => (confirmMute = false)}>{t("attendee.mute.cancel")}</button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 {#if settings}
   <div class="card stack">
-    <div class="field-label">{t("attendee.private")}</div>
-    <div class="row" style="flex-wrap:wrap">
-      <button class="btn inline" class:primary={has(settings.favorites)} onclick={() => toggle("favorites")}>{t("attendee.favorite")}</button>
-      <button class="btn inline" class:primary={has(settings.want_to_meet)} onclick={() => toggle("want_to_meet")}>{t("attendee.wantToMeet")}</button>
-      <button class="btn inline" class:primary={has(settings.met)} onclick={() => toggle("met")}>{t("attendee.met")}</button>
+    <div class="field-label" id="private-label">{t("attendee.private")}</div>
+    <div class="row" style="flex-wrap:wrap" role="group" aria-labelledby="private-label">
+      <button class="btn inline" aria-pressed={has(settings.favorites)} class:primary={has(settings.favorites)} onclick={() => toggle("favorites")}>{t("attendee.favorite")}</button>
+      <button class="btn inline" aria-pressed={has(settings.want_to_meet)} class:primary={has(settings.want_to_meet)} onclick={() => toggle("want_to_meet")}>{t("attendee.wantToMeet")}</button>
+      <button class="btn inline" aria-pressed={has(settings.met)} class:primary={has(settings.met)} onclick={() => toggle("met")}>{t("attendee.met")}</button>
     </div>
     <textarea rows="2" placeholder={t("attendee.note.placeholder")} bind:value={noteDraft} onblur={saveNote}></textarea>
   </div>
@@ -199,6 +244,7 @@
   <div class="stack">
     {#each posts as p (p.id)}<PostView post={p} />{/each}
   </div>
+{/if}
 {/if}
 
 <style>

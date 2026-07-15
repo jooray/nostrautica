@@ -7,7 +7,6 @@
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { VideoCapture } from "$lib/media/capture.js";
-  import EventHeader from "$lib/components/EventHeader.svelte";
   import {
     uploadMedia,
     submitProfileAndMedia,
@@ -33,6 +32,10 @@
   let busy = $state(false);
   let done = $state(false);
   let library = $state<MediaDescriptor[]>([]);
+  // Pre-submit disclosure (H10): the intro must not leave the device until the
+  // user acknowledges who processes it. Blocks every submit path below.
+  let disclosureAck = $state(false);
+  const hasCoordinator = $derived(!!ctx?.config.coordinator);
 
   const maxSec = $derived(ctx ? (talk ? ctx.config.maxTalkSec : ctx.config.maxVideoSec) : 90);
 
@@ -149,13 +152,12 @@
   }
 </script>
 
-{#if ctx}<EventHeader {ctx} compact link />{/if}
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
 
 {#if error}<div class="card warn">{error}</div>{/if}
 
 {#if done}
-  <div class="card">
+  <div class="card" role="status">
     <p>{t("record.uploaded", { kind: kindLabel })}</p>
     <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
       {t("record.backToEvent")}
@@ -166,6 +168,26 @@
     <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("record.loginFirst")}</button>
   </div>
 {:else}
+  <!-- What is shared, and with whom, before anything leaves the device (H10). -->
+  <div class="card" style="background:var(--bg-elev2)">
+    <strong>{t("record.disclosure.title")}</strong>
+    <ul class="muted" style="margin:0.5rem 0;padding-left:1.1rem;line-height:1.5">
+      <li>{t("record.disclosure.attendees")}</li>
+      {#if hasCoordinator}
+        <li>{t("record.disclosure.coordinator")}</li>
+        <li>{t("record.disclosure.providers")}</li>
+      {/if}
+    </ul>
+    <label class="row" style="align-items:flex-start;gap:0.5rem;font-weight:400">
+      <input
+        type="checkbox"
+        bind:checked={disclosureAck}
+        style="width:auto;min-height:0;flex:none;margin-top:0.2rem"
+      />
+      <span>{hasCoordinator ? t("record.disclosure.confirm") : t("record.disclosure.confirmNoCoord")}</span>
+    </label>
+  </div>
+
   {#if library.length > 0 && !recorded}
     <div class="card">
       <h2>{t("record.reuse.title")}</h2>
@@ -174,8 +196,8 @@
         <div class="row" style="justify-content:space-between;margin-top:0.5rem">
           <span class="badge">{m.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")} · {m.duration ?? "?"}s</span>
           <div class="row">
-            <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy}>{t("record.reuse.reuse")}</button>
-            <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy}>{t("record.reuse.fresh")}</button>
+            <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy || !disclosureAck}>{t("record.reuse.reuse")}</button>
+            <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy || !disclosureAck}>{t("record.reuse.fresh")}</button>
           </div>
         </div>
       {/each}
@@ -189,14 +211,14 @@
       <p class="muted">{t("record.recorded", { sec: recorded.durationSec })}</p>
       <div class="row">
         <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
-        <button class="btn primary" onclick={submitRecorded} disabled={busy}>
+        <button class="btn primary" onclick={submitRecorded} disabled={busy || !disclosureAck}>
           {busy ? t("record.uploading") : t("record.useThis")}
         </button>
       </div>
     {:else}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video bind:this={videoEl} playsinline muted style="max-width:100%;border-radius:12px;background:#000"></video>
-      <p class="muted">
+      <p class="muted" role="status" aria-live="polite">
         {t("record.limit", { sec: maxSec })}
         {#if recording}<strong>{t("record.timeLeft", { sec: remaining })}</strong>{/if}
       </p>

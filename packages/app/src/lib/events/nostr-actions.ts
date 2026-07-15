@@ -7,11 +7,12 @@ import {
   KIND_PROFILE,
   KIND_CONTACTS,
   KIND_RELAY_LIST,
+  KIND_DM_RELAY_LIST,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { ONBOARDING_RELAY_LIST } from "$lib/nostr/relays.js";
+import { ONBOARDING_RELAY_LIST, DM_RELAY_LIST } from "$lib/nostr/relays.js";
 import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -49,6 +50,35 @@ export async function ensureRelayList(signer: AppSigner): Promise<boolean> {
     kind: KIND_RELAY_LIST,
     created_at: Math.floor(Date.now() / 1000),
     tags,
+    content: "",
+  });
+  await publishOrQueue(event);
+  return true;
+}
+
+/**
+ * Build NIP-17 DM-relay-list (kind-10050) tags from a set of relay URLs. Pure so
+ * the tag shape is unit-tested. NIP-17 tags are `["relay", <url>]`.
+ */
+export function dmRelayListTags(urls: string[]): Tag[] {
+  return urls.map((url) => ["relay", url]);
+}
+
+/**
+ * Publish a NIP-17 DM relay list (kind-10050) IF the user has none yet — same
+ * fetch-first, never-override policy as `ensureRelayList` (spec §5.4). Without a
+ * 10050, gift-wrapped DMs and future group chat don't reliably reach the user in
+ * other clients. Returns true if a list was published, false if one already
+ * existed. Only ever call this for keys the app generated itself.
+ */
+export async function ensureDmRelayList(signer: AppSigner): Promise<boolean> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_DM_RELAY_LIST, pubkey);
+  if (existing) return false; // never override a user's existing DM relay list
+  const event = await signer.signEvent({
+    kind: KIND_DM_RELAY_LIST,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: dmRelayListTags(DM_RELAY_LIST),
     content: "",
   });
   await publishOrQueue(event);

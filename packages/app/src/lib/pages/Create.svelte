@@ -10,7 +10,7 @@
     uploadPublicImage,
   } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
-  import { publishProfile, ensureRelayList, seedFollows } from "$lib/events/nostr-actions.js";
+  import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -81,6 +81,7 @@
         if (signer) {
           await publishProfile(signer, { name: organizerName.trim() }).catch(() => {});
           await ensureRelayList(signer).catch(() => {});
+          await ensureDmRelayList(signer).catch(() => {});
         }
       }
       const signer = session.signer;
@@ -155,7 +156,7 @@
         <strong>{t("create.step.share")}</strong>
         <p class="mono" style="margin:0.25rem 0">{shareLink}</p>
         <div class="row">
-          <button class="btn inline" onclick={copyShare}>
+          <button class="btn inline" aria-live="polite" onclick={copyShare}>
             {copiedShare ? t("create.copied") : t("create.copyLink")}
           </button>
           {#if canShare}

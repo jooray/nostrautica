@@ -187,7 +187,7 @@
       <a class="btn primary" href={nc.uri} style="margin-top:0.5rem">{t("signin.remote.openAmber")}</a>
       <div class="row" style="margin-top:0.5rem">
         <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{nc.uri}</span>
-        <button class="btn inline" style="flex:none" onclick={copyUri}>
+        <button class="btn inline" style="flex:none" aria-live="polite" onclick={copyUri}>
           {copiedUri ? t("signin.remote.copied") : t("signin.remote.copy")}
         </button>
       </div>

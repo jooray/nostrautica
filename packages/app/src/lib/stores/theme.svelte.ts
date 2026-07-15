@@ -7,6 +7,10 @@ export type ThemePref = "light" | "dark" | "system";
 
 const STORAGE_KEY = "nostrautica:theme";
 
+// The effective page background per theme (mirrors --bg in app.css), used for
+// the address-bar/theme-color <meta> so browser chrome matches the app surface.
+const BG_COLOR = { dark: "#0e0e15", light: "#fafafc" } as const;
+
 function systemDark(): boolean {
   return (
     typeof window !== "undefined" &&
@@ -30,6 +34,15 @@ class ThemeStore {
       }
     }
     this.apply();
+    // When following the system and it flips, re-apply so data-theme and the
+    // theme-color meta track the OS without a reload.
+    if (typeof window !== "undefined" && window.matchMedia) {
+      window
+        .matchMedia("(prefers-color-scheme: dark)")
+        .addEventListener?.("change", () => {
+          if (this.pref === "system") this.apply();
+        });
+    }
   }
 
   set(pref: ThemePref): void {
@@ -39,9 +52,17 @@ class ThemeStore {
   }
 
   private apply(): void {
-    if (typeof document !== "undefined") {
-      document.documentElement.setAttribute("data-theme", this.effective);
+    if (typeof document === "undefined") return;
+    const eff = this.effective;
+    document.documentElement.setAttribute("data-theme", eff);
+    // Keep the browser chrome (address bar) in step with the app surface.
+    let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    if (!meta) {
+      meta = document.createElement("meta");
+      meta.name = "theme-color";
+      document.head.appendChild(meta);
     }
+    meta.content = BG_COLOR[eff];
   }
 }
 

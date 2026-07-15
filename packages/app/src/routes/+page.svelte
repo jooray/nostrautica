@@ -14,6 +14,9 @@
   import Attendee from "$lib/pages/Attendee.svelte";
   import Matches from "$lib/pages/Matches.svelte";
   import Admin from "$lib/pages/Admin.svelte";
+  import Posts from "$lib/pages/Posts.svelte";
+  import Post from "$lib/pages/Post.svelte";
+  import EventMore from "$lib/pages/EventMore.svelte";
   import Dm from "$lib/pages/Dm.svelte";
   import DmChat from "$lib/pages/DmChat.svelte";
   import NotFound from "$lib/pages/NotFound.svelte";
@@ -45,6 +48,12 @@
   {#key route.naddr}<Matches naddr={route.naddr} />{/key}
 {:else if route.name === "admin"}
   {#key route.naddr}<Admin naddr={route.naddr} />{/key}
+{:else if route.name === "posts"}
+  {#key route.naddr}<Posts naddr={route.naddr} />{/key}
+{:else if route.name === "post"}
+  {#key route.naddr + route.d}<Post naddr={route.naddr} d={route.d} />{/key}
+{:else if route.name === "eventMore"}
+  {#key route.naddr}<EventMore naddr={route.naddr} />{/key}
 {:else if route.name === "dm"}
   <Dm />
 {:else if route.name === "dmPeer"}

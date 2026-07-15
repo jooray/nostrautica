@@ -15,6 +15,7 @@ import {
   freshCopy,
   blindedD,
   blindedDLiteral,
+  mediaDescriptorSchema,
   type MediaDescriptor,
   type AttendeeProfile,
 } from "@nostrautica/protocol";
@@ -88,7 +89,8 @@ export async function uploadMedia(
     ciphertext,
     "application/octet-stream",
   );
-  return { ...descriptor, url: urls };
+  // Real Blossom URLs are known now — validate the finalized descriptor (https-only).
+  return mediaDescriptorSchema.parse({ ...descriptor, url: urls });
 }
 
 /**
@@ -185,7 +187,7 @@ export async function prepareReuse(
       re.ciphertext,
       "application/octet-stream",
     );
-    return { ...re.descriptor, url: urls };
+    return mediaDescriptorSchema.parse({ ...re.descriptor, url: urls });
   }
   // Default reuse: mirror the existing blob onto this event's servers.
   const extraUrls: string[] = [];
@@ -193,7 +195,7 @@ export async function prepareReuse(
     const url = await mirror(signer, server, descriptor.url[0]!, descriptor.x);
     if (url && !descriptor.url.includes(url)) extraUrls.push(url);
   }
-  return { ...descriptor, url: unionRelays(descriptor.url, extraUrls) };
+  return mediaDescriptorSchema.parse({ ...descriptor, url: unionRelays(descriptor.url, extraUrls) });
 }
 
 /** Load the attendee's own 31602 self-copy for this event (profile + media). */

@@ -11,14 +11,14 @@
   import { sendJoinRequest } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
-  import { publishProfile, ensureRelayList, seedFollows } from "$lib/events/nostr-actions.js";
+  import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import { parseCoordinate } from "@nostrautica/protocol";
   import { fetchProfiles } from "$lib/events/social.js";
   import { uploadPublicImage } from "$lib/media/image.js";
-  import { loadLibrary, prepareReuse } from "$lib/media/submit.js";
+  import { loadLibrary, prepareReuse, loadSelfCopy } from "$lib/media/submit.js";
   import type { MediaDescriptor } from "@nostrautica/protocol";
   import BackupCard from "$lib/components/BackupCard.svelte";
-  import EventHeader from "$lib/components/EventHeader.svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
@@ -125,6 +125,7 @@
       approved = await isApproved(ctx.coordinate);
       if (approved) {
         clearJoinSent(ctx.coordinate);
+        void checkIntro();
       } else if (joinSentAt(ctx.coordinate) !== undefined) {
         sent = true;
         void pollForGrant();
@@ -146,7 +147,24 @@
       await receiveGrants(session.signer).catch(() => {});
       approved = await isApproved(coordinate);
     }
-    if (approved) clearJoinSent(coordinate); // marker served its purpose
+    if (approved) {
+      clearJoinSent(coordinate); // marker served its purpose
+      void checkIntro();
+    }
+  }
+
+  // Post-approval routing (U1): lead with "Record your intro" unless one already
+  // exists, in which case "Go to event overview" is the primary action.
+  let introDone = $state(false);
+  async function checkIntro() {
+    if (!ctx || !session.signer) return;
+    try {
+      const bk = await deriveBlindingKey(session.signer);
+      const self = await loadSelfCopy(session.signer, ctx, bk);
+      introDone = (self?.media ?? []).some((m) => m.kind === "intro");
+    } catch {
+      /* can't tell — default to offering Record (introDone stays false) */
+    }
   }
 
   // Quiet "send again" for the stuck case (P2) — clears the marker and returns
@@ -206,6 +224,7 @@
         // Only for a key WE generated do we publish kind-0 (§5.4).
         await publishProfile(signer, { name: displayName, about, picture });
         await ensureRelayList(signer);
+        await ensureDmRelayList(signer).catch(() => {});
         // Seed the follow list with the event so it's never empty (§5.4 item 3).
         await seedFollows(signer, parseCoordinate(ctx.coordinate).pubkey).catch(() => {});
       } else {
@@ -280,10 +299,23 @@
   <p class="muted">{t("join.loading")}</p>
 {:else if approved}
   <h1>{t("join.youreIn")}</h1>
-  <div class="card">
-    <button class="btn primary" onclick={() => router.go({ name: "attendees", naddr })}>
-      {t("join.seeWhosHere")}
-    </button>
+  <div class="card stack">
+    {#if !introDone}
+      <!-- U1: recording the intro is the next step matching depends on. -->
+      <button class="btn primary" onclick={() => router.go({ name: "record", naddr, talk: false })}>
+        {t("join.recordIntro")}
+      </button>
+      <button class="btn" onclick={() => router.go({ name: "event", naddr })}>
+        {t("join.goToOverview")}
+      </button>
+    {:else}
+      <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
+        {t("join.goToOverview")}
+      </button>
+      <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>
+        {t("join.seeWhosHere")}
+      </button>
+    {/if}
   </div>
   {#if session.signer?.method === "local"}
     <div class="card">
@@ -319,7 +351,6 @@
     </p>
   </div>
 {:else}
-  <EventHeader {ctx} />
   <h1>{t("join.title", { title: ctx.title })}</h1>
 
   {#if !session.loggedIn}
@@ -370,7 +401,7 @@
           {#if newPicPreview}
             <img src={newPicPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
           {:else}
-            <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;font-size:1.4rem;color:var(--text-dim)">＋</span>
+            <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;color:var(--text-dim)"><Icon name="plus" size={22} /></span>
           {/if}
           <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
         </label>

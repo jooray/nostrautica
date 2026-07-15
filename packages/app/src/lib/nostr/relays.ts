@@ -49,6 +49,16 @@ export const DEFAULT_BLOSSOM_SERVERS = ENV_BLOSSOM ?? [
   "https://cdn.satellite.earth",
 ];
 
+/**
+ * NIP-17 DM-relay defaults (kind 10050) published for app-generated keys so
+ * gift-wrapped DMs (and future group chat) reliably reach the user in other
+ * clients. These are inboxes where the user agrees to receive kind-1059 wraps —
+ * a small set of widely-reachable write relays. Honors VITE_NOSTRAUTICA_RELAYS
+ * so local e2e keeps working.
+ */
+export const DM_RELAY_LIST: string[] =
+  ENV_RELAYS ?? ["wss://relay.primal.net", "wss://relay.damus.io", "wss://nos.lol"];
+
 /** NIP-65 relay-list defaults published for new users (spec §5.4 item 2). */
 export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean }[] =
   ENV_RELAYS

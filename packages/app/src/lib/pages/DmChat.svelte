@@ -8,7 +8,10 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { fetchDms, sendDm, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { mutes } from "$lib/stores/mutes.svelte.js";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import Avatar from "$lib/components/Avatar.svelte";
 
   let { npub }: { npub: string } = $props();
 
@@ -26,9 +29,23 @@
   let draft = $state("");
   let loading = $state(true);
   let sending = $state(false);
-  let error = $state<string | null>(null);
+  let error = $state<unknown>(null);
   let timer: ReturnType<typeof setInterval> | undefined;
   let scroller = $state<HTMLDivElement | null>(null);
+  let muteBusy = $state(false);
+  const muted = $derived(!!peer && mutes.isMuted(peer));
+
+  async function toggleMute() {
+    if (!session.signer || !peer) return;
+    muteBusy = true;
+    try {
+      await mutes.toggle(session.signer, peer);
+    } catch (e) {
+      error = e;
+    } finally {
+      muteBusy = false;
+    }
+  }
 
   async function refresh() {
     if (!session.signer || !peer) return;
@@ -39,12 +56,13 @@
         !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
       // Merge: relay results replace optimistic entries with the same text+minute.
       messages = mine;
+      error = null;
       if (atBottom) {
         await tick();
         scroller?.scrollTo({ top: scroller.scrollHeight });
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      error = e;
     } finally {
       loading = false;
     }
@@ -52,6 +70,7 @@
 
   onMount(async () => {
     await connectNdk();
+    if (session.signer) void mutes.load(session.signer);
     if (peer) profile = (await fetchProfiles([peer])).get(peer);
     await refresh();
     timer = setInterval(refresh, 5_000);
@@ -95,23 +114,21 @@
   <div class="card warn">{t("dmchat.invalidLink")}</div>
 {:else}
   <div class="row" style="gap:0.75rem;margin:1rem 0 0.5rem">
-    {#if profile?.picture}
-      <img
-        src={profile.picture}
-        alt=""
-        width="40"
-        height="40"
-        style="border-radius:50%;object-fit:cover;flex:none"
-      />
-    {/if}
-    <h1 style="margin:0;font-size:1.25rem">{title}</h1>
+    <Avatar pubkey={peer} name={profile?.name} picture={profile?.picture} size={40} />
+    <h1 style="margin:0;font-size:1.25rem;flex:1;min-width:0">{title}</h1>
+    <button class="btn inline" style="flex:none" onclick={toggleMute} disabled={muteBusy}>
+      {muted ? t("attendee.unmute") : t("attendee.mute")}
+    </button>
   </div>
   <p class="muted" style="margin:0 0 0.5rem">
     {t("dmchat.e2e")}
   </p>
+  {#if muted}
+    <p class="muted" role="status" style="margin:0 0 0.5rem">{t("mute.confirm")}</p>
+  {/if}
 
   {#if error}
-    <div class="card warn"><span class="muted">{error}</span></div>
+    <ErrorState {error} />
   {/if}
 
   <div

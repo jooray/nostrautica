@@ -52,7 +52,7 @@
       {t("me.handle.body")}
     </p>
     <p class="mono">{session.npub}</p>
-    <button class="btn inline" onclick={copyNpub}>{copied ? t("me.copied") : t("me.copyNpub")}</button>
+    <button class="btn inline" aria-live="polite" onclick={copyNpub}>{copied ? t("me.copied") : t("me.copyNpub")}</button>
     <p class="muted" style="margin-top:0.5rem">
       {t("me.signedInVia", { method: session.signer?.method ?? "" })}
       {#if !isLocal}

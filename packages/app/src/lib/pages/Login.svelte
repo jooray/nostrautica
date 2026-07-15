@@ -1,11 +1,12 @@
 <script lang="ts">
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
-  import { publishProfile, ensureRelayList } from "$lib/events/nostr-actions.js";
+  import { publishProfile, ensureRelayList, ensureDmRelayList } from "$lib/events/nostr-actions.js";
   import { uploadPublicImage } from "$lib/media/image.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let error = $state<string | null>(null);
@@ -37,6 +38,7 @@
             await publishProfile(signer, { name: newName.trim() || undefined, picture }).catch(() => {});
           }
           await ensureRelayList(signer).catch(() => {});
+          await ensureDmRelayList(signer).catch(() => {});
         }
         // Stay so the freshly-generated key's backup card shows.
       } catch (e) {
@@ -95,7 +97,7 @@
         {#if picPreview}
           <img src={picPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
         {:else}
-          <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;font-size:1.4rem;color:var(--text-dim)">＋</span>
+          <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;color:var(--text-dim)"><Icon name="plus" size={22} /></span>
         {/if}
         <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
       </label>

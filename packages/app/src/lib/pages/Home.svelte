@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import { coordinateToNaddr, parseCoordinate } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -96,7 +97,7 @@
     {/each}
   </div>
   <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
-    {t("home.createAnother")}
+    <Icon name="plus" size={17} />{t("home.createAnother")}
   </button>
 {:else if !session.loggedIn}
   <div class="card">

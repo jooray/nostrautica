@@ -14,9 +14,9 @@
 
 <div class="card">
   <div class="field-label">{t("settings.theme")}</div>
-  <div class="row">
+  <div class="row" role="group" aria-label={t("settings.theme")}>
     {#each themeOptions as o (o.value)}
-      <button class="btn inline" class:primary={theme.pref === o.value} onclick={() => theme.set(o.value)}>
+      <button class="btn inline" aria-pressed={theme.pref === o.value} class:primary={theme.pref === o.value} onclick={() => theme.set(o.value)}>
         {t(o.label)}
       </button>
     {/each}
@@ -25,9 +25,9 @@
 
 <div class="card">
   <div class="field-label">{t("settings.language")}</div>
-  <div class="row">
+  <div class="row" role="group" aria-label={t("settings.language")}>
     {#each LOCALES as loc (loc)}
-      <button class="btn inline" class:primary={i18n.locale === loc} onclick={() => i18n.set(loc)}>
+      <button class="btn inline" aria-pressed={i18n.locale === loc} class:primary={i18n.locale === loc} onclick={() => i18n.set(loc)}>
         {LOCALE_NAMES[loc]}
       </button>
     {/each}

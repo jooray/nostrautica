@@ -9,11 +9,20 @@
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { joinSentAt, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
   import { install } from "$lib/stores/install.svelte.js";
-  import { fetchEventUpdates, type EventUpdate } from "$lib/events/updates.js";
-  import { deriveBlindingKey } from "$lib/events/blinding.js";
-  import { loadSelfCopy } from "$lib/media/submit.js";
-  import { renderMarkdown } from "$lib/social/markdown.js";
+  import {
+    fetchEventPosts,
+    fetchAttendeePosts,
+    fetchPostByD,
+    type EventPost,
+  } from "$lib/events/posts.js";
+  import { fetchEventPage, resolveTarget, type EventPageModel } from "$lib/events/event-page.js";
+  import Icon from "$lib/components/icons/Icon.svelte";
+  import { fetchRoster } from "$lib/events/attendee.js";
+  import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import PostCard from "$lib/components/PostCard.svelte";
+  import ReadinessJourney from "$lib/components/ReadinessJourney.svelte";
+  import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -23,11 +32,12 @@
   let approved = $state(false);
   let organizer = $state(false);
   let requestPending = $state(false); // join request sent, approval not landed yet (P2)
-  let updates = $state<EventUpdate[]>([]);
-  // State-aware record CTA (UI-SUGGESTIONS #5): primary = "Record your intro"
-  // until the 31602 self-copy carries an intro for this event. Default true so
-  // the CTA doesn't flash "record" at people who already have one.
-  let hasIntro = $state(true);
+  // Customized layout (31608) or the default feed when none is published.
+  let page = $state<EventPageModel | undefined>(undefined);
+  let eventPosts = $state<EventPost[]>([]);
+  let attendeePosts = $state<EventPost[]>([]);
+  let pinnedPosts = $state<Map<string, EventPost>>(new Map());
+  let rosterCount = $state<number | undefined>(undefined);
   let installHint = $state(false);
 
   const installHintId = "event-page";
@@ -53,24 +63,82 @@
       });
       if (approved) {
         installHint = install.shouldShow(installHintId);
-        void checkIntro();
       }
-      // Event updates (30023 by E_id) are public — everyone sees them.
-      updates = await fetchEventUpdates(ctx.coordinate).catch(() => []);
+      // Readiness journey (§4.1): derived from real state, one primary CTA.
+      void readinessStore.load(ctx, session.signer);
+      // Customized layout (spec §7.4 kind 31608) or the default feed. Members
+      // decrypt the members-only additions; visitors get the public parts.
+      page = await fetchEventPage(ctx).catch(() => undefined);
+      // The official feed (30023 ∪ 31607 by E_id) is fetched either way —
+      // it's the default layout and the most common custom section.
+      eventPosts = await fetchEventPosts(ctx).catch(() => []);
+      if (page) await loadSectionData(page.sections);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
   });
 
-  async function checkIntro() {
-    if (!ctx || !session.signer) return;
-    try {
-      const bk = await deriveBlindingKey(session.signer);
-      const self = await loadSelfCopy(session.signer, ctx, bk);
-      hasIntro = (self?.media ?? []).some((m) => m.kind === "intro");
-    } catch {
-      /* can't tell — keep the default, don't nag */
+  async function loadSectionData(sections: MergedSection[]) {
+    if (!ctx) return;
+    const jobs: Promise<void>[] = [];
+    if (sections.some((s) => s.type === "posts" && s.source !== "event")) {
+      jobs.push(
+        fetchAttendeePosts(ctx).then((p) => {
+          attendeePosts = p;
+        }),
+      );
     }
+    if (sections.some((s) => s.type === "attendees") && approved) {
+      jobs.push(
+        fetchRoster(ctx!)
+          .then((r) => {
+            rosterCount = r?.attendees.length;
+          })
+          .catch(() => undefined) as Promise<void>,
+      );
+    }
+    const refs = sections.flatMap((s) => (s.type === "pinned" ? s.refs : []));
+    for (const ref of refs) {
+      jobs.push(
+        resolvePinned(ref).then((post) => {
+          if (post) pinnedPosts = new Map(pinnedPosts).set(ref, post);
+        }),
+      );
+    }
+    await Promise.allSettled(jobs);
+  }
+
+  /** A pinned naddr → this event's post by d (foreign refs are skipped). */
+  async function resolvePinned(ref: string): Promise<EventPost | undefined> {
+    if (!ctx) return undefined;
+    try {
+      const { coordinate } = naddrToCoordinate(ref);
+      const { pubkey, identifier } = parseCoordinate(coordinate);
+      const { pubkey: eid } = parseCoordinate(ctx.coordinate);
+      if (pubkey !== eid) return undefined;
+      return await fetchPostByD(ctx, identifier);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Posts for a `posts` section, filtered by its source × visibility config. */
+  function sectionPosts(section: Extract<MergedSection, { type: "posts" }>): EventPost[] {
+    let list: EventPost[] = [];
+    if (section.source !== "attendees") list = list.concat(eventPosts);
+    if (section.source !== "event") list = list.concat(attendeePosts);
+    if (section.visibility === "public") list = list.filter((p) => !p.membersOnly);
+    if (section.visibility === "members") list = list.filter((p) => p.membersOnly);
+    return list.sort((a, b) => b.publishedAt - a.publishedAt);
+  }
+
+  function openMenuTarget(target: string) {
+    if (!ctx) return;
+    const resolved = resolveTarget(ctx, target);
+    if (!resolved) return;
+    if (resolved.type === "post") router.go({ name: "post", naddr, d: resolved.d });
+    else if (resolved.type === "url") window.open(resolved.href, "_blank", "noopener");
+    else window.open(`https://njump.me/${resolved.naddr}`, "_blank", "noopener");
   }
 
   async function promptInstall() {
@@ -83,9 +151,17 @@
     installHint = false;
   }
 
-  function fmt(unix?: number) {
-    return unix ? new Date(unix * 1000).toLocaleString() : "";
-  }
+  const overviewStatus = $derived.by(() => {
+    if (organizer || approved)
+      return { labelKey: "event.status.approved" as const, tone: "ok" as const };
+    if (requestPending)
+      return { labelKey: "event.status.pending" as const, tone: "warn" as const };
+    return { labelKey: "event.status.visitor" as const, tone: "neutral" as const };
+  });
+
+  const latestPost = $derived(
+    [...eventPosts].sort((a, b) => b.publishedAt - a.publishedAt)[0],
+  );
 </script>
 
 {#if error}
@@ -96,78 +172,37 @@
 {:else if !ctx}
   <p class="muted">{t("event.loading")}</p>
 {:else}
-  <EventHeader {ctx} />
-  <p>{ctx.summary}</p>
-  <p class="muted">
-    {#if ctx.start}📅 {fmt(ctx.start)}{/if}
-    {#if ctx.location}· 📍 {ctx.location}{/if}
-  </p>
-  <div class="row" style="flex-wrap:wrap">
-    <!-- Human labels, not raw config values (UI-SUGGESTIONS #3). -->
-    <span class="badge">
-      {ctx.config.approval === "invite"
-        ? t("event.approval.invite")
-        : ctx.config.approval === "manual"
-          ? t("event.approval.manual")
-          : t("event.approval.both")}
-    </span>
-    {#if ctx.config.matching === "on"}<span class="badge">{t("event.matching")}</span>{/if}
-  </div>
+  <EventHeader {ctx} status={overviewStatus} />
+  {#if ctx.summary}<p class="summary">{ctx.summary}</p>{/if}
 
-  <div class="card stack">
-    {#if organizer}
-      <button class="btn primary" onclick={() => router.go({ name: "admin", naddr })}>
-        {t("event.organizerAdmin")}
-      </button>
-    {/if}
-    {#if approved}
-      <!-- State-aware primary (UI-SUGGESTIONS #5): no intro yet → recording is
-           the highest-value action; intro done → matches take the lead. -->
-      {#if !hasIntro}
-        <button class="btn primary" onclick={() => router.go({ name: "record", naddr, talk: false })}>
-          {t("event.recordIntro")}
+  {#if organizer}
+    <button class="btn inline" onclick={() => router.go({ name: "admin", naddr })}>
+      {t("event.organizerAdmin")}
+    </button>
+  {/if}
+
+  <!-- Readiness journey (§4.1): one honest next action, derived from real state.
+       Visitors see the Join CTA as step 1; approved members see intro/matches. -->
+  {#if readinessStore.readiness}
+    <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
+  {/if}
+
+  {#if page && page.menu.length}
+    <!-- Custom menu (31608): merged public + members-only items, in order. -->
+    <nav class="row menu" style="flex-wrap:wrap" data-event-menu>
+      {#each page.menu as item (item.label + item.target)}
+        <button class="btn inline" onclick={() => openMenuTarget(item.target)}>
+          {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
         </button>
-        <p class="muted" style="margin:-0.25rem 0 0">
-          {t("event.recordIntro.body")}
-        </p>
-        <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>
-          {t("event.seeWhosHere")}
-        </button>
-        {#if ctx.config.matching === "on"}
-          <button class="btn" onclick={() => router.go({ name: "matches", naddr })}>
-            {t("event.peopleToMeet")}
-          </button>
-        {/if}
-      {:else}
-        <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>
-          {t("event.seeWhosHere")}
-        </button>
-        {#if ctx.config.matching === "on"}
-          <button class="btn primary" onclick={() => router.go({ name: "matches", naddr })}>
-            {t("event.peopleToMeet")}
-          </button>
-        {/if}
-        <button class="btn" onclick={() => router.go({ name: "record", naddr, talk: false })}>
-          {t("event.recordOrUpdate")}
-        </button>
-      {/if}
-    {:else if requestPending}
-      <p style="margin:0"><strong>{t("event.requestSent")}</strong></p>
-      <p class="muted" style="margin:0">
-        {t("event.requestSent.body")}
-      </p>
-      <button class="btn" onclick={() => router.go({ name: "join", naddr })}>
-        {t("event.checkStatus")}
-      </button>
-    {:else}
-      <button class="btn primary" onclick={() => router.go({ name: "join", naddr })}>
-        {t("event.join")}
-      </button>
-      <p class="muted">
-        {t("event.join.body")}
-      </p>
-    {/if}
-  </div>
+      {/each}
+    </nav>
+  {/if}
+
+  {#if latestPost}
+    <!-- "Latest" highlight — newest update, links through to the Updates tab. -->
+    <p class="kicker">{t("event.latest")}</p>
+    <PostCard post={latestPost} {naddr} full />
+  {/if}
 
   {#if approved && installHint}
     <!-- One-time, dismissable install hint (UI-SUGGESTIONS #24). Never shown in
@@ -191,35 +226,75 @@
     </div>
   {/if}
 
-  {#if updates.length}
-    <h2>{t("event.updates")}</h2>
-    {#each updates as u (u.d)}
-      <article class="card">
-        <div class="row" style="justify-content:space-between;align-items:baseline">
-          <h3 style="margin:0">{u.title}</h3>
-          <span class="muted" style="font-size:0.75rem;flex:none">
-            {new Date(u.publishedAt * 1000).toLocaleDateString()}
-            {#if u.editedAt > u.publishedAt}{t("event.updates.edited")}{/if}
-          </span>
+  {#if page}
+    <!-- Custom layout (31608): sections compose the home below the header. -->
+    {#each page.sections as section, i (i)}
+      {#if section.type === "posts"}
+        {@const list = sectionPosts(section)}
+        {#if list.length}
+          <h2>{t("event.posts")}</h2>
+          {#each list as post (post.source + post.authorPubkey + post.d)}
+            <PostCard {post} {naddr} full={post.source === "event"} />
+          {/each}
+        {/if}
+      {:else if section.type === "pinned"}
+        {@const pins = section.refs
+          .map((ref) => pinnedPosts.get(ref))
+          .filter((p): p is EventPost => p !== undefined)}
+        {#if pins.length}
+          <h2 class="pinned-head"><Icon name="pennant" size={18} /> {t("event.pinned")}</h2>
+          {#each pins as post (post.d)}
+            <PostCard {post} {naddr} full />
+          {/each}
+        {/if}
+      {:else if section.type === "attendees" && approved}
+        <!-- Roster preview — renders only for members (spec §7.4). -->
+        <div class="card">
+          <strong>{t("event.attendeesSection")}</strong>
+          {#if rosterCount !== undefined}
+            <p class="muted" style="margin:0.25rem 0 0.5rem">
+              {t("event.attendeesSection.count", { n: rosterCount })}
+            </p>
+          {/if}
+          <button class="btn inline" onclick={() => router.go({ name: "attendees", naddr })}>
+            {t("event.seeWhosHere")}
+          </button>
         </div>
-        <!-- Safe: renderMarkdown escapes the source before emitting its own tags. -->
-        <div class="longform">{@html renderMarkdown(u.content)}</div>
-      </article>
+      {/if}
     {/each}
+    <button class="btn inline" onclick={() => router.go({ name: "posts", naddr })}>
+      {t("event.allPosts")}
+    </button>
+  {:else if eventPosts.length}
+    <!-- Default layout (no 31608): the official feed, exactly as before. -->
+    <h2>{t("event.updates")}</h2>
+    {#each eventPosts as post (post.d)}
+      <PostCard {post} {naddr} full />
+    {/each}
+    <button class="btn inline" onclick={() => router.go({ name: "posts", naddr })}>
+      {t("event.allPosts")}
+    </button>
   {/if}
 {/if}
 
 <style>
-  .longform :global(p) {
+  .menu {
     margin: 0.5rem 0;
   }
-  .longform :global(ul) {
-    margin: 0.5rem 0;
-    padding-left: 1.25rem;
+  .summary {
+    margin: 0.25rem 0 0.75rem;
   }
-  .longform :global(h3),
-  .longform :global(h4),
-  .longform :global(h5) {
-    margin: 0.75rem 0 0.25rem;
+  .kicker {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.72rem;
+    font-weight: 650;
+    color: var(--text-dim);
+    margin: 1.1rem 0 0.35rem;
+  }
+  .pinned-head {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
   }
 </style>

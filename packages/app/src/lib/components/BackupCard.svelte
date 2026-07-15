@@ -50,7 +50,7 @@
     {t("backup.noKey")}
   </p>
 {:else}
-  <button class="btn primary" onclick={() => copy(toNsec(sk), "key")}>
+  <button class="btn primary" aria-live="polite" onclick={() => copy(toNsec(sk), "key")}>
     {copied === "key" ? t("backup.copied") : t("backup.copyKey")}
   </button>
   <p class="muted" style="margin-top:0.5rem">

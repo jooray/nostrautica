@@ -7,12 +7,15 @@ import {
   KIND_GIFT_WRAP,
   KIND_KEY_GRANT,
   KIND_ORGANIZER_GRANT,
+  KIND_EVENT_CONFIG,
+  KIND_CALENDAR_EVENT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
   KIND_MATCH_LIST,
   giftwrapSince,
   eckDecrypt,
   base64ToBytes,
+  hexToBytes,
   blindedD,
   keyGrantContentSchema,
   organizerGrantContentSchema,
@@ -20,11 +23,17 @@ import {
   rosterContentSchema,
   matchListContentSchema,
   parseCoordinate,
+  parseEventConfig,
   type DirectoryEntryContent,
   type RosterContent,
   type MatchListContent,
+  type KeyGrantContent,
+  type OrganizerGrantContent,
+  type EventConfig,
+  type Rumor,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
+import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
@@ -34,11 +43,135 @@ import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 
 /**
+ * Authenticate a received 21605 Organizer Grant (spec §8, audit finding C2).
+ *
+ * The seal author is bound to `rumor.pubkey` by `signerUnwrap` (NIP-59 rumor/seal
+ * author binding), so `rumor.pubkey` is the cryptographically verified authority
+ * that sealed this grant. A genuine organizer grant is sealed by the event's E_id
+ * (= the coordinate's pubkey), names E_id as the granter, and carries custody
+ * secrets that derive exactly E_id and the event's declared inbox key. Anyone else
+ * (a random Nostr key claiming to be E_id) is rejected: they can't seal as E_id.
+ *
+ * `config` is the event's parsed, signed 31600. When it can't be fetched the E_id
+ * authority + `eid_nsec` derivation are still enforced; the inbox check is skipped.
+ */
+export function authenticateOrganizerGrant(
+  rumor: Rumor,
+  grant: OrganizerGrantContent,
+  config: EventConfig | undefined,
+): boolean {
+  let coord;
+  try {
+    coord = parseCoordinate(grant.a);
+  } catch {
+    return false;
+  }
+  if (coord.kind !== KIND_CALENDAR_EVENT) return false;
+  const eid = coord.pubkey;
+  // Must be sealed by E_id itself, and name E_id as the granting authority.
+  if (rumor.pubkey !== eid) return false;
+  if (grant.granted_by !== rumor.pubkey) return false;
+  // Custody secrets must derive exactly E_id (and the declared inbox, if known).
+  try {
+    if (getPublicKey(hexToBytes(grant.eid_nsec)) !== eid) return false;
+    const einboxPk = getPublicKey(hexToBytes(grant.einbox_nsec));
+    if (config && einboxPk !== config.inbox) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Authenticate a received 21602 Key Grant (audit finding C2).
+ *
+ * A genuine key grant is sealed either by the event's E_id (= the coordinate's
+ * pubkey) or by the event's currently configured coordinator, and names that same
+ * author as the granter. `rumor.pubkey` is the verified seal author (see
+ * `authenticateOrganizerGrant`). The event's signed 31600 `config` is required to
+ * identify the configured coordinator; without it the authority can't be
+ * established and the grant is rejected.
+ */
+export function authenticateKeyGrant(
+  rumor: Rumor,
+  grant: KeyGrantContent,
+  config: EventConfig | undefined,
+): boolean {
+  let coord;
+  try {
+    coord = parseCoordinate(grant.a);
+  } catch {
+    return false;
+  }
+  if (coord.kind !== KIND_CALENDAR_EVENT) return false;
+  if (!config) return false;
+  const eid = coord.pubkey;
+  const author = rumor.pubkey;
+  const authorized = author === eid || (!!config.coordinator && author === config.coordinator);
+  if (!authorized) return false;
+  if (grant.granted_by !== author) return false;
+  return true;
+}
+
+/** Fetch and parse the latest signed 31600 config for an event coordinate. */
+async function fetchEventConfig(coordinate: string): Promise<EventConfig | undefined> {
+  let coord;
+  try {
+    coord = parseCoordinate(coordinate);
+  } catch {
+    return undefined;
+  }
+  const events = await fetchEvents(
+    { kinds: [KIND_EVENT_CONFIG], authors: [coord.pubkey], "#d": [coord.identifier] },
+    DEFAULT_RELAYS,
+  );
+  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  if (!latest) return undefined;
+  try {
+    return parseEventConfig(coord.pubkey, latest.tags);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Per-identity marker: has a full-history grant backfill run on this device? */
+function grantsBackfilledKey(pubkey: string): string {
+  return `nostrautica-grants-backfilled:${pubkey}`;
+}
+function hasBackfilledGrants(pubkey: string): boolean {
+  try {
+    return localStorage.getItem(grantsBackfilledKey(pubkey)) === "1";
+  } catch {
+    return false;
+  }
+}
+function markGrantsBackfilled(pubkey: string): void {
+  try {
+    localStorage.setItem(grantsBackfilledKey(pubkey), "1");
+  } catch {
+    /* storage unavailable — a full backfill just re-runs next load */
+  }
+}
+
+/**
  * Scan for ECK grants addressed to the user and fold them into the local key
  * store. Returns the coordinates the user now holds a key for.
+ *
+ * Every grant is authenticated before it can mutate local key custody (audit
+ * finding C2): a forged grant sealed by an arbitrary Nostr key claiming to be the
+ * event's E_id/coordinator is ignored, so an attacker can't poison local state
+ * with attacker-chosen keys or fabricate administration/approval.
+ *
+ * Recovery window (audit finding H2): on the FIRST grant scan for this identity on
+ * this device (a fresh install or a restored identity), backfill the full
+ * gift-wrap history (since 0) so an ECK grant published longer than the
+ * steady-state window ago — e.g. an event joined weeks earlier — is not missed on
+ * a clean device. Later scans use the narrow live-overlap window. This mirrors the
+ * coordinator's fresh-install vs. recent backfill.
  */
 export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
+  const fullBackfill = !hasBackfilledGrants(pubkey);
   // Relay-only read (no dexie cache in the loop): grants must not be missed —
   // fetchEvents can EOSE-resolve before the cache adapter surfaces a wrap that
   // already arrived from the relay (found via e2e, TEST-REPORT-2026-07-13).
@@ -48,13 +181,27 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     {
       kinds: [KIND_GIFT_WRAP],
       "#p": [pubkey],
-      since: giftwrapSince(),
+      since: fullBackfill ? 0 : giftwrapSince(),
     },
     DEFAULT_RELAYS,
   )) as unknown as GiftWrap[];
 
   const coordinates = new Set<string>();
+  // Cache the (network-fetched) signed 31600 per coordinate so multiple grants
+  // for one event only cost a single config lookup.
+  const configCache = new Map<string, EventConfig | undefined>();
+  const configFor = async (coordinate: string): Promise<EventConfig | undefined> => {
+    if (!configCache.has(coordinate)) {
+      configCache.set(coordinate, await fetchEventConfig(coordinate));
+    }
+    return configCache.get(coordinate);
+  };
+
   for (const wrap of wraps) {
+    // Recipient binding: the relay filter already restricts `#p`, but a hostile
+    // relay can return extra wraps — the successful unwrap below proves the wrap
+    // was actually sealed to us, this is just a cheap early guard.
+    if (!wrap.tags.some((tg) => tg[0] === "p" && tg[1] === pubkey)) continue;
     let rumor;
     try {
       rumor = await signerUnwrap(signer, wrap);
@@ -63,19 +210,28 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     }
     if (rumor.kind === KIND_ORGANIZER_GRANT) {
       // Co-organizer custody: store the full event keys so this device can admin.
+      let grant;
       try {
-        const grant = organizerGrantContentSchema.parse(JSON.parse(rumor.content));
-        await saveEventKeys({
-          coordinate: grant.a,
-          role: "organizer",
-          eck: grant.eck,
-          eidNsecHex: grant.eid_nsec,
-          einboxNsecHex: grant.einbox_nsec,
-        });
-        coordinates.add(grant.a);
+        grant = organizerGrantContentSchema.parse(JSON.parse(rumor.content));
       } catch {
-        /* malformed */
+        continue; /* malformed */
       }
+      const config = await configFor(grant.a);
+      if (!authenticateOrganizerGrant(rumor, grant, config)) {
+        console.warn(
+          "[receiveGrants] ignored forged/invalid organizer grant (21605) for",
+          grant.a,
+        );
+        continue;
+      }
+      await saveEventKeys({
+        coordinate: grant.a,
+        role: "organizer",
+        eck: grant.eck,
+        eidNsecHex: grant.eid_nsec,
+        einboxNsecHex: grant.einbox_nsec,
+      });
+      coordinates.add(grant.a);
       continue;
     }
     if (rumor.kind !== KIND_KEY_GRANT) continue;
@@ -85,6 +241,14 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     } catch {
       continue;
     }
+    const config = await configFor(grant.a);
+    if (!authenticateKeyGrant(rumor, grant, config)) {
+      console.warn(
+        "[receiveGrants] ignored forged/invalid key grant (21602) for",
+        grant.a,
+      );
+      continue;
+    }
     await addEckVersions(
       grant.a,
       grant.eck,
@@ -92,6 +256,9 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     );
     coordinates.add(grant.a);
   }
+  // The full-history scan completed without throwing (a fetch failure would have
+  // rejected above), so later scans can safely narrow to the live-overlap window.
+  if (fullBackfill) markGrantsBackfilled(pubkey);
   return [...coordinates];
 }
 
