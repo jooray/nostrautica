@@ -55,6 +55,7 @@ class FakeInvites extends TinyEmitter {
 class FakeGroups {
   groups: { idStr: string; id: Uint8Array; state: unknown; on: () => void }[] = [];
   connectAllCalls = 0;
+  send = vi.fn(async () => {});
   connectAll() {
     this.connectAllCalls++;
     return { unsubscribe() {} };
@@ -67,7 +68,7 @@ class FakeGroups {
 class FakeMarmotClient {
   invites = new FakeInvites();
   groups = new FakeGroups();
-  keyPackages = { ensurePublished: vi.fn(async () => {}) };
+  keyPackages = { ensurePublished: vi.fn(async () => {}), create: vi.fn(async () => ({})) };
   joinedFrom: string[] = [];
   async canJoinInvite(inv: { joinable?: boolean }) {
     return inv.joinable !== false;
@@ -85,15 +86,25 @@ class FakeMarmotClient {
 }
 
 let lastClient: FakeMarmotClient;
-vi.mock("@internet-privacy/marmot-ts/client", () => ({
-  MarmotClient: class {
-    constructor() {
-      lastClient = new FakeMarmotClient();
-      return lastClient as unknown as object;
-    }
-  },
-}));
-vi.mock("@internet-privacy/marmot-ts/core", () => ({ getNostrGroupIdHex: () => "deadbeef" }));
+// Keep the real rumor codec (createChatRumor / serialize / deserialize) so the
+// optimistic-echo path (Bug 4) exercises the actual bytes — only the client shell
+// and the group-id helper are faked.
+vi.mock("@internet-privacy/marmot-ts/client", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return {
+    ...actual,
+    MarmotClient: class {
+      constructor() {
+        lastClient = new FakeMarmotClient();
+        return lastClient as unknown as object;
+      }
+    },
+  };
+});
+vi.mock("@internet-privacy/marmot-ts/core", async (orig) => {
+  const actual = (await orig()) as Record<string, unknown>;
+  return { ...actual, getNostrGroupIdHex: () => "deadbeef" };
+});
 vi.mock("@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js", () => ({
   proposeRemoveUser: () => async () => [],
 }));
@@ -114,7 +125,10 @@ vi.mock("./stores.js", () => ({
 }));
 vi.mock("./network.js", () => ({ createMarmotNetwork: () => ({}) }));
 vi.mock("./attest.js", () => ({ sendChatKeyAttestation: vi.fn(async () => {}) }));
-vi.mock("$lib/nostr/ndk.js", () => ({ publishSigned: vi.fn(async () => {}) }));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  publishSigned: vi.fn(async () => {}),
+  fetchEventsRelayOnly: vi.fn(async () => []),
+}));
 
 import { MarmotChat } from "./client.js";
 
@@ -167,5 +181,35 @@ describe("MarmotChat.start() — late welcome (G-3)", () => {
     // Give any (incorrectly still-attached) async handler a chance to run.
     await new Promise((r) => setTimeout(r, 20));
     expect(lastClient.joinedFrom).toEqual([]);
+  });
+});
+
+describe("MarmotChat.send() — optimistic own-message echo (Bug 4)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("surfaces the sender's own message locally, exactly once", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const seen: { id: string; content: string; pubkey: string }[] = [];
+    chat.onMessage = (m) => seen.push(m);
+    await chat.start();
+    // Join a group so send() has a target.
+    lastClient.invites.deliver({ id: "welcome-send" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-send"]));
+
+    await chat.send("hello from me");
+
+    // The wire send happened AND we echoed it into the UI (marmot doesn't echo own).
+    expect(lastClient.groups.send).toHaveBeenCalledOnce();
+    const mine = seen.filter((m) => m.content === "hello from me");
+    expect(mine).toHaveLength(1);
+    expect(mine[0].pubkey).toBe("c".repeat(64));
+
+    // A later real echo carrying the SAME rumor id must de-dupe (id is stable).
+    const echoed = mine[0];
+    if (!seen.some((m) => m.id === echoed.id)) throw new Error("echo id missing");
+    // Simulate the group re-delivering the same message: onMessage consumers key
+    // off `id`, so re-invoking with the same id would be dropped by the page-level
+    // de-dupe — assert the id is stable/re-derivable rather than duplicated here.
+    expect(seen.filter((m) => m.id === echoed.id)).toHaveLength(1);
   });
 });

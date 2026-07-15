@@ -20,12 +20,20 @@ import { proposeRemoveUser } from "@internet-privacy/marmot-ts/lib/client/group/
 import { KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
-import { publishSigned } from "$lib/nostr/ndk.js";
+import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { resolveChatIdentity, type ChatIdentity } from "./identity.js";
 import { makeMarmotStores, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
-import { buildChatSend, decodeApplicationMessage, type ChatMessage } from "./messages.js";
+import {
+  buildChatSend,
+  decodeApplicationMessage,
+  roundTripChatRumor,
+  type ChatMessage,
+} from "./messages.js";
 import { sendChatKeyAttestation } from "./attest.js";
+
+/** Addressable MLS key-package event (Marmot / NIP-104). */
+const KIND_KEY_PACKAGE = 30443;
 
 /** A live chat message listener. */
 export type ChatMessageHandler = (message: ChatMessage) => void;
@@ -98,6 +106,15 @@ export class MarmotChat {
       identifier: this.identity.clientId,
       client: "nostrautica-web",
     });
+    // Bug 2 heal: marmot's `keyPackages.ensurePublished` early-returns whenever a
+    // locally-stored key package is still "unused", WITHOUT checking the kind-30443
+    // is actually on the relays. So a publish that never reached the relay (our
+    // NDK adapter swallows a failed send, network.ts), or a relay that dropped /
+    // expired the event, leaves this client believing it advertised a key package
+    // the coordinator can never see — with no log on either side. Verify the 30443
+    // is retrievable; if not, force a fresh publish to the same `d` slot (the relay
+    // replaces in place, so this can't spawn a duplicate).
+    await this.ensureKeyPackageOnRelays();
     // Device-key accounts must attest the chat key to the coordinator (sealed by
     // the account key). Local-key accounts are their own chat identity — skip.
     if (!this.identity.isAccountKey) {
@@ -131,6 +148,43 @@ export class MarmotChat {
       publishSigned(inbox as unknown as Parameters<typeof publishSigned>[0], this.relays).catch(() => {}),
       publishSigned(nip65 as unknown as Parameters<typeof publishSigned>[0], this.relays).catch(() => {}),
     ]);
+  }
+
+  /**
+   * Verify our kind-30443 key package is actually retrievable from the event
+   * relays; if it isn't, force a fresh publish under the same slot. This heals the
+   * gap where marmot's `ensurePublished` trusts a stale local "unused" record and
+   * never re-advertises a key package that never reached (or was dropped by) the
+   * relay — the coordinator's 30443 watcher then never adds us (Bug 2). A
+   * relay-only read (no cache) is used so a locally-cached-but-not-on-relay copy
+   * doesn't mask the miss. Best-effort: failures here must not block startup.
+   */
+  private async ensureKeyPackageOnRelays(): Promise<void> {
+    try {
+      // Only relevant while we're still waiting to be added: a client that already
+      // holds a joined group is a member and needs no key-package re-advertisement.
+      // Scoping to the not-yet-joined case also means we never republish a fresh
+      // key package for an existing member (which could prompt a redundant re-add).
+      const groups = await this.client.groups.loadAll().catch(() => []);
+      if (groups.length > 0) return;
+      const found = await fetchEventsRelayOnly(
+        {
+          kinds: [KIND_KEY_PACKAGE],
+          authors: [this.identity.pubkey],
+          "#d": [this.identity.clientId],
+        },
+        this.relays,
+      ).catch(() => []);
+      if (found.length > 0) return;
+      // Absent from every relay — republish to the same `d` slot (relay-replaces).
+      await this.client.keyPackages.create({
+        relays: this.relays,
+        identifier: this.identity.clientId,
+        client: "nostrautica-web",
+      });
+    } catch (err) {
+      console.warn("marmot: key-package relay re-verification failed", err);
+    }
   }
 
   /**
@@ -232,8 +286,18 @@ export class MarmotChat {
     const groups = await this.client.groups.loadAll();
     const group = groups[0];
     if (!group) throw new Error("no joined chat group yet");
-    const { intent } = buildChatSend(this.identity.pubkey, text);
+    const { rumor, intent } = buildChatSend(this.identity.pubkey, text);
     await this.client.groups.send(group.id, intent);
+    // Optimistic local echo (Bug 4): marmot does not deliver our own application
+    // message back to us over the 445 subscription, so the sender would otherwise
+    // never see what they sent. Surface it through the same `onMessage` path; it
+    // de-dupes by inner rumor id, so a real echo (if one ever arrives) can't double
+    // up. `roundTripChatRumor` reproduces the exact bytes the group emits.
+    try {
+      this.onMessage?.(roundTripChatRumor(rumor as unknown as Parameters<typeof roundTripChatRumor>[0]));
+    } catch (err) {
+      console.warn("marmot: local echo of sent message failed", err);
+    }
   }
 
   /**

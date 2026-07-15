@@ -12,6 +12,8 @@
     type EventContext,
   } from "$lib/events/event-context.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
+  import { receiveGrants } from "$lib/events/attendee.js";
+  import { evaluateChatGate } from "$lib/chat/gate.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
@@ -24,9 +26,15 @@
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let phase = $state<"loading" | "setup" | "ready" | "unavailable">("loading");
   let error = $state<unknown>(null);
+  let sendError = $state<string | null>(null);
   let messages = $state<ChatMessage[]>([]);
   let draft = $state("");
   let sending = $state(false);
+  // Set once our own membership-resolve pass (grant fetch + shell re-sync) has run.
+  let membershipKnown = $state(false);
+  // Latches once we've kicked off the chat session — prevents the reactive gate
+  // from starting it twice. Plain (non-reactive) on purpose.
+  let started = false;
   // $state.raw: reactive by reference (so the handoff card appears once set)
   // without deep-proxying the class instance.
   let chat = $state.raw<MarmotChat | undefined>(undefined);
@@ -36,22 +44,64 @@
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
-      // Guard: chat must be enabled (chat=marmot + coordinator) and viewer a member.
-      if (!eventShell.showChat) {
-        phase = "unavailable";
-        return;
+      // Bug 3: membership is resolved asynchronously and decoupled from this mount.
+      // A deep link straight to chat can arrive before EventHome ingested the ECK
+      // grant, so actively fetch it here, then re-sync the shell so `showChat`
+      // reflects it. The reactive gate below then settles correctly instead of
+      // latching "not a member yet" on a lost race.
+      if (session.signer) {
+        await receiveGrants(session.signer).catch(() => {});
+        await eventShell.sync(naddr);
       }
-      if (!session.signer) {
-        phase = "unavailable";
-        return;
-      }
+    } catch (e) {
+      error = e;
+    } finally {
+      // Membership is now genuinely known (member or not) — release the gate.
+      membershipKnown = true;
+    }
+  });
+
+  onDestroy(() => chat?.dispose());
+
+  // Reactive membership gate (Bug 3). Re-evaluates whenever the event-shell's
+  // roster/ECK/membership state resolves, so a late-resolving Add transitions the
+  // page from "loading" into setup/ready instead of stranding on the negative.
+  // The gate can only settle "unavailable" once membership is genuinely known.
+  $effect(() => {
+    if (started || error) return;
+    const gate = evaluateChatGate({
+      membershipKnown,
+      shellNaddr: eventShell.naddr,
+      naddr,
+      loading: eventShell.loading,
+      showChat: eventShell.showChat,
+      hasSigner: !!session.signer,
+    });
+    if (gate === "loading") {
+      phase = "loading";
+    } else if (gate === "unavailable") {
+      phase = "unavailable";
+    } else {
+      // Member + chat enabled: start the session exactly once.
+      started = true;
+      void startChat();
+    }
+  });
+
+  // Lazy-load the whole marmot stack and drive the member side of the protocol.
+  async function startChat() {
+    if (!ctx || !session.signer) {
+      phase = "unavailable";
+      return;
+    }
+    try {
       phase = "setup";
-      // Lazy-load the whole marmot stack only now.
       const { MarmotChat } = await import("$lib/chat/client.js");
       chat = await MarmotChat.create({ accountSigner: session.signer, ctx });
       chatPubkey = chat.identity.pubkey;
       chat.onMessage = (m) => {
-        // De-dupe by inner rumor id; keep chronological order.
+        // De-dupe by inner rumor id; keep chronological order. This also absorbs
+        // any echo of our own optimistically-appended message (Bug 4).
         if (messages.some((x) => x.id === m.id)) return;
         messages = [...messages, m].sort((a, b) => a.createdAt - b.createdAt);
       };
@@ -72,9 +122,7 @@
       error = e;
       phase = "unavailable";
     }
-  });
-
-  onDestroy(() => chat?.dispose());
+  }
 
   // Flip to "ready" once we've joined a group (a nostr_group_id exists).
   async function syncPhase() {
@@ -87,11 +135,14 @@
     const text = draft.trim();
     if (!text || !chat || sending) return;
     sending = true;
+    sendError = null;
     try {
       await chat.send(text);
       draft = "";
-    } catch (e) {
-      error = e;
+    } catch {
+      // Bug 5: surface the failure instead of silently swallowing it. A revoked
+      // (removed) attendee's send lands here once they've lost the group locally.
+      sendError = t("chat.sendFailed");
     } finally {
       sending = false;
     }
@@ -136,7 +187,7 @@
     </div>
   {/if}
 {:else if phase === "loading"}
-  <p class="muted">{t("app.loading")}</p>
+  <p class="muted">{t("chat.checking")}</p>
 {:else}
   <div class="messages" aria-live="polite">
     {#if messages.length === 0}
@@ -179,6 +230,10 @@
       <Icon name="send" size={20} />
     </button>
   </form>
+
+  {#if sendError}
+    <p class="send-error" role="alert">{sendError}</p>
+  {/if}
 
   {#if chat}
     <ChatHandoffCard isAccountKey={chat.identity.isAccountKey} secretKey={chat.identity.secretKey} />
@@ -302,5 +357,10 @@
   .send:disabled {
     opacity: 0.5;
     cursor: default;
+  }
+  .send-error {
+    margin: 0.25rem 0 0.5rem;
+    font-size: 0.82rem;
+    color: var(--danger);
   }
 </style>
