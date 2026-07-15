@@ -20,6 +20,8 @@
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
+  import { fetchPendingTalks, type PendingTalk } from "$lib/events/talks.js";
+  import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
   import { decode } from "nostr-tools/nip19";
   import QrCode from "$lib/components/QrCode.svelte";
@@ -81,6 +83,37 @@
     // Cross-reference the roster so already-approved attendees don't show as pending.
     const roster = await fetchRoster(ctx).catch(() => undefined);
     rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? []);
+    // Pending talk submissions (spec F2.3) — moderation needs a coordinator to
+    // publish the 31610, so only fetch the queue when one is attached.
+    pendingTalks =
+      ctx.config.talks !== "off" && ctx.config.coordinator
+        ? await fetchPendingTalks(ctx, keys).catch(() => [])
+        : [];
+  }
+
+  // ── pending talk moderation (spec F2.3) ────────────────────────────────────
+  let pendingTalks = $state<PendingTalk[]>([]);
+  let moderatedTalks = $state<Set<string>>(new Set()); // acted-on this session
+  let talkBusy = $state<string | null>(null);
+  let previewingTalk = $state<string | null>(null);
+  function tkKey(tk: PendingTalk): string {
+    return `${tk.pubkey}:${tk.talkD}`;
+  }
+  const visibleTalks = $derived(pendingTalks.filter((tk) => !moderatedTalks.has(tkKey(tk))));
+
+  async function moderateTalk(tk: PendingTalk, cmd: "talk_publish" | "talk_reject") {
+    if (!ctx?.config.coordinator) return;
+    const key = tkKey(tk);
+    talkBusy = key;
+    error = null;
+    try {
+      await sendAdminCommand(ctx, cmd, { pubkey: tk.pubkey, talk_d: tk.talkD });
+      moderatedTalks = new Set([...moderatedTalks, key]);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      talkBusy = null;
+    }
   }
 
   function scrollToRequests() {
@@ -776,6 +809,57 @@
           {/if}
         </div>
       {/each}
+    </div>
+  {/if}
+
+  {#if ctx && ctx.config.talks !== "off"}
+    <h2 class="section-head">{t("admin.talks.mod.section")}</h2>
+    <div class="card">
+      <div class="field-label">{t("admin.talks.mod.title")}</div>
+      {#if !ctx.config.coordinator}
+        <!-- Publishing a talk's 31610 is a coordinator action (spec F2). Without one
+             there's no publish path, so surface that instead of dead buttons. -->
+        <p class="muted">{t("admin.talks.mod.needsCoordinator")}</p>
+      {:else if visibleTalks.length === 0}
+        <p class="muted">{t("admin.talks.mod.none")}</p>
+      {:else}
+        <p class="muted">{t("admin.talks.mod.body")}</p>
+        <div class="stack">
+          {#each visibleTalks as tk (tkKey(tk))}
+            <div class="card" style="background:var(--bg-elev2)">
+              <strong>{tk.title}</strong>
+              <span class="badge">{short(tk.pubkey)}</span>
+              {#if tk.revision > 0}
+                <span class="badge">{t("admin.talks.mod.revision", { n: tk.revision })}</span>
+              {/if}
+              {#if tk.description}<p class="muted">{tk.description}</p>{/if}
+              {#if previewingTalk === tkKey(tk)}
+                <MediaPlayer descriptor={tk.media} />
+              {:else}
+                <button class="btn inline" onclick={() => (previewingTalk = tkKey(tk))}>
+                  {t("admin.talks.mod.preview")}
+                </button>
+              {/if}
+              <div class="row">
+                <button
+                  class="btn primary"
+                  onclick={() => moderateTalk(tk, "talk_publish")}
+                  disabled={talkBusy === tkKey(tk)}
+                >
+                  {t("admin.talks.mod.publish")}
+                </button>
+                <button
+                  class="btn inline danger"
+                  onclick={() => moderateTalk(tk, "talk_reject")}
+                  disabled={talkBusy === tkKey(tk)}
+                >
+                  {t("admin.talks.mod.reject")}
+                </button>
+              </div>
+            </div>
+          {/each}
+        </div>
+      {/if}
     </div>
   {/if}
 

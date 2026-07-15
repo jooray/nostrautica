@@ -11,16 +11,25 @@
 import {
   KIND_TALK,
   KIND_TALK_SUBMISSION,
+  KIND_GIFT_WRAP,
   eckDecrypt,
   base64ToBytes,
+  hexToBytes,
   talkContentSchema,
+  talkSubmissionContentSchema,
+  giftwrapSince,
+  unwrapRumor,
   bytesToHex,
   type TalkContent,
+  type TalkSubmissionContent,
   type MediaDescriptor,
+  type GiftWrap,
 } from "@nostrautica/protocol";
+import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import type { EventKeys } from "./keystore.js";
+import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { signerWrap } from "./giftwrap.js";
@@ -76,6 +85,114 @@ export async function fetchTalks(ctx: EventContext): Promise<TalkItem[]> {
 export async function fetchTalk(ctx: EventContext, d: string): Promise<TalkContent | undefined> {
   const talks = await fetchTalks(ctx);
   return talks.find((it) => it.d === d)?.talk;
+}
+
+// ── pending talk moderation (organizer side, spec F2.3) ──────────────────────
+
+/** A submitted talk awaiting organizer moderation (unwrapped from E_inbox). */
+export interface PendingTalk {
+  pubkey: string; // speaker (seal author of the 21609 rumor)
+  talkD: string;
+  title: string;
+  description: string;
+  speakers: string[];
+  media: MediaDescriptor;
+  revision: number;
+  rumorCreatedAt: number;
+}
+
+/** A raw unwrapped 21609 submission — the input to the pure dedup step. */
+export interface RawTalkSubmission {
+  pubkey: string;
+  content: TalkSubmissionContent;
+  rumorCreatedAt: number;
+}
+
+/** Stable per-speaker-per-talk key used for dedup + published-revision lookup. */
+function talkKey(pubkey: string, talkD: string): string {
+  return `${pubkey}:${talkD}`;
+}
+
+/**
+ * Pure moderation-queue logic (unit-testable, no network): keep the LATEST
+ * submission per (speaker, talk_d) by rumor created_at, then drop any that are
+ * already published as a 31610 at the same-or-newer revision. Editing a talk bumps
+ * `revision`, so a fresh edit re-appears in the queue even after the prior revision
+ * was published. Oldest-submitted first (the moderation order).
+ */
+export function dedupePendingTalks(
+  subs: RawTalkSubmission[],
+  publishedRevByKey: Map<string, number>,
+): PendingTalk[] {
+  const latest = new Map<string, PendingTalk>();
+  for (const s of subs) {
+    const key = talkKey(s.pubkey, s.content.talk_d);
+    const prev = latest.get(key);
+    if (!prev || s.rumorCreatedAt > prev.rumorCreatedAt) {
+      latest.set(key, {
+        pubkey: s.pubkey,
+        talkD: s.content.talk_d,
+        title: s.content.title,
+        description: s.content.description,
+        speakers: s.content.speakers,
+        media: s.content.media,
+        revision: s.content.revision,
+        rumorCreatedAt: s.rumorCreatedAt,
+      });
+    }
+  }
+  return [...latest.values()]
+    .filter((t) => (publishedRevByKey.get(talkKey(t.pubkey, t.talkD)) ?? -1) < t.revision)
+    .sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
+}
+
+/**
+ * Fetch PENDING talk submissions for the event (organizer moderation, spec F2.3).
+ * Unwraps kind-21609 rumors from E_inbox exactly as `fetchPending` unwraps join
+ * requests (the organizer holds the E_inbox secret), keeps the latest per
+ * (speaker, talk_d), and excludes any already published as a 31610 at the
+ * same-or-newer revision. Returns [] when talks are off. Requires the E_inbox key.
+ */
+export async function fetchPendingTalks(
+  ctx: EventContext,
+  keys: EventKeys,
+): Promise<PendingTalk[]> {
+  if (ctx.config.talks === "off") return [];
+  if (!keys.einboxNsecHex) throw new Error("missing E_inbox key");
+  const einboxSk = hexToBytes(keys.einboxNsecHex);
+  // Relay-only: submissions must not be lost to the cache/EOSE race (see ndk.ts).
+  const wraps = (await fetchEventsRelayOnly(
+    { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(einboxSk)], since: giftwrapSince() },
+    ctx.config.relays,
+  )) as unknown as GiftWrap[];
+
+  const subs: RawTalkSubmission[] = [];
+  for (const wrap of wraps) {
+    let rumor;
+    try {
+      rumor = unwrapRumor(wrap, einboxSk);
+    } catch {
+      continue; // not ours / malformed
+    }
+    if (rumor.kind !== KIND_TALK_SUBMISSION) continue;
+    try {
+      const content = talkSubmissionContentSchema.parse(JSON.parse(rumor.content));
+      if (content.a !== ctx.coordinate) continue;
+      subs.push({ pubkey: rumor.pubkey, content, rumorCreatedAt: rumor.created_at });
+    } catch {
+      /* ignore malformed submission */
+    }
+  }
+
+  // Exclude talks already published as 31610 (per speaker+talk_d, highest revision).
+  const published = await fetchTalks(ctx).catch(() => []);
+  const publishedRevByKey = new Map<string, number>();
+  for (const { talk } of published) {
+    const key = talkKey(talk.pubkey, talk.talk_d);
+    publishedRevByKey.set(key, Math.max(publishedRevByKey.get(key) ?? -1, talk.revision));
+  }
+
+  return dedupePendingTalks(subs, publishedRevByKey);
 }
 
 /** A locally-generated, stable talk id (`talk_d`) for a new talk. */

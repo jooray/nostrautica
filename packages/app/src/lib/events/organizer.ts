@@ -304,7 +304,7 @@ function splitCoordinate(coordinate: string): { identifier: string } {
  */
 export async function sendAdminCommand(
   ctx: EventContext,
-  cmd: "approve" | "recompute" | "reprocess" | "revoke",
+  cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject",
   args: Record<string, unknown> = {},
 ): Promise<void> {
   if (!ctx.config.coordinator) throw new Error("no coordinator attached");
