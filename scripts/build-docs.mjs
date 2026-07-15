@@ -8,7 +8,7 @@
  *   existing `-dark.png` sibling renders BOTH, and CSS shows the one matching
  *   the active theme.
  * - Internal `*.md` links become `*.html`; everything is relative so the site
- *   works from any base path (deployed under /nostrautica/docs/).
+ *   works from any base path (deployed under /docs/, same origin as /app).
  *
  * Usage: node scripts/build-docs.mjs [outDir]   (default docs-site-build)
  */
@@ -140,7 +140,7 @@ function page(title, body, { home = false } = {}) {
 </div></header>
 <main class="wrap">
 ${body}
-<footer>Nostrautica — Nostr-native event matchmaking. <a href="https://cypherpunk.today/nostrautica/">Open the app</a> · <a href="index.html">Docs index</a></footer>
+<footer>Nostrautica — Nostr-native event matchmaking. <a href="/app">Open the app</a> · <a href="index.html">Docs index</a></footer>
 </main>
 </body>
 </html>`;
@@ -193,7 +193,7 @@ for (const r of reports) {
 
 const indexBody = [
   `<h1>Nostrautica documentation</h1>`,
-  `<p class="section-blurb">Meet the right people at events — intro videos, AI matchmaking, and a portable identity you keep. <a href="https://cypherpunk.today/nostrautica/">Open the app →</a></p>`,
+  `<p class="section-blurb">Meet the right people at events — intro videos, AI matchmaking, and a portable identity you keep. <a href="/app">Open the app →</a></p>`,
   ...SECTIONS.map((s) => {
     const cards = s.docs
       .filter((d) => existsSync(join(DOCS, d.file)))

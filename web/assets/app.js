@@ -11,7 +11,20 @@
 
   /* ---------- Language ---------- */
 
+  // A language encoded in the URL hash (#en / #sk / #cs, or #cz as an alias),
+  // so a link can open the page in a chosen language. Returns null if the hash
+  // isn't a language (e.g. an in-page anchor like #attendees).
+  function langFromHash() {
+    var h = String(location.hash || "").replace(/^#/, "").toLowerCase();
+    if (h.indexOf("cz") === 0) h = "cs";
+    return LANGS.indexOf(h) !== -1 ? h : null;
+  }
+
+  // Precedence: URL hash > stored manual choice > navigator autodetect > en.
   function detectLang() {
+    var fromHash = langFromHash();
+    if (fromHash) return fromHash;
+
     try {
       var stored = localStorage.getItem(LANG_KEY);
       if (stored && LANGS.indexOf(stored) !== -1) return stored;
@@ -55,7 +68,7 @@
     var metaDesc = document.querySelector('meta[name="description"]');
     if (metaDesc && dict["meta.description"]) metaDesc.setAttribute("content", dict["meta.description"]);
 
-    document.querySelectorAll(".lang-switch button").forEach(function (btn) {
+    document.querySelectorAll(".lang-switch a").forEach(function (btn) {
       var isCurrent = btn.getAttribute("data-lang") === lang;
       btn.setAttribute("aria-current", isCurrent ? "true" : "false");
     });
@@ -64,9 +77,20 @@
     syncThemeButtonLabel();
   }
 
-  function setLang(lang) {
+  // Update the URL hash to reflect the language without scrolling or adding a
+  // history entry, so the address bar stays copyable and scroll position holds.
+  function reflectLangInHash(lang) {
+    try {
+      var url = location.pathname + location.search + "#" + lang;
+      history.replaceState(history.state, "", url);
+    } catch (e) { /* history unavailable — non-fatal */ }
+  }
+
+  function setLang(lang, updateHash) {
+    if (LANGS.indexOf(lang) === -1) lang = "en";
     try { localStorage.setItem(LANG_KEY, lang); } catch (e) { /* ignore */ }
     applyLang(lang);
+    if (updateHash) reflectLangInHash(lang);
   }
 
   /* ---------- Theme ---------- */
@@ -117,11 +141,75 @@
 
   applyLang(detectLang());
 
-  document.querySelectorAll(".lang-switch button").forEach(function (btn) {
-    btn.addEventListener("click", function () {
-      setLang(btn.getAttribute("data-lang"));
+  // Language switcher: real anchors (href="#en" / "#sk" / "#cs") so right-click →
+  // "Copy link address" yields a shareable per-language link. Clicking switches
+  // instantly (no reload), persists the choice, and syncs the hash for copying —
+  // preventDefault keeps scroll position and avoids a history entry.
+  document.querySelectorAll(".lang-switch a").forEach(function (btn) {
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      setLang(btn.getAttribute("data-lang"), true);
     });
   });
+
+  // If the hash changes to a language (pasted #sk link, manual edit, back/forward),
+  // follow it. In-page anchors like #attendees return null and are ignored.
+  window.addEventListener("hashchange", function () {
+    var fromHash = langFromHash();
+    if (fromHash && fromHash !== currentLang()) setLang(fromHash, false);
+  });
+
+  /* ---------- Copy shareable link ---------- */
+
+  var copyBtn = document.getElementById("copy-link");
+  var copyStatus = document.getElementById("copy-status");
+  if (copyBtn) {
+    var copyTimer = null;
+
+    function shareUrl() {
+      return location.origin + location.pathname + location.search + "#" + currentLang();
+    }
+
+    function flashCopied() {
+      var dict = DICT[currentLang()] || DICT.en;
+      var msg = dict["share.copied"] || "Copied";
+      copyBtn.classList.add("copied");
+      if (copyStatus) copyStatus.textContent = msg;
+      if (copyTimer) clearTimeout(copyTimer);
+      copyTimer = setTimeout(function () {
+        copyBtn.classList.remove("copied");
+        if (copyStatus) copyStatus.textContent = "";
+      }, 1800);
+    }
+
+    function legacyCopy(text) {
+      try {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "absolute";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        return true;
+      } catch (e) { return false; }
+    }
+
+    copyBtn.addEventListener("click", function () {
+      var url = shareUrl();
+      // Keep the address bar in sync with what we copy.
+      reflectLangInHash(currentLang());
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(flashCopied, function () {
+          if (legacyCopy(url)) flashCopied();
+        });
+      } else if (legacyCopy(url)) {
+        flashCopied();
+      }
+    });
+  }
 
   var themeBtn = document.getElementById("theme-toggle");
   if (themeBtn) themeBtn.addEventListener("click", toggleTheme);

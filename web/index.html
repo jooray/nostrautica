@@ -38,24 +38,30 @@
     <nav id="nav-links" class="nav-links" aria-label="Primary">
       <a href="#how" data-i18n="nav.how">How it works</a>
       <a href="#formats" data-i18n="nav.formats">Formats</a>
-      <a href="#organizers" data-i18n="nav.organizers">Organizers</a>
       <a href="#attendees" data-i18n="nav.attendees">Attendees</a>
+      <a href="#organizers" data-i18n="nav.organizers">Organizers</a>
       <a href="#privacy" data-i18n="nav.privacy">Privacy</a>
     </nav>
 
     <div class="nav-controls">
       <div class="lang-switch" role="group" data-i18n-aria="a11y.lang_label" aria-label="Language">
-        <button type="button" data-lang="en" aria-current="true">EN</button>
-        <button type="button" data-lang="sk" aria-current="false">SK</button>
-        <button type="button" data-lang="cs" aria-current="false">CS</button>
+        <a href="#en" data-lang="en" aria-current="true">EN</a>
+        <a href="#sk" data-lang="sk" aria-current="false">SK</a>
+        <a href="#cs" data-lang="cs" aria-current="false">CS</a>
       </div>
+
+      <button type="button" id="copy-link" class="icon-btn" data-i18n-aria="a11y.copy_link" aria-label="Copy link to this page">
+        <svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.5 14.5 14.5 9.5M10.5 6.5l1-1a4 4 0 0 1 5.66 5.66l-1 1M13.5 17.5l-1 1a4 4 0 0 1-5.66-5.66l1-1"/></svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg>
+      </button>
+      <span id="copy-status" class="copy-status" role="status" aria-live="polite"></span>
 
       <button type="button" id="theme-toggle" class="icon-btn" data-i18n-aria="a11y.toggle_theme_to_dark" aria-label="Switch to dark mode">
         <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path stroke-linecap="round" d="M12 2.5v2.4M12 19.1v2.4M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M2.5 12h2.4M19.1 12h2.4M4.6 19.4l1.7-1.7M17.7 6.3l1.7-1.7"/></svg>
         <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M20 14.5A8.5 8.5 0 1 1 9.5 4a6.8 6.8 0 0 0 10.5 10.5Z"/></svg>
       </button>
 
-      <a class="btn btn-primary btn-sm" href="https://cypherpunk.today/nostrautica/" data-i18n="nav.launch">Launch the app</a>
+      <a class="btn btn-primary btn-sm" href="/app" data-i18n="nav.launch">Launch the app</a>
 
       <button type="button" id="nav-toggle" class="nav-toggle" aria-label="Menu" aria-expanded="false" aria-controls="nav-links">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" d="M3 6h18M3 12h18M3 18h18"/></svg>
@@ -74,7 +80,7 @@
         <h1 data-i18n-html="hero.title">Chart a course to the people <span class="accent">worth meeting.</span></h1>
         <p class="lede" data-i18n="hero.subtitle">Record a short intro. Nostrautica reads it alongside your public Nostr activity and tells you who to talk to at the event, and why, in plain language.</p>
         <div class="hero-ctas">
-          <a class="btn btn-primary" href="https://cypherpunk.today/nostrautica/" data-i18n="hero.cta_primary">Launch the app</a>
+          <a class="btn btn-primary" href="/app" data-i18n="hero.cta_primary">Launch the app</a>
           <a class="btn btn-ghost" href="#how" data-i18n="hero.cta_secondary">See how it works</a>
         </div>
         <div class="hero-badges">
@@ -106,12 +112,6 @@
           <div class="phone phone-secondary">
             <img class="img-dark" src="assets/screenshots/02-event-page-dark.png" alt="A Nostrautica public event page for Cypherpunk Assembly 2026, with a Join this event button.">
             <img class="img-light" src="assets/screenshots/02-event-page-light.png" alt="A Nostrautica public event page for Cypherpunk Assembly 2026, with a Join this event button.">
-          </div>
-          <div class="phone-caption">
-            <strong data-i18n="hero.mock_caption1">Ranked, with reasons.</strong>
-          </div>
-          <div class="phone-caption" style="right:0.5rem; left:auto; top:auto; bottom:0.5rem;">
-            <strong data-i18n="hero.mock_caption2">The event page, before you've even joined.</strong>
           </div>
         </div>
       </div>
@@ -196,51 +196,13 @@
       </div>
 
       <figure class="talks-visual">
-        <div class="phone">
-          <img class="img-dark" src="assets/screenshots/26-talks-empty-dark.png" alt="The Talks tab in Nostrautica, with a Submit a talk button.">
-          <img class="img-light" src="assets/screenshots/26-talks-empty-light.png" alt="The Talks tab in Nostrautica, with a Submit a talk button.">
-        </div>
         <figcaption data-i18n="formats.caption">Talks, queued up before you arrive.</figcaption>
       </figure>
     </div>
   </section>
 
-  <!-- ================= ORGANIZERS ================= -->
-  <section id="organizers">
-    <div class="wrap feature-split">
-      <div class="feature-split-copy">
-        <p class="eyebrow" data-i18n="organizers.eyebrow">For organizers</p>
-        <h2 data-i18n="organizers.title">Run the whole thing from your phone.</h2>
-        <p data-i18n="organizers.intro">Create an event, open the door, and let the coordinator handle the matching. There's no server to babysit: the app publishes to Nostr relays and Blossom, and that's the entire backend.</p>
-        <ul class="feature-list">
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f1">Manual approval, invite codes, or both — your call</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f2">Attach an AI coordinator for matchmaking, or run without one</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f3">Public updates or members-only posts, encrypted to your attendees alone</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f4">A custom event page and your own theme CSS</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f5">Live talks or prerecorded — including the no-stage format</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f6">Encrypted group chat that survives into mobile Nostr apps</span></li>
-        </ul>
-        <a class="btn btn-ghost" href="https://cypherpunk.today/nostrautica/docs/ORGANIZER-GUIDE.html" data-i18n="organizers.cta">Read the organizer guide</a>
-      </div>
-
-      <div class="feature-split-visual mock-cluster">
-        <div class="phone phone-primary">
-          <img class="img-dark" src="assets/screenshots/03-admin-empty-dark.png" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
-          <img class="img-light" src="assets/screenshots/03-admin-empty-light.png" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
-        </div>
-        <div class="phone phone-secondary">
-          <img class="img-dark" src="assets/screenshots/05-coordinator-dark.png" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
-          <img class="img-light" src="assets/screenshots/05-coordinator-light.png" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
-        </div>
-        <div class="phone-caption" style="left:-1rem; right:auto; top:auto; bottom:1.5rem;">
-          <strong data-i18n="organizers.caption">Operations first: join requests and matchmaking, right at the top.</strong>
-        </div>
-      </div>
-    </div>
-  </section>
-
   <!-- ================= ATTENDEES ================= -->
-  <section class="section-alt" id="attendees">
+  <section id="attendees">
     <div class="wrap feature-split reverse">
       <div class="feature-split-copy">
         <p class="eyebrow" data-i18n="attendees.eyebrow">For attendees</p>
@@ -251,10 +213,9 @@
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f2">Get a ranked, reasoned list of people to meet</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f3">See who you already follow, and who follows you</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f4">Message anyone directly, end-to-end encrypted</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f5">Mute, favorite, and take private notes — nobody else ever sees them</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f6">Leave with a real Nostr identity you carry to the next event</span></li>
         </ul>
-        <a class="btn btn-ghost" href="https://cypherpunk.today/nostrautica/docs/PARTICIPANT-GUIDE.html" data-i18n="attendees.cta">Read the participant guide</a>
+        <a class="btn btn-ghost" href="/docs/PARTICIPANT-GUIDE.html" data-i18n="attendees.cta">Read the participant guide</a>
       </div>
 
       <div class="feature-split-visual mock-cluster">
@@ -268,6 +229,37 @@
         </div>
         <div class="phone-caption">
           <strong data-i18n="attendees.caption">The People tab: search, filter, everyone's skills at a glance.</strong>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= ORGANIZERS ================= -->
+  <section class="section-alt" id="organizers">
+    <div class="wrap feature-split">
+      <div class="feature-split-copy">
+        <p class="eyebrow" data-i18n="organizers.eyebrow">For organizers</p>
+        <h2 data-i18n="organizers.title">Run the whole thing from your phone.</h2>
+        <p data-i18n="organizers.intro">Create an event, open the door, and let the coordinator handle the matching. There's no server to babysit: the app publishes to Nostr relays and Blossom, and that's the entire backend.</p>
+        <ul class="feature-list">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f1">Manual approval, invite codes, or both — your call</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f2">Attach an AI coordinator for matchmaking, or run without one</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f3">Public updates or members-only posts, encrypted to your attendees alone</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f4">A custom event page and your own theme CSS</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f5">Live talks or prerecorded — including the no-stage format</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f6">Encrypted group chat that survives into mobile Nostr apps</span></li>
+        </ul>
+        <a class="btn btn-ghost" href="/docs/ORGANIZER-GUIDE.html" data-i18n="organizers.cta">Read the organizer guide</a>
+      </div>
+
+      <div class="feature-split-visual mock-cluster">
+        <div class="phone phone-primary">
+          <img class="img-dark" src="assets/screenshots/03-admin-empty-dark.png" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
+          <img class="img-light" src="assets/screenshots/03-admin-empty-light.png" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
+        </div>
+        <div class="phone phone-secondary">
+          <img class="img-dark" src="assets/screenshots/05-coordinator-dark.png" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
+          <img class="img-light" src="assets/screenshots/05-coordinator-light.png" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
         </div>
       </div>
     </div>
@@ -350,8 +342,8 @@
       <h2 data-i18n="cta.title">Set a course.</h2>
       <p data-i18n="cta.subtitle">Whether you're running the event or walking into one, the next conversation that matters is one intro video away.</p>
       <div class="hero-ctas">
-        <a class="btn btn-primary" href="https://cypherpunk.today/nostrautica/#/create" data-i18n="cta.primary">Create an event</a>
-        <a class="btn btn-ghost" href="https://cypherpunk.today/nostrautica/" data-i18n="cta.secondary">Join with an invite</a>
+        <a class="btn btn-primary" href="/app/#/create" data-i18n="cta.primary">Create an event</a>
+        <a class="btn btn-ghost" href="/app" data-i18n="cta.secondary">Join with an invite</a>
       </div>
     </div>
   </section>
@@ -375,8 +367,8 @@
         <ul>
           <li><a href="#how" data-i18n="nav.how">How it works</a></li>
           <li><a href="#formats" data-i18n="nav.formats">Formats</a></li>
-          <li><a href="#organizers" data-i18n="nav.organizers">Organizers</a></li>
           <li><a href="#attendees" data-i18n="nav.attendees">Attendees</a></li>
+          <li><a href="#organizers" data-i18n="nav.organizers">Organizers</a></li>
           <li><a href="#privacy" data-i18n="nav.privacy">Privacy</a></li>
         </ul>
       </div>
@@ -384,9 +376,9 @@
       <div class="footer-col">
         <h5 data-i18n="footer.col_resources">Guides</h5>
         <ul>
-          <li><a href="https://cypherpunk.today/nostrautica/docs/ORGANIZER-GUIDE.html" data-i18n="footer.organizer_guide">Organizer guide</a></li>
-          <li><a href="https://cypherpunk.today/nostrautica/docs/PARTICIPANT-GUIDE.html" data-i18n="footer.participant_guide">Participant guide</a></li>
-          <li><a href="https://cypherpunk.today/nostrautica/docs/SPECIFICATION.html" data-i18n="footer.spec">Technical specification</a></li>
+          <li><a href="/docs/ORGANIZER-GUIDE.html" data-i18n="footer.organizer_guide">Organizer guide</a></li>
+          <li><a href="/docs/PARTICIPANT-GUIDE.html" data-i18n="footer.participant_guide">Participant guide</a></li>
+          <li><a href="/docs/SPECIFICATION.html" data-i18n="footer.spec">Technical specification</a></li>
         </ul>
       </div>
     </div>

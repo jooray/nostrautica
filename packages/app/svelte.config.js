@@ -17,7 +17,7 @@ const config = {
     prerender: { entries: [] },
     // Deep links like /#/e/... never hit the server; a single fallback covers all.
     // BASE_PATH lets the same artifact serve from a subdirectory (e.g.
-    // https://host/nostrautica/) — assets resolve under that prefix.
+    // https://host/app/) — assets resolve under that prefix.
     paths: { base: process.env.BASE_PATH || "", relative: true },
   },
 };

@@ -202,7 +202,7 @@ A stranger can: open an invite link on a phone, register with just a display nam
 
 ## 5. Build status (as implemented)
 
-All phases **P0–P6 are implemented** (monorepo `packages/protocol`, `packages/app`, `packages/coordinator`, `e2e/`). Unit tests pass across packages (protocol + coordinator + app). A live reference deployment runs at `https://cypherpunk.today/nostrautica/` with a Venice-backed coordinator. See SPECIFICATION.md §16 for as-built protocol/architecture notes; the key deltas from this plan:
+All phases **P0–P6 are implemented** (monorepo `packages/protocol`, `packages/app`, `packages/coordinator`, `e2e/`). Unit tests pass across packages (protocol + coordinator + app). A live reference deployment runs at `https://nostrautica.cypherpunk.today/` (app at `/app`, docs at `/docs`) with a Venice-backed coordinator. See SPECIFICATION.md §16 for as-built protocol/architecture notes; the key deltas from this plan:
 
 - **Coordinator store:** `node:sqlite` (built-in, Node ≥ 22.5) instead of `better-sqlite3` — avoids a native build; CI/Docker pin Node 24.
 - **Providers verified live (Venice):** STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; match `zai-org-glm-5-2`; embed `text-embedding-bge-m3` (all private-tier). Reasoning models require `venice_parameters.disable_thinking` + suppressing Venice's system prompt, and pair scores are clamped to [0,1].
