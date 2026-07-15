@@ -11,11 +11,16 @@ Five minutes of setup, all on your phone.
 
 ## 1. Open your invite link
 
-Tap the link you were given. You'll see the event page — what it is, when,
-where — and a button to join. If the organizer has posted any announcements,
-they show up here too, under **Updates from the organizer**.
+Tap the link you were given. You'll see the event's **Overview** — what it is,
+when, where — and a button to join. If the organizer has posted any
+announcements, the latest show up here too.
 
-![Event page](images/participant/02-event-page-light.png)
+Once you're in an event, the bar along the bottom is all about *this* event:
+**Overview** (where you are now), **People**, **Matches**, **Updates**, and
+**More** (your account, settings, other events). A small header at the top always
+tells you which event you're in and whether you're a visitor, waiting, or in.
+
+![Event overview](images/participant/02-event-overview-light.png)
 
 ## 2. Join
 
@@ -57,6 +62,11 @@ After you submit, one of two things happens depending on your link:
 
   ![Request sent](images/participant/05-request-sent-light.png)
 
+Back on **Overview**, a short **"Getting you ready"** checklist tracks exactly
+where you are — Joined → Backup secured → Intro submitted → Processing →
+Matches ready — and shows you the *one* next thing to do, front and center. No
+guessing why matches haven't appeared yet: the list tells you.
+
 ### Save your key (30 seconds — actually do it)
 
 After joining, the app shows a **backup card** with your secret key. Tap **Copy
@@ -84,37 +94,51 @@ original one tap away ("show original"). So just be yourself in your own words.
 
 ![Recording your intro](images/participant/09-record-light.png)
 
-## 4. See who's here
+## 4. People
 
-Once you're in, tap **See who's here** to browse the attendee list. Each row
-shows a photo, name, their skills, and — once the matchmaking has run — a match
-percentage and a "following" badge if you already follow them on Nostr. You can
-re-sort by **matches**, **follows**, or **name**.
+Tap **People** in the bottom bar to browse who's here. Each row shows an avatar
+(their photo, or their initials on a coloured tile), their name, and their
+skills. **Search** by name or skill, and filter to just the people you've marked
+**want to meet**, **met**, **favorited**, or people you **follow** on Nostr.
 
-![Who's here](images/participant/08-attendees-light.png)
+The roster is **encrypted to approved attendees**, so until you're approved (or
+in the moment right after, before it syncs) the People screen stays empty and
+tells you why — that's the privacy model working, not a bug:
 
-Tap anyone to open their page: their intro video (**▶ Play intro**), what they
-do, what they're looking for, an AI-written summary once the matchmaking has
-run, and their recent public posts.
+![People — encrypted until you're approved](images/participant/08-attendees-light.png)
+
+Once you're in, tap anyone to open their page: their intro video, what they do,
+what they're looking for, an AI-written summary once the matchmaking has run, and
+their recent public posts.
 
 On a person's page you can **Follow** them, tap **Message** to start a private
-chat (see §6), and — privately, nobody else ever sees these — **★ Favorite**
-them, mark **Want to meet** or **Met ✓**, and keep a private note ("the drummer
-with the mesh-network startup"). Reload and it all persists.
+chat (see §6), and — privately, nobody else ever sees these — mark **Favorite**,
+**Want to meet**, or **Met ✓**, and keep a private note ("the drummer with the
+mesh-network startup"). Reload and it all persists. If someone's bothering you,
+**Mute** hides them from your People list, Matches, and messages (it's a standard
+Nostr mute, so it carries to other Nostr apps too):
 
-![A person's page](images/participant/10-attendee-detail-light.png)
+![A person's page, with the mute confirmation](images/participant/18-mute-confirm-light.png)
 
 ## 5. Your matches
 
-Shortly after you record your intro, tap **People you should meet**: a ranked
-list of attendees, each with a **match percentage**, a **similar / complementary**
-breakdown, and a plain-language explanation of why you two should talk. The
-list updates as more people join. Tap a match to open their full page.
+Shortly after you record your intro, tap **Matches**: a ranked list of people to
+meet. Each one leads with how strong the match is — **Strong match** or **Good
+match** — and, most importantly, a plain-language explanation of *why you two
+should talk*, right up front. If you want the mechanics (how similar vs. how
+complementary you are), they're one tap away under "score details" — but the
+reason comes first. The list updates as more people join. Tap a match to open
+their full page.
 
-![People you should meet](images/participant/11-matches-light.png)
+![Matches](images/participant/11-matches-light.png)
 
 At the event, work the list: find your top matches, mention the app told you to.
 Best icebreaker there is.
+
+> Matches only appear once the organizer's coordinator has processed a few
+> people's intros — so if the list says "no matches yet", it just means the room
+> is still warming up. Record your own intro first (§3); that's what puts you in
+> everyone else's matches.
 
 ## 6. Message people
 
@@ -123,8 +147,8 @@ Anyone's page has a **Message** button. Tap it to open a private,
 
 ![A conversation](images/participant/15-dm-chat-light.png)
 
-Your messages live in the **Messages** tab (the 💬 in the bottom bar), which
-lists every conversation, newest first:
+Your messages live under **More → Messages**, which lists every conversation,
+newest first:
 
 ![Messages inbox](images/participant/14-messages-light.png)
 
@@ -135,7 +159,7 @@ your conversation shows up there too. It isn't locked to this event.
 ## 7. Afterwards: your profile is yours to keep
 
 Surprise: the account you just used is a **Nostr identity** — a login you own,
-not tied to this app or any company. Open the **Me** tab (👤) to see your
+not tied to this app or any company. Open **More → Your identity** to see your
 public handle (your *npub*), copy your key, and jump to other Nostr apps.
 
 ![Your profile](images/participant/13-me-light.png)
@@ -145,10 +169,16 @@ whole ecosystem of social apps (Primal, Damus, Amethyst, Yakihonne…). Copy you
 key, open one of them, choose "log in with a key", and paste it in — you're
 already there.
 
-One more thing: the **Settings** tab (⚙) has a dark mode and a language switch
+One more thing: **More → Settings** has a dark mode and a language switch
 (English / Slovenčina), and your choice sticks:
 
 ![Settings](images/app/settings-light.png)
+
+> **Organizer posts and members-only notes.** Under **Updates** you'll find the
+> organizer's announcements. Some may be **members-only** — encrypted so only
+> approved attendees can read them (the after-party address, a door code). If you
+> ever see a post with a lock and "join the event to read this", that's a
+> members-only post you don't yet have access to.
 
 ## Privacy, in one paragraph
 

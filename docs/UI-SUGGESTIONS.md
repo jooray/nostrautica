@@ -13,6 +13,21 @@ no collapsible raw error yet; 16 now complete including coordinator
 liveness; 20 now complete — see below). Still open: 23 (ongoing mobile
 testing).
 
+> **Update 2026-07-15 — the full UI redesign has since been delivered** (working tree,
+> not yet committed), superseding the incremental fixes below with the ground-up scheme in
+> [`REDESIGN-PLAN.md`](REDESIGN-PLAN.md): an event-scoped bottom nav
+> (Overview / People / Matches / Updates / More), an Overview readiness journey with a
+> single next-action, confidence-first Matches ("Strong / Good match", reasoning-first,
+> raw scores behind a disclosure), a People roster with search + filter chips + initial
+> avatars, an operations-first Admin, a monochrome icon set (no calendar/clock), and a
+> per-event colour wash + serif titles. Items 1–6 and 49-style suggestions here are now
+> **realized in that redesign** rather than as spot edits. Verified end-to-end in
+> [`FEATURE-VERIFICATION-2026-07-15.md`](FEATURE-VERIFICATION-2026-07-15.md). The redesign
+> did **not** close two things this document cares about: raw-error rendering still exists
+> on three pages (the shared `ErrorState` is used on five), and a real bug now blocks intro
+> recording (see the verification doc, gap G1). New UI friction found during that pass is
+> appended, dated, at the bottom of this file.
+
 Principles applied throughout: the most common action comes first and is the
 default; one primary action per screen; plain language over protocol
 language; less text (people don't read at events, on phones, in a hurry);
@@ -314,3 +329,36 @@ run).
   `images/organizer/08-revoke-{light,dark}.png` and
   `images/participant/05-request-sent-{light,dark}.png` (the waiting state now
   persists across reloads and offers a quiet "Send the request again").
+
+---
+
+## Observations from the 2026-07-15 redesign verification pass
+
+Appended (not rewritten) per this file's convention. Grounded in a live mobile-viewport
+run of the redesigned build; full context in
+[`FEATURE-VERIFICATION-2026-07-15.md`](FEATURE-VERIFICATION-2026-07-15.md).
+
+- **[blocker] Intro recording fails before upload.** Record → review → *Use this* throws
+  "must be an https URL" and nothing is submitted (verification gap G1). Since the whole
+  product hinges on intros, this is the first thing to fix; it also means the redesign's
+  "Intro submitted / Processing / Matches ready" readiness steps can never advance in the
+  current tree.
+- **[medium] The post-approval wait is still the softest spot in onboarding.** After the
+  organizer approves, the attendee's Overview keeps showing "Pending / Waiting for the
+  organizer's approval" until grants propagate over the relay — seconds to tens of
+  seconds — with only a passive "refresh in a moment" hint on the People screen. The
+  readiness journey improves the framing but doesn't give an active "you're in now"
+  moment. Consider a live grant subscription that flips the Overview and (optionally) a
+  local notification, as suggested in item #4 above — still relevant post-redesign.
+- **[low] Three screens bypass the shared `ErrorState`.** `Join`, `EventHome`, and
+  `Admin` still render a raw `card warn` error box; folding them into `ErrorState` would
+  finish audit Q3.
+- **[low] Organizer theme CSS is applied unsanitized.** The kind-31609 editor is powerful
+  and correctly blocks HTML/script (it sets `textContent`), but arbitrary CSS can still,
+  e.g., `@import` or scrape via attribute selectors. A one-line caution in the editor UI
+  ("only paste CSS you trust / wrote") would set expectations.
+- **[positive] The redesign reads well on a 390 px phone in both themes.** Event colour
+  wash + serif title give each event a distinct identity without a custom theme; the
+  readiness journey and the confidence-first empty states are legible and reassuring; the
+  members-only post lock badge on Overview communicates the gate cleanly. No horizontal
+  scroll observed on the captured screens.

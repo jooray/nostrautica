@@ -229,7 +229,22 @@ All phases **P0–P6 are implemented** (monorepo `packages/protocol`, `packages/
 - **Scoped batched recompute** (spec §9.3): a re-recorded intro invalidates only the changed attendee's pairs (both directions, by `inputs_hash`); unrelated pairs are untouched. Forward (changed→others) batches as one target + ≤K candidates; reverse (others→changed) uses a mirror **reverse-batch** prompt (one shared candidate + ≤K targets) so it stays batched. **Call-count, 1 changed attendee, N=50, K=10:** forward ⌈49/10⌉ = 5 calls, reverse ⌈49/10⌉ = 5 calls — vs. 49 single-candidate calls under naive per-other recompute. Affected 31605 lists republish under content-addressed keys.
 - **Tests**: protocol config round-trips `lang` (+ default-omit); scoring tests assert the language block for a non-en event and its absence for en, plus the reverse-batch prompt/mapping; a coordinator mock-provider test drives a re-recorded intro end to end (scope: unrelated pair untouched, both changed directions rescored + batched, 31605s republished with fresh content); a Slovak-event test asserts Slovak scoring instruction + published translation with originals preserved; i18n tests cover explicit-vs-adopted locale. `pnpm check` green.
 
-### P9 — Event customization (spec §7.4) — PLANNED, size: L
+### P9 — Event customization (spec §7.4) — IMPLEMENTED 2026-07-15 (e2e specs pending), size: L
+
+Landed: protocol kinds 31607–31609 + zod schemas + ECK encrypt/decrypt with size
+caps (60 KB post markdown, 65,535-byte NIP-44 ceiling enforced in `eckEncrypt`,
+32 KB theme CSS) + `pos`-merge/split helpers (`protocol/src/event-page.ts`);
+markdown renderer extended (images, fenced code, tables, nested lists —
+escape-first, XSS regression tests); `PostEditor` (visibility radio at creation
+only, preview tab, byte counter) replacing the Admin updates textarea;
+posts publish/read (`app/src/lib/events/posts.ts`, dedupe-by-`d` across both
+kinds, key by `eck` tag) + `#/e/:naddr/posts[/:d]` routes/pages with lock+join;
+Admin Menu & layout (post picker, members-only toggles, reorder) and Appearance
+(live-preview CSS) editors publishing 31608/31609; EventHome renders merged
+menu + sections with default-layout fallback; theme injector keyed off
+`eventNaddr(route)` (single `<style data-event-theme>`, event routes only).
+Remaining from the acceptance list: the three-context Playwright e2e specs and
+the P6 revocation-extension e2e.
 
 Design decisions locked 2026-07-14 (owner): full custom CSS (no token-only mode); two visibility levels (public / members-only, no public teasers); one custom Event Page kind with mixed public+encrypted items (no Nostree mirror in v1); extend the hand-rolled escape-first markdown renderer (no library).
 

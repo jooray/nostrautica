@@ -6,7 +6,8 @@ A sanity review of how key material is used across the codebase. Unlike
 `packages/coordinator`, and calls out where code and spec disagree. It is meant
 to be accurate, not flattering.
 
-Verified against the tree on `main` (2026-07-14). Primary sources:
+Verified against the tree on `main` (2026-07-14); findings F1–F3 were fixed in
+code on 2026-07-15 and are marked as such below. Primary sources:
 `packages/protocol/src/crypto.ts`, `giftwrap.ts`; `packages/app/src/lib/events/{create,join,organizer,attendee,keystore,blinding}.ts`,
 `packages/app/src/lib/signer/{session.svelte,backup,keystore}.ts`;
 `packages/coordinator/src/{coordinator,config}.ts`, `store/db.ts`, `pipeline/entitlement.ts`.
@@ -30,17 +31,20 @@ those, this review flags several concrete issues the spec is quieter about:
 - The **ECK is not in the invite link** — a coordinator (or the organizer's
   online client) is *required* to distribute event access. The invite link only
   auto-*requests*; it does not auto-*admit*. (§3, §4)
-- The coordinator stores **`E_inbox` nsec and every ECK in plaintext SQLite** on
-  disk. (§2, §6)
-- The coordinator **does not verify that a `21603` install grant actually came
-  from `E_id`** — it trusts any well-formed gift-wrapped grant. (§6)
-- **Invite `nsec` in the URL fragment** leaks through the usual fragment vectors
-  (browser history, clipboard, "share sheet", shoulder-surf), same as the
-  login-`nsec` link. (§7)
+- The coordinator stored **`E_inbox` nsec and every ECK in plaintext SQLite** on
+  disk. **Fixed 2026-07-15** — now NIP-44-encrypted at rest under the
+  coordinator identity key. (§2, F1)
+- The coordinator **did not verify that a `21603` install grant actually came
+  from `E_id`**. **Fixed 2026-07-15** — the seal author must now equal the
+  coordinate's `E_id` pubkey, same as `21604`. (§6, F2)
+- **Invite `nsec` in the URL fragment** leaked through browser history because,
+  unlike the login-`nsec` link, it was never stripped after consumption.
+  **Fixed 2026-07-15** — stripped from URL + history the moment it is read; the
+  remaining exposure (clipboard, share sheets, shoulder-surf) is inherent to
+  link-based invites. (§7, F3)
 
-None of these are catastrophic for the threat model as scoped, but two (plaintext
-key-at-rest on the coordinator, and the unverified install grant) are worth
-fixing.
+None of these were catastrophic for the threat model as scoped; the three
+concrete code issues (F1–F3) have since been fixed.
 
 ### Key inventory
 
@@ -48,8 +52,8 @@ fixing.
 |---|---|---|---|---|---|
 | **User identity** (npub/nsec) | secp256k1 | `LocalSigner.generate()` on first use, or brought via NIP-07/NIP-46/import | IndexedDB **raw bytes** (`nostrautica` DB, `keystore` store) for local keys; never leaves the extension/Amber for NIP-07/46 | the user | never (local key); email-`nsec` link + ncryptsec export are user-initiated backups |
 | **`E_id`** (event identity) | secp256k1 | `generateSecretKey()` at event create | organizer IndexedDB (`nostrautica-eventkeys`), plus self-encrypted `30078` backup on relays | organizer + co-organizers | co-organizer only, via `21605` gift wrap. **Never** to attendees or coordinator |
-| **`E_inbox`** (event inbox) | secp256k1 | `generateSecretKey()` at event create | organizer IndexedDB + `30078` backup; coordinator SQLite (**plaintext**) | organizer + co-organizers + coordinator | to coordinator via `21603`; to co-organizer via `21605`. Never to attendees |
-| **ECK** (Event Content Key) | 32 random bytes | `generateEck()` at create; new version on each revoke | organizer/attendee IndexedDB (`eck` array, base64); coordinator SQLite (**plaintext**); relay backups (`30078` for organizer; the `21602` grants themselves for attendees) | organizer + coordinator + every approved attendee | to attendees via `21602`/`21605` gift wrap |
+| **`E_inbox`** (event inbox) | secp256k1 | `generateSecretKey()` at event create | organizer IndexedDB + `30078` backup; coordinator SQLite (**NIP-44-encrypted under the coordinator identity key**, F1) | organizer + co-organizers + coordinator | to coordinator via `21603`; to co-organizer via `21605`. Never to attendees |
+| **ECK** (Event Content Key) | 32 random bytes | `generateEck()` at create; new version on each revoke | organizer/attendee IndexedDB (`eck` array, base64); coordinator SQLite (**NIP-44-encrypted under the coordinator identity key**, F1); relay backups (`30078` for organizer; the `21602` grants themselves for attendees) | organizer + coordinator + every approved attendee | to attendees via `21602`/`21605` gift wrap |
 | **Invite code** | secp256k1 nsec | `generateSecretKey()` per code | shown once to organizer; only `sha256(pubkey)` published in `31601` | organizer, then whoever holds the link | in the invite-link URL **fragment** |
 | **Coordinator identity** | secp256k1 | operator-provided | env `NOSTRAUTICA_COORDINATOR_NSEC` or `ncryptsec_file` + passphrase | coordinator operator | public key referenced in `31600` `coordinator` tag |
 | **Media key** (AES-256-GCM) | 32 bytes + 12-byte IV | fresh per blob, `aesGcmEncrypt()` | only inside encrypted media descriptors | anyone who can read the descriptor | rides inside `21601`/`31602`/`31603` payloads, never its own event |
@@ -246,41 +250,52 @@ in the organizer UI, which it is.
 ## 6. Concrete findings & footguns
 
 **F1 — Coordinator stores `E_inbox` nsec and all ECKs in plaintext on disk.**
-`store/db.ts` schema: `events.inbox_nsec TEXT NOT NULL`, `eck_json TEXT`. The
-`21603` install writes them straight in (`coordinator.ts` `installEvent` →
-`upsertEvent`). Anyone who reads the coordinator's SQLite file (backup, disk
-seizure, container escape, an operator with filesystem access) gets read access
-to every hosted event's inbox and content keys. The coordinator's *own* identity
-key can be an encrypted `ncryptsec_file`, but the far more sensitive per-event
-keys it custodies are not encrypted at rest. **Recommend: encrypt the event-key
-columns under the coordinator identity key, or at least document that the DB
-volume is as sensitive as the identity key.**
+**FIXED 2026-07-15.** `store/db.ts` now encrypts the `events.inbox_nsec` and
+`eck_json` columns with NIP-44 self-encryption under the coordinator's identity
+key (the audited primitive via the protocol package's `selfEncrypt`/`selfDecrypt`
+— no bespoke crypto) before they touch SQLite; encrypted values carry a `nip44:`
+prefix, so detection is unambiguous. All write paths encrypt and all read paths
+transparently decrypt. On startup, a one-way, idempotent, logged migration
+re-encrypts any legacy plaintext rows in place. Residual truth: whoever holds
+*both* the DB file and the coordinator identity key (env/ncryptsec passphrase)
+can still read everything — the DB volume alone is no longer sufficient.
+Original finding: anyone who read the coordinator's SQLite file (backup, disk
+seizure, container escape, filesystem access) got read access to every hosted
+event's inbox and content keys.
 
 **F2 — Coordinator does not authenticate the `21603` install grant against
-`E_id`.** `installEvent` derives `eidPubkey` from the *coordinate inside the
-grant* (`parseCoordinate(grant.coordinate)`), not from the seal author. The gift
-wrap only proves *someone* sent it; nothing checks that the seal author equals
-the event's `E_id`. In practice the grant carries the real `E_inbox` nsec, so a
-forger would have to already possess it — limiting the blast radius. But the
-coordinator will happily "install" and start serving an event on the say-so of
-any sender who supplies a valid-looking grant, including binding to relays the
-sender chose. Contrast this with **admin commands (`21604`), which *are* checked**:
-`handleAdmin` does `if (from !== state.eidPubkey) return`, and `from` is the seal
-author (`rumor.pubkey`) — that check is correct and authentic. **Recommend: apply
-the same `seal-author == E_id` check to `21603`.**
+`E_id`.** **FIXED 2026-07-15.** The client (`organizer.ts` `attachCoordinator`)
+now seals the `21603` grant with `E_id` (it previously sealed with the
+organizer's personal key), and the coordinator (`handleCoordinatorWrap`) rejects
+— with a log line — any install grant whose seal author (`rumor.pubkey`) does not
+equal the pubkey inside the grant's coordinate: the exact `seal-author == E_id`
+check `21604` admin commands already had. Spec §7.2 now states this for 21603.
+While fixing this, a deeper hole was found and closed: the protocol package's
+`unwrapRumor` delegated to nostr-tools `unwrapEvent`, which never binds
+`rumor.pubkey` to the seal author — so a forger could seal with their *own* key
+and claim `E_id` inside the rumor, defeating both the 21603 and the existing
+21604 check (this review's earlier claim that the 21604 check was "authentic"
+was wrong). `unwrapRumor` now enforces `rumor.pubkey == seal.pubkey` (the seal
+author being authenticated by the NIP-44 ECDH decryption itself), mirroring the
+app's `signerUnwrap`.
+Note: grants sent by pre-fix clients (sealed by the organizer's personal key)
+are rejected by a fixed coordinator — acceptable pre-release. Original finding:
+`installEvent` derived `eidPubkey` from the *coordinate inside the grant*, never
+checking the seal author, so the coordinator would "install" and serve an event
+(on relays the sender chose) for any well-formed grant.
 
-**F3 — Invite `nsec` in the URL fragment.** The invite code is a full nsec that
-rides `…/join?code=<invite-nsec>` in the fragment. Fragments never hit the
-server, but they *do* land in browser history, `Referer` for same-document
-navigations is mitigated but shoulder-surfing / clipboard / chat-app link
-previews / "share sheet" all expose it. Because the proof is pubkey-bound, a
-leaked code can't be replayed against a *different* attendee — but it *can* be
-used first by anyone who sees it (first-come single-use), stealing the slot. The
-login-`nsec` link is at least stripped from history on consume
-(`session.svelte.ts` `consumeNsecFromHash`); **the invite link is not stripped**
-after `Join.svelte` reads it, so it lingers in `location.hash` and history.
-**Recommend: strip `?code=` from the URL after reading it, mirroring the
-login-nsec handling.**
+**F3 — Invite `nsec` in the URL fragment.** **FIXED 2026-07-15** (the
+history-lingering part). `Join.svelte` now consumes the code into memory and
+immediately strips `?code=` from the URL and history via
+`history.replaceState` — mirroring the login-`nsec` handling in
+`consumeNsecFromHash` — and clears it from the in-memory route so back-navigation
+cannot rebuild a URL carrying it. A reload mid-join degrades gracefully to the
+normal join screen. What remains (inherent to link-based invites): the code is a
+full nsec riding `…/join?code=<invite-nsec>` in the fragment, so clipboard,
+chat-app link previews, "share sheet", and shoulder-surfing still expose it in
+transit. Because the proof is pubkey-bound, a leaked code can't be replayed
+against a *different* attendee — but it *can* be used first by anyone who sees
+it (first-come single-use), stealing the slot.
 
 **F4 — Local user keys are stored as raw bytes in IndexedDB.** `signer/keystore.ts`
 puts the 32-byte secret key unencrypted in IndexedDB (`nostrautica`/`keystore`).
@@ -322,15 +337,16 @@ self-encrypted user-private tier the coordinator genuinely can't read.
 
 Ordered roughly by value:
 
-1. **Encrypt the coordinator's event-key columns at rest** (F1). Wrap
-   `inbox_nsec` and `eck_json` under the coordinator identity key before writing
-   to SQLite, or at minimum document the DB volume's sensitivity in the operator
-   guide.
-2. **Authenticate `21603` install grants against `E_id`** (F2) — reuse the exact
-   `seal-author == E_id` check that `21604` already does.
-3. **Strip the invite `code` from the URL/history after reading it** (F3),
-   mirroring `consumeNsecFromHash`. Cheap, closes the history/lingering-fragment
-   leak.
+1. ~~**Encrypt the coordinator's event-key columns at rest** (F1).~~ **Done
+   2026-07-15**: `inbox_nsec` and `eck_json` are NIP-44-encrypted under the
+   coordinator identity key, with a transparent startup migration for existing
+   plaintext rows.
+2. ~~**Authenticate `21603` install grants against `E_id`** (F2).~~ **Done
+   2026-07-15**: 21603 is sealed by `E_id` client-side and the coordinator
+   enforces `seal-author == E_id`, same as `21604`.
+3. ~~**Strip the invite `code` from the URL/history after reading it** (F3).~~
+   **Done 2026-07-15**: stripped on consume in `Join.svelte`, mirroring
+   `consumeNsecFromHash`.
 4. **Reconcile spec §6.5 route shape** (`#/join?event=…&code=…`) with the
    implemented `#/e/:naddr/join?code=…` so the doc and code agree.
 5. **Ship scoped admin roles** (F5) — an approve-only delegate that gets the ECK

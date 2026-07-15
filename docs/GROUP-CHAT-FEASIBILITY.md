@@ -1,51 +1,65 @@
 # Per-event group chat — feasibility study
 
-Status: research document, 2026-07-14. Sources: the Marmot spec repo (restructured 2026,
-MIP-era docs deprecated), `marmot-ts` v0.6.0 source (cloned and read, commit of
-2026-06-24), merged NIP-EE (`nips/EE.md`, merged 2025-08-27), NIP-17/28/29/46 texts,
-Whitenoise public materials, and this codebase (`packages/protocol`,
-`packages/app/src/lib/signer`, spec §5–§7). Facts marked *(unverified)* could not be
-confirmed against primary sources and must be checked at implementation time.
+Status: research document, 2026-07-14; **revised 2026-07-15 per owner decision** — the
+ECK-encrypted web-only chat is dropped (rejected: web-only, §2.5) and NIP-17 group
+messages are promoted from "rejected" to a researched first-class option alongside
+Marmot. Sources: the Marmot spec repo (restructured 2026, MIP-era docs deprecated),
+`marmot-ts` v0.6.0 source (cloned and read, commit of 2026-06-24), merged NIP-EE
+(`nips/EE.md`, merged 2025-08-27), NIP-17/28/29/46/59 texts (fetched from master
+2026-07-14/15), the nostrability DM-interop tracker (issue #169) and client source
+(Amethyst/Quartz, 0xchat-core — fetched 2026-07-15), Whitenoise public materials, and
+this codebase (`packages/protocol`, `packages/app/src/lib/signer`,
+`packages/app/src/lib/events/giftwrap.ts`, spec §5–§7). Facts marked *(unverified)*
+could not be confirmed against primary sources and must be checked at implementation
+time.
 
 ---
 
 ## 1. Summary & recommendation
 
-**Recommendation: two chats, phased.**
+**Recommendation: two chat options, choosable per event by the organizer — either or
+both.**
 
-1. **Phase 1 — ship an ECK-native event chat now.** A custom regular kind whose content
-   is NIP-44-encrypted under the existing Event Content Key. It reuses the key
-   distribution we already have (21602 grants), works identically for local-key, NIP-07
-   and NIP-46 users, needs no new infrastructure, no new trust, and roughly a week of
-   work including UI. Its honest limits: no forward secrecy beyond ECK rotation
-   (identical to the rest of the event-encrypted tier, §4.2), readable only inside
-   Nostrautica, and it effectively dies when people stop opening the web app.
+1. **NIP-17 group messages** (kind-14 rumors with multiple `p` tags, gift-wrapped per
+   NIP-59 — the exact machinery our 1:1 DMs already use; full analysis in §2.2). Zero
+   new kinds, zero new dependencies, zero new trust; a group started in Nostrautica is
+   a *standard* NIP-17 room living on the attendees' own DM relays, independent of this
+   app. Its honest limits are hard ones: the spec itself says groups with **more than
+   10 participants** "should find a more suitable messaging scheme"; the room's
+   identity IS the exact member set, so **every roster change forks the conversation**;
+   and a NIP-46 (Amber) sender pays 2 serial remote round-trips per member per message.
+   Group (as opposed to 1:1) support in other clients is thin — verified today
+   essentially **Amethyst and Nostria**, with 0xchat *unconfirmed* (§2.2 matrix).
+   Right-sized for **small events and spawned subgroups (roughly ≤ 10–20 people)**, not
+   for a 200-person conference chat.
 
-2. **Phase 2 — add Marmot (MLS over Nostr) as the durable, interoperable chat**, built
-   on `marmot-ts`, with **the coordinator acting as the group's admin bot** (it is the
-   only long-lived, stateful actor we have; membership automation is impossible
-   client-side-only unless the organizer keeps a tab open). Marmot is the only option
-   that satisfies the actual product goal — *the conference chat keeps living in a
-   mobile app with push notifications after people stop opening the web app* — because
+2. **Marmot (MLS over Nostr)** as the durable, event-scale chat, built on `marmot-ts`,
+   with **the coordinator acting as the group's admin bot** (it is the only long-lived,
+   stateful actor we have; membership automation is impossible client-side-only unless
+   the organizer keeps a tab open). Marmot is the only option that scales to conference
+   size AND satisfies the mobile-continuity goal — *the chat keeps living in a mobile
+   app with push notifications after people stop opening the web app* — because
    Whitenoise ships MIP-05 push (live on iOS) and the group is client-independent at the
    protocol level. Ship it as an **experimental opt-in per event**, clearly labelled,
    because `marmot-ts` is alpha ("do not use in production yet", its own README) and
    there is **no production-grade web Marmot client anywhere yet** — we would be the
    first.
 
-3. **Per-event choice: yes, but as one config tag, not a plugin framework.** A `chat`
-   tag on the kind 31600 config (`none | eck | marmot`, extensible) is needed anyway
-   (Marmot requires an attached coordinator; ECK chat doesn't). A generic pluggable chat
-   abstraction beyond that is overengineering — the two backends share almost no code
-   below the message-list UI.
+3. **Per-event choice: one config tag, not a plugin framework.** `chat` tags on the
+   kind 31600 config — values `nip17` and `marmot`, absent = no chat, **both tags
+   allowed** when the organizer offers both. The tag is needed anyway (Marmot requires
+   an attached coordinator; NIP-17 doesn't). A generic pluggable chat abstraction
+   beyond that is overengineering — the two backends share almost no code below the
+   message-list UI. Spec stub: SPECIFICATION.md §7.5 (planned, not built).
 
-4. **Reject** NIP-17 group DMs (spec itself caps sensible size at ~10 members; per-message
-   fan-out is one gift wrap per recipient, which for a NIP-46 user means hundreds of
-   serial Amber round-trips per sent message), **reject** NIP-28 (deprecated in favor of
-   NIP-29, plaintext, no membership), **defer** NIP-29 (healthy in 2026, good mobile
-   clients, but requires running dedicated relay software per group, messages are
-   plaintext to that relay, and it adds a new trusted party — reconsider only if an
-   organizer explicitly wants relay-moderated public-ish chat).
+4. **Rejected: ECK-encrypted web-only chat** (previously this document's phase 1 —
+   owner decision 2026-07-15, kept for the record in §2.5): a chat readable only inside
+   the Nostrautica web app fails the product goal by construction — post-conference
+   chats must survive in the clients attendees already use. **Reject** NIP-28
+   (deprecated in favor of NIP-29, plaintext, no membership), **defer** NIP-29 (healthy
+   in 2026, good mobile clients, but requires running dedicated relay software per
+   group, messages are plaintext to that relay, and it adds a new trusted party —
+   reconsider only if an organizer explicitly wants relay-moderated public-ish chat).
 
 **The critical multi-client answer, up front (details in §3):** joining the event's
 Marmot group in the Nostrautica web app does **not** make the group appear in Whitenoise
@@ -143,18 +157,121 @@ alpha dependency, MLS state fragility in browser storage, coordinator becomes a 
 admin bot and a group member (it reads the chat — consistent with §4.2, but must be
 disclosed in the UI the same way matchmaking is), and the multi-client model of §3.
 
-### 2.2 NIP-17 gift-wrapped group DMs
+### 2.2 NIP-17 gift-wrapped group messages
 
-NIP-17 supports rooms (kind 14 rumor with multiple p-tags) and we already ship the 1:1
-version. But: one gift wrap **per recipient per message** (sender pays N seals + N wrap
-encryptions; for NIP-46 that is N `sign_event` + 2N `nip44_encrypt` serial round-trips
-through Amber per message — the tab-backgrounding fragility we already fought in
-`0cf4062` makes this hopeless at conference scale); receivers pay 2 `nip44_decrypt` per
-incoming message (nips issue #2160 documents exactly this pain); the spec itself says
-groups over ~10 participants "should find a more suitable messaging scheme"; no
-membership management, no admin, no join/leave semantics — "the group" is whatever
-p-tags each sender chooses; no FS/PCS. **Rejected** for event chat (kept, as today, for
-1:1 DMs, where it interoperates beautifully with 0xchat/Amethyst/Damus).
+**What it is.** NIP-17 "chat rooms": a kind-14 rumor whose `p` tags name **all**
+receivers, sealed (kind 13, signed by the true author) and gift-wrapped (kind 1059,
+fresh ephemeral key) **separately to every receiver and to the sender** — byte-for-byte
+the construction our 1:1 DMs already ship (`packages/app/src/lib/events/giftwrap.ts`,
+spec §7.2). Current spec text (master, fetched 2026-07-14), the load-bearing lines
+verbatim:
+
+- Room identity: *"The set of `pubkey` + `p` tags defines a chat room. If a new `p`
+  tag is added or a current one is removed, a new room is created with a clean message
+  history."* There is **no group identifier** — deliberately (*"No Public Group
+  Identifiers"* is listed as a privacy benefit).
+- Naming: *"An optional `subject` tag defines the current name/topic of the
+  conversation. Any member can change the topic by simply submitting a new `subject`
+  to an existing `pubkey` + `p` tags room."* Newest wins; any member can rename.
+- Size guidance: *"The main limitation of this approach is having to send a separate
+  encrypted event to each receiver. Group chats with more than 10 participants should
+  find a more suitable messaging scheme."* **The cap is 10, straight from the spec** —
+  this document's earlier "~10" was accurate.
+- Also in the current spec: kind-15 file messages and kind-7 reactions may be sent to
+  a room; kind 10050 lists DM inbox relays and clients *"MUST only publish events to
+  the relays listed in the recipient's kind 10050 event"* — no 10050, no delivery.
+- Spec churn check (2025–2026 commit history): kind-15 files, `q` tags, reactions,
+  10050 MUST, delete/edit/disappearing messages were merged; **no merged change to the
+  group semantics** — the p-set room model and the 10-participant line are unchanged.
+  Active proposals (PRs #1647 NIP-4E, #2361, #2397) all attack wrapper-key/remote-
+  signer cost, not group scale; larger groups keep being pointed at MLS.
+
+**Membership semantics — the p-list IS the group, per message.** There is no join, no
+leave, no admin, no membership event. "Adding" a member = senders start including their
+`p` tag (the newcomer sees **no history** — nothing was ever encrypted to them);
+"removing" = senders stop including them (they keep everything they received, and
+nothing stops them wrapping messages to the stale list). Crucially, per the spec text
+above, **any change to the member set is a NEW room with clean history** in conforming
+clients. Verified in Amethyst's source: rooms are keyed by
+`ChatroomKey(users: Set<HexKey>)` — the participant set and nothing else (subject is
+*not* part of the key; changing it renames in place, changing the p-list forks). For a
+fluctuating event roster this is the killer UX fact: **every approval or revocation
+forks the event chat into a fresh conversation** in attendees' apps, with the old one
+going quiet. Workable policies: freeze the p-list at chat spawn (late joiners get the
+*next* spawned room), or batch roster changes into deliberate, announced "chat v2"
+forks. Pretending the roster can flow through continuously is not an option.
+
+**Client interop matrix — the load-bearing finding.** "Will a conference group chat
+started in Nostrautica show up in attendees' daily apps, with notifications?" Verified
+per client (primary sources: client source code, README NIP lists, and the
+nostrability DM-interop tracker, github.com/nostrability/nostrability issue #169,
+checked 2026-07-15):
+
+| Client | Platform | 1:1 NIP-17 | **Group** (multi-p 14) receive/reply | Create group | `subject` | DM push | Evidence |
+|---|---|---|---|---|---|---|---|
+| **Amethyst** | Android | yes | **yes** — Quartz `nip17Dm` pkg; `reply()` re-targets the full recipient set | yes (protocol verified; UI multi-select inferred) | **yes** (`changeSubject`, `NewChatroomSubjectDialog`) | yes (Google + UnifiedPush) | Quartz source: `ChatMessageEvent.kt`, `ChatroomKey.kt`, `TagArrayBuilderExt.kt` |
+| **Nostria** | web/Windows | yes | **yes** — documents "NIP-17 groups", `computeGroupChatId()` (participant-set hash) | yes | *(unverified)* | *(unverified)* | nostrability #169 |
+| **0xchat** | iOS/Android | yes | **unconfirmed — likely no.** Its "private groups" are a custom kind 40/41/42 gift-wrap scheme (own `doc/privateGroup.md`), now migrating to MLS; code modules for DMs vs. private groups are disjoint. nostrability #169 flags 0xchat under "groups", but that almost certainly refers to this custom scheme. **Live test required before promising anything.** | no (custom scheme) | no evidence (kind-40/41 `name` instead) | yes (custom push) | 0xchat-core source + `doc/privateGroup.md`; nostrability #169 |
+| **Damus** | iOS | **no** — NIP-04 only in production; NIP-17 PRs in progress (#3590 closed, #3667 open) | no | no | — | yes (1:1 legacy) | nostrability #169 |
+| **Primal** | all | no (NIP-04 only; no 13/14/1059/10050) | no | no | — | — | nostrability #169 |
+| **Coracle / Flotilla** | web | no by stance — hodlbod calls NIP-17 "evil", plans MLS; Flotilla is relay-based (NIP-29-style) groups | no | no | — | — | nostrability #169; coracle-social/flotilla |
+| **Snort, Nostur, notedeck, Wisp** | various | yes (per tracker) | *(unverified — no group evidence)* | *(unverified)* | *(unverified)* | varies | nostrability #169 |
+| **Yakihonne** | web/mobile | unclear (NIP-04 confirmed; "secure DM" toggle) | no evidence | no | no evidence | UnifiedPush (DM path unverified) | YakiHonne READMEs; nostrability #169 |
+| **Whitenoise** | iOS/Android | **no** — Marmot/MLS only, no kind-14 code path | no | no | — | yes (MLS/MIP-05) | parres-hq/whitenoise README, NIP-EE |
+
+**Honest bottom line on interop:** NIP-17 *1:1* interoperates broadly (Amethyst,
+0xchat, Snort, Nostur, notedeck, Nostria, …) — that story is real and we already ride
+it. NIP-17 *groups* interoperate today between **Amethyst and Nostria, full stop**,
+pending a live 0xchat test. For our audience (Amber/Android-heavy, Amethyst common)
+that is meaningfully better than web-only — the room genuinely lives on in the
+attendee's daily driver with push — but it is nowhere near the 1:1 story, and iOS
+attendees (Damus/Primal) see nothing. Interop must be promised as "continues in
+Amethyst and other NIP-17-group clients", not "works everywhere".
+
+**Scaling math, honestly.** Per message to a room of N members (sender's copies
+included: one wrap per receiver + one to self), the sender performs N × (2 NIP-44
+encrypts + 2 Schnorr signs) plus N publishes of ~1.5–2.5 KB each; a receiver pays 2
+NIP-44 decrypts per incoming message. Of those, exactly the seal's encrypt + sign go
+through the user's signer (the wrap layer uses a local ephemeral key — see
+`signerWrap`). So:
+
+- **Local-key / NIP-07 users:** crypto is negligible (well under a second even at
+  N=200). The real sender costs are bandwidth (N=200 ⇒ ~300–500 KB uploaded *per
+  message*) and relay behavior — publishing hundreds of 1059s per message, per sender,
+  into each recipient's 10050 relays will meet rate limits, and PR #686's critique
+  stands: data volume is O(participants × messages). Receiving is cheap.
+- **NIP-46 (Amber) users:** each copy costs **2 serial remote round-trips**
+  (`nip44_encrypt` + `sign_event:13`) at ~0.5–2 s each over the signer relay. Realistic
+  send ceilings — N=10: ~20 RTs ≈ 10–40 s; **N=20: ~40 RTs ≈ 30–80 s**; N=50: ~100 RTs
+  ≈ 2–3 min; N=200: ~400 RTs ≈ 7–13 min. On mobile the tab backgrounds behind the
+  signer app and the kind-24133 reply sockets drop (the exact fragility fought in
+  `0cf4062`) — a multi-minute serial chain **will** break in practice. Reading hurts
+  too: 2 remote decrypts per incoming wrap means a 100-message day costs ~200 Amber
+  round-trips just to render the room (the O(n) remote-decrypt pain of nips issue
+  #2160, and why PRs #1647/#2361/#2397 exist).
+- **Cost asymmetry, stated plainly:** a local-key member and an Amber member sit in
+  the same room with ~100× different send/read costs. A group is only as usable as its
+  worst-signer member — and our onboarding funnel deliberately produces NIP-46 users.
+
+**Viable-size verdict.** The spec's own cap of 10 is about right for mixed-signer
+rooms; with patience and mostly-local keys perhaps 15–20. **Viable:** small events
+(a dinner, a workshop, a ≤20-person meetup) and **spawned subgroups** of a larger
+event — topic tables, session groups, match clusters of ≤10, all derivable from the
+roster and match data we already have (match-pair 1:1 intro DMs already exist, spec
+§13 "Introduce us"). **Not viable:** one big chat for a 50–500-person conference —
+that is Marmot's job (§2.1). The UI must enforce this: refuse (or at minimum scream)
+above ~20 members, and offer subgroup spawning instead.
+
+**Other properties.** No FS/PCS (a compromised key reads all past wraps it received —
+same as our 1:1 DMs); metadata-private (ephemeral wrap authors, randomized timestamps,
+no group identifier — strictly better event-privacy than any public-channel scheme);
+spam/abuse: anyone who learns the member list can wrap into the room, and any member
+can "rename" it via `subject` — acceptable at ≤20 trusted attendees, unacceptable at
+conference scale. Delivery requires each recipient to have a kind 10050 (we must
+publish one for app-generated keys — same open question as Marmot's, §7 Q2).
+
+**Verdict: adopt, correctly scoped** — as the small-event / subgroup chat option,
+promoted per event via `chat=nip17`, never as the flagship conference-wide chat.
 
 ### 2.3 NIP-28 public chat channels
 
@@ -175,30 +292,20 @@ privacy-first event app whose encrypted tier hides even attendance, shipping the
 plaintext to a third-party relay is a hard sell. **Deferred** — a reasonable future
 third backend for events that explicitly want open community chat.
 
-### 2.5 Naive: chat messages encrypted to the event's ECK
+### 2.5 ECK-encrypted chat — REJECTED (web-only), kept for the record
 
-A custom **regular** kind (e.g. 1600 — re-verify unassigned per §15 discipline), shaped
-like our other event-encrypted content:
+An earlier revision of this document recommended shipping this first: a custom regular
+kind, outer event signed by a fresh ephemeral key, blinded `h` topic tag, content
+NIP-44-encrypted under the event's ECK with a signed inner rumor. It reused existing
+key distribution (21602), worked for the whole login ladder, and cost ~a week to build.
 
-- Outer event signed by a **fresh ephemeral key per message** (not the attendee's key —
-  a chat message signed by the attendee with an event `a`-tag would publicly announce
-  attendance, which the rest of the design carefully hides via blinded d-tags).
-- Tag: `["h", hmac_sha256(ECK, "<coordinate>|chat")[0..32]]` — the blinded chat topic;
-  only key-holders can correlate it to the event; subscription filter is `{kinds, #h}`.
-- Content: NIP-44-encrypted under the current ECK; plaintext is a **signed inner rumor**
-  (author = attendee, signed via `AppSigner.signEvent`) so ECK-holders can't impersonate
-  each other. One `sign_event` per message through the signer — fine for local keys,
-  and Amber handles per-kind auto-approval (add the kind to `DEFAULT_PERMS` in
-  `signer/nip46.ts`).
-
-Properties: works for 100% of the login ladder today; offline-cacheable via the existing
-Dexie layer; ECK rotation on revoke degrades gracefully (removed attendee stops reading
-future messages — same forward-only honesty as §6.3); zero new dependencies; the
-Dm/DmChat UI is directly reusable. Limits: no FS (any past ECK-holder reads the whole
-history forever), coordinator can read it (already true of the whole tier), **no
-interop — the chat exists only inside Nostrautica and only while people open the web
-app**, and no notifications beyond an in-app badge. As the *during-the-event* chat this
-is excellent; as the *post-event* chat it fails the product goal by construction.
+**Owner decision 2026-07-15: rejected.** Its disqualifying property was always in the
+text: the chat exists **only inside Nostrautica and only while people open the web
+app** — no interop, no notifications beyond an in-app badge. Post-conference chats must
+survive in the clients attendees already use daily; a web-only chat fails that by
+construction, and shipping it first would have anchored users to the wrong thing. The
+design is preserved in git history should a "during-the-event-only" scratch chat ever
+be wanted; it is not on any roadmap.
 
 ---
 
@@ -281,8 +388,8 @@ organizer-chosen trusted infrastructure that reads all event content (§4.2). De
   and unlike ECK rotation this is real PCS for the chat.
 - **No coordinator** → no Marmot chat for that event (organizer's browser tab can
   technically admin via `marmot-ts`, but adds then only happen while the tab is open —
-  a support nightmare; ECK chat remains available). This coupling is another reason the
-  `chat` config tag must exist.
+  a support nightmare; NIP-17 chat remains available, being coordinator-free). This
+  coupling is another reason the `chat` config tag must exist.
 - Disclosure: the chat settings UI must say the coordinator operates and can read the
   group chat, mirroring the existing matchmaking disclosure.
 
@@ -290,12 +397,12 @@ organizer-chosen trusted infrastructure that reads all event content (§4.2). De
 - *Key package publish*: one `sign_event:30443` (and/or 443) — add to `DEFAULT_PERMS`.
 - *Welcome unwrap*: two `nip44_decrypt` round-trips, once per group join. Fine.
 - *Chatting*: **zero signer traffic** (ephemeral-key signing, exporter-secret
-  decryption, all local). This makes Marmot *better* for NIP-46 users than either
-  NIP-17 groups (catastrophic) or ECK chat (one sign per message).
+  decryption, all local). This makes Marmot *dramatically better* for NIP-46 users than
+  NIP-17 groups (2 remote round-trips per member per sent message, 2 per received —
+  §2.2 scaling math). If an event enables both chat options, the UI should steer
+  NIP-46-heavy audiences toward the Marmot chat for anything beyond small rooms.
 - *Caveat*: no `accountProofSigner` possible → leaf lacks the identity-proof extension →
   possible rejection by strict validators (§2.1, open question 3).
-- ECK chat: one `sign_event` per message (inner rumor); Amber per-kind auto-approve
-  makes it silent after first grant.
 
 ## 5. Notifications
 
@@ -309,15 +416,18 @@ organizer-chosen trusted infrastructure that reads all event content (§4.2). De
   ships iOS push with on-device decryption (Apple sees a delivery, not content); Android
   via its own channels *(mechanics unverified)*. This is the payoff of §3's "get a
   mobile leaf into the group" UX.
-- **ECK chat / NIP-17 groups**: nothing outside the open web app.
+- **NIP-17 groups**: in our web app, nothing outside the open tab — but the room is
+  standard NIP-17, so members on **Amethyst get real push** (Google/UnifiedPush) for
+  the group, today. That, not our tab, is the NIP-17 notification story.
 - **NIP-29**: native-client notifications (0xchat) — decent, if we ever add it.
 
 ## 6. Pluggable per-event protocol — worth it?
 
-A `["chat", "none" | "eck" | "marmot"]` tag on 31600 (default `none`; `marmot` valid
-only with a coordinator; conceivably both enabled at once during transition): **yes** —
-it's ~20 lines in `packages/protocol/src/config.ts` and honest UI copy, and the
-capability difference between backends forces a switch anyway.
+`["chat", "nip17"]` / `["chat", "marmot"]` tags on 31600 (absent = no chat; `marmot`
+valid only with a coordinator; **both tags allowed** when the organizer offers both —
+e.g. Marmot as the event-wide chat plus NIP-17 for spawned subgroups): **yes** — it's
+~20 lines in `packages/protocol/src/config.ts` and honest UI copy, and the capability
+difference between backends forces a switch anyway. Spec stub: SPECIFICATION.md §7.5.
 
 A *generic* chat-plugin abstraction (interface all backends implement, third-party
 backends, per-event negotiation): **overengineering**. The backends share only the
@@ -331,9 +441,10 @@ data points instead of guesses.
 1. **Wire-format skew**: does shipping Whitenoise consume kind-30443 addressable key
    packages (current Marmot spec, marmot-ts) or kind-443 (merged NIP-EE)? Interop test
    is step zero of Phase 2; if they diverge, we may need to publish both.
-2. **Relay lists**: Marmot expects kind 10050 inbox relays for welcome delivery; we
-   publish 10002 only (§5.4). Publish a 10050 for app-generated keys? For existing users
-   without one?
+2. **Relay lists**: Marmot expects kind 10050 inbox relays for welcome delivery, and
+   NIP-17 now says clients "MUST only publish to the recipient's 10050 relays" — no
+   10050, no group messages either; we publish 10002 only (§5.4). Publish a 10050 for
+   app-generated keys? For existing users without one?
 3. **`account-identity-proof`**: does Whitenoise reject leaves without it? If yes,
    NIP-46 users can't interop-chat until the proof gets a NIP-46-compatible signing path
    (upstream conversation to have with the Marmot folks).
@@ -347,20 +458,28 @@ data points instead of guesses.
    coordinator mode running?
 7. **marmot-ts API churn**: alpha, breaking changes promised. Pin hard, vendor if
    needed, budget for rework before their v1.
-8. **Kind number for ECK chat** (e.g. 1600) — re-verify unassigned against the NIPs
-   registry, same as §15.
-9. **Group scale**: MLS handles hundreds of members fine cryptographically; commit
+8. **0xchat live test** (NIP-17): does current 0xchat render an incoming multi-p
+   kind-14 conversation as a group at all, or mis-thread it as 1:1s? Its code suggests
+   the latter (§2.2). The answer decides whether the interop promise names 0xchat.
+9. **Roster-fork policy** (NIP-17): freeze the p-list at chat spawn vs. batched,
+   announced "chat v2" forks on roster change (§2.2 membership semantics). Owner call —
+   it's pure UX policy, the protocol allows only forking.
+10. **Group scale**: MLS handles hundreds of members fine cryptographically; commit
    traffic on flaky venue Wi-Fi with ~200 members × multiple devices is untested in any
    web client. Load-test.
 
 ## 8. Phased implementation plan
 
-**Phase 1 — ECK event chat (~3–5 dev-days)**
-`chat` tag in protocol config + schemas; ephemeral-outer/signed-inner message helper in
-`packages/protocol` (reuses `eckEncrypt`, blinding, and the giftwrap-style rumor
-pattern); `#/e/:naddr/chat` page reusing DmChat UI; Dexie offline cache; Amber perm
-addition; i18n (en+sk). No coordinator changes. Ships value immediately and is the
-fallback for coordinator-less events forever.
+**Phase 1 — NIP-17 group chat (~1–2 dev-weeks)**
+`chat` tag in protocol config + schemas; generalize `sendDm`/`fetchDms`/`threadsOf`
+(`packages/app/src/lib/events/dm.ts`) from single-peer to participant-set rooms keyed
+Amethyst-style (set of pubkeys), honoring `subject`; roster→p-list derivation with the
+chosen fork policy (§7 Q9); member-count guard (~20 hard, 10 advisory per spec) +
+subgroup spawning from matches; 10050 publication/lookup (§7 Q2); batching + progress
+UI for NIP-46 fan-out sends; `#/e/:naddr/chat` page reusing DmChat UI; Dexie offline
+cache; i18n (en+sk). No coordinator changes, works for coordinator-less events. Gate:
+a live interop test against Amethyst (and 0xchat, §7 Q8) before the interop promise
+goes in any UI copy.
 
 **Phase 2 — Marmot chat, experimental opt-in (~4–7 weeks)**
 1. *Spike + interop test (1 wk)*: marmot-ts in the browser against Whitenoise on a
@@ -383,6 +502,10 @@ encrypted media in chat once marmot-ts finishes MIP-04.
 
 ---
 
-*Bottom line*: Marmot from day one is feasible — with the coordinator as admin bot, an
-experimental label, and the §3 multi-client UX designed in — but it should ride on top
-of a boring ECK chat that works for every event, every signer, and every browser today.
+*Bottom line*: two interoperable chats, each honest about its lane. NIP-17 groups are
+cheap to build (we already ship the machinery for 1:1), live on in Amethyst/Nostria
+with real push, and are strictly a **small-room** tool — ≤10 per the spec, ~20 at the
+outside, forking on every roster change. Marmot — coordinator as admin bot,
+experimental label, §3 multi-client UX designed in — is the only event-scale option
+and the real bearer of the "chat survives in attendees' daily apps" promise. The
+organizer picks either or both per event; web-only chat is off the table.

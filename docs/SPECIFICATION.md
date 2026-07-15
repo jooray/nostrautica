@@ -285,6 +285,7 @@ Sent by the organizer (manual approval) or the coordinator (invite auto-approval
 content: {"v":1, "a": <coordinate>, "inbox_nsec":"<hex>",
           "eck":[…], "config_relays":["wss://…"]}
 ```
+Sealed by `E_id` (like 21604): the coordinator authenticates the install by requiring the gift wrap's seal author to equal the coordinate's `E_id` pubkey, rejecting anything else.
 
 **rumor kind 21604 — Admin Command** (organizer → coordinator)
 ```
@@ -398,6 +399,22 @@ content: <raw CSS, ≤ 32 KB>
 - Applied by injecting a single `<style data-event-theme>` element **only while a route under `#/e/<naddr>` is active**, removed on leaving the event; never active on login, settings, key-backup or DM routes.
 - Deliberately *not* stored in 31600 `content`: 31600 is rebuilt from parsed tags and republished by config flows (e.g. coordinator attach), which would silently drop a content payload.
 - **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages — where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed, and no key material is ever rendered on themed routes.
+
+### 7.5 Event group chat (PLANNED — not built)
+
+Two organizer-choosable chat options per event, declared as `chat` tags on the 31600 config (§7.1). Research, client-interop matrix and scaling analysis: `GROUP-CHAT-FEASIBILITY.md`.
+
+```
+["chat", "nip17"]     // NIP-17 group messages offered
+["chat", "marmot"]    // Marmot (MLS) group offered — valid only with a coordinator tag
+```
+Tag absent = no chat. **Both tags MAY be present** when the organizer offers both (e.g. Marmot event-wide + NIP-17 subgroups).
+
+- **`nip17`** — standard NIP-17 chat rooms: kind-14 rumors carrying the member set as `p` tags, sealed + gift-wrapped to every member and the sender via the existing §7.2 signer path — **no new kinds**. Bootstrap: any member can message the group; the app derives the p-list from the roster (31604 `attendees` pubkeys + organizer pubkeys) **frozen at chat spawn** — per NIP-17 the room's identity is the exact pubkey+p set, and any change starts a *new* room with clean history, so roster changes surface as an explicit organizer "start chat v2" action, never a silent refresh. Subject convention: `["subject", <31923 title>]` on the first message (any member may rename later; newest wins, per NIP-17). Delivery requires each member's kind 10050 DM-relay list. **Size:** NIP-17's own guidance caps rooms at 10 participants; the composer refuses above ~20 and offers match/table subgroups instead (a NIP-46 sender pays 2 remote signer round-trips per member per message — the practical reason for the cap). **Interop promise:** the room continues, with native push, in clients with NIP-17 *group* support — verified Amethyst and Nostria as of 2026-07; 0xchat unconfirmed pending a live test; most other clients are 1:1-only.
+- **`marmot`** — one MLS group per event (Marmot protocol, kind 443/444/445 family), created and administered by the **coordinator as admin bot**: add-on-approval, remove-on-revoke (real PCS, unlike ECK rotation), auto-add of new key packages from enrolled npubs (multi-device + state-loss healing). The coordinator is a group member and can read the chat — disclosed in UI, consistent with §4.2. **Interop promise:** the chat continues in Whitenoise (and other Marmot clients) — but MLS state is strictly per-client: each client/device joins as its own leaf and reads only **from its join epoch forward**; history never syncs, by design.
+- **Non-members see nothing** under either option: both are E2E-encrypted with no event linkage — kind-1059/445 traffic carries no `a` tag and only ephemeral authors, so it cannot be correlated to the event.
+
+Everything in this subsection is **planned, not implemented**; tag values and conventions may shift at implementation time (open questions in the feasibility doc, §7).
 
 ## 8. Flows
 
@@ -609,7 +626,7 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 - **Chunked media encryption:** streaming playback + >25 MB robustness.
 - **Attendee-authored members-only posts:** 31607 signed by attendee keys needs a *blinded* event linkage for discovery (a cleartext `a` tag would publicly tie the author to the event) — deferred; v1 members-only posts are E_id-only (§7.4).
 - **Nostree mirror:** optionally republish the public menu items as a real NIP-51 kind 30003 bookmark set for interop with list clients.
-- **Per-event group chat:** see `GROUP-CHAT-FEASIBILITY.md` (ECK-encrypted chat now, Marmot/MLS opt-in later).
+- **Per-event group chat:** planned spec in §7.5 — NIP-17 group messages (small events / spawned subgroups, lives on in Amethyst/Nostria) and/or Marmot/MLS (event-scale, coordinator as admin bot, lives on in Whitenoise), organizer-choosable per event via 31600 `chat` tags; research in `GROUP-CHAT-FEASIBILITY.md`. (An ECK-encrypted web-only chat was considered and rejected — post-event chats must survive in attendees' own clients.)
 
 ## 14. Security & threat model summary
 
@@ -671,4 +688,4 @@ This section records concrete decisions and small deviations made while building
 
 ### 16.4 Reference deployment (cypherpunk.today)
 - PWA served at `https://cypherpunk.today/nostrautica/` (built with `BASE_PATH=/nostrautica`).
-- Coordinator on Venice: STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; match `zai-org-glm-5-2`; embed `text-embedding-bge-m3` (all Venice private-tier; `require_private=true`). No Cashu.
+- Coordinator on Venice: STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; embed `text-embedding-bge-m3` (private-tier); translate `gemini-3-flash-preview` (private-tier). **Match model is `deepseek-v4-flash` on Venice's non-private tier** (the benchmark winner, ≈45× cheaper — `docs/MATCHING-BENCHMARK.md`): the global `providers.venice.require_private=true` default is overridden for the match role only via `models.match.require_private=false` (the per-role knob, §16.2). The daemon logs a warning at startup for the accepted non-private role; all other roles that see user content stay private-tier. An operator-accepted privacy trade-off for the reference deployment, disclosed per §4.2 — not a claim that all inference is private. No Cashu.

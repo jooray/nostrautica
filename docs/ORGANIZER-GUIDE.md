@@ -12,12 +12,19 @@ and why. This guide takes you from nothing to a running event.
 3. Share the event — open link, invite codes, or both.
 4. Approve attendees (or let invite codes auto-approve them).
 5. Optionally attach an AI coordinator for matchmaking.
-6. Post updates and run the event.
+6. Post updates, customize your event page, and run the event.
 
 Everything runs in your browser. There is no server to set up — the app
 stores event data, encrypted, on the open Nostr network. Your browser holds
 the event's keys, so **use one browser you'll keep** (and back up your
 identity when prompted).
+
+> **A note on how the app is laid out.** Once you're inside an event, the bottom
+> bar is *event-scoped* — **Overview**, **People**, **Matches**, **Updates**, and
+> **More** all act on the event you're in, with a compact header showing the event's
+> name and your status. Your global stuff (all your events, messages, settings, your
+> identity) lives under **More**. As the organizer you also get **Manage event** in
+> that menu, which opens the admin console described in §3.
 
 ## 1. Create your identity
 
@@ -90,11 +97,16 @@ Capture the link — every attendee uses it.
 
 ## 3. Open the admin screen and share
 
-Tap **Open organizer admin**. This is your control panel: event updates,
-coordinator, co-organizers, invite codes, and join requests. Fresh event, no
-requests yet:
+Tap **Open organizer admin** (also reachable any time from **More → Manage
+event**). This is your control panel, and it's ordered the way a live event
+actually runs — **operations first**: a status line (pending count, with a
+one-tap jump) and the **join requests** sit at the very top, so admitting people
+never means scrolling past setup. Below that come the things you touch less
+often — **Communicate** (posts/updates), **People** (approved attendees), and
+**Event setup** (invite codes, coordinator, co-organizers, event page,
+appearance). Fresh event, no requests yet:
 
-![Admin overview, before requests](images/organizer/03-admin-empty-light.png)
+![Admin overview, operations-first](images/organizer/03-admin-empty-light.png)
 
 You have two kinds of links to share:
 
@@ -163,23 +175,49 @@ matches** button appears; use it after a burst of new attendees.
 > [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml)
 > and the repo README. Point its relays at the same relay your event uses.
 
-## 6. Post updates to your attendees
+## 6. Post to your attendees
 
-Use the **Event updates** card at the top of admin to post announcements —
-"schedule is live", "venue change", "tonight's dinner is at…". Give it a title,
-write the body (**Markdown works** — headings, lists, links, bold), and tap
-**Publish update**. Published updates are listed below the composer with an
-**Edit** button.
+The **Event posts** card (under **Communicate** in admin) is your announcement
+channel — "schedule is live", "venue change", "tonight's dinner is at…". Give it
+a title and an optional summary/header image, write the body (**Markdown works** —
+headings, lists, links, bold), and pick **who can read it**:
 
-![Event updates composer](images/organizer/09-updates-composer-light.png)
+- **Public** — anyone with the event link sees it, logged in or not. These are
+  standard Nostr long-form posts published under the event's identity, so they're
+  visible in other Nostr readers too.
+- **Members-only** — encrypted to your approved attendees. Non-members (and the
+  public) see only a lock and a "join the event to read this" prompt, never the
+  content. Use it for the after-party address, the door code, anything you want
+  to stay inside the room.
 
-Updates render on the **public event page**, under "Updates from the
-organizer", so *anyone with the link* sees them — no need for attendees to be
-approved or even logged in. Technically they're standard Nostr long-form posts
-published under the event's identity, so they're visible in other Nostr readers
-too. Here's how a published update looks to a visitor on the event page:
+Tap **Publish post**. The visibility is fixed once published (you can edit the
+text later, but a public post can't be quietly turned members-only or vice
+versa). You can also drop a link to an existing post straight from the composer's
+picker, and pin a post to the top of the event page.
 
-![Update shown on the event page](images/participant/02-event-page-light.png)
+![Event posts composer — members-only selected](images/organizer/09-posts-editor-light.png)
+
+Public posts render on the **event page** for everyone; members-only posts show
+up for approved attendees in **Updates** and in the event's **Overview** "Latest"
+strip, marked with a lock badge. Here's the members-only lock as an attendee who
+hasn't joined yet sees it:
+
+![Members-only post, locked to a non-member](images/participant/12-posts-feed-light.png)
+
+### Customize the event page and its look
+
+Two more controls live in **Event setup**:
+
+- **Event page** (kind 31608) — build a custom menu and arrange sections
+  (which posts show where) for the public event page, instead of the default
+  layout. Reorder with the ↑/↓ controls.
+- **Appearance** (kind 31609) — paste custom CSS to theme *this event's* pages.
+  There's a live **Preview** before you **Publish theme**; leaving admin without
+  publishing restores the last saved theme. It sits on top of the app's built-in
+  per-event colour wash, so a little goes a long way. (Only paste CSS you wrote
+  or trust — it styles the page for every attendee.)
+
+![Appearance — per-event theme CSS with live preview](images/organizer/10-theme-editor-light.png)
 
 ## 7. During the event
 
