@@ -48,6 +48,37 @@ semantics when needed.
 - Relay: `ws://localhost:7777` · Blossom: `http://localhost:3000`.
 - Set `NOSTRAUTICA_E2E_RELAY=1` when running the scripted Playwright suite in `e2e/`.
 
+#### HTTPS Blossom for the record flow (required since the C3 hardening)
+
+The media descriptor schema now accepts only `https://` blob URLs (audit C3 —
+SSRF hardening). `e2e/local-infra/blossom.mjs` is plain HTTP by default, so
+**recording an intro/talk and submitting it will fail** ("must be an https
+URL") unless its upload responses are https. Front it with a local
+TLS-terminating proxy and point it at that origin:
+
+```sh
+# One-time: a throwaway self-signed cert.
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/nostrautica-tls/key.pem \
+  -out /tmp/nostrautica-tls/cert.pem -days 3 -nodes -subj "/CN=localhost"
+
+# blossom.mjs on :3000 (its upload responses now point at the https origin
+# below instead of hardcoding its own http://localhost:3000), an https proxy
+# on :8443 in front of it.
+BLOSSOM_PUBLIC_BASE_URL=https://localhost:8443 node e2e/local-infra/blossom.mjs &
+node e2e/local-infra/https-proxy.mjs &   # ~20-line https→http proxy to :3000, self-signed cert
+
+# Build the app pointed at the https origin, and trust the self-signed cert:
+VITE_NOSTRAUTICA_BLOSSOM=https://localhost:8443 \
+PUBLIC_CSP_EXTRA_CONNECT=" ws: http: https://localhost:8443" \
+pnpm --filter @nostrautica/app build
+```
+
+Chromium (headed or Playwright) additionally needs `--ignore-certificate-errors`
+(and `ignoreHTTPSErrors: true` in Playwright context options) to accept the
+self-signed cert — already wired into `e2e/playwright.config.ts`. A real
+deployment's Blossom origin has a real certificate, so this is test-only
+infrastructure, not a product concern.
+
 ### 1.2 Two test tiers
 
 | Tier | Infrastructure | What is testable |

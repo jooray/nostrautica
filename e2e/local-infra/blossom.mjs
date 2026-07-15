@@ -9,6 +9,11 @@ import { createServer } from "node:http";
 import { createHash } from "node:crypto";
 
 const PORT = Number(process.argv[2] ?? 3000);
+// The app's media descriptor schema requires https:// blob URLs (audit C3
+// hardening). When this plain-HTTP server sits behind a local TLS-terminating
+// proxy (see _scratch_https_proxy.mjs), point BLOSSOM_PUBLIC_BASE_URL at the
+// externally-reachable https origin so returned upload URLs validate.
+const PUBLIC_BASE_URL = process.env.BLOSSOM_PUBLIC_BASE_URL ?? `http://localhost:${PORT}`;
 const blobs = new Map(); // sha256 -> { data, type }
 
 const server = createServer((req, res) => {
@@ -31,7 +36,7 @@ const server = createServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
-          url: `http://localhost:${PORT}/${sha256}`,
+          url: `${PUBLIC_BASE_URL}/${sha256}`,
           sha256,
           size: data.length,
           type,

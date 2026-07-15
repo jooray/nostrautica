@@ -1,9 +1,15 @@
 # Marmot group chat — specification and implementation plan
 
-Status: **specification + phased plan. Build in progress (2026-07-15): Phases 1, 2 (app side),
-and 4 (UI) implemented and green; packaging resolved (§2.1). Phase 3 (coordinator admin bot)
-in parallel; Phase 5 (live e2e + hardening) and full send/receive verification pending — see
-§8.** Successor to the analysis in
+Status: **specification + phased plan. Phases 1, 2 (app side), 3 (coordinator admin bot), and
+4 (UI) are all implemented; packaging resolved (§2.1). Live-tested 2026-07-16 (see
+`docs/FEATURE-VERIFICATION-2026-07-16.md`): the attendee → coordinator direction works
+end-to-end against a real relay — the browser client publishes its 30443 key package +
+10050/10002 relay lists, the coordinator's live watcher receives it and performs a genuine MLS
+Add + Welcome. But the coordinator → attendee direction does not complete client-side: two
+independent identities both stayed on "Setting up your secure chat…" indefinitely (40s+ across
+repeated reloads, and 32s continuously without reload) after the coordinator's confirmed
+server-side add, so no 445 message round-trip or revoke-lockout could be exercised. Phase 5
+(live e2e + hardening) is accordingly still open — see §8.** Successor to the analysis in
 [GROUP-CHAT-FEASIBILITY.md](GROUP-CHAT-FEASIBILITY.md) (read it first for the option analysis
 and the multi-client reasoning; this document fixes the design and turns it into buildable
 phases). Cross-reference stub: SPECIFICATION.md §7.5.

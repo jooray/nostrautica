@@ -139,6 +139,17 @@ matches) and **Revoke**.
 Approved attendees get access to the encrypted roster, other people's intro
 videos, and (with a coordinator) their matches.
 
+> **Known issue as of this pass (2026-07-16):** when an event has **no
+> coordinator attached**, approving someone here does not currently reach
+> their device — their own app keeps showing "waiting for approval" even
+> though your admin screen shows them Approved, and they never see the
+> roster/directory. It reproduces every time in testing; see
+> [`FEATURE-VERIFICATION-2026-07-16.md`](FEATURE-VERIFICATION-2026-07-16.md)
+> gap G-2. Attaching a coordinator (§5) sidesteps it — approval and grants
+> route through the coordinator instead — so **attach a coordinator before
+> your event if you can**, even one running in matching=off mode, until this
+> is fixed.
+
 ### Removing someone
 
 Tap **Revoke** on an approved card. You'll get a confirmation explaining the
@@ -219,6 +230,33 @@ Two more controls live in **Event setup**:
 
 ![Appearance — per-event theme CSS with live preview](images/organizer/10-theme-editor-light.png)
 
+## 6.5 Talks and group chat (both new, both optional)
+
+**Prerecorded talks.** In **Event setup → Prerecorded talks**, switch it *On*
+(or *Prerecord-first*, which puts Talks ahead of People in attendees' nav —
+good for a "watch ahead, meet at the venue" format) and **Save**. Approved
+attendees can then submit short talks from the same composer used for intros.
+
+> **Known gap as of this pass (2026-07-16):** there is currently no screen in
+> admin to review or publish a submitted talk — attendees can submit, but
+> nothing in the app lets you move a talk from "submitted" to "visible to
+> attendees." Every talk you enable this round will need that moderation step
+> once it ships; track it in the gap report (G-1) before promising this
+> feature to attendees.
+
+**Group chat (Marmot, experimental).** In **Event setup**, toggle **Group
+chat** and save — it needs a coordinator attached (the coordinator operates
+the encrypted group: adding people as they're approved, removing them on
+revoke). Once on, approved attendees get a **Chat** tab: a single
+end-to-end-encrypted room for the whole event, separate from 1:1 messages.
+
+![Group chat toggle in admin](images/organizer/11-chat-toggle-light.png)
+
+This is early: joining the group can take a little while server-side even
+once toggled on, and it's marked *Experimental* in the UI on purpose — don't
+lean on it as the only way to reach attendees during an event yet. Posts
+(§6) remain the reliable channel.
+
 ## 7. During the event
 
 - **Roster fills in live** — approved attendees appear as they join; match
@@ -239,10 +277,15 @@ Two more controls live in **Event setup**:
   — title, summary, dates, location, and your posted updates. The roster,
   videos, and matches are encrypted to approved attendees.
 
-- **I opened the event on another device and there's no admin button.** The
-  organizer keys live in the browser that created the event. Either add yourself
-  as a **co-organizer** from the original device (using this device's npub), or
-  restore your identity backup (paste your secret key) on the new device.
+- **I opened the event on another device and there's no admin button.** Sign in
+  with the same identity (paste the secret key you backed up when you created
+  the account) and reopen the event — as of this pass, organizer access to
+  every event you created is automatically recovered from that one key alone,
+  no separate event backup needed. It reads back your event keys from relays
+  the moment you sign in, so give it a few seconds on a fresh device before
+  concluding it didn't work. (Adding a **co-organizer** from the original
+  device, using the new device's npub, is still the fastest option if you
+  still have the original device handy.)
 
 - **An invite link didn't auto-approve someone.** Auto-approval needs a
   coordinator attached *and running*. Without one, invite requests still arrive

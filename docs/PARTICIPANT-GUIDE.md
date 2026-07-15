@@ -80,11 +80,34 @@ email you a recovery link or make a password-protected file.)
 ## 3. Record your intro
 
 This is the important part — **no intro, no matches**. From the event page, tap
-**Record / update your intro**, tap **Enable camera**, then **● Record**. Talk
-for up to a minute: who you are, what you're working on, what you're looking
-for. Hit **■ Stop** (it also stops itself at the time limit), watch it back,
-and tap **Use this** — or **Re-record** until you're happy. Nobody outside this
-event's attendees can ever see it.
+**Record / update your intro**. You get three ways to introduce yourself — pick
+whichever suits you:
+
+- **Video** (the default) — tap **Enable camera**, then **● Record**. Talk for
+  up to a minute: who you are, what you're working on, what you're looking for.
+  Hit **■ Stop** (it also stops itself at the time limit), watch it back, and
+  tap **Use this** — or **Re-record** until you're happy.
+- **Audio** — same idea, no camera. Tap **Enable microphone**, watch the level
+  meter to confirm it's picking you up, then **● Record audio**.
+- **Text** — no recording at all. Type a few sentences about who you are and
+  what you're looking for; it feeds your matches exactly like a spoken intro,
+  and (unlike video/audio) nothing is ever transcribed — the text you wrote is
+  the only thing that leaves your device.
+
+Before anything uploads, the app tells you plainly who processes it — the
+event's attendees, the organizer's matchmaking service if there is one, and
+which AI providers see the audio/transcript (or just the text, for text
+intros) — and you have to tick a box confirming you've read that. Nobody
+outside this event's attendees can ever see the intro itself.
+
+![Recording your intro — video, audio, and text modes](images/participant/09-record-light.png)
+
+Video and audio intros get an automatic transcript once the organizer's
+matchmaking service has processed them — on your own or anyone else's page,
+tap **Show transcript** under the player to read along or search it, or if you
+just can't listen right now:
+
+![A transcript, shown under the media player](images/participant/21-transcript-light.png)
 
 **Use whatever language you like.** Record your intro and write your profile in
 the language you're most comfortable in — it doesn't have to match the event's
@@ -92,7 +115,19 @@ language. The app writes your matches and summaries in the event's language, and
 if your bio is in a different language it shows everyone a translation with your
 original one tap away ("show original"). So just be yourself in your own words.
 
-![Recording your intro](images/participant/09-record-light.png)
+### Your own event profile
+
+Once the matchmaking service has processed your intro, open **More → My event
+profile** to see exactly what everyone else sees about you: the bits you wrote
+yourself, and — separately — the AI-written summary, skills, interests, and
+"looking for" generated from your intro. Got something wrong? You can edit any
+generated field, hide just that field, or hide the whole AI summary and show
+only what you wrote. There's also a quick "report a problem" note if something
+is off and you'd rather flag it than fix it yourself. Save, and other attendees
+see your correction immediately — their view of you shows a small **"Edited by
+attendee"** badge so they know it's not purely automated.
+
+![My event profile — edit, hide, or report a generated field](images/participant/23-my-profile-edited-light.png)
 
 ## 4. People
 
@@ -119,6 +154,21 @@ mesh-network startup"). Reload and it all persists. If someone's bothering you,
 Nostr mute, so it carries to other Nostr apps too):
 
 ![A person's page, with the mute confirmation](images/participant/18-mute-confirm-light.png)
+
+## 4.5 Talks (if the organizer turned them on)
+
+Some events let attendees submit short prerecorded talks instead of — or ahead
+of — meeting in person. If it's on for your event, a **Talks** tab appears in
+the bottom bar. Tap **Submit a talk**, give it a title and a short description,
+then record or write it exactly like your intro (§3). It goes to the organizer
+to publish before it's visible to anyone, so don't expect it to show up
+instantly.
+
+![The Talks list](images/participant/26-talks-empty-light.png)
+
+Watching a talk remembers where you left off, so you can close the app and
+pick it up later, and — like your own intro — a transcript is available if the
+speaker recorded rather than wrote it.
 
 ## 5. Your matches
 
@@ -155,6 +205,28 @@ newest first:
 Because these are standard Nostr private messages, **they also work with other
 Nostr messengers** — the person can reply from whatever Nostr app they use, and
 your conversation shows up there too. It isn't locked to this event.
+
+## 6.5 Group chat (experimental)
+
+If the organizer has turned on **Group chat**, a **Chat** tab appears once
+you're approved — a single encrypted room for the whole event, separate from
+one-to-one messages. It's genuinely end-to-end encrypted (a protocol called
+Marmot/MLS), though the organizer's matchmaking service operates the group
+(adds and removes people as they're approved or revoked) and can read it — the
+app tells you this up front, every time you open the tab. Each device only
+sees messages sent after it joined, so a new phone won't see old history.
+
+![Group chat](images/participant/30-event-chat-setup-light.png)
+
+Want push notifications instead of checking the tab? Tap **Show my chat key**
+and follow the steps to open the same conversation in
+[Whitenoise](https://github.com/parres-hq/whitenoise), a dedicated Marmot chat
+app — history there starts from whenever your phone joins.
+
+This feature is marked **Experimental** for a reason: it's new, and joining
+the group can take a little while (or occasionally need a retry) before
+messages start flowing. If the tab is stuck on "setting up," give it a few
+minutes and reopen it.
 
 ## 7. Afterwards: your profile is yours to keep
 
@@ -205,7 +277,10 @@ they open the attendee list — nothing:
 
 - **I got a new phone, or cleared my browser.** Open the app, tap **Already on
   Nostr? Sign in → Paste a key**, and paste the secret key you saved when you
-  joined. Same account, same events. (This is why saving that key matters.)
+  joined. Same account, same events. (This is why saving that key matters.) If
+  you organized an event yourself, your full organizer access — approving
+  people, the admin screen, everything — comes back too, automatically, from
+  that one key; you don't need a separate backup of the event itself.
 
 - **No matches are showing yet.** Record your intro first — no intro, no
   matches. After that, matches take a little while to compute and need a few
