@@ -212,6 +212,15 @@ describe("every §7 payload round-trips through JSON", () => {
       einbox_nsec: "b".repeat(64),
       eck: [{ id: 1, key: b64_32 }],
     }));
+
+  it("30078 event keys backup with coordinate", () =>
+    roundTrips(eventKeysBackupSchema, {
+      v: 1,
+      a: `31923:${hex}:cypherpunk-2026`,
+      eid_nsec: hex,
+      einbox_nsec: "b".repeat(64),
+      eck: [{ id: 1, key: b64_32 }],
+    }));
 });
 
 describe("schema validation rejects malformed payloads", () => {

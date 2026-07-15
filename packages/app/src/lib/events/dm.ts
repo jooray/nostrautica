@@ -6,12 +6,12 @@
  * own pubkey — so sent history is recoverable on any device. Plain NIP-17:
  * conversations continue in 0xchat/Amethyst/any NIP-17 client.
  */
-import { KIND_DM, KIND_GIFT_WRAP } from "@nostrautica/protocol";
+import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
 export interface DmMessage {
@@ -28,22 +28,58 @@ export interface DmThread {
   count: number;
 }
 
-/** Send `text` to `recipient`: one wrap to them, one to self. */
+/** Extract the relay URLs from a NIP-17 DM relay list's (`["relay", url]`) tags. */
+export function relayUrlsFromDmList(tags: string[][]): string[] {
+  return tags.filter((t) => t[0] === "relay" && !!t[1]).map((t) => t[1]);
+}
+
+/**
+ * Where to deliver a gift-wrap addressed to `pubkey`: the recipient's declared
+ * NIP-17 inboxes (kind-10050) UNIONED with sensible app defaults, so the DM
+ * reaches the recipient's other clients while still landing on relays we know
+ * are reachable. Falls back to defaults alone when the recipient has no 10050.
+ */
+export function selectDmRelays(
+  recipientDmRelays: string[],
+  defaults: string[] = DEFAULT_RELAYS,
+): string[] {
+  return unionRelays(recipientDmRelays, defaults);
+}
+
+/** Fetch a pubkey's kind-10050 DM relay list; [] if they've published none. */
+export async function fetchDmRelays(pubkey: string): Promise<string[]> {
+  const events = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey] });
+  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  return latest ? relayUrlsFromDmList(latest.tags) : [];
+}
+
+/**
+ * Send `text` to `recipient`: one wrap to them, one to self. Each wrap is
+ * published to that party's declared kind-10050 DM inboxes (union defaults) so
+ * NIP-17 messages reach the recipient's other clients and the sender's own
+ * sent-history copy lands on the sender's inboxes (audit G4). Missing 10050s
+ * degrade gracefully to the default relays.
+ */
 export async function sendDm(
   signer: AppSigner,
   recipient: string,
   text: string,
 ): Promise<void> {
+  const me = await signer.getPublicKey();
   const input = {
     kind: KIND_DM as typeof KIND_DM,
     content: text,
     tags: [["p", recipient]],
   };
+  const [recipientRelays, selfRelays] = await Promise.all([
+    fetchDmRelays(recipient).catch(() => []),
+    fetchDmRelays(me).catch(() => []),
+  ]);
   const toRecipient = await signerWrap(signer, recipient, input);
-  const toSelf = await signerWrap(signer, await signer.getPublicKey(), input);
+  const toSelf = await signerWrap(signer, me, input);
   await Promise.all([
-    publishOrQueue(toRecipient as never),
-    publishOrQueue(toSelf as never),
+    publishOrQueue(toRecipient as never, selectDmRelays(recipientRelays)),
+    publishOrQueue(toSelf as never, selectDmRelays(selfRelays)),
   ]);
 }
 

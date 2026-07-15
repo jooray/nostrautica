@@ -16,7 +16,9 @@ import {
 } from "$lib/events/event-context.js";
 import { isApproved } from "$lib/events/attendee.js";
 import { loadEventKeys } from "$lib/events/keystore.js";
+import { recoverEventKeys } from "$lib/events/recover.js";
 import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
+import { session } from "$lib/signer/session.svelte.js";
 
 export type EventRole = "visitor" | "pending" | "attendee" | "organizer";
 
@@ -88,7 +90,13 @@ class EventShell {
       if (tok !== this.token) return;
       this.ctx = ctx;
       const approved = await isApproved(ctx.coordinate).catch(() => false);
-      const keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+      let keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+      // Fresh-device deep-link: no local custody for an event this identity may
+      // have created — read back the 30078 eventkeys backup (once per session).
+      if (!keys && session.signer) {
+        await recoverEventKeys(session.signer).catch(() => {});
+        keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+      }
       if (tok !== this.token) return;
       const organizer = keys?.role === "organizer";
       this.role = organizer

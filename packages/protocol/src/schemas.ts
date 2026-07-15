@@ -500,6 +500,10 @@ export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 
 export const eventKeysBackupSchema = z.object({
   v: version,
+  // Event coordinate (`31923:<E_id pubkey>:<d>`). Optional for backward-compat
+  // with backups written before it was recorded — recovery falls back to
+  // deriving it from the E_id key + the published config when absent.
+  a: z.string().optional(),
   eid_nsec: secretKeyHex,
   einbox_nsec: secretKeyHex,
   eck: z.array(eckVersionSchema),

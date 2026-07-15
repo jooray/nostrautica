@@ -5,7 +5,13 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { toNsec, toNcryptsec, mailtoBackup } from "$lib/signer/backup.js";
   import { markBackedUp } from "$lib/stores/backup-nag.svelte.js";
+  import { markKeyBackedUp } from "$lib/events/key-backup.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+
+  /** Record a durable, relay-persisted backup marker (honest readiness signal). */
+  function markDurable() {
+    if (session.signer) markKeyBackedUp(session.signer).catch(() => {});
+  }
 
   const sk = $derived(session.signer?.getSecretKey?.());
   const appBase = $derived(
@@ -21,6 +27,7 @@
       await navigator.clipboard.writeText(text);
       copied = label;
       markBackedUp();
+      markDurable();
       setTimeout(() => (copied = null), 2000);
     } catch {
       copied = null;
@@ -35,6 +42,7 @@
   function downloadNcryptsec() {
     if (!ncryptsec) return;
     markBackedUp();
+    markDurable();
     const blob = new Blob([ncryptsec], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -65,7 +73,14 @@
         <p class="muted">
           {t("backup.email.body")}
         </p>
-        <a class="btn" href={mailtoBackup(appBase, sk)} onclick={() => markBackedUp()}>
+        <a
+          class="btn"
+          href={mailtoBackup(appBase, sk)}
+          onclick={() => {
+            markBackedUp();
+            markDurable();
+          }}
+        >
           {t("backup.email.button")}
         </a>
       </div>

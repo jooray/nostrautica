@@ -21,6 +21,7 @@ import { isApproved, fetchDirectoryEntry, fetchMatches } from "./attendee.js";
 import { loadEventKeys } from "./keystore.js";
 import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
 import { backupNag } from "$lib/stores/backup-nag.svelte.js";
+import { hasDurableKeyBackup } from "./key-backup.js";
 import { deriveBlindingKey } from "./blinding.js";
 import { loadSelfCopy } from "$lib/media/submit.js";
 import { online } from "$lib/stores/online.svelte.js";
@@ -65,6 +66,17 @@ class ReadinessStore {
             : "visitor";
       const isMember = role === "attendee" || role === "organizer";
 
+      // "Backup secured" is honest: for a local key it reflects a DURABLE,
+      // relay-persisted backup marker (recoverable on a fresh device), not the
+      // transient dismiss-nag. Remote signers (nip07/nip46) hold the key
+      // themselves — deriveReadiness treats that as secured via `signerMethod`.
+      let backupAcked: boolean;
+      if (signer?.method === "local") {
+        backupAcked = await hasDurableKeyBackup(signer).catch(() => false);
+      } else {
+        backupAcked = backupNag.done;
+      }
+
       let hasIntro: boolean | undefined;
       let processed: boolean | undefined;
       let matchesAvailable: boolean | undefined;
@@ -108,8 +120,7 @@ class ReadinessStore {
         naddr: ctx.naddr,
         role,
         signerMethod: signer?.method,
-        // TODO(P0.2): swap to the authenticated durable-backup status when it lands.
-        backupAcked: backupNag.done,
+        backupAcked,
         hasIntro,
         processed,
         matchesAvailable,

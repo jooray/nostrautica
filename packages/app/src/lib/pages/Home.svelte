@@ -6,6 +6,7 @@
   import { router } from "$lib/router/router.svelte.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { listEventKeys } from "$lib/events/keystore.js";
+  import { recoverEventKeys } from "$lib/events/recover.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -35,6 +36,9 @@
   // Backfill "My events" from the local key store — every event the user created
   // or was approved into — so events created before this list existed still show.
   onMount(async () => {
+    // Fresh-device recovery: read back the 30078 eventkeys backups so events this
+    // identity created reappear (and their custody is restored) from relays alone.
+    if (session.signer) await recoverEventKeys(session.signer).catch(() => {});
     const keys = await listEventKeys().catch(() => []);
     for (const k of keys) {
       if (recentEvents.has(k.coordinate)) continue;

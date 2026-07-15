@@ -22,6 +22,7 @@ import {
   loadNip46Session,
   clearKeystore,
 } from "./keystore.js";
+import { setActiveOwner } from "$lib/events/keystore.js";
 
 class Session {
   signer = $state<AppSigner | null>(null);
@@ -40,6 +41,8 @@ class Session {
   private async adopt(signer: AppSigner): Promise<void> {
     this.pubkey = await signer.getPublicKey();
     this.signer = signer;
+    // Scope the per-event keystore to this identity (audit G2 owner-scoping).
+    setActiveOwner(this.pubkey);
   }
 
   /** Try to restore a previous session (local key) from IndexedDB. */
@@ -124,6 +127,7 @@ class Session {
       /* transport teardown failed — proceed with local logout */
     }
     await clearKeystore();
+    setActiveOwner(null);
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;
