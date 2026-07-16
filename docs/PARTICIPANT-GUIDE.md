@@ -135,6 +135,9 @@ Tap **People** in the bottom bar to browse who's here. Each row shows an avatar
 (their photo, or their initials on a coloured tile), their name, and their
 skills. **Search** by name or skill, and filter to just the people you've marked
 **want to meet**, **met**, **favorited**, or people you **follow** on Nostr.
+The list streams in as relays answer — people appear as they decrypt (names and
+photos fill in a moment later), so a big roster on a slow connection never
+blocks on the slowest relay.
 
 The roster is **encrypted to approved attendees**, so until you're approved (or
 in the moment right after, before it syncs) the People screen stays empty and
