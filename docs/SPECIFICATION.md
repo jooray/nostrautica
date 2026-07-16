@@ -673,6 +673,18 @@ This section records concrete decisions and small deviations made while building
 - **Venice adapter:** requests set `venice_parameters` `{ disable_thinking:true, include_venice_system_prompt:false, strip_thinking_response:true }` and a higher default `max_tokens` — reasoning models otherwise spend the whole budget on chain-of-thought and return empty content.
 
 ### 16.3 Client
+- **Organizer self-enrollment (2026-07-16):** the create form has a default-on
+  checkbox that enrolls the organizer as a participant of their own event, so
+  the roster is never empty for the first attendee. Implementation is purely
+  protocol-native, keyed to the organizer's PERSONAL pubkey (never E_id): a
+  self-minted single-use invite (31601) backs a real 21600 join request to
+  E_inbox — so a coordinator attached later auto-approves it from the
+  full-history backfill instead of queueing the organizer as pending — plus an
+  immediate client-side self-approval (grant/directory/roster signed by E_id,
+  roster role "organizer") for instant visibility. The enrollment completes
+  before the share link is shown (an attendee's approval must never race it),
+  and the keystore is untouched (an incoming attendee-role grant never
+  downgrades an existing organizer record).
 - **Perceived latency (2026-07-16):** relays are slow, so the client hides round-trips two ways. *Predictive prefetch* (`lib/nostr/prefetch.ts`): each page silently warms what the next step renders — Home warms event contexts on mount and card hover; Join warms organizer profiles + the post-join event page while the form is being filled, and grants + the attendees tab on sign-in; the event page warms the Attendees tab and organizer key recovery. Warmers are best-effort, TTL-deduped, and never trigger a remote-signer prompt (decrypt-bearing warmers gate on local-key signers). *Progressive multi-relay fetching* (`lib/nostr/stream.ts`, `dedupe.ts`): a streaming fetch emits events as each relay answers — deduped by id plus NIP-01 latest-wins per replaceable key — and resolves on first EOSE + a short grace instead of waiting for the slowest relay, with a hard timeout so a dead relay can never stall a screen. The roster renders entries as they decrypt; the matches screen paints before names/avatars enrich; event page + posts fetch in parallel with the grant scan. The per-identity blinding key is memoized (was: a relay fetch — and a signer prompt for remote signers — on every derivation), cleared on logout.
 - **PWA auto-update:** on detecting a new deploy the app reloads itself (no "click to reload"): `autoUpdate` (skipWaiting + clientsClaim) + a guarded `controllerchange` reload; update checks run every 60s / on focus / on reconnect, fetching `sw.js` with `cache:'no-store'`. Classic hosts that cache `sw.js` aggressively still update because `registration.update()` bypasses the HTTP cache per the SW spec.
 - **Relay publish resilience:** a publish succeeds if it reaches ≥1 relay; a global `unhandledrejection` guard swallows expected relay rejections (rate-limited, timeout, PoW, auth-required, duplicate…) so a slow relay's late `OK=false` (NDK orphan-promise) never surfaces as an uncaught error.

@@ -45,7 +45,9 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
 
     await organizer.goto(`/#/e/${naddr}/admin`);
     await organizer.getByRole("button", { name: /^approve$/i }).first().click();
-    await expect(organizer.getByText(/approved ✓/i)).toBeVisible({ timeout: 20_000 });
+    // The organizer is self-enrolled at creation, so one "Approved ✓" card exists
+    // from the start — wait for the SECOND one (the just-approved attendee).
+    await expect(organizer.getByText(/approved ✓/i)).toHaveCount(2, { timeout: 20_000 });
 
     // Grants propagate async — visit the event page first so receiveGrants runs.
     await attendee.goto(`/#/e/${naddr}`);

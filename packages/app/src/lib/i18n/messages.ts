@@ -155,6 +155,9 @@ export const messages = {
     "create.field.matching": "AI matchmaking",
     "create.matching.on": "On (needs a coordinator)",
     "create.matching.off": "Off",
+    "create.field.enrollSelf": "Join as a participant yourself",
+    "create.enrollSelf.body":
+      "You'll appear in the People list like any attendee, so the first person who joins isn't alone. Your profile name and bio are visible to approved attendees only.",
     "create.field.talks": "Prerecorded talks",
     "create.field.talks.body":
       "Let attendees submit talks that others can watch. Off keeps the event as a normal meetup.",
@@ -1021,6 +1024,9 @@ export const messages = {
     "create.field.matching": "AI párovanie",
     "create.matching.on": "Zapnuté (potrebuje koordinátora)",
     "create.matching.off": "Vypnuté",
+    "create.field.enrollSelf": "Pridať sa medzi účastníkov",
+    "create.enrollSelf.body":
+      "Zobrazíte sa v zozname ľudí ako každý iný účastník, takže prvý prihlásený nebude sám. Vaše meno a bio z profilu vidia iba schválení účastníci.",
     "create.rotationNote":
       "Poznámka: rotácia kľúčov je len dopredná — ktokoľvek, kto niekedy držal dešifrovací kľúč, dokáže navždy dešifrovať obsah zverejnený počas jeho platnosti (špec. §4.2).",
     "create.creating": "Vytvára sa…",

@@ -20,6 +20,7 @@ import {
   buildEventConfig,
   blindedD,
   type Approval,
+  type EventConfig,
   type MatchVisibility,
   type TalksMode,
   type ChatBackend,
@@ -29,6 +30,10 @@ import type { AppSigner } from "$lib/signer/types.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 import { saveEventKeys } from "./keystore.js";
+import type { EventContext } from "./event-context.js";
+import { generateInvites, approveAttendee } from "./organizer.js";
+import { sendJoinRequest } from "./join.js";
+import { fetchProfiles } from "./social.js";
 
 export interface CreateEventInput {
   title: string;
@@ -58,6 +63,9 @@ export interface CreatedEvent {
   naddr: string;
   eidPubkey: string;
   inboxPubkey: string;
+  /** The parsed config as published — lets callers act on the event (e.g.
+   *  organizer self-enrollment) without a relay round-trip. */
+  config: EventConfig;
 }
 
 function slug(title: string): string {
@@ -118,7 +126,7 @@ export async function createEvent(
   );
 
   // 3. kind 31600 — the networking config (signed by E_id).
-  const cfg = buildEventConfig({
+  const config: EventConfig = {
     d,
     eidPubkey,
     inbox: inboxPubkey,
@@ -134,7 +142,8 @@ export async function createEvent(
     lang: input.lang ?? "en",
     talks: input.talks ?? "off",
     chat: input.chat ?? [],
-  });
+  };
+  const cfg = buildEventConfig(config);
   const event31600 = finalizeEvent(
     {
       kind: cfg.kind,
@@ -185,5 +194,83 @@ export async function createEvent(
     naddr: coordinateToNaddr(coordinate, relays),
     eidPubkey,
     inboxPubkey,
+    config,
   };
+}
+
+/**
+ * A local EventContext for the event just created — everything is known
+ * client-side, so post-create actions never race the relay round-trip.
+ */
+export function createdEventContext(created: CreatedEvent, input: CreateEventInput): EventContext {
+  return {
+    naddr: created.naddr,
+    coordinate: created.coordinate,
+    config: created.config,
+    title: input.title,
+    summary: input.summary,
+    start: input.start,
+    end: input.end,
+    icon: input.icon,
+    banner: input.banner,
+    location: input.location,
+    hashtags: input.hashtags ?? [],
+  };
+}
+
+/**
+ * Enroll the organizer as a regular participant of their own event (the
+ * create-form checkbox). Two halves, both keyed to the organizer's PERSONAL
+ * pubkey (never E_id):
+ *
+ * 1. A real invite-backed 21600 join request to E_inbox. This is what makes the
+ *    enrollment durable across a LATER coordinator attach: a fresh install
+ *    backfills E_inbox history, finds the request, and the invite proof
+ *    auto-approves it — the organizer never lands in their own pending queue,
+ *    and the coordinator's roster/directory (which replace E_id's once
+ *    attached) include them.
+ * 2. An immediate client-side self-approval (grant + directory entry + roster,
+ *    all signed by E_id) so the first attendee sees the organizer right away,
+ *    before any coordinator exists. Roster role stays "organizer" — the roster
+ *    schema models participant-and-admin natively.
+ *
+ * The keystore is untouched: the organizer record already exists and an
+ * incoming ECK grant never downgrades its role.
+ */
+export async function enrollOrganizerAsParticipant(
+  organizer: AppSigner,
+  ctx: EventContext,
+  blindingKey: Uint8Array,
+  appBaseUrl: string,
+): Promise<void> {
+  const pubkey = await organizer.getPublicKey();
+  const me = await fetchProfiles([pubkey]).catch(() => new Map());
+  const name = me.get(pubkey)?.name ?? "";
+  const profile = {
+    about: me.get(pubkey)?.about ?? "",
+    skills: [],
+    looking_for: "",
+    links: [],
+  };
+
+  const [invite] = await generateInvites(organizer, ctx, 1, appBaseUrl, "organizer-self");
+  await sendJoinRequest(
+    organizer,
+    ctx,
+    { name, profile, inviteNsec: invite?.nsec },
+    blindingKey,
+  );
+  await approveAttendee(
+    organizer,
+    ctx,
+    {
+      attendeePubkey: pubkey,
+      name,
+      message: "",
+      rsvpPublic: false,
+      profile,
+      rumorCreatedAt: Math.floor(Date.now() / 1000),
+    },
+    "organizer",
+  );
 }

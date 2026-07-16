@@ -64,7 +64,9 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
       const n = await buttons.count();
       for (let i = 0; i < n; i++) await buttons.first().click();
     }
-    await expect(organizer.getByText(/approved ✓/i).first()).toBeVisible({ timeout: 20_000 });
+    // Organizer self-enrolled card + Alice + Bob — wait for all three so the
+    // grant publishes are durable before the attendees move on.
+    await expect(organizer.getByText(/approved ✓/i)).toHaveCount(3, { timeout: 20_000 });
 
     // Alice authors a distinctive profile field via the intro composer's text
     // mode (no camera needed) so it shows up verbatim in Bob's directory read.

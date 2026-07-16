@@ -60,6 +60,11 @@ Choose **Create an event** and fill in the form:
 - **Event language** — see below.
 - **AI matchmaking** — set to *On* if you plan to attach a coordinator (§5).
   You can attach the coordinator later; leave the setting on now.
+- **Join as a participant yourself** — checked by default: you're enrolled
+  like any attendee, so the first person who joins sees at least you in
+  **People** instead of an empty list (and you can be matched too, once you
+  record an intro). Your name and bio are visible to approved attendees only;
+  uncheck it if you'd rather organize without appearing in the roster.
 - **Advanced** (collapsed) — upload an event icon and banner (a design is
   generated from the title otherwise) and set the intro-video length cap.
 

@@ -47,10 +47,13 @@ test.describe(RELAY_UP ? "walking skeleton" : "walking skeleton (needs relay —
     await expect(attendee.getByText(/request sent/i)).toBeVisible();
 
     // Organizer approves. Match the per-card "Approved ✓" (the section header
-    // "Approved" alone can appear before the grant publish finishes).
+    // "Approved" alone can appear before the grant publish finishes). The
+    // organizer is self-enrolled at creation, so one "Approved ✓" card exists
+    // from the start — wait for the SECOND one (the just-approved attendee),
+    // which is the signal that the attendee's grant publish is durable.
     await organizer.goto(`/#/e/${naddr}/admin`);
     await organizer.getByRole("button", { name: /^approve$/i }).first().click();
-    await expect(organizer.getByText(/approved ✓/i)).toBeVisible({ timeout: 20_000 });
+    await expect(organizer.getByText(/approved ✓/i)).toHaveCount(2, { timeout: 20_000 });
 
     // The event page runs the receiveGrants poll — visit it first so the roster
     // decrypts (going straight to /attendees races the one-shot grant fetch).

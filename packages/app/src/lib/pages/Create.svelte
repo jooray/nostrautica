@@ -1,7 +1,13 @@
 <script lang="ts">
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
-  import { createEvent, type CreatedEvent } from "$lib/events/create.js";
+  import {
+    createEvent,
+    createdEventContext,
+    enrollOrganizerAsParticipant,
+    type CreatedEvent,
+    type CreateEventInput,
+  } from "$lib/events/create.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import {
@@ -34,6 +40,9 @@
   let maxTalkUnlimited = $state(false);
   let talks = $state<"off" | "on" | "prerecord-first">("off");
   let matching = $state<"on" | "off">("on");
+  // Enroll the organizer as a participant too (default on) — the first attendee
+  // then sees at least the organizer in People instead of an empty roster.
+  let enrollSelf = $state(true);
   let chatEnabled = $state(false); // Marmot group chat (experimental); operative once a coordinator is attached
   let matchVisibility = $state<"pair" | "event">("pair");
   let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
@@ -101,41 +110,53 @@
       const signer = session.signer;
       if (!signer) throw new Error(t("create.error.identityFailed"));
       const blindingKey = await deriveBlindingKey(signer);
-      created = await createEvent(
-        signer,
-        {
-          title: title.trim(),
-          summary: summary.trim(),
-          start: Math.floor(new Date(startLocal).getTime() / 1000),
-          end: endLocal ? Math.floor(new Date(endLocal).getTime() / 1000) : undefined,
-          location: locationStr.trim() || undefined,
-          // Both images optional: store only what the organizer uploaded. The
-          // attendee UI falls back to generated gradients for display.
-          icon: iconUrl.trim() || undefined,
-          banner: bannerUrl.trim() || undefined,
-          maxVideoSec: maxVideoUnlimited ? UNLIMITED_SEC : Math.max(1, Math.round(maxVideoMinutes * 60)),
-          maxTalkSec: maxTalkUnlimited ? UNLIMITED_SEC : Math.max(1, Math.round(maxTalkMinutes * 60)),
-          matching,
-          matchVisibility,
-          approval,
-          nostrContext: 100,
-          lang,
-          talks,
-          chat: chatEnabled ? ["marmot"] : [],
-        },
-        blindingKey,
-      );
+      const createInput: CreateEventInput = {
+        title: title.trim(),
+        summary: summary.trim(),
+        start: Math.floor(new Date(startLocal).getTime() / 1000),
+        end: endLocal ? Math.floor(new Date(endLocal).getTime() / 1000) : undefined,
+        location: locationStr.trim() || undefined,
+        // Both images optional: store only what the organizer uploaded. The
+        // attendee UI falls back to generated gradients for display.
+        icon: iconUrl.trim() || undefined,
+        banner: bannerUrl.trim() || undefined,
+        maxVideoSec: maxVideoUnlimited ? UNLIMITED_SEC : Math.max(1, Math.round(maxVideoMinutes * 60)),
+        maxTalkSec: maxTalkUnlimited ? UNLIMITED_SEC : Math.max(1, Math.round(maxTalkMinutes * 60)),
+        matching,
+        matchVisibility,
+        approval,
+        nostrContext: 100,
+        lang,
+        talks,
+        chat: chatEnabled ? ["marmot"] : [],
+      };
+      const result = await createEvent(signer, createInput, blindingKey);
       recentEvents.record({
-        coordinate: created.coordinate,
-        naddr: created.naddr,
+        coordinate: result.coordinate,
+        naddr: result.naddr,
         title: title.trim(),
         icon: iconUrl.trim() || undefined,
         role: "organizer",
       });
       // Freshly-generated organizer keys follow their own event (§5.4 item 3).
       if (session.freshLocalKey) {
-        await seedFollows(signer, created.eidPubkey).catch(() => {});
+        await seedFollows(signer, result.eidPubkey).catch(() => {});
       }
+      // Enroll the organizer as a participant (checkbox, default on) — a real
+      // invite-backed join request + immediate self-approval, so the roster is
+      // never empty and a later-attached coordinator picks them up from the
+      // E_inbox backfill. Best-effort (the event exists either way), but it must
+      // complete BEFORE the share link is shown: once the link is out, an
+      // attendee's approval could race an enrollment still in flight.
+      if (enrollSelf) {
+        await enrollOrganizerAsParticipant(
+          signer,
+          createdEventContext(result, createInput),
+          blindingKey,
+          appBase(),
+        ).catch((e) => console.warn("organizer self-enrollment failed:", e));
+      }
+      created = result;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -331,6 +352,13 @@
         <option value="on">{t("create.matching.on")}</option>
         <option value="off">{t("create.matching.off")}</option>
       </select>
+    </div>
+    <div>
+      <label class="row" style="font-weight:400">
+        <input type="checkbox" bind:checked={enrollSelf} style="width:auto" />
+        {t("create.field.enrollSelf")}
+      </label>
+      <p class="muted" style="margin:0.25rem 0 0">{t("create.enrollSelf.body")}</p>
     </div>
     <div>
       <label for="talks">{t("create.field.talks")}</label>

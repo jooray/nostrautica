@@ -50,7 +50,9 @@ test.describe(RELAY_UP ? "members-only posts" : "members-only posts (needs relay
     await expect(attendee.getByText(/request sent/i)).toBeVisible();
     await organizer.goto(`/#/e/${naddr}/admin`);
     await organizer.getByRole("button", { name: /^approve$/i }).first().click();
-    await expect(organizer.getByText(/approved ✓/i)).toBeVisible({ timeout: 20_000 });
+    // The organizer is self-enrolled at creation, so one "Approved ✓" card exists
+    // from the start — wait for the SECOND one (the just-approved attendee).
+    await expect(organizer.getByText(/approved ✓/i)).toHaveCount(2, { timeout: 20_000 });
 
     // Organizer authors a members-only post (Admin's inline PostEditor, §7.4) —
     // publishMembersPost genuinely branches to an encrypted 31607, not a

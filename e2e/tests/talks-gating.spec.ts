@@ -50,7 +50,9 @@ test.describe(RELAY_UP ? "talks gating" : "talks gating (needs relay — skipped
     await expect(attendee.getByText(/request sent/i)).toBeVisible();
     await organizer.goto(`/#/e/${naddr}/admin`);
     await organizer.getByRole("button", { name: /^approve$/i }).first().click();
-    await expect(organizer.getByText(/approved ✓/i)).toBeVisible({ timeout: 20_000 });
+    // The organizer is self-enrolled at creation, so one "Approved ✓" card exists
+    // from the start — wait for the SECOND one (the just-approved attendee).
+    await expect(organizer.getByText(/approved ✓/i)).toHaveCount(2, { timeout: 20_000 });
     await attendee.goto(`/#/e/${naddr}`);
     await expect(attendee.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
   }
