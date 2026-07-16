@@ -3,7 +3,7 @@
  * joined, or opened, so they can always navigate back to them from Home. This is
  * a convenience cache (the authoritative membership is the key material + relays).
  */
-import { naddrToCoordinate } from "@nostrautica/protocol";
+import { naddrToCoordinate, coordinateToNaddr } from "@nostrautica/protocol";
 
 export interface RecentEvent {
   coordinate: string; // stable identity (naddr relay hints can vary)
@@ -27,12 +27,26 @@ function coordOf(e: RecentEvent): string {
   }
 }
 
+/** A usable naddr for an entry, reconstructed from the coordinate if missing. */
+function naddrOf(e: RecentEvent): string | undefined {
+  if (e.naddr) return e.naddr;
+  try {
+    return coordinateToNaddr(coordOf(e));
+  } catch {
+    return undefined;
+  }
+}
+
 /** Collapse entries that refer to the same event (by coordinate). */
 function dedupe(list: RecentEvent[]): RecentEvent[] {
   const byCoord = new Map<string, RecentEvent>();
   for (const raw of list) {
+    // An entry that can't produce a navigable naddr is useless AND breaks the
+    // Home card click ("#/e/undefined", prod console 2026-07-16) — drop it.
+    const naddr = naddrOf(raw);
+    if (!naddr) continue;
     const coordinate = coordOf(raw);
-    const e = { ...raw, coordinate };
+    const e = { ...raw, naddr, coordinate };
     const prior = byCoord.get(coordinate);
     if (!prior) {
       byCoord.set(coordinate, e);
@@ -76,6 +90,11 @@ class RecentEvents {
    */
   record(evt: Omit<RecentEvent, "at"> & { at?: number }): void {
     if (typeof localStorage === "undefined") return;
+    // Never store an unnavigable entry (see dedupe): reconstruct the naddr from
+    // the coordinate, or refuse the record.
+    const naddr = naddrOf(evt as RecentEvent);
+    if (!naddr) return;
+    evt = { ...evt, naddr };
     const all = load();
     const prior = all.find((e) => e.coordinate === evt.coordinate);
     const existing = all.filter((e) => e.coordinate !== evt.coordinate);

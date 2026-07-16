@@ -10,6 +10,8 @@
   import { defaultEventIcon } from "$lib/media/image.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
   import { prefetchEventContext } from "$lib/nostr/prefetch.js";
+  import { connectNdk } from "$lib/nostr/ndk.js";
+  import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
@@ -43,18 +45,49 @@
     const keys = await listEventKeys().catch(() => []);
     for (const k of keys) {
       if (recentEvents.has(k.coordinate)) continue;
-      recentEvents.record({
-        coordinate: k.coordinate,
-        naddr: coordinateToNaddr(k.coordinate),
-        title: placeholderTitle(k.coordinate),
-        role: k.role,
-        at: 1, // backfill without bumping to the top
-      });
+      try {
+        recentEvents.record({
+          coordinate: k.coordinate,
+          naddr: coordinateToNaddr(k.coordinate),
+          title: placeholderTitle(k.coordinate),
+          role: k.role,
+          at: 1, // backfill without bumping to the top
+        });
+      } catch {
+        /* one malformed coordinate must not abort the whole backfill */
+      }
     }
     // Warm the contexts the user is most likely to tap next; the rest warm on
     // hover/focus (see the card handlers below).
     for (const e of recentEvents.list.slice(0, 4)) prefetchEventContext(e.naddr);
+    // Backfilled entries carry a slug-derived placeholder title and no icon
+    // (fresh-device recovery, user feedback 2026-07-16) — replace them with the
+    // real title/icon from the event context, without bumping list order.
+    void enrichEvents();
   });
+
+  async function enrichEvents() {
+    const targets = recentEvents.list.slice(0, 8);
+    if (!targets.length) return;
+    await connectNdk().catch(() => {});
+    await Promise.allSettled(
+      targets.map(async (e) => {
+        const ctx =
+          cachedEventContext(e.naddr) ??
+          (await loadEventContext(e.naddr, { adoptLang: false }));
+        if (ctx.title !== e.title || (ctx.icon && ctx.icon !== e.icon)) {
+          recentEvents.record({
+            coordinate: e.coordinate,
+            naddr: e.naddr,
+            title: ctx.title,
+            icon: ctx.icon ?? e.icon,
+            role: e.role,
+            at: e.at, // keep its position — this is a refresh, not a visit
+          });
+        }
+      }),
+    );
+  }
 </script>
 
 <h1>{t("home.title")}</h1>

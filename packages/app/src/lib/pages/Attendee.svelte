@@ -33,6 +33,8 @@
   let blindingKey: Uint8Array | null = null;
   let noteDraft = $state("");
   let busy = $state(false);
+  let loading = $state(true);
+  let followKnown = $state(false); // don't offer "Follow" before we know
   let error = $state<unknown>(null);
   let confirmMute = $state(false);
   let showAnyway = $state(false);
@@ -60,17 +62,24 @@
       }
       entry = dirEntry ?? null;
       posts = recent;
+      loading = false;
       if (session.signer) {
         void mutes.load(session.signer);
         const me = await session.signer.getPublicKey();
         following = isFollowing(await fetchFollowTags(session.signer), pubkey);
+        followKnown = true;
         followsYou = (await fetchFollowersOf(me, [pubkey])).has(pubkey);
         blindingKey = await deriveBlindingKey(session.signer);
         settings = await loadPerEventSettings(session.signer, ctx, blindingKey);
         noteDraft = settings.notes[pubkey] ?? "";
+      } else {
+        followKnown = true;
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      loading = false;
+      followKnown = true;
     }
   });
 
@@ -112,7 +121,9 @@
     }
   }
 
-  const displayName = $derived(kind0?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"));
+  const displayName = $derived(
+    kind0?.name || entry?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"),
+  );
   const has = (list?: string[]) => !!list?.includes(pubkey);
 
   // A coordinator-published translation of the user's authored fields into the
@@ -140,7 +151,18 @@
 
 {#if error}<ErrorState {error} />{/if}
 
-{#if muted && !showAnyway}
+{#if loading}
+  <!-- Never render a bare "Attendee + Follow" shell while data is in flight
+       (user feedback 2026-07-16) — show that we're working. -->
+  <div class="card" role="status" aria-label={t("app.loading")}>
+    <div class="row">
+      <span class="sk-avatar"></span>
+      <span class="sk-line" style="width:10rem"></span>
+    </div>
+    <div class="sk-line" style="width:85%;margin-top:0.8rem"></div>
+    <div class="sk-line" style="width:60%;margin-top:0.5rem"></div>
+  </div>
+{:else if muted && !showAnyway}
   <div class="card" role="status">
     <strong>{t("attendee.muted.title")}</strong>
     <p class="muted">{t("mute.confirm")}</p>
@@ -222,8 +244,14 @@
   {/if}
 
   <div class="row" style="flex-wrap:wrap">
-    <button class="btn primary" onclick={follow} disabled={busy || following}>
-      {following ? t("attendee.following") : busy ? t("attendee.followingBusy") : t("attendee.follow")}
+    <button class="btn primary" onclick={follow} disabled={busy || following || !followKnown}>
+      {!followKnown
+        ? "…"
+        : following
+          ? t("attendee.following")
+          : busy
+            ? t("attendee.followingBusy")
+            : t("attendee.follow")}
     </button>
     <button
       class="btn"
@@ -254,7 +282,7 @@
   <div class="card stack">
     <div class="field-label" id="private-label">{t("attendee.private")}</div>
     <div class="row" style="flex-wrap:wrap" role="group" aria-labelledby="private-label">
-      <button class="btn inline" aria-pressed={has(settings.favorites)} class:primary={has(settings.favorites)} onclick={() => toggle("favorites")}>{t("attendee.favorite")}</button>
+      <!-- "Favorite" retired (user feedback 2026-07-16) — want-to-meet/met say it better. -->
       <button class="btn inline" aria-pressed={has(settings.want_to_meet)} class:primary={has(settings.want_to_meet)} onclick={() => toggle("want_to_meet")}>{t("attendee.wantToMeet")}</button>
       <button class="btn inline" aria-pressed={has(settings.met)} class:primary={has(settings.met)} onclick={() => toggle("met")}>{t("attendee.met")}</button>
     </div>
@@ -291,5 +319,34 @@
     font-size: 0.85rem;
     cursor: pointer;
     text-decoration: underline;
+  }
+  .sk-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--bg-elev2, rgba(128, 128, 128, 0.15));
+    animation: sk-pulse 1.2s ease-in-out infinite;
+    flex: none;
+  }
+  .sk-line {
+    height: 0.85rem;
+    border-radius: 0.45rem;
+    background: var(--bg-elev2, rgba(128, 128, 128, 0.15));
+    animation: sk-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes sk-pulse {
+    0%,
+    100% {
+      opacity: 0.55;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sk-avatar,
+    .sk-line {
+      animation: none;
+    }
   }
 </style>

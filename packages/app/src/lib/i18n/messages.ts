@@ -162,8 +162,9 @@ export const messages = {
     "create.field.talks.body":
       "Let attendees submit talks that others can watch. Off keeps the event as a normal meetup.",
     "create.talks.off": "Off",
-    "create.talks.on": "On",
-    "create.talks.prerecordFirst": "Prerecord-first (watch ahead, meet at the venue)",
+    "create.talks.on": "On — attendees can submit talks (Talks tab appears)",
+    "create.talks.prerecordFirst":
+      "Prerecord-first — same, but Talks is the featured tab: the format is watch ahead, meet at the venue",
     "create.field.maxTalk": "Max talk length (minutes)",
     "create.rotationNote":
       "Note: key rotation is forward-only — anyone who ever held a decryption key can decrypt content published while it was current, forever (spec §4.2).",
@@ -447,7 +448,7 @@ export const messages = {
     "matches.none":
       "No matches yet — they appear once the coordinator has processed a few attendees. Check back soon.",
     "matches.none.noIntro":
-      "No matches yet — record your intro so the coordinator can match you with people worth meeting.",
+      "No matches yet — the coordinator starts from your Nostr profile and posts, so check back in a few minutes. Recording an intro makes your matches much better.",
     "matches.rankedNote": "Ranked by how much you'd get from meeting — with the reasoning.",
     "matches.live": "your intro is in, so these are live",
     "matches.band.strong": "Strong match",
@@ -1018,8 +1019,9 @@ export const messages = {
     "create.field.talks.body":
       "Umožnite účastníkom pridávať prednášky, ktoré si ostatní môžu pozrieť. Vypnuté ponechá podujatie ako bežné stretnutie.",
     "create.talks.off": "Vypnuté",
-    "create.talks.on": "Zapnuté",
-    "create.talks.prerecordFirst": "Najprv prednahraté (pozri vopred, stretni sa na mieste)",
+    "create.talks.on": "Zapnuté — účastníci môžu posielať prednášky (pribudne záložka Prednášky)",
+    "create.talks.prerecordFirst":
+      "Najprv prednahraté — to isté, ale Prednášky sú hlavná záložka: formát „pozri vopred, stretni sa na mieste“",
     "create.field.maxTalk": "Max. dĺžka prednášky (minúty)",
     "create.field.matching": "AI párovanie",
     "create.matching.on": "Zapnuté (potrebuje koordinátora)",
@@ -1307,7 +1309,7 @@ export const messages = {
     // Matches
     "matches.title": "Ľudia na stretnutie",
     "matches.none.noIntro":
-      "Zatiaľ žiadne spojenia — nahrajte svoje predstavenie, aby vás koordinátor mohol spojiť s ľuďmi, ktorých sa oplatí stretnúť.",
+      "Zatiaľ žiadne spojenia — koordinátor začína z vášho Nostr profilu a príspevkov, skúste o pár minút. Nahraté predstavenie vaše spojenia výrazne zlepší.",
     "matches.live": "vaše predstavenie je odoslané, takže tieto sú aktuálne",
     "matches.band.strong": "Silná zhoda",
     "matches.band.good": "Dobrá zhoda",

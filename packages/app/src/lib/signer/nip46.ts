@@ -426,17 +426,38 @@ export class Nip46Signer implements AppSigner {
     return this.pk;
   }
 
+  // Every bunker RPC is time-bounded: with the signer relay unreachable, an
+  // unbounded await freezes whatever UI initiated it ("Decrypting…" forever —
+  // prod report 2026-07-16). 60s is generous enough for a human approving the
+  // request in their signer app, and turns a dead relay into a visible error.
+  private static readonly RPC_TIMEOUT_MS = 60_000;
+
   async signEvent(template: EventTemplate): Promise<VerifiedEvent> {
     const pubkey = await this.getPublicKey();
-    return (await this.bunker.signEvent({ ...template, pubkey } as any)) as VerifiedEvent;
+    return (await withTimeout(
+      this.bunker.signEvent({ ...template, pubkey } as any),
+      Nip46Signer.RPC_TIMEOUT_MS,
+      undefined,
+      timeoutMessage(),
+    )) as VerifiedEvent;
   }
 
   async nip44Encrypt(recipientPubkey: string, plaintext: string): Promise<string> {
-    return this.bunker.nip44Encrypt(recipientPubkey, plaintext);
+    return withTimeout(
+      this.bunker.nip44Encrypt(recipientPubkey, plaintext),
+      Nip46Signer.RPC_TIMEOUT_MS,
+      undefined,
+      timeoutMessage(),
+    );
   }
 
   async nip44Decrypt(counterpartyPubkey: string, ciphertext: string): Promise<string> {
-    return this.bunker.nip44Decrypt(counterpartyPubkey, ciphertext);
+    return withTimeout(
+      this.bunker.nip44Decrypt(counterpartyPubkey, ciphertext),
+      Nip46Signer.RPC_TIMEOUT_MS,
+      undefined,
+      timeoutMessage(),
+    );
   }
 
   /**

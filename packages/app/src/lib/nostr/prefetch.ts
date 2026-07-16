@@ -55,8 +55,8 @@ function isSilentSigner(signer: AppSigner | null | undefined): signer is AppSign
 }
 
 /** Warm the event context (31600 + 31923 + E_id kind-0) for an naddr. */
-export function prefetchEventContext(naddr: string): void {
-  if (cachedEventContext(naddr)) return;
+export function prefetchEventContext(naddr: string | undefined): void {
+  if (!naddr || cachedEventContext(naddr)) return;
   warm(`ctx:${naddr}`, () => loadEventContext(naddr, { adoptLang: false }));
 }
 

@@ -50,6 +50,44 @@ export function defaultEventIcon(seed: string, label = ""): string {
 </svg>`);
 }
 
+/**
+ * Center-crop ("cover") + scale an image to an exact target size on a canvas.
+ * The create form crops uploads to the aspect ratio the pages actually render
+ * (banner 5:2, icon 1:1), so the preview IS what attendees will see — no more
+ * uploading blind (user feedback 2026-07-16). Transparent sources keep PNG;
+ * photos become JPEG.
+ */
+export async function cropScaleImage(
+  file: Blob,
+  targetW: number,
+  targetH: number,
+): Promise<Blob> {
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(file);
+    const scale = Math.max(targetW / bitmap.width, targetH / bitmap.height);
+    const sw = targetW / scale;
+    const sh = targetH / scale;
+    const sx = (bitmap.width - sw) / 2;
+    const sy = (bitmap.height - sh) / 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const c2d = canvas.getContext("2d");
+    if (!c2d) return file;
+    c2d.drawImage(bitmap, sx, sy, sw, sh, 0, 0, targetW, targetH);
+    const type = file.type === "image/png" ? "image/png" : "image/jpeg";
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, type, 0.9),
+    );
+    return blob ?? file;
+  } catch {
+    return file; // undecodable input — upload as-is rather than fail
+  } finally {
+    bitmap?.close?.();
+  }
+}
+
 /** Upload a public (unencrypted) image to Blossom; returns the primary URL. */
 export async function uploadPublicImage(
   signer: AppSigner,

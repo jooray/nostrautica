@@ -74,7 +74,12 @@
     router.go({ name: "dmPeer", npub: npubEncode(pubkey) });
   }
   function nameOf(pubkey: string): string {
-    return profiles.get(pubkey)?.name || names.get(pubkey)?.profile.about?.slice(0, 40) || t("matches.name");
+    return (
+      profiles.get(pubkey)?.name ||
+      names.get(pubkey)?.name || // directory-entry name — no kind-0 round-trip needed
+      names.get(pubkey)?.profile.about?.slice(0, 40) ||
+      t("matches.name")
+    );
   }
   function descriptorOf(pubkey: string): string {
     const about = names.get(pubkey)?.profile.about;

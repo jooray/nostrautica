@@ -10,7 +10,8 @@ import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST } from "@nostrautica/protoc
 import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { fetchEvents } from "$lib/nostr/ndk.js";
+import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
@@ -87,30 +88,48 @@ export async function sendDm(
  * Fetch and unwrap the user's DMs. Non-DM rumors (grants etc.) and wraps we
  * can't decrypt are skipped silently; copies are deduped by rumor id.
  */
+// Per-wrap unwrap memo (keyed by wrap id, per identity): a wrap's plaintext never
+// changes, and the 5s DM poll otherwise re-runs a signer decrypt per wrap per
+// tick — for a remote signer (Amber/NIP-46) that's a prompt-or-roundtrip storm,
+// and one unreachable bunker relay froze the DM screens entirely (user report
+// 2026-07-16). `null` = not a DM of ours; cached failures don't retry.
+let unwrapCacheOwner = "";
+const unwrapCache = new Map<string, DmMessage | null>();
+
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
-  // Relay-only: gift wraps must not be lost to the cache/EOSE race (see ndk.ts).
-  // Explicit relay set: without one, NDK's outbox calculation can stall the
-  // fetch indefinitely when relay lists are unresolvable (BUG-1b).
-  const wraps = (await fetchEventsRelayOnly(
-    {
-      kinds: [KIND_GIFT_WRAP],
-      "#p": [me],
-      limit: 500,
-    },
-    DEFAULT_RELAYS,
-  )) as unknown as GiftWrap[];
+  if (unwrapCacheOwner !== me) {
+    unwrapCache.clear();
+    unwrapCacheOwner = me;
+  }
+  // Streamed relay-only read: gift wraps must not be lost to the dexie
+  // cache/EOSE race (see ndk.ts), and the read must TERMINATE even when a relay
+  // never answers — first EOSE + grace, hard timeout. The 5s poll makes any
+  // single missed late event a non-issue.
+  const events = (await streamEvents(
+    { kinds: [KIND_GIFT_WRAP], "#p": [me], limit: 500 },
+    { relays: DEFAULT_RELAYS, relayOnly: true, timeoutMs: 10_000 },
+  ).ready) as unknown as GiftWrap[];
 
-  const byId = new Map<string, DmMessage>();
-  for (const wrap of wraps) {
+  for (const wrap of events) {
+    if (unwrapCache.has(wrap.id)) continue;
     try {
       const rumor = await signerUnwrap(signer, wrap);
-      if (rumor.kind !== KIND_DM) continue;
+      if (rumor.kind !== KIND_DM) {
+        unwrapCache.set(wrap.id, null);
+        continue;
+      }
       const recipient = rumor.tags.find((t) => t[0] === "p")?.[1];
-      if (!recipient) continue;
+      if (!recipient) {
+        unwrapCache.set(wrap.id, null);
+        continue;
+      }
       const peer = rumor.pubkey === me ? recipient : rumor.pubkey;
-      if (peer === me && rumor.pubkey !== me) continue; // malformed
-      byId.set(rumor.id, {
+      if (peer === me && rumor.pubkey !== me) {
+        unwrapCache.set(wrap.id, null); // malformed
+        continue;
+      }
+      unwrapCache.set(wrap.id, {
         id: rumor.id,
         peer,
         from: rumor.pubkey,
@@ -118,9 +137,12 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
         at: rumor.created_at,
       });
     } catch {
-      // not for us / not decryptable / different rumor family — skip
+      // not for us / not decryptable / different rumor family — skip for good
+      unwrapCache.set(wrap.id, null);
     }
   }
+  const byId = new Map<string, DmMessage>();
+  for (const m of unwrapCache.values()) if (m) byId.set(m.id, m);
   return [...byId.values()].sort((a, b) => a.at - b.at);
 }
 

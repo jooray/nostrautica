@@ -155,8 +155,19 @@
   .evt-head.has-banner .inner {
     min-height: 120px;
   }
+  /* A real banner renders at the same 5:2 the create-form crops and previews
+     use (capped on desktop so it never dominates the viewport). Flex keeps the
+     title anchored to the bottom over the scrim at any height. */
+  .evt-head.has-banner:not(.compact) {
+    aspect-ratio: 5 / 2;
+    max-height: 260px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+  }
   .evt-head.has-banner:not(.compact) .inner {
-    min-height: 176px;
+    /* height now comes from the root's 5:2 ratio; the inner hugs its content */
+    min-height: 0;
     display: flex;
     flex-direction: column;
     justify-content: flex-end;

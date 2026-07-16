@@ -210,6 +210,7 @@ export async function approveAttendee(
   const entryContent = {
     v: 1,
     pubkey: req.attendeePubkey,
+    ...(req.name ? { name: req.name } : {}),
     profile: req.profile ?? { about: "", skills: [], looking_for: "", links: [] },
     media: req.media ?? [],
     updated_at: Math.floor(Date.now() / 1000),

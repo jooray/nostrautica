@@ -134,7 +134,9 @@ attendee"** badge so they know it's not purely automated.
 Tap **People** in the bottom bar to browse who's here. Each row shows an avatar
 (their photo, or their initials on a coloured tile), their name, and their
 skills. **Search** by name or skill, and filter to just the people you've marked
-**want to meet**, **met**, **favorited**, or people you **follow** on Nostr.
+**want to meet**, **met**, or people you **follow** on Nostr. Each row also
+has quick actions: mark **want to meet** or start a **message** without
+opening their page.
 The list streams in as relays answer — people appear as they decrypt (names and
 photos fill in a moment later), so a big roster on a slow connection never
 blocks on the slowest relay.
@@ -150,8 +152,8 @@ what they're looking for, an AI-written summary once the matchmaking has run, an
 their recent public posts.
 
 On a person's page you can **Follow** them, tap **Message** to start a private
-chat (see §6), and — privately, nobody else ever sees these — mark **Favorite**,
-**Want to meet**, or **Met ✓**, and keep a private note ("the drummer with the
+chat (see §6), and — privately, nobody else ever sees these — mark
+**Want to meet** or **Met ✓**, and keep a private note ("the drummer with the
 mesh-network startup"). Reload and it all persists. If someone's bothering you,
 **Mute** hides them from your People list, Matches, and messages (it's a standard
 Nostr mute, so it carries to other Nostr apps too):
@@ -260,8 +262,8 @@ One more thing: **More → Settings** has a dark mode and a language switch
 Your name, photo, and bio are public (that's your profile). Your intro video,
 the attendee list, and your matches are **encrypted so only this event's
 approved attendees can see them** — not the public, not people who weren't let
-in. Your favorites and private notes are encrypted so **only you** can see
-them. Your messages are end-to-end encrypted between you and the other person.
+in. Your want-to-meet/met marks and private notes are encrypted so **only you**
+can see them. Your messages are end-to-end encrypted between you and the other person.
 The matching runs on an AI service chosen by the organizer, which reads intros
 and profiles to write its recommendations. Here's what a non-attendee sees if
 they open the attendee list — nothing:

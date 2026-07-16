@@ -13,12 +13,12 @@ export default defineConfig({
       workbox: {
         cleanupOutdatedCaches: true,
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest,woff2}"],
-        // Base-aware SPA navigation fallback. After BASE_PATH moved the app under
-        // /app, the default `/` is no longer in the precache (every entry is
-        // /app/…), so workbox threw `non-precached-url: /` when binding the nav
-        // handler. Point it at the precached base index (directoryIndex resolves
-        // /app/ → /app/index.html).
-        navigateFallback: (process.env.BASE_PATH || "") + "/",
+        // Base-aware SPA navigation fallback. `createHandlerBoundToURL` needs an
+        // URL that resolves to an actual PRECACHE entry — "<base>/" relied on
+        // directoryIndex resolution that doesn't apply there, so production under
+        // /app threw `non-precached-url: /app/` and the SW nav fallback was dead
+        // (prod console 2026-07-16). Bind the precached file itself.
+        navigateFallback: (process.env.BASE_PATH || "") + "/index.html",
       },
       manifest: {
         name: "Nostrautica",

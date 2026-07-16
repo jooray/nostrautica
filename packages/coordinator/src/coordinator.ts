@@ -686,6 +686,12 @@ export class Coordinator {
     await this.publishDirectory(state, attendeePubkey);
     await this.publishRoster(state);
     log(`[grant] ECK granted to ${short(attendeePubkey)}; directory + roster published`);
+    // Profile-first matching (user feedback 2026-07-16): a Nostr-native attendee
+    // brings a kind-0 bio and posts — start the AI pipeline at approval time so
+    // matching runs from profile + nostr-context immediately, no intro required.
+    // The job is keyed by the submission hash, so when an intro lands later the
+    // changed key re-processes and the scoped recompute re-matches them.
+    this.enqueueProcess(state.coordinate, attendeePubkey);
     // The AI pipeline is kicked off when a profile submission arrives (there is
     // nothing to transcribe/profile until then). Directory text is already visible.
     if (this.deps.store.getAttendee(state.coordinate, attendeePubkey)?.profile_json) {
@@ -743,6 +749,7 @@ export class Coordinator {
     const entry = buildDirectoryEntry(this.publishKeys(state), state.coordinate, {
       v: 1,
       pubkey,
+      ...(attendee?.display_name ? { name: attendee.display_name } : {}),
       profile,
       media,
       ...(aiProfile ? { ai_profile: aiProfile } : {}),

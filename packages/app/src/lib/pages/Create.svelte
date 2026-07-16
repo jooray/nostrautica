@@ -11,6 +11,7 @@
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import {
+    cropScaleImage,
     defaultEventBanner,
     defaultEventIcon,
     uploadPublicImage,
@@ -71,7 +72,13 @@
     error = null;
     try {
       await connectNdk();
-      const url = await uploadPublicImage(session.signer, file);
+      // Crop/scale to the exact aspect the pages render (banner 5:2, icon 1:1)
+      // so the preview below is what attendees will actually see.
+      const cropped =
+        which === "icon"
+          ? await cropScaleImage(file, 512, 512)
+          : await cropScaleImage(file, 1500, 600);
+      const url = await uploadPublicImage(session.signer, cropped);
       if (which === "icon") iconUrl = url;
       else bannerUrl = url;
     } catch (err) {
@@ -290,10 +297,9 @@
       <LanguagePicker id="lang" bind:value={lang} />
       <p class="muted" style="margin:0.25rem 0 0">{t("create.field.language.body")}</p>
     </div>
-    <!-- Rarely-changed options tucked away; title + date is enough (UI-SUGGESTIONS #13). -->
-    <details>
-      <summary class="muted" style="cursor:pointer">{t("create.advanced")}</summary>
-      <div class="stack" style="margin-top:0.75rem">
+    <!-- Images + intro length promoted out of "Advanced" (user feedback
+         2026-07-16): nearly every event wants images, and the previews below
+         show the EXACT crop attendees will see (uploads are cropped to it). -->
     <div>
       <div class="field-label">{t("create.field.images")} <span class="muted" style="font-weight:400">{t("create.field.images.optional")}</span></div>
       <div class="row" style="align-items:flex-start;gap:0.75rem">
@@ -336,8 +342,6 @@
         <ToggleSwitch bind:checked={maxVideoUnlimited}>{t("create.field.noLimit")}</ToggleSwitch>
       </div>
     </div>
-      </div>
-    </details>
     <div>
       <label for="approval">{t("create.field.approval")}</label>
       <select id="approval" bind:value={approval}>

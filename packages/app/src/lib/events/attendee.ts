@@ -281,10 +281,12 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
   if (!eck) return undefined;
   const publisher = directoryPublisher(ctx);
   const { identifier } = parseCoordinate(ctx.coordinate);
-  const events = await fetchEvents(
+  // Streamed one-shot: first EOSE + grace instead of the slowest relay — this
+  // read gates the whole People screen ("Decrypting the roster…").
+  const events = await streamEvents(
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
-    ctx.config.relays,
-  );
+    { relays: ctx.config.relays },
+  ).ready;
   const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   if (!latest) return { v: 1, eck_current: 1, attendees: [] };
   try {
@@ -305,10 +307,10 @@ export async function fetchDirectory(
 
   const publisher = directoryPublisher(ctx);
   const ds = roster.attendees.map((a) => a.d);
-  const events = await fetchEvents(
+  const events = await streamEvents(
     { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": ds },
-    ctx.config.relays,
-  );
+    { relays: ctx.config.relays },
+  ).ready;
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
@@ -422,10 +424,10 @@ export async function fetchMatches(
   if (!eck) return undefined;
   const pubkey = await signer.getPublicKey();
   const d = blindedD(eck, ctx.coordinate, pubkey);
-  const events = await fetchEvents(
+  const events = await streamEvents(
     { kinds: [KIND_MATCH_LIST], authors: [coordinator], "#d": [d] },
-    ctx.config.relays,
-  );
+    { relays: ctx.config.relays },
+  ).ready;
   const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   if (!latest) return undefined;
   try {

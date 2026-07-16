@@ -319,6 +319,10 @@ export const directoryEntryContentSchema = z
   .object({
     v: version,
     pubkey: hex32,
+    // Display name from the join request: the roster must be able to show WHO
+    // someone is even when their kind-0 is slow or unreachable on the event
+    // relays (UX finding 2026-07-16). kind-0 stays the preferred source.
+    name: z.string().optional(),
     profile: attendeeProfileSchema,
     media: z.array(mediaDescriptorSchema).default([]),
     ai_profile: aiProfileSchema.optional(), // appears when processing completes

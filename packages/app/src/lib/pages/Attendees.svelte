@@ -8,7 +8,8 @@
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { streamDirectory, fetchMatches, type DirectoryStream } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
-  import { loadPerEventSettings } from "$lib/events/settings.js";
+  import { loadPerEventSettings, toggleSetting } from "$lib/events/settings.js";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
@@ -25,11 +26,12 @@
     name: "attendees.sort.name",
   };
 
-  type FilterKey = "want_to_meet" | "met" | "favorites" | "following";
+  // "Favorites" retired (user feedback 2026-07-16): three clear categories —
+  // planning (want to meet), done (met), and the Nostr graph (following).
+  type FilterKey = "want_to_meet" | "met" | "following";
   const filterLabels: Record<FilterKey, MessageKey> = {
     want_to_meet: "attendees.filter.wantToMeet",
     met: "attendees.filter.met",
-    favorites: "attendees.filter.favorites",
     following: "attendees.filter.following",
   };
 
@@ -46,7 +48,22 @@
   let error = $state<unknown>(null);
 
   let stream: DirectoryStream | undefined;
+  let blindingKey: Uint8Array | null = null;
   const profiledPubkeys = new Set<string>();
+
+  // Row-level quick actions (user feedback 2026-07-16): message someone or mark
+  // "want to meet" straight from the list, no detour through their profile.
+  function message(pubkey: string) {
+    if (!session.loggedIn) return router.go({ name: "login" });
+    router.go({ name: "dmPeer", npub: npubEncode(pubkey) });
+  }
+  async function toggleWantToMeet(pubkey: string) {
+    if (!session.signer || !ctx || !blindingKey) return;
+    settings = await toggleSetting(session.signer, ctx, blindingKey, "want_to_meet", pubkey).catch(
+      () => settings,
+    );
+  }
+  const wantToMeet = (pubkey: string) => !!settings?.want_to_meet?.includes(pubkey);
 
   // Social overlay (follows, per-event settings, match scores) loads in
   // parallel with the roster stream — none of it blocks the first paint.
@@ -59,7 +76,10 @@
         .then((s) => (followSet = s))
         .catch(() => {}),
       deriveBlindingKey(signer)
-        .then((bk) => loadPerEventSettings(signer, c, bk))
+        .then((bk) => {
+          blindingKey = bk; // kept for the row-level Want-to-meet toggle
+          return loadPerEventSettings(signer, c, bk);
+        })
         .then((s) => (settings = s))
         .catch(() => {}),
     ];
@@ -110,8 +130,14 @@
   onMount(load);
   onDestroy(() => stream?.stop());
 
+  const entryByPubkey = $derived(new Map(entries.map((e) => [e.pubkey, e])));
   function nameOf(pubkey: string, about?: string): string {
-    return profiles.get(pubkey)?.name || about?.slice(0, 40) || pubkey.slice(0, 10) + "…";
+    return (
+      profiles.get(pubkey)?.name ||
+      entryByPubkey.get(pubkey)?.name || // directory-entry name: instant, no kind-0 round-trip
+      about?.slice(0, 40) ||
+      pubkey.slice(0, 10) + "…"
+    );
   }
 
   // Show the coordinator-published translation of an attendee's bio/skills when the
@@ -205,7 +231,7 @@
     />
     {#if session.loggedIn}
       <div class="row" style="flex-wrap:wrap" role="group" aria-label={t("attendees.filter.label")}>
-        {#each ["want_to_meet", "met", "favorites", "following"] as const as f (f)}
+        {#each ["want_to_meet", "met", "following"] as const as f (f)}
           <button
             class="btn inline"
             aria-pressed={activeFilters.has(f)}
@@ -252,6 +278,28 @@
             {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
             {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
           {/snippet}
+          {#snippet actions()}
+            {#if session.loggedIn && e.pubkey !== session.pubkey}
+              <button
+                class="btn inline icon-btn"
+                aria-pressed={wantToMeet(e.pubkey)}
+                class:primary={wantToMeet(e.pubkey)}
+                title={t("attendees.filter.wantToMeet")}
+                aria-label={t("attendees.filter.wantToMeet")}
+                onclick={() => toggleWantToMeet(e.pubkey)}
+              >
+                <Icon name="star" size={16} />
+              </button>
+              <button
+                class="btn inline icon-btn"
+                title={t("matches.message")}
+                aria-label={t("matches.message")}
+                onclick={() => message(e.pubkey)}
+              >
+                <Icon name="send" size={16} />
+              </button>
+            {/if}
+          {/snippet}
         </PersonCard>
       {/each}
     </div>
@@ -266,5 +314,9 @@
   }
   .roster {
     padding: 0.25rem 0.9rem;
+  }
+  .icon-btn {
+    padding: 0.4rem 0.5rem;
+    line-height: 0;
   }
 </style>
