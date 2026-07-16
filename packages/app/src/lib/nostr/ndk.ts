@@ -100,11 +100,10 @@ export function subscribe(
   onEvent: (event: NDKEvent) => void,
   relays?: string[],
 ): NDKSubscription {
-  const sub = getNdk().subscribe(
-    filters as unknown as NDKFilter | NDKFilter[],
-    { closeOnEose: false },
-    relaySet(relays),
-  );
+  const sub = getNdk().subscribe(filters as unknown as NDKFilter | NDKFilter[], {
+    closeOnEose: false,
+    relaySet: relaySet(relays),
+  });
   sub.on("event", onEvent);
   return sub;
 }
@@ -114,11 +113,10 @@ export async function fetchEvents(
   filters: Filter | Filter[],
   relays?: string[],
 ): Promise<NDKEvent[]> {
-  const set = await getNdk().fetchEvents(
-    filters as unknown as NDKFilter | NDKFilter[],
-    { closeOnEose: true },
-    relaySet(relays),
-  );
+  const set = await getNdk().fetchEvents(filters as unknown as NDKFilter | NDKFilter[], {
+    closeOnEose: true,
+    relaySet: relaySet(relays),
+  });
   return [...set];
 }
 
@@ -132,11 +130,11 @@ export async function fetchEventsRelayOnly(
   filters: Filter | Filter[],
   relays?: string[],
 ): Promise<NDKEvent[]> {
-  const set = await getNdk().fetchEvents(
-    filters as unknown as NDKFilter | NDKFilter[],
-    { closeOnEose: true, cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY },
-    relaySet(relays),
-  );
+  const set = await getNdk().fetchEvents(filters as unknown as NDKFilter | NDKFilter[], {
+    closeOnEose: true,
+    cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY,
+    relaySet: relaySet(relays),
+  });
   return [...set];
 }
 

@@ -13,6 +13,8 @@
     fetchEventPosts,
     fetchAttendeePosts,
     fetchPostByD,
+    cachedEventPosts,
+    cachedAttendeePosts,
     type EventPost,
   } from "$lib/events/posts.js";
   import { fetchEventPage, resolveTarget, type EventPageModel } from "$lib/events/event-page.js";
@@ -28,7 +30,8 @@
 
   let { naddr }: { naddr: string } = $props();
 
-  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
+  const cachedCtx = cachedEventContext(naddr);
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<string | null>(null);
   let approved = $state(false);
   let organizer = $state(false);
@@ -36,12 +39,14 @@
   // No status badge until the role is actually known — a fresh device briefly
   // resolving grants/keys must not flash "Visitor" at the organizer.
   let roleResolved = $state(false);
-  // The body below the header is still fetching — show a skeleton, not a void.
-  let bodyLoading = $state(true);
   // Customized layout (31608) or the default feed when none is published.
   let page = $state<EventPageModel | undefined>(undefined);
-  let eventPosts = $state<EventPost[]>([]);
-  let attendeePosts = $state<EventPost[]>([]);
+  // Cache-first: returning to the event page paints its feed instantly.
+  let eventPosts = $state<EventPost[]>((cachedCtx && cachedEventPosts(cachedCtx.coordinate)) ?? []);
+  let attendeePosts = $state<EventPost[]>((cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? []);
+  // The body below the header is still fetching — show a skeleton only on a cold
+  // open (no cached posts to paint).
+  let bodyLoading = $state(eventPosts.length === 0);
   let pinnedPosts = $state<Map<string, EventPost>>(new Map());
   let rosterCount = $state<number | undefined>(undefined);
   let installHint = $state(false);
@@ -93,9 +98,11 @@
       // Readiness journey (§4.1): derived from real state, one primary CTA.
       void readinessStore.load(ctx, session.signer);
       // Background-warm what the user opens next: the Attendees tab (directory
-      // decrypt is signer-free), and — for a local key with no custody record
-      // yet — the organizer key recovery. Detached: must not delay first paint.
+      // decrypt is signer-free), the attendee-posts feed (so Updates opens warm),
+      // and — for a local key with no custody record yet — the organizer key
+      // recovery. Detached: must not delay first paint.
       if (approved) prefetchAttendeesTab(ctx, session.signer);
+      void fetchAttendeePosts(ctx).catch(() => {});
       if (!keys) prefetchOrganizerRecovery(session.signer);
       await publicLoad;
       // Fresh device whose ECK arrived during this visit: the public pass ran
@@ -161,6 +168,18 @@
     }
   }
 
+  // A post's stable identity on this page (used to dedupe across widgets).
+  const postKey = (p: EventPost) => `${p.source}:${p.authorPubkey}:${p.d}`;
+  // Posts already surfaced in the "Latest" highlight or a pinned section must
+  // not appear a second time in the feed below (user feedback 2026-07-17: the
+  // "Secret article" showed twice).
+  const featuredKeys = $derived.by(() => {
+    const s = new Set<string>();
+    if (latestPost) s.add(postKey(latestPost));
+    for (const p of pinnedPosts.values()) s.add(postKey(p));
+    return s;
+  });
+
   /** Posts for a `posts` section, filtered by its source × visibility config. */
   function sectionPosts(section: Extract<MergedSection, { type: "posts" }>): EventPost[] {
     let list: EventPost[] = [];
@@ -168,7 +187,9 @@
     if (section.source !== "event") list = list.concat(attendeePosts);
     if (section.visibility === "public") list = list.filter((p) => !p.membersOnly);
     if (section.visibility === "members") list = list.filter((p) => p.membersOnly);
-    return list.sort((a, b) => b.publishedAt - a.publishedAt);
+    return list
+      .filter((p) => !featuredKeys.has(postKey(p)))
+      .sort((a, b) => b.publishedAt - a.publishedAt);
   }
 
   function openMenuTarget(target: string) {
@@ -320,11 +341,14 @@
       {/if}
     {/each}
   {:else if eventPosts.length}
-    <!-- Default layout (no 31608): the official feed, exactly as before. -->
-    <h2>{t("event.updates")}</h2>
-    {#each eventPosts as post (post.d)}
-      <PostCard {post} {naddr} full />
-    {/each}
+    {@const rest = eventPosts.filter((p) => !featuredKeys.has(postKey(p)))}
+    {#if rest.length}
+      <!-- Default layout (no 31608): the official feed, minus the highlighted post. -->
+      <h2>{t("event.updates")}</h2>
+      {#each rest as post (post.d)}
+        <PostCard {post} {naddr} full />
+      {/each}
+    {/if}
   {/if}
 {/if}
 

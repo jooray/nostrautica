@@ -14,6 +14,23 @@ export interface ProfileMeta {
   about?: string;
 }
 
+// Session-lifetime kind-0 cache so a profile fetched once (roster, matches,
+// prefetch) paints instantly everywhere it's needed next — the app re-reads the
+// same handful of pubkeys across People/Matches/attendee pages. Latest write
+// wins; a background refetch simply overwrites (user feedback 2026-07-17:
+// "everything should be snappier / cached ASAP").
+const profileCache = new Map<string, ProfileMeta>();
+
+/** Cached kind-0s for these pubkeys (no network) — for cache-first paint. */
+export function cachedProfiles(pubkeys: string[]): Map<string, ProfileMeta> {
+  const out = new Map<string, ProfileMeta>();
+  for (const p of pubkeys) {
+    const hit = profileCache.get(p);
+    if (hit) out.set(p, hit);
+  }
+  return out;
+}
+
 /** Batch-fetch kind-0 profiles for a set of pubkeys → map of latest per pubkey. */
 export async function fetchProfiles(
   pubkeys: string[],
@@ -29,7 +46,9 @@ export async function fetchProfiles(
   for (const [pubkey, e] of latest) {
     try {
       const p = JSON.parse(e.content);
-      out.set(pubkey, { name: p.name || p.display_name, picture: p.picture, about: p.about });
+      const meta = { name: p.name || p.display_name, picture: p.picture, about: p.about };
+      out.set(pubkey, meta);
+      profileCache.set(pubkey, meta);
     } catch {
       /* skip malformed profile */
     }

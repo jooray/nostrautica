@@ -60,11 +60,10 @@ export function createMarmotNetwork(): MarmotNetwork {
     },
 
     async request(relays, filters) {
-      const set = await getNdk().fetchEvents(
-        filters,
-        { closeOnEose: true },
-        relaySet(relays),
-      );
+      const set = await getNdk().fetchEvents(filters, {
+        closeOnEose: true,
+        relaySet: relaySet(relays),
+      });
       return [...set].map((e) => e.rawEvent());
     },
 
@@ -73,7 +72,7 @@ export function createMarmotNetwork(): MarmotNetwork {
         subscribe(observer) {
           let sub: NDKSubscription | undefined;
           try {
-            sub = getNdk().subscribe(filters, { closeOnEose: false }, relaySet(relays));
+            sub = getNdk().subscribe(filters, { closeOnEose: false, relaySet: relaySet(relays) });
             sub.on("event", (e: NDKEvent) => observer.next?.(e.rawEvent()));
             sub.on("eose", () => {
               /* keep open — marmot wants a live subscription, not a one-shot */

@@ -17,6 +17,8 @@
   import {
     fetchEventPosts,
     fetchAttendeePosts,
+    cachedEventPosts,
+    cachedAttendeePosts,
     type EventPost,
   } from "$lib/events/posts.js";
   import PostCard from "$lib/components/PostCard.svelte";
@@ -24,11 +26,18 @@
 
   let { naddr }: { naddr: string } = $props();
 
-  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
+  const cachedCtx = cachedEventContext(naddr);
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<string | null>(null);
-  let loading = $state(true);
-  let eventPosts = $state<EventPost[]>([]);
-  let attendeePosts = $state<EventPost[]>([]);
+  // Cache-first: paint posts already fetched (event home / prefetch) instantly,
+  // then refresh in the background. Only show the spinner on a cold open.
+  let eventPosts = $state<EventPost[]>(
+    (cachedCtx && cachedEventPosts(cachedCtx.coordinate)) ?? [],
+  );
+  let attendeePosts = $state<EventPost[]>(
+    (cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? [],
+  );
+  let loading = $state(eventPosts.length === 0 && attendeePosts.length === 0);
 
   let source = $state<"event" | "attendees" | "both">("both");
   let visibility = $state<"public" | "members" | "both">("both");
@@ -46,16 +55,22 @@
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
+      // Populate cached posts for the resolved coordinate before the network
+      // returns (covers the cold-context case where cachedCtx was null above).
+      if (eventPosts.length === 0) eventPosts = cachedEventPosts(ctx.coordinate) ?? [];
+      if (attendeePosts.length === 0) attendeePosts = cachedAttendeePosts(ctx.coordinate) ?? [];
+      if (eventPosts.length || attendeePosts.length) loading = false;
       // Fold in any pending ECK grants so members-only posts decrypt.
       if (session.signer) await receiveGrants(session.signer).catch(() => {});
       const [ev, att] = await Promise.all([
-        fetchEventPosts(ctx).catch(() => []),
-        fetchAttendeePosts(ctx).catch(() => []),
+        fetchEventPosts(ctx).catch(() => eventPosts),
+        fetchAttendeePosts(ctx).catch(() => attendeePosts),
       ]);
       eventPosts = ev;
       attendeePosts = att;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (eventPosts.length === 0 && attendeePosts.length === 0)
+        error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
     }

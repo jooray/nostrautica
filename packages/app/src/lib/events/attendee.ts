@@ -296,6 +296,27 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
   }
 }
 
+// Session-lifetime directory cache per coordinate: the decrypted roster entries.
+// The attendee-detail page reuses it instead of re-fetching the whole directory
+// just to show one person (user feedback 2026-07-17: clicking a person was slow
+// and rendered an empty page while it re-pulled everyone).
+const directoryCache = new Map<string, DirectoryEntryContent[]>();
+function cacheDirectory(coordinate: string, entries: DirectoryEntryContent[]): void {
+  directoryCache.set(coordinate, entries);
+}
+
+/** All cached directory entries for a coordinate (no network), or undefined. */
+export function cachedDirectory(coordinate: string): DirectoryEntryContent[] | undefined {
+  return directoryCache.get(coordinate);
+}
+/** One cached directory entry by pubkey (no network), or undefined. */
+export function cachedDirectoryEntry(
+  coordinate: string,
+  pubkey: string,
+): DirectoryEntryContent | undefined {
+  return directoryCache.get(coordinate)?.find((e) => e.pubkey === pubkey);
+}
+
 /** Fetch + decrypt every directory entry listed in the roster. */
 export async function fetchDirectory(
   ctx: EventContext,
@@ -328,6 +349,7 @@ export async function fetchDirectory(
       /* skip entries we can't decrypt (e.g. published under a newer ECK) */
     }
   }
+  cacheDirectory(ctx.coordinate, entries);
   return entries;
 }
 
@@ -364,7 +386,9 @@ export async function streamDirectory(
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   const flush = () => {
     flushTimer = undefined;
-    onEntries(snapshot());
+    const snap = snapshot();
+    cacheDirectory(ctx.coordinate, snap); // warm the per-person detail page
+    onEntries(snap);
   };
 
   const handle = streamEvents(

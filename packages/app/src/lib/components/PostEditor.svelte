@@ -11,6 +11,10 @@
     utf8ByteLength,
     MAX_MEMBERS_POST_MARKDOWN_BYTES,
   } from "@nostrautica/protocol";
+  import { session } from "$lib/signer/session.svelte.js";
+  import { connectNdk } from "$lib/nostr/ndk.js";
+  import { uploadPublicImage } from "$lib/media/image.js";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import type { PostVisibility } from "$lib/events/posts.js";
 
@@ -41,6 +45,23 @@
   } = $props();
 
   let tab = $state<"write" | "preview">("write");
+  let uploading = $state(false);
+  let uploadError = $state("");
+
+  async function onImageFile(e: Event) {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file || !session.signer) return;
+    uploading = true;
+    uploadError = "";
+    try {
+      await connectNdk();
+      image = await uploadPublicImage(session.signer, file);
+    } catch (err) {
+      uploadError = err instanceof Error ? err.message : String(err);
+    } finally {
+      uploading = false;
+    }
+  }
 
   const bytes = $derived(utf8ByteLength(content));
   const overCap = $derived(
@@ -54,7 +75,19 @@
 <div class="stack">
   <input placeholder={t("post.editor.titlePlaceholder")} bind:value={title} />
   <input placeholder={t("post.editor.summaryPlaceholder")} bind:value={summary} />
-  <input placeholder={t("post.editor.imagePlaceholder")} bind:value={image} />
+
+  <div class="image-field">
+    <input placeholder={t("post.editor.imagePlaceholder")} bind:value={image} />
+    <label class="btn inline upload">
+      <Icon name="plus" size={15} />
+      {uploading ? t("post.editor.uploading") : t("post.editor.upload")}
+      <input type="file" accept="image/*" onchange={onImageFile} disabled={uploading} hidden />
+    </label>
+  </div>
+  {#if image}
+    <img class="image-preview" src={image} alt={t("post.editor.imagePreview")} />
+  {/if}
+  {#if uploadError}<p class="over" style="margin:0">{uploadError}</p>{/if}
 
   <fieldset class="visibility" disabled={editing || !canMembers}>
     <legend class="field-label">{t("post.editor.visibility")}</legend>
@@ -203,6 +236,30 @@
   }
   .over {
     color: var(--danger);
+  }
+  .image-field {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .image-field > input {
+    flex: 1;
+    min-width: 0;
+  }
+  .upload {
+    width: auto;
+    flex: none;
+    white-space: nowrap;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  .image-preview {
+    max-width: 100%;
+    max-height: 160px;
+    border-radius: var(--radius-sm, 8px);
+    object-fit: cover;
   }
   .preview :global(p) {
     margin: 0.5rem 0;

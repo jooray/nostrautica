@@ -11,7 +11,6 @@
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import {
-    cropScaleImage,
     defaultEventBanner,
     defaultEventIcon,
     uploadPublicImage,
@@ -21,6 +20,7 @@
   import BackupCard from "$lib/components/BackupCard.svelte";
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
+  import ImageCropper from "$lib/components/ImageCropper.svelte";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -61,24 +61,32 @@
   const previewIcon = $derived(iconUrl.trim() || defaultEventIcon(title, title));
   const previewBanner = $derived(bannerUrl.trim() || defaultEventBanner(title));
 
-  async function onImageFile(e: Event, which: "icon" | "banner") {
-    const file = (e.target as HTMLInputElement).files?.[0];
+  // The chosen file opens the crop/zoom picker; upload happens on confirm.
+  let cropFile = $state<File | null>(null);
+  let cropWhich = $state<"icon" | "banner">("icon");
+
+  function onImageFile(e: Event, which: "icon" | "banner") {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = ""; // allow re-picking the same file after a cancel
     if (!file) return;
     if (!session.signer) {
       error = t("create.error.loginToUpload");
       return;
     }
+    cropWhich = which;
+    cropFile = file;
+  }
+
+  async function onCropConfirm(blob: Blob) {
+    const which = cropWhich;
+    cropFile = null;
+    if (!session.signer) return;
     uploading = which;
     error = null;
     try {
       await connectNdk();
-      // Crop/scale to the exact aspect the pages render (banner 5:2, icon 1:1)
-      // so the preview below is what attendees will actually see.
-      const cropped =
-        which === "icon"
-          ? await cropScaleImage(file, 512, 512)
-          : await cropScaleImage(file, 1500, 600);
-      const url = await uploadPublicImage(session.signer, cropped);
+      const url = await uploadPublicImage(session.signer, blob);
       if (which === "icon") iconUrl = url;
       else bannerUrl = url;
     } catch (err) {
@@ -407,6 +415,16 @@
       {busy ? t("create.creating") : t("create.submit")}
     </button>
   </div>
+{/if}
+
+{#if cropFile}
+  <ImageCropper
+    file={cropFile}
+    aspect={cropWhich === "icon" ? 1 : 2.5}
+    outWidth={cropWhich === "icon" ? 512 : 1500}
+    onConfirm={onCropConfirm}
+    onCancel={() => (cropFile = null)}
+  />
 {/if}
 
 <style>

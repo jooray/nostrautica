@@ -156,6 +156,24 @@ function newestFirst(posts: EventPost[]): EventPost[] {
  * across both kinds, newest first. Members-only posts decrypt when the reader
  * holds the named ECK version; otherwise they come back locked.
  */
+// Session-lifetime post cache per coordinate, so the Updates/Posts page and the
+// event home paint instantly on revisit while a background refetch updates them
+// (user feedback 2026-07-17: "I'm in the event, why must I wait every time").
+const postCache = new Map<string, { event?: EventPost[]; attendees?: EventPost[] }>();
+
+/** Cached official/attendee posts for a coordinate (no network), or undefined. */
+export function cachedEventPosts(coordinate: string): EventPost[] | undefined {
+  return postCache.get(coordinate)?.event;
+}
+export function cachedAttendeePosts(coordinate: string): EventPost[] | undefined {
+  return postCache.get(coordinate)?.attendees;
+}
+function cachePosts(coordinate: string, key: "event" | "attendees", posts: EventPost[]): void {
+  const entry = postCache.get(coordinate) ?? {};
+  entry[key] = posts;
+  postCache.set(coordinate, entry);
+}
+
 export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey } = parseCoordinate(ctx.coordinate);
   // Discovery for 31607 is {kinds, authors:[E_id]} — no `a` tag (spec §7.4).
@@ -165,11 +183,13 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   );
   const keys = await loadEventKeys(ctx.coordinate);
   const eck = keys?.eck ?? [];
-  return newestFirst(
+  const posts = newestFirst(
     dedupePostsByD(events as unknown as RawPostEvent[]).map((e) =>
       toEventPost(e, eck, "event"),
     ),
   );
+  cachePosts(ctx.coordinate, "event", posts);
+  return posts;
 }
 
 /**
@@ -189,7 +209,9 @@ export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]
   const raw = (events as unknown as RawPostEvent[]).filter(
     (e) => e.pubkey !== eid && (!members || members.has(e.pubkey)),
   );
-  return newestFirst(dedupePostsByD(raw).map((e) => toEventPost(e, [], "attendees")));
+  const posts = newestFirst(dedupePostsByD(raw).map((e) => toEventPost(e, [], "attendees")));
+  cachePosts(ctx.coordinate, "attendees", posts);
+  return posts;
 }
 
 /**

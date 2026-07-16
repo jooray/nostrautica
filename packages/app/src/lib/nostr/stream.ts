@@ -83,15 +83,12 @@ export function streamEvents(
   };
 
   try {
-    sub = getNdk().subscribe(
-      filters as unknown as NDKFilter | NDKFilter[],
-      {
-        closeOnEose: false,
-        groupable: false,
-        ...(relayOnly ? { cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY } : {}),
-      },
-      relaySet(relays),
-    );
+    sub = getNdk().subscribe(filters as unknown as NDKFilter | NDKFilter[], {
+      closeOnEose: false,
+      groupable: false,
+      relaySet: relaySet(relays),
+      ...(relayOnly ? { cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY } : {}),
+    });
     sub.on("event", (e: NDKEvent) => {
       if (stopped) return;
       const raw = e.rawEvent() as unknown as MinimalEvent;

@@ -6,11 +6,11 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk, fetchEvents } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchDirectoryEntry } from "$lib/events/attendee.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { fetchDirectoryEntry, cachedDirectoryEntry } from "$lib/events/attendee.js";
   import { followUser, fetchFollowTags } from "$lib/events/nostr-actions.js";
   import { isFollowing } from "$lib/events/onboarding.js";
-  import { fetchFollowersOf, fetchRecentPosts, type RecentPost } from "$lib/events/social.js";
+  import { fetchFollowersOf, fetchRecentPosts, cachedProfiles, type RecentPost } from "$lib/events/social.js";
   import { loadPerEventSettings, toggleSetting, setNote } from "$lib/events/settings.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
@@ -45,24 +45,52 @@
       const decoded = decode(npub);
       if (decoded.type !== "npub") throw new Error(t("attendee.error.badNpub"));
       pubkey = decoded.data;
+
+      // Cache-first paint: if People/Matches already fetched this person, show
+      // them instantly (name, picture, bio, skills) and refresh in the
+      // background — never a blank page while everything re-fetches.
+      const cached = cachedEventContext(naddr);
+      ctx = cached ?? null;
+      const cachedMeta = cachedProfiles([pubkey]).get(pubkey);
+      if (cachedMeta) kind0 = { name: cachedMeta.name, picture: cachedMeta.picture, about: cachedMeta.about };
+      if (cached) entry = cachedDirectoryEntry(cached.coordinate, pubkey) ?? null;
+      if (kind0 || entry) loading = false;
+
       await connectNdk();
-      ctx = await loadEventContext(naddr);
-      const [profileEvents, dirEntry, recent] = await Promise.all([
-        fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }),
-        fetchDirectoryEntry(ctx, pubkey),
-        fetchRecentPosts(pubkey, 20),
-      ]);
-      const latest = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-      if (latest) {
-        try {
-          kind0 = JSON.parse(latest.content);
-        } catch {
-          kind0 = null;
-        }
-      }
-      entry = dirEntry ?? null;
-      posts = recent;
-      loading = false;
+      if (!ctx) ctx = await loadEventContext(naddr);
+      const eventCtx = ctx;
+
+      // Three independent fetches — each updates its own slice, none blocks the
+      // others or the page. The directory entry comes from the in-memory cache
+      // when possible (no whole-directory re-pull just to show one person).
+      void fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] })
+        .then((events) => {
+          const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+          if (latest) {
+            try {
+              kind0 = JSON.parse(latest.content);
+            } catch {
+              /* keep cached */
+            }
+          }
+          loading = false;
+        })
+        .catch(() => (loading = false));
+
+      const cachedEntry = cachedDirectoryEntry(eventCtx.coordinate, pubkey);
+      if (cachedEntry) entry = cachedEntry;
+      else
+        void fetchDirectoryEntry(eventCtx, pubkey)
+          .then((e) => {
+            if (e) entry = e;
+            loading = false;
+          })
+          .catch(() => {});
+
+      void fetchRecentPosts(pubkey, 20)
+        .then((recent) => (posts = recent))
+        .catch(() => {});
+
       if (session.signer) {
         void mutes.load(session.signer);
         const me = await session.signer.getPublicKey();
@@ -70,13 +98,13 @@
         followKnown = true;
         followsYou = (await fetchFollowersOf(me, [pubkey])).has(pubkey);
         blindingKey = await deriveBlindingKey(session.signer);
-        settings = await loadPerEventSettings(session.signer, ctx, blindingKey);
+        settings = await loadPerEventSettings(session.signer, eventCtx, blindingKey);
         noteDraft = settings.notes[pubkey] ?? "";
       } else {
         followKnown = true;
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (!kind0 && !entry) error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
       followKnown = true;

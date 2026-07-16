@@ -6,12 +6,15 @@
 export type Token =
   | { type: "text"; value: string }
   | { type: "image"; url: string }
+  | { type: "video"; url: string }
   | { type: "link"; url: string }
-  | { type: "mention"; bech32: string };
+  | { type: "mention"; bech32: string } // a person: npub / nprofile
+  | { type: "embed"; bech32: string }; // a quoted note/event: note / nevent / naddr
 
 const URL_RE = /(https?:\/\/[^\s]+)/gi;
 const NOSTR_RE = /nostr:((?:npub|nprofile|note|nevent|naddr)1[0-9a-z]+)/gi;
 const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|avif|bmp)(\?[^\s]*)?$/i;
+const VIDEO_EXT_RE = /\.(mp4|webm|mov|m4v|ogv)(\?[^\s]*)?$/i;
 
 /**
  * Tokenize note content. `imetaUrls` (from imeta tags) are treated as images even
@@ -30,9 +33,17 @@ export function parsePostContent(content: string, imetaUrls: string[] = []): Tok
     }
     const match = m[0];
     if (match.startsWith("nostr:")) {
-      tokens.push({ type: "mention", bech32: match.slice("nostr:".length) });
+      const bech32 = match.slice("nostr:".length);
+      // Profiles are inline @-mentions; notes/events become quoted-note embeds.
+      if (bech32.startsWith("npub") || bech32.startsWith("nprofile")) {
+        tokens.push({ type: "mention", bech32 });
+      } else {
+        tokens.push({ type: "embed", bech32 });
+      }
     } else if (imeta.has(match) || IMAGE_EXT_RE.test(match)) {
       tokens.push({ type: "image", url: match });
+    } else if (VIDEO_EXT_RE.test(match)) {
+      tokens.push({ type: "video", url: match });
     } else {
       tokens.push({ type: "link", url: match });
     }
