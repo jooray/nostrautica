@@ -75,7 +75,20 @@ export class NostrClient {
 
   /** Publish a signed event to the given relays; resolves when any accepts. */
   async publish(event: NostrEvent, relays: string[] = this.defaultRelays): Promise<void> {
-    await Promise.any(this.pool.publish(relays, event));
+    await Promise.any(
+      this.pool.publish(relays, event).map((p) =>
+        p.catch((err) => {
+          // OK=false with "duplicate"/"replaced" means the relay already holds
+          // this event (or a newer version of the addressable coordinate) — the
+          // data is durably there, which is what publish promises. Burst
+          // republishes of 31605 lists otherwise fail every retry against
+          // strfry's "replaced: have newer event".
+          const reason = String((err as Error)?.message ?? err);
+          if (/\b(duplicate|replaced)\b/i.test(reason)) return "already-stored";
+          throw err;
+        }),
+      ),
+    );
   }
 
   close(): void {

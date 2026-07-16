@@ -53,6 +53,9 @@ on, invite-code auto-approval via the coordinator.
 
 ## Bugs found
 
+> **Status update (same day):** B1 and B2 are **fixed and verified** — see
+> "Fixes" at the end of this report. B3 remains open (minor).
+
 ### B1 (P1) — match *reasoning* sometimes describes the wrong person / wrong perspective
 
 Roughly **2 of 8 cards per viewer** show reasoning that (a) calls the matched
@@ -116,3 +119,32 @@ This had silently broken the docker path of the e2e suite; the walking-skeleton
 spec passes again. Pre-existing e2e baseline (unchanged by 0.2.0): video/audio
 intro specs need the HTTPS Blossom proxy; join-approve-directory,
 members-only-posts and talks=on fail identically on `main`.
+
+## Fixes (same day)
+
+**B1 — root cause was deeper than prompt wording: the LLM never saw anyone's
+name.** `profileText` sent only summary/skills/interests/offers/seeks, so the
+model *could not* name people and borrowed "Elena" from the prompt's host-voice
+example; without name anchors, the "you" binding also drifted in the reverse
+batch. Fix (coordinator):
+- The join request's display name is now persisted (`attendees.display_name`,
+  migrated in place) and threaded into both scoring calls — every profile block
+  gains a `Name:` line (`scoreBatch` target+candidates, `scoreReverseBatch`
+  shared+targets). Nameless pre-migration rows degrade gracefully (no line).
+- Both prompts gained an additive bullet (BP3's benchmarked wording untouched)
+  pinning the bindings: the target is always "you"; the other person is called
+  by the `Name:` in their profile; example names are never attendees'.
+
+Verified by a full `recompute` on the test event (names backfilled from
+kind-0s): all inspected lists (Sofia, Tomás, Marek) now use correct names and
+correct perspective — e.g. Sofia's Marek card reads *"Marek is a Rust developer
+building Nostr and Cashu relay software — he's exactly the technical cofounder
+you're seeking"*. Screenshots in `docs/images/participant/11-matches-*` are
+from the fixed run. Unit tests: `scoring.test.ts` "name-aware reasoning (B1)".
+
+**B2 — fixed**: `NostrClient.publish` now treats an OK=false whose reason
+matches `duplicate`/`replaced` as success (the relay durably holds the event or
+a newer version of the addressable coordinate). The same recompute burst that
+previously logged 81 `publish_matches failed` retries logged **zero**.
+
+**B3 — open** (admin attach-confirmation robustness; minor).

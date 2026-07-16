@@ -72,6 +72,9 @@ export interface AttendeeRow {
   // JSON. Authoritative until the attendee changes it, and re-applied at publish
   // time on top of a freshly generated ai_profile — so it SURVIVES reprocessing.
   correction_json: string | null;
+  // Display name from the join request (B1): match reasoning must be able to
+  // call people by their actual names — profiles alone carry no name.
+  display_name: string | null;
   updated_at: number;
 }
 
@@ -148,6 +151,7 @@ CREATE TABLE IF NOT EXISTS attendees (
   ai_source_revision TEXT,
   transcripts_json TEXT,
   correction_json TEXT,
+  display_name TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -352,7 +356,8 @@ export class Store {
     // Migration (Q10): revision-tracking columns on older attendee rows.
     // Migration (F1): transcripts_json on attendees; lang on transcripts.
     // Migration (F3): correction_json on attendees (ai_profile correction/hide).
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT"]) {
+    // Migration (B1 2026-07-16): display_name — match reasoning needs real names.
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT"]) {
       try {
         this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
       } catch {
@@ -490,13 +495,14 @@ export class Store {
     aiSourceRevision?: string | null;
     transcriptsJson?: string | null;
     correctionJson?: string | null;
+    displayName?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
@@ -507,6 +513,7 @@ export class Store {
            ai_source_revision = COALESCE(:aiSourceRevision, attendees.ai_source_revision),
            transcripts_json = COALESCE(:transcriptsJson, attendees.transcripts_json),
            correction_json = COALESCE(:correctionJson, attendees.correction_json),
+           display_name = COALESCE(:displayName, attendees.display_name),
            updated_at = :now`,
       )
       .run({
@@ -521,6 +528,7 @@ export class Store {
         aiSourceRevision: row.aiSourceRevision ?? null,
         transcriptsJson: row.transcriptsJson ?? null,
         correctionJson: row.correctionJson ?? null,
+        displayName: row.displayName ?? null,
         now: row.now,
       });
   }

@@ -597,7 +597,7 @@ export class Coordinator {
     state: EventState,
     attendeePubkey: string,
     tags: string[][],
-    _name: string,
+    name: string,
   ): Promise<void> {
     // Already approved (re-delivered join): nothing to do.
     const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
@@ -620,6 +620,8 @@ export class Coordinator {
       coordinate: state.coordinate,
       pubkey: attendeePubkey,
       status: decision.grant ? "approved" : "pending",
+      // B1: keep the display name — match reasoning addresses people by name.
+      displayName: name.trim() || null,
       now: this.now(),
     });
 
@@ -1003,7 +1005,7 @@ export class Coordinator {
     for (const p of todo) {
       const profile = this.loadAiProfile(coordinate, p.b);
       if (!profile) continue;
-      candidates.push({ id: p.b, profile });
+      candidates.push({ id: p.b, profile, name: this.loadDisplayName(coordinate, p.b) });
       pairById.set(p.b, p);
     }
     if (candidates.length === 0) return { scored: [], missing: 0 };
@@ -1015,6 +1017,7 @@ export class Coordinator {
       targetProfile,
       candidates,
       this.matchRng,
+      this.loadDisplayName(coordinate, target),
     );
     const scored: CandidatePair[] = [];
     for (const [candId, ds] of scores) {
@@ -1058,7 +1061,7 @@ export class Coordinator {
     for (const p of todo) {
       const profile = this.loadAiProfile(coordinate, p.a);
       if (!profile) continue;
-      targets.push({ id: p.a, profile });
+      targets.push({ id: p.a, profile, name: this.loadDisplayName(coordinate, p.a) });
       pairByTarget.set(p.a, p);
     }
     if (targets.length === 0) return { scored: [], missing: 0 };
@@ -1070,6 +1073,7 @@ export class Coordinator {
       sharedProfile,
       targets,
       this.matchRng,
+      this.loadDisplayName(coordinate, shared),
     );
     const scored: CandidatePair[] = [];
     for (const [targetId, ds] of scores) {
@@ -1089,6 +1093,11 @@ export class Coordinator {
   private loadAiProfile(coordinate: string, pubkey: string) {
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     return attendee?.ai_profile_json ? JSON.parse(attendee.ai_profile_json) : undefined;
+  }
+
+  /** Display name from the join request (B1), for name-aware match reasoning. */
+  private loadDisplayName(coordinate: string, pubkey: string): string | undefined {
+    return this.deps.store.getAttendee(coordinate, pubkey)?.display_name ?? undefined;
   }
 
   private async publishMatchesJob(coordinate: string, pubkey: string): Promise<void> {

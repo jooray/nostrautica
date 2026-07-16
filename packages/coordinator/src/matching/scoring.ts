@@ -59,8 +59,11 @@ export function pairInputsHash(hashA: string, hashB: string): string {
   return sha256Hex(utf8ToBytes(`${x}|${y}`));
 }
 
-function profileText(p: AiProfile): string {
+function profileText(p: AiProfile, name?: string): string {
   return [
+    // B1: without a Name line the model cannot address anyone correctly and
+    // falls back to inventing one (it copied "Elena" from the prompt example).
+    ...(name ? [`Name: ${name}`] : []),
     `Summary: ${p.summary}`,
     `Skills: ${p.skills.join(", ")}`,
     `Interests: ${p.interests.join(", ")}`,
@@ -146,6 +149,8 @@ export const BATCH_SYSTEM_PROMPT = [
   "reasoning_for_target — THIS TEXT IS SHOWN DIRECTLY TO THE TARGET ATTENDEE. Write 1-2 sentences in",
   "the voice of a good host introducing them to the candidate:",
   ' • Second person, direct: "You should grab Elena — ...", "Ask him about ...".',
+  " • The TARGET is always \"you\". Call the candidate by the Name given in THEIR profile — never a",
+  '   name from these instructions or examples ("Elena"/"Sunny" are example names, not attendees).',
   " • Name a CONCRETE thing to talk about or do together, drawn from both people's actual details.",
   ' • ABSOLUTELY NO analytical framing: never say "this pair", "based on their profiles", "high',
   '   complementarity", "scores", "match", or explain why a rating was given. No hedging boilerplate.',
@@ -197,6 +202,8 @@ interface RawBatchMatch {
 export interface BatchCandidate {
   id: string;
   profile: AiProfile;
+  /** Display name (B1) so reasoning can call the person by their actual name. */
+  name?: string;
 }
 
 export interface BatchScoreResult {
@@ -232,6 +239,7 @@ export async function scoreBatch(
   target: AiProfile,
   candidates: readonly BatchCandidate[],
   rng: () => number = Math.random,
+  targetName?: string,
 ): Promise<BatchScoreResult> {
   const scores = new Map<string, DirectedScore>();
   if (candidates.length === 0) return { scores, missing: [] };
@@ -248,10 +256,10 @@ export async function scoreBatch(
     ...eventBlock,
     "",
     "TARGET ATTENDEE:",
-    profileText(target),
+    profileText(target, targetName),
     "",
     "CANDIDATES:",
-    ...ordered.map((c, i) => [`--- CANDIDATE ${i + 1} ---`, profileText(c.profile)].join("\n")),
+    ...ordered.map((c, i) => [`--- CANDIDATE ${i + 1} ---`, profileText(c.profile, c.name)].join("\n")),
   ].join("\n");
 
   const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
@@ -323,6 +331,9 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
   "reasoning_for_target — THIS TEXT IS SHOWN DIRECTLY TO THE TARGET ATTENDEE. Write 1-2 sentences in",
   "the voice of a good host introducing them to the shared person:",
   ' • Second person, direct: "You should grab Elena — ...", "Ask him about ...".',
+  " • Each TARGET is always \"you\" in their own entry — describe the SHARED person to them, never the",
+  "   other way around. Call the shared person by the Name given in THEIR profile — never a name from",
+  '   these instructions or examples ("Elena" is an example name, not an attendee).',
   " • Name a CONCRETE thing to talk about or do together, drawn from both people's actual details.",
   ' • ABSOLUTELY NO analytical framing: never say "this pair", "based on their profiles", "high',
   '   complementarity", "scores", "match", or explain why a rating was given. No hedging boilerplate.',
@@ -342,6 +353,7 @@ export async function scoreReverseBatch(
   shared: AiProfile,
   targets: readonly BatchCandidate[],
   rng: () => number = Math.random,
+  sharedName?: string,
 ): Promise<BatchScoreResult> {
   const scores = new Map<string, DirectedScore>();
   if (targets.length === 0) return { scores, missing: [] };
@@ -357,10 +369,10 @@ export async function scoreReverseBatch(
     ...eventBlock,
     "",
     "SHARED PERSON (the one each target below would meet):",
-    profileText(shared),
+    profileText(shared, sharedName),
     "",
     "TARGET ATTENDEES:",
-    ...ordered.map((c, i) => [`--- TARGET ${i + 1} ---`, profileText(c.profile)].join("\n")),
+    ...ordered.map((c, i) => [`--- TARGET ${i + 1} ---`, profileText(c.profile, c.name)].join("\n")),
   ].join("\n");
 
   const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({

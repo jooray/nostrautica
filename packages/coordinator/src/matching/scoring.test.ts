@@ -234,3 +234,47 @@ describe("reverse batched scoring (spec §16.2 reverse variant)", () => {
     expect(llm.completeCalls).toBe(0);
   });
 });
+
+describe("name-aware reasoning (B1, TEST-REPORT-2026-07-16-MATCHING)", () => {
+  it("forward batch carries Name: lines for the target and named candidates", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    const cands = [{ id: "c1", profile: profile("c1"), name: "Priya Chandrasekaran" }];
+    await scoreBatch(llm, "m", EVENT, profile("t"), cands, Math.random, "Marek Dvořák");
+    expect(seen!.user).toContain("TARGET ATTENDEE:\nName: Marek Dvořák");
+    expect(seen!.user).toContain("--- CANDIDATE 1 ---\nName: Priya Chandrasekaran");
+  });
+
+  it("reverse batch carries Name: lines for the shared person and targets", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    const targets = [{ id: "t1", profile: profile("t1"), name: "Tomás Herrera" }];
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), targets, Math.random, "Sofia Lindqvist");
+    expect(seen!.user).toContain("SHARED PERSON (the one each target below would meet):\nName: Sofia Lindqvist");
+    expect(seen!.user).toContain("--- TARGET 1 ---\nName: Tomás Herrera");
+  });
+
+  it("a nameless profile omits the Name line (pre-migration rows degrade gracefully)", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreBatch(llm, "m", EVENT, profile("t"), candidates(1));
+    expect(seen!.user).not.toContain("Name:");
+  });
+
+  it("both prompts forbid reusing example names and pin the 'you' binding", () => {
+    expect(BATCH_SYSTEM_PROMPT).toContain("never a");
+    expect(BATCH_SYSTEM_PROMPT).toContain('example names, not attendees');
+    expect(BATCH_SYSTEM_PROMPT).toContain('The TARGET is always "you"');
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain('Each TARGET is always "you" in their own entry');
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("an example name, not an attendee");
+  });
+});
