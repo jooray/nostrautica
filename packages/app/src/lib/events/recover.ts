@@ -100,24 +100,35 @@ export async function recoverEventKeys(
   );
 
   const restoredCoords: string[] = [];
+  let candidates = 0; // eventkeys backups we saw
+  let decrypted = 0; // …of which we could actually read
   for (const e of events) {
     const d = e.tags.find((t) => t[0] === "d")?.[1];
     if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
+    candidates++;
     let backup: EventKeysBackup;
     try {
       const json = await signer.nip44Decrypt(pubkey, e.content);
       backup = eventKeysBackupSchema.parse(JSON.parse(json));
     } catch {
-      continue; // not our backup / undecryptable / malformed
+      continue; // not our backup / undecryptable / SIGNER NOT READY / malformed
     }
+    decrypted++;
     const coordinate = await resolveCoordinate(backup);
     if (!coordinate) continue;
     await restore(coordinate, backup);
     if (!restoredCoords.includes(coordinate)) restoredCoords.push(coordinate);
   }
 
-  // Marked only after a non-throwing pass, so an offline failure retries later.
-  recovered.add(pubkey);
+  // Latch the once-per-session guard ONLY after a genuine sweep — otherwise a
+  // remote signer (NIP-46/Amber) that wasn't reachable yet, or a relay race that
+  // returned nothing, would permanently disable recovery and strand a real
+  // organizer on "Visitor". A meaningful sweep is: we fetched app-data AND either
+  // there were no eventkeys backups to read, or we successfully decrypted ≥1
+  // (proving the signer can read them). Anything else stays retryable so the next
+  // event-shell sync (a tab nav, or the signer finally answering) tries again.
+  const meaningful = events.length > 0 && (candidates === 0 || decrypted > 0);
+  if (meaningful) recovered.add(pubkey);
   return restoredCoords;
 }
 

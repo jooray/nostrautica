@@ -106,18 +106,27 @@
       remember("nip07");
     });
 
-  const startNostrConnect = () =>
-    run(async () => {
-      const handle = Nip46Signer.startNostrConnect(NIP46_RELAYS);
-      nc = handle;
-      try {
-        const signer = await handle.connected;
-        await session.loginNip46(signer);
-        remember("nip46");
-      } finally {
-        nc = null;
-      }
-    });
+  // NOT routed through run(): the QR is shown passively on mount and waits for a
+  // scan that may never come, so it must NOT hold the global `busy` flag — doing
+  // so would keep the extension + paste buttons disabled the whole time (a user
+  // with Alby couldn't sign in). It manages its own error/success instead.
+  async function startNostrConnect() {
+    error = null;
+    const handle = Nip46Signer.startNostrConnect(NIP46_RELAYS);
+    nc = handle;
+    try {
+      const signer = await handle.connected;
+      await session.loginNip46(signer);
+      remember("nip46");
+      onSignedIn?.();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // A user-initiated Cancel isn't an error — reset quietly.
+      if (msg !== "Cancelled") error = msg;
+    } finally {
+      nc = null;
+    }
+  }
 
   function cancelNostrConnect() {
     nc?.cancel();
