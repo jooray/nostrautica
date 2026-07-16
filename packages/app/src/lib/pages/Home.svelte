@@ -9,6 +9,7 @@
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
+  import { prefetchEventContext } from "$lib/nostr/prefetch.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
@@ -50,6 +51,9 @@
         at: 1, // backfill without bumping to the top
       });
     }
+    // Warm the contexts the user is most likely to tap next; the rest warm on
+    // hover/focus (see the card handlers below).
+    for (const e of recentEvents.list.slice(0, 4)) prefetchEventContext(e.naddr);
   });
 </script>
 
@@ -82,6 +86,8 @@
         class="card row"
         style="text-align:left;cursor:pointer;gap:0.75rem;align-items:center"
         onclick={() => router.go({ name: "event", naddr: e.naddr })}
+        onpointerenter={() => prefetchEventContext(e.naddr)}
+        onfocus={() => prefetchEventContext(e.naddr)}
       >
         <img
           src={e.icon || defaultEventIcon(e.title, e.title)}

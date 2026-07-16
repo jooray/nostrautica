@@ -40,6 +40,7 @@ import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 
 /**
@@ -326,6 +327,75 @@ export async function fetchDirectory(
     }
   }
   return entries;
+}
+
+export interface DirectoryStream {
+  /** Settles at first-EOSE+grace or timeout with everything decrypted so far. */
+  ready: Promise<DirectoryEntryContent[]>;
+  stop: () => void;
+}
+
+/**
+ * Progressive variant of `fetchDirectory`: decrypted entries reach `onEntries`
+ * (full snapshot, latest per blinded d) as relays answer, so the roster renders
+ * without waiting for the slowest relay. Batched on a short timer so a burst of
+ * events doesn't re-sort the UI per event. Signer-free: the ECK comes from the
+ * keystore. Returns undefined when the user isn't approved or the roster is
+ * empty — same cases where `fetchDirectory` returns [].
+ */
+export async function streamDirectory(
+  ctx: EventContext,
+  onEntries: (entries: DirectoryEntryContent[]) => void,
+): Promise<DirectoryStream | undefined> {
+  const eck = await eckBytesFor(ctx.coordinate);
+  if (!eck) return undefined;
+  const roster = await fetchRoster(ctx);
+  if (!roster || roster.attendees.length === 0) return undefined;
+
+  const publisher = directoryPublisher(ctx);
+  const ds = roster.attendees.map((a) => a.d);
+  // The stream already resolves latest-per-d (31603 is addressable), so every
+  // callback event is new or strictly newer for its d.
+  const byD = new Map<string, DirectoryEntryContent>();
+  const snapshot = () => [...byD.values()];
+
+  let flushTimer: ReturnType<typeof setTimeout> | undefined;
+  const flush = () => {
+    flushTimer = undefined;
+    onEntries(snapshot());
+  };
+
+  const handle = streamEvents(
+    { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": ds },
+    {
+      relays: ctx.config.relays,
+      onEvent: (e) => {
+        const d = e.tags.find((tg) => tg[0] === "d")?.[1];
+        if (!d) return;
+        try {
+          byD.set(d, directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
+        } catch {
+          return; /* skip entries we can't decrypt (e.g. published under a newer ECK) */
+        }
+        if (!flushTimer) flushTimer = setTimeout(flush, 60);
+      },
+    },
+  );
+
+  return {
+    ready: handle.ready.then(() => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flush();
+      }
+      return snapshot();
+    }),
+    stop: () => {
+      if (flushTimer) clearTimeout(flushTimer);
+      flushTimer = undefined;
+      handle.stop();
+    },
+  };
 }
 
 /** Fetch + decrypt a single attendee's directory entry by pubkey. */

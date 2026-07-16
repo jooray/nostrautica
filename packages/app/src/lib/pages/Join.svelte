@@ -23,6 +23,12 @@
   import SignInOptions from "$lib/components/SignInOptions.svelte";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { joinSentAt, markJoinSent, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
+  import {
+    prefetchOrganizerProfiles,
+    prefetchJoinLanding,
+    prefetchAttendeesTab,
+    prefetchGrants,
+  } from "$lib/nostr/prefetch.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
@@ -116,12 +122,20 @@
   onMount(async () => {
     try {
       await connectNdk();
+      // The grant scan doesn't need the event context — run both in parallel.
+      const grantsScan = session.signer
+        ? receiveGrants(session.signer).catch(() => {})
+        : Promise.resolve();
       ctx = await loadEventContext(naddr);
+      // While the user reads the form / scans the Amber QR, warm what the next
+      // screens render: organizer profiles here, EventHome after joining.
+      prefetchOrganizerProfiles(ctx);
+      prefetchJoinLanding(ctx);
       // Restore the "request sent" waiting state across reloads (P2): if we
       // recorded a join marker for this event and aren't approved yet, show the
       // waiting screen instead of a pristine form. If approval already landed,
       // the marker is stale — clear it and fall through to the "You're in" state.
-      if (session.signer) await receiveGrants(session.signer).catch(() => {});
+      await grantsScan;
       approved = await isApproved(ctx.coordinate);
       if (approved) {
         clearJoinSent(ctx.coordinate);
@@ -179,6 +193,13 @@
   $effect(() => {
     if (session.loggedIn && !profileLoaded && !profileLoading) void loadExistingProfile();
     if (session.loggedIn && !libraryLoaded) void loadReuseLibrary();
+    // The moment a signer lands (sign-in mid-join), front-run the post-login
+    // step: approval status + the roster the user will open next. Both warmers
+    // self-gate so remote signers (Amber/NIP-07) never get a surprise prompt.
+    if (session.loggedIn && ctx) {
+      prefetchGrants(session.signer);
+      prefetchAttendeesTab(ctx, session.signer);
+    }
   });
 
   async function loadExistingProfile() {

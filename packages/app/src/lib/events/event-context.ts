@@ -42,7 +42,10 @@ export function cachedEventContext(naddr: string): EventContext | undefined {
   return contextCache.get(naddr);
 }
 
-export async function loadEventContext(naddr: string): Promise<EventContext> {
+export async function loadEventContext(
+  naddr: string,
+  opts: { adoptLang?: boolean } = {},
+): Promise<EventContext> {
   let decoded: { coordinate: string; relays: string[] };
   try {
     decoded = naddrToCoordinate(naddr);
@@ -67,8 +70,10 @@ export async function loadEventContext(naddr: string): Promise<EventContext> {
   if (config.relays.length) addRelays(config.relays);
   // The UI follows the event's language for this session unless the user has made
   // an explicit choice in Settings (spec §7.1). Cached-context re-entry is fine —
-  // adoptEventLang is a no-op once an explicit choice exists.
-  i18n.adoptEventLang(config.lang);
+  // adoptEventLang is a no-op once an explicit choice exists. Background
+  // prefetches pass adoptLang:false: warming another event's cache must not
+  // switch the UI language mid-page.
+  if (opts.adoptLang !== false) i18n.adoptEventLang(config.lang);
 
   // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.
   const profileEvent = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];

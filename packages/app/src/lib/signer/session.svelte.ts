@@ -23,6 +23,7 @@ import {
   clearKeystore,
 } from "./keystore.js";
 import { setActiveOwner } from "$lib/events/keystore.js";
+import { clearBlindingCache } from "$lib/events/blinding.js";
 
 class Session {
   signer = $state<AppSigner | null>(null);
@@ -128,6 +129,7 @@ class Session {
     }
     await clearKeystore();
     setActiveOwner(null);
+    clearBlindingCache();
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;

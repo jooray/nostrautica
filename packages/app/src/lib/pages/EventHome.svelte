@@ -16,6 +16,7 @@
     type EventPost,
   } from "$lib/events/posts.js";
   import { fetchEventPage, resolveTarget, type EventPageModel } from "$lib/events/event-page.js";
+  import { prefetchAttendeesTab, prefetchOrganizerRecovery } from "$lib/nostr/prefetch.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { fetchRoster } from "$lib/events/attendee.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
@@ -45,8 +46,12 @@
   onMount(async () => {
     try {
       await connectNdk();
+      // The grant scan doesn't need the event context — run both in parallel.
+      const grantsScan = session.signer
+        ? receiveGrants(session.signer).catch(() => {})
+        : Promise.resolve();
       ctx = await loadEventContext(naddr);
-      if (session.signer) await receiveGrants(session.signer).catch(() => {});
+      await grantsScan;
       approved = await isApproved(ctx.coordinate);
       // The join-sent marker outlives a reload; approval supersedes it (P2).
       if (approved) clearJoinSent(ctx.coordinate);
@@ -66,12 +71,19 @@
       }
       // Readiness journey (§4.1): derived from real state, one primary CTA.
       void readinessStore.load(ctx, session.signer);
-      // Customized layout (spec §7.4 kind 31608) or the default feed. Members
-      // decrypt the members-only additions; visitors get the public parts.
-      page = await fetchEventPage(ctx).catch(() => undefined);
-      // The official feed (30023 ∪ 31607 by E_id) is fetched either way —
-      // it's the default layout and the most common custom section.
-      eventPosts = await fetchEventPosts(ctx).catch(() => []);
+      // Background-warm what the user opens next: the Attendees tab (directory
+      // decrypt is signer-free), and — for a local key with no custody record
+      // yet — the organizer key recovery. Detached: must not delay first paint.
+      if (approved) prefetchAttendeesTab(ctx, session.signer);
+      if (!keys) prefetchOrganizerRecovery(session.signer);
+      // Customized layout (spec §7.4 kind 31608) and the official feed
+      // (30023 ∪ 31607 by E_id) don't depend on each other — fetch in parallel.
+      const [pageRes, postsRes] = await Promise.allSettled([
+        fetchEventPage(ctx),
+        fetchEventPosts(ctx),
+      ]);
+      page = pageRes.status === "fulfilled" ? pageRes.value : undefined;
+      eventPosts = postsRes.status === "fulfilled" ? postsRes.value : [];
       if (page) await loadSectionData(page.sections);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

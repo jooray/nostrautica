@@ -10,6 +10,10 @@ services:
       - "7777:7777"
     volumes:
       - strfry-data:/app/strfry-db
+      # The image's default config binds 127.0.0.1 INSIDE the container, which
+      # makes the mapped port unreachable from the host — this copy only flips
+      # relay.bind to 0.0.0.0.
+      - ./strfry.conf:/app/strfry.conf:ro
 
   blossom:
     # Pinned by immutable digest (audit Q14); resolved from

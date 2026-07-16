@@ -24,14 +24,31 @@ import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 
 const BLINDSEED_D = "nostrautica:blindseed";
 
+// The blinding key is stable per identity, but the remote-signer path costs a
+// relay fetch plus a live NIP-44 decrypt (an Amber/NIP-07 prompt) — memoize per
+// pubkey so one session pays that at most once. Cleared on logout.
+const blindCache = new Map<string, Promise<Uint8Array>>();
+
+export function clearBlindingCache(): void {
+  blindCache.clear();
+}
+
 export async function deriveBlindingKey(signer: AppSigner): Promise<Uint8Array> {
   const sk = signer.getSecretKey?.();
   if (sk) return selfConversationKey(sk);
-  return getOrCreateBlindSeed(signer);
+  const pubkey = await signer.getPublicKey();
+  // Cache the promise (not the value) so concurrent callers share one fetch;
+  // drop it on failure so the next call can retry.
+  let pending = blindCache.get(pubkey);
+  if (!pending) {
+    pending = getOrCreateBlindSeed(signer, pubkey);
+    blindCache.set(pubkey, pending);
+    pending.catch(() => blindCache.delete(pubkey));
+  }
+  return pending;
 }
 
-async function getOrCreateBlindSeed(signer: AppSigner): Promise<Uint8Array> {
-  const pubkey = await signer.getPublicKey();
+async function getOrCreateBlindSeed(signer: AppSigner, pubkey: string): Promise<Uint8Array> {
   const existing = await fetchEvents({
     kinds: [KIND_APP_DATA],
     authors: [pubkey],

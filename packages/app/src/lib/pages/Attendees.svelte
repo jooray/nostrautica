@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { npubEncode } from "nostr-tools/nip19";
   import type { DirectoryEntryContent, PerEventSettings } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchDirectory, fetchMatches } from "$lib/events/attendee.js";
+  import { streamDirectory, fetchMatches, type DirectoryStream } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { loadPerEventSettings } from "$lib/events/settings.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
@@ -45,25 +45,61 @@
   let loading = $state(true);
   let error = $state<unknown>(null);
 
+  let stream: DirectoryStream | undefined;
+  const profiledPubkeys = new Set<string>();
+
+  // Social overlay (follows, per-event settings, match scores) loads in
+  // parallel with the roster stream — none of it blocks the first paint.
+  async function loadSocial(c: EventContext) {
+    if (!session.signer) return;
+    const signer = session.signer;
+    void mutes.load(signer);
+    const jobs: Promise<unknown>[] = [
+      fetchFollowSet(signer)
+        .then((s) => (followSet = s))
+        .catch(() => {}),
+      deriveBlindingKey(signer)
+        .then((bk) => loadPerEventSettings(signer, c, bk))
+        .then((s) => (settings = s))
+        .catch(() => {}),
+    ];
+    if (c.config.coordinator) {
+      jobs.push(
+        fetchMatches(signer, c)
+          .then((list) => {
+            scores = new Map((list?.matches ?? []).map((m) => [m.pubkey, m.score]));
+            if (scores.size > 0) sortBy = "matches";
+          })
+          .catch(() => {}),
+      );
+    }
+    await Promise.all(jobs);
+  }
+
   async function load() {
     loading = true;
     error = null;
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
-      entries = await fetchDirectory(ctx);
-      profiles = await fetchProfiles(entries.map((e) => e.pubkey)).catch(() => new Map());
-      if (session.signer) {
-        void mutes.load(session.signer);
-        followSet = await fetchFollowSet(session.signer).catch(() => new Set<string>());
-        const bk = await deriveBlindingKey(session.signer).catch(() => null);
-        if (bk) settings = await loadPerEventSettings(session.signer, ctx, bk).catch(() => null);
-        if (ctx.config.coordinator) {
-          const list = await fetchMatches(session.signer, ctx).catch(() => undefined);
-          scores = new Map((list?.matches ?? []).map((m) => [m.pubkey, m.score]));
-          if (scores.size > 0) sortBy = "matches";
+      const social = loadSocial(ctx);
+      stream?.stop();
+      // Progressive roster: entries render as each relay answers; profiles are
+      // fetched incrementally for the pubkeys that just appeared.
+      stream = await streamDirectory(ctx, (list) => {
+        entries = list;
+        loading = false;
+        const fresh = list.map((e) => e.pubkey).filter((p) => !profiledPubkeys.has(p));
+        if (fresh.length) {
+          for (const p of fresh) profiledPubkeys.add(p);
+          fetchProfiles(fresh)
+            .then((m) => {
+              if (m.size) profiles = new Map([...profiles, ...m]);
+            })
+            .catch(() => {});
         }
-      }
+      });
+      await Promise.allSettled([social, stream?.ready]);
     } catch (e) {
       error = e;
     } finally {
@@ -72,6 +108,7 @@
   }
 
   onMount(load);
+  onDestroy(() => stream?.stop());
 
   function nameOf(pubkey: string, about?: string): string {
     return profiles.get(pubkey)?.name || about?.slice(0, 40) || pubkey.slice(0, 10) + "…";

@@ -36,15 +36,22 @@
       }
       if (!session.signer) return;
       void mutes.load(session.signer);
-      const [list, directory] = await Promise.all([
-        fetchMatches(session.signer, ctx),
-        fetchDirectory(ctx),
-      ]);
+      // The match list is the page — paint it as soon as it lands. The directory
+      // and kind-0 profiles only enrich names/avatars; they fill in reactively.
+      const directoryFill = fetchDirectory(ctx)
+        .then((directory) => (names = new Map(directory.map((e) => [e.pubkey, e]))))
+        .catch(() => {});
+      const list = await fetchMatches(session.signer, ctx);
       matches = list?.matches ?? [];
-      names = new Map(directory.map((e) => [e.pubkey, e]));
-      profiles = await fetchProfiles(matches.map((m) => m.pubkey)).catch(() => new Map());
+      loading = false;
       // Powers the cause-aware empty state ("record your intro" when that's why).
       void readinessStore.load(ctx, session.signer);
+      await Promise.allSettled([
+        directoryFill,
+        fetchProfiles(matches.map((m) => m.pubkey))
+          .then((m) => (profiles = m))
+          .catch(() => {}),
+      ]);
     } catch (e) {
       error = e;
     } finally {
