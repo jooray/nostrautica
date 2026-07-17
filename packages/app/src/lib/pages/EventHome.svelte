@@ -17,10 +17,16 @@
     cachedAttendeePosts,
     type EventPost,
   } from "$lib/events/posts.js";
-  import { fetchEventPage, resolveTarget, type EventPageModel } from "$lib/events/event-page.js";
-  import { prefetchAttendeesTab, prefetchOrganizerRecovery } from "$lib/nostr/prefetch.js";
+  import { fetchEventPage, cachedEventPage, resolveTarget, type EventPageModel } from "$lib/events/event-page.js";
+  import {
+    prefetchAttendeesTab,
+    prefetchOrganizerRecovery,
+    prefetchEventContent,
+    prefetchAdmin,
+  } from "$lib/nostr/prefetch.js";
   import Icon from "$lib/components/icons/Icon.svelte";
-  import { fetchRoster } from "$lib/events/attendee.js";
+  import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
+  import { perfMark } from "$lib/perf.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
@@ -40,16 +46,24 @@
   // resolving grants/keys must not flash "Visitor" at the organizer.
   let roleResolved = $state(false);
   // Customized layout (31608) or the default feed when none is published.
-  let page = $state<EventPageModel | undefined>(undefined);
+  // Cache-first (§2.4): paint the last-seen custom layout before the network.
+  let page = $state<EventPageModel | undefined>(
+    cachedCtx ? cachedEventPage(cachedCtx.coordinate) : undefined,
+  );
   // Cache-first: returning to the event page paints its feed instantly.
   let eventPosts = $state<EventPost[]>((cachedCtx && cachedEventPosts(cachedCtx.coordinate)) ?? []);
   let attendeePosts = $state<EventPost[]>((cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? []);
   // The body below the header is still fetching — show a skeleton only on a cold
-  // open (no cached posts to paint).
-  let bodyLoading = $state(eventPosts.length === 0);
+  // open (no cached posts/page to paint).
+  let bodyLoading = $state(eventPosts.length === 0 && !page);
   let pinnedPosts = $state<Map<string, EventPost>>(new Map());
-  let rosterCount = $state<number | undefined>(undefined);
+  // Seed the attendees-section count from the cached roster (§2.4) so the widget
+  // paints instantly on revisit rather than after a fresh roster decrypt.
+  let rosterCount = $state<number | undefined>(
+    cachedCtx ? cachedRoster(cachedCtx.coordinate)?.attendees.length : undefined,
+  );
   let installHint = $state(false);
+  if (cachedCtx && (page || eventPosts.length)) perfMark("EventHome", "cache-paint");
 
   const installHintId = "event-page";
 
@@ -61,10 +75,21 @@
         ? receiveGrants(session.signer).catch(() => {})
         : Promise.resolve();
       ctx = await loadEventContext(naddr);
+      perfMark("EventHome", "cache-paint"); // first meaningful data (ctx) is set
       // Whether the ECK was already in the keystore BEFORE this visit's fetches:
       // if not (fresh device), the public-content pass below can't decrypt
       // members-only additions and is re-run once the grant scan lands them.
-      const hadEck = !!currentEck(await loadEventKeys(ctx.coordinate));
+      const preKeys = await loadEventKeys(ctx.coordinate);
+      const hadEck = !!currentEck(preKeys);
+      // Local custody answers the role WITHOUT the network (§2.4): if we already
+      // hold keys, resolve approved/organizer immediately so a reload never
+      // flashes "Visitor" at a member while the grant scan is in flight. The
+      // grant scan below still runs and reconciles (must-not-miss, constraint 1).
+      if (preKeys) {
+        approved = hadEck;
+        organizer = preKeys.role === "organizer";
+        roleResolved = true;
+      }
       // Public content (custom layout 31608 + official feed) needs no keys and
       // no grant scan — start immediately so the page fills while grants resolve.
       const publicLoad = (async () => {
@@ -102,6 +127,12 @@
       // and — for a local key with no custody record yet — the organizer key
       // recovery. Detached: must not delay first paint.
       if (approved) prefetchAttendeesTab(ctx, session.signer);
+      // Joining/opening an event precaches the People tab + posts + talks +
+      // matches + theme (§2.15) so those tabs open instantly.
+      if (approved) prefetchEventContent(ctx, session.signer);
+      // Organizers: precache the whole Admin surface so it opens without the
+      // serial pending→roster→talks→statuses wait (§2.15).
+      if (organizer) prefetchAdmin(ctx, keys ?? undefined);
       void fetchAttendeePosts(ctx).catch(() => {});
       if (!keys) prefetchOrganizerRecovery(session.signer);
       await publicLoad;
@@ -121,6 +152,7 @@
     } finally {
       bodyLoading = false;
       roleResolved = true;
+      perfMark("EventHome", "network-settled");
     }
   });
 

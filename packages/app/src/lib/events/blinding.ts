@@ -21,8 +21,15 @@ import {
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 const BLINDSEED_D = "nostrautica:blindseed";
+// Persist the remote-signer blind seed owner-scoped (CACHING-PLAN §2.9). This is
+// the same secret-at-rest class as the ECK / local-sk already in IndexedDB
+// (SPECIFICATION.md §14) and is wiped on logout by clearOwnerCache. Persisting it
+// saves one Amber/NIP-07 prompt + relay fetch per session for remote-signer users
+// (local-key derivation stays purely computed — never cached).
+const BLINDSEED_CACHE_KEY = "blindseed";
 
 // The blinding key is stable per identity, but the remote-signer path costs a
 // relay fetch plus a live NIP-44 decrypt (an Amber/NIP-07 prompt) — memoize per
@@ -49,6 +56,12 @@ export async function deriveBlindingKey(signer: AppSigner): Promise<Uint8Array> 
 }
 
 async function getOrCreateBlindSeed(signer: AppSigner, pubkey: string): Promise<Uint8Array> {
+  // Cross-session cache hit: no relay fetch, no signer prompt (§2.9).
+  const cached = cacheGet<string>(BLINDSEED_CACHE_KEY, pubkey);
+  if (cached) {
+    const bytes = base64ToBytes(cached.data);
+    if (bytes.length === 32) return bytes;
+  }
   const existing = await fetchEvents({
     kinds: [KIND_APP_DATA],
     authors: [pubkey],
@@ -57,11 +70,15 @@ async function getOrCreateBlindSeed(signer: AppSigner, pubkey: string): Promise<
   if (existing[0]) {
     const b64 = await signer.nip44Decrypt(pubkey, existing[0].content);
     const bytes = base64ToBytes(b64);
-    if (bytes.length === 32) return bytes;
+    if (bytes.length === 32) {
+      cacheSet(BLINDSEED_CACHE_KEY, b64, existing[0].created_at ?? 0, pubkey);
+      return bytes;
+    }
   }
 
   const seed = crypto.getRandomValues(new Uint8Array(32));
-  const content = await signer.nip44Encrypt(pubkey, bytesToBase64(seed));
+  const seedB64 = bytesToBase64(seed);
+  const content = await signer.nip44Encrypt(pubkey, seedB64);
   const event = await signer.signEvent({
     kind: KIND_APP_DATA,
     created_at: Math.floor(Date.now() / 1000),
@@ -69,5 +86,6 @@ async function getOrCreateBlindSeed(signer: AppSigner, pubkey: string): Promise<
     content,
   });
   await publishOrQueue(event);
+  cacheSet(BLINDSEED_CACHE_KEY, seedB64, event.created_at, pubkey);
   return seed;
 }

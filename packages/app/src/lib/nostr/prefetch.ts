@@ -14,7 +14,7 @@ import {
   cachedEventContext,
   type EventContext,
 } from "$lib/events/event-context.js";
-import { fetchProfiles } from "$lib/events/social.js";
+import { fetchProfiles, fetchFollowSet } from "$lib/events/social.js";
 import {
   fetchDirectory,
   fetchMatches,
@@ -22,8 +22,17 @@ import {
   receiveGrants,
 } from "$lib/events/attendee.js";
 import { fetchEventPage } from "$lib/events/event-page.js";
-import { fetchEventPosts } from "$lib/events/posts.js";
+import { fetchEventPosts, fetchAttendeePosts } from "$lib/events/posts.js";
+import { fetchTalks } from "$lib/events/talks.js";
+import { fetchEventTheme } from "$lib/events/theme.js";
 import { recoverEventKeys } from "$lib/events/recover.js";
+import { fetchDms, fetchDmRelays } from "$lib/events/dm.js";
+import { deriveBlindingKey } from "$lib/events/blinding.js";
+import { mutes } from "$lib/stores/mutes.svelte.js";
+import { fetchPending, fetchCoordinatorLastSeen } from "$lib/events/organizer.js";
+import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
+import { fetchPendingTalks } from "$lib/events/talks.js";
+import type { EventKeys } from "$lib/events/keystore.js";
 
 // A repeated trigger (hover, re-render, remount) within the TTL is a no-op; an
 // in-flight warm is never duplicated.
@@ -103,4 +112,74 @@ export function prefetchGrants(signer: AppSigner | null): void {
 export function prefetchOrganizerRecovery(signer: AppSigner | null): void {
   if (!isSilentSigner(signer)) return;
   warm("recovery", () => recoverEventKeys(signer));
+}
+
+/**
+ * Identity-scoped warmers (CACHING-PLAN §2.15), run on login/session-restore:
+ * grants, organizer recovery, own kind-0, follow set, DM relay list (all
+ * prompt-free), plus mutes, blind seed (local derivation), and one DM inbox scan
+ * — the last three only for a silent signer so no remote-signer prompt fires
+ * (HARD CONSTRAINT 2).
+ */
+export function prefetchIdentity(signer: AppSigner | null): void {
+  if (!signer) return;
+  prefetchGrants(signer);
+  prefetchOrganizerRecovery(signer);
+  warm("self-kind0", async () => {
+    await fetchProfiles([await signer.getPublicKey()], { force: true });
+  });
+  warm("followset", () => fetchFollowSet(signer)); // kind-3, no decrypt
+  warm("dmrelays", async () => {
+    await fetchDmRelays(await signer.getPublicKey()); // kind-10050, no decrypt
+  });
+  if (isSilentSigner(signer)) {
+    warm("mutes", () => mutes.load(signer)); // nip44-decrypts private items
+    warm("blindseed", () => deriveBlindingKey(signer)); // remote path fetches+decrypts
+    warm("dmscan", () => fetchDms(signer)); // signerUnwrap per wrap
+  }
+}
+
+/**
+ * Content warmers for a coordinate (§2.15), run when a member opens/joins an
+ * event: directory + profiles + posts + attendee posts + event page + talks +
+ * theme (all keystore-ECK or public — no signer prompt); matches only for a
+ * silent signer. "Joining an event precaches the People tab."
+ */
+export function prefetchEventContent(ctx: EventContext, signer: AppSigner | null): void {
+  warm(`content:${ctx.coordinate}`, () =>
+    Promise.allSettled([
+      fetchEventPage(ctx),
+      fetchEventPosts(ctx),
+      fetchAttendeePosts(ctx),
+      (async () => {
+        const entries = await fetchDirectory(ctx);
+        if (entries.length) await fetchProfiles(entries.map((e) => e.pubkey));
+      })(),
+      ctx.config.talks !== "off" ? fetchTalks(ctx) : Promise.resolve(),
+      fetchEventTheme(ctx),
+    ]),
+  );
+  if (ctx.config.coordinator && isSilentSigner(signer)) {
+    warm(`matches:${ctx.coordinate}`, () => fetchMatches(signer, ctx));
+  }
+}
+
+/**
+ * Admin warmers for organizers (§2.15): pending queue, roster, coordinator
+ * statuses + liveness, pending talks. All raw-key (E_id / E_inbox) unwraps the
+ * organizer already holds — no remote-signer prompt. Admin then opens instantly.
+ */
+export function prefetchAdmin(ctx: EventContext, keys: EventKeys | undefined): void {
+  if (!keys) return;
+  warm(`admin:${ctx.coordinate}`, () =>
+    Promise.allSettled([
+      fetchPending(ctx, keys),
+      fetchRoster(ctx),
+      keys.eidNsecHex
+        ? fetchCoordinatorStatuses(ctx, keys.eidNsecHex)
+        : Promise.resolve([]),
+      fetchCoordinatorLastSeen(ctx),
+      ctx.config.talks !== "off" ? fetchPendingTalks(ctx, keys) : Promise.resolve([]),
+    ]),
+  );
 }

@@ -9,6 +9,7 @@
  * leaving the app.
  */
 import { parseHash, buildHash, type Route } from "./routes.js";
+import { markRouteChange } from "$lib/perf.js";
 
 /** The sensible parent screen for a route when there's no back-history. */
 function parentOf(route: Route): Route | null {
@@ -59,6 +60,9 @@ class Router {
       this.stack.push(this.route);
       if (this.stack.length > 50) this.stack.shift();
     }
+    // Perf baseline (§1.3): page cache-paint/network-settled deltas measure from
+    // here. Cheap and UI-free.
+    markRouteChange();
     this.route = next;
   }
 

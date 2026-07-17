@@ -31,6 +31,7 @@ import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import { fetchRoster } from "./attendee.js";
 import type { EventContext } from "./event-context.js";
+import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
 
 export type PostSource = "event" | "attendees";
 export type PostVisibility = "public" | "members";
@@ -156,22 +157,34 @@ function newestFirst(posts: EventPost[]): EventPost[] {
  * across both kinds, newest first. Members-only posts decrypt when the reader
  * holds the named ECK version; otherwise they come back locked.
  */
-// Session-lifetime post cache per coordinate, so the Updates/Posts page and the
-// event home paint instantly on revisit while a background refetch updates them
-// (user feedback 2026-07-17: "I'm in the event, why must I wait every time").
-const postCache = new Map<string, { event?: EventPost[]; attendees?: EventPost[] }>();
+// Persistent post cache per coordinate (CACHING-PLAN §2.4): the Updates/Posts
+// page and event home paint instantly on revisit — now ACROSS RELOADS — while a
+// background refetch updates them. A 31607 members post carries decrypted
+// content, so we owner-scope whenever logged in (wiped on logout) and fall back
+// to anon for logged-out visitors (public 30023 only). `at` = newest post's edit
+// time, so latest-wins never regresses a feed to an older snapshot.
+function postsKey(coordinate: string, slot: "event" | "attendees"): string {
+  return `posts:${coordinate}:${slot}`;
+}
+function postsScope(): string {
+  return activeCacheOwner() ?? ANON;
+}
+function newestEditedAt(posts: EventPost[]): number {
+  return posts.reduce((m, p) => Math.max(m, p.editedAt), 0);
+}
 
 /** Cached official/attendee posts for a coordinate (no network), or undefined. */
 export function cachedEventPosts(coordinate: string): EventPost[] | undefined {
-  return postCache.get(coordinate)?.event;
+  return cacheGet<EventPost[]>(postsKey(coordinate, "event"), postsScope())?.data;
 }
 export function cachedAttendeePosts(coordinate: string): EventPost[] | undefined {
-  return postCache.get(coordinate)?.attendees;
+  return cacheGet<EventPost[]>(postsKey(coordinate, "attendees"), postsScope())?.data;
 }
+// Bound the persisted feed at 300/coordinate (§3.5); posts are newest-first.
+const MAX_CACHED_POSTS = 300;
 function cachePosts(coordinate: string, key: "event" | "attendees", posts: EventPost[]): void {
-  const entry = postCache.get(coordinate) ?? {};
-  entry[key] = posts;
-  postCache.set(coordinate, entry);
+  const capped = posts.length > MAX_CACHED_POSTS ? posts.slice(0, MAX_CACHED_POSTS) : posts;
+  cacheSet(postsKey(coordinate, key), capped, newestEditedAt(posts), postsScope());
 }
 
 export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
@@ -218,6 +231,17 @@ export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]
  * Resolve one post at `d`: 30023-by-d, then 31607-by-d, keeping the highest
  * created_at across both kinds (spec §10.1 `#/e/:naddr/posts/:d`).
  */
+/**
+ * A single post at `d` from the cached feeds (no network), or undefined. The
+ * Post page paints this instantly, then background-refreshes via `fetchPostByD`.
+ */
+export function cachedPostByD(coordinate: string, d: string): EventPost | undefined {
+  return (
+    cachedEventPosts(coordinate)?.find((p) => p.d === d) ??
+    cachedAttendeePosts(coordinate)?.find((p) => p.d === d)
+  );
+}
+
 export async function fetchPostByD(
   ctx: EventContext,
   d: string,

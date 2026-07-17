@@ -19,8 +19,16 @@ import { loadEventKeys } from "$lib/events/keystore.js";
 import { recoverEventKeys } from "$lib/events/recover.js";
 import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
 import { session } from "$lib/signer/session.svelte.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 export type EventRole = "visitor" | "pending" | "attendee" | "organizer";
+
+// Persist the resolved role per coordinate (owner-scoped, CACHING-PLAN §2.13) so
+// a cold boot seeds the shell's role before the async keystore/grants
+// reconciliation — never flash "Visitor" at an organizer.
+function roleKey(coordinate: string): string {
+  return `role:${coordinate}`;
+}
 
 class EventShell {
   naddr = $state<string | undefined>(undefined);
@@ -83,12 +91,22 @@ class EventShell {
     }
     this.naddr = naddr;
     const cached = cachedEventContext(naddr);
-    if (cached) this.ctx = cached; // no flash on inter-subpage navigation
+    if (cached) {
+      this.ctx = cached; // no flash on inter-subpage navigation
+      // Seed the role from the persisted value before reconciliation (§2.13).
+      const cachedRole = cacheGet<EventRole>(roleKey(cached.coordinate))?.data;
+      if (cachedRole) this.role = cachedRole;
+    }
     this.loading = true;
     try {
       const ctx = cached ?? (await loadEventContext(naddr));
       if (tok !== this.token) return;
       this.ctx = ctx;
+      // Context may have loaded from the network — seed role now if not already.
+      if (!cached) {
+        const cachedRole = cacheGet<EventRole>(roleKey(ctx.coordinate))?.data;
+        if (cachedRole) this.role = cachedRole;
+      }
       const approved = await isApproved(ctx.coordinate).catch(() => false);
       let keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
       // Fresh-device deep-link: no local custody for an event this identity may
@@ -99,13 +117,21 @@ class EventShell {
       }
       if (tok !== this.token) return;
       const organizer = keys?.role === "organizer";
-      this.role = organizer
+      const resolved: EventRole = organizer
         ? "organizer"
         : approved
           ? "attendee"
           : joinSentAt(ctx.coordinate) !== undefined
             ? "pending"
             : "visitor";
+      this.role = resolved;
+      // Persist the resolved role, but never downgrade a cached member/organizer
+      // to "visitor" on a transient miss — local custody is authoritative, and a
+      // failed grant scan must not erase a known role (§2.13).
+      const prior = cacheGet<EventRole>(roleKey(ctx.coordinate))?.data;
+      const downgrade =
+        (prior === "organizer" || prior === "attendee") && resolved === "visitor";
+      if (!downgrade) cacheSet(roleKey(ctx.coordinate), resolved, Math.floor(Date.now() / 1000));
     } catch {
       /* keep whatever context/role we already have */
     } finally {

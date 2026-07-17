@@ -40,8 +40,9 @@ import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { streamEvents } from "$lib/nostr/stream.js";
+import { streamEvents, type StreamHandle } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 /**
  * Authenticate a received 21605 Organizer Grant (spec §8, audit finding C2).
@@ -188,6 +189,14 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   )) as unknown as GiftWrap[];
 
   const coordinates = new Set<string>();
+  // Per-wrap unwrap memo (CACHING-PLAN §2.3), owner-scoped, persisted: a wrap we
+  // have ALREADY unwrapped once never needs `signerUnwrap` again on a re-scan —
+  // the #1 Amber/NIP-46 prompt/latency saver. The relay-only fetch above still
+  // runs every time (HARD CONSTRAINT 1: must-not-miss semantics untouched); this
+  // only skips the redundant per-wrap signer round-trip. Transient unwrap
+  // failures are NOT memoized, so a real grant that failed to decrypt is retried.
+  const memo: Record<string, true> = { ...(cacheGet<Record<string, true>>("grantwraps")?.data ?? {}) };
+  let memoDirty = false;
   // Cache the (network-fetched) signed 31600 per coordinate so multiple grants
   // for one event only cost a single config lookup.
   const configCache = new Map<string, EventConfig | undefined>();
@@ -203,12 +212,17 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     // relay can return extra wraps — the successful unwrap below proves the wrap
     // was actually sealed to us, this is just a cheap early guard.
     if (!wrap.tags.some((tg) => tg[0] === "p" && tg[1] === pubkey)) continue;
+    // Already unwrapped in a prior scan/session — skip the signer round-trip.
+    if (memo[wrap.id]) continue;
     let rumor;
     try {
       rumor = await signerUnwrap(signer, wrap);
     } catch {
-      continue;
+      continue; // transient/foreign — NOT memoized, retried next scan
     }
+    // Successfully unwrapped: never signer-decrypt this wrap again.
+    memo[wrap.id] = true;
+    memoDirty = true;
     if (rumor.kind === KIND_ORGANIZER_GRANT) {
       // Co-organizer custody: store the full event keys so this device can admin.
       let grant;
@@ -260,6 +274,7 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   // The full-history scan completed without throwing (a fetch failure would have
   // rejected above), so later scans can safely narrow to the live-overlap window.
   if (fullBackfill) markGrantsBackfilled(pubkey);
+  if (memoDirty) cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
   return [...coordinates];
 }
 
@@ -273,6 +288,24 @@ async function eckBytesFor(coordinate: string): Promise<Uint8Array | undefined> 
   const keys = await loadEventKeys(coordinate);
   const eck = currentEck(keys);
   return eck ? base64ToBytes(eck.key) : undefined;
+}
+
+// Decrypted roster/directory/matches are member-only (ECK/nip44), so they cache
+// under the OWNER scope and now survive reloads (CACHING-PLAN §2.3) — wiped on
+// logout by clearOwnerCache. Keyed per coordinate.
+function rosterKey(coordinate: string): string {
+  return `roster:${coordinate}`;
+}
+function dirKey(coordinate: string): string {
+  return `dir:${coordinate}`;
+}
+function matchesKey(coordinate: string): string {
+  return `matches:${coordinate}`;
+}
+
+/** Cached decrypted roster for a coordinate (no network), or undefined. */
+export function cachedRoster(coordinate: string): RosterContent | undefined {
+  return cacheGet<RosterContent>(rosterKey(coordinate))?.data;
 }
 
 /** Fetch + decrypt the roster. Returns undefined if the user isn't approved. */
@@ -290,31 +323,31 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
   const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   if (!latest) return { v: 1, eck_current: 1, attendees: [] };
   try {
-    return rosterContentSchema.parse(JSON.parse(eckDecrypt(eck, latest.content)));
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(eck, latest.content)));
+    cacheSet(rosterKey(ctx.coordinate), roster, latest.created_at ?? 0);
+    return roster;
   } catch {
     return undefined;
   }
 }
 
-// Session-lifetime directory cache per coordinate: the decrypted roster entries.
-// The attendee-detail page reuses it instead of re-fetching the whole directory
-// just to show one person (user feedback 2026-07-17: clicking a person was slow
-// and rendered an empty page while it re-pulled everyone).
-const directoryCache = new Map<string, DirectoryEntryContent[]>();
-function cacheDirectory(coordinate: string, entries: DirectoryEntryContent[]): void {
-  directoryCache.set(coordinate, entries);
+// The decrypted directory entries survive reloads too (owner-scoped) so the
+// attendee-detail page paints one person instantly and the People list paints
+// its last snapshot before the roster stream even opens.
+function cacheDirectory(coordinate: string, entries: DirectoryEntryContent[], at?: number): void {
+  cacheSet(dirKey(coordinate), entries, at);
 }
 
 /** All cached directory entries for a coordinate (no network), or undefined. */
 export function cachedDirectory(coordinate: string): DirectoryEntryContent[] | undefined {
-  return directoryCache.get(coordinate);
+  return cacheGet<DirectoryEntryContent[]>(dirKey(coordinate))?.data;
 }
 /** One cached directory entry by pubkey (no network), or undefined. */
 export function cachedDirectoryEntry(
   coordinate: string,
   pubkey: string,
 ): DirectoryEntryContent | undefined {
-  return directoryCache.get(coordinate)?.find((e) => e.pubkey === pubkey);
+  return cachedDirectory(coordinate)?.find((e) => e.pubkey === pubkey);
 }
 
 /** Fetch + decrypt every directory entry listed in the roster. */
@@ -342,14 +375,16 @@ export async function fetchDirectory(
   }
 
   const entries: DirectoryEntryContent[] = [];
+  let newestAt = 0;
   for (const e of latestByD.values()) {
     try {
       entries.push(directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
+      if ((e.created_at ?? 0) > newestAt) newestAt = e.created_at ?? 0;
     } catch {
       /* skip entries we can't decrypt (e.g. published under a newer ECK) */
     }
   }
-  cacheDirectory(ctx.coordinate, entries);
+  cacheDirectory(ctx.coordinate, entries, newestAt);
   return entries;
 }
 
@@ -372,54 +407,112 @@ export async function streamDirectory(
   onEntries: (entries: DirectoryEntryContent[]) => void,
 ): Promise<DirectoryStream | undefined> {
   const eck = await eckBytesFor(ctx.coordinate);
-  if (!eck) return undefined;
-  const roster = await fetchRoster(ctx);
-  if (!roster || roster.attendees.length === 0) return undefined;
-
+  if (!eck) return undefined; // not approved — nothing decryptable
   const publisher = directoryPublisher(ctx);
-  const ds = roster.attendees.map((a) => a.d);
-  // The stream already resolves latest-per-d (31603 is addressable), so every
-  // callback event is new or strictly newer for its d.
-  const byD = new Map<string, DirectoryEntryContent>();
-  const snapshot = () => [...byD.values()];
+  const coord = ctx.coordinate;
+
+  // Accumulate by PUBKEY (one entry per attendee), latest-wins by created_at, so
+  // we can seed from the cached snapshot and a background refresh never flashes
+  // the list down to fewer people (CACHING-PLAN §2.3, §3.4).
+  const byPk = new Map<string, { entry: DirectoryEntryContent; at: number }>();
+  const cached = cachedDirectory(coord);
+  if (cached) for (const e of cached) byPk.set(e.pubkey, { entry: e, at: 0 });
+  const snapshot = () => [...byPk.values()].map((v) => v.entry);
+  let newestAt = 0;
 
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   const flush = () => {
     flushTimer = undefined;
     const snap = snapshot();
-    cacheDirectory(ctx.coordinate, snap); // warm the per-person detail page
+    cacheDirectory(coord, snap, newestAt); // write-through the decrypted snapshot
     onEntries(snap);
   };
+  const scheduleFlush = () => {
+    if (!flushTimer) flushTimer = setTimeout(flush, 60);
+  };
 
-  const handle = streamEvents(
-    { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": ds },
-    {
-      relays: ctx.config.relays,
-      onEvent: (e) => {
-        const d = e.tags.find((tg) => tg[0] === "d")?.[1];
-        if (!d) return;
-        try {
-          byD.set(d, directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
-        } catch {
-          return; /* skip entries we can't decrypt (e.g. published under a newer ECK) */
-        }
-        if (!flushTimer) flushTimer = setTimeout(flush, 60);
-      },
-    },
-  );
+  const onDirEvent = (e: { tags: string[][]; content: string; created_at?: number }) => {
+    if (!e.tags.some((tg) => tg[0] === "d")) return;
+    const at = e.created_at ?? 0;
+    try {
+      const entry = directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content)));
+      const prev = byPk.get(entry.pubkey);
+      if (!prev || at >= prev.at) byPk.set(entry.pubkey, { entry, at });
+      if (at > newestAt) newestAt = at;
+      scheduleFlush();
+    } catch {
+      /* skip entries we can't decrypt (e.g. published under a newer ECK) */
+    }
+  };
 
-  return {
-    ready: handle.ready.then(() => {
+  // Paint whatever we already have, instantly.
+  if (byPk.size) onEntries(snapshot());
+
+  // (Re)start the entry stream over a blinded-d list; restarts when the fresh
+  // roster changes the set. Entries accumulate into the same byPk map.
+  let inner: StreamHandle | undefined;
+  let currentDs: string[] = [];
+  const startStream = (ds: string[]): StreamHandle => {
+    inner?.stop();
+    currentDs = ds;
+    inner = streamEvents(
+      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": ds },
+      { relays: ctx.config.relays, onEvent: onDirEvent },
+    );
+    return inner;
+  };
+  const dsChanged = (ds: string[]): boolean =>
+    ds.length > 0 &&
+    (ds.length !== currentDs.length || ds.some((d) => !currentDs.includes(d)));
+
+  let resolveReady!: (v: DirectoryEntryContent[]) => void;
+  const ready = new Promise<DirectoryEntryContent[]>((r) => (resolveReady = r));
+  const settle = (h: StreamHandle | undefined) => {
+    if (!h) return resolveReady(snapshot());
+    void h.ready.then(() => {
       if (flushTimer) {
         clearTimeout(flushTimer);
         flush();
       }
-      return snapshot();
-    }),
+      resolveReady(snapshot());
+    });
+  };
+
+  // Refresh the roster from relays in the background; if its blinded-d set
+  // changed, restart the entry stream over the new set (§2.3 step 2).
+  const refreshRoster = async () => {
+    const fresh = await fetchRoster(ctx).catch(() => undefined);
+    if (fresh && dsChanged(fresh.attendees.map((a) => a.d))) {
+      const h = startStream(fresh.attendees.map((a) => a.d));
+      void h.ready.then(() => {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flush();
+        }
+      });
+    }
+  };
+
+  const cachedR = cachedRoster(coord);
+  if (cachedR && cachedR.attendees.length) {
+    // Warm: don't await fetchRoster — stream the cached d's now, refresh in parallel.
+    settle(startStream(cachedR.attendees.map((a) => a.d)));
+    void refreshRoster();
+  } else {
+    // Cold: must await the fresh roster before we know which d's to stream.
+    void (async () => {
+      const fresh = await fetchRoster(ctx).catch(() => undefined);
+      if (!fresh || fresh.attendees.length === 0) return settle(undefined);
+      settle(startStream(fresh.attendees.map((a) => a.d)));
+    })();
+  }
+
+  return {
+    ready,
     stop: () => {
       if (flushTimer) clearTimeout(flushTimer);
       flushTimer = undefined;
-      handle.stop();
+      inner?.stop();
     },
   };
 }
@@ -438,6 +531,11 @@ export async function fetchDirectoryEntry(
  * is NIP-44-encrypted coordinator→recipient, so only the recipient can read the
  * reasoning (spec §6.4). Returns undefined if there's no coordinator or no list.
  */
+/** Cached decrypted match list for a coordinate (no network), or undefined. */
+export function cachedMatches(coordinate: string): MatchListContent | undefined {
+  return cacheGet<MatchListContent>(matchesKey(coordinate))?.data;
+}
+
 export async function fetchMatches(
   signer: AppSigner,
   ctx: EventContext,
@@ -456,7 +554,11 @@ export async function fetchMatches(
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(coordinator, latest.content);
-    return matchListContentSchema.parse(JSON.parse(json));
+    const list = matchListContentSchema.parse(JSON.parse(json));
+    // Persist the decrypted list (owner-scoped) so Matches paints instantly next
+    // time (§2.3); latest-wins on the 31605's created_at.
+    cacheSet(matchesKey(ctx.coordinate), list, latest.created_at ?? 0);
+    return list;
   } catch {
     return undefined;
   }

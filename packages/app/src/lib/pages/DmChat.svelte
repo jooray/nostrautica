@@ -6,10 +6,11 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { fetchDms, sendDm, type DmMessage } from "$lib/events/dm.js";
+  import { fetchDms, cachedDms, sendDm, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
 
@@ -65,6 +66,7 @@
       error = e;
     } finally {
       loading = false;
+      perfMark("DmChat", "network-settled");
     }
   }
 
@@ -73,6 +75,16 @@
     // header isn't a bare npub while the network/signer is slow (user feedback
     // 2026-07-17). Refresh in the background.
     if (peer) profile = cachedProfiles([peer]).get(peer) ?? profile;
+    // Cache-first thread (§2.6): paint prior messages from the persisted DM memo
+    // before connectNdk()/the signer resolve, so the conversation isn't blank.
+    if (peer && session.pubkey) {
+      const cached = cachedDms(session.pubkey).filter((m) => m.peer === peer);
+      if (cached.length) {
+        messages = cached;
+        loading = false;
+        perfMark("DmChat", "cache-paint");
+      }
+    }
     await connectNdk();
     if (session.signer) void mutes.load(session.signer);
     if (peer) {

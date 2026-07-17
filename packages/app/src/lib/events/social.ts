@@ -7,6 +7,8 @@ import { KIND_CONTACTS, KIND_NOTE, KIND_PROFILE } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { fetchFollowTags } from "./nostr-actions.js";
+import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
+import { swr } from "$lib/cache/swr.js";
 
 export interface ProfileMeta {
   name?: string;
@@ -14,30 +16,50 @@ export interface ProfileMeta {
   about?: string;
 }
 
-// Session-lifetime kind-0 cache so a profile fetched once (roster, matches,
-// prefetch) paints instantly everywhere it's needed next — the app re-reads the
-// same handful of pubkeys across People/Matches/attendee pages. Latest write
-// wins; a background refetch simply overwrites (user feedback 2026-07-17:
-// "everything should be snappier / cached ASAP").
-const profileCache = new Map<string, ProfileMeta>();
+// kind-0 profiles are public, so they cache under the anon scope and now SURVIVE
+// RELOADS (CACHING-PLAN §2.2): a profile fetched once (roster, matches, prefetch)
+// paints instantly everywhere it's needed next, across sessions. Per-pubkey entry
+// keyed `profile:<pubkey>`, `at` = the kind-0's created_at (latest-wins).
+function profileKey(pubkey: string): string {
+  return `profile:${pubkey}`;
+}
+// Re-fetch a cached profile only when it's older than this (§2.2): kind-0s change
+// rarely, so most People/Matches paints skip relays entirely.
+const PROFILE_TTL_SEC = 10 * 60;
 
 /** Cached kind-0s for these pubkeys (no network) — for cache-first paint. */
 export function cachedProfiles(pubkeys: string[]): Map<string, ProfileMeta> {
   const out = new Map<string, ProfileMeta>();
   for (const p of pubkeys) {
-    const hit = profileCache.get(p);
-    if (hit) out.set(p, hit);
+    const hit = cacheGet<ProfileMeta>(profileKey(p), ANON);
+    if (hit) out.set(p, hit.data);
   }
   return out;
 }
 
-/** Batch-fetch kind-0 profiles for a set of pubkeys → map of latest per pubkey. */
+/**
+ * Batch-fetch kind-0 profiles for a set of pubkeys → map of latest per pubkey.
+ * Cache-first: only pubkeys MISSING or older than 10 min hit relays (§2.2); the
+ * returned map always merges the cached entries with any freshly fetched ones.
+ * Pass `{ force: true }` to bypass the freshness check (explicit refresh).
+ */
 export async function fetchProfiles(
   pubkeys: string[],
+  opts: { force?: boolean } = {},
 ): Promise<Map<string, ProfileMeta>> {
   const out = new Map<string, ProfileMeta>();
   if (pubkeys.length === 0) return out;
-  const events = await fetchEvents({ kinds: [KIND_PROFILE], authors: pubkeys });
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const stale: string[] = [];
+  for (const p of pubkeys) {
+    const hit = cacheGet<ProfileMeta>(profileKey(p), ANON);
+    if (hit) out.set(p, hit.data);
+    if (opts.force || !hit || nowSec - hit.at > PROFILE_TTL_SEC) stale.push(p);
+  }
+  if (stale.length === 0) return out;
+
+  const events = await fetchEvents({ kinds: [KIND_PROFILE], authors: stale });
   const latest = new Map<string, (typeof events)[number]>();
   for (const e of events) {
     const prev = latest.get(e.pubkey);
@@ -48,7 +70,7 @@ export async function fetchProfiles(
       const p = JSON.parse(e.content);
       const meta = { name: p.name || p.display_name, picture: p.picture, about: p.about };
       out.set(pubkey, meta);
-      profileCache.set(pubkey, meta);
+      cacheSet(profileKey(pubkey), meta, e.created_at ?? nowSec, ANON);
     } catch {
       /* skip malformed profile */
     }
@@ -56,10 +78,38 @@ export async function fetchProfiles(
   return out;
 }
 
-/** The set of pubkeys the signed-in user follows (from their kind-3). */
-export async function fetchFollowSet(signer: AppSigner): Promise<Set<string>> {
-  const tags = await fetchFollowTags(signer);
-  return new Set(tags.filter((t) => t[0] === "p" && t[1]).map((t) => t[1] as string));
+// The signed-in user's follow set (kind-3 p-tags) is cached per owner (`follows`)
+// so People "you already follow" badges paint instantly (§2.2).
+const FOLLOWS_KEY = "follows";
+
+/** Cached follow set for the active owner (no network), or undefined. */
+export function cachedFollowSet(): Set<string> | undefined {
+  const hit = cacheGet<string[]>(FOLLOWS_KEY);
+  return hit ? new Set(hit.data) : undefined;
+}
+
+/**
+ * The set of pubkeys the signed-in user follows (from their kind-3), SWR: paints
+ * the cached set immediately via `apply` (if given), refreshes in the background.
+ * Returns the fresh (or cached) set. NOTE: `followUser`'s fetch-merge-write MUST
+ * still fetch fresh kind-3 from relays before publishing (§2.2, HARD CONSTRAINT 4)
+ * — it must never merge into this cached copy.
+ */
+export async function fetchFollowSet(
+  signer: AppSigner,
+  apply?: (set: Set<string>) => void,
+): Promise<Set<string>> {
+  const owner = await signer.getPublicKey();
+  const fresh = await swr<string[]>(
+    FOLLOWS_KEY,
+    async () => {
+      const tags = await fetchFollowTags(signer);
+      return tags.filter((t) => t[0] === "p" && t[1]).map((t) => t[1] as string);
+    },
+    (list) => apply?.(new Set(list)),
+    { scope: owner },
+  );
+  return new Set(fresh ?? []);
 }
 
 /** The set of pubkeys (among `candidates`) who follow `me` (kind-3 p-tagging me). */

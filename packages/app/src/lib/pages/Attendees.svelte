@@ -6,9 +6,10 @@
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { streamDirectory, fetchMatches, type DirectoryStream } from "$lib/events/attendee.js";
-  import { fetchFollowSet, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
-  import { loadPerEventSettings, toggleSetting } from "$lib/events/settings.js";
+  import { streamDirectory, fetchMatches, cachedDirectory, type DirectoryStream } from "$lib/events/attendee.js";
+  import { fetchFollowSet, fetchProfiles, cachedProfiles, cachedFollowSet, type ProfileMeta } from "$lib/events/social.js";
+  import { loadPerEventSettings, toggleSetting, cachedPerEventSettings } from "$lib/events/settings.js";
+  import { perfMark } from "$lib/perf.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
@@ -35,17 +36,27 @@
     following: "attendees.filter.following",
   };
 
-  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
-  let entries = $state<DirectoryEntryContent[]>([]);
-  let profiles = $state<Map<string, ProfileMeta>>(new Map());
-  let followSet = $state<Set<string>>(new Set());
+  const cachedCtx = cachedEventContext(naddr);
+  // Cache-first paint (§2.3): the roster/directory/follows/settings the app has
+  // seen render instantly on revisit; the stream + social refresh in background.
+  const cachedEntries = cachedCtx ? (cachedDirectory(cachedCtx.coordinate) ?? []) : [];
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
+  let entries = $state<DirectoryEntryContent[]>(cachedEntries);
+  let profiles = $state<Map<string, ProfileMeta>>(
+    cachedProfiles(cachedEntries.map((e) => e.pubkey)),
+  );
+  let followSet = $state<Set<string>>(cachedFollowSet() ?? new Set());
   let scores = $state<Map<string, number>>(new Map());
-  let settings = $state<PerEventSettings | null>(null);
+  let settings = $state<PerEventSettings | null>(
+    cachedCtx ? (cachedPerEventSettings(cachedCtx.coordinate) ?? null) : null,
+  );
   let sortBy = $state<"matches" | "follows" | "name">("name");
   let query = $state("");
   let activeFilters = $state<Set<FilterKey>>(new Set());
-  let loading = $state(true);
+  let loading = $state(cachedEntries.length === 0);
   let error = $state<unknown>(null);
+
+  if (cachedEntries.length) perfMark("Attendees", "cache-paint");
 
   let stream: DirectoryStream | undefined;
   let blindingKey: Uint8Array | null = null;
@@ -124,6 +135,7 @@
       error = e;
     } finally {
       loading = false;
+      perfMark("Attendees", "network-settled");
     }
   }
 

@@ -6,10 +6,11 @@
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchMatches, fetchDirectory } from "$lib/events/attendee.js";
-  import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { fetchMatches, fetchDirectory, cachedMatches, cachedDirectory } from "$lib/events/attendee.js";
+  import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
+  import { perfMark } from "$lib/perf.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -18,13 +19,25 @@
 
   let { naddr }: { naddr: string } = $props();
 
-  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
-  let matches = $state<Match[]>([]);
-  let names = $state<Map<string, DirectoryEntryContent>>(new Map());
-  let profiles = $state<Map<string, ProfileMeta>>(new Map());
-  let loading = $state(true);
+  const cachedCtx = cachedEventContext(naddr);
+  // Cache-first paint (§2.3): matches/names/profiles from the persistent cache so
+  // the page shows the ranked list instantly on revisit, then refreshes.
+  const cachedList = cachedCtx ? cachedMatches(cachedCtx.coordinate) : undefined;
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
+  let matches = $state<Match[]>(cachedList?.matches ?? []);
+  let names = $state<Map<string, DirectoryEntryContent>>(
+    cachedCtx
+      ? new Map((cachedDirectory(cachedCtx.coordinate) ?? []).map((e) => [e.pubkey, e]))
+      : new Map(),
+  );
+  let profiles = $state<Map<string, ProfileMeta>>(
+    cachedList ? cachedProfiles(cachedList.matches.map((m) => m.pubkey)) : new Map(),
+  );
+  let loading = $state(matches.length === 0);
   let error = $state<unknown>(null);
   let noCoordinator = $state(false);
+
+  if (matches.length) perfMark("Matches", "cache-paint");
 
   onMount(async () => {
     try {
@@ -56,6 +69,7 @@
       error = e;
     } finally {
       loading = false;
+      perfMark("Matches", "network-settled");
     }
   });
 

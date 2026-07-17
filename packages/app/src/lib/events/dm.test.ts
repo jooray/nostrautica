@@ -5,27 +5,52 @@
  * clients. The self-copy goes to the sender's own inboxes.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
+import { KIND_DM, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 import type { VerifiedEvent } from "nostr-tools/pure";
 
-const { fetchEvents, publishOrQueue } = vi.hoisted(() => ({
+const { fetchEvents, publishOrQueue, streamEvents, signerUnwrap } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
   publishOrQueue: vi.fn(),
+  streamEvents: vi.fn(),
+  signerUnwrap: vi.fn(),
 }));
 
 vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
 vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue }));
+vi.mock("$lib/nostr/stream.js", () => ({ streamEvents }));
 // signerWrap tags the wrap with the intended recipient's "p" so we can assert routing.
 vi.mock("./giftwrap.js", () => ({
   signerWrap: async (_s: unknown, recipient: string) => ({
     kind: 1059,
     tags: [["p", recipient]],
   }),
-  signerUnwrap: vi.fn(),
+  signerUnwrap,
 }));
 
-import { relayUrlsFromDmList, selectDmRelays, sendDm } from "./dm.js";
+import { relayUrlsFromDmList, selectDmRelays, sendDm, fetchDms, cachedDms } from "./dm.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import {
+  __setPersistBackend,
+  __resetPersistForTests,
+  setActiveCacheOwner,
+  type CacheEntry,
+  type PersistBackend,
+} from "$lib/cache/persist.js";
+
+function memPersist(): PersistBackend {
+  const store = new Map<string, CacheEntry>();
+  return {
+    async getAll() {
+      return [...store.entries()];
+    },
+    async put(k, v) {
+      store.set(k, v);
+    },
+    async delete(keys) {
+      for (const k of keys) store.delete(k);
+    },
+  };
+}
 
 const RECIPIENT = "b".repeat(64);
 const ME = "a".repeat(64);
@@ -104,5 +129,43 @@ describe("sendDm relay routing", () => {
     await sendDm(signer, RECIPIENT, "hi");
     const [recipientCall] = publishOrQueue.mock.calls;
     expect(recipientCall[1]).toEqual(DEFAULT_RELAYS);
+  });
+});
+
+describe("fetchDms unwrap memo persistence (§2.6)", () => {
+  const OWNER = "c".repeat(64); // distinct owner so the module cache re-hydrates
+  const PEER = "d".repeat(64);
+  const signer = { getPublicKey: async () => OWNER } as never;
+
+  beforeEach(() => {
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    setActiveCacheOwner(OWNER);
+    streamEvents.mockReset();
+    signerUnwrap.mockReset();
+  });
+
+  it("decrypts wraps once, then serves history from the persisted memo", async () => {
+    // First scan returns one gift-wrap that unwraps to a DM from PEER.
+    streamEvents.mockReturnValue({ ready: Promise.resolve([{ id: "wrap-1" }]), stop: () => {} });
+    signerUnwrap.mockResolvedValue({
+      id: "rumor-1",
+      pubkey: PEER,
+      kind: KIND_DM,
+      tags: [["p", OWNER]],
+      content: "hello there",
+      created_at: 123,
+    });
+
+    const first = await fetchDms(signer);
+    // Give the background unwrap loop's .finally(persist) a microtask to settle.
+    await Promise.resolve();
+    expect(first).toEqual([
+      expect.objectContaining({ peer: PEER, from: PEER, text: "hello there", at: 123 }),
+    ]);
+    // The decrypted message is now in the persistent memo (cache-first paint).
+    expect(cachedDms(OWNER)).toEqual([
+      expect.objectContaining({ peer: PEER, text: "hello there" }),
+    ]);
   });
 });

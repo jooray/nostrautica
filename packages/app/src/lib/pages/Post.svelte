@@ -13,28 +13,38 @@
     type EventContext,
   } from "$lib/events/event-context.js";
   import { receiveGrants } from "$lib/events/attendee.js";
-  import { fetchPostByD, type EventPost } from "$lib/events/posts.js";
+  import { fetchPostByD, cachedPostByD, type EventPost } from "$lib/events/posts.js";
   import PostCard from "$lib/components/PostCard.svelte";
   import { router } from "$lib/router/router.svelte.js";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, d }: { naddr: string; d: string } = $props();
 
-  let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
+  const cachedCtx = cachedEventContext(naddr);
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<string | null>(null);
-  let loading = $state(true);
-  let post = $state<EventPost | undefined>(undefined);
+  // Cache-first (§2.4): paint the post from the cached feeds instantly instead
+  // of always round-tripping, then refresh in the background.
+  let post = $state<EventPost | undefined>(
+    cachedCtx ? cachedPostByD(cachedCtx.coordinate, d) : undefined,
+  );
+  let loading = $state(post === undefined);
+  if (post) perfMark("Post", "cache-paint");
 
   onMount(async () => {
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
+      if (post === undefined) post = cachedPostByD(ctx.coordinate, d);
       if (session.signer) await receiveGrants(session.signer).catch(() => {});
-      post = await fetchPostByD(ctx, d);
+      const fresh = await fetchPostByD(ctx, d);
+      if (fresh) post = fresh;
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      if (!post) error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+      perfMark("Post", "network-settled");
     }
   });
 </script>

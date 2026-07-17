@@ -14,6 +14,8 @@ import {
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
 import { i18n, t } from "$lib/i18n/i18n.svelte.js";
+import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
+import { swr } from "$lib/cache/swr.js";
 
 export interface EventContext {
   naddr: string;
@@ -27,19 +29,45 @@ export interface EventContext {
   banner?: string; // wide banner (31923 image / kind-0 banner)
   location?: string;
   hashtags: string[];
+  /** created_at of the 31600 config event — the latest-wins stamp for the cache. */
+  configAt?: number;
 }
 
 function tag(tags: string[][], name: string): string | undefined {
   return tags.find((t) => t[0] === name)?.[1];
 }
 
-// In-memory cache so navigating between event sub-pages is instant — the page
-// renders from cache immediately and can refresh in the background.
-const contextCache = new Map<string, EventContext>();
+// The event context is public (kind 31600 + 31923 + E_id kind-0), so it's cached
+// under the anon scope and now SURVIVES RELOADS (CACHING-PLAN §2.1) — navigating
+// into any event sub-page paints instantly instead of awaiting a relay round-trip.
+function ctxKey(naddr: string): string {
+  return `ctx:${naddr}`;
+}
 
 /** The already-loaded context for an naddr, if any (no network). */
 export function cachedEventContext(naddr: string): EventContext | undefined {
-  return contextCache.get(naddr);
+  return cacheGet<EventContext>(ctxKey(naddr), ANON)?.data;
+}
+
+/**
+ * SWR wrapper (§2.1): paint the cached context synchronously via `apply`, then
+ * refresh from relays in the background and `apply` the fresh one. Crucially,
+ * re-add the cached config's home relays SYNCHRONOUSLY so subsequent fetches
+ * (roster, posts, …) target the right relays without waiting for the 31600
+ * re-fetch. Returns the fresh (or cached) context for await-style callers.
+ */
+export async function ensureEventContext(
+  naddr: string,
+  apply: (ctx: EventContext, source: "cache" | "network") => void,
+): Promise<EventContext | undefined> {
+  const cached = cachedEventContext(naddr);
+  if (cached?.config.relays.length) addRelays(cached.config.relays);
+  return swr<EventContext>(
+    ctxKey(naddr),
+    () => loadEventContext(naddr),
+    (ctx, source) => apply(ctx, source),
+    { scope: ANON, atOf: (c) => c.configAt ?? 0 },
+  );
 }
 
 export async function loadEventContext(
@@ -99,7 +127,10 @@ export async function loadEventContext(
     banner: (evt && tag(evt.tags, "image")) || kind0.banner || undefined,
     location: evt ? tag(evt.tags, "location") : undefined,
     hashtags: evt ? evt.tags.filter((t) => t[0] === "t").map((t) => t[1]!) : [],
+    configAt: configEvent.created_at,
   };
-  contextCache.set(naddr, ctx);
+  // Write-through to the persistent anon cache (§2.1); latest-wins on the config
+  // event's created_at so a background refresh never regresses to an older config.
+  cacheSet(ctxKey(naddr), ctx, ctx.configAt ?? 0, ANON);
   return ctx;
 }

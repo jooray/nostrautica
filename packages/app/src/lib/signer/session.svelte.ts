@@ -24,6 +24,7 @@ import {
 } from "./keystore.js";
 import { setActiveOwner } from "$lib/events/keystore.js";
 import { clearBlindingCache } from "$lib/events/blinding.js";
+import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
 
 class Session {
   signer = $state<AppSigner | null>(null);
@@ -44,6 +45,9 @@ class Session {
     this.signer = signer;
     // Scope the per-event keystore to this identity (audit G2 owner-scoping).
     setActiveOwner(this.pubkey);
+    // Scope the persistent app-cache to this identity too (CACHING-PLAN §3.1),
+    // so owner-scoped cachedX() reads resolve against the current owner.
+    setActiveCacheOwner(this.pubkey);
   }
 
   /** Try to restore a previous session (local key) from IndexedDB. */
@@ -128,7 +132,12 @@ class Session {
       /* transport teardown failed — proceed with local logout */
     }
     await clearKeystore();
+    // Wipe every decrypted app-cache copy for this identity BEFORE dropping the
+    // owner (CACHING-PLAN §3.1), then unscope. Anon (public) entries survive.
+    const owner = this.pubkey;
+    if (owner) clearOwnerCache(owner);
     setActiveOwner(null);
+    setActiveCacheOwner(null);
     clearBlindingCache();
     this.signer = null;
     this.pubkey = null;

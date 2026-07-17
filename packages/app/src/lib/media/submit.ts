@@ -26,6 +26,25 @@ import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob } from "$lib/blossom/client.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+
+// The self-copy (31602) and reuse library are decrypted private data, cached
+// owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
+// readiness paint the last intro/library instantly instead of re-decrypting.
+type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string };
+function selfCopyKey(coordinate: string): string {
+  return `selfcopy:${coordinate}`;
+}
+const MEDIALIB_KEY = "medialib";
+
+/** Cached self-copy for a coordinate (no network), or undefined. */
+export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
+  return cacheGet<SelfCopy>(selfCopyKey(coordinate))?.data;
+}
+/** Cached reuse-library media (no network), or undefined. */
+export function cachedLibrary(): MediaDescriptor[] | undefined {
+  return cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.data;
+}
 
 /** The Blossom servers to use: event 31600 servers ∪ user 10063 servers ∪ default. */
 export async function resolveBlossomServers(
@@ -239,7 +258,13 @@ export async function loadSelfCopy(
       media?: MediaDescriptor[];
       intro_text?: string;
     };
-    return { profile: parsed.profile, media: parsed.media ?? [], introText: parsed.intro_text };
+    const self: SelfCopy = {
+      profile: parsed.profile,
+      media: parsed.media ?? [],
+      introText: parsed.intro_text,
+    };
+    cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
+    return self;
   } catch {
     return undefined;
   }
@@ -262,7 +287,9 @@ export async function loadLibrary(
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
     const parsed = JSON.parse(json) as { media?: MediaDescriptor[] };
-    return parsed.media ?? [];
+    const media = parsed.media ?? [];
+    cacheSet(MEDIALIB_KEY, media, latest.created_at ?? 0);
+    return media;
   } catch {
     return [];
   }

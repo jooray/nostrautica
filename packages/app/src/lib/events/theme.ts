@@ -16,6 +16,18 @@ import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
+import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
+
+// Theme CSS is public, so it caches under the anon scope (CACHING-PLAN §2.12) and
+// the injector applies it synchronously on route entry — no unthemed flash.
+function themeKey(coordinate: string): string {
+  return `theme:${coordinate}`;
+}
+
+/** Cached theme CSS for a coordinate (no network), or undefined. */
+export function cachedEventTheme(coordinate: string): string | undefined {
+  return cacheGet<string>(themeKey(coordinate), ANON)?.data || undefined;
+}
 
 /** The event's published CSS, or undefined (none / empty / over the cap). */
 export async function fetchEventTheme(ctx: EventContext): Promise<string | undefined> {
@@ -26,9 +38,11 @@ export async function fetchEventTheme(ctx: EventContext): Promise<string | undef
   );
   const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   const css = latest?.content ?? "";
-  if (!css.trim()) return undefined;
-  if (utf8ByteLength(css) > MAX_THEME_CSS_BYTES) return undefined;
-  return css;
+  const valid = css.trim() && utf8ByteLength(css) <= MAX_THEME_CSS_BYTES;
+  // Write-through: cache the CSS (or "" for "no theme") so the next entry paints
+  // instantly. latest-wins on the 31609 created_at.
+  cacheSet(themeKey(ctx.coordinate), valid ? css : "", latest?.created_at ?? 0, ANON);
+  return valid ? css : undefined;
 }
 
 /**

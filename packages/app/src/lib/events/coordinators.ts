@@ -11,6 +11,7 @@ import {
 } from "@nostrautica/protocol";
 import { npubEncode } from "nostr-tools/nip19";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 
 export interface DiscoveredCoordinator {
   pubkey: string; // hex
@@ -19,8 +20,28 @@ export interface DiscoveredCoordinator {
   createdAt: number;
 }
 
-/** Fetch + parse all coordinator announcements, latest per identity, newest first. */
-export async function fetchCoordinators(): Promise<DiscoveredCoordinator[]> {
+// The coordinator picker (kind 31611) is public and changes rarely — cache it
+// under the anon scope with a 1 h TTL (CACHING-PLAN §2.11).
+const COORDINATORS_KEY = "coordinators";
+const COORDINATORS_TTL_SEC = 60 * 60;
+
+/** Cached coordinator list (no network), or undefined. */
+export function cachedCoordinators(): DiscoveredCoordinator[] | undefined {
+  return cacheGet<DiscoveredCoordinator[]>(COORDINATORS_KEY, ANON)?.data;
+}
+
+/**
+ * Fetch + parse all coordinator announcements, latest per identity, newest first.
+ * Cache-first with a 1 h TTL: a cached list younger than the TTL is returned
+ * without a relay round-trip. Pass `{ force }` to bypass the TTL.
+ */
+export async function fetchCoordinators(
+  opts: { force?: boolean } = {},
+): Promise<DiscoveredCoordinator[]> {
+  const hit = cacheGet<DiscoveredCoordinator[]>(COORDINATORS_KEY, ANON);
+  if (!opts.force && hit && Math.floor(Date.now() / 1000) - hit.at < COORDINATORS_TTL_SEC) {
+    return hit.data;
+  }
   const events = await fetchEvents({ kinds: [KIND_COORDINATOR_ANNOUNCE] }).catch(() => []);
   // Latest per pubkey (replaceable, but relays may return stale copies).
   const latest = new Map<string, (typeof events)[number]>();
@@ -42,7 +63,9 @@ export async function fetchCoordinators(): Promise<DiscoveredCoordinator[]> {
       /* skip malformed announcements */
     }
   }
-  return out.sort((a, b) => b.createdAt - a.createdAt);
+  const sorted = out.sort((a, b) => b.createdAt - a.createdAt);
+  cacheSet(COORDINATORS_KEY, sorted, Math.floor(Date.now() / 1000), ANON);
+  return sorted;
 }
 
 /** A one-line human pricing summary for a coordinator card. */

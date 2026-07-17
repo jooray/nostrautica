@@ -5,18 +5,26 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { fetchDms, threadsOf, type DmThread } from "$lib/events/dm.js";
-  import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { fetchDms, cachedDms, threadsOf, type DmThread } from "$lib/events/dm.js";
+  import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
 
-  let threads = $state<DmThread[]>([]);
-  let profiles = $state<Map<string, ProfileMeta>>(new Map());
-  let loading = $state(true);
+  // Cache-first (§2.6): DM history from the persisted unwrap memo paints the
+  // thread list before connectNdk() even resolves — no "Decrypting…" wait.
+  const cachedThreads = session.pubkey ? threadsOf(cachedDms(session.pubkey)) : [];
+  let threads = $state<DmThread[]>(cachedThreads);
+  let profiles = $state<Map<string, ProfileMeta>>(
+    cachedProfiles(cachedThreads.map((th) => th.peer)),
+  );
+  let loading = $state(cachedThreads.length === 0);
   let error = $state<unknown>(null);
   let timer: ReturnType<typeof setInterval> | undefined;
+
+  if (cachedThreads.length) perfMark("Dm", "cache-paint");
 
   // Muted peers drop out of the thread list (U10).
   const visibleThreads = $derived(threads.filter((th) => !mutes.isMuted(th.peer)));
@@ -37,6 +45,7 @@
       error = e;
     } finally {
       loading = false;
+      perfMark("Dm", "network-settled");
     }
   }
 

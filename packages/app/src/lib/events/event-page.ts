@@ -33,10 +33,27 @@ import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
+import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
 
 export interface EventPageModel {
   menu: MergedMenuItem[]; // merged, in display order; membersOnly flags kept
   sections: MergedSection[];
+}
+
+// The merged event page may contain decrypted private menu/sections, so it's
+// owner-scoped when logged in (wiped on logout) and anon for visitors (public
+// parts only). Persisted so EventHome paints menu/sections before the network
+// (CACHING-PLAN §2.4).
+function pageKey(coordinate: string): string {
+  return `page:${coordinate}`;
+}
+function pageScope(): string {
+  return activeCacheOwner() ?? ANON;
+}
+
+/** Cached merged event page for a coordinate (no network), or undefined. */
+export function cachedEventPage(coordinate: string): EventPageModel | undefined {
+  return cacheGet<EventPageModel>(pageKey(coordinate), pageScope())?.data;
 }
 
 function tag(tags: string[][], name: string): string | undefined {
@@ -79,10 +96,12 @@ export async function fetchEventPage(
       }
     }
   }
-  return {
+  const model: EventPageModel = {
     menu: mergeMenu(publicMenu, priv.menu),
     sections: mergeSections(content.sections, priv.sections),
   };
+  cacheSet(pageKey(ctx.coordinate), model, latest.created_at ?? 0, pageScope());
+  return model;
 }
 
 /**

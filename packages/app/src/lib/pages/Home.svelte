@@ -13,6 +13,7 @@
   import { prefetchEventContext } from "$lib/nostr/prefetch.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
@@ -39,20 +40,11 @@
 
   // Backfill "My events" from the local key store — every event the user created
   // or was approved into — so events created before this list existed still show.
-  onMount(async () => {
-    if (session.signer) {
-      // Fresh-device recovery, both roles so "My events" is complete on a new
-      // login (user feedback 2026-07-17: an approved attendee saw "No events yet"
-      // because their grant was never scanned here):
-      //  - recoverEventKeys: 30078 backups → events this identity CREATED (E_id).
-      //  - receiveGrants: 21602/21605 gift-wraps → events this identity was
-      //    APPROVED into (ECK) or granted co-organizer custody.
-      await Promise.allSettled([
-        recoverEventKeys(session.signer),
-        receiveGrants(session.signer),
-      ]);
-    }
-    const keys = await listEventKeys().catch(() => []);
+  // Backfill "My events" from whatever the KEYSTORE already holds first — never
+  // wait on the two relay scans before filling the list (CACHING-PLAN §2.14). The
+  // fresh-device recovery + grant scan then run in the background and backfill
+  // again once they land.
+  function backfillFromKeystore(keys: { coordinate: string; role: "organizer" | "attendee" }[]) {
     for (const k of keys) {
       if (recentEvents.has(k.coordinate)) continue;
       try {
@@ -67,13 +59,31 @@
         /* one malformed coordinate must not abort the whole backfill */
       }
     }
-    // Warm the contexts the user is most likely to tap next; the rest warm on
-    // hover/focus (see the card handlers below).
+  }
+
+  onMount(async () => {
+    // 1. Instant: local custody answers "My events" with no network.
+    backfillFromKeystore(await listEventKeys().catch(() => []));
+    perfMark("Home", "cache-paint");
+    // 2. Warm the contexts the user is most likely to tap next.
     for (const e of recentEvents.list.slice(0, 4)) prefetchEventContext(e.naddr);
-    // Backfilled entries carry a slug-derived placeholder title and no icon
-    // (fresh-device recovery, user feedback 2026-07-16) — replace them with the
-    // real title/icon from the event context, without bumping list order.
     void enrichEvents();
+    // 3. Background: fresh-device recovery + grant scan, then backfill again so a
+    //    newly-recovered/approved event appears without blocking first paint.
+    //  - recoverEventKeys: 30078 backups → events this identity CREATED (E_id).
+    //  - receiveGrants: 21602/21605 gift-wraps → events APPROVED into / co-organizer.
+    if (session.signer) {
+      void Promise.allSettled([
+        recoverEventKeys(session.signer),
+        receiveGrants(session.signer),
+      ]).then(async () => {
+        backfillFromKeystore(await listEventKeys().catch(() => []));
+        void enrichEvents();
+        perfMark("Home", "network-settled");
+      });
+    } else {
+      perfMark("Home", "network-settled");
+    }
   });
 
   async function enrichEvents() {

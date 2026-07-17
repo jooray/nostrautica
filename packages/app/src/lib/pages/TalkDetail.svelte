@@ -5,26 +5,38 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk, fetchEvents } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import {
     fetchTalk,
+    cachedTalk,
     saveWatchProgress,
     loadWatchProgress,
     setTalkEditDraft,
   } from "$lib/events/talks.js";
+  import { cachedProfiles } from "$lib/events/social.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, d }: { naddr: string; d: string } = $props();
 
-  let ctx = $state<EventContext | null>(null);
-  let talk = $state<TalkContent | null>(null);
-  let speakerName = $state("");
+  const cachedCtx = cachedEventContext(naddr);
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
+  // Cache-first (§2.5): the talk set was decrypted once — don't re-decrypt the
+  // whole set on every open; paint this talk from cache, refresh in background.
+  let talk = $state<TalkContent | null>(
+    cachedCtx ? (cachedTalk(cachedCtx.coordinate, d) ?? null) : null,
+  );
+  let speakerName = $state(
+    talk ? (cachedProfiles([talk.pubkey]).get(talk.pubkey)?.name ?? "") : "",
+  );
   let resumeAt = $state(0);
-  let loading = $state(true);
+  let loading = $state(talk === null);
   let error = $state<unknown>(null);
+
+  if (talk) perfMark("TalkDetail", "cache-paint");
 
   const isOwn = $derived(!!talk && !!session.pubkey && talk.pubkey === session.pubkey);
 
@@ -33,7 +45,8 @@
       await connectNdk();
       ctx = await loadEventContext(naddr);
       if (ctx.config.talks === "off") return;
-      talk = (await fetchTalk(ctx, d)) ?? null;
+      if (!talk) talk = cachedTalk(ctx.coordinate, d) ?? null;
+      talk = (await fetchTalk(ctx, d)) ?? talk;
       if (talk) {
         resumeAt = loadWatchProgress(ctx.coordinate, talk.media.x);
         const profiles = await fetchEvents({ kinds: [KIND_PROFILE], authors: [talk.pubkey] });
@@ -50,6 +63,7 @@
       error = e;
     } finally {
       loading = false;
+      perfMark("TalkDetail", "network-settled");
     }
   });
 

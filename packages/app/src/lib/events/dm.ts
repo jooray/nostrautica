@@ -6,7 +6,7 @@
  * own pubkey — so sent history is recoverable on any device. Plain NIP-17:
  * conversations continue in 0xchat/Amethyst/any NIP-17 client.
  */
-import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
+import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST, giftwrapSince } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
@@ -14,6 +14,7 @@ import { fetchEvents } from "$lib/nostr/ndk.js";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 export interface DmMessage {
   id: string; // rumor id (stable across the recipient/self copies)
@@ -99,6 +100,53 @@ const unwrapCache = new Map<string, DmMessage | null>();
 // of a slow signer.
 let unwrapInFlight: Promise<void> | null = null;
 
+// The per-wrap unwrap memo is now PERSISTED owner-scoped (CACHING-PLAN §2.6):
+// hydrated into `unwrapCache` on the first fetch per identity, so a DM decrypted
+// once is never signer-decrypted again — across sessions — and the inbox paints
+// full history instantly. Bounded to 3000 wraps (§3.5). Wiped on logout.
+const DMWRAPS_KEY = "dmwraps";
+const DMSCAN_KEY = "dmscanat"; // last steady-state scan time per owner
+const MAX_DM_WRAPS = 3000;
+
+type DmMemo = Record<string, DmMessage | null>;
+
+function snapshotFromMemo(memo: DmMemo): DmMessage[] {
+  const byId = new Map<string, DmMessage>();
+  for (const m of Object.values(memo)) if (m) byId.set(m.id, m);
+  return [...byId.values()].sort((a, b) => a.at - b.at);
+}
+
+/**
+ * Cached DM history for `me` (no network, no signer) — the inbox/thread paint
+ * this synchronously before `connectNdk()` even resolves (§2.6).
+ */
+export function cachedDms(me: string): DmMessage[] {
+  return snapshotFromMemo(cacheGet<DmMemo>(DMWRAPS_KEY, me)?.data ?? {});
+}
+
+function hydrateUnwrapCache(me: string): void {
+  unwrapCache.clear();
+  const memo = cacheGet<DmMemo>(DMWRAPS_KEY, me)?.data ?? {};
+  for (const [id, m] of Object.entries(memo)) unwrapCache.set(id, m);
+  unwrapCacheOwner = me;
+}
+
+/** Persist the unwrap memo, capped to the 3000 most-recent wraps by message time. */
+function persistUnwrapCache(me: string): void {
+  let entries = [...unwrapCache.entries()];
+  if (entries.length > MAX_DM_WRAPS) {
+    entries = entries
+      .sort((a, b) => (b[1]?.at ?? 0) - (a[1]?.at ?? 0))
+      .slice(0, MAX_DM_WRAPS);
+    // Also bound the in-memory map so it doesn't grow without limit.
+    unwrapCache.clear();
+    for (const [id, m] of entries) unwrapCache.set(id, m);
+  }
+  const memo: DmMemo = {};
+  for (const [id, m] of entries) memo[id] = m;
+  cacheSet(DMWRAPS_KEY, memo, Math.floor(Date.now() / 1000), me);
+}
+
 function snapshotDms(): DmMessage[] {
   const byId = new Map<string, DmMessage>();
   for (const m of unwrapCache.values()) if (m) byId.set(m.id, m);
@@ -107,18 +155,26 @@ function snapshotDms(): DmMessage[] {
 
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
-  if (unwrapCacheOwner !== me) {
-    unwrapCache.clear();
-    unwrapCacheOwner = me;
-  }
+  if (unwrapCacheOwner !== me) hydrateUnwrapCache(me);
+
+  // First scan for this identity does the full limit:500 history sweep; later
+  // scans narrow to since = min(giftwrapSince(), lastScan - 24h) so the steady
+  // poll is cheap while still overlapping enough to never miss a wrap (§2.6).
+  const lastScan = cacheGet<number>(DMSCAN_KEY, me)?.data;
+  const firstRun = lastScan === undefined;
+  const since = firstRun ? undefined : Math.min(giftwrapSince(), lastScan - 24 * 60 * 60);
+
   // Streamed relay-only read: gift wraps must not be lost to the dexie
   // cache/EOSE race (see ndk.ts), and the read must TERMINATE even when a relay
   // never answers — first EOSE + grace, hard timeout. The 5s poll makes any
   // single missed late event a non-issue.
   const events = (await streamEvents(
-    { kinds: [KIND_GIFT_WRAP], "#p": [me], limit: 500 },
+    firstRun
+      ? { kinds: [KIND_GIFT_WRAP], "#p": [me], limit: 500 }
+      : { kinds: [KIND_GIFT_WRAP], "#p": [me], since },
     { relays: DEFAULT_RELAYS, relayOnly: true, timeoutMs: 10_000 },
   ).ready) as unknown as GiftWrap[];
+  cacheSet(DMSCAN_KEY, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), me);
 
   // Unwrapping is a per-wrap signer round-trip; a remote signer (Amber/NIP-46)
   // with an unreachable relay makes each one hang to its timeout, so decrypting a
@@ -159,6 +215,8 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
         }
       }
     })().finally(() => {
+      // Persist the decrypted memo (capped) so it survives reloads (§2.6).
+      persistUnwrapCache(me);
       unwrapInFlight = null;
     });
   }

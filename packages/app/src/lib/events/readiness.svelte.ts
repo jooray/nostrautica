@@ -25,8 +25,20 @@ import { hasDurableKeyBackup } from "./key-backup.js";
 import { deriveBlindingKey } from "./blinding.js";
 import { loadSelfCopy } from "$lib/media/submit.js";
 import { online } from "$lib/stores/online.svelte.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 type Role = "visitor" | "pending" | "attendee" | "organizer";
+
+// Persist the last derived readiness + the monotonic latch per coordinate
+// (owner-scoped, CACHING-PLAN §2.7) so the journey widget paints instantly on
+// reload and a finished step never regresses across sessions.
+interface PersistedReadiness {
+  readiness: Readiness;
+  latched: ReadinessStepId[];
+}
+function readinessKey(coordinate: string): string {
+  return `readiness:${coordinate}`;
+}
 
 class ReadinessStore {
   readiness = $state<Readiness | undefined>(undefined);
@@ -52,8 +64,16 @@ class ReadinessStore {
   async load(ctx: EventContext, signer: AppSigner | null): Promise<void> {
     const tok = ++this.token;
     this.loading = true;
+    const coord = ctx.coordinate;
+    // Paint the last derived readiness synchronously before the (many) network
+    // fetches, and re-seat the monotonic latch from the persisted set (§2.7).
+    const cached = cacheGet<PersistedReadiness>(readinessKey(coord))?.data;
+    if (cached) {
+      this.readiness = cached.readiness;
+      const latch = this.latchFor(coord);
+      for (const id of cached.latched) latch.add(id);
+    }
     try {
-      const coord = ctx.coordinate;
       const approved = await isApproved(coord).catch(() => false);
       const keys = await loadEventKeys(coord).catch(() => undefined);
       const organizer = keys?.role === "organizer";
@@ -133,6 +153,12 @@ class ReadinessStore {
       const latch = this.latchFor(coord);
       for (const s of derived.steps) if (s.state === "complete") latch.add(s.id);
       this.readiness = derived;
+      // Persist the freshly derived readiness + latch (§2.7).
+      cacheSet(
+        readinessKey(coord),
+        { readiness: derived, latched: [...latch] } satisfies PersistedReadiness,
+        Math.floor(Date.now() / 1000),
+      );
     } finally {
       if (tok === this.token) this.loading = false;
     }

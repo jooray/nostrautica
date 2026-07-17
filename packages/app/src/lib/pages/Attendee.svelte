@@ -11,9 +11,10 @@
   import { followUser, fetchFollowTags } from "$lib/events/nostr-actions.js";
   import { isFollowing } from "$lib/events/onboarding.js";
   import { fetchFollowersOf, fetchRecentPosts, cachedProfiles, type RecentPost } from "$lib/events/social.js";
-  import { loadPerEventSettings, toggleSetting, setNote } from "$lib/events/settings.js";
+  import { loadPerEventSettings, toggleSetting, setNote, cachedPerEventSettings } from "$lib/events/settings.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
+  import { perfMark } from "$lib/perf.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import PostView from "$lib/components/PostView.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -53,8 +54,16 @@
       ctx = cached ?? null;
       const cachedMeta = cachedProfiles([pubkey]).get(pubkey);
       if (cachedMeta) kind0 = { name: cachedMeta.name, picture: cachedMeta.picture, about: cachedMeta.about };
-      if (cached) entry = cachedDirectoryEntry(cached.coordinate, pubkey) ?? null;
-      if (kind0 || entry) loading = false;
+      if (cached) {
+        entry = cachedDirectoryEntry(cached.coordinate, pubkey) ?? null;
+        // Cached per-event settings (want-to-meet/met/note) paint instantly (§2.8).
+        settings = cachedPerEventSettings(cached.coordinate) ?? null;
+        if (settings) noteDraft = settings.notes[pubkey] ?? "";
+      }
+      if (kind0 || entry) {
+        loading = false;
+        perfMark("Attendee", "cache-paint");
+      }
 
       await connectNdk();
       if (!ctx) ctx = await loadEventContext(naddr);
@@ -103,6 +112,7 @@
       } else {
         followKnown = true;
       }
+      perfMark("Attendee", "network-settled");
     } catch (e) {
       if (!kind0 && !entry) error = e instanceof Error ? e.message : String(e);
     } finally {

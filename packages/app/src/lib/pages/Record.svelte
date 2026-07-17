@@ -4,7 +4,7 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { VideoCapture } from "$lib/media/capture.js";
   import {
@@ -12,10 +12,13 @@
     submitProfileAndMedia,
     loadSelfCopy,
     loadLibrary,
+    cachedLibrary,
+    cachedSelfCopy,
     prepareReuse,
   } from "$lib/media/submit.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
@@ -37,7 +40,10 @@
   type Mode = "video" | "audio" | "text";
   let mode = $state<Mode>("video");
 
-  let ctx = $state<EventContext | null>(null);
+  // Cache-first (§2.7): the composer opens instantly with the last library/intro
+  // from cache while the fresh copies refresh in the background.
+  const cachedCtx = cachedEventContext(naddr);
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<unknown>(null);
   let videoEl = $state<HTMLVideoElement | null>(null);
   // Reactive so the UI reflects mic/camera-enabled state (hide the "Enable"
@@ -50,8 +56,10 @@
   let recorded = $state<{ blob: Blob; url: string; durationSec: number } | null>(null);
   let busy = $state(false);
   let done = $state(false);
-  let library = $state<MediaDescriptor[]>([]);
-  let textIntro = $state("");
+  let library = $state<MediaDescriptor[]>(cachedLibrary() ?? []);
+  let textIntro = $state(
+    cachedCtx ? (cachedSelfCopy(cachedCtx.coordinate)?.introText ?? "") : "",
+  );
 
   // Live mic level (0..1) for the audio meter; driven by a Web Audio analyser.
   let micLevel = $state(0);
@@ -67,6 +75,8 @@
   // UNLIMITED_SEC (0) means the organizer set no length cap: no hard-stop, no countdown.
   const unlimited = $derived(maxSec === UNLIMITED_SEC);
   const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
+
+  if (cachedCtx && (library.length || textIntro)) perfMark("Record", "cache-paint");
 
   onMount(async () => {
     try {
@@ -93,6 +103,8 @@
       }
     } catch (e) {
       error = e;
+    } finally {
+      perfMark("Record", "network-settled");
     }
   });
 

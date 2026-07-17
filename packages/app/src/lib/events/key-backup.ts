@@ -13,8 +13,12 @@ import { KIND_APP_DATA } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 const KEY_BACKUP_D = "nostrautica:keybackup";
+// Persist the confirmed marker per owner (CACHING-PLAN §2.10) so readiness reports
+// "secured" instantly on reload — a monotone true (never re-nag a backed-up user).
+const KEY_BACKUP_CACHE_KEY = "keybackup";
 
 // A confirmed marker never becomes false again, so once we've seen it this
 // session we can answer "yes" even offline (avoids re-nagging a backed-up user).
@@ -35,6 +39,7 @@ export async function markKeyBackedUp(signer: AppSigner): Promise<void> {
   });
   await publishOrQueue(event);
   confirmed.add(pubkey);
+  cacheSet(KEY_BACKUP_CACHE_KEY, true, Math.floor(Date.now() / 1000), pubkey);
 }
 
 /**
@@ -45,13 +50,21 @@ export async function markKeyBackedUp(signer: AppSigner): Promise<void> {
 export async function hasDurableKeyBackup(signer: AppSigner): Promise<boolean> {
   const pubkey = await signer.getPublicKey();
   if (confirmed.has(pubkey)) return true;
+  // Persisted marker: report secured instantly on a reload, before the network.
+  if (cacheGet<boolean>(KEY_BACKUP_CACHE_KEY, pubkey)?.data) {
+    confirmed.add(pubkey);
+    return true;
+  }
   const events = await fetchEvents({
     kinds: [KIND_APP_DATA],
     authors: [pubkey],
     "#d": [KEY_BACKUP_D],
   });
   const has = events.length > 0;
-  if (has) confirmed.add(pubkey);
+  if (has) {
+    confirmed.add(pubkey);
+    cacheSet(KEY_BACKUP_CACHE_KEY, true, Math.floor(Date.now() / 1000), pubkey);
+  }
   return has;
 }
 

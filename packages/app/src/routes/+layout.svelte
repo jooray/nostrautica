@@ -13,6 +13,8 @@
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
+  import { hydrateAppCache } from "$lib/cache/persist.js";
+  import { prefetchIdentity } from "$lib/nostr/prefetch.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import TopBar from "$lib/components/TopBar.svelte";
@@ -35,6 +37,10 @@
     online.init();
     recentEvents.init();
     router.init();
+    // Warm the persistent app-cache mirror BEFORE booting so every page's
+    // cachedX() helper paints on first render (CACHING-PLAN §1.1). Bounded to
+    // 1500 ms internally, so a slow/broken IDB never blocks boot.
+    await hydrateAppCache();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
     await consumeNsecFromHash();
     if (!session.loggedIn) await session.restore().catch(() => {});
@@ -42,6 +48,10 @@
     void flushQueue();
     registerPwa();
     booted = true;
+    // Identity-scoped warmers (§2.15): grants, recovery, own kind-0, follows,
+    // mutes, DM relay list, blind seed (local only), one DM inbox scan. Silent
+    // (fire-and-forget) and silent-signer-guarded inside the warmer.
+    if (session.signer) prefetchIdentity(session.signer);
   });
 
   // Per-route document title, focus management, and a polite announcement (A2).

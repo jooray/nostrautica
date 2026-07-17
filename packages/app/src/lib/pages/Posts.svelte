@@ -22,6 +22,7 @@
     type EventPost,
   } from "$lib/events/posts.js";
   import PostCard from "$lib/components/PostCard.svelte";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -38,6 +39,7 @@
     (cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? [],
   );
   let loading = $state(eventPosts.length === 0 && attendeePosts.length === 0);
+  if (!loading) perfMark("Posts", "cache-paint");
 
   let source = $state<"event" | "attendees" | "both">("both");
   let visibility = $state<"public" | "members" | "both">("both");
@@ -73,6 +75,7 @@
         error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+      perfMark("Posts", "network-settled");
     }
   });
 </script>

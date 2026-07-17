@@ -5,12 +5,14 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
-  import { fetchRoster, receiveGrants } from "$lib/events/attendee.js";
+  import { fetchRoster, cachedRoster, receiveGrants } from "$lib/events/attendee.js";
   import {
     fetchPending,
+    cachedPending,
     approveAttendee,
     attachCoordinator,
     fetchCoordinatorLastSeen,
+    cachedCoordinatorLastSeen,
     generateInvites,
     revokeAttendeeClient,
     sendAdminCommand,
@@ -19,17 +21,19 @@
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
-  import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
+  import { fetchCoordinatorStatuses, cachedCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import {
     fetchCoordinators,
+    cachedCoordinators,
     pricingLabel,
     checkoutUrlForEvent,
     type DiscoveredCoordinator,
   } from "$lib/events/coordinators.js";
-  import { fetchPendingTalks, type PendingTalk } from "$lib/events/talks.js";
+  import { fetchPendingTalks, cachedPendingTalks, type PendingTalk } from "$lib/events/talks.js";
+  import { perfMark } from "$lib/perf.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
   import { decode } from "nostr-tools/nip19";
@@ -38,6 +42,7 @@
   import { publishEventUpdate } from "$lib/events/updates.js";
   import {
     fetchEventPosts,
+    cachedEventPosts,
     publishMembersPost,
     type EventPost,
     type PostVisibility,
@@ -67,6 +72,9 @@
   let approvedSet = $state<Set<string>>(new Set()); // approved this session
   let rosterApproved = $state<Set<string>>(new Set()); // approved per the roster
   let loading = $state(true);
+  // A subtle "refreshing…" affordance while background refreshes run on top of a
+  // cached paint (CACHING-PLAN §2.11, §3.4) — spinners only on a true cold open.
+  let refreshing = $state(false);
   let error = $state<string | null>(null);
   let notOrganizer = $state(false);
   let missingEidKey = $state(false); // organizer role but no E_id secret on this device
@@ -195,17 +203,42 @@
       // Organizer role but still no E_id after recovery: writes will fail, so
       // flag it and surface a clear message instead of cryptic per-action errors.
       missingEidKey = !keys.eidNsecHex;
-      await refresh();
-      await loadUpdates();
-      void refreshLiveness();
-      // Warm the coordinator picker when none is attached yet.
-      if (!ctx.config.coordinator) void loadCoordinators();
+      // Paint every Admin slice from cache instantly (§2.11): pending, roster
+      // approvals, pending talks, statuses, last-seen, updates, coordinators.
+      paintFromCache();
+      loading = false;
+      perfMark("Admin", "cache-paint");
+      // Then run all refreshes in parallel — they're independent — updating each
+      // slice as it lands. The relay-only scan semantics are untouched.
+      refreshing = true;
+      await Promise.allSettled([
+        refresh(),
+        loadUpdates(),
+        refreshLiveness(),
+        !ctx.config.coordinator ? loadCoordinators() : Promise.resolve(),
+      ]);
+      refreshing = false;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+      refreshing = false;
+      perfMark("Admin", "network-settled");
     }
   });
+
+  /** Seed every slice from the persistent cache for an instant Admin paint (§2.11). */
+  function paintFromCache() {
+    if (!ctx) return;
+    const coord = ctx.coordinate;
+    pending = cachedPending(coord) ?? pending;
+    rosterApproved = new Set(cachedRoster(coord)?.attendees.map((a) => a.pubkey) ?? [...rosterApproved]);
+    pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
+    coordStatuses = cachedCoordinatorStatuses(coord) ?? coordStatuses;
+    coordLastSeen = cachedCoordinatorLastSeen(coord) ?? coordLastSeen;
+    posts = cachedEventPosts(coord) ?? posts;
+    if (!ctx.config.coordinator) coordinators = cachedCoordinators() ?? coordinators;
+  }
 
   async function pollForOrganizerGrant() {
     if (!ctx || !session.signer) return;
@@ -790,6 +823,12 @@
 {:else if loading}
   <p class="muted">{t("admin.loading")}</p>
 {:else}
+  {#if refreshing}
+    <!-- Subtle refresh affordance over the cached paint (§2.11) — not a spinner. -->
+    <p class="muted" role="status" aria-live="polite" style="font-size:0.8rem;margin:0 0 0.35rem">
+      {t("admin.loading")}
+    </p>
+  {/if}
   <div class="row" style="justify-content:space-between">
     <button
       class="btn inline"

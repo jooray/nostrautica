@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   generateEck,
   bytesToBase64,
@@ -7,7 +7,44 @@ import {
   KIND_MEMBERS_POST,
   type EckVersion,
 } from "@nostrautica/protocol";
-import { dedupePostsByD, toEventPost, randomPostD, type RawPostEvent } from "./posts.js";
+
+// Cache-path setup (CACHING-PLAN §2.4): mock the relay layer so fetchEventPosts
+// runs against a fixed event set and we can assert the persistent write-through.
+const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
+vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
+vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue: vi.fn() }));
+
+import {
+  dedupePostsByD,
+  toEventPost,
+  randomPostD,
+  fetchEventPosts,
+  cachedEventPosts,
+  type RawPostEvent,
+} from "./posts.js";
+import type { EventContext } from "./event-context.js";
+import {
+  __setPersistBackend,
+  __resetPersistForTests,
+  setActiveCacheOwner,
+  type CacheEntry,
+  type PersistBackend,
+} from "$lib/cache/persist.js";
+
+function memPersist(): PersistBackend {
+  const store = new Map<string, CacheEntry>();
+  return {
+    async getAll() {
+      return [...store.entries()];
+    },
+    async put(k, v) {
+      store.set(k, v);
+    },
+    async delete(keys) {
+      for (const k of keys) store.delete(k);
+    },
+  };
+}
 
 const EID = "e".repeat(64);
 
@@ -132,5 +169,45 @@ describe("randomPostD", () => {
     const b = randomPostD();
     expect(a).toMatch(/^[0-9a-f]{32}$/);
     expect(a).not.toBe(b);
+  });
+});
+
+describe("fetchEventPosts cache write-through (§2.4)", () => {
+  const OWNER = "1".repeat(64);
+  const ctx = {
+    coordinate: `31923:${EID}:ev`,
+    config: { relays: [] },
+  } as unknown as EventContext;
+
+  beforeEach(() => {
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    fetchEvents.mockReset();
+  });
+
+  it("persists the fetched feed owner-scoped so cachedEventPosts paints it", async () => {
+    setActiveCacheOwner(OWNER);
+    fetchEvents.mockResolvedValue([pub("x", 100, "Hello")]);
+    expect(cachedEventPosts(ctx.coordinate)).toBeUndefined();
+
+    const posts = await fetchEventPosts(ctx);
+    expect(posts).toHaveLength(1);
+    expect(cachedEventPosts(ctx.coordinate)?.[0].title).toBe("Hello");
+
+    // Owner-scoped: a different identity does not see this feed.
+    setActiveCacheOwner("2".repeat(64));
+    expect(cachedEventPosts(ctx.coordinate)).toBeUndefined();
+  });
+
+  it("latest-wins: an older re-fetch never regresses the cached feed", async () => {
+    setActiveCacheOwner(OWNER);
+    fetchEvents.mockResolvedValue([pub("x", 500, "New")]);
+    await fetchEventPosts(ctx);
+    expect(cachedEventPosts(ctx.coordinate)?.[0].title).toBe("New");
+
+    // A stale relay answers with an older revision — the cache keeps the newer one.
+    fetchEvents.mockResolvedValue([pub("x", 100, "Old")]);
+    await fetchEventPosts(ctx);
+    expect(cachedEventPosts(ctx.coordinate)?.[0].title).toBe("New");
   });
 });

@@ -34,6 +34,7 @@ import { loadEventKeys, currentEck } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 async function eckBytes(coordinate: string): Promise<Uint8Array | undefined> {
   const keys = await loadEventKeys(coordinate);
@@ -45,6 +46,21 @@ async function eckBytes(coordinate: string): Promise<Uint8Array | undefined> {
 export interface TalkItem {
   talk: TalkContent;
   d: string;
+}
+
+// Decrypted talks are member-only (ECK), cached owner-scoped and wiped on logout
+// (CACHING-PLAN §2.5): Talks/TalkDetail paint the last set instantly on revisit.
+function talksKey(coordinate: string): string {
+  return `talks:${coordinate}`;
+}
+
+/** Cached decrypted talks for a coordinate (no network), or undefined. */
+export function cachedTalks(coordinate: string): TalkItem[] | undefined {
+  return cacheGet<TalkItem[]>(talksKey(coordinate))?.data;
+}
+/** One cached talk by its blinded `d` (no network), or undefined. */
+export function cachedTalk(coordinate: string, d: string): TalkContent | undefined {
+  return cachedTalks(coordinate)?.find((it) => it.d === d)?.talk;
 }
 
 /**
@@ -69,16 +85,20 @@ export async function fetchTalks(ctx: EventContext): Promise<TalkItem[]> {
     if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latestByD.set(d, e);
   }
   const items: TalkItem[] = [];
+  let newestAt = 0;
   for (const [d, e] of latestByD) {
     try {
       const talk = talkContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content)));
       if (talk.status === "published") items.push({ talk, d });
+      if ((e.created_at ?? 0) > newestAt) newestAt = e.created_at ?? 0;
     } catch {
       /* skip talks we can't decrypt (published under a newer ECK) or malformed */
     }
   }
   // Newest published first.
-  return items.sort((a, b) => b.talk.published_at - a.talk.published_at);
+  const sorted = items.sort((a, b) => b.talk.published_at - a.talk.published_at);
+  cacheSet(talksKey(ctx.coordinate), sorted, newestAt);
+  return sorted;
 }
 
 /** A single talk by its blinded `d` route param (found among the fetched set). */
@@ -111,6 +131,15 @@ export interface RawTalkSubmission {
 /** Stable per-speaker-per-talk key used for dedup + published-revision lookup. */
 function talkKey(pubkey: string, talkD: string): string {
   return `${pubkey}:${talkD}`;
+}
+
+// Cached pending-talk moderation queue, owner-scoped (CACHING-PLAN §2.11).
+function pendingTalksKey(coordinate: string): string {
+  return `pendingtalks:${coordinate}`;
+}
+/** Cached pending talks for a coordinate (no network), or undefined. */
+export function cachedPendingTalks(coordinate: string): PendingTalk[] | undefined {
+  return cacheGet<PendingTalk[]>(pendingTalksKey(coordinate))?.data;
 }
 
 /**
@@ -192,7 +221,10 @@ export async function fetchPendingTalks(
     publishedRevByKey.set(key, Math.max(publishedRevByKey.get(key) ?? -1, talk.revision));
   }
 
-  return dedupePendingTalks(subs, publishedRevByKey);
+  const queue = dedupePendingTalks(subs, publishedRevByKey);
+  const newestAt = queue.reduce((m, tk) => Math.max(m, tk.rumorCreatedAt), 0);
+  cacheSet(pendingTalksKey(ctx.coordinate), queue, newestAt);
+  return queue;
 }
 
 /** A locally-generated, stable talk id (`talk_d`) for a new talk. */

@@ -3,19 +3,24 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchTalks, type TalkItem } from "$lib/events/talks.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { fetchTalks, cachedTalks, type TalkItem } from "$lib/events/talks.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
-  let ctx = $state<EventContext | null>(null);
-  let items = $state<TalkItem[]>([]);
-  let loading = $state(true);
+  const cachedCtx = cachedEventContext(naddr);
+  let ctx = $state<EventContext | null>(cachedCtx ?? null);
+  // Cache-first paint (§2.5): last-seen talks render instantly, then refresh.
+  let items = $state<TalkItem[]>(cachedCtx ? (cachedTalks(cachedCtx.coordinate) ?? []) : []);
+  let loading = $state(items.length === 0);
   let error = $state<unknown>(null);
   let gatedOff = $state(false);
+
+  if (items.length) perfMark("Talks", "cache-paint");
 
   onMount(async () => {
     try {
@@ -31,6 +36,7 @@
       error = e;
     } finally {
       loading = false;
+      perfMark("Talks", "network-settled");
     }
   });
 </script>

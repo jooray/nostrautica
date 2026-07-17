@@ -8,7 +8,7 @@
  */
 import { loadEventContext, cachedEventContext } from "./event-context.js";
 import { parseCoordinate } from "@nostrautica/protocol";
-import { fetchEventTheme } from "./theme.js";
+import { fetchEventTheme, cachedEventTheme } from "./theme.js";
 import { avatarHues } from "$lib/identity/avatar.js";
 
 const ATTR = "data-event-theme";
@@ -102,7 +102,13 @@ export async function syncEventTheme(naddr: string | undefined): Promise<void> {
   const token = requestToken;
   // Apply the wash as early as possible: synchronously from cache when we have it.
   const cached = cachedEventContext(naddr);
-  if (cached) syncEventWash(cached.coordinate);
+  if (cached) {
+    syncEventWash(cached.coordinate);
+    // Apply the cached 31609 CSS synchronously too (§2.12) — no unthemed flash on
+    // reload/re-entry; the fetch below refreshes it in the background.
+    const cachedCss = cachedEventTheme(cached.coordinate);
+    if (cachedCss) inject(naddr, cachedCss);
+  }
   try {
     const ctx = cached ?? (await loadEventContext(naddr));
     if (token !== requestToken) return; // navigated away meanwhile

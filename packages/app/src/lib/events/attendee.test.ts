@@ -5,7 +5,7 @@
  * configured coordinator for key grants) — a grant forged by an arbitrary Nostr
  * key claiming to be that authority is rejected. Pure crypto, no relays.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import {
   makeCoordinate,
@@ -21,7 +21,65 @@ import {
 } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { authenticateKeyGrant, authenticateOrganizerGrant } from "./attendee.js";
+import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches } from "./attendee.js";
+
+// Cache-path setup (CACHING-PLAN §2.3): mock the relay stream so fetchMatches
+// runs against a fixed 31605, and inject an in-memory keystore for the ECK.
+import type { EventContext } from "./event-context.js";
+import {
+  __setKeystoreBackend,
+  setActiveOwner,
+  saveEventKeys,
+  type KeystoreBackend,
+} from "./keystore.js";
+import {
+  __setPersistBackend,
+  __resetPersistForTests,
+  setActiveCacheOwner,
+  type CacheEntry,
+  type PersistBackend,
+} from "$lib/cache/persist.js";
+
+const { streamEvents } = vi.hoisted(() => ({ streamEvents: vi.fn() }));
+vi.mock("$lib/nostr/stream.js", () => ({ streamEvents }));
+vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents: vi.fn(), fetchEventsRelayOnly: vi.fn() }));
+
+function memKeystore(): KeystoreBackend {
+  const composite = new Map<string, { owner: string; coordinate: string } & Record<string, unknown>>();
+  return {
+    async get(o, c) {
+      return composite.get(`${o} ${c}`) as never;
+    },
+    async put(rec) {
+      composite.set(`${rec.owner} ${rec.coordinate}`, rec as never);
+    },
+    async list(o) {
+      return [...composite.values()].filter((r) => r.owner === o) as never;
+    },
+    async legacyGet() {
+      return undefined;
+    },
+    async legacyList() {
+      return [];
+    },
+    async legacyDelete() {},
+  };
+}
+
+function memPersist(): PersistBackend {
+  const store = new Map<string, CacheEntry>();
+  return {
+    async getAll() {
+      return [...store.entries()];
+    },
+    async put(k, v) {
+      store.set(k, v);
+    },
+    async delete(keys) {
+      for (const k of keys) store.delete(k);
+    },
+  };
+}
 
 /** A minimal parsed 31600 config for the given E_id / inbox / coordinator. */
 function makeConfig(
@@ -235,5 +293,55 @@ describe("C2 — end-to-end unwrap + authenticate (no relays)", () => {
     expect(
       authenticateOrganizerGrant(forgedRumor, forged, config),
     ).toBe(false);
+  });
+});
+
+describe("fetchMatches cache write-through (§2.3)", () => {
+  const OWNER = "1".repeat(64);
+  const COORDINATOR = "9".repeat(64);
+  const PEER = "7".repeat(64);
+  const EID2 = "e".repeat(64);
+  const coordinate = `31923:${EID2}:ev`;
+  const ctx = {
+    coordinate,
+    config: { coordinator: COORDINATOR, relays: [] },
+  } as unknown as EventContext;
+
+  const signer = {
+    getPublicKey: async () => OWNER,
+    nip44Decrypt: async () =>
+      JSON.stringify({
+        v: 1,
+        computed_at: 500,
+        matches: [
+          { pubkey: PEER, score: 0.9, similarity: 0.8, complementarity: 0.7, reasoning: "good" },
+        ],
+      }),
+  } as never;
+
+  beforeEach(async () => {
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    __setKeystoreBackend(memKeystore());
+    setActiveOwner(OWNER);
+    setActiveCacheOwner(OWNER);
+    await saveEventKeys({ coordinate, role: "attendee", eck: [{ id: 1, key: bytesToBase64(generateEck()) }] });
+    streamEvents.mockReset();
+  });
+
+  it("persists the decrypted match list owner-scoped for instant repaint", async () => {
+    streamEvents.mockReturnValue({
+      ready: Promise.resolve([{ content: "ct", created_at: 500, tags: [] }]),
+      stop: () => {},
+    });
+    expect(cachedMatches(coordinate)).toBeUndefined();
+
+    const list = await fetchMatches(signer, ctx);
+    expect(list?.matches[0].pubkey).toBe(PEER);
+    expect(cachedMatches(coordinate)?.matches[0].pubkey).toBe(PEER);
+
+    // Owner-scoped: another identity can't read this match list.
+    setActiveCacheOwner("2".repeat(64));
+    expect(cachedMatches(coordinate)).toBeUndefined();
   });
 });

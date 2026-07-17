@@ -62,6 +62,26 @@ import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+
+// Admin surfaces cache their decrypted/derived results owner-scoped so the page
+// paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
+// logout. The relay-only scans still run every refresh (HARD CONSTRAINT 1).
+function pendingKey(coordinate: string): string {
+  return `pending:${coordinate}`;
+}
+function coordSeenKey(coordinate: string): string {
+  return `coordseen:${coordinate}`;
+}
+
+/** Cached pending join queue for a coordinate (no network), or undefined. */
+export function cachedPending(coordinate: string): PendingRequest[] | undefined {
+  return cacheGet<PendingRequest[]>(pendingKey(coordinate))?.data;
+}
+/** Cached coordinator last-seen for a coordinate (no network), or undefined. */
+export function cachedCoordinatorLastSeen(coordinate: string): number | undefined {
+  return cacheGet<number>(coordSeenKey(coordinate))?.data;
+}
 
 export interface PendingRequest {
   attendeePubkey: string;
@@ -152,7 +172,10 @@ export async function fetchPending(
       req.media = sub.media;
     }
   }
-  return [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
+  const result = [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
+  const newestAt = result.reduce((m, r) => Math.max(m, r.rumorCreatedAt), 0);
+  cacheSet(pendingKey(ctx.coordinate), result, newestAt);
+  return result;
 }
 
 function parseInviteTag(tags: string[][]): InviteProof | undefined {
@@ -385,7 +408,9 @@ export async function fetchCoordinatorLastSeen(
     ).catch(() => []);
     for (const e of roster) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
   }
-  return newest || undefined;
+  const seen = newest || undefined;
+  if (seen !== undefined) cacheSet(coordSeenKey(ctx.coordinate), seen, seen);
+  return seen;
 }
 
 export interface GeneratedInvite {
