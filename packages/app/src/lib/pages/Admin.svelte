@@ -89,11 +89,20 @@
   function isApprovedNow(pubkey: string): boolean {
     return approvedSet.has(pubkey) || rosterApproved.has(pubkey);
   }
+  // Pubkeys revoked this session. A just-revoked attendee keeps their card in the
+  // Approved section (rendering "Revoked ✓"), so the outcome stays visible even
+  // once a background refresh drops them from the roster — otherwise the card
+  // would silently flip into the pending queue as a fresh, re-approvable request
+  // (their join 21601 is still on the relay), which is both confusing and racy
+  // (caching verification 2026-07-17: the e2e revoke assertion never caught the
+  // transient "Revoked ✓" because the refresh moved the card first). Excluded
+  // from pendingRequests for the same reason.
+  let revokedSet = $state<Set<string>>(new Set());
   const pendingRequests = $derived(
-    pending.filter((p) => !isApprovedNow(p.attendeePubkey)),
+    pending.filter((p) => !isApprovedNow(p.attendeePubkey) && !revokedSet.has(p.attendeePubkey)),
   );
   const approvedRequests = $derived(
-    pending.filter((p) => isApprovedNow(p.attendeePubkey)),
+    pending.filter((p) => isApprovedNow(p.attendeePubkey) || revokedSet.has(p.attendeePubkey)),
   );
 
   // The organizer is a participant of their own event only if they've enrolled
@@ -224,13 +233,18 @@
       // Then run all refreshes in parallel — they're independent — updating each
       // slice as it lands. The relay-only scan semantics are untouched.
       refreshing = true;
-      await Promise.allSettled([
-        refresh(),
-        loadUpdates(),
+      // Liveness + coordinator discovery paint no user-facing strap slice, so let
+      // them finish silently in the background (§2.11): clear the "Refreshing…"
+      // affordance as soon as the user-facing slices (pending + updates) settle,
+      // rather than lingering for the slowest background member. network-settled
+      // (finally) still waits for everything, so perf marks stay meaningful.
+      const background = Promise.allSettled([
         refreshLiveness(),
         !ctx.config.coordinator ? loadCoordinators() : Promise.resolve(),
       ]);
+      await Promise.allSettled([refresh(), loadUpdates()]);
       refreshing = false;
+      await background;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -546,12 +560,23 @@
   }
 
   async function reprocess(req: PendingRequest) {
-    if (!ctx || !session.signer) return;
+    if (!ctx || !session.signer || !keys) return;
     try {
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "reprocess", { pubkey: req.attendeePubkey });
       } else {
-        await approveAttendee(session.signer, ctx, req); // re-publishes the entry
+        // Re-process exists to pull in a submission that landed AFTER approval —
+        // typically a text intro the attendee typed once they were in. approveAttendee
+        // threads req.introText into the 31603 entry, so it must act on a FRESH
+        // fetchPending: the in-memory `req` predates that submission (this admin
+        // page hasn't re-read the E_inbox since it loaded), and republishing the
+        // stale req drops the new intro entirely (caching verification 2026-07-17:
+        // this is why the e2e directory-loop marker never reached the attendee).
+        // Fetch-fresh-before-publish, same as the other read-modify-write paths.
+        const fresh = await fetchPending(ctx, keys);
+        const latest = fresh.find((r) => r.attendeePubkey === req.attendeePubkey) ?? req;
+        pending = fresh; // keep the rendered queue in sync with what we just re-read
+        await approveAttendee(session.signer, ctx, latest); // re-publishes the entry
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -584,7 +609,6 @@
     }
   }
 
-  let revokedSet = $state<Set<string>>(new Set());
   // Inline, screenshotable revoke confirmation (no window.confirm) — the attendee
   // card swaps to the consequence copy + Revoke/Keep while this holds a pubkey.
   let confirmingRevoke = $state<string | null>(null);
@@ -837,9 +861,11 @@
   <p class="muted">{t("admin.loading")}</p>
 {:else}
   {#if refreshing}
-    <!-- Subtle refresh affordance over the cached paint (§2.11) — not a spinner. -->
+    <!-- Subtle refresh affordance over the cached paint (§2.11) — not a spinner.
+         "Refreshing…", not admin.loading ("Loading pending requests…"): the page
+         is already painted, so the loading copy would be wrong over it. -->
     <p class="muted" role="status" aria-live="polite" style="font-size:0.8rem;margin:0 0 0.35rem">
-      {t("admin.loading")}
+      {t("admin.refreshing")}
     </p>
   {/if}
   <div class="row" style="justify-content:space-between">

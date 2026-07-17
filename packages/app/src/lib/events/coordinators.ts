@@ -10,7 +10,7 @@ import {
   type CoordinatorAnnounce,
 } from "@nostrautica/protocol";
 import { npubEncode } from "nostr-tools/nip19";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { streamEvents } from "$lib/nostr/stream.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 
 export interface DiscoveredCoordinator {
@@ -42,7 +42,15 @@ export async function fetchCoordinators(
   if (!opts.force && hit && Math.floor(Date.now() / 1000) - hit.at < COORDINATORS_TTL_SEC) {
     return hit.data;
   }
-  const events = await fetchEvents({ kinds: [KIND_COORDINATOR_ANNOUNCE] }).catch(() => []);
+  // streamEvents, not fetchEvents: NDK's aggregated EOSE needs ≥2 relays before
+  // it arms its timer, so on a single-relay stack (or a coordinator-less event)
+  // fetchEvents hangs forever — and Admin.svelte awaits this in Promise.allSettled,
+  // so a hang means its network-settled mark never fires. streamEvents settles at
+  // first-EOSE+grace or the 8 s hard timeout, whichever comes first (see stream.ts).
+  const events = await streamEvents(
+    { kinds: [KIND_COORDINATOR_ANNOUNCE] },
+    { timeoutMs: 8000 },
+  ).ready.catch(() => []);
   // Latest per pubkey (replaceable, but relays may return stale copies).
   const latest = new Map<string, (typeof events)[number]>();
   for (const e of events) {

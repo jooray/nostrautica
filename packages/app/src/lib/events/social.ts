@@ -6,6 +6,7 @@
 import { KIND_CONTACTS, KIND_NOTE, KIND_PROFILE } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { streamEvents } from "$lib/nostr/stream.js";
 import { fetchFollowTags } from "./nostr-actions.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 import { swr } from "$lib/cache/swr.js";
@@ -59,7 +60,16 @@ export async function fetchProfiles(
   }
   if (stale.length === 0) return out;
 
-  const events = await fetchEvents({ kinds: [KIND_PROFILE], authors: stale });
+  // streamEvents, not fetchEvents: (a) same single-relay EOSE stall as coordinator
+  // discovery — fetchEvents hangs on a 1-relay stack; (b) fetchEvents' dexie-cache/EOSE
+  // race can resolve before a just-arrived kind-0 is surfaced (see ndk.ts
+  // fetchEventsRelayOnly), which left blank attendee names in the verification pass.
+  // NOT relay-only: the dexie cache is a legitimate fast source for public profiles,
+  // and streamEvents includes cache results while still terminating on the hard timeout.
+  const events = await streamEvents(
+    { kinds: [KIND_PROFILE], authors: stale },
+    { timeoutMs: 8000 },
+  ).ready;
   const latest = new Map<string, (typeof events)[number]>();
   for (const e of events) {
     const prev = latest.get(e.pubkey);
