@@ -21,6 +21,7 @@
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
+  import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import {
     fetchCoordinators,
@@ -68,6 +69,7 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let notOrganizer = $state(false);
+  let missingEidKey = $state(false); // organizer role but no E_id secret on this device
   let copiedLink = $state(false);
   let copiedNpub = $state(false);
   let coordLastSeen = $state<number | undefined>(undefined);
@@ -174,6 +176,14 @@
       await connectNdk();
       ctx = await loadEventContext(naddr);
       keys = (await loadEventKeys(ctx.coordinate)) ?? null;
+      // A device can hold the organizer ROLE without the E_id secret (e.g. the
+      // role arrived via a 21602 ECK grant, or a partial state) — then every
+      // admin write ("E_id key not available"). Try to restore it from the 30078
+      // self-backup before giving up (user feedback 2026-07-17).
+      if (session.signer && keys?.role === "organizer" && !keys.eidNsecHex) {
+        await recoverEventKeys(session.signer, { force: true }).catch(() => {});
+        keys = (await loadEventKeys(ctx.coordinate)) ?? keys;
+      }
       if (!keys || keys.role !== "organizer") {
         notOrganizer = true;
         // The organizer keys may arrive as a 21605 grant (co-organizer / hand-off
@@ -182,6 +192,9 @@
         void pollForOrganizerGrant();
         return;
       }
+      // Organizer role but still no E_id after recovery: writes will fail, so
+      // flag it and surface a clear message instead of cryptic per-action errors.
+      missingEidKey = !keys.eidNsecHex;
       await refresh();
       await loadUpdates();
       void refreshLiveness();
@@ -792,7 +805,14 @@
        so a pending approval is visible without scrolling past setup/invite QR. -->
   <h2 class="section-head">{t("admin.section.operations")}</h2>
 
-  {#if !selfEnrolled}
+  {#if missingEidKey}
+    <div class="card warn" style="margin-bottom:0.75rem">
+      <strong>{t("admin.noEidKey.title")}</strong>
+      <p class="muted" style="margin:0.25rem 0 0">{t("admin.noEidKey.body")}</p>
+    </div>
+  {/if}
+
+  {#if !selfEnrolled && !missingEidKey}
     <div class="card" style="margin-bottom:0.75rem">
       <strong>{t("admin.enrollSelf.title")}</strong>
       <p class="muted" style="margin:0.25rem 0 0.5rem">{t("admin.enrollSelf.body")}</p>

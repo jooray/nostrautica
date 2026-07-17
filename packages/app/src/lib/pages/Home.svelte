@@ -7,6 +7,7 @@
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { listEventKeys } from "$lib/events/keystore.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
+  import { receiveGrants } from "$lib/events/attendee.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
   import { prefetchEventContext } from "$lib/nostr/prefetch.js";
@@ -39,9 +40,18 @@
   // Backfill "My events" from the local key store — every event the user created
   // or was approved into — so events created before this list existed still show.
   onMount(async () => {
-    // Fresh-device recovery: read back the 30078 eventkeys backups so events this
-    // identity created reappear (and their custody is restored) from relays alone.
-    if (session.signer) await recoverEventKeys(session.signer).catch(() => {});
+    if (session.signer) {
+      // Fresh-device recovery, both roles so "My events" is complete on a new
+      // login (user feedback 2026-07-17: an approved attendee saw "No events yet"
+      // because their grant was never scanned here):
+      //  - recoverEventKeys: 30078 backups → events this identity CREATED (E_id).
+      //  - receiveGrants: 21602/21605 gift-wraps → events this identity was
+      //    APPROVED into (ECK) or granted co-organizer custody.
+      await Promise.allSettled([
+        recoverEventKeys(session.signer),
+        receiveGrants(session.signer),
+      ]);
+    }
     const keys = await listEventKeys().catch(() => []);
     for (const k of keys) {
       if (recentEvents.has(k.coordinate)) continue;

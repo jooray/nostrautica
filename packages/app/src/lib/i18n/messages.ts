@@ -573,6 +573,9 @@ export const messages = {
     "admin.enrollSelf.title": "Join your own event",
     "admin.enrollSelf.body":
       "You created this event but aren't a participant yet. Join to appear in People, get matched, and — if group chat is on — be added to it. Being the organizer alone doesn't put you on the roster.",
+    "admin.noEidKey.title": "Organizer key not on this device",
+    "admin.noEidKey.body":
+      "You hold this event's organizer role here, but not its signing key (E_id), so admin actions can't be published from this device. Open the event on the device where you created it, or restore that device's key backup, then come back.",
     "admin.enrollSelf.action": "Join as a participant",
     "admin.enrollSelf.busy": "Joining…",
     "admin.enrollSelf.sent":
@@ -1479,6 +1482,9 @@ export const messages = {
     "admin.enrollSelf.title": "Pridajte sa na vlastné podujatie",
     "admin.enrollSelf.body":
       "Vytvorili ste toto podujatie, ale ešte nie ste účastník. Pridajte sa, aby ste sa zobrazili v zozname ľudí, boli spárovaní a — ak je zapnutý skupinový chat — boli doň pridaní. Byť organizátorom vás samo o sebe nezaradí do zoznamu.",
+    "admin.noEidKey.title": "Kľúč organizátora nie je na tomto zariadení",
+    "admin.noEidKey.body":
+      "Na tomto zariadení máte rolu organizátora, ale nie podpisový kľúč (E_id), takže odtiaľto sa administrátorské akcie nedajú zverejniť. Otvorte podujatie na zariadení, kde ste ho vytvorili, alebo obnovte zálohu kľúča z toho zariadenia a vráťte sa.",
     "admin.enrollSelf.action": "Pridať sa ako účastník",
     "admin.enrollSelf.busy": "Pridávam…",
     "admin.enrollSelf.sent":

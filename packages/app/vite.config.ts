@@ -21,14 +21,18 @@ export default defineConfig({
         // (which has NO html), so the plugin never precaches the shell — yet it
         // still registers a NavigationRoute to it. That mismatch threw
         // `non-precached-url` at SW load, aborting the whole service worker
-        // (prod console 2026-07-17). Explicitly precache the shell at "<base>/"
-        // (the origin serves index.html there) and point the fallback at it, so
-        // `createHandlerBoundToURL` resolves and the SW installs. The per-build
-        // `revision` makes the shell refresh on deploy (drives auto-update).
-        navigateFallback: (process.env.BASE_PATH || "") + "/",
+        // (prod console 2026-07-17). Explicitly precache the shell and point the
+        // fallback at it so `createHandlerBoundToURL` resolves and the SW
+        // installs. We precache the explicit `index.html` FILE (not the bare
+        // "<base>/" directory): it's a real 200 blob on BOTH deploy targets —
+        // nginx and nsite — whereas nsite only serves its SPA fallback for
+        // unknown deep paths with a 404 (which a precache fetch would reject),
+        // and "<base>/" directory-indexing isn't guaranteed. The per-build
+        // `revision` refreshes the shell on deploy (drives auto-update).
+        navigateFallback: (process.env.BASE_PATH || "") + "/index.html",
         additionalManifestEntries: [
           {
-            url: (process.env.BASE_PATH || "") + "/",
+            url: (process.env.BASE_PATH || "") + "/index.html",
             revision: `${pkg.version}-${Date.now()}`,
           },
         ],
