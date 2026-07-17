@@ -569,6 +569,13 @@ export const messages = {
     "admin.pending.many": "{n} pending requests ↓",
     "admin.refresh": "Refresh",
     "admin.section.operations": "Operations",
+    "admin.enrollSelf.title": "Join your own event",
+    "admin.enrollSelf.body":
+      "You created this event but aren't a participant yet. Join to appear in People, get matched, and — if group chat is on — be added to it. Being the organizer alone doesn't put you on the roster.",
+    "admin.enrollSelf.action": "Join as a participant",
+    "admin.enrollSelf.busy": "Joining…",
+    "admin.enrollSelf.sent":
+      "Joined ✓ — with a coordinator attached it adds you to People and the group chat within a few seconds. Refresh to check.",
     "admin.section.communicate": "Communicate",
     "admin.section.people": "People",
     "admin.section.setup": "Event setup",
@@ -1452,6 +1459,13 @@ export const messages = {
     "admin.pending.many": "{n} čakajúcich žiadostí ↓",
     "admin.refresh": "Obnoviť",
     "admin.section.operations": "Prevádzka",
+    "admin.enrollSelf.title": "Pridajte sa na vlastné podujatie",
+    "admin.enrollSelf.body":
+      "Vytvorili ste toto podujatie, ale ešte nie ste účastník. Pridajte sa, aby ste sa zobrazili v zozname ľudí, boli spárovaní a — ak je zapnutý skupinový chat — boli doň pridaní. Byť organizátorom vás samo o sebe nezaradí do zoznamu.",
+    "admin.enrollSelf.action": "Pridať sa ako účastník",
+    "admin.enrollSelf.busy": "Pridávam…",
+    "admin.enrollSelf.sent":
+      "Pridané ✓ — s pripojeným koordinátorom vás do zoznamu ľudí a skupinového chatu pridá v priebehu pár sekúnd. Obnovte pre kontrolu.",
     "admin.section.communicate": "Komunikácia",
     "admin.section.people": "Ľudia",
     "admin.section.setup": "Nastavenie podujatia",

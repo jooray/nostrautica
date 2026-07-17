@@ -20,6 +20,8 @@
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
+  import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
+  import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { fetchPendingTalks, type PendingTalk } from "$lib/events/talks.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
@@ -77,6 +79,39 @@
   const approvedRequests = $derived(
     pending.filter((p) => isApprovedNow(p.attendeePubkey)),
   );
+
+  // The organizer is a participant of their own event only if they've enrolled
+  // (the create-form checkbox, or the button below). Being the organizer is NOT
+  // the same as being on the roster — and the group chat only includes roster
+  // members, so an un-enrolled organizer can't see the chat (user feedback
+  // 2026-07-17).
+  const selfEnrolled = $derived(!!session.pubkey && rosterApproved.has(session.pubkey));
+  let enrollingSelf = $state(false);
+  let enrollSent = $state(false);
+  let enrollError = $state<string | null>(null);
+
+  async function enrollSelf() {
+    if (!ctx || !session.signer) return;
+    enrollingSelf = true;
+    enrollError = null;
+    try {
+      const bk = await deriveBlindingKey(session.signer);
+      const base = window.location.origin + window.location.pathname;
+      await enrollOrganizerAsParticipant(session.signer, ctx, bk, base);
+      // Fold in the grant we just self-issued + refresh the roster. With a
+      // coordinator attached, the authoritative roster is the coordinator's — it
+      // republishes (and adds us to the group chat via syncMember) a few seconds
+      // after it processes our join request, so `selfEnrolled` flips on a later
+      // refresh; show a "sent" note meanwhile.
+      if (session.signer) await receiveGrants(session.signer).catch(() => {});
+      await refresh();
+      enrollSent = true;
+    } catch (e) {
+      enrollError = e instanceof Error ? e.message : String(e);
+    } finally {
+      enrollingSelf = false;
+    }
+  }
 
   async function refresh() {
     if (!ctx || !keys) return;
@@ -711,6 +746,21 @@
   <!-- Operations first (§9): urgent join requests render above everything else,
        so a pending approval is visible without scrolling past setup/invite QR. -->
   <h2 class="section-head">{t("admin.section.operations")}</h2>
+
+  {#if !selfEnrolled}
+    <div class="card" style="margin-bottom:0.75rem">
+      <strong>{t("admin.enrollSelf.title")}</strong>
+      <p class="muted" style="margin:0.25rem 0 0.5rem">{t("admin.enrollSelf.body")}</p>
+      {#if enrollSent}
+        <p class="muted" style="margin:0">{t("admin.enrollSelf.sent")}</p>
+      {:else}
+        <button class="btn inline primary" onclick={enrollSelf} disabled={enrollingSelf}>
+          {enrollingSelf ? t("admin.enrollSelf.busy") : t("admin.enrollSelf.action")}
+        </button>
+      {/if}
+      {#if enrollError}<p class="muted" style="color:var(--danger);margin:0.5rem 0 0">{enrollError}</p>{/if}
+    </div>
+  {/if}
 
   {#if poisonStatuses.length}
     <div class="stack" style="margin-bottom:0.75rem">
