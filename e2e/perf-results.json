@@ -1,0 +1,179 @@
+{
+  "naddr": "naddr1qvzqqqrukvpzqf53g9yda8anr7stmr4hxjq9gsvmfzecuwdlxgrjzzc3wzf6mvcxqyfhwue69uhkcmmrv9kxsmmnwsarwdehxuqp7ur9wfnz6mt9v9eh2un9d4jkuapdv4mx2mn594nrgd3h8qcrvds4te8qa",
+  "results": {
+    "Home": {
+      "cold": {
+        "cachePaintMs": 3,
+        "networkSettledMs": 22
+      },
+      "warmNav": {
+        "cachePaintMs": 5,
+        "networkSettledMs": 19
+      },
+      "warmReload": {
+        "cachePaintMs": 27,
+        "networkSettledMs": 55
+      }
+    },
+    "EventHome": {
+      "cold": {
+        "cachePaintMs": 1,
+        "networkSettledMs": 73
+      },
+      "warmNav": {
+        "cachePaintMs": 1,
+        "networkSettledMs": 38
+      },
+      "warmReload": {
+        "cachePaintMs": 13,
+        "networkSettledMs": 264
+      }
+    },
+    "Attendees": {
+      "cold": {
+        "cachePaintMs": 1,
+        "networkSettledMs": 427
+      },
+      "warmNav": {
+        "cachePaintMs": 1,
+        "networkSettledMs": 428
+      },
+      "warmReload": {
+        "cachePaintMs": 11,
+        "networkSettledMs": 644
+      }
+    },
+    "Attendee": {
+      "cold": {
+        "cachePaintMs": 2,
+        "networkSettledMs": 48
+      },
+      "warmNav": {
+        "cachePaintMs": 2,
+        "networkSettledMs": 45
+      },
+      "warmReload": {
+        "cachePaintMs": 12,
+        "networkSettledMs": 365
+      }
+    },
+    "Matches": {
+      "cold": {
+        "cachePaintMs": null,
+        "networkSettledMs": 17
+      },
+      "warmNav": {
+        "cachePaintMs": null,
+        "networkSettledMs": 15
+      },
+      "warmReload": {
+        "cachePaintMs": null,
+        "networkSettledMs": 261
+      }
+    },
+    "Posts": {
+      "cold": {
+        "cachePaintMs": 0,
+        "networkSettledMs": 452
+      },
+      "warmNav": {
+        "cachePaintMs": 0,
+        "networkSettledMs": 449
+      },
+      "warmReload": {
+        "cachePaintMs": 11,
+        "networkSettledMs": 676
+      }
+    },
+    "Post": {
+      "cold": {
+        "cachePaintMs": 0,
+        "networkSettledMs": 44
+      },
+      "warmNav": {
+        "cachePaintMs": 0,
+        "networkSettledMs": 47
+      },
+      "warmReload": {
+        "cachePaintMs": 12,
+        "networkSettledMs": 359
+      }
+    },
+    "Talks": {
+      "cold": {
+        "cachePaintMs": null,
+        "networkSettledMs": 31
+      },
+      "warmNav": {
+        "cachePaintMs": null,
+        "networkSettledMs": 34
+      },
+      "warmReload": {
+        "cachePaintMs": null,
+        "networkSettledMs": 373
+      }
+    },
+    "Admin": {
+      "cold": {
+        "cachePaintMs": 21,
+        "networkSettledMs": null
+      },
+      "warmNav": {
+        "cachePaintMs": 19,
+        "networkSettledMs": null
+      },
+      "warmReload": {
+        "cachePaintMs": 277,
+        "networkSettledMs": null
+      }
+    },
+    "Dm": {
+      "cold": {
+        "cachePaintMs": 1,
+        "networkSettledMs": 414
+      },
+      "warmNav": {
+        "cachePaintMs": 0,
+        "networkSettledMs": 404
+      },
+      "warmReload": {
+        "cachePaintMs": 12,
+        "networkSettledMs": 567
+      }
+    },
+    "DmChat": {
+      "cold": {
+        "cachePaintMs": 2,
+        "networkSettledMs": 409
+      },
+      "warmNav": {
+        "cachePaintMs": 1,
+        "networkSettledMs": 407
+      },
+      "warmReload": {
+        "cachePaintMs": 12,
+        "networkSettledMs": 660
+      }
+    },
+    "Record": {
+      "cold": {
+        "cachePaintMs": null,
+        "networkSettledMs": 53
+      },
+      "warmNav": {
+        "cachePaintMs": null,
+        "networkSettledMs": 47
+      },
+      "warmReload": {
+        "cachePaintMs": null,
+        "networkSettledMs": 301
+      }
+    }
+  },
+  "relayKilledCheck": {
+    "idbExists": true,
+    "cachePaintMs": 11,
+    "networkSettledFired": false,
+    "paintedRealContent": true
+  }
+}

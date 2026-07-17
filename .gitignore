@@ -31,3 +31,6 @@ logo-prompts.txt
 # internal AI-agent audit/planning notes — point-in-time snapshots, not docs for
 # readers; kept local, never committed or deployed
 docs/internal/
+
+# playwright artifacts
+e2e/test-results/
