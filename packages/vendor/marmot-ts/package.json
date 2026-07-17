@@ -1,0 +1,78 @@
+{
+  "name": "@internet-privacy/marmot-ts",
+  "version": "0.6.0",
+  "description": "Vendored build of @internet-privacy/marmot-ts 0.6.0 (marmot-protocol/marmot-ts master @ 2f60dbb). Emits the current Marmot v2 wire format (kind 30443) and carries the mandatory marmot.account-identity-proof.v1 leaf needed for Whitenoise/MDK interop. Committed pre-built (see packages/vendor/README) because 0.6.0 depends on an unpublished ts-mls fork via a git-submodule path dep that pnpm --frozen-lockfile cannot resolve; npm's published 0.5.1 lacks the identity-proof leaf.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./mls": {
+      "types": "./lib/mls.d.ts",
+      "import": "./lib/mls.js",
+      "default": "./lib/mls.js"
+    },
+    "./client": {
+      "types": "./lib/client/index.d.ts",
+      "import": "./lib/client/index.js",
+      "default": "./lib/client/index.js"
+    },
+    "./core": {
+      "types": "./lib/core/index.d.ts",
+      "import": "./lib/core/index.js",
+      "default": "./lib/core/index.js"
+    },
+    "./engine": {
+      "types": "./lib/engine/index.d.ts",
+      "import": "./lib/engine/index.js",
+      "default": "./lib/engine/index.js"
+    },
+    "./audit": {
+      "types": "./lib/audit/index.d.ts",
+      "import": "./lib/audit/index.js",
+      "default": "./lib/audit/index.js"
+    },
+    "./extra": {
+      "types": "./lib/extra/index.d.ts",
+      "import": "./lib/extra/index.js",
+      "default": "./lib/extra/index.js"
+    },
+    "./extra/audit/node": {
+      "types": "./lib/extra/audit/node.d.ts",
+      "import": "./lib/extra/audit/node.js",
+      "default": "./lib/extra/audit/node.js"
+    },
+    "./extra/audit/browser": {
+      "types": "./lib/extra/audit/browser.d.ts",
+      "import": "./lib/extra/audit/browser.js",
+      "default": "./lib/extra/audit/browser.js"
+    },
+    "./utils": {
+      "types": "./lib/utils/index.d.ts",
+      "import": "./lib/utils/index.js",
+      "default": "./lib/utils/index.js"
+    },
+    "./package.json": "./package.json",
+    "./lib/*": "./lib/*"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@scure/base": "^2.2.0",
+    "applesauce-common": "0.0.0-next-20260620175751",
+    "applesauce-core": "0.0.0-next-20260620175751",
+    "debug": "^4.4.3",
+    "eventemitter3": "^5.0.4",
+    "ts-mls": "workspace:*"
+  }
+}

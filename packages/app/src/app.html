@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b0b12" />
+    <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
+    <!-- Social preview (shares the branded OG card with the landing page) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Nostrautica" />
+    <meta property="og:url" content="https://nostrautica.cypherpunk.today/app" />
+    <meta property="og:title" content="Nostrautica — meet the right people at events" />
+    <meta
+      property="og:description"
+      content="Nostr-native matchmaking: record a short intro, get an AI-written list of who to meet and why, and keep a real portable Nostr identity."
+    />
+    <meta property="og:image" content="https://nostrautica.cypherpunk.today/assets/og-card.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Nostrautica" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Nostrautica — meet the right people at events" />
+    <meta name="twitter:description" content="Nostr-native matchmaking for any event." />
+    <meta name="twitter:image" content="https://nostrautica.cypherpunk.today/assets/og-card.png" />
+    <!--
+      CSP (spec §14). The real goal is blocking THIRD-PARTY/external scripts and
+      limiting network to relays (wss) + Blossom (https) — enforced by the absence
+      of any external host in script-src/connect-src. 'unsafe-inline' is allowed for
+      scripts so SvelteKit's inline bootstrap runs AND NIP-07 signer extensions
+      (which inject inline content scripts) keep working; the app uses no {@html},
+      so there is no untrusted-HTML injection vector. Kept as a meta so it applies
+      on any dumb static host and on nsite. Local e2e builds (VITE_NOSTRAUTICA_*
+      overrides) must also set PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" — plain-scheme
+      localhost infra is otherwise blocked; unset, the substitution is empty and
+      production CSP is unchanged.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
+    />
+    %sveltekit.head%
+  </head>
+  <body data-sveltekit-preload-data="hover">
+    <div style="display: contents">%sveltekit.body%</div>
+  </body>
+</html>

@@ -1,0 +1,38 @@
+{
+  "name": "@nostrautica/app",
+  "version": "0.6.5",
+  "description": "Nostrautica PWA — static SvelteKit client (relays + Blossom only).",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@internet-privacy/marmot-ts": "workspace:*",
+    "@nostrautica/protocol": "workspace:*",
+    "nostr-tools": "^2.10.4",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@nostr-dev-kit/ndk": "^3.0.3",
+    "@nostr-dev-kit/cache-dexie": "^2.7.8",
+    "@sveltejs/adapter-static": "^3.0.8",
+    "@sveltejs/kit": "^2.15.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "@types/qrcode": "^1.5.5",
+    "dexie": "^4.0.10",
+    "qrcode": "^1.5.4",
+    "svelte": "^5.16.0",
+    "svelte-check": "^4.1.1",
+    "typescript": "^5.7.2",
+    "vite": "^7.0.0",
+    "@vite-pwa/sveltekit": "^1.0.0",
+    "workbox-window": "^7.3.0",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,76 @@
+# Nostrautica coordinator configuration (spec §9.5).
+# Installation is protocol-level (a 21603 grant from an organizer) — there is no
+# per-event server config here, only the daemon's identity, providers, and knobs.
+
+[identity]
+# Provide the secret key via env NOSTRAUTICA_COORDINATOR_NSEC (nsec or 64-hex),
+# or point at an NIP-49 encrypted key file and set NOSTRAUTICA_COORDINATOR_PASSPHRASE.
+ncryptsec_file = "coordinator.ncryptsec"
+
+[relays]
+default = ["wss://relay.primal.net", "wss://relay.damus.io"]
+
+[providers.venice]
+api_key_env = "VENICE_API_KEY"
+require_private = true            # default privacy policy: private/TEE-tier models only;
+                                  # overridable per role via models.<role>.require_private
+
+# [providers.routstr]              # v2 (P6), Cashu-paid decentralized nodes
+# node_url = "https://api.routstr.com/v1"
+# mint = "https://mint.example"
+# wallet_db = "cashu-wallet.sqlite"
+
+[stt]
+provider = "venice-stt"           # or "local-whisper"
+model = "openai/whisper-large-v3"
+
+# Resolve these against GET /models at runtime — never hardcode volatile ids.
+[models.summary]
+provider = "venice"
+model = "qwen3-4b"                # cheap: nostr-context summaries
+
+[models.match]
+provider = "venice"
+model = "deepseek-v4-flash"       # matching-benchmark winner (docs/MATCHING-BENCHMARK.md):
+                                  # best recall@1 + separation, judge 4.53, ~45× cheaper than
+                                  # glm-5-2 pairwise ($0.22/100 attendees, batched K=10).
+# TRADE-OFF: deepseek-v4-flash is NOT a Venice private/TEE-tier model — attendee
+# ai_profiles sent for match scoring leave the TEE boundary (Venice still doesn't
+# log/train on API traffic, but the hardware-attestation guarantee is gone).
+# require_private = false accepts that for THIS role only; summary/embed/STT keep
+# the provider default above. For a no-policy-change alternative, use the private
+# tier: model = "zai-org-glm-5-2" (judge 4.63, $2.64/100) with require_private
+# left unset, or budget "zai-org-glm-4.7-flash" ($0.32/100, softer separation).
+require_private = false
+
+[models.embed]
+provider = "venice"
+model = "text-embedding-bge-m3"
+
+[matching]
+prefilter_threshold = 50          # below this many attendees, score everyone
+prefilter_top_m = 30              # top-M by cosine similarity
+prefilter_random = 10             # random low-similarity slice (complementarity!)
+top_k = 20                        # matches per attendee list
+batch_size = 10                   # candidates per batched scoring call (benchmark K=10)
+
+# ── Discovery announcement (kind 31611, docs/COORDINATOR-DISCOVERY-PLAN.md) ──────
+# Published on boot so organizers can PICK this coordinator in the app instead of
+# pasting its npub. Set announce = false to stay paste-only (unlisted).
+[coordinator]
+announce = true
+name = "Nostrautica coordinator"
+# about = "AI matchmaking for freedom-tech events."
+# picture = "https://…/logo.png"
+# operator = "npub1… or a contact string"
+# terms_url = "https://…/terms"
+
+# ── Billing policy (Part 3) — payment is NOT handled yet; this only shapes the ──
+# announce and the `billing` signal in the 21606 status. Default: free.
+[pricing]
+model = "free"                    # free | per_user | per_event | negotiated | external
+# free_up_to_users = 20           # optional soft/hard free tier
+# summary = "Up to 20 attendees free; larger events by quote."
+# checkout_url = "https://…/checkout"   # the app appends ?event=<naddr>
+# currency = "sats"
+# free_organizers = ["npub1…"]    # always-free (community). PRIVATE — never announced.

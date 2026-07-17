@@ -1,0 +1,29 @@
+# Local dev/test infra (IMPLEMENTATION_PLAN §2): a Nostr relay + a Blossom server.
+# Used by the Playwright e2e suite and coordinator integration tests.
+services:
+  relay:
+    # Pinned by immutable digest (audit Q14): the upstream `latest` tag is mutable,
+    # so test infra could change without a repo change. Digest resolved from
+    # ghcr.io/hoytech/strfry:latest. Re-pin deliberately when upgrading.
+    image: ghcr.io/hoytech/strfry:latest@sha256:14aff3fa46a8cc8f6d640e736678b187cb26ffad71be3dca06c43976eb07a9aa
+    ports:
+      - "7777:7777"
+    volumes:
+      - strfry-data:/app/strfry-db
+      # The image's default config binds 127.0.0.1 INSIDE the container, which
+      # makes the mapped port unreachable from the host — this copy only flips
+      # relay.bind to 0.0.0.0.
+      - ./strfry.conf:/app/strfry.conf:ro
+
+  blossom:
+    # Pinned by immutable digest (audit Q14); resolved from
+    # ghcr.io/hzrd149/blossom-server:master. Re-pin deliberately when upgrading.
+    image: ghcr.io/hzrd149/blossom-server:master@sha256:b659cb34ab3bd90d762424ff64aef3a195103f1fae7d0231ca782631ba5512ee
+    ports:
+      - "3000:3000"
+    volumes:
+      - blossom-data:/app/data
+
+volumes:
+  strfry-data:
+  blossom-data:

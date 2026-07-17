@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # Guardrail (audit Q14): fail on inconsistent Node majors or mutable infra tags,
+  # so runtime/image declarations can't silently drift apart again.
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Assert one Node major and no mutable infrastructure tags
+        run: node .github/scripts/check-pins.mjs
+
+  build:
+    runs-on: ubuntu-latest
+    needs: pins
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nostrautica/protocol build
+      - run: pnpm check
+      - run: pnpm --filter @nostrautica/app build
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nostrautica/protocol build
+      - run: pnpm --filter @nostrautica/app build
+      - run: pnpm --filter @nostrautica/e2e exec playwright install --with-deps chromium
+      # Dockerized relay + Blossom for the full-loop specs (skipped specs no-op).
+      - run: docker compose -f docker/docker-compose.yml up -d
+      - run: NOSTRAUTICA_E2E_RELAY=ws://localhost:7777 pnpm --filter @nostrautica/e2e test

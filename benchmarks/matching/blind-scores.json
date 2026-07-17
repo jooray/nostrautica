@@ -1,0 +1,13 @@
+{
+  "_rubric": "1-5 per reasoning, judged blind before opening blind-key.json. Criteria: specific to BOTH personas' actual details; actionable (concrete conversation hook); no invented facts; second-person addressed to reader; ZERO analytical framing — scoresplaining (score/similarity/complementarity/match talk, 'this pair', prompt-rubric echoes) penalized hard. Overlong (>2 sentences) mildly penalized per product spec.",
+  "scores": {
+    "0": 5, "1": 4, "2": 4, "3": 4, "4": 5, "5": 2, "6": 4, "7": 5, "8": 3, "9": 5,
+    "10": 4, "11": 5, "12": 5, "13": 4, "14": 4, "15": 4, "16": 2.5, "17": 4, "18": 5, "19": 4,
+    "20": 2, "21": 3, "22": 5, "23": 2, "24": 5, "25": 5, "26": 4, "27": 5, "28": 5, "29": 4,
+    "30": 5, "31": 4, "32": 4, "33": 3, "34": 4, "35": 5, "36": 5, "37": 4, "38": 4, "39": 5,
+    "40": 5, "41": 5, "42": 2.5, "43": 3, "44": 3, "45": 4, "46": 4, "47": 5, "48": 4, "49": 5,
+    "50": 4, "51": 4, "52": 4, "53": 4, "54": 5, "55": 4, "56": 5, "57": 4, "58": 4, "59": 5,
+    "60": 4, "61": 3, "62": 4, "63": 4, "64": 5, "65": 4, "66": 4, "67": 4, "68": 4, "69": 5,
+    "70": 2, "71": 5, "72": 3, "73": 3, "74": 4
+  }
+}

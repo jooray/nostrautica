@@ -1,0 +1,28 @@
+{
+  "name": "nostrautica",
+  "version": "0.6.5",
+  "private": true,
+  "description": "Nostr-native event organizer built around networking and AI matchmaking",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "packageManager": "pnpm@11.12.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r --filter=!@nostrautica/e2e test",
+    "typecheck": "pnpm -r --filter=!@nostrautica/e2e typecheck",
+    "lint": "pnpm -r --filter=!@nostrautica/e2e lint",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "e2e": "pnpm --filter @nostrautica/e2e test"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "eslint": "^9.17.0",
+    "marked": "^18.0.6",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1"
+  }
+}

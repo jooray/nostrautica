@@ -1,0 +1,1088 @@
+/** @module @category Engine */
+import { bytesToHex } from "@noble/hashes/utils.js";
+import { contentTypes, createApplicationMessage, createCommit, createProposal, defaultProposalTypes, getCredentialFromLeafIndex, isSelfRemoveProposal, acceptAll, nodeTypes, processMessage, selfRemoveProposalType, wireformats, } from "ts-mls";
+import { marmotAuthService } from "../core/auth-service.js";
+import { getMarmotGroupView } from "../core/client-state.js";
+import { getCredentialPubkey } from "../core/credential.js";
+import { decideAutoCommit } from "./auto-committer.js";
+import { deriveConvergenceStatus, } from "../core/convergence-status.js";
+import { DEFAULT_CONVERGENCE_POLICY, validateConvergencePolicy, } from "../core/convergence.js";
+import { canTransitionLifecycle, groupLifecycleStates, mayPrepareLocalCommit, transitionLifecycle, } from "../core/group-lifecycle.js";
+import { auditEpochStateName, createAuditEmitter, digestString, errorDetail, messageArtifactKindFromNostrKind, } from "../audit/index.js";
+import { framedContentType } from "./wire-format.js";
+import { logger } from "../utils/debug.js";
+import { createAdminCommitPolicyCallback } from "./admin-policy.js";
+import { DeliveredPayloadLedger } from "./delivered-payloads.js";
+import { ForkRecovery } from "./fork-recovery.js";
+import { GroupHistoryTree } from "./history-tree.js";
+import { IngestionPool } from "./ingestion-pool.js";
+import { ingestEnvelopes, isAuthenticApplicationMessage, } from "./ingest.js";
+import { ingestResultDisposition } from "./ingest-disposition.js";
+import { RetainedHistoryStore } from "./retained-store.js";
+const DEFAULT_SCHEDULER = {
+    setTimer: (ms, cb) => setTimeout(cb, ms),
+    clearTimer: (handle) => clearTimeout(handle),
+};
+/**
+ * Transport-agnostic MLS group state machine: ingest, send intents, fork
+ * recovery, and publish-before-apply lifecycle for local commits.
+ *
+ * This class is a coordinator. The heavy concerns live in focused modules it
+ * composes: retained history ({@link RetainedHistoryStore}), convergence fork
+ * recovery ({@link ForkRecovery}), and the inbound pipeline ({@link
+ * ingestEnvelopes}). The engine owns only the live state and lifecycle, the
+ * send path, and the wiring between those modules — mirroring darkmatter's
+ * `cgka-engine` split across `message_processor/{ingest,send,store}`,
+ * `fork_recovery`, and `epoch_manager`.
+ */
+export class MarmotGroupEngine {
+    ciphersuite;
+    peeler;
+    #state;
+    /** Group lifecycle state (group-state.md); only `Stable` may prepare a commit. */
+    #lifecycle = groupLifecycleStates.stable;
+    /**
+     * Source (parent) epoch of a staged local commit awaiting publish
+     * confirmation. Set on entering `PendingPublish`, cleared once the commit
+     * merges or its publish is abandoned. Pinned against retained-history pruning
+     * while set, so an unrelated inbound commit advancing the tip cannot drop the
+     * state needed to apply the staged commit on confirmation (`retained-history.md`
+     * "Pruning").
+     */
+    #stagedCommitParentEpoch;
+    /** Retained canonical states + applied commits for fork recovery. */
+    #retained;
+    /** Full-fork history tree: every observed state (canonical + every fork). */
+    #tree;
+    /** The active convergence policy (branch selection + rollback horizon). */
+    #policy;
+    /** Undecryptable events held for retry as the tree grows (cross-batch). */
+    #pool;
+    /** Convergence candidate-branch construction and selection. */
+    #forkRecovery;
+    /** App payloads delivered eagerly, retracted as `invalidated` on rewind (M7). */
+    #delivered = new DeliveredPayloadLedger();
+    #onStateChanged;
+    /** Injectable wall-clock for the convergence quiescence window (B5). */
+    #now;
+    /** Quiescence window (ms) before a convergence pass may be treated as settled. */
+    #settlementQuiescenceMs;
+    /** Wall-clock (ms) of the most recent convergence-relevant inbound input. */
+    #lastConvergenceRelevantInputMs = 0;
+    /** Whether the last convergence pass left a non-proposal input undispositioned. */
+    #lastPassUnresolved = false;
+    /** Whether the last convergence pass hit a blocking (missing-anchor) error. */
+    #lastPassBlocked = false;
+    /** Injectable timer for the settle-check (B5). */
+    #scheduler;
+    /** Settle-window elapsed callback; re-checks status to release queued outbound. */
+    #onSettleCheck;
+    /** Handle of the pending settle-check timer, if any (cleared/reset per pass). */
+    #settleTimer;
+    #audit;
+    constructor(options) {
+        this.#state = options.state;
+        this.ciphersuite = options.ciphersuite;
+        this.peeler = options.peeler;
+        this.#onStateChanged = options.onStateChanged;
+        this.#now = options.now ?? (() => Date.now());
+        this.#settlementQuiescenceMs =
+            options.settlementQuiescenceMs ??
+                DEFAULT_CONVERGENCE_POLICY.settlementQuiescenceMs;
+        this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
+        this.#onSettleCheck = options.onSettleCheck;
+        this.#policy = options.convergencePolicy ?? DEFAULT_CONVERGENCE_POLICY;
+        validateConvergencePolicy(this.#policy);
+        this.#retained =
+            options.retained ?? new RetainedHistoryStore(options.state, this.#policy);
+        this.#tree = options.historyTree ?? new GroupHistoryTree(options.state);
+        this.#forkRecovery = new ForkRecovery(options.ciphersuite, options.peeler, this.#policy);
+        this.#pool = new IngestionPool(options.ingestionPool);
+        this.#audit = createAuditEmitter(options.audit && options.auditContext
+            ? { ...options.auditContext, sink: options.audit }
+            : undefined);
+        this.#emitEngineContext();
+        this.#emitGroupContext("engine_started");
+    }
+    /** Number of undecryptable events currently held in the ingestion pool. */
+    get pendingCount() {
+        return this.#pool.size;
+    }
+    /**
+     * The full-fork history tree: every group state observed — the canonical
+     * branch and every fork — keyed by MLS confirmation tag. Read-only structural
+     * access; the engine grows it as commits and proposals arrive.
+     */
+    get history() {
+        return this.#tree;
+    }
+    /**
+     * Records an applied commit into both retained history and the history tree.
+     * The freshly-produced `newState` is captured pristine; a tree hiccup (e.g. a
+     * parent not yet present) is logged and never breaks protocol processing.
+     */
+    #recordCommitNode(parentState, message, newState) {
+        this.#retained.record(parentState, message, newState, this.#pinnedEpochs());
+        try {
+            const parentTag = bytesToHex(parentState.confirmationTag);
+            if (!this.#tree.hasNode(parentTag))
+                this.#tree.setRoot(parentState);
+            this.#tree.recordCommit(parentTag, message, newState);
+        }
+        catch (error) {
+            this.#log()("history tree recordCommit failed: %o", error);
+        }
+    }
+    /**
+     * Epochs the active lifecycle still needs and that retained-history pruning
+     * MUST NOT drop, even when older than the rollback horizon (`retained-history.md`
+     * "Pruning"). Currently a staged local commit awaiting publish confirmation
+     * pins its source epoch; `Recovering` and `Unrecoverable` replay/observe
+     * synchronously and need no separate prune-time pin.
+     */
+    #pinnedEpochs() {
+        return this.#stagedCommitParentEpoch === undefined
+            ? []
+            : [this.#stagedCommitParentEpoch];
+    }
+    get state() {
+        return this.#state;
+    }
+    set state(newState) {
+        this.#setState(newState);
+    }
+    /**
+     * The group's lifecycle state (`group-state.md`). A new local commit may only
+     * be prepared while `Stable`; the commit flow moves through `PendingPublish`
+     * (commit prepared, publish unconfirmed) and `Merging` (publish acked, staged
+     * commit applying) and back to `Stable`.
+     */
+    get lifecycle() {
+        return this.#lifecycle;
+    }
+    /**
+     * The derived convergence status (`group-state.md` §Convergence status, B5):
+     * `Syncing` while the quiescence window since the last convergence-relevant
+     * input has not elapsed, then `Resolving` / `Blocked` / `Settled` per the last
+     * pass. Recomputed on every read against the injected clock, so it advances to
+     * `Settled` as wall-clock time passes even with no new input.
+     */
+    get convergenceStatus() {
+        return deriveConvergenceStatus({
+            nowMs: this.#now(),
+            lastConvergenceRelevantInputMs: this.#lastConvergenceRelevantInputMs,
+            settlementQuiescenceMs: this.#settlementQuiescenceMs,
+            hasUnresolvedInput: this.#lastPassUnresolved,
+            hasBlockingError: this.#lastPassBlocked,
+        });
+    }
+    /** Executes a local send intent and returns the wrapped transport envelope. */
+    async send(intent) {
+        const intentKind = auditSendIntentKind(intent);
+        this.#emitAudit({ type: "send_entry", intent_kind: intentKind });
+        try {
+            const result = await this.#sendInner(intent);
+            this.#emitAudit({
+                type: "send_outcome",
+                intent_kind: intentKind,
+                result_kind: auditSendResultKind(result),
+                outbound_messages: [
+                    {
+                        msg_id: this.peeler.idOf(result.envelope),
+                        artifact_kind: this.#artifactKind(result.envelope, result.kind),
+                        transport: this.#transportEnvelope(result.envelope),
+                    },
+                ],
+            });
+            return result;
+        }
+        catch (error) {
+            this.#emitAudit({
+                type: "send_error",
+                intent_kind: intentKind,
+                error_kind: "engine_error",
+                detail: errorDetail(error),
+            });
+            throw error;
+        }
+    }
+    async #sendInner(intent) {
+        switch (intent.kind) {
+            case "applicationMessage": {
+                const { newState, message } = await createApplicationMessage({
+                    context: {
+                        cipherSuite: this.ciphersuite,
+                        authService: marmotAuthService,
+                        externalPsks: {},
+                    },
+                    state: this.state,
+                    message: intent.payload,
+                });
+                const envelope = await this.peeler.wrapGroupMessage(message, this.state);
+                this.#setState(newState);
+                return { kind: "applicationMessage", envelope, newState };
+            }
+            case "proposal": {
+                const { message, newState } = await createProposal({
+                    context: {
+                        cipherSuite: this.ciphersuite,
+                        authService: marmotAuthService,
+                        externalPsks: {},
+                    },
+                    state: this.state,
+                    proposal: intent.proposal,
+                    // Handshake content is wired as MLS PublicMessage (see wire-format.ts).
+                    wireAsPublicMessage: true,
+                });
+                const envelope = await this.peeler.wrapGroupMessage(message, this.state);
+                return {
+                    kind: "proposal",
+                    envelope,
+                    pending: { kind: "proposal", newState },
+                };
+            }
+            case "commit": {
+                const groupData = getMarmotGroupView(this.state);
+                if (!groupData) {
+                    throw new Error("MarmotGroupData not found in ClientState.");
+                }
+                if (!mayPrepareLocalCommit(this.#lifecycle)) {
+                    throw new Error(`Cannot prepare a commit while the group is ${this.#lifecycle}`);
+                }
+                const context = {
+                    state: this.state,
+                    ciphersuite: this.ciphersuite,
+                    groupData,
+                };
+                const newProposals = [];
+                if (intent.extraProposals && intent.extraProposals.length > 0) {
+                    for (const item of intent.extraProposals.flat()) {
+                        if (typeof item === "function") {
+                            newProposals.push(await item(context));
+                        }
+                        else {
+                            newProposals.push(item);
+                        }
+                    }
+                }
+                const selectedProposals = [];
+                if (intent.proposalRefs) {
+                    for (const ref of intent.proposalRefs) {
+                        const proposalWithSender = this.state.unappliedProposals[ref];
+                        if (!proposalWithSender) {
+                            throw new Error(`Proposal reference not found in unappliedProposals: ${ref}`);
+                        }
+                        selectedProposals.push(proposalWithSender.proposal);
+                    }
+                }
+                const allProposals = [...newProposals, ...selectedProposals];
+                // MIP-03 admin-only commits, with the non-admin carve-out from
+                // protocol-core/group-messaging.md: a non-admin may commit a
+                // self-update-only commit (no proposals, or only self-targeted Update
+                // proposals — an Update can only target the committer's own leaf) or a
+                // self_remove-only commit (committing peers' departures — this is the
+                // auto-committer path). Anything that changes other members or group
+                // state needs admin. This mirrors the inbound admin policy
+                // (admin-policy.ts) so a commit we emit is one a conformant peer accepts.
+                if (!groupData.adminPubkeys.includes(intent.actorPubkey)) {
+                    const selfUpdateOnly = allProposals.every((p) => p.proposalType === defaultProposalTypes.update);
+                    const selfRemoveOnly = allProposals.length > 0 &&
+                        allProposals.every((p) => p.proposalType === selfRemoveProposalType);
+                    if (!selfUpdateOnly && !selfRemoveOnly) {
+                        throw new Error("Not a group admin. Non-admins may only commit a self-update-only or self_remove-only commit.");
+                    }
+                }
+                const commitOptions = {
+                    // Handshake content is wired as MLS PublicMessage (see wire-format.ts).
+                    wireAsPublicMessage: true,
+                    ratchetTreeExtension: true,
+                };
+                if (intent.extraProposals || intent.proposalRefs) {
+                    commitOptions.extraProposals = allProposals;
+                }
+                const parentState = this.state;
+                const { commit, newState, welcome } = await createCommit({
+                    context: {
+                        cipherSuite: this.ciphersuite,
+                        authService: marmotAuthService,
+                    },
+                    state: this.state,
+                    ...commitOptions,
+                });
+                this.#transitionLifecycle(groupLifecycleStates.pendingPublish, "begin_pending", "commit");
+                this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
+                const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+                return {
+                    kind: "groupEvolution",
+                    envelope,
+                    welcome,
+                    pending: {
+                        kind: "commit",
+                        newState,
+                        parentState,
+                        commitMessage: commit,
+                    },
+                };
+            }
+            case "selfUpdate": {
+                const { commit, newState } = await createCommit({
+                    context: {
+                        cipherSuite: this.ciphersuite,
+                        authService: marmotAuthService,
+                    },
+                    state: this.state,
+                    // Handshake content is wired as MLS PublicMessage (see wire-format.ts).
+                    wireAsPublicMessage: true,
+                    ratchetTreeExtension: true,
+                    extraProposals: [],
+                });
+                const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+                return {
+                    kind: "selfUpdate",
+                    envelope,
+                    pending: { kind: "selfUpdate", newState },
+                };
+            }
+        }
+    }
+    /** Applies staged state after publish confirmation (publish-before-apply). */
+    confirmPublished(pending) {
+        if (pending.kind === "commit") {
+            if (!pending.parentState || !pending.commitMessage) {
+                throw new Error("Commit pending state requires parentState and commitMessage");
+            }
+            const fromEpoch = Number(pending.parentState.groupContext.epoch);
+            const toEpoch = Number(pending.newState.groupContext.epoch);
+            this.#transitionLifecycle(groupLifecycleStates.merging, "publish_confirmed", pending.kind);
+            this.#setState(pending.newState);
+            this.#recordCommitNode(pending.parentState, pending.commitMessage, pending.newState);
+            this.#emitAudit({
+                type: "epoch_confirmed",
+                from_epoch: fromEpoch,
+                to_epoch: toEpoch,
+                pending_kind: pending.kind,
+            });
+            this.#transitionLifecycle(groupLifecycleStates.stable, "merge_complete", pending.kind);
+            this.#stagedCommitParentEpoch = undefined;
+            return;
+        }
+        this.#setState(pending.newState);
+    }
+    /** Reverts lifecycle when a staged commit publish fails or is abandoned. */
+    publishFailed(pending) {
+        if (pending.kind !== "commit")
+            return;
+        if (this.#lifecycle !== groupLifecycleStates.pendingPublish)
+            return;
+        const pendingEpoch = Number(pending.newState.groupContext.epoch);
+        const restoredEpoch = Number(this.#state.groupContext.epoch);
+        this.#emitAudit({
+            type: "epoch_rolled_back",
+            pending_epoch: pendingEpoch,
+            restored_epoch: restoredEpoch,
+            pending_kind: pending.kind,
+        });
+        this.#transitionLifecycle(groupLifecycleStates.stable, "publish_failed", pending.kind);
+        this.#stagedCommitParentEpoch = undefined;
+    }
+    /**
+     * Ingests transport envelopes and applies MLS messages to group state.
+     *
+     * @yields DispositionedIngestResult - processing result plus inbound
+     *   {@link Disposition}.
+     */
+    async *ingest(envelopes, options) {
+        // Track this batch's convergence signal (B5): whether it carried any
+        // convergence-relevant input (commits / fork material), whether anything was
+        // left undispositioned (a deferred commit ⇒ Resolving), and whether it hit a
+        // blocking missing-anchor error (⇒ Blocked).
+        let convergenceRelevant = false;
+        let unresolved = false;
+        let blocked = false;
+        for (const envelope of envelopes)
+            this.#emitIngestEntry(envelope);
+        for await (const result of this.#ingestWithPool(envelopes, options)) {
+            if (this.#isConvergenceRelevant(result))
+                convergenceRelevant = true;
+            if (result.kind === "deferred")
+                unresolved = true;
+            if (result.kind === "skipped" &&
+                result.reason === "missing-retained-anchor")
+                blocked = true;
+            const dispositioned = {
+                ...result,
+                disposition: ingestResultDisposition(result),
+            };
+            this.#emitIngestOutcome(dispositioned);
+            yield dispositioned;
+        }
+        // A convergence pass ran only if convergence-relevant input arrived; a batch
+        // of pure application messages or lone proposals MUST NOT reset the
+        // quiescence window or overwrite the last pass's status inputs.
+        if (convergenceRelevant) {
+            this.#lastConvergenceRelevantInputMs = this.#now();
+            this.#lastPassUnresolved = unresolved;
+            this.#lastPassBlocked = blocked;
+            // The window just reset; arm the settle-check so queued outbound is
+            // re-evaluated once it elapses (B5). Reschedules any prior pending check.
+            this.#scheduleSettleCheck();
+        }
+        // After the batch, if this client is the deterministically-elected committer
+        // for any pending self_remove proposals, build and stage a self_remove-only
+        // commit (B6, member-departure.md). It is surfaced as an `autoCommit` result;
+        // the layer that owns the transport publishes it (publish-before-apply).
+        const auto = await this.#maybeAutoCommitSelfRemoves();
+        if (auto) {
+            const dispositioned = {
+                ...auto,
+                disposition: ingestResultDisposition(auto),
+            };
+            this.#emitIngestOutcome(dispositioned);
+            yield dispositioned;
+        }
+    }
+    /**
+     * Runs the ingest pipeline, but instead of surfacing a decrypt failure as
+     * terminal `unreadable`, holds the event in the {@link IngestionPool} and
+     * retries the whole pool whenever the canonical tip advances (a new epoch may
+     * unlock a pooled event's key). This is what lets a newer-epoch message that
+     * streamed in before its commit be read once the commit arrives, across ingest
+     * batches. Entries the tip ages past the retention window are finally surfaced
+     * as terminal `unreadable`.
+     */
+    async *#ingestWithPool(envelopes, options) {
+        const MAX_SWEEPS = 16;
+        let pass = envelopes;
+        let sweeps = 0;
+        while (pass.length > 0) {
+            const tipBefore = bytesToHex(this.#state.confirmationTag);
+            for await (const result of ingestEnvelopes(this.#ingestContext(), pass, options)) {
+                if (result.kind === "unreadable" && result.decryptFailure) {
+                    // Hold for retry rather than dropping; suppress the terminal yield.
+                    this.#pool.add(this.peeler.idOf(result.envelope), result.envelope, Number(this.#state.groupContext.epoch));
+                    continue;
+                }
+                if (result.kind === "processed" || result.kind === "removed")
+                    this.#pool.remove(this.peeler.idOf(result.envelope));
+                yield result;
+            }
+            const tipAfter = bytesToHex(this.#state.confirmationTag);
+            // Re-feed the pool only when the tip advanced — an unchanged tip would
+            // reproduce the same failures. Bounded by MAX_SWEEPS per ingest call.
+            pass =
+                tipAfter !== tipBefore && this.#pool.size > 0 && ++sweeps < MAX_SWEEPS
+                    ? this.#pool.envelopes()
+                    : [];
+        }
+        // Tree-targeted sweep: read/apply pooled events against any retained fork or
+        // past-epoch node state, so late-arriving old-epoch and divergent-fork
+        // messages are read and all reachable forks are grown into the tree.
+        if (this.#pool.size > 0)
+            yield* this.#sweepTree();
+        // Give up on entries aged past the retention window — surface them terminal.
+        const evicted = this.#pool.evictStale(Number(this.#state.groupContext.epoch));
+        for (const entry of evicted) {
+            yield {
+                kind: "unreadable",
+                envelope: entry.envelope,
+                errors: [
+                    new Error("ingestion pool gave up: undecryptable within the retention window"),
+                ],
+            };
+        }
+    }
+    /**
+     * Reads/applies pooled events against retained history-tree node states (not
+     * just the current tip): an app message that decrypts on a node is read
+     * (`processed` if that node is on the canonical path, else `invalidated` per
+     * M7); a commit/proposal is applied against its node to grow that fork into
+     * the tree. Each `(event, node)` pair is tried at most once (memoized on the
+     * pool entry); growing the tree can unlock further pooled events, so it loops
+     * to a fixed point. This is the "read epoch-1 messages while on epoch 15" and
+     * "capture every reachable fork" path.
+     */
+    async *#sweepTree() {
+        const MAX_ITERS = 32;
+        const log = this.#log();
+        for (let iter = 0; iter < MAX_ITERS && this.#pool.size > 0; iter++) {
+            const canonicalPath = new Set(this.#tree.path(bytesToHex(this.#state.confirmationTag)) ?? []);
+            // Recent epochs first — most pooled events sit near the current tip.
+            const tags = this.#tree
+                .tags()
+                .sort((a, b) => (this.#tree.epochOf(b) ?? 0) - (this.#tree.epochOf(a) ?? 0));
+            let progress = false;
+            for (const entry of this.#pool.entries()) {
+                for (const tag of tags) {
+                    if (entry.triedTags.has(tag))
+                        continue;
+                    entry.triedTags.add(tag);
+                    const state = await this.#tree.stateAt(tag);
+                    if (!state)
+                        continue;
+                    let message;
+                    try {
+                        const peeled = await this.peeler.peelGroupMessages([entry.envelope], state);
+                        message = peeled.read[0]?.message;
+                    }
+                    catch {
+                        message = undefined;
+                    }
+                    // Only framed messages (commit/proposal/application) are processable.
+                    if (!message ||
+                        (message.wireformat !== wireformats.mls_private_message &&
+                            message.wireformat !== wireformats.mls_public_message))
+                        continue;
+                    const result = await this.#sweepResult(entry.envelope, tag, state, message, canonicalPath.has(tag), log);
+                    if (!result)
+                        continue;
+                    this.#pool.remove(entry.id);
+                    progress = true;
+                    yield result;
+                    break;
+                }
+            }
+            if (!progress)
+                break;
+        }
+    }
+    /**
+     * Processes a pooled message that decrypted against retained node `tag` and
+     * classifies the outcome. Returns `undefined` to keep trying other nodes (the
+     * message did not process against this state); otherwise the ingest result.
+     */
+    async #sweepResult(envelope, tag, state, message, onCanonical, log) {
+        // Narrow to a framed message (the caller already guards this).
+        if (message.wireformat !== wireformats.mls_private_message &&
+            message.wireformat !== wireformats.mls_public_message)
+            return undefined;
+        const isCommit = framedContentType(message) === contentTypes.commit;
+        let result;
+        try {
+            result = await processMessage({
+                context: {
+                    cipherSuite: this.ciphersuite,
+                    authService: marmotAuthService,
+                    externalPsks: {},
+                },
+                state,
+                message,
+                callback: isCommit
+                    ? this.#createAdminVerificationCallback(state)
+                    : acceptAll,
+            });
+        }
+        catch {
+            return undefined; // decrypted but not processable against this node
+        }
+        if (result.kind === "newState") {
+            if (result.actionTaken === "reject")
+                return { kind: "rejected", result, envelope, message };
+            try {
+                if (isCommit) {
+                    // Grow this fork into the tree (capture it, off node `tag`).
+                    this.#tree.recordCommit(tag, message, result.newState);
+                }
+                else {
+                    // A proposal staged onto this node (its tag is unchanged).
+                    this.#tree.updateSnapshot(tag, result.newState);
+                }
+            }
+            catch (error) {
+                log("history tree sweep update failed: %o", error);
+            }
+            return { kind: "processed", result, envelope, message };
+        }
+        if (result.kind === "applicationMessage") {
+            if (!isAuthenticApplicationMessage(result, state, log, "sweep"))
+                return {
+                    kind: "skipped",
+                    envelope,
+                    message,
+                    reason: "invalid-app-payload",
+                };
+            // A read on the canonical path is delivered; one that only decrypts on a
+            // losing fork is reported as invalidated (M7), never delivered as accepted.
+            // The losing read still carries its fork-node identity (the node `tag` it
+            // decrypted against and that node's epoch) so a full-history consumer can
+            // attribute it; an app message does not change the epoch/confirmation tag,
+            // so `tag` is the delivery branch.
+            return onCanonical
+                ? { kind: "processed", result, envelope, message }
+                : {
+                    kind: "invalidated",
+                    envelope,
+                    message,
+                    payload: result.message,
+                    tag,
+                    epoch: Number(state.groupContext.epoch),
+                };
+        }
+        return undefined;
+    }
+    /**
+     * Whether an ingest result represents convergence-relevant input — a commit
+     * (applied, rejected, deferred, or one that removed us), fork material
+     * (past-epoch / beyond-anchor / missing-anchor skips), or a rewind retraction.
+     * Application messages, lone proposals, self-echoes, our own staged
+     * auto-commit, and undecryptable garbage are NOT convergence-relevant and MUST
+     * NOT reset the quiescence window (B5; lone-proposal exemption darkmatter#154).
+     */
+    #isConvergenceRelevant(result) {
+        switch (result.kind) {
+            case "processed":
+            case "rejected":
+                return framedContentType(result.message) === contentTypes.commit;
+            case "deferred":
+            case "invalidated":
+            case "removed":
+                return true;
+            case "skipped":
+                return (result.reason === "past-epoch" ||
+                    result.reason === "beyond-anchor" ||
+                    result.reason === "missing-retained-anchor");
+            case "autoCommit":
+            case "unreadable":
+                return false;
+        }
+    }
+    /**
+     * Arms (or re-arms) the settle-check timer to fire when the quiescence window
+     * since the last convergence-relevant input elapses (B5). Cancels any pending
+     * check first, so a fresh input always restarts the window. A no-op when no
+     * settle callback is wired (the engine has nothing to notify).
+     */
+    #scheduleSettleCheck() {
+        if (!this.#onSettleCheck)
+            return;
+        if (this.#settleTimer !== undefined) {
+            this.#scheduler.clearTimer(this.#settleTimer);
+            this.#settleTimer = undefined;
+        }
+        const elapsed = this.#now() - this.#lastConvergenceRelevantInputMs;
+        const delay = Math.max(0, this.#settlementQuiescenceMs - elapsed);
+        this.#settleTimer = this.#scheduler.setTimer(delay, () => {
+            this.#settleTimer = undefined;
+            // Fire-and-forget; the owner's drain handles and logs its own errors.
+            void this.#onSettleCheck?.();
+        });
+    }
+    /**
+     * Releases engine resources — currently the pending settle-check timer.
+     * Called on group teardown (destroy/unload) so no timer outlives the group.
+     */
+    dispose() {
+        if (this.#settleTimer !== undefined) {
+            this.#scheduler.clearTimer(this.#settleTimer);
+            this.#settleTimer = undefined;
+        }
+    }
+    /**
+     * If pending proposals are exactly a set of `self_remove`s this client is
+     * elected to commit (lowest eligible leaf, {@link decideAutoCommit}), builds
+     * and stages a `self_remove`-only commit by reference. Returns the staged
+     * commit for the caller to publish, or `undefined` when this client should
+     * just observe.
+     */
+    async #maybeAutoCommitSelfRemoves() {
+        if (!mayPrepareLocalCommit(this.#lifecycle))
+            return undefined;
+        const state = this.#state;
+        const unapplied = Object.values(state.unappliedProposals);
+        if (unapplied.length === 0)
+            return undefined;
+        // createCommit bundles ALL unapplied proposals by reference, so only
+        // auto-commit when every pending proposal is a self_remove — otherwise we
+        // would fold foreign proposals into a commit that is no longer
+        // self_remove-only. Mixed sets are left for an admin's explicit commit.
+        if (!unapplied.every((p) => isSelfRemoveProposal(p.proposal)))
+            return undefined;
+        const groupData = getMarmotGroupView(state);
+        const adminPubkeys = groupData?.adminPubkeys ?? [];
+        const leaverLeafIndices = [];
+        let anyLeaverIsActiveAdmin = false;
+        for (const p of unapplied) {
+            if (p.senderLeafIndex === undefined)
+                return undefined;
+            leaverLeafIndices.push(Number(p.senderLeafIndex));
+            try {
+                const leaverPubkey = getCredentialPubkey(getCredentialFromLeafIndex(state.ratchetTree, p.senderLeafIndex));
+                if (adminPubkeys.includes(leaverPubkey))
+                    anyLeaverIsActiveAdmin = true;
+            }
+            catch {
+                anyLeaverIsActiveAdmin = true; // fail-closed
+            }
+        }
+        let ownPubkey;
+        try {
+            ownPubkey = getCredentialPubkey(getCredentialFromLeafIndex(state.ratchetTree, state.privatePath.leafIndex));
+        }
+        catch {
+            return undefined;
+        }
+        const decision = decideAutoCommit({
+            leaverLeafIndices,
+            ownLeafIndex: Number(state.privatePath.leafIndex),
+            memberLeafIndices: this.#occupiedLeafIndices(),
+            anyLeaverIsActiveAdmin,
+        });
+        if (decision !== "commit")
+            return undefined;
+        // No extraProposals/refs: createCommit bundles the pending self_removes by
+        // reference (required — an inline self_remove inherits the committer as
+        // sender and is rejected). The send-path admin gate sees no extra proposals
+        // and treats it as a self-update-only commit, which a non-admin may make.
+        const result = await this.send({ kind: "commit", actorPubkey: ownPubkey });
+        if (result.kind !== "groupEvolution")
+            return undefined;
+        this.#log()("auto-committing %d self_remove proposal(s)", leaverLeafIndices.length);
+        return {
+            kind: "autoCommit",
+            envelope: result.envelope,
+            pending: result.pending,
+            actorPubkey: ownPubkey,
+        };
+    }
+    /** Leaf indices of all occupied leaves in the current ratchet tree. */
+    #occupiedLeafIndices() {
+        const out = [];
+        const tree = this.#state.ratchetTree;
+        for (let nodeIndex = 0; nodeIndex < tree.length; nodeIndex++) {
+            const node = tree[nodeIndex];
+            if (node && node.nodeType === nodeTypes.leaf)
+                out.push(Math.floor(nodeIndex / 2));
+        }
+        return out;
+    }
+    #setState(newState) {
+        this.#state = newState;
+        this.#onStateChanged?.(newState);
+    }
+    #emitAudit(kind) {
+        this.#audit?.emit(kind, {
+            groupRef: bytesToHex(this.#state.groupContext.groupId),
+            context: {
+                group: this.#auditGroupContext(),
+            },
+        });
+    }
+    #emitEngineContext() {
+        this.#emitAudit({
+            type: "engine_context",
+            context: {
+                ciphersuite: Number(this.#state.groupContext.cipherSuite),
+                convergence_max_rewind_commits: finiteAuditNumber(this.#policy.maxRewindCommits),
+            },
+        });
+    }
+    #emitGroupContext(reason) {
+        this.#emitAudit({
+            type: "group_context",
+            reason,
+            context: this.#auditGroupContext(),
+        });
+    }
+    #auditGroupContext() {
+        const groupData = getMarmotGroupView(this.#state);
+        return {
+            epoch: Number(this.#state.groupContext.epoch),
+            member_count: this.#occupiedLeafIndices().length,
+            admin_count: groupData?.adminPubkeys.length ?? 0,
+            convergence_max_rewind_commits: finiteAuditNumber(this.#policy.maxRewindCommits),
+        };
+    }
+    #transitionLifecycle(next, reason, pendingKind) {
+        const previous = this.#lifecycle;
+        this.#lifecycle = transitionLifecycle(this.#lifecycle, next);
+        this.#emitAudit({
+            type: "epoch_state_changed",
+            previous_state: auditEpochStateName(previous),
+            new_state: auditEpochStateName(this.#lifecycle),
+            epoch: Number(this.#state.groupContext.epoch),
+            reason,
+            pending_kind: pendingKind,
+        });
+    }
+    #emitIngestEntry(envelope) {
+        const raw = JSON.stringify(envelope);
+        this.#emitAudit({
+            type: "ingest_entry",
+            msg_id: this.peeler.idOf(envelope),
+            envelope_kind: this.#artifactKind(envelope),
+            transport_source: "nostr",
+            transport: this.#transportEnvelope(envelope),
+            payload_len: raw.length,
+            payload_digest: digestString(raw),
+        });
+    }
+    #emitIngestOutcome(result) {
+        const msgId = this.peeler.idOf(result.envelope);
+        const outcome = auditIngestOutcome(result);
+        if (outcome) {
+            this.#emitAudit({
+                type: "ingest_outcome",
+                msg_id: msgId,
+                outcome_kind: outcome.kind,
+                stale_reason: outcome.staleReason,
+                epoch: auditResultEpoch(result),
+            });
+        }
+        if (result.kind === "invalidated") {
+            this.#emitAudit({
+                type: "message_state_changed",
+                msg_id: msgId,
+                artifact_kind: this.#artifactKind(result.envelope),
+                new_state: "epoch_invalidated",
+                epoch: result.epoch,
+                reason: "convergence_rewind",
+            });
+        }
+        if (result.kind === "rejected") {
+            this.#emitAudit({
+                type: "rejection",
+                msg_id: msgId,
+                reason: "admin_policy",
+            });
+        }
+    }
+    #transportEnvelope(envelope) {
+        const candidate = envelope;
+        const groupTag = candidate.tags?.find((tag) => tag[0] === "h")?.[1];
+        return {
+            transport: "nostr",
+            wire_id: candidate.id,
+            wire_kind: candidate.kind?.toString(),
+            wire_pubkey_hex: candidate.pubkey,
+            transport_group_id: groupTag,
+            nostr_event_id: candidate.id,
+            nostr_kind: candidate.kind,
+            nostr_pubkey_hex: candidate.pubkey,
+        };
+    }
+    #artifactKind(envelope, resultKind) {
+        if (resultKind === "applicationMessage")
+            return "application_message";
+        if (resultKind === "groupEvolution" || resultKind === "selfUpdate")
+            return "commit";
+        if (resultKind === "proposal")
+            return "proposal";
+        const candidate = envelope;
+        return messageArtifactKindFromNostrKind(candidate.kind);
+    }
+    #log() {
+        const idStr = bytesToHex(this.#state.groupContext.groupId);
+        return logger.extend(`group-engine:${idStr.slice(0, 8)}`);
+    }
+    /** The dependency surface the ingest pipeline drives. */
+    #ingestContext() {
+        return {
+            ciphersuite: this.ciphersuite,
+            peeler: this.peeler,
+            retained: this.#retained,
+            maxRewindCommits: this.#policy.maxRewindCommits,
+            log: this.#log(),
+            getState: () => this.#state,
+            setState: (state) => this.#setState(state),
+            recordCommit: (parentState, message, newState) => this.#recordCommitNode(parentState, message, newState),
+            recordProposalStaged: (state) => {
+                try {
+                    const tag = bytesToHex(state.confirmationTag);
+                    if (this.#tree.hasNode(tag))
+                        this.#tree.updateSnapshot(tag, state);
+                }
+                catch (error) {
+                    this.#log()("history tree recordProposalStaged failed: %o", error);
+                }
+            },
+            createAdminCallback: () => this.#createAdminVerificationCallback(),
+            resolveFork: (forkEpoch, pool, encrypted, witnessEnvelopes) => this.#resolveFork(forkEpoch, pool, encrypted, witnessEnvelopes),
+            recordDeliveredAppPayload: (epoch, stateTag, envelope, message, payload) => {
+                this.#delivered.record({ epoch, stateTag, envelope, message, payload });
+                const anchor = this.#retained.anchorEpoch();
+                if (anchor !== undefined)
+                    this.#delivered.pruneBelow(anchor);
+            },
+            toUnrecoverable: () => this.#toUnrecoverable(),
+        };
+    }
+    /**
+     * Drives the lifecycle to the terminal `Unrecoverable` state, routing through
+     * `Recovering` when needed (the only legal predecessor per group-state.md).
+     * Idempotent: a no-op once already `Unrecoverable`.
+     */
+    #toUnrecoverable() {
+        if (this.#lifecycle === groupLifecycleStates.unrecoverable)
+            return;
+        if (this.#lifecycle === groupLifecycleStates.stable)
+            this.#transitionLifecycle(groupLifecycleStates.recovering, "missing_retained_anchor");
+        if (canTransitionLifecycle(this.#lifecycle, groupLifecycleStates.unrecoverable))
+            this.#transitionLifecycle(groupLifecycleStates.unrecoverable, "missing_retained_anchor");
+    }
+    /**
+     * Resolves a fork via {@link ForkRecovery} and applies the rewind: on a
+     * canonical-branch win, transitions through `Recovering`, adopts the winning
+     * tip, records the replayed chain into retained history, and returns to
+     * `Stable`. Lifecycle ownership stays here in the engine.
+     */
+    async #resolveFork(forkEpoch, pool, encrypted, witnessEnvelopes) {
+        const resolution = await this.#forkRecovery.resolveFork({
+            forkEpoch,
+            pool,
+            encrypted,
+            witnessEnvelopes,
+            currentState: this.state,
+            retained: this.#retained,
+            adminCallback: this.#createAdminVerificationCallback(),
+        });
+        // Retain every branch built while resolving — the winner and every loser —
+        // so the full fork tree survives even when we do not change branches. Edges
+        // are in DFS order (parents first); a dangling edge is skipped, not fatal.
+        if (resolution.outcome !== "skip") {
+            try {
+                for (const edge of resolution.edges)
+                    this.#tree.recordEdge(edge);
+            }
+            catch (error) {
+                this.#log()("history tree recordEdge failed: %o", error);
+            }
+        }
+        if (resolution.outcome !== "recovered") {
+            this.#emitAudit({
+                type: "convergence_decision",
+                current_tip_epoch: Number(this.state.groupContext.epoch),
+                max_rewind_commits: finiteAuditNumber(this.#policy.maxRewindCommits),
+                candidates: [],
+                error_kinds: resolution.outcome === "skip" ? ["candidate_state_unavailable"] : [],
+            });
+            return { outcome: resolution.outcome };
+        }
+        // The canonical branch's state identities (root + every applied child +
+        // the tip). Any app payload delivered above the fork epoch whose delivery
+        // state is not on this chain decrypted only on the abandoned branch, so it
+        // is retracted as `invalidated` (M7, convergence.md).
+        const canonicalTags = new Set();
+        if (resolution.winnerChain.length > 0)
+            canonicalTags.add(bytesToHex(resolution.winnerChain[0].parent.confirmationTag));
+        for (const link of resolution.winnerChain)
+            canonicalTags.add(bytesToHex(link.child.confirmationTag));
+        canonicalTags.add(bytesToHex(resolution.winnerTip.confirmationTag));
+        const invalidated = this.#delivered.invalidatedByRewind(forkEpoch, canonicalTags);
+        this.#emitAudit({
+            type: "convergence_decision",
+            current_tip_epoch: Number(this.state.groupContext.epoch),
+            max_rewind_commits: finiteAuditNumber(this.#policy.maxRewindCommits),
+            candidates: [
+                {
+                    branch_id: bytesToHex(resolution.winnerTip.confirmationTag),
+                    fork_epoch: forkEpoch,
+                    tip_epoch: Number(resolution.winnerTip.groupContext.epoch),
+                },
+            ],
+            selected_branch_id: bytesToHex(resolution.winnerTip.confirmationTag),
+            selected_fork_epoch: forkEpoch,
+            selected_tip_epoch: Number(resolution.winnerTip.groupContext.epoch),
+        });
+        this.#transitionLifecycle(groupLifecycleStates.recovering, "fork_detected");
+        this.#setState(resolution.winnerTip);
+        for (const link of resolution.winnerChain) {
+            this.#retained.record(link.parent, link.message, link.child, this.#pinnedEpochs());
+        }
+        this.#transitionLifecycle(groupLifecycleStates.stable, "branch_applied");
+        const anchor = this.#retained.anchorEpoch();
+        if (anchor !== undefined)
+            this.#delivered.pruneBelow(anchor);
+        return {
+            outcome: "recovered",
+            result: resolution.result,
+            invalidated: invalidated.map(({ envelope, message, payload, stateTag, epoch }) => ({
+                envelope,
+                message,
+                payload,
+                tag: stateTag,
+                epoch,
+            })),
+        };
+    }
+    #createAdminVerificationCallback(state = this.state) {
+        const groupData = getMarmotGroupView(state);
+        if (!groupData)
+            return acceptAll;
+        return createAdminCommitPolicyCallback({
+            ratchetTree: state.ratchetTree,
+            adminPubkeys: groupData.adminPubkeys,
+            ciphersuiteId: this.ciphersuite.id,
+            onUnverifiableCommit: "retry",
+        });
+    }
+}
+function finiteAuditNumber(value) {
+    return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
+}
+function auditSendIntentKind(intent) {
+    switch (intent.kind) {
+        case "applicationMessage":
+            return "app_message";
+        case "proposal":
+            return "proposal";
+        case "commit":
+            return "group_evolution";
+        case "selfUpdate":
+            return "self_update";
+    }
+}
+function auditSendResultKind(result) {
+    switch (result.kind) {
+        case "applicationMessage":
+            return "application_message";
+        case "proposal":
+            return "proposal";
+        case "groupEvolution":
+            return "group_evolution";
+        case "selfUpdate":
+            return "self_update";
+    }
+}
+function auditIngestOutcome(result) {
+    switch (result.disposition.kind) {
+        case "accepted":
+            return { kind: "processed" };
+        case "deferred":
+            return { kind: "buffered" };
+        case "stale":
+            return { kind: "stale", staleReason: auditStaleReason(result) };
+        case "invalidated":
+            return undefined;
+    }
+}
+function auditStaleReason(result) {
+    switch (result.kind) {
+        case "skipped":
+            return result.reason;
+        case "unreadable":
+            return result.decryptFailure ? "decrypt_failed" : "unreadable";
+        case "rejected":
+            return "rejected";
+        case "removed":
+            return "removed";
+        case "processed":
+        case "deferred":
+        case "invalidated":
+        case "autoCommit":
+            return undefined;
+    }
+}
+function auditResultEpoch(result) {
+    switch (result.kind) {
+        case "invalidated":
+            return result.epoch;
+        case "deferred":
+        case "processed":
+        case "rejected":
+        case "skipped":
+        case "unreadable":
+        case "autoCommit":
+        case "removed":
+            return undefined;
+    }
+}
+//# sourceMappingURL=group-engine.js.map

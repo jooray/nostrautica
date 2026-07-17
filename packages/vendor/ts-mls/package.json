@@ -1,0 +1,32 @@
+{
+  "name": "ts-mls",
+  "version": "2.0.0-rc.14-marmot.2ca5c43",
+  "description": "Vendored build of ts-mls (hzrd149/ts-mls @ 2ca5c43, marmot-required-ext branch) — the MLS engine marmot-ts 0.6.0 depends on. Committed pre-built (see packages/vendor/README) because upstream ships it only as a git submodule fork that pnpm --frozen-lockfile cannot resolve.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "files": [
+    "lib"
+  ],
+  "dependencies": {
+    "@hpke/core": "^1.9.0",
+    "@noble/ciphers": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
+    "@noble/curves": "^2.2.0",
+    "@hpke/chacha20poly1305": "1.8.0",
+    "@hpke/dhkem-x448": "1.8.0",
+    "@hpke/hybridkem-x-wing": "0.7.0",
+    "@hpke/ml-kem": "0.3.0",
+    "@noble/post-quantum": "0.6.1"
+  }
+}

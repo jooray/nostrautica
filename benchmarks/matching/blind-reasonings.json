@@ -1,0 +1,4253 @@
+[
+  {
+    "id": 0,
+    "targetName": "Mara Okafor",
+    "targetProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "candidateName": "Dmitri Volkov",
+    "candidateProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "reasoning": "You need a senior Rust engineer as a technical co-founder — Dmitri is a staff-level Rust and payments infrastructure engineer who is disillusioned with corporate work and wants a mission-driven founder with users and funding. Ask him what he'd build first for your payments app."
+  },
+  {
+    "id": 1,
+    "targetName": "Casimir Wolff",
+    "targetProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "candidateName": "Yusuf Demir",
+    "candidateProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "reasoning": "Yusuf scales privacy tools ethically — if you ever want to grow your workshop reach beyond insiders, he's the person to talk to about distribution."
+  },
+  {
+    "id": 2,
+    "targetName": "Tomás Reyes",
+    "targetProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "candidateName": "Yusuf Demir",
+    "candidateProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "reasoning": "Yusuf is a marketing and growth expert for startups, which is a very different track from your musical and DevOps interests."
+  },
+  {
+    "id": 3,
+    "targetName": "Priya Nadar",
+    "targetProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "candidateName": "Aleksy Nowak",
+    "candidateProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "reasoning": "You've built your career on getting surveillance stories in front of festival audiences, but you've told us your biggest gap is finding people who can give you *realistic* threat models to protect vulnerable sources before you ever point a camera at them. Aleksy is exactly that person — he studies metadata leakage and deanonymization for a living, and he's actively looking for journalists who need source-protection threat models. He can tell you, concretely, how the subjects you're filming might be tracked through their phone metadata, app usage patterns, or network traffic even if the content of your footage is secure. That's not theoretical for him — protecting activists and sources is his stated motivation. Beyond protecting your existing subjects, Aleksy's research into how people get deanonymized *is* a high-stakes untold story. Academic papers don't reach the public; your documentaries do. You could be the bridge that turns his findings into something millions of people watch and understand."
+  },
+  {
+    "id": 4,
+    "targetName": "Elena Marchetti",
+    "targetProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "candidateName": "Yusuf Demir",
+    "candidateProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "reasoning": "You should talk to Yusuf — he's scaled privacy tools ethically and is hunting for a strong product with no distribution, exactly the kind of go-to-market partner your cryptography needs. Ask him how he'd position your protocols for developers without overselling."
+  },
+  {
+    "id": 5,
+    "targetName": "Elena Marchetti",
+    "targetProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "candidateName": "Yusuf Demir",
+    "candidateProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "reasoning": "You, Elena, have powerful protocols but no distribution or marketing. Yusuf specializes in taking great privacy tools and getting them into users' hands ethically. He's looking for an engineering team that lacks marketing capacity — that's you. He can help you find the product designer you need and build a community around your work. Strong complementarity: your tech + his growth = real impact."
+  },
+  {
+    "id": 6,
+    "targetName": "Gideon Frei",
+    "targetProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "candidateName": "Bao Nguyen",
+    "candidateProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "reasoning": "You're a source-protection lawyer who wants to get involved early, and Bao is sitting on a massive leaked dataset that could be the story of the year. He's overwhelmed and needs a data scientist, but before any analysis happens, those sources and documents need legal scaffolding. You can offer him the legal risk assessment and source-protection counseling that ensures his work doesn't collapse under litigation. In return, he gives you a concrete, high-stakes case where your expertise is needed immediately — exactly the kind of partnership you're looking for."
+  },
+  {
+    "id": 7,
+    "targetName": "Halima Osei",
+    "targetProfile": {
+      "summary": "Halima is a UX writer and plain-language specialist who rewrites dense, scary security instructions into clear, calm words, treating clarity as a safety feature. She seeks security/privacy projects whose solid tools are undermined by intimidating language.",
+      "skills": [
+        "UX writing",
+        "plain-language design",
+        "documentation",
+        "content design",
+        "security communication"
+      ],
+      "interests": [
+        "plain language",
+        "usable security",
+        "onboarding",
+        "human-centered safety"
+      ],
+      "offers": [
+        "clear plain-language writing",
+        "security onboarding and docs",
+        "content design that changes behavior"
+      ],
+      "seeks": [
+        "security and privacy projects with intimidating instructions",
+        "teams whose UX writing fails users"
+      ]
+    },
+    "candidateName": "Jonah Bright",
+    "candidateProfile": {
+      "summary": "Jonah is a product designer who left ad-tech to work on meaningful, private products. He specializes in making intimidating technical tools feel simple and seeks a deep technical partner whose powerful work suffers from poor usability.",
+      "skills": [
+        "product design",
+        "UX research",
+        "interaction design",
+        "prototyping",
+        "design systems"
+      ],
+      "interests": [
+        "privacy",
+        "usable security",
+        "ethical technology",
+        "consumer product design"
+      ],
+      "offers": [
+        "turning complex tech into simple UX",
+        "product and interaction design",
+        "user research"
+      ],
+      "seeks": [
+        "a deep technical partner in cryptography or security",
+        "powerful tech that needs usability"
+      ]
+    },
+    "reasoning": "You should grab Jonah — he's a product designer who left ad-tech specifically to make intimidating security tools feel simple, and he's hunting for a technical partner whose powerful work suffers from poor usability. You two are attacking the same wall from adjacent sides; ask him which onboarding flow he thinks fails users the hardest, and compare notes on where words vs. interaction design should carry the load."
+  },
+  {
+    "id": 8,
+    "targetName": "Bao Nguyen",
+    "targetProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "candidateName": "Gideon Frei",
+    "candidateProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "reasoning": "Gideon is exactly the legal shield you need before you publish. He specializes in whistleblower defense and source protection — and he wants to partner with storytellers early, not after the story breaks. Your leaked dataset almost certainly involves sources who need legal protection, and Gideon can help you assess risk, structure your reporting to minimize legal exposure, and even connect you with whistleblowers who have cases worth telling. This is a high-value meeting that protects both your story and your sources."
+  },
+  {
+    "id": 9,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Mara Okafor",
+    "candidateProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "reasoning": "You should absolutely meet Mara — she's a mission-driven founder with a censorship-resistant payments app, users, and funding, but needs a technical co-founder. Ask her about the grassroots organizers she's already working with."
+  },
+  {
+    "id": 10,
+    "targetName": "Jonah Bright",
+    "targetProfile": {
+      "summary": "Jonah is a product designer who left ad-tech to work on meaningful, private products. He specializes in making intimidating technical tools feel simple and seeks a deep technical partner whose powerful work suffers from poor usability.",
+      "skills": [
+        "product design",
+        "UX research",
+        "interaction design",
+        "prototyping",
+        "design systems"
+      ],
+      "interests": [
+        "privacy",
+        "usable security",
+        "ethical technology",
+        "consumer product design"
+      ],
+      "offers": [
+        "turning complex tech into simple UX",
+        "product and interaction design",
+        "user research"
+      ],
+      "seeks": [
+        "a deep technical partner in cryptography or security",
+        "powerful tech that needs usability"
+      ]
+    },
+    "candidateName": "Kenji Watanabe",
+    "candidateProfile": {
+      "summary": "Kenji is a hardware hacker who designs secure elements, tamper-evident devices and cold-storage gadgets. Strong on physical security but weak on software, he seeks a firmware/embedded engineer to make his devices' code as robust as their hardware.",
+      "skills": [
+        "hardware design",
+        "secure elements",
+        "PCB design",
+        "tamper resistance",
+        "electronics prototyping"
+      ],
+      "interests": [
+        "hardware security",
+        "cold storage",
+        "tamper resistance",
+        "trusted devices"
+      ],
+      "offers": [
+        "secure hardware design",
+        "PCB and tamper-resistant enclosures",
+        "physical-layer security"
+      ],
+      "seeks": [
+        "a firmware / embedded-software engineer",
+        "someone to make secure-device code robust"
+      ]
+    },
+    "reasoning": "Kenji builds tamper-evident hardware and secure elements but is weak on software — he's really looking for a firmware engineer rather than a designer. If his secure devices ever need a friendlier interface layer, that's where your skills could come in, but it's not his stated gap."
+  },
+  {
+    "id": 11,
+    "targetName": "Jonah Bright",
+    "targetProfile": {
+      "summary": "Jonah is a product designer who left ad-tech to work on meaningful, private products. He specializes in making intimidating technical tools feel simple and seeks a deep technical partner whose powerful work suffers from poor usability.",
+      "skills": [
+        "product design",
+        "UX research",
+        "interaction design",
+        "prototyping",
+        "design systems"
+      ],
+      "interests": [
+        "privacy",
+        "usable security",
+        "ethical technology",
+        "consumer product design"
+      ],
+      "offers": [
+        "turning complex tech into simple UX",
+        "product and interaction design",
+        "user research"
+      ],
+      "seeks": [
+        "a deep technical partner in cryptography or security",
+        "powerful tech that needs usability"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "You should grab Elena immediately — she's an applied cryptographer working on ZK proofs and MPC whose protocols are powerful but unusable, and she's urgently looking for a product designer to make her cryptography approachable. This is exactly the deep technical partner whose powerful work suffers from poor usability that you've been seeking; ask her to walk you through what a normal person's journey through her tools would look like today."
+  },
+  {
+    "id": 12,
+    "targetName": "Dmitri Volkov",
+    "targetProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "candidateName": "Mara Okafor",
+    "candidateProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "reasoning": "You should grab Mara immediately — she's a funded, mission-driven founder with real users building a censorship-resistant payments app for grassroots organizers, and she's explicitly looking for a senior Rust engineer as a technical co-founder. Ask her what her users are hitting right now and what the payments architecture she needs looks like."
+  },
+  {
+    "id": 13,
+    "targetName": "Bao Nguyen",
+    "targetProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "candidateName": "Ingrid Solberg",
+    "candidateProfile": {
+      "summary": "Ingrid is a data scientist and ML engineer who thrives on messy, large-scale real-world data, graph analysis and anomaly detection. Between jobs and craving meaningful work, she seeks a high-impact dataset and a domain-expert partner.",
+      "skills": [
+        "data science",
+        "graph analysis",
+        "anomaly detection",
+        "Python",
+        "large-scale data pipelines"
+      ],
+      "interests": [
+        "messy real-world data",
+        "graph analysis",
+        "meaningful ML",
+        "investigations"
+      ],
+      "offers": [
+        "turning huge messy datasets into structure",
+        "anomaly and pattern detection",
+        "ML engineering"
+      ],
+      "seeks": [
+        "a high-impact dataset",
+        "a domain-expert partner who has the story but not the analysis skills"
+      ]
+    },
+    "reasoning": "You're sitting on a leaked dataset that could be a career-defining story, but the scale of it is drowning you — you can see the documents, you have the sources, but you can't see the patterns buried in the transaction data. That's exactly Ingrid's sweet spot. She lives for messy, large-scale real-world data and specializes in graph analysis and anomaly detection — the precise toolkit for surfacing who's moving money to whom across a sanctions-evasion network. She's between jobs and actively looking for a high-impact dataset and a domain-expert partner, which means she has both the time and the hunger to dig into your leak with you. You bring the story instincts and the source access; she brings the ability to turn a wall of raw transactions into a structured map you can actually write from. This is the collaborator you came to Reclaim to find."
+  },
+  {
+    "id": 14,
+    "targetName": "Sunny Kaur",
+    "targetProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "candidateName": "Aleksy Nowak",
+    "candidateProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "reasoning": "Aleksy is an anonymity researcher looking for builders to ship tools; there is a slight technical overlap in your C skills, but he isn't looking for a bandmate."
+  },
+  {
+    "id": 15,
+    "targetName": "Fatima Rahimi",
+    "targetProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "candidateName": "Nadia Petrov",
+    "candidateProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "reasoning": "You've spent years building something most technical builders never get access to — real, hard-won trust inside refugee and immigrant networks where people are shut out of banking and identity systems. But you've said yourself you need patient technical partners, and here's the thing: finding the right partners is exactly what Nadia does. She writes early checks into freedom-tech teams and mentors first-time founders, which means she knows who the patient, mission-driven builders are before anyone else does. If you're looking for people who can build practical money and identity tools for your communities, Nadia can connect you to early teams who are already working on these problems and who might need exactly the kind of community access and grassroots education capacity you bring. She's also someone who could help you think about funding and organizational strategy if you're trying to turn your community work into something sustainable. You're not a startup founder, but you're building something that looks like one — and she might see that."
+  },
+  {
+    "id": 16,
+    "targetName": "Ingrid Solberg",
+    "targetProfile": {
+      "summary": "Ingrid is a data scientist and ML engineer who thrives on messy, large-scale real-world data, graph analysis and anomaly detection. Between jobs and craving meaningful work, she seeks a high-impact dataset and a domain-expert partner.",
+      "skills": [
+        "data science",
+        "graph analysis",
+        "anomaly detection",
+        "Python",
+        "large-scale data pipelines"
+      ],
+      "interests": [
+        "messy real-world data",
+        "graph analysis",
+        "meaningful ML",
+        "investigations"
+      ],
+      "offers": [
+        "turning huge messy datasets into structure",
+        "anomaly and pattern detection",
+        "ML engineering"
+      ],
+      "seeks": [
+        "a high-impact dataset",
+        "a domain-expert partner who has the story but not the analysis skills"
+      ]
+    },
+    "candidateName": "Aleksy Nowak",
+    "candidateProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "reasoning": "Aleksy studies metadata leakage and traffic analysis — he has deep domain expertise in privacy and anonymity, and he's frustrated that his research doesn't reach builders. You could be the builder who turns his findings into a tool. He offers realistic threat models and protocol privacy analysis, which could become the foundation for a high-impact ML project. You bring the data engineering and anomaly detection; he brings the domain story. This is a strong complementary match."
+  },
+  {
+    "id": 17,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Halima Osei",
+    "candidateProfile": {
+      "summary": "Halima is a UX writer and plain-language specialist who rewrites dense, scary security instructions into clear, calm words, treating clarity as a safety feature. She seeks security/privacy projects whose solid tools are undermined by intimidating language.",
+      "skills": [
+        "UX writing",
+        "plain-language design",
+        "documentation",
+        "content design",
+        "security communication"
+      ],
+      "interests": [
+        "plain language",
+        "usable security",
+        "onboarding",
+        "human-centered safety"
+      ],
+      "offers": [
+        "clear plain-language writing",
+        "security onboarding and docs",
+        "content design that changes behavior"
+      ],
+      "seeks": [
+        "security and privacy projects with intimidating instructions",
+        "teams whose UX writing fails users"
+      ]
+    },
+    "reasoning": "You should grab Halima — your portfolio companies' security tools often have intimidating UX, and she's the person who can turn that around. Ask her about the worst onboarding flow she's ever fixed."
+  },
+  {
+    "id": 18,
+    "targetName": "Tomás Reyes",
+    "targetProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "candidateName": "Sunny Kaur",
+    "candidateProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "reasoning": "You've been hunting for a bassist — Sunny plays bass, works in embedded firmware, is new in town and dead serious about joining a band with technical people. Ask her what she'd want your first setlist to sound like."
+  },
+  {
+    "id": 19,
+    "targetName": "Fatima Rahimi",
+    "targetProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "candidateName": "Kenji Watanabe",
+    "candidateProfile": {
+      "summary": "Kenji is a hardware hacker who designs secure elements, tamper-evident devices and cold-storage gadgets. Strong on physical security but weak on software, he seeks a firmware/embedded engineer to make his devices' code as robust as their hardware.",
+      "skills": [
+        "hardware design",
+        "secure elements",
+        "PCB design",
+        "tamper resistance",
+        "electronics prototyping"
+      ],
+      "interests": [
+        "hardware security",
+        "cold storage",
+        "tamper resistance",
+        "trusted devices"
+      ],
+      "offers": [
+        "secure hardware design",
+        "PCB and tamper-resistant enclosures",
+        "physical-layer security"
+      ],
+      "seeks": [
+        "a firmware / embedded-software engineer",
+        "someone to make secure-device code robust"
+      ]
+    },
+    "reasoning": "You came to Reclaim looking for patient technical partners who can help you bring money and identity tools to people shut out of banking — and Kenji is building exactly the kind of physical, tamper-resistant hardware that your communities could actually hold in their hands. His secure-element devices and cold-storage gadgets are designed to work without trusting phones or laptops that refugees may not own or may not be safe to carry. He is not the firmware engineer he needs, and you are not either — but you both need the same missing person to complete the loop. If you connect him to your community's real constraints (no fixed address, documents confiscated, phones shared), you can shape what he builds so it genuinely serves people on the margins. And between his hardware instincts and your community access, the two of you are a compelling co-founding story that could attract exactly the embedded engineer you both need."
+  },
+  {
+    "id": 20,
+    "targetName": "Fatima Rahimi",
+    "targetProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "candidateName": "Yusuf Demir",
+    "candidateProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "reasoning": "Yusuf is a growth and go-to-market specialist for open-source privacy tools. If you find or build a tool that works for your community, he could help you distribute it ethically and reach more people. You have the community trust and access; he has the marketing and distribution expertise. This is a good complementarity, though you are not yet at the stage of needing a growth marketer—you still need the technical partners first."
+  },
+  {
+    "id": 21,
+    "targetName": "Rosa Delgado",
+    "targetProfile": {
+      "summary": "Rosa is an embedded/firmware engineer who loves tight, defensive, close-to-metal code touching cryptography, but is stuck doing web work. She wants to partner with a hardware builder who needs solid firmware for secure devices.",
+      "skills": [
+        "embedded firmware",
+        "C and Rust",
+        "defensive programming",
+        "real-time systems",
+        "cryptographic implementations"
+      ],
+      "interests": [
+        "embedded systems",
+        "hardware security",
+        "low-level programming",
+        "cryptographic implementations"
+      ],
+      "offers": [
+        "robust defensive firmware",
+        "real-time embedded engineering",
+        "secure crypto implementations"
+      ],
+      "seeks": [
+        "a hardware builder making secure or interesting devices",
+        "firmware work back on the metal"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "You, Rosa, are a firmware engineer who loves implementing cryptography close to the metal. Elena designs cutting-edge ZK and MPC protocols but her implementations are unusable. That's a mismatch: she needs a product designer, not a firmware engineer. Your skills don't complement hers for this event's purpose, and you don't need her protocols for your hardware focus. Meeting her would be a low-value use of your time."
+  },
+  {
+    "id": 22,
+    "targetName": "Sunny Kaur",
+    "targetProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "candidateName": "Tomás Reyes",
+    "candidateProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "reasoning": "You're looking for a drummer to anchor a rhythm section, and Tomás is a lifelong drummer in DevOps who's specifically hunting for a bassist to form a serious band from the tech scene. Ask him what kind of music he wants to play and whether he's got a practice space yet."
+  },
+  {
+    "id": 23,
+    "targetName": "Elena Marchetti",
+    "targetProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "candidateName": "Jonah Bright",
+    "candidateProfile": {
+      "summary": "Jonah is a product designer who left ad-tech to work on meaningful, private products. He specializes in making intimidating technical tools feel simple and seeks a deep technical partner whose powerful work suffers from poor usability.",
+      "skills": [
+        "product design",
+        "UX research",
+        "interaction design",
+        "prototyping",
+        "design systems"
+      ],
+      "interests": [
+        "privacy",
+        "usable security",
+        "ethical technology",
+        "consumer product design"
+      ],
+      "offers": [
+        "turning complex tech into simple UX",
+        "product and interaction design",
+        "user research"
+      ],
+      "seeks": [
+        "a deep technical partner in cryptography or security",
+        "powerful tech that needs usability"
+      ]
+    },
+    "reasoning": "You, Elena, urgently need a product designer to make your cryptography usable by normal people. Jonah is exactly that — he left ad-tech to work on meaningful, private products and specializes in making intimidating technical tools feel simple. He's seeking a deep technical partner whose powerful work suffers from poor usability. That's you. This is the highest complementarity in the room: your ZK and MPC expertise + his UX design = a tool people can actually use."
+  },
+  {
+    "id": 24,
+    "targetName": "Kenji Watanabe",
+    "targetProfile": {
+      "summary": "Kenji is a hardware hacker who designs secure elements, tamper-evident devices and cold-storage gadgets. Strong on physical security but weak on software, he seeks a firmware/embedded engineer to make his devices' code as robust as their hardware.",
+      "skills": [
+        "hardware design",
+        "secure elements",
+        "PCB design",
+        "tamper resistance",
+        "electronics prototyping"
+      ],
+      "interests": [
+        "hardware security",
+        "cold storage",
+        "tamper resistance",
+        "trusted devices"
+      ],
+      "offers": [
+        "secure hardware design",
+        "PCB and tamper-resistant enclosures",
+        "physical-layer security"
+      ],
+      "seeks": [
+        "a firmware / embedded-software engineer",
+        "someone to make secure-device code robust"
+      ]
+    },
+    "candidateName": "Rosa Delgado",
+    "candidateProfile": {
+      "summary": "Rosa is an embedded/firmware engineer who loves tight, defensive, close-to-metal code touching cryptography, but is stuck doing web work. She wants to partner with a hardware builder who needs solid firmware for secure devices.",
+      "skills": [
+        "embedded firmware",
+        "C and Rust",
+        "defensive programming",
+        "real-time systems",
+        "cryptographic implementations"
+      ],
+      "interests": [
+        "embedded systems",
+        "hardware security",
+        "low-level programming",
+        "cryptographic implementations"
+      ],
+      "offers": [
+        "robust defensive firmware",
+        "real-time embedded engineering",
+        "secure crypto implementations"
+      ],
+      "seeks": [
+        "a hardware builder making secure or interesting devices",
+        "firmware work back on the metal"
+      ]
+    },
+    "reasoning": "You should grab Rosa immediately — she's an embedded firmware engineer who writes tight defensive C and Rust with cryptographic implementations, and she's actively looking for a hardware builder making secure devices. She is exactly the person you've been searching for; ask her how she'd approach hardening firmware for your tamper-evident enclosures."
+  },
+  {
+    "id": 25,
+    "targetName": "Fatima Rahimi",
+    "targetProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "candidateName": "Casimir Wolff",
+    "candidateProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "reasoning": "You absolutely need to meet Casimir — he's a Bitcoin and Lightning developer who runs self-custody workshops but only reaches crypto insiders, and he's explicitly looking for community organizers to bring financial sovereignty to non-technical, underserved people. Ask him to co-design a workshop curriculum for your refugee and immigrant networks."
+  },
+  {
+    "id": 26,
+    "targetName": "Rosa Delgado",
+    "targetProfile": {
+      "summary": "Rosa is an embedded/firmware engineer who loves tight, defensive, close-to-metal code touching cryptography, but is stuck doing web work. She wants to partner with a hardware builder who needs solid firmware for secure devices.",
+      "skills": [
+        "embedded firmware",
+        "C and Rust",
+        "defensive programming",
+        "real-time systems",
+        "cryptographic implementations"
+      ],
+      "interests": [
+        "embedded systems",
+        "hardware security",
+        "low-level programming",
+        "cryptographic implementations"
+      ],
+      "offers": [
+        "robust defensive firmware",
+        "real-time embedded engineering",
+        "secure crypto implementations"
+      ],
+      "seeks": [
+        "a hardware builder making secure or interesting devices",
+        "firmware work back on the metal"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "You want to get back to the metal and work on secure, interesting hardware — and the fastest path to meaningful firmware work at this event may be through someone who has the cryptographic protocols worth protecting. Elena designs ZK proofs and MPC schemes with rigorous privacy guarantees, but her implementations are not yet usable and she is actively looking for collaborators who can bring her work closer to reality. If you want to do defensive, crypto-adjacent firmware engineering for freedom-tech, partnering with someone who has cutting-edge protocols but needs help making them run safely on real devices could give you exactly the kind of close-to-metal, high-impact work you have been missing. She is not a hardware builder, but her needs and your skills overlap in the place that matters most: secure, real-world cryptographic implementations."
+  },
+  {
+    "id": 27,
+    "targetName": "Yusuf Demir",
+    "targetProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "candidateName": "Casimir Wolff",
+    "candidateProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "reasoning": "Casimir runs Bitcoin self-custody workshops but only reaches insiders — you could help him reach underserved communities with your marketing skills. Ask him what his biggest challenge is in making workshops accessible."
+  },
+  {
+    "id": 28,
+    "targetName": "Gideon Frei",
+    "targetProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "candidateName": "Tomás Reyes",
+    "candidateProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "reasoning": "Tomás is a drummer hunting for a bassist to form a band — not related to your work, but if you play an instrument or just want to talk music, he'd be a fun break. Ask him what band he'd want to start."
+  },
+  {
+    "id": 29,
+    "targetName": "Mara Okafor",
+    "targetProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "candidateName": "Dmitri Volkov",
+    "candidateProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "reasoning": "You've been carrying a funded, user-validated payments app entirely on the operations and fundraising side, and the bottleneck is clear: you need someone who can actually build the censorship-resistant infrastructure you've been promising grassroots organizers. Dmitri is a staff-level Rust engineer who has spent years architecting payments systems and cryptographic protocols at a large fintech — he knows exactly how to build the hard, secure backend your app requires. More importantly, he's disillusioned with corporate work and actively looking for a mission-driven co-founder role, not just another paycheck. He has the specific technical depth (Rust, payments infra, crypto protocols) that your product vision demands, and he's offering exactly what you're seeking. This is the kind of conversation that could turn your project from a funded mission into a shipping product."
+  },
+  {
+    "id": 30,
+    "targetName": "Gideon Frei",
+    "targetProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "candidateName": "Bao Nguyen",
+    "candidateProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "reasoning": "Bao is exactly who you are looking for; he has a massive leaked dataset and needs the early legal risk assessment and source protection you specialize in before he publishes."
+  },
+  {
+    "id": 31,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Sunny Kaur",
+    "candidateProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "reasoning": "While she is looking for a team, her focus is on music and firmware rather than the freedom-tech startups you fund."
+  },
+  {
+    "id": 32,
+    "targetName": "Elena Marchetti",
+    "targetProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "candidateName": "Yusuf Demir",
+    "candidateProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "reasoning": "You've built cryptographic protocols with rigorous privacy guarantees, but you've said yourself that your implementations are unusable — and you're looking for a product designer to bridge that gap. Here's the thing: Yusuf won't solve your UX problem directly, but he solves the problem right *behind* it. Even with a designer on board, your tool dies in a drawer without distribution. Yusuf has ethically scaled two open-source privacy tools and specializes in taking strong technical products that nobody knows about and getting them into the right hands — developer communities, the privacy-curious, the people who need what you've built but will never read a ZK paper. He's explicitly looking for a freedom-tech product with no marketing capacity, which is exactly where you are. If you want your cryptography to actually reach people, Yusuf is the distribution half of your puzzle."
+  },
+  {
+    "id": 33,
+    "targetName": "Sunny Kaur",
+    "targetProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "candidateName": "Tomás Reyes",
+    "candidateProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "reasoning": "Tomás is a drummer actively hunting for a bassist to form a band — that's you! You're a reliable bassist who wants to anchor a rhythm section, and he's a committed drummer who needs exactly that. You both work in tech (DevOps/firmware) and share a passion for live performance. This is a near-perfect complement: you provide the low end and synth textures, he provides the beat. Meeting him could be the start of the band you came here to find."
+  },
+  {
+    "id": 34,
+    "targetName": "Yusuf Demir",
+    "targetProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "Elena has powerful cryptographic protocols that are currently unusable; while she specifically needs a designer, your positioning skills would be vital once her tech is ready for a broader audience."
+  },
+  {
+    "id": 35,
+    "targetName": "Gideon Frei",
+    "targetProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "candidateName": "Priya Nadar",
+    "candidateProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "reasoning": "You should grab Priya immediately — she's an award-circuit documentary filmmaker specializing in surveillance and dissent who explicitly wants a legal ally to protect vulnerable sources before she films them. Tell her about your high-profile whistleblower cases and ask how early in her story-development process you could start building source-protection frameworks."
+  },
+  {
+    "id": 36,
+    "targetName": "Aleksy Nowak",
+    "targetProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "candidateName": "Priya Nadar",
+    "candidateProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "reasoning": "Priya is a documentary filmmaker who needs legal protection for her sources before she films — you have the threat models and deanonymization expertise to help her understand exactly what risks her subjects face. Ask her about the surveillance story she's chasing and what protections she's already considering."
+  },
+  {
+    "id": 37,
+    "targetName": "Aleksy Nowak",
+    "targetProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "candidateName": "Bao Nguyen",
+    "candidateProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "reasoning": "Bao is sitting on a massive leaked dataset and needs to understand the risks of deanonymization; you can provide the technical threat modeling he needs to ensure his reporting doesn't inadvertently expose his sources."
+  },
+  {
+    "id": 38,
+    "targetName": "Bao Nguyen",
+    "targetProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "candidateName": "Kenji Watanabe",
+    "candidateProfile": {
+      "summary": "Kenji is a hardware hacker who designs secure elements, tamper-evident devices and cold-storage gadgets. Strong on physical security but weak on software, he seeks a firmware/embedded engineer to make his devices' code as robust as their hardware.",
+      "skills": [
+        "hardware design",
+        "secure elements",
+        "PCB design",
+        "tamper resistance",
+        "electronics prototyping"
+      ],
+      "interests": [
+        "hardware security",
+        "cold storage",
+        "tamper resistance",
+        "trusted devices"
+      ],
+      "offers": [
+        "secure hardware design",
+        "PCB and tamper-resistant enclosures",
+        "physical-layer security"
+      ],
+      "seeks": [
+        "a firmware / embedded-software engineer",
+        "someone to make secure-device code robust"
+      ]
+    },
+    "reasoning": "Kenji's hardware security skills are impressive but tangential to your immediate need — you're drowning in transaction data, not building cold-storage devices. Unless your leaked dataset involves tamper-evident hardware logs or physical security tokens, a meeting would be a low-priority conversation. You'd be better off focusing on candidates who can help you parse the data itself."
+  },
+  {
+    "id": 39,
+    "targetName": "Aleksy Nowak",
+    "targetProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "candidateName": "Priya Nadar",
+    "candidateProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "reasoning": "Priya needs to protect her sources from high-stakes surveillance, which is exactly where your threat models and metadata expertise are most needed. Offer to help her build a realistic defense strategy for the whistleblowers she films."
+  },
+  {
+    "id": 40,
+    "targetName": "Bao Nguyen",
+    "targetProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "candidateName": "Ingrid Solberg",
+    "candidateProfile": {
+      "summary": "Ingrid is a data scientist and ML engineer who thrives on messy, large-scale real-world data, graph analysis and anomaly detection. Between jobs and craving meaningful work, she seeks a high-impact dataset and a domain-expert partner.",
+      "skills": [
+        "data science",
+        "graph analysis",
+        "anomaly detection",
+        "Python",
+        "large-scale data pipelines"
+      ],
+      "interests": [
+        "messy real-world data",
+        "graph analysis",
+        "meaningful ML",
+        "investigations"
+      ],
+      "offers": [
+        "turning huge messy datasets into structure",
+        "anomaly and pattern detection",
+        "ML engineering"
+      ],
+      "seeks": [
+        "a high-impact dataset",
+        "a domain-expert partner who has the story but not the analysis skills"
+      ]
+    },
+    "reasoning": "You should grab Ingrid immediately — she's a data scientist who specializes in graph analysis and anomaly detection on messy real-world data, and she's actively looking for a high-impact dataset and a domain-expert partner with a story to tell. Hand her the leaked dataset and ask her what transaction patterns jump out when she maps it as a graph."
+  },
+  {
+    "id": 41,
+    "targetName": "Gideon Frei",
+    "targetProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "candidateName": "Priya Nadar",
+    "candidateProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "reasoning": "Priya is a documentary filmmaker specifically looking for legal allies to protect her subjects before she starts filming. You should talk to her about the high-stakes stories she has in development and how your early-stage risk assessments can secure her sources."
+  },
+  {
+    "id": 42,
+    "targetName": "Yusuf Demir",
+    "targetProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "candidateName": "Mara Okafor",
+    "candidateProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "reasoning": "You should grab Mara — she has a funded, censorship-resistant payments app with real users but zero engineering capacity, and she needs exactly the kind of go-to-market and positioning help you offer. Ask her what her user acquisition looks like right now and where distribution is breaking down."
+  },
+  {
+    "id": 43,
+    "targetName": "Dmitri Volkov",
+    "targetProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "You are a senior Rust engineer with cryptographic protocol expertise, building hard infrastructure. Elena is an applied cryptographer (ZK proofs, MPC) whose protocols are powerful but unusable — she urgently needs someone to make her cryptography approachable. While she seeks a product designer, your systems architecture and Rust skills could help her build practical, usable implementations. You both share deep privacy-tech interests, and your ability to ship production-grade code complements her theoretical rigor. This could be a powerful collaboration: she provides cutting-edge protocols, you provide the engineering to make them real."
+  },
+  {
+    "id": 44,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Fatima Rahimi",
+    "candidateProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "reasoning": "Fatima has deep trust in refugee and immigrant networks that are shut out of banking and identity systems — exactly the underserved communities you want to back. She needs patient technical partners to bring practical money and identity tools to her people. You could fund a project pairing her with a builder like Casimir, or mentor her on fundraising strategy. Her grassroots access and your capital/coaching are a perfect complement."
+  },
+  {
+    "id": 45,
+    "targetName": "Jonah Bright",
+    "targetProfile": {
+      "summary": "Jonah is a product designer who left ad-tech to work on meaningful, private products. He specializes in making intimidating technical tools feel simple and seeks a deep technical partner whose powerful work suffers from poor usability.",
+      "skills": [
+        "product design",
+        "UX research",
+        "interaction design",
+        "prototyping",
+        "design systems"
+      ],
+      "interests": [
+        "privacy",
+        "usable security",
+        "ethical technology",
+        "consumer product design"
+      ],
+      "offers": [
+        "turning complex tech into simple UX",
+        "product and interaction design",
+        "user research"
+      ],
+      "seeks": [
+        "a deep technical partner in cryptography or security",
+        "powerful tech that needs usability"
+      ]
+    },
+    "candidateName": "Halima Osei",
+    "candidateProfile": {
+      "summary": "Halima is a UX writer and plain-language specialist who rewrites dense, scary security instructions into clear, calm words, treating clarity as a safety feature. She seeks security/privacy projects whose solid tools are undermined by intimidating language.",
+      "skills": [
+        "UX writing",
+        "plain-language design",
+        "documentation",
+        "content design",
+        "security communication"
+      ],
+      "interests": [
+        "plain language",
+        "usable security",
+        "onboarding",
+        "human-centered safety"
+      ],
+      "offers": [
+        "clear plain-language writing",
+        "security onboarding and docs",
+        "content design that changes behavior"
+      ],
+      "seeks": [
+        "security and privacy projects with intimidating instructions",
+        "teams whose UX writing fails users"
+      ]
+    },
+    "reasoning": "You and Halima share a mission of making security less intimidating; you should compare notes on how her plain-language writing and your UX design can work together to protect users."
+  },
+  {
+    "id": 46,
+    "targetName": "Dmitri Volkov",
+    "targetProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "candidateName": "Lars Andersen",
+    "candidateProfile": {
+      "summary": "Lars is a semi-retired veteran network engineer turned beekeeper who attends conferences for conversation and to mentor younger engineers. He has deep legacy-networking knowledge but no active projects or strong goals.",
+      "skills": [
+        "network engineering",
+        "BGP",
+        "legacy infrastructure",
+        "beekeeping",
+        "mentoring"
+      ],
+      "interests": [
+        "networking history",
+        "mentorship",
+        "beekeeping",
+        "good conversation"
+      ],
+      "offers": [
+        "decades of networking wisdom",
+        "mentorship and war stories",
+        "friendly company"
+      ],
+      "seeks": [
+        "good conversations",
+        "younger engineers to mentor occasionally"
+      ]
+    },
+    "reasoning": "Lars could be a great source of networking war stories and mentorship as you transition out of your corporate fintech role."
+  },
+  {
+    "id": 47,
+    "targetName": "Elena Marchetti",
+    "targetProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "candidateName": "Rosa Delgado",
+    "candidateProfile": {
+      "summary": "Rosa is an embedded/firmware engineer who loves tight, defensive, close-to-metal code touching cryptography, but is stuck doing web work. She wants to partner with a hardware builder who needs solid firmware for secure devices.",
+      "skills": [
+        "embedded firmware",
+        "C and Rust",
+        "defensive programming",
+        "real-time systems",
+        "cryptographic implementations"
+      ],
+      "interests": [
+        "embedded systems",
+        "hardware security",
+        "low-level programming",
+        "cryptographic implementations"
+      ],
+      "offers": [
+        "robust defensive firmware",
+        "real-time embedded engineering",
+        "secure crypto implementations"
+      ],
+      "seeks": [
+        "a hardware builder making secure or interesting devices",
+        "firmware work back on the metal"
+      ]
+    },
+    "reasoning": "Rosa is an embedded firmware engineer who loves implementing cryptography in C and Rust — she could help you build tight, secure implementations of your protocols. Ask her if she's ever worked with ZK proofs or MPC on constrained hardware."
+  },
+  {
+    "id": 48,
+    "targetName": "Kenji Watanabe",
+    "targetProfile": {
+      "summary": "Kenji is a hardware hacker who designs secure elements, tamper-evident devices and cold-storage gadgets. Strong on physical security but weak on software, he seeks a firmware/embedded engineer to make his devices' code as robust as their hardware.",
+      "skills": [
+        "hardware design",
+        "secure elements",
+        "PCB design",
+        "tamper resistance",
+        "electronics prototyping"
+      ],
+      "interests": [
+        "hardware security",
+        "cold storage",
+        "tamper resistance",
+        "trusted devices"
+      ],
+      "offers": [
+        "secure hardware design",
+        "PCB and tamper-resistant enclosures",
+        "physical-layer security"
+      ],
+      "seeks": [
+        "a firmware / embedded-software engineer",
+        "someone to make secure-device code robust"
+      ]
+    },
+    "candidateName": "Priya Nadar",
+    "candidateProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "reasoning": "Priya films surveillance and dissent stories — if your tamper-resistant hardware has been used by anyone in a high-stakes context, she'd want to hear about it, but it's a stretch from what you're each looking for."
+  },
+  {
+    "id": 49,
+    "targetName": "Tomás Reyes",
+    "targetProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "candidateName": "Sunny Kaur",
+    "candidateProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "reasoning": "You should grab Sunny immediately—she is a reliable bassist and synth player who is new in town and specifically looking for a drummer to form a band with."
+  },
+  {
+    "id": 50,
+    "targetName": "Mara Okafor",
+    "targetProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "candidateName": "Nadia Petrov",
+    "candidateProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "reasoning": "You're walking into Reclaim with something most people here don't have: real users, real funding, and a live product vision for censorship-resistant payments serving grassroots organizers. But you've flagged the exact gap that could stall everything — you need a senior Rust engineer who'll pick mission over paycheck. Nadia isn't that engineer, but she might be the fastest path to one. She writes early checks into freedom tech specifically, which means she understands the landscape you're building in and has likely already met the technical talent you're hunting. Her offer isn't just money — it's network access and founder coaching, and as a first-time non-technical founder, her fundraising strategy and mentorship could be the difference between burning your current runway and building the credibility to attract a technical co-founder. Talk to her about your user base and your traction; that's exactly what she's looking to fund and support."
+  },
+  {
+    "id": 51,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Mara Okafor",
+    "candidateProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "reasoning": "Mara is building a censorship-resistant payments app for grassroots organizers — she has users, funding, and product vision but no engineering capacity. She needs a senior Rust engineer as technical co-founder. You could help her find that person through your network, or mentor her on fundraising strategy. Her mission-driven startup is exactly the kind of early team you seek, and your network and coaching complement her operational needs perfectly."
+  },
+  {
+    "id": 52,
+    "targetName": "Casimir Wolff",
+    "targetProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "candidateName": "Nadia Petrov",
+    "candidateProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "reasoning": "You've built a Bitcoin protocol education engine, but your own summary names the exact gap: you're only reaching crypto insiders. Nadia doesn't just bring a check—she brings a founder coach's instinct and a network that extends well past the Bitcoin echo chamber. She's actively looking for mission-driven freedom-tech teams, and your workshop curriculum aimed at non-technical, underserved users is exactly the kind of real-world sovereignty tool she wants to back. She can help you think about your education initiative as a fundable venture rather than a series of workshops, connect you to operators who've built community trust in the populations you're trying to reach, and pressure-test your go-to-market. If you want to stop preaching to the converted, this conversation is where that starts."
+  },
+  {
+    "id": 53,
+    "targetName": "Bao Nguyen",
+    "targetProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "candidateName": "Dmitri Volkov",
+    "candidateProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "reasoning": "You should grab Dmitri — he's a staff-level engineer with deep payments-infrastructure and cryptographic-protocol expertise, disillusioned with corporate fintech and looking for a mission-driven project. Ask him to help you model the transaction flows in your leaked dataset; his real-world payments knowledge could surface the patterns your sources can't."
+  },
+  {
+    "id": 54,
+    "targetName": "Yusuf Demir",
+    "targetProfile": {
+      "summary": "Yusuf is a growth and go-to-market specialist for open-source and privacy startups, having scaled two tools ethically. He seeks a strong but undistributed freedom-tech product whose team lacks marketing capacity.",
+      "skills": [
+        "growth marketing",
+        "go-to-market strategy",
+        "developer relations",
+        "content strategy",
+        "community building"
+      ],
+      "interests": [
+        "open-source distribution",
+        "privacy tools",
+        "ethical marketing",
+        "developer communities"
+      ],
+      "offers": [
+        "go-to-market and growth",
+        "developer relations",
+        "ethical distribution and positioning"
+      ],
+      "seeks": [
+        "a great privacy/freedom-tech product with no distribution",
+        "an engineering team lacking marketing"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "Elena has powerful ZK protocols that are unusable — you could help her figure out how to position and distribute them. Ask her what the most exciting application of her cryptography would be."
+  },
+  {
+    "id": 55,
+    "targetName": "Tomás Reyes",
+    "targetProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "candidateName": "Sunny Kaur",
+    "candidateProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "reasoning": "Sunny is a bassist and synth tinkerer who works in embedded firmware — and she's new in town, looking for a drummer to play with. This is exactly what you're hunting for. You bring drumming and rhythm; she brings bass and low end. Together you form a complete rhythm section. She's also technical (embedded firmware), so you share the tech-band culture. Meeting her is your highest priority: she's the bassist you need to anchor your band."
+  },
+  {
+    "id": 56,
+    "targetName": "Bao Nguyen",
+    "targetProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "candidateName": "Aleksy Nowak",
+    "candidateProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "reasoning": "Ask Aleksy about source-protection threat models — he studies metadata leakage and deanonymization, and if your leaked dataset contains communications metadata, his expertise could help you understand what patterns might expose your sources."
+  },
+  {
+    "id": 57,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Mara Okafor",
+    "candidateProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "reasoning": "Mara is exactly the kind of mission-driven founder you seek, building a censorship-resistant payments app with active users; she needs your fundraising strategy and network to find a technical co-founder."
+  },
+  {
+    "id": 58,
+    "targetName": "Tomás Reyes",
+    "targetProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "candidateName": "Sunny Kaur",
+    "candidateProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "reasoning": "You're a drummer hunting for a bassist to anchor your rhythm section, and Sunny is exactly that — a reliable, committed bass player who specifically wants to find a drummer and join a band with technical people. She's new in town and knows zero local musicians, which means she's hungry and available right now, not already locked into a project. Beyond bass, she brings synth and production skills that could add texture to whatever you're building sonically. The fact that she works in embedded firmware and C means she lives in the same technical world you do with DevOps and Linux — you'll speak the same language both in rehearsal and in the hallway track. At a cypherpunk unconference full of builders, finding your musical other half who also gets the tech life is rare; finding one who's actively looking for you is a gift. Don't let this one walk past."
+  },
+  {
+    "id": 59,
+    "targetName": "Jonah Bright",
+    "targetProfile": {
+      "summary": "Jonah is a product designer who left ad-tech to work on meaningful, private products. He specializes in making intimidating technical tools feel simple and seeks a deep technical partner whose powerful work suffers from poor usability.",
+      "skills": [
+        "product design",
+        "UX research",
+        "interaction design",
+        "prototyping",
+        "design systems"
+      ],
+      "interests": [
+        "privacy",
+        "usable security",
+        "ethical technology",
+        "consumer product design"
+      ],
+      "offers": [
+        "turning complex tech into simple UX",
+        "product and interaction design",
+        "user research"
+      ],
+      "seeks": [
+        "a deep technical partner in cryptography or security",
+        "powerful tech that needs usability"
+      ]
+    },
+    "candidateName": "Elena Marchetti",
+    "candidateProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "reasoning": "You should grab Elena immediately—she is a cryptographer whose powerful ZK protocols are currently unusable, and she is specifically looking for a designer like you to make her work approachable."
+  },
+  {
+    "id": 60,
+    "targetName": "Dmitri Volkov",
+    "targetProfile": {
+      "summary": "Dmitri is a staff-level Rust engineer at a large fintech, expert in payments infrastructure and cryptographic protocols, but disillusioned with corporate work. He wants to join a mission-driven project and is open to co-founding.",
+      "skills": [
+        "Rust",
+        "distributed systems",
+        "payments infrastructure",
+        "cryptographic protocols",
+        "systems architecture"
+      ],
+      "interests": [
+        "freedom tech",
+        "privacy",
+        "meaningful engineering",
+        "financial systems"
+      ],
+      "offers": [
+        "senior Rust backend engineering",
+        "payments systems architecture",
+        "ability to build hard infra solo"
+      ],
+      "seeks": [
+        "a mission-driven founder with users and funding",
+        "a real problem worth solving",
+        "a co-founder role"
+      ]
+    },
+    "candidateName": "Lars Andersen",
+    "candidateProfile": {
+      "summary": "Lars is a semi-retired veteran network engineer turned beekeeper who attends conferences for conversation and to mentor younger engineers. He has deep legacy-networking knowledge but no active projects or strong goals.",
+      "skills": [
+        "network engineering",
+        "BGP",
+        "legacy infrastructure",
+        "beekeeping",
+        "mentoring"
+      ],
+      "interests": [
+        "networking history",
+        "mentorship",
+        "beekeeping",
+        "good conversation"
+      ],
+      "offers": [
+        "decades of networking wisdom",
+        "mentorship and war stories",
+        "friendly company"
+      ],
+      "seeks": [
+        "good conversations",
+        "younger engineers to mentor occasionally"
+      ]
+    },
+    "reasoning": "Lars is a retired network engineer turned beekeeper here for conversation and mentorship — not a mission-driven founder. You might enjoy a chat over coffee, but he's not the co-founder you're seeking."
+  },
+  {
+    "id": 61,
+    "targetName": "Priya Nadar",
+    "targetProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "candidateName": "Gideon Frei",
+    "candidateProfile": {
+      "summary": "Gideon is a human-rights lawyer specializing in whistleblower defense and source protection, having defended high-profile leakers. He wants to partner with storytellers early so sources are protected before, not after, publication.",
+      "skills": [
+        "source-protection law",
+        "whistleblower defense",
+        "legal risk assessment",
+        "digital-security counseling",
+        "litigation"
+      ],
+      "interests": [
+        "press freedom",
+        "whistleblowers",
+        "civil liberties",
+        "digital security"
+      ],
+      "offers": [
+        "legal protection for sources",
+        "whistleblower defense",
+        "cases worth telling",
+        "early legal risk counseling"
+      ],
+      "seeks": [
+        "journalists and filmmakers telling whistleblower stories",
+        "cases that matter"
+      ]
+    },
+    "reasoning": "Gideon is exactly the kind of legal ally you seek: a human-rights lawyer specializing in whistleblower defense and source protection. He wants to partner with storytellers early to protect sources before publication—this is a perfect complement to your filmmaking. You offer the platform and stories; he offers the legal shield. Meeting him could be the most valuable connection at the event for your mission."
+  },
+  {
+    "id": 62,
+    "targetName": "Aleksy Nowak",
+    "targetProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "candidateName": "Ingrid Solberg",
+    "candidateProfile": {
+      "summary": "Ingrid is a data scientist and ML engineer who thrives on messy, large-scale real-world data, graph analysis and anomaly detection. Between jobs and craving meaningful work, she seeks a high-impact dataset and a domain-expert partner.",
+      "skills": [
+        "data science",
+        "graph analysis",
+        "anomaly detection",
+        "Python",
+        "large-scale data pipelines"
+      ],
+      "interests": [
+        "messy real-world data",
+        "graph analysis",
+        "meaningful ML",
+        "investigations"
+      ],
+      "offers": [
+        "turning huge messy datasets into structure",
+        "anomaly and pattern detection",
+        "ML engineering"
+      ],
+      "seeks": [
+        "a high-impact dataset",
+        "a domain-expert partner who has the story but not the analysis skills"
+      ]
+    },
+    "reasoning": "You've been frustrated that your anonymity research stays in papers and never reaches the people it could help — Ingrid is the builder who can change that. She's a data scientist who specializes in exactly the kind of messy, large-scale real-world data your traffic analysis and metadata leakage work produces: graph structures, anomaly detection, pattern-finding in noise. She's between jobs and actively seeking a high-impact dataset and a domain expert to partner with, which means she's motivated and available right now. She can take your threat models and protocol privacy analysis and engineer them into something people can actually run — turning your academic findings into a shipped tool. At a cypherpunk unconference full of people who want to ship, this is your best shot at finding the technical partner who bridges the gap between your research and real-world impact."
+  },
+  {
+    "id": 63,
+    "targetName": "Priya Nadar",
+    "targetProfile": {
+      "summary": "Priya is an award-circuit documentary filmmaker specializing in surveillance and dissent. She seeks high-stakes untold stories and, crucially, legal allies who can protect vulnerable sources before she films them.",
+      "skills": [
+        "documentary filmmaking",
+        "interviewing",
+        "story development",
+        "video editing",
+        "visual storytelling"
+      ],
+      "interests": [
+        "surveillance",
+        "dissent",
+        "press freedom",
+        "human rights",
+        "source protection"
+      ],
+      "offers": [
+        "a platform to tell high-stakes stories",
+        "filmmaking and visual storytelling",
+        "festival reach"
+      ],
+      "seeks": [
+        "whistleblowers and subjects with real stories",
+        "lawyers or advocates who protect sources"
+      ]
+    },
+    "candidateName": "Fatima Rahimi",
+    "candidateProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "reasoning": "You're hunting for high-stakes, untold stories about surveillance and dissent — and Fatima is sitting on exactly that. The refugee and immigrant communities she has earned hard-won trust in are people who are routinely shut out of banking and identity systems, which means they are living the consequences of the very surveillance and exclusion you document. She can open doors that no filmmaker typically gets through, and the stories behind those doors — of people navigating stateless identity, financial exclusion, and the friction of being unbanked — are precisely the kind of human-rights narratives you build films around. But here's the complementary piece: you also seek lawyers and advocates who can protect vulnerable sources before you film them. Fatima's organizing instincts and community trust make her a natural partner in designing that protection — she knows who is at risk, what exposure looks like, and how to approach people safely. You bring the platform and festival reach; she brings the access and the trust. This is a collaboration that could turn into both a film and a protective framework at the same time."
+  },
+  {
+    "id": 64,
+    "targetName": "Aleksy Nowak",
+    "targetProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "candidateName": "Bao Nguyen",
+    "candidateProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "reasoning": "Bao is drowning in a massive leaked dataset and needs pattern analysis — your traffic-analysis skills overlap more than you'd think, and he could use your perspective on what metadata in those transactions reveals. Ask him what the dataset looks like and whether transaction-graph patterns map onto anything you've seen in network traffic."
+  },
+  {
+    "id": 65,
+    "targetName": "Sunny Kaur",
+    "targetProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "candidateName": "Bao Nguyen",
+    "candidateProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "reasoning": "You're here looking for technical bandmates — and Bao isn't that. But here's the angle: Bao is an investigative journalist sitting on a massive leaked dataset of financial crime and sanctions evasion transactions, and he's desperate for someone who can mine it for patterns. Your embedded firmware and C programming background means you think systematically about data and systems, even if you wouldn't call yourself a data scientist. If you're open to a side quest, helping Bao surface the story in that data could be a meaningful cypherpunk contribution — accountability journalism is core to this movement. More practically for your main goal: Bao's source network likely includes people in the freedom-tech and privacy community who could connect you to the technically-minded collaborators you're actually looking for. A journalist covering financial crime knows people. Help him, and you earn a well-connected ally who'd happily introduce you around."
+  },
+  {
+    "id": 66,
+    "targetName": "Casimir Wolff",
+    "targetProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "candidateName": "Fatima Rahimi",
+    "candidateProfile": {
+      "summary": "Fatima is a community organizer with deep, hard-won trust in refugee and immigrant networks whose members are routinely shut out of banking and identity systems. She seeks patient technical partners to bring practical money and identity tools to her communities.",
+      "skills": [
+        "community organizing",
+        "trust building",
+        "translation",
+        "grassroots education",
+        "event facilitation"
+      ],
+      "interests": [
+        "refugee rights",
+        "financial inclusion",
+        "identity",
+        "grassroots empowerment"
+      ],
+      "offers": [
+        "deep community trust and access",
+        "organizing and facilitation",
+        "translation and grassroots reach"
+      ],
+      "seeks": [
+        "patient technical partners",
+        "people to teach money and identity tools to underserved communities"
+      ]
+    },
+    "reasoning": "You must meet Fatima; she has the deep trust of refugee and immigrant communities who are excluded from banking and is specifically looking for a patient technical partner to teach them about money tools."
+  },
+  {
+    "id": 67,
+    "targetName": "Sunny Kaur",
+    "targetProfile": {
+      "summary": "Sunny is a reliable bassist and synth tinkerer who works in embedded firmware. New in town and knowing no local musicians, she wants to join or form a band, ideally with fellow technical people.",
+      "skills": [
+        "bass guitar",
+        "synthesizers",
+        "music production",
+        "embedded firmware",
+        "C programming"
+      ],
+      "interests": [
+        "music",
+        "synthesizers",
+        "embedded hardware",
+        "band culture"
+      ],
+      "offers": [
+        "bass and low end",
+        "reliability and commitment",
+        "synth and production skills"
+      ],
+      "seeks": [
+        "a band to join",
+        "a drummer to play with",
+        "technical bandmates"
+      ]
+    },
+    "candidateName": "Tomás Reyes",
+    "candidateProfile": {
+      "summary": "Tomás is a lifelong drummer working in DevOps by day. He wants to form a serious band from the tech scene and is specifically hunting for a bassist to anchor a rhythm section.",
+      "skills": [
+        "drums",
+        "percussion",
+        "live performance",
+        "DevOps",
+        "Linux sysadmin"
+      ],
+      "interests": [
+        "music",
+        "live performance",
+        "band culture",
+        "self-hosting"
+      ],
+      "offers": [
+        "drumming and rhythm",
+        "a committed bandmate",
+        "DevOps know-how"
+      ],
+      "seeks": [
+        "a bassist",
+        "serious musicians to form a band",
+        "people in tech who also play"
+      ]
+    },
+    "reasoning": "You just arrived knowing no local musicians and want a band with technical people — Tomás is a committed drummer actively looking for a bassist, which is the exact role you fill. He's not casually interested; he wants to form something serious from the tech scene, and he's offering the seat next to him in the rhythm section. His DevOps and Linux sysadmin background means he's solidly in your world of embedded firmware and C — you won't have to explain why you'd rather talk about self-hosting or hardware at practice. A drummer who already plays live and wants a bassist to anchor the low end with him is the hardest piece to find when you're starting from zero connections. He's at this conference for the same reasons you are: building things that matter, and finding people to build music with on the side. Grab a coffee and see if the groove is there."
+  },
+  {
+    "id": 68,
+    "targetName": "Theo Lindqvist",
+    "targetProfile": {
+      "summary": "Theo is a generalist full-stack web developer and hobby photographer with casual curiosity about the privacy scene but no strong mission. He's here to learn, make friends, and maybe find a low-stakes side project.",
+      "skills": [
+        "full-stack development",
+        "JavaScript",
+        "React",
+        "photography",
+        "general web"
+      ],
+      "interests": [
+        "web development",
+        "photography",
+        "hiking",
+        "board games",
+        "learning about privacy"
+      ],
+      "offers": [
+        "general full-stack web help",
+        "a curious audience",
+        "casual collaboration"
+      ],
+      "seeks": [
+        "to learn about the cypherpunk scene",
+        "friends and casual connections",
+        "a possible side project"
+      ]
+    },
+    "candidateName": "Casimir Wolff",
+    "candidateProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "reasoning": "You mentioned you're here to learn about the cypherpunk scene and maybe find a low-stakes side project — Casimir is honestly a great person to absorb some of that from. He lives and breathes Bitcoin self-custody and runs hands-on workshops, so if you want to understand what 'financial sovereignty' actually means in practice rather than as a slogan, he's your guy. On the project side: he has a real pain point — his workshops only reach crypto insiders, and he wants to break out of that bubble. If you wanted a chill, low-commitment way to contribute your full-stack and photography skills, you could help him build something that makes self-custody education feel approachable to non-technical people. It won't be a world-changing collaboration, but it's a genuine way to dip your toes in freedom-tech while making a friend who knows the space deeply."
+  },
+  {
+    "id": 69,
+    "targetName": "Elena Marchetti",
+    "targetProfile": {
+      "summary": "Elena is an applied cryptographer (ZK proofs, MPC) transitioning from academia to practice. Her protocols are powerful but her implementations are unusable; she urgently seeks a product designer to make her cryptography approachable.",
+      "skills": [
+        "zero-knowledge proofs",
+        "cryptographic protocol design",
+        "MPC",
+        "formal verification",
+        "academic research"
+      ],
+      "interests": [
+        "privacy technology",
+        "applied cryptography",
+        "making crypto usable"
+      ],
+      "offers": [
+        "cutting-edge cryptographic protocols",
+        "ZK and MPC expertise",
+        "rigorous privacy guarantees"
+      ],
+      "seeks": [
+        "a product designer / UX person",
+        "someone to make her cryptography usable by normal people"
+      ]
+    },
+    "candidateName": "Aleksy Nowak",
+    "candidateProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "reasoning": "Aleksy's traffic-analysis and deanonymization research could stress-test your ZK and MPC protocols for metadata leaks — ask him which of your privacy guarantees would actually hold up against a real adversary."
+  },
+  {
+    "id": 70,
+    "targetName": "Ingrid Solberg",
+    "targetProfile": {
+      "summary": "Ingrid is a data scientist and ML engineer who thrives on messy, large-scale real-world data, graph analysis and anomaly detection. Between jobs and craving meaningful work, she seeks a high-impact dataset and a domain-expert partner.",
+      "skills": [
+        "data science",
+        "graph analysis",
+        "anomaly detection",
+        "Python",
+        "large-scale data pipelines"
+      ],
+      "interests": [
+        "messy real-world data",
+        "graph analysis",
+        "meaningful ML",
+        "investigations"
+      ],
+      "offers": [
+        "turning huge messy datasets into structure",
+        "anomaly and pattern detection",
+        "ML engineering"
+      ],
+      "seeks": [
+        "a high-impact dataset",
+        "a domain-expert partner who has the story but not the analysis skills"
+      ]
+    },
+    "candidateName": "Bao Nguyen",
+    "candidateProfile": {
+      "summary": "Bao is an investigative journalist covering financial crime and sanctions evasion, strong on documents and sources but overwhelmed by a massive leaked dataset. He seeks a data scientist to surface patterns he can turn into a story.",
+      "skills": [
+        "investigative journalism",
+        "financial forensics",
+        "FOIA",
+        "narrative writing",
+        "interviewing"
+      ],
+      "interests": [
+        "financial crime",
+        "sanctions evasion",
+        "accountability journalism",
+        "leaks"
+      ],
+      "offers": [
+        "a major leaked dataset and story",
+        "source access",
+        "narrative and reporting"
+      ],
+      "seeks": [
+        "a data scientist to analyze large leaked datasets",
+        "help finding patterns in transaction data"
+      ]
+    },
+    "reasoning": "Bao is exactly the partner you're looking for: an investigative journalist with a massive leaked dataset (financial crime, sanctions evasion) who is overwhelmed by the data and needs a data scientist to surface patterns. You have the graph analysis, anomaly detection, and ML engineering skills to turn his messy dataset into a story. He has the domain expertise, the sources, and the narrative. This is a near-perfect puzzle-piece fit — you complete each other for this event's purpose."
+  },
+  {
+    "id": 71,
+    "targetName": "Kenji Watanabe",
+    "targetProfile": {
+      "summary": "Kenji is a hardware hacker who designs secure elements, tamper-evident devices and cold-storage gadgets. Strong on physical security but weak on software, he seeks a firmware/embedded engineer to make his devices' code as robust as their hardware.",
+      "skills": [
+        "hardware design",
+        "secure elements",
+        "PCB design",
+        "tamper resistance",
+        "electronics prototyping"
+      ],
+      "interests": [
+        "hardware security",
+        "cold storage",
+        "tamper resistance",
+        "trusted devices"
+      ],
+      "offers": [
+        "secure hardware design",
+        "PCB and tamper-resistant enclosures",
+        "physical-layer security"
+      ],
+      "seeks": [
+        "a firmware / embedded-software engineer",
+        "someone to make secure-device code robust"
+      ]
+    },
+    "candidateName": "Rosa Delgado",
+    "candidateProfile": {
+      "summary": "Rosa is an embedded/firmware engineer who loves tight, defensive, close-to-metal code touching cryptography, but is stuck doing web work. She wants to partner with a hardware builder who needs solid firmware for secure devices.",
+      "skills": [
+        "embedded firmware",
+        "C and Rust",
+        "defensive programming",
+        "real-time systems",
+        "cryptographic implementations"
+      ],
+      "interests": [
+        "embedded systems",
+        "hardware security",
+        "low-level programming",
+        "cryptographic implementations"
+      ],
+      "offers": [
+        "robust defensive firmware",
+        "real-time embedded engineering",
+        "secure crypto implementations"
+      ],
+      "seeks": [
+        "a hardware builder making secure or interesting devices",
+        "firmware work back on the metal"
+      ]
+    },
+    "reasoning": "You've been hunting for a firmware engineer — Rosa writes tight C and Rust for secure devices and is desperate to get back on the metal. Ask her how she'd harden your device's code."
+  },
+  {
+    "id": 72,
+    "targetName": "Nadia Petrov",
+    "targetProfile": {
+      "summary": "Nadia is an angel investor and ex-founder who writes small early checks into freedom tech and mentors first-time founders. She seeks mission-obsessed early teams solving real censorship or privacy problems.",
+      "skills": [
+        "early-stage investing",
+        "startup mentorship",
+        "fundraising strategy",
+        "network access",
+        "founder coaching"
+      ],
+      "interests": [
+        "freedom tech",
+        "censorship resistance",
+        "early-stage startups",
+        "founder mentorship"
+      ],
+      "offers": [
+        "angel funding",
+        "founder mentorship and coaching",
+        "network access",
+        "fundraising strategy"
+      ],
+      "seeks": [
+        "early mission-driven freedom-tech teams",
+        "first-time founders solving privacy or censorship problems"
+      ]
+    },
+    "candidateName": "Casimir Wolff",
+    "candidateProfile": {
+      "summary": "Casimir is a Bitcoin protocol developer and educator who runs self-custody workshops but only reaches existing crypto insiders. He wants to partner with community organizers to bring financial sovereignty to underserved, non-technical people.",
+      "skills": [
+        "Bitcoin protocol",
+        "Lightning Network",
+        "technical education",
+        "workshop facilitation",
+        "wallet security"
+      ],
+      "interests": [
+        "financial sovereignty",
+        "self-custody",
+        "bitcoin education",
+        "reaching non-technical users"
+      ],
+      "offers": [
+        "deep bitcoin and self-custody expertise",
+        "workshop curriculum",
+        "technical education"
+      ],
+      "seeks": [
+        "community organizers and educators",
+        "help reaching non-technical, underserved communities"
+      ]
+    },
+    "reasoning": "You should talk to Casimir — he's a Bitcoin protocol developer who runs self-custody workshops but can't reach non-technical communities. He's exactly the kind of patient technical partner Fatima or another organizer needs, and you could help him find the right founder."
+  },
+  {
+    "id": 73,
+    "targetName": "Theo Lindqvist",
+    "targetProfile": {
+      "summary": "Theo is a generalist full-stack web developer and hobby photographer with casual curiosity about the privacy scene but no strong mission. He's here to learn, make friends, and maybe find a low-stakes side project.",
+      "skills": [
+        "full-stack development",
+        "JavaScript",
+        "React",
+        "photography",
+        "general web"
+      ],
+      "interests": [
+        "web development",
+        "photography",
+        "hiking",
+        "board games",
+        "learning about privacy"
+      ],
+      "offers": [
+        "general full-stack web help",
+        "a curious audience",
+        "casual collaboration"
+      ],
+      "seeks": [
+        "to learn about the cypherpunk scene",
+        "friends and casual connections",
+        "a possible side project"
+      ]
+    },
+    "candidateName": "Mara Okafor",
+    "candidateProfile": {
+      "summary": "Mara is a mission-driven, non-technical founder with a background in mutual-aid logistics, building a censorship-resistant payments app for grassroots organizers. She has users and some funding but no engineering capacity.",
+      "skills": [
+        "fundraising",
+        "operations",
+        "community organizing",
+        "product vision",
+        "grant writing"
+      ],
+      "interests": [
+        "censorship resistance",
+        "mutual aid",
+        "grassroots payments",
+        "financial inclusion"
+      ],
+      "offers": [
+        "a funded mission-driven startup",
+        "user access",
+        "fundraising and ops leadership",
+        "product direction"
+      ],
+      "seeks": [
+        "a senior Rust engineer as technical co-founder",
+        "someone who wants a mission over a paycheck"
+      ]
+    },
+    "reasoning": "Mara has a funded payments app for organizers but needs a technical co-founder — you're a full-stack dev looking for a side project, so you could explore whether her mission and your skills align. Ask her what the hardest technical problem in her app is right now."
+  },
+  {
+    "id": 74,
+    "targetName": "Aleksy Nowak",
+    "targetProfile": {
+      "summary": "Aleksy is a privacy researcher studying metadata leakage, traffic analysis and deanonymization, frustrated that his academic work never reaches the people it could help. He seeks builders to ship his findings and journalists who need realistic threat models.",
+      "skills": [
+        "privacy research",
+        "traffic analysis",
+        "anonymity systems",
+        "academic writing",
+        "threat modeling"
+      ],
+      "interests": [
+        "anonymity",
+        "metadata privacy",
+        "traffic analysis",
+        "protecting activists and sources"
+      ],
+      "offers": [
+        "deep anonymity and deanonymization expertise",
+        "realistic threat models",
+        "protocol privacy analysis"
+      ],
+      "seeks": [
+        "builders to turn research into shipped tools",
+        "journalists needing source-protection threat models"
+      ]
+    },
+    "candidateName": "Ingrid Solberg",
+    "candidateProfile": {
+      "summary": "Ingrid is a data scientist and ML engineer who thrives on messy, large-scale real-world data, graph analysis and anomaly detection. Between jobs and craving meaningful work, she seeks a high-impact dataset and a domain-expert partner.",
+      "skills": [
+        "data science",
+        "graph analysis",
+        "anomaly detection",
+        "Python",
+        "large-scale data pipelines"
+      ],
+      "interests": [
+        "messy real-world data",
+        "graph analysis",
+        "meaningful ML",
+        "investigations"
+      ],
+      "offers": [
+        "turning huge messy datasets into structure",
+        "anomaly and pattern detection",
+        "ML engineering"
+      ],
+      "seeks": [
+        "a high-impact dataset",
+        "a domain-expert partner who has the story but not the analysis skills"
+      ]
+    },
+    "reasoning": "You should compare notes with Ingrid on graph analysis and pattern detection; her data science skills could help you scale your traffic analysis research to even larger, messier datasets."
+  }
+]

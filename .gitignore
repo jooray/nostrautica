@@ -1,0 +1,33 @@
+node_modules/
+dist/
+build/
+.svelte-kit/
+coverage/
+*.log
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-*
+coordinator.toml
+!coordinator.example.toml
+*.ncryptsec
+.pnpm-store/
+
+# coordinator runtime artifacts
+coordinator.out
+docs-site-build/
+
+# local notes, not for the repo
+CLAUDE.md
+benchmarks/matching/cache/
+
+# scratch design assets — kept local, never committed
+landing-mockups/
+logo-prompts.txt
+
+# internal AI-agent audit/planning notes — point-in-time snapshots, not docs for
+# readers; kept local, never committed or deployed
+docs/internal/

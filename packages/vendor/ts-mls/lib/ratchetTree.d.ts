@@ -1,0 +1,40 @@
+import { Encoder } from "./codec/tlsEncoder.js";
+import { Decoder } from "./codec/tlsDecoder.js";
+import { nodeTypes } from "./nodeType.js";
+import { ParentNode } from "./parentNode.js";
+import { LeafIndex, NodeIndex } from "./treemath.js";
+import { LeafNode } from "./leafNode.js";
+/** @public */
+export type Node = NodeParent | NodeLeaf;
+/** @public */
+export type NodeParent = {
+    nodeType: typeof nodeTypes.parent;
+    parent: ParentNode;
+};
+/** @public */
+export type NodeLeaf = {
+    nodeType: typeof nodeTypes.leaf;
+    leaf: LeafNode;
+};
+export declare function getHpkePublicKey(n: Node): Uint8Array;
+/** @public */
+export type RatchetTree = (Node | undefined)[];
+export declare const ratchetTreeEncoder: Encoder<RatchetTree>;
+export declare const ratchetTreeDecoder: Decoder<RatchetTree>;
+export declare function findBlankLeafNodeIndex(tree: RatchetTree): NodeIndex | undefined;
+export declare function findBlankLeafNodeIndexOrExtend(tree: RatchetTree): NodeIndex;
+export declare function addLeafNodeMutable(mutableTree: RatchetTree, leafNode: LeafNode): NodeIndex;
+export declare function updateLeafNodeMutable(mutableTree: RatchetTree, leafNode: LeafNode, leafIndex: LeafIndex): void;
+export declare function removeLeafNodeMutable(mutableTree: RatchetTree, removedLeafIndex: LeafIndex): void;
+export declare function resolution(tree: (Node | undefined)[], nodeIndex: NodeIndex): NodeIndex[];
+export declare function filteredDirectPath(leafIndex: LeafIndex, tree: RatchetTree): NodeIndex[];
+export declare function filteredDirectPathAndCopathResolution(leafIndex: LeafIndex, tree: RatchetTree): {
+    resolution: NodeIndex[];
+    nodeIndex: NodeIndex;
+}[];
+export declare function removeLeaves(tree: RatchetTree, leafIndices: LeafIndex[]): RatchetTree;
+export declare function findFirstNonBlankAncestor(tree: RatchetTree, nodeIndex: NodeIndex): NodeIndex;
+export declare function findLeafIndex(tree: RatchetTree, leaf: LeafNode): LeafIndex | undefined;
+/** @public */
+export declare function getCredentialFromLeafIndex(ratchetTree: RatchetTree, leafIndex: LeafIndex): import("./credential.js").Credential;
+export declare function getSignaturePublicKeyFromLeafIndex(ratchetTree: RatchetTree, leafIndex: LeafIndex): Uint8Array;

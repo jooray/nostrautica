@@ -1,0 +1,51 @@
+diff --git a/lib/ee-safe.js b/lib/ee-safe.js
+index f91252c5ed129b43e6653febc962ddef93d4ab22..a107bb802c5018ae289360356e4896ec563ee7c4 100644
+--- a/lib/ee-safe.js
++++ b/lib/ee-safe.js
+@@ -19,7 +19,7 @@ function emit(event, a, b, c, d, e) {
+             return false;
+         if (arguments.length < 6) {
+             for (var i = 0, len = ev.length; i < len; ++i) {
+-                ev[i](a, b, c, d, e);
++                if (typeof ev[i] === 'function') ev[i](a, b, c, d, e);
+             }
+         }
+         else {
+@@ -28,7 +28,7 @@ function emit(event, a, b, c, d, e) {
+                 arr[i] = arguments[i + 1];
+             }
+             for (var i = 0, len = ev.length; i < len; ++i) {
+-                ev[i].apply(undefined, arr);
++                if (typeof ev[i] === 'function') ev[i].apply(undefined, arr);
+             }
+         }
+         return true;
+@@ -43,7 +43,7 @@ function emitHasOnce(event, a, b, c, d, e) {
+             return false;
+         if (arguments.length < 6) {
+             for (var i = 0, len = ev.length; i < len; ++i) {
+-                ev[i](a, b, c, d, e);
++                if (typeof ev[i] === 'function') ev[i](a, b, c, d, e);
+             }
+         }
+         else {
+@@ -52,7 +52,7 @@ function emitHasOnce(event, a, b, c, d, e) {
+                 argsArr[i] = arguments[i + 1];
+             }
+             for (var i = 0, len = ev.length; i < len; ++i) {
+-                ev[i].apply(undefined, argsArr);
++                if (typeof ev[i] === 'function') ev[i].apply(undefined, argsArr);
+             }
+         }
+     }
+diff --git a/lib/index.js b/lib/index.js
+index ee8a7a19fb5fbf409464e467aa7c3a4c0869534c..6fbbde795e9006c15314b1dd95e01b19cae80309 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -15,5 +15,5 @@ var __exportStar = (this && this.__exportStar) || function(m, exports) {
+ };
+ Object.defineProperty(exports, "__esModule", { value: true });
+ __exportStar(require("./types"), exports);
+-__exportStar(require("./ee"), exports);
++__exportStar(require("./ee-safe"), exports);
+ //# sourceMappingURL=index.js.map

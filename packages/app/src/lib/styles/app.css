@@ -1,0 +1,409 @@
+/* Design tokens via CSS custom properties (spec §10.5). Dark/light keyed off
+   the `data-theme` attribute set by the theme store. Mobile-first.
+
+   Design language: minimal, elevation over outlines. Cards separate from the
+   canvas by surface color (dark) / soft shadow (light) instead of 1px boxes;
+   one solid purple primary action per screen, quiet ghost secondaries.
+   Contrast floors (both themes): body ≥ 12:1, secondary ≥ 4.5:1,
+   white-on-purple primaries ≥ 4.3:1 at 600 weight. */
+
+:root {
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Display face for event titles and key moments only. System stacks; no fetch. */
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia,
+    serif;
+  --radius: 14px; /* cards, large surfaces */
+  --radius-sm: 10px; /* buttons, inputs, badges */
+  --maxw: 640px;
+
+  --accent-contrast: #ffffff;
+  /* Event hue pair (degrees). JS overrides these per event via the wash injector;
+     defaults echo the brand purple so non-event and fallback states match. */
+  --event-h1: 256;
+  --event-h2: 322;
+  /* Bottom-nav geometry (A7) */
+  --nav-target: 48px;
+}
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark; /* native pickers/checkboxes/scrollbars follow the theme */
+  --bg: #0e0e15;
+  --bg-elev: #17171f;
+  --bg-elev2: #22222e;
+  --text: #ededf4;
+  --text-dim: #a2a2ba;
+  --border: #272734;
+  --card-border: #23232f; /* hint of an edge; dark cards get no shadow */
+  --accent: #a18aff; /* links, focus — lighter for legibility on dark */
+  --accent-bg: #7c5cff; /* solid button fill */
+  --accent-bg-hover: #8d71ff;
+  --accent-soft: rgba(140, 110, 255, 0.16);
+  --shadow: none;
+  /* Semantic status (A6). Text-grade: ≥ 4.5:1 on --bg AND --bg-elev. */
+  --ok: #3fb877;
+  --warn: #e0a53a;
+  --danger: #e5686c;
+  --ok-soft: rgba(63, 184, 119, 0.16);
+  --warn-soft: rgba(224, 165, 58, 0.16);
+  --danger-soft: rgba(229, 104, 108, 0.14);
+  /* Decorative constellation/route strokes (always aria-hidden contexts) */
+  --route-line: color-mix(in srgb, var(--accent) 60%, transparent);
+  /* Raised surface for the sticky nav + menus, above --bg-elev2 */
+  --bg-raised: #1d1d27;
+  --shadow-raised: 0 -1px 0 var(--border);
+  /* Low-contrast event wash, built from the hue pair */
+  --event-wash: linear-gradient(
+    160deg,
+    hsl(var(--event-h1) 72% 62% / 0.22),
+    hsl(var(--event-h2) 65% 58% / 0.12) 55%,
+    transparent
+  );
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #fafafc;
+  --bg-elev: #ffffff;
+  --bg-elev2: #f2f1f7;
+  --text: #17171f;
+  --text-dim: #5c5b70;
+  --border: #e6e5ef;
+  --card-border: #ececf3;
+  --accent: #6544e6; /* deeper on white for contrast */
+  --accent-bg: #6c4cf2;
+  --accent-bg-hover: #5d3be4;
+  --accent-soft: rgba(108, 76, 242, 0.1);
+  --shadow: 0 1px 2px rgba(22, 18, 48, 0.05), 0 4px 16px rgba(22, 18, 48, 0.06);
+  --ok: #1e7f4f;
+  --warn: #8a5c04;
+  --danger: #c62b31;
+  --ok-soft: rgba(47, 158, 99, 0.14);
+  --warn-soft: rgba(207, 138, 26, 0.15);
+  --danger-soft: rgba(216, 58, 63, 0.1);
+  --route-line: color-mix(in srgb, var(--accent) 55%, transparent);
+  --bg-raised: #ffffff;
+  --shadow-raised: 0 -1px 0 var(--border), 0 -6px 20px rgba(22, 18, 48, 0.06);
+  --event-wash: linear-gradient(
+    160deg,
+    hsl(var(--event-h1) 70% 55% / 0.14),
+    hsl(var(--event-h2) 62% 55% / 0.08) 60%,
+    transparent
+  );
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Native <button> resets text color to the system color (often black). Any button
+   used as a container (a card, a list row) must inherit the theme text color. The
+   .btn class sets its own color explicitly, so this never affects real buttons. */
+button {
+  color: inherit;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  min-height: 100dvh;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The <main> landmark receives focus on route change (A2). It is not a
+   keyboard-tabbable control, so suppress the focus ring on programmatic focus. */
+main:focus {
+  outline: none;
+}
+
+/* Visually hidden but available to assistive tech — used by live regions and
+   the skip link's off-screen resting state (A2/A6). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Skip-to-content link: first focusable element, off-screen until focused. */
+.skip-link {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 100;
+  transform: translateY(-120%);
+  margin: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-radius: var(--radius-sm);
+  background: var(--accent-bg);
+  color: var(--accent-contrast);
+  font-weight: 600;
+  transition: transform 0.15s ease;
+}
+.skip-link:focus {
+  transform: translateY(0);
+  text-decoration: none;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+.app-shell {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 0 1rem 5rem;
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  background: color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.card {
+  background: var(--bg-elev);
+  color: var(--text); /* buttons used as cards would otherwise reset to black */
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.1rem 1.15rem;
+  margin: 0.85rem 0;
+  font: inherit;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 44px; /* comfortable tap target */
+  padding: 0.65rem 1.1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  width: 100%;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+.btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--accent-soft);
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn.primary {
+  background: var(--accent-bg);
+  color: var(--accent-contrast);
+  border-color: transparent;
+}
+.btn.primary:hover {
+  background: var(--accent-bg-hover);
+}
+.btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+}
+.btn.danger:hover {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.inline {
+  width: auto;
+  min-height: 36px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  min-height: 44px;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+textarea {
+  line-height: 1.5;
+}
+input::placeholder,
+textarea::placeholder {
+  color: color-mix(in srgb, var(--text-dim) 75%, transparent);
+}
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+input:disabled,
+textarea:disabled,
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+label,
+.field-label {
+  display: block;
+  margin: 0.75rem 0 0.3rem;
+  font-weight: 600;
+  font-size: 0.88rem;
+}
+
+.muted {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  background: var(--bg-elev2);
+  color: var(--text-dim);
+}
+/* Semantic status badges (A6): shape + colour + text, never colour alone. */
+.badge.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+.badge.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.badge.accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.warn {
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg-elev));
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-all;
+  font-size: 0.85rem;
+}
+
+/* A quiet "or" separator with hairlines on both sides. */
+.or-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  margin: 1.25rem 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+}
+.or-divider::before,
+.or-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+h1 {
+  font-size: 1.75rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+  margin: 1.25rem 0 0.75rem;
+  text-wrap: balance;
+}
+h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+  .btn:active {
+    transform: none;
+  }
+}

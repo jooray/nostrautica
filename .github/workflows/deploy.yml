@@ -1,0 +1,33 @@
+name: Deploy PWA (nsite)
+
+# Publishes the static PWA as an nsite on tagged releases (spec §11). Signs with a
+# NIP-46 bunker key stored in the NSYTE_BUNKER_URI secret.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nostrautica/protocol build
+      - run: pnpm --filter @nostrautica/app build
+      - name: Deploy to nsite
+        if: ${{ env.NSYTE_BUNKER_URI != '' }}
+        env:
+          NSYTE_BUNKER_URI: ${{ secrets.NSYTE_BUNKER_URI }}
+        run: |
+          npx nsyte deploy packages/app/build \
+            --fallback /index.html \
+            --bunker "$NSYTE_BUNKER_URI" \
+            --relays wss://relay.primal.net,wss://relay.damus.io,wss://nos.lol

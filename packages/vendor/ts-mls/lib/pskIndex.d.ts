@@ -1,0 +1,6 @@
+import { CiphersuiteImpl } from "./crypto/ciphersuite.js";
+import { PskId } from "./presharedkey.js";
+export interface PskIndex {
+    findPsk(preSharedKeyId: PskId): Uint8Array | undefined;
+}
+export declare function accumulatePskSecret(groupedPsk: PskId[], pskSearch: PskIndex, cs: CiphersuiteImpl, zeroes: Uint8Array): Promise<[Uint8Array, PskId[]]>;

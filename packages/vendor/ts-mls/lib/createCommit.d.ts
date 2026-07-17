@@ -1,0 +1,61 @@
+import { ClientState } from "./clientState.js";
+import { CiphersuiteImpl } from "./crypto/ciphersuite.js";
+import { GroupContext } from "./groupContext.js";
+import { GroupInfo } from "./groupInfo.js";
+import { KeyPackage, PrivateKeyPackage } from "./keyPackage.js";
+import { MlsFramedMessage, MlsPublicMessage, MlsWelcomeMessage } from "./message.js";
+import { PrivateKeyPath } from "./privateKeyPath.js";
+import { Proposal } from "./proposal.js";
+import { RatchetTree } from "./ratchetTree.js";
+import { TreeHashCache } from "./treeHash.js";
+import { LeafIndex, NodeIndex } from "./treemath.js";
+import { UpdatePath } from "./updatePath.js";
+import { GroupInfoExtension } from "./extension.js";
+import { MlsContext } from "./mlsContext.js";
+/** @public */
+export interface CreateCommitResult {
+    newState: ClientState;
+    welcome: MlsWelcomeMessage | undefined;
+    commit: MlsFramedMessage;
+    consumed: Uint8Array[];
+}
+/** @public */
+export interface CreateCommitOptions {
+    wireAsPublicMessage?: boolean;
+    extraProposals?: Proposal[];
+    ratchetTreeExtension?: boolean;
+    groupInfoExtensions?: GroupInfoExtension[];
+    authenticatedData?: Uint8Array;
+}
+/** @public */
+export interface CreateCommitParams extends CreateCommitOptions {
+    context: MlsContext;
+    state: ClientState;
+}
+export declare function createCommitInternal(params: CreateCommitParams & {
+    resumingFromState?: ClientState;
+}): Promise<CreateCommitResult>;
+/** @public */
+export declare function createCommit(params: CreateCommitParams): Promise<CreateCommitResult>;
+/** @public */
+export declare function createGroupInfoWithExternalPub(state: ClientState, extensions: GroupInfoExtension[], cs: CiphersuiteImpl): Promise<GroupInfo>;
+/** @public */
+export declare function createGroupInfoWithExternalPubAndRatchetTree(state: ClientState, extensions: GroupInfoExtension[], cs: CiphersuiteImpl): Promise<GroupInfo>;
+export declare function applyUpdatePathSecret(tree: RatchetTree, privatePath: PrivateKeyPath, senderLeafIndex: LeafIndex, gc: GroupContext, path: UpdatePath, excludeNodes: NodeIndex[], cs: CiphersuiteImpl): Promise<{
+    nodeIndex: NodeIndex;
+    pathSecret: Uint8Array;
+}>;
+/** @public */
+export declare function joinGroupExternal(params: {
+    context: MlsContext;
+    groupInfo: GroupInfo;
+    keyPackage: KeyPackage;
+    privateKeys: PrivateKeyPackage;
+    resync: boolean;
+    tree?: RatchetTree;
+    authenticatedData?: Uint8Array;
+}): Promise<{
+    commit: MlsPublicMessage;
+    newState: ClientState;
+}>;
+export declare function deriveTreeHashCache(newLen: number, oldCache: TreeHashCache, touchedLeaves: readonly LeafIndex[]): TreeHashCache;
