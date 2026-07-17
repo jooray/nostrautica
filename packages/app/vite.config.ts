@@ -1,6 +1,9 @@
 import { sveltekit } from "@sveltejs/kit/vite";
 import { SvelteKitPWA } from "@vite-pwa/sveltekit";
 import { defineConfig } from "vitest/config";
+import { createRequire } from "node:module";
+
+const pkg = createRequire(import.meta.url)("./package.json") as { version: string };
 
 export default defineConfig({
   plugins: [
@@ -13,12 +16,22 @@ export default defineConfig({
       workbox: {
         cleanupOutdatedCaches: true,
         globPatterns: ["**/*.{js,css,html,ico,png,svg,webmanifest,woff2}"],
-        // Base-aware SPA navigation fallback. `createHandlerBoundToURL` needs an
-        // URL that resolves to an actual PRECACHE entry — "<base>/" relied on
-        // directoryIndex resolution that doesn't apply there, so production under
-        // /app threw `non-precached-url: /app/` and the SW nav fallback was dead
-        // (prod console 2026-07-16). Bind the precached file itself.
-        navigateFallback: (process.env.BASE_PATH || "") + "/index.html",
+        // SPA navigation fallback. adapter-static writes the fallback index.html
+        // only into `build/`, but the SW is generated from the client output
+        // (which has NO html), so the plugin never precaches the shell — yet it
+        // still registers a NavigationRoute to it. That mismatch threw
+        // `non-precached-url` at SW load, aborting the whole service worker
+        // (prod console 2026-07-17). Explicitly precache the shell at "<base>/"
+        // (the origin serves index.html there) and point the fallback at it, so
+        // `createHandlerBoundToURL` resolves and the SW installs. The per-build
+        // `revision` makes the shell refresh on deploy (drives auto-update).
+        navigateFallback: (process.env.BASE_PATH || "") + "/",
+        additionalManifestEntries: [
+          {
+            url: (process.env.BASE_PATH || "") + "/",
+            revision: `${pkg.version}-${Date.now()}`,
+          },
+        ],
       },
       manifest: {
         name: "Nostrautica",

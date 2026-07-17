@@ -40,7 +40,9 @@
   let ctx = $state<EventContext | null>(null);
   let error = $state<unknown>(null);
   let videoEl = $state<HTMLVideoElement | null>(null);
-  let stream: MediaStream | null = null;
+  // Reactive so the UI reflects mic/camera-enabled state (hide the "Enable"
+  // button once the stream is live — user feedback 2026-07-17).
+  let stream = $state<MediaStream | null>(null);
   let capture: VideoCapture | null = null;
 
   let recording = $state(false);
@@ -491,11 +493,17 @@
           <button class="btn danger" onclick={stopRecording}>{t("record.stop")}</button>
         {:else}
           <div class="row" style="flex-wrap:wrap">
-            {#if mode === "audio"}
+            {#if stream}
+              <!-- Device already granted → confirm it's ready instead of asking again. -->
+              <span class="badge ok">{mode === "audio" ? t("record.micReady") : t("record.camReady")}</span>
+            {:else if mode === "audio"}
               <button class="btn" onclick={enableMic}>{t("record.audio.enableMic")}</button>
-              <button class="btn primary" onclick={startRecording}>{t("record.audio.record")}</button>
             {:else}
               <button class="btn" onclick={enableCamera}>{t("record.enableCamera")}</button>
+            {/if}
+            {#if mode === "audio"}
+              <button class="btn primary" onclick={startRecording}>{t("record.audio.record")}</button>
+            {:else}
               <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
             {/if}
             <label class="btn" style="cursor:pointer">
