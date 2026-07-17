@@ -7,8 +7,8 @@ simultaneous participants**, and produces three artifacts:
 2. **[`ORGANIZER-GUIDE.md`](ORGANIZER-GUIDE.md)** — completed with real screenshots.
 3. **[`PARTICIPANT-GUIDE.md`](PARTICIPANT-GUIDE.md)** — completed with real screenshots.
 
-Observations about awkward UX go into [`UI-SUGGESTIONS.md`](UI-SUGGESTIONS.md)
-(append; don't rewrite others' findings).
+Observations about awkward UX go into a local `docs/internal/UI-SUGGESTIONS.md`
+(gitignored — not published; append, don't rewrite others' findings).
 
 > **Resilience note for the tester (human or model).** This guide describes
 > *intent*, not pixels. Button labels, exact copy, and layout will drift.
@@ -170,7 +170,7 @@ At minimum, verify on mobile: no horizontal scrolling anywhere, bottom nav
 reachable and not overlapping content, join form usable, video recording UI
 fits portrait, long `naddr`/`npub` strings truncate instead of overflowing,
 QR codes fit the screen, tap targets are comfortably tappable. File anything
-off into `UI-SUGGESTIONS.md` with a screenshot.
+off into `docs/internal/UI-SUGGESTIONS.md` with a screenshot.
 
 ### 2.2 Simulating the sign-in methods
 
@@ -207,8 +207,8 @@ off into `UI-SUGGESTIONS.md` with a screenshot.
   connect — each printed URI is single-use, so copy the *latest* printed URI
   per client (or pre-authorize a known client key with `-k
   <client-pubkey-hex>`). This exercises the full remote-sign surface: join
-  gift-wraps, grant unwrapping, roster decrypt, follows, NIP-17 DMs — see
-  `testing/REMOTE-SIGNER-TEST-2026-07-13.md` for measured results.
+  gift-wraps, grant unwrapping, roster decrypt, follows, NIP-17 DMs — measured
+  results are logged locally under `docs/internal/testing/`.
 - **NIP-46 `nostrconnect://` QR flow** — `nak bunker connect <uri>` is a stub
   in nak ≤ 0.15.2 (“this is not implemented yet”), so nak cannot consume the
   app's QR. Verify the option renders a QR + copyable URI + waiting state; to
@@ -247,7 +247,7 @@ screenshot; names refer to the checklist in §5.
    proposition and a way to get started. 📸 `participant/01-home`
 2. Open Settings: switch theme Light↔Dark (persists across reload), switch
    language to Slovenčina and back (UI re-translates; note untranslated
-   strings for `UI-SUGGESTIONS.md`). 📸 `app/settings`
+   strings for `docs/internal/UI-SUGGESTIONS.md`). 📸 `app/settings`
 3. Confirm the PWA manifest and service worker are served (installable app).
 4. Deep-link to a nonsense event URL (`#/e/naddr1invalid`) — the app shell
    must render an error state, not a blank page or server 404.
@@ -276,7 +276,7 @@ screenshot; names refer to the checklist in §5.
 1. Open the **plain event link** (no code) in Nina's session. Expect the
    event page with a clear “join” call to action. 📸 `participant/02-event-page`
 2. Join as a brand-new user: photo, name, bio, skills, “looking for”. Note
-   for `UI-SUGGESTIONS.md`: is it obvious which fields are public? Is any
+   for `docs/internal/UI-SUGGESTIONS.md`: is it obvious which fields are public? Is any
    Nostr jargon leaking? 📸 `participant/04-join-form`
 3. Submit. Expect a “request sent / waiting for the organizer” state.
    📸 `participant/05-request-sent`
@@ -380,7 +380,7 @@ screenshot; names refer to the checklist in §5.
 
 Re-check S3, S6.4, S7–S9 screens on the phone personas per §2.1's checklist
 (no horizontal scroll, nav reachable, truncation, tap targets). Screenshot
-anything broken for `UI-SUGGESTIONS.md`.
+anything broken for `docs/internal/UI-SUGGESTIONS.md`.
 
 ---
 
@@ -443,10 +443,11 @@ during) the test run:
 
 ## 7. Reporting results
 
-Write `docs/testing/TEST-REPORT-<YYYY-MM-DD>.md` containing: environment
-(commit, tier, browser), a table of scenarios S1–S13 with pass / fail /
-skipped and one-line notes, a **Bugs** section (repro steps, expected vs.
-actual, console errors, screenshot), and a pointer to the UI observations you
-appended to `UI-SUGGESTIONS.md`. Bugs block guide-writing only if the flow is
+Write `docs/internal/testing/TEST-REPORT-<YYYY-MM-DD>.md` (gitignored — local
+only) containing: environment (commit, tier, browser), a table of scenarios
+S1–S13 with pass / fail / skipped and one-line notes, a **Bugs** section
+(repro steps, expected vs. actual, console errors, screenshot), and a pointer
+to the UI observations you appended to `docs/internal/UI-SUGGESTIONS.md`.
+Bugs block guide-writing only if the flow is
 impossible to complete — otherwise document the workaround in the guide's
 troubleshooting section and keep going.

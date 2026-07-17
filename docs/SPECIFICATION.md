@@ -400,21 +400,23 @@ content: <raw CSS, ≤ 32 KB>
 - Deliberately *not* stored in 31600 `content`: 31600 is rebuilt from parsed tags and republished by config flows (e.g. coordinator attach), which would silently drop a content payload.
 - **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages — where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed, and no key material is ever rendered on themed routes.
 
-### 7.5 Event group chat (PLANNED — not built)
+### 7.5 Event group chat
 
 Two organizer-choosable chat options per event, declared as `chat` tags on the 31600 config (§7.1). Research, client-interop matrix and scaling analysis: `GROUP-CHAT-FEASIBILITY.md`.
 
+**Status (as-built).** `marmot` is implemented — protocol schemas, app chat UI, and the coordinator's admin bot all exist and are live-tested against a real relay: the attendee → coordinator direction works end-to-end (key package publish, MLS Add + Welcome), while the coordinator → attendee direction has an open client-side bug (see `MARMOT-GROUP-CHAT.md` §8 for the current gap). It ships labeled alpha/experimental. `nip17` (below) remains design-only: `ChatBackend`/`CHAT_BACKENDS` in `packages/protocol/src/config.ts` currently accept only `"marmot"`, so a `["chat","nip17"]` tag parses as unknown and is dropped.
+
 ```
-["chat", "nip17"]     // NIP-17 group messages offered
-["chat", "marmot"]    // Marmot (MLS) group offered — valid only with a coordinator tag
+["chat", "nip17"]     // NIP-17 group messages — designed, not yet implemented
+["chat", "marmot"]    // Marmot (MLS) group — implemented (alpha), valid only with a coordinator tag
 ```
-Tag absent = no chat. **Both tags MAY be present** when the organizer offers both (e.g. Marmot event-wide + NIP-17 subgroups).
+Tag absent = no chat. **Both tags MAY be present** when the organizer offers both (e.g. Marmot event-wide + NIP-17 subgroups) — once `nip17` lands.
 
 - **`nip17`** — standard NIP-17 chat rooms: kind-14 rumors carrying the member set as `p` tags, sealed + gift-wrapped to every member and the sender via the existing §7.2 signer path — **no new kinds**. Bootstrap: any member can message the group; the app derives the p-list from the roster (31604 `attendees` pubkeys + organizer pubkeys) **frozen at chat spawn** — per NIP-17 the room's identity is the exact pubkey+p set, and any change starts a *new* room with clean history, so roster changes surface as an explicit organizer "start chat v2" action, never a silent refresh. Subject convention: `["subject", <31923 title>]` on the first message (any member may rename later; newest wins, per NIP-17). Delivery requires each member's kind 10050 DM-relay list. **Size:** NIP-17's own guidance caps rooms at 10 participants; the composer refuses above ~20 and offers match/table subgroups instead (a NIP-46 sender pays 2 remote signer round-trips per member per message — the practical reason for the cap). **Interop promise:** the room continues, with native push, in clients with NIP-17 *group* support — verified Amethyst and Nostria as of 2026-07; 0xchat unconfirmed pending a live test; most other clients are 1:1-only.
 - **`marmot`** — one MLS group per event (Marmot protocol, kind 443/444/445 family), created and administered by the **coordinator as admin bot**: add-on-approval, remove-on-revoke (real PCS, unlike ECK rotation), auto-add of new key packages from enrolled npubs (multi-device + state-loss healing). The coordinator is a group member and can read the chat — disclosed in UI, consistent with §4.2. **Interop promise:** the chat continues in Whitenoise (and other Marmot clients) — but MLS state is strictly per-client: each client/device joins as its own leaf and reads only **from its join epoch forward**; history never syncs, by design.
 - **Non-members see nothing** under either option: both are E2E-encrypted with no event linkage — kind-1059/445 traffic carries no `a` tag and only ephemeral authors, so it cannot be correlated to the event.
 
-Everything in this subsection is **planned, not implemented**; tag values and conventions may shift at implementation time (open questions in the feasibility doc, §7).
+The Marmot path above is implemented as described; the `nip17` path and the dual-backend case remain **not implemented** — tag values and conventions there may still shift (open questions in the feasibility doc, §7).
 
 ## 8. Flows
 
@@ -626,7 +628,7 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 - **Chunked media encryption:** streaming playback + >25 MB robustness.
 - **Attendee-authored members-only posts:** 31607 signed by attendee keys needs a *blinded* event linkage for discovery (a cleartext `a` tag would publicly tie the author to the event) — deferred; v1 members-only posts are E_id-only (§7.4).
 - **Nostree mirror:** optionally republish the public menu items as a real NIP-51 kind 30003 bookmark set for interop with list clients.
-- **Per-event group chat:** planned spec in §7.5 — NIP-17 group messages (small events / spawned subgroups, lives on in Amethyst/Nostria) and/or Marmot/MLS (event-scale, coordinator as admin bot, lives on in Whitenoise), organizer-choosable per event via 31600 `chat` tags; research in `GROUP-CHAT-FEASIBILITY.md`. (An ECK-encrypted web-only chat was considered and rejected — post-event chats must survive in attendees' own clients.)
+- **Per-event group chat — NIP-17 half:** spec in §7.5 — NIP-17 group messages (small events / spawned subgroups, lives on in Amethyst/Nostria), organizer-choosable per event via a 31600 `chat` tag; research in `GROUP-CHAT-FEASIBILITY.md`. (Marmot/MLS, the other half of §7.5, is already implemented — see §7.5's status note. An ECK-encrypted web-only chat was considered and rejected — post-event chats must survive in attendees' own clients.)
 
 ## 14. Security & threat model summary
 
@@ -651,7 +653,7 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 | nsite gateway behavior (404-status fallback, header policy, manifest sync interval) | test deploy against target gateway (e.g. nsite.lol) |
 | NDK v3 / nostr-tools / blossom-client-sdk APIs | pin versions at P0; notes in IMPLEMENTATION_PLAN.md |
 | Amber NIP-46 behavior (per-connection keys, `logout`) | test against current Amber release |
-| Custom kind collisions (31600–31609, 21600–21605 — re-verified unassigned against the nostr-protocol/nips registry on 2026-07-13, all CLEAR; see docs/testing/RELAY-AND-KINDS-CHECK-2026-07-13.md) | re-check nostr-protocol/nips registry before first release |
+| Custom kind collisions (31600–31609, 21600–21605 — re-verified unassigned against the nostr-protocol/nips registry on 2026-07-13, all CLEAR) | re-check nostr-protocol/nips registry before first release |
 
 ---
 
@@ -665,7 +667,7 @@ This section records concrete decisions and small deviations made while building
 - Rumor-kind range is now **21600–21605**; re-check the NIPs registry before public release (§15).
 
 ### 16.2 Coordinator
-- **Store:** Node's built-in `node:sqlite` (Node ≥ 22.5) instead of `better-sqlite3` — same synchronous embedded-SQLite semantics as §9.1 intends, no fragile native build. Requires Node ≥ 22.5 (CI/Docker pin Node 24).
+- **Store:** Node's built-in `node:sqlite` (Node ≥ 22.5) instead of `better-sqlite3` — same synchronous embedded-SQLite semantics as §9.1 intends, no fragile native build. Requires Node ≥ 22.5 (CI/Docker pinned to Node 22).
 - **Install-time subscription:** on receiving a `21603` grant while already running, the coordinator subscribes to that event's `E_inbox` immediately (idempotently); `since = now − 3d` backfills join requests/submissions published before it was attached.
 - **Manual approval with a coordinator:** the organizer's Approve routes through the coordinator via a `21604 approve` command so the directory/roster are authored under the coordinator key (which is where attendees look for them). Without a coordinator, the organizer publishes them signed by `E_id`.
 - **Matching (2026-07-13, batched — docs/MATCHING-BENCHMARK.md):** pair scoring is **batched and directional**: one LLM call scores ONE target attendee against ≤K candidates (`matching.batch_size`, default 10; candidate order shuffled per batch to spread position bias) using the benchmark's BP3 prompt verbatim — rubric score anchors plus host-voice `reasoning_for_target` that is shown to the attendee as-is. Each direction of a pair (`a→b`, `b→a`) is scored and persisted independently in the pair cache (same `inputs_hash` keying; the reverse direction comes from the candidate's own batch via content-addressed recompute triggers), so an attendee's list ranks by their own directional scores. Batching is a transport optimization only: results are written per pair, a retried or partial batch re-sends only still-unscored candidates (finished pairs are never re-billed), and one malformed candidate never poisons its batch-mates. Scores are clamped/rescaled to [0,1] defensively; `recompute` clears the pair cache before re-scoring.

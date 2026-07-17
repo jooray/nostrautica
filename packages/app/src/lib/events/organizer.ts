@@ -90,6 +90,8 @@ export interface PendingRequest {
   rsvpPublic: boolean;
   profile?: AttendeeProfile;
   media?: MediaDescriptor[];
+  /** A plain-text intro (spec F1) from a 21601 submission — see fetchPending. */
+  introText?: string;
   invite?: InviteProof;
   rumorCreatedAt: number;
 }
@@ -118,7 +120,7 @@ export async function fetchPending(
   const byAttendee = new Map<string, PendingRequest>();
   const submissions = new Map<
     string,
-    { at: number; profile: AttendeeProfile; media: MediaDescriptor[] }
+    { at: number; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
   >();
 
   for (const wrap of wraps) {
@@ -156,6 +158,7 @@ export async function fetchPending(
             at: rumor.created_at,
             profile: parsed.profile,
             media: parsed.media,
+            introText: parsed.intro_text,
           });
         }
       } catch {
@@ -170,6 +173,7 @@ export async function fetchPending(
     if (req) {
       req.profile = sub.profile;
       req.media = sub.media;
+      req.introText = sub.introText;
     }
   }
   const result = [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
@@ -236,6 +240,13 @@ export async function approveAttendee(
     ...(req.name ? { name: req.name } : {}),
     profile: req.profile ?? { about: "", skills: [], looking_for: "", links: [] },
     media: req.media ?? [],
+    // A typed text intro (spec F1) has no media blob, so it must be carried
+    // through separately — this was previously dropped by the no-coordinator
+    // approve/re-process path (caching verification 2026-07-17): fetchPending
+    // parsed intro_text off the 21601 submission but neither PendingRequest nor
+    // this entry construction kept it, so a text-only intro never reached the
+    // directory entry outside the coordinator path.
+    ...(req.introText ? { intro_text: req.introText } : {}),
     updated_at: Math.floor(Date.now() / 1000),
   };
   const entryEvent = finalizeEvent(
@@ -267,7 +278,17 @@ export async function approveAttendee(
   ]);
 }
 
-/** Fetch + decrypt the current roster (or an empty one if none exists yet). */
+/**
+ * Fetch + decrypt the current roster (or an empty one if none exists yet).
+ * This gates a read-modify-write republish (approveAttendee/revoke): it MUST
+ * see the latest roster, including one this same client just published a
+ * moment ago in a prior loop iteration (e.g. "Approve all"), or the republish
+ * silently drops whoever was added last. `fetchEvents` goes through NDK's
+ * cache-adapter-integrated subscription, which can resolve on EOSE before a
+ * just-published/just-arrived event is surfaced (same hazard documented on
+ * `fetchEventsRelayOnly` in ndk.ts) — use the relay-only variant here, same as
+ * the other must-not-miss reads (grants, pending queue) already do.
+ */
 export async function loadRoster(
   ctx: EventContext,
   eckBytes: Uint8Array,
@@ -275,7 +296,7 @@ export async function loadRoster(
 ): Promise<RosterContent> {
   const publisher = directoryPublisher(ctx);
   const { identifier } = splitCoordinate(ctx.coordinate);
-  const events = await fetchEvents(
+  const events = await fetchEventsRelayOnly(
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
     ctx.config.relays,
   );

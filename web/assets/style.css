@@ -667,6 +667,8 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
   font-size: 0.82rem;
   color: var(--text-faint);
 }
+.footer-bottom a { color: var(--text-faint); }
+.footer-bottom a:hover { color: var(--accent); }
 
 /* ---------- Responsive ---------- */
 @media (max-width: 980px) {

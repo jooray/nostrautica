@@ -131,9 +131,22 @@
 
   async function refresh() {
     if (!ctx || !keys) return;
-    pending = await fetchPending(ctx, keys);
+    // Fetch pending + roster CONCURRENTLY and assign atomically (same tick): a
+    // sequential `pending = await fetchPending(...)` followed by a separate
+    // `await fetchRoster(...)` opens a window where `pending` already includes
+    // the organizer's own residual self-enrollment request but `rosterApproved`
+    // hasn't caught up yet, so it briefly renders an actionable "Approve" button
+    // for an already-approved organizer — a fast click (or an impatient human)
+    // can land on it instead of the real pending attendee's button, silently
+    // re-publishing the roster without the new attendee (bug found in caching
+    // verification 2026-07-17: the parallel Promise.allSettled refresh made this
+    // window wide enough to hit reliably in the e2e suite).
+    const [freshPending, roster] = await Promise.all([
+      fetchPending(ctx, keys),
+      fetchRoster(ctx).catch(() => undefined),
+    ]);
+    pending = freshPending;
     // Cross-reference the roster so already-approved attendees don't show as pending.
-    const roster = await fetchRoster(ctx).catch(() => undefined);
     rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? []);
     // Pending talk submissions (spec F2.3) — moderation needs a coordinator to
     // publish the 31610, so only fetch the queue when one is attached.
@@ -556,7 +569,6 @@
   }
 
   async function approve(req: PendingRequest) {
-    console.debug("[DEBUG approve] called", { hasCtx: !!ctx, hasSigner: !!session.signer, pubkey: req.attendeePubkey });
     if (!ctx || !session.signer) return;
     try {
       if (ctx.config.coordinator) {
@@ -566,11 +578,8 @@
       } else {
         await approveAttendee(session.signer, ctx, req);
       }
-      console.debug("[DEBUG approve] success, adding to approvedSet", req.attendeePubkey);
       approvedSet = new Set([...approvedSet, req.attendeePubkey]);
-      console.debug("[DEBUG approve] approvedSet now", [...approvedSet]);
     } catch (e) {
-      console.debug("[DEBUG approve] threw", e);
       error = e instanceof Error ? e.message : String(e);
     }
   }
