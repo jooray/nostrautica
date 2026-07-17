@@ -81,6 +81,15 @@ describe("verifyModelPrivacy (spec §16.4 startup check)", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("not found in GET /models"));
   });
 
+  it("does NOT warn for an embed model absent from GET /models (separate catalogue)", async () => {
+    const warn = vi.fn();
+    // Embedding models live on `/models?type=embedding`, not GET /models, so an
+    // absent embed id is expected — must not produce a scary boot warning.
+    const cfg = makeConfig({ embed: { provider: "venice", model: "text-embedding-bge-m3" } });
+    await expect(verifyModelPrivacy(mockLlm(catalogue), cfg, { warn })).resolves.toBeUndefined();
+    expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("not found in GET /models"));
+  });
+
   it("does not verify non-venice roles", async () => {
     const cfg = makeConfig({ summary: { provider: "routstr", model: "whatever" } });
     // routstr summary is skipped; match is accepted-public → resolves.

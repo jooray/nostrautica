@@ -37,9 +37,15 @@ export async function verifyModelPrivacy(
     if (ref.provider !== "venice") continue;
     const info = byId.get(ref.model);
     if (!info) {
-      logger.warn(
-        `[coordinator] models.${role} "${ref.model}" not found in GET /models — cannot verify privacy tier`,
-      );
+      // Embedding models are catalogued on a separate endpoint
+      // (`GET /models?type=embedding`) that `models()` (text/image inference)
+      // doesn't return, so a valid embed model is expectedly absent here — not a
+      // problem. Only warn for the inference roles, whose models SHOULD be listed.
+      if (role !== "embed") {
+        logger.warn(
+          `[coordinator] models.${role} "${ref.model}" not found in GET /models — cannot verify privacy tier`,
+        );
+      }
       continue;
     }
     const wantPrivate = roleRequiresPrivate(config, role);
