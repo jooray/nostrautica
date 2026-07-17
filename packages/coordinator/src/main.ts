@@ -9,9 +9,11 @@ import {
   loadConfig,
   resolveIdentity,
   veniceApiKey,
+  buildAnnounceContent,
 } from "./config.js";
 import { Store } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
+import { buildCoordinatorAnnounce } from "./nostr/publisher.js";
 import { Coordinator, type Transport } from "./coordinator.js";
 import { verifyFfmpeg } from "./pipeline/audio.js";
 import { verifyModelPrivacy } from "./providers/privacy.js";
@@ -122,6 +124,22 @@ async function main(): Promise<void> {
   });
 
   await coordinator.start();
+
+  // Publish the public discovery announcement (kind 31611) so organizers can pick
+  // this coordinator instead of pasting its npub (docs/COORDINATOR-DISCOVERY-PLAN.md).
+  // Replaceable — republished on every boot so config edits propagate.
+  if (config.coordinator.announce) {
+    try {
+      const announce = buildCoordinatorAnnounce(coordSk, buildAnnounceContent(config));
+      await client.publish(announce as any, config.relays.default);
+      console.log(
+        `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
+      );
+    } catch (e) {
+      console.warn("[coordinator] announce publish failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
   console.log("[coordinator] running — watching for installs, submissions, admin commands");
 
   // Job loop: drain runnable jobs, then idle briefly.

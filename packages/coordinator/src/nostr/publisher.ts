@@ -13,6 +13,8 @@ import {
   KIND_MATCH_MATRIX,
   KIND_KEY_GRANT,
   KIND_COORDINATOR_STATUS,
+  KIND_COORDINATOR_ANNOUNCE,
+  COORDINATOR_ANNOUNCE_D,
   KIND_TALK,
   eckEncrypt,
   blindedD,
@@ -26,6 +28,7 @@ import {
   type MatchListContent,
   type MatchMatrixContent,
   type CoordinatorStatusContent,
+  type CoordinatorAnnounce,
   type TalkContent,
 } from "@nostrautica/protocol";
 
@@ -171,6 +174,28 @@ export function buildCoordinatorStatus(
     kind: KIND_COORDINATOR_STATUS,
     content,
   }) as unknown as NostrEvent;
+}
+
+/**
+ * kind 31611 Coordinator Announcement — public, replaceable, for discovery
+ * (docs/COORDINATOR-DISCOVERY-PLAN.md). Signed by the coordinator's own key.
+ */
+export function buildCoordinatorAnnounce(
+  coordSk: Uint8Array,
+  content: CoordinatorAnnounce,
+): NostrEvent {
+  return finalizeEvent(
+    {
+      kind: KIND_COORDINATOR_ANNOUNCE,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [
+        ["d", COORDINATOR_ANNOUNCE_D],
+        ["v", "1"],
+      ],
+      content: JSON.stringify(content),
+    },
+    coordSk,
+  );
 }
 
 /** kind 21602 ECK grant → attendee, gift-wrapped and sealed by the coordinator. */

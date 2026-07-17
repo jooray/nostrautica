@@ -51,6 +51,11 @@ export const KIND_EVENT_PAGE = 31608; // Event Page — menu + layout (d = event
 export const KIND_EVENT_THEME = 31609; // Event Theme — raw CSS (d = event-d)
 // 31610 extends past the reserved 31600–31609 block (see NOTE above; NIPs re-check).
 export const KIND_TALK = 31610; // Talk (ECK) — a prerecorded talk, blinded d per talk (F2)
+// Coordinator Announcement (public, replaceable, signed by the coordinator key):
+// self-description for discovery, so organizers can pick a coordinator instead of
+// pasting an npub (docs/COORDINATOR-DISCOVERY-PLAN.md). d = "nostrautica:coordinator".
+export const KIND_COORDINATOR_ANNOUNCE = 31611;
+export const COORDINATOR_ANNOUNCE_D = "nostrautica:coordinator";
 
 // ── Custom gift-wrap rumor kinds (21600–21604) ──────────────────────────────
 export const KIND_JOIN_REQUEST = 21600; // → E_inbox

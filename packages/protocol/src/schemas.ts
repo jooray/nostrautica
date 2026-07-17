@@ -518,18 +518,71 @@ export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 // When a pipeline job exhausts its retries the coordinator gift-wraps this to the
 // organizer (E_id) so a poisoned job is visible without server logs. The Admin UI
 // half is app-side. `error_category` is a sanitized class, never attendee text.
+/**
+ * Billing signal a coordinator sends the organizer (docs/COORDINATOR-DISCOVERY-PLAN.md,
+ * Part 3). Payment itself is NOT handled here — `checkout_url` is a link the app
+ * opens (the app appends the event identifier). A free coordinator sends `ok` or
+ * omits billing entirely.
+ */
+export const coordinatorBillingSchema = z.object({
+  state: z.enum(["ok", "payment_required", "grace"]),
+  reason: z.string().max(500).optional(), // human message ("exceeds 20-user free tier")
+  checkout_url: z.string().max(2048).optional(),
+  due: z.number().nonnegative().optional(), // amount, optional (may be negotiated)
+  currency: z.string().max(16).optional(),
+  grace_until: z.number().int().optional(), // unix; matching continues until then
+});
+export type CoordinatorBilling = z.infer<typeof coordinatorBillingSchema>;
+
+// A 21606 status is EITHER a poison/health report (poison fields present) OR a
+// billing update (`billing` present) OR both — so the poison-specific fields are
+// optional. `v`, `a`, `at` are always present. Existing poison statuses (all
+// fields set) parse unchanged.
 export const coordinatorStatusContentSchema = z.object({
   v: version,
   a: z.string(), // coordinate
   pubkey: hex32.optional(), // affected attendee, when the job is attendee-scoped
-  stage: z.string(), // job type (e.g. "process_attendee")
-  state: z.enum(["poison", "cleared"]),
-  attempts: z.number().int().nonnegative(),
-  error_category: z.string(), // sanitized category, no prompts/attendee text
-  retryable: z.boolean(),
+  stage: z.string().optional(), // job type (e.g. "process_attendee")
+  state: z.enum(["poison", "cleared"]).optional(),
+  attempts: z.number().int().nonnegative().optional(),
+  error_category: z.string().optional(), // sanitized category, no prompts/attendee text
+  retryable: z.boolean().optional(),
+  billing: coordinatorBillingSchema.optional(),
   at: z.number().int(),
 });
 export type CoordinatorStatusContent = z.infer<typeof coordinatorStatusContentSchema>;
+
+// ── 31611 Coordinator Announcement (discovery) ───────────────────────────────
+export const coordinatorPricingSchema = z.object({
+  // How billing works — NOT necessarily the amount (may be negotiated off-band).
+  model: z.enum(["free", "per_user", "per_event", "negotiated", "external"]),
+  free_up_to_users: z.number().int().nonnegative().optional(),
+  summary: z.string().max(280).optional(), // one-line human pricing summary
+  checkout_url: z.string().max(2048).optional(),
+  currency: z.string().max(16).optional(),
+});
+export type CoordinatorPricing = z.infer<typeof coordinatorPricingSchema>;
+
+export const coordinatorAnnounceSchema = z.object({
+  v: version,
+  name: z.string().min(1).max(120),
+  about: z.string().max(2000).optional(),
+  picture: z.string().max(2048).optional(),
+  operator: z.string().max(200).optional(),
+  relays: z.array(z.string()).default([]),
+  features: z
+    .object({
+      matching: z.boolean().default(true),
+      talks: z.boolean().default(false),
+      chat: z.array(z.string()).default([]),
+    })
+    .default({}),
+  // Per-role privacy disclosure (role → tier string, e.g. "private"/"non-private").
+  privacy: z.record(z.string(), z.string()).optional(),
+  terms_url: z.string().max(2048).optional(),
+  pricing: coordinatorPricingSchema.optional(),
+});
+export type CoordinatorAnnounce = z.infer<typeof coordinatorAnnounceSchema>;
 
 /** Parse-and-validate helper that throws a descriptive error on mismatch. */
 export function parsePayload<T>(schema: z.ZodType<T>, raw: unknown): T {

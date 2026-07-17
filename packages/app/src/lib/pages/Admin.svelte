@@ -22,6 +22,12 @@
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
+  import {
+    fetchCoordinators,
+    pricingLabel,
+    checkoutUrlForEvent,
+    type DiscoveredCoordinator,
+  } from "$lib/events/coordinators.js";
   import { fetchPendingTalks, type PendingTalk } from "$lib/events/talks.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
@@ -179,6 +185,8 @@
       await refresh();
       await loadUpdates();
       void refreshLiveness();
+      // Warm the coordinator picker when none is attached yet.
+      if (!ctx.config.coordinator) void loadCoordinators();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -264,6 +272,19 @@
     coordStatuses.filter(
       (s) => s.state === "poison" && !dismissedStatuses.has(statusId(s)),
     ),
+  );
+
+  // Latest billing signal from the coordinator (payment_required / grace).
+  // Payment is external for now — we just surface the reason + a checkout link,
+  // with the event identifier appended so the checkout page knows the event.
+  const billing = $derived.by(() => {
+    const withBilling = coordStatuses
+      .filter((s) => s.billing && s.billing.state !== "ok")
+      .sort((a, b) => b.at - a.at);
+    return withBilling[0]?.billing;
+  });
+  const billingCheckoutUrl = $derived(
+    billing?.checkout_url ? checkoutUrlForEvent(billing.checkout_url, naddr) : undefined,
   );
 
   async function refreshCoordStatus() {
@@ -359,17 +380,25 @@
     }
   }
 
-  async function attach() {
-    if (!ctx || !session.signer || !coordinatorInput.trim()) return;
+  // Discovered coordinators (kind 31611) — pick one instead of pasting an npub.
+  let coordinators = $state<DiscoveredCoordinator[]>([]);
+  let loadingCoordinators = $state(false);
+  async function loadCoordinators() {
+    loadingCoordinators = true;
+    try {
+      coordinators = await fetchCoordinators();
+    } catch {
+      coordinators = [];
+    } finally {
+      loadingCoordinators = false;
+    }
+  }
+
+  async function attachPubkey(pubkey: string) {
+    if (!ctx || !session.signer) return;
     attaching = true;
     error = null;
     try {
-      let pubkey = coordinatorInput.trim();
-      if (pubkey.startsWith("npub1")) {
-        const decoded = decode(pubkey);
-        if (decoded.type !== "npub") throw new Error(t("admin.error.badNpub"));
-        pubkey = decoded.data;
-      }
       if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error(t("admin.error.enterNpub"));
       await attachCoordinator(session.signer, ctx, pubkey);
       attached = true;
@@ -378,6 +407,22 @@
     } finally {
       attaching = false;
     }
+  }
+
+  async function attach() {
+    if (!coordinatorInput.trim()) return;
+    let pubkey = coordinatorInput.trim();
+    if (pubkey.startsWith("npub1")) {
+      try {
+        const decoded = decode(pubkey);
+        if (decoded.type !== "npub") throw new Error();
+        pubkey = decoded.data;
+      } catch {
+        error = t("admin.error.badNpub");
+        return;
+      }
+    }
+    await attachPubkey(pubkey);
   }
 
   let coOrgInput = $state("");
@@ -771,7 +816,7 @@
             <span class="badge">{s.stage}</span>
           </div>
           <p class="muted" style="margin:0.25rem 0">
-            {t("admin.poison.body", { stage: s.stage, attempts: s.attempts })}
+            {t("admin.poison.body", { stage: s.stage ?? "", attempts: s.attempts ?? 0 })}
           </p>
           {#if s.pubkey}
             <p class="muted" style="margin:0.25rem 0">
@@ -1203,6 +1248,21 @@
           <span style="color:var(--danger)">{t("admin.coordinator.stale")}</span>
         {/if}
       </p>
+      {#if billing}
+        <div class="card warn" style="margin:0.5rem 0">
+          <strong>
+            {billing.state === "payment_required"
+              ? t("admin.billing.required")
+              : t("admin.billing.grace")}
+          </strong>
+          {#if billing.reason}<p class="muted" style="margin:0.25rem 0">{billing.reason}</p>{/if}
+          {#if billingCheckoutUrl}
+            <a class="btn inline primary" href={billingCheckoutUrl} target="_blank" rel="noopener noreferrer">
+              {t("admin.billing.checkout")}
+            </a>
+          {/if}
+        </div>
+      {/if}
       <button class="btn inline" onclick={recomputeMatches} disabled={recomputing}>
         {recomputing ? t("admin.coordinator.recomputing") : t("admin.coordinator.recompute")}
       </button>
@@ -1212,10 +1272,59 @@
       <p class="muted">
         {t("admin.coordinator.body")}
       </p>
-      <input placeholder={t("admin.coordinator.placeholder")} bind:value={coordinatorInput} />
-      <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
-        {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attach")}
-      </button>
+
+      <!-- Discovered coordinators (kind 31611) — pick one, no npub needed. -->
+      {#if loadingCoordinators}
+        <p class="muted">{t("admin.coordinator.discovering")}</p>
+      {:else if coordinators.length}
+        <div class="stack" style="gap:0.5rem;margin:0.5rem 0">
+          {#each coordinators as c (c.pubkey)}
+            <div class="card coord-card">
+              <div class="row" style="gap:0.6rem;align-items:flex-start">
+                {#if c.announce.picture}
+                  <img src={c.announce.picture} alt="" class="coord-logo" />
+                {/if}
+                <div style="flex:1;min-width:0">
+                  <strong>{c.announce.name}</strong>
+                  <span class="badge">{pricingLabel(c.announce)}</span>
+                  {#if c.announce.about}
+                    <p class="muted" style="margin:0.2rem 0 0;font-size:0.85rem">{c.announce.about}</p>
+                  {/if}
+                  <div class="row" style="flex-wrap:wrap;gap:0.3rem;margin-top:0.35rem">
+                    {#if c.announce.features?.matching}<span class="badge">{t("admin.coordinator.feat.matching")}</span>{/if}
+                    {#if c.announce.features?.talks}<span class="badge">{t("admin.coordinator.feat.talks")}</span>{/if}
+                    {#if c.announce.features?.chat?.length}<span class="badge">{t("admin.coordinator.feat.chat")}</span>{/if}
+                    {#if c.announce.privacy}
+                      {#each Object.entries(c.announce.privacy).filter(([, v]) => v !== "private") as [role] (role)}
+                        <span class="badge warn">{role}: {t("admin.coordinator.nonPrivate")}</span>
+                      {/each}
+                    {/if}
+                  </div>
+                  <p class="muted mono" style="margin:0.35rem 0 0;font-size:0.72rem">{c.npub.slice(0, 20)}…</p>
+                </div>
+              </div>
+              <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
+                {#if c.announce.terms_url}
+                  <a class="btn inline" href={c.announce.terms_url} target="_blank" rel="noopener noreferrer">{t("admin.coordinator.terms")}</a>
+                {/if}
+                <button class="btn inline primary" onclick={() => attachPubkey(c.pubkey)} disabled={attaching}>
+                  {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attachThis")}
+                </button>
+              </div>
+            </div>
+          {/each}
+        </div>
+        <p class="muted" style="margin:0.5rem 0 0;font-size:0.8rem">{t("admin.coordinator.unverified")}</p>
+      {/if}
+
+      <!-- Advanced / fallback: paste an npub directly. -->
+      <details style="margin-top:0.5rem">
+        <summary class="muted" style="cursor:pointer">{t("admin.coordinator.paste")}</summary>
+        <input style="margin-top:0.5rem" placeholder={t("admin.coordinator.placeholder")} bind:value={coordinatorInput} />
+        <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
+          {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attach")}
+        </button>
+      </details>
     {/if}
   </div>
 
@@ -1286,5 +1395,15 @@
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-dim);
+  }
+  .coord-card {
+    background: var(--bg-elev2, transparent);
+  }
+  .coord-logo {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    object-fit: cover;
+    flex: none;
   }
 </style>

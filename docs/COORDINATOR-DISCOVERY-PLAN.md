@@ -1,8 +1,24 @@
 # Coordinator discovery + billing-aware attach — plan (2026-07-17)
 
-Status: **design only.** Nothing here is implemented yet; the current coordinator
-stays free and organizers keep the paste-an-npub path. This documents the target
-so we can build it incrementally without repainting the protocol.
+Status: **steps 1–4 implemented** (announce + discovery picker + billing signal
+surface). Step 5 (native payment) is still deferred; the current coordinator
+stays free and organizers keep the paste-an-npub fallback. What shipped:
+
+- **Protocol**: `KIND_COORDINATOR_ANNOUNCE = 31611` + `coordinatorAnnounceSchema`
+  / `coordinatorPricingSchema` / `coordinatorBillingSchema`; the 21606 status
+  gained an optional `billing` block (poison fields relaxed to optional).
+- **Coordinator**: publishes its 31611 on boot (`[coordinator]` config, default
+  `announce=true`); `[pricing]` + `free_organizers` config; pure
+  `buildAnnounceContent` / `evaluateBilling` / `isFreeOrganizer` (tested). Free
+  by default → always emits `billing: ok` (no behaviour change).
+- **App**: `fetchCoordinators()` + an Admin picker (cards with features, privacy
+  disclosure, pricing label, Attach) with the paste-npub box kept as a fallback;
+  a billing banner in the coordinator-status area that appends the event `naddr`
+  to the checkout URL (`checkoutUrlForEvent`).
+
+Remaining (step 5): actually wire the coordinator to EMIT a `payment_required`
+status when a paid event crosses its free tier, and native ecash/Lightning
+behind the `checkout_url`. The pieces below describe the full target.
 
 ## Goal
 

@@ -628,10 +628,23 @@ export const messages = {
     "admin.coordinator.attachedOk":
       "Coordinator attached ✓ Matchmaking will begin as attendees are processed.",
     "admin.coordinator.body":
-      "A coordinator is a service that transcribes intro videos and computes who should meet whom. Without one there are no matches, and invite links need your manual approval. Whoever runs it gives you its npub — paste it here. It can read event content but can never act as the event.",
+      "A coordinator is a service that transcribes intro videos and computes who should meet whom. Without one there are no matches, and invite links need your manual approval. Pick one below (or paste an npub). It can read event content but can never act as the event.",
     "admin.coordinator.placeholder": "npub1… (coordinator)",
     "admin.coordinator.attaching": "Attaching…",
     "admin.coordinator.attach": "Attach coordinator",
+    "admin.coordinator.discovering": "Finding coordinators…",
+    "admin.coordinator.attachThis": "Use this coordinator",
+    "admin.coordinator.paste": "Or paste a coordinator npub (advanced)",
+    "admin.coordinator.terms": "Terms",
+    "admin.coordinator.unverified":
+      "Coordinators self-publish these listings; only attach one you trust — it can read event content.",
+    "admin.coordinator.nonPrivate": "leaves TEE",
+    "admin.coordinator.feat.matching": "Matching",
+    "admin.coordinator.feat.talks": "Talks",
+    "admin.coordinator.feat.chat": "Group chat",
+    "admin.billing.required": "Payment required",
+    "admin.billing.grace": "Payment due soon",
+    "admin.billing.checkout": "Open checkout",
     "admin.coorg.title": "Co-organizers",
     "admin.coorg.body":
       "Add someone by their npub to share full organizer control — they can edit the event, approve attendees, and manage the coordinator. (Their keys are gift-wrapped to them; they'll get access next time they open the event.)",
@@ -1518,10 +1531,23 @@ export const messages = {
     "admin.coordinator.attachedOk":
       "Koordinátor pripojený ✓ Párovanie sa spustí, ako sa účastníci spracujú.",
     "admin.coordinator.body":
-      "Koordinátor je služba, ktorá prepisuje predstavovacie videá a počíta, kto by mal koho stretnúť. Bez neho neexistujú spojenia a pozývacie odkazy vyžadujú vaše manuálne schválenie. Ten, kto ho prevádzkuje, vám dá jeho npub — vložte ho sem. Dokáže čítať obsah podujatia, ale nikdy nemôže konať ako podujatie.",
+      "Koordinátor je služba, ktorá prepisuje predstavovacie videá a počíta, kto by mal koho stretnúť. Bez neho neexistujú spojenia a pozývacie odkazy vyžadujú vaše manuálne schválenie. Vyberte si nižšie (alebo vložte npub). Dokáže čítať obsah podujatia, ale nikdy nemôže konať ako podujatie.",
     "admin.coordinator.placeholder": "npub1… (koordinátor)",
     "admin.coordinator.attaching": "Pripája sa…",
     "admin.coordinator.attach": "Pripojiť koordinátora",
+    "admin.coordinator.discovering": "Hľadám koordinátorov…",
+    "admin.coordinator.attachThis": "Použiť tohto koordinátora",
+    "admin.coordinator.paste": "Alebo vložte npub koordinátora (pokročilé)",
+    "admin.coordinator.terms": "Podmienky",
+    "admin.coordinator.unverified":
+      "Koordinátori si tieto záznamy zverejňujú sami; pripojte len takého, ktorému dôverujete — dokáže čítať obsah podujatia.",
+    "admin.coordinator.nonPrivate": "opúšťa TEE",
+    "admin.coordinator.feat.matching": "Párovanie",
+    "admin.coordinator.feat.talks": "Prednášky",
+    "admin.coordinator.feat.chat": "Skupinový chat",
+    "admin.billing.required": "Vyžaduje sa platba",
+    "admin.billing.grace": "Platba čoskoro splatná",
+    "admin.billing.checkout": "Otvoriť platbu",
     "admin.coorg.title": "Spoluorganizátori",
     "admin.coorg.body":
       "Pridajte niekoho podľa jeho npub a zdieľajte plnú organizátorskú kontrolu — môže upravovať podujatie, schvaľovať účastníkov a spravovať koordinátora. (Ich kľúče sú im zabalené ako darček (gift wrap); prístup získajú, keď nabudúce otvoria podujatie.)",

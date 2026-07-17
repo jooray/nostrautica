@@ -53,3 +53,24 @@ prefilter_top_m = 30              # top-M by cosine similarity
 prefilter_random = 10             # random low-similarity slice (complementarity!)
 top_k = 20                        # matches per attendee list
 batch_size = 10                   # candidates per batched scoring call (benchmark K=10)
+
+# ── Discovery announcement (kind 31611, docs/COORDINATOR-DISCOVERY-PLAN.md) ──────
+# Published on boot so organizers can PICK this coordinator in the app instead of
+# pasting its npub. Set announce = false to stay paste-only (unlisted).
+[coordinator]
+announce = true
+name = "Nostrautica coordinator"
+# about = "AI matchmaking for freedom-tech events."
+# picture = "https://…/logo.png"
+# operator = "npub1… or a contact string"
+# terms_url = "https://…/terms"
+
+# ── Billing policy (Part 3) — payment is NOT handled yet; this only shapes the ──
+# announce and the `billing` signal in the 21606 status. Default: free.
+[pricing]
+model = "free"                    # free | per_user | per_event | negotiated | external
+# free_up_to_users = 20           # optional soft/hard free tier
+# summary = "Up to 20 attendees free; larger events by quote."
+# checkout_url = "https://…/checkout"   # the app appends ?event=<naddr>
+# currency = "sats"
+# free_organizers = ["npub1…"]    # always-free (community). PRIVATE — never announced.
