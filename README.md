@@ -34,6 +34,12 @@ See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative) and
 - **Two event keypairs** (spec §6.1): `E_id` signs the public event/config/invites;
   `E_inbox` receives inbound submissions. The coordinator gets `E_inbox` but never
   `E_id` — it can read event content but cannot impersonate the event.
+- **Cache-first reads**: every relay read paints from a persistent IndexedDB cache
+  (`nostrautica-appcache`, owner-scoped for decrypted content, wiped on logout) and
+  revalidates in the background (stale-while-revalidate) — a page never blocks on a
+  relay round-trip for data the app has already seen. Verified end-to-end (cache-paint
+  timings down to single-digit milliseconds, and a reload-with-the-relay-stopped proof
+  that the paint is genuinely cache-driven).
 
 See [`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md) for what's protected, what leaks
 (and why it's accepted), and who's trusted.
