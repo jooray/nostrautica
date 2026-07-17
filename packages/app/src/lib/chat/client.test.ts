@@ -121,6 +121,7 @@ vi.mock("./identity.js", () => ({
 }));
 vi.mock("./stores.js", () => ({
   makeMarmotStores: () => ({}),
+  makeMarmotHistoryFactory: () => () => undefined,
   marmotKvBackend: () => ({ get: async () => undefined, set: async () => {} }),
 }));
 vi.mock("./network.js", () => ({ createMarmotNetwork: () => ({}) }));

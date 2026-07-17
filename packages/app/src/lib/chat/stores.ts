@@ -25,6 +25,7 @@
 import type { GenericKeyValueStore } from "@internet-privacy/marmot-ts/utils";
 import type { SerializedClientState } from "@internet-privacy/marmot-ts/core";
 import type { StoredKeyPackage, StoredInviteEntry } from "@internet-privacy/marmot-ts/client";
+import { makeKeyValueRumorHistoryFactory } from "@internet-privacy/marmot-ts/extra";
 
 /** Unit-separator between identity, namespace, and the user key (never in a hex/base64 key). */
 const SEP = "\x1f";
@@ -35,6 +36,8 @@ export const MARMOT_NAMESPACES = {
   keyPackage: "key-package",
   invites: "invites",
   rewind: "rewind",
+  // Decrypted-message history is further sub-namespaced per group (`history:<id>`).
+  history: "history",
 } as const;
 
 /**
@@ -102,6 +105,28 @@ export function makeMarmotStores(backend: MarmotKvBackend, identity: string): Ma
     inviteStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.invites),
     rewindStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.rewind),
   };
+}
+
+/** Lowercase hex of a byte array (for the per-group history namespace). */
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/**
+ * A durable decrypted-message history factory for the MarmotClient (§5 message
+ * persistence). marmot auto-saves every application message it ingests OR sends
+ * into `group.history`; backing that with IndexedDB (one namespace per group,
+ * under this chat identity) is what makes past + while-offline messages survive a
+ * navigation/reload — without it, `messages` lived only in the page's memory and
+ * every chat re-open started blank. Each rumor is keyed by its own id, so relay
+ * backfill re-ingesting the same message overwrites in place instead of dup'ing.
+ */
+export function makeMarmotHistoryFactory(backend: MarmotKvBackend, identity: string) {
+  return makeKeyValueRumorHistoryFactory((groupId) =>
+    namespacedStore(backend, identity, `${MARMOT_NAMESPACES.history}:${toHex(groupId)}`),
+  );
 }
 
 // ── In-memory backend (tests + the marmot in-memory parity path) ──────────────

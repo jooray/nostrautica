@@ -13,6 +13,7 @@
  * written to the verified marmot-ts API surface; the final live pass verifies it.
  */
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
+import type { GroupRumorHistory } from "@internet-privacy/marmot-ts/client";
 import { getNostrGroupIdHex } from "@internet-privacy/marmot-ts/core";
 // `proposeRemoveUser` is not in marmot-ts's export map (UPSTREAM U7) — deep-import
 // it through the vendored package's `./lib/*` wildcard export.
@@ -22,12 +23,16 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { resolveChatIdentity, type ChatIdentity } from "./identity.js";
-import { makeMarmotStores, marmotKvBackend } from "./stores.js";
+import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
 import {
   buildChatSend,
   decodeApplicationMessage,
   roundTripChatRumor,
+  rumorToChatMessage,
+  CHAT_KIND_TEXT,
+  CHAT_KIND_REACTION,
+  CHAT_KIND_EDIT,
   type ChatMessage,
 } from "./messages.js";
 import { sendChatKeyAttestation } from "./attest.js";
@@ -50,7 +55,7 @@ export interface MarmotChatOptions {
  */
 export class MarmotChat {
   readonly identity: ChatIdentity;
-  private readonly client: MarmotClient<undefined, undefined>;
+  private readonly client: MarmotClient<GroupRumorHistory, undefined>;
   private readonly ctx: EventContext;
   private readonly accountSigner: AppSigner;
   private connection?: { unsubscribe(): void };
@@ -67,8 +72,9 @@ export class MarmotChat {
     this.ctx = ctx;
     this.accountSigner = accountSigner;
     // Shared IndexedDB backend; namespacing is per chat identity.
-    const stores = makeMarmotStores(marmotKvBackend(), identity.pubkey);
-    this.client = new MarmotClient<undefined, undefined>({
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, identity.pubkey);
+    this.client = new MarmotClient<GroupRumorHistory, undefined>({
       // Structural EventSigner (identity.ts) — checked structurally by marmot.
       signer: identity.eventSigner as unknown as MarmotClientCtorSigner,
       accountProofSigner: identity.accountProofSigner,
@@ -77,6 +83,10 @@ export class MarmotChat {
       keyPackageStore: stores.keyPackageStore,
       inviteStore: stores.inviteStore,
       rewindStore: stores.rewindStore,
+      // Durable decrypted-message history so past + while-offline messages survive
+      // a navigation/reload (§5). marmot auto-saves every ingested/sent application
+      // message here; we replay it on bind (see replayHistory).
+      historyFactory: makeMarmotHistoryFactory(backend, identity.pubkey),
       clientId: identity.clientId,
     });
   }
@@ -98,6 +108,17 @@ export class MarmotChat {
    * attestation binding the chat key to the account. Idempotent.
    */
   async ensurePublished(): Promise<void> {
+    // Already a joined member? Publish NOTHING. Re-advertising a fresh kind-30443
+    // key package, or (for device-key accounts) re-sending an op:"add" 21607
+    // attestation, prompts the coordinator to add us AGAIN — a new MLS Add commit,
+    // a new epoch, a forked ratchet — after which our persisted group state is
+    // behind the group and the live 445 stream is undecryptable. That is the
+    // "re-adds me every time I open chat, so I never see messages" bug. Persisted
+    // group state is authoritative; identity (re)publish is only for the not-yet-
+    // joined first run and the eviction-heal path (healIfEvicted, §5), both of
+    // which reach here with NO group.
+    const joined = await this.client.groups.loadAll().catch(() => []);
+    if (joined.length > 0) return;
     await this.ensureRelayLists();
     // Publish (or confirm) the kind-30443 key package on the event relays under
     // this device's stable slot. This is what the coordinator's watcher adds.
@@ -271,6 +292,37 @@ export class MarmotChat {
         }
       });
       group.on("stateChanged", () => this.onStateChange?.());
+      // Paint the durable history for this group immediately, so a re-open shows
+      // the whole conversation (not just what arrives live after this mount). The
+      // live `connectAll` backfill then adds anything sent while we were away; both
+      // flow through onMessage, which de-dupes by rumor id (§5).
+      await this.replayHistory(group);
+    }
+  }
+
+  /**
+   * Emit every persisted decrypted message for a group through `onMessage`. marmot
+   * auto-saves each ingested/sent application message into `group.history`
+   * (KeyValueRumorHistoryBackend, IndexedDB), so this is a local read — no relay,
+   * no re-decrypt of past ciphertext (which the forward-only ratchet couldn't do
+   * anyway). Best-effort: a missing/empty history just yields nothing.
+   */
+  private async replayHistory(group: {
+    history?: { queryRumors(filters: unknown): Promise<unknown[]> };
+  }): Promise<void> {
+    try {
+      const rumors = await group.history?.queryRumors({
+        kinds: [CHAT_KIND_TEXT, CHAT_KIND_REACTION, CHAT_KIND_EDIT],
+      });
+      for (const rumor of rumors ?? []) {
+        try {
+          this.onMessage?.(rumorToChatMessage(rumor as Parameters<typeof rumorToChatMessage>[0]));
+        } catch (err) {
+          console.warn("marmot: dropped malformed history rumor", err);
+        }
+      }
+    } catch (err) {
+      console.warn("marmot: history replay failed", err);
     }
   }
 
