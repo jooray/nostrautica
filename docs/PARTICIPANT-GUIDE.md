@@ -236,10 +236,14 @@ minutes and reopen it.
 ## 7. Afterwards: your profile is yours to keep
 
 Surprise: the account you just used is a **Nostr identity** — a login you own,
-not tied to this app or any company. Open **More → Your identity** to see your
-public handle (your *npub*), copy your key, and jump to other Nostr apps.
+not tied to this app or any company. The **More** tab leads with an identity
+card showing your photo, your name, and your public handle (your *npub*) — tap
+the npub to copy it:
 
-![Your profile](images/participant/13-me-light.png)
+![The More tab — your identity card](images/participant/14-more-light.png)
+
+Tap the card to open your full profile, copy your secret key, and jump to other
+Nostr apps.
 
 The people you followed at the event, your profile, all of it works across a
 whole ecosystem of social apps (Primal, Damus, Amethyst, Yakihonne…). Copy your

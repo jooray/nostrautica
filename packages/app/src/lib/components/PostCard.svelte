@@ -14,11 +14,15 @@
     post,
     naddr,
     full = false,
+    openable = true,
   }: {
     post: EventPost;
     naddr: string;
     /** Render the whole markdown body instead of a summary + read link. */
     full?: boolean;
+    /** Whether the card links to the dedicated post viewer. False on the post
+     *  page itself (a self-link would be pointless). */
+    openable?: boolean;
   } = $props();
 
   function open() {
@@ -39,7 +43,7 @@
   {:else}
     <div class="row" style="justify-content:space-between;align-items:baseline">
       <h3 style="margin:0">
-        {#if full}{post.title}{:else}<button class="linkish" onclick={open}>{post.title}</button>{/if}
+        {#if openable}<button class="linkish" onclick={open}>{post.title}</button>{:else}{post.title}{/if}
       </h3>
       <span class="muted" style="font-size:0.75rem;flex:none">
         {new Date(post.publishedAt * 1000).toLocaleDateString()}
@@ -56,6 +60,11 @@
     {#if full}
       <!-- Safe: renderMarkdown escapes the source before emitting its own tags. -->
       <div class="longform">{@html renderMarkdown(post.content)}</div>
+      {#if openable}
+        <!-- A `full` card in a feed is a preview — give it an explicit way into
+             the dedicated post viewer (user feedback 2026-07-17). -->
+        <button class="btn inline open-post" onclick={open}>{t("post.open")}</button>
+      {/if}
     {:else}
       {#if post.summary}
         <p class="muted" style="margin:0.25rem 0">{post.summary}</p>
@@ -81,6 +90,9 @@
     max-width: 100%;
     border-radius: var(--radius-sm);
     margin: 0.5rem 0;
+  }
+  .open-post {
+    margin-top: 0.5rem;
   }
   .longform :global(p) {
     margin: 0.5rem 0;

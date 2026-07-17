@@ -56,7 +56,7 @@
       </button>
     </div>
   {:else}
-    <PostCard {post} {naddr} full />
+    <PostCard {post} {naddr} full openable={false} />
     <button class="btn inline" onclick={() => router.go({ name: "posts", naddr })}>
       {t("post.allPosts")}
     </button>

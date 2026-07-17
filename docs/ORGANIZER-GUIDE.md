@@ -176,11 +176,24 @@ profile of each attendee, and computes who should meet whom. Without it, the
 event still fully works — roster, videos, follows — there are just no automatic
 matches, and invite links need your manual approval.
 
-You (or whoever runs your infrastructure) start the coordinator; it prints its
-**public key (npub…)**. Paste that into the admin **AI coordinator** section
-and tap **Attach coordinator**. You'll see it confirmed:
+In the admin **AI coordinator** section you **pick a coordinator from the list**
+— each announces itself on Nostr with its name, features, a privacy disclosure
+(which AI steps leave the secure enclave), and its pricing (the reference one is
+**Free**). Tap **Use this coordinator**:
+
+![Choosing a coordinator from the discovery list](images/organizer/05a-coordinator-picker-light.png)
+
+Prefer to run your own, or were given a specific one? Expand **Or paste a
+coordinator npub (advanced)** and paste its public key instead. Either way you'll
+see it confirmed:
 
 ![Coordinator attached](images/organizer/05-coordinator-light.png)
+
+> **Paid coordinators.** A coordinator may charge (AI matchmaking costs scale
+> with attendee count), so a listing can show a price or a free tier (e.g.
+> "up to 20 attendees free"). If payment is ever needed, the admin screen shows
+> a **Payment required** banner with a checkout link — the current reference
+> coordinator is free.
 
 The coordinator only ever *reads* event content — it can never act as the event
 or approve people beyond the rules you set. Once attached, an **↻ Recompute all
