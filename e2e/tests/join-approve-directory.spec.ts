@@ -102,6 +102,18 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
     // moment before Bob looks; the marker assertion below still retries for 15s
     // on top of this as the real safety net.
     await organizer.waitForTimeout(3_000);
+    // A relay publish that fails (observed: transient "not enough relays
+    // received the event" under the concurrent load this test creates) now
+    // correctly falls back to the durable offline queue (publish-queue.ts fix,
+    // caching verification 2026-07-17) instead of throwing — but the queue only
+    // retries on the next page load or a browser "online" event, neither of
+    // which happens automatically within a single already-open session. Reload
+    // once (mirroring a real user refreshing) so `+layout.svelte`'s boot-time
+    // `flushQueue()` delivers anything that got queued, same as a real reload
+    // would, before Bob checks.
+    await organizer.reload();
+    await organizer.getByText(/organizer admin/i).waitFor({ timeout: 15_000 });
+    await organizer.waitForTimeout(2_000);
 
     // Bob reads Alice's directory entry — the roster decrypt + attendee detail
     // path, not just her display name. Several relay round-trips have to land

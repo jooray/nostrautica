@@ -6,9 +6,14 @@ transcribes them, enriches them with each person's existing Nostr content, and
 tells every attendee **who they should meet and why** — scoring pairs on
 similarity *and* complementarity of skills, with plain-language reasoning.
 
+**Try it live:** [nostrautica.cypherpunk.today](https://nostrautica.cypherpunk.today) —
+the app is at `/app`, docs at `/docs`. Nothing to install; it's a static PWA that talks
+only to Nostr relays and Blossom servers.
+
 See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative) and
 [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Product pitch:
-[`docs/ELEVATOR-PITCH-en.md`](docs/ELEVATOR-PITCH-en.md).
+[`docs/ELEVATOR-PITCH-en.md`](docs/ELEVATOR-PITCH-en.md). Guides:
+[organizer](docs/ORGANIZER-GUIDE.md) · [participant](docs/PARTICIPANT-GUIDE.md).
 
 ## What's here
 
