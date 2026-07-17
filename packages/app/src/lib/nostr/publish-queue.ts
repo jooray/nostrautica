@@ -81,7 +81,15 @@ export async function publishOrQueue(
       /* fall through to queue */
     }
   }
-  await persist({ event, relays, queuedAt: Date.now() });
+  // Callers routinely pass a relays array straight off Svelte $state (e.g.
+  // ctx.config.relays) — that's a reactive Proxy, and IndexedDB's structured
+  // clone algorithm cannot clone a Proxy ("DataCloneError: ... could not be
+  // cloned"), which used to make this exact fallback throw and silently drop
+  // the event instead of queuing it (caching verification 2026-07-17: a
+  // transient "not enough relays received the event" under concurrent
+  // publishes turned into permanent data loss here). Spread to a plain array
+  // first so the durable queue actually survives a Proxy input.
+  await persist({ event, relays: relays ? [...relays] : undefined, queuedAt: Date.now() });
   return false;
 }
 

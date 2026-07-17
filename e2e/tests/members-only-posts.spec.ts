@@ -6,12 +6,9 @@ import { test, expect, type BrowserContext } from "@playwright/test";
  * outsider (no ECK) sees a lock + join prompt, never the plaintext, while an
  * approved attendee reads it. (feature-verification 2026-07-16, deliverable C.)
  *
- * KNOWN FAILURE as of this pass (P0, see docs/FEATURE-VERIFICATION-2026-07-16.md
- * gap G-2): the manual (no-coordinator) approval path's 21602 key grant is sealed
- * by the organizer's personal signer instead of E_id, so the attendee's C2
- * grant-authentication (packages/app/src/lib/events/attendee.ts:95-111) rejects
- * it as forged and the attendee never gets the ECK needed to read the members-only
- * post. Expected to fail on the attendee-side assertion until that's fixed.
+ * The gap that used to block this test (manual/no-coordinator approval's key
+ * grant being rejected as forged) is fixed — the no-coordinator approval path
+ * works end to end as of the caching-verification pass (2026-07-17).
  */
 const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 
@@ -71,16 +68,23 @@ test.describe(RELAY_UP ? "members-only posts" : "members-only posts (needs relay
     // Attendee (has the ECK) should see the plaintext. Grant delivery is async
     // (the "Pending" badge can briefly outlive the actual approval — a known UX
     // gap, feature-verification 2026-07-15 §1) so poll instead of a single read.
+    // The Posts list is a preview/title list (UI change since this spec was
+    // written) — the decrypted body only renders on the individual post page,
+    // reached via "Read ›", so click through before checking for the secret.
     await attendee.goto(`/#/e/${naddr}`);
     await expect(attendee.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
     await expect(async () => {
       await attendee.goto(`/#/e/${naddr}/posts`);
-      await expect(attendee.getByText(secretText, { exact: false })).toBeVisible({ timeout: 5_000 });
+      await expect(attendee.getByText(postTitle, { exact: false }).first()).toBeVisible({ timeout: 5_000 });
     }).toPass({ timeout: 30_000, intervals: [2_000] });
+    await attendee.getByText(/read ›/i).first().click();
+    await expect(attendee.getByText(secretText, { exact: false })).toBeVisible({ timeout: 10_000 });
 
-    // Outsider (no ECK, never joined) should see a lock, never the plaintext.
+    // Outsider (no ECK, never joined) should see a lock, never the plaintext —
+    // not even the real title, which the encrypted-post placeholder now hides too.
     await outsider.goto(`/#/e/${naddr}/posts`);
     await expect(outsider.getByText(secretText, { exact: false })).toHaveCount(0);
+    await expect(outsider.getByText(postTitle, { exact: false })).toHaveCount(0);
     await expect(outsider.getByText(/members-only post/i).first()).toBeVisible({ timeout: 15_000 });
   });
 });

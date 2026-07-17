@@ -86,15 +86,22 @@
         })
         .catch(() => (loading = false));
 
+      // Paint the cached entry instantly, but ALWAYS refresh from relays in the
+      // background too (SWR — CACHING-PLAN §3.4) — this used to be an if/else
+      // that skipped the network fetch entirely whenever any cached entry
+      // existed, so a person's updated profile/intro (e.g. after their record
+      // flow) could stay invisible to viewers who'd already cached the older
+      // (e.g. approval-time, empty-profile) snapshot, forever, even across
+      // reloads now that the cache is persistent (caching verification
+      // 2026-07-17).
       const cachedEntry = cachedDirectoryEntry(eventCtx.coordinate, pubkey);
       if (cachedEntry) entry = cachedEntry;
-      else
-        void fetchDirectoryEntry(eventCtx, pubkey)
-          .then((e) => {
-            if (e) entry = e;
-            loading = false;
-          })
-          .catch(() => {});
+      void fetchDirectoryEntry(eventCtx, pubkey)
+        .then((e) => {
+          if (e) entry = e;
+          loading = false;
+        })
+        .catch(() => {});
 
       void fetchRecentPosts(pubkey, 20)
         .then((recent) => (posts = recent))
