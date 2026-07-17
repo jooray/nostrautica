@@ -548,6 +548,7 @@ export const messages = {
     "dmchat.e2e": "End-to-end encrypted (NIP-17) — also readable in other Nostr messengers.",
     "dmchat.decrypting": "Decrypting…",
     "dmchat.empty": "No messages yet — say hi.",
+    "dmchat.signerSlow": "Waiting for your signer to sign & encrypt… if you use Amber or a bunker, make sure it's reachable.",
     "dmchat.placeholder": "Write a message…",
     "dmchat.send": "Send",
 
@@ -1455,6 +1456,7 @@ export const messages = {
     "dmchat.e2e": "Koncovo šifrované (NIP‑17) — čitateľné aj v iných Nostr aplikáciách na správy.",
     "dmchat.decrypting": "Dešifruje sa…",
     "dmchat.empty": "Zatiaľ žiadne správy — pozdravte sa.",
+    "dmchat.signerSlow": "Čaká sa, kým podpisovač podpíše a zašifruje… ak používate Amber alebo bunker, uistite sa, že je dostupný.",
     "dmchat.placeholder": "Napíšte správu…",
     "dmchat.send": "Odoslať",
 

@@ -95,6 +95,15 @@ export async function sendDm(
 // 2026-07-16). `null` = not a DM of ours; cached failures don't retry.
 let unwrapCacheOwner = "";
 const unwrapCache = new Map<string, DmMessage | null>();
+// Only one unwrap loop runs at a time — the 5s poll must not stack loops on top
+// of a slow signer.
+let unwrapInFlight: Promise<void> | null = null;
+
+function snapshotDms(): DmMessage[] {
+  const byId = new Map<string, DmMessage>();
+  for (const m of unwrapCache.values()) if (m) byId.set(m.id, m);
+  return [...byId.values()].sort((a, b) => a.at - b.at);
+}
 
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
@@ -111,39 +120,52 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
     { relays: DEFAULT_RELAYS, relayOnly: true, timeoutMs: 10_000 },
   ).ready) as unknown as GiftWrap[];
 
-  for (const wrap of events) {
-    if (unwrapCache.has(wrap.id)) continue;
-    try {
-      const rumor = await signerUnwrap(signer, wrap);
-      if (rumor.kind !== KIND_DM) {
-        unwrapCache.set(wrap.id, null);
-        continue;
+  // Unwrapping is a per-wrap signer round-trip; a remote signer (Amber/NIP-46)
+  // with an unreachable relay makes each one hang to its timeout, so decrypting a
+  // whole mailbox could freeze the screen. Run the loop in the background writing
+  // to the cache, and RACE it against a short deadline — fetchDms returns whatever
+  // decrypted so far (empty on a dead signer, so the UI leaves "Decrypting…" and
+  // shows the composer), and the next 5s poll surfaces more as the cache fills.
+  if (!unwrapInFlight) {
+    unwrapInFlight = (async () => {
+      for (const wrap of events) {
+        if (unwrapCache.has(wrap.id)) continue;
+        try {
+          const rumor = await signerUnwrap(signer, wrap);
+          if (rumor.kind !== KIND_DM) {
+            unwrapCache.set(wrap.id, null);
+            continue;
+          }
+          const recipient = rumor.tags.find((t) => t[0] === "p")?.[1];
+          if (!recipient) {
+            unwrapCache.set(wrap.id, null);
+            continue;
+          }
+          const peer = rumor.pubkey === me ? recipient : rumor.pubkey;
+          if (peer === me && rumor.pubkey !== me) {
+            unwrapCache.set(wrap.id, null); // malformed
+            continue;
+          }
+          unwrapCache.set(wrap.id, {
+            id: rumor.id,
+            peer,
+            from: rumor.pubkey,
+            text: rumor.content,
+            at: rumor.created_at,
+          });
+        } catch {
+          // not for us / not decryptable / different rumor family — skip for good
+          unwrapCache.set(wrap.id, null);
+        }
       }
-      const recipient = rumor.tags.find((t) => t[0] === "p")?.[1];
-      if (!recipient) {
-        unwrapCache.set(wrap.id, null);
-        continue;
-      }
-      const peer = rumor.pubkey === me ? recipient : rumor.pubkey;
-      if (peer === me && rumor.pubkey !== me) {
-        unwrapCache.set(wrap.id, null); // malformed
-        continue;
-      }
-      unwrapCache.set(wrap.id, {
-        id: rumor.id,
-        peer,
-        from: rumor.pubkey,
-        text: rumor.content,
-        at: rumor.created_at,
-      });
-    } catch {
-      // not for us / not decryptable / different rumor family — skip for good
-      unwrapCache.set(wrap.id, null);
-    }
+    })().finally(() => {
+      unwrapInFlight = null;
+    });
   }
-  const byId = new Map<string, DmMessage>();
-  for (const m of unwrapCache.values()) if (m) byId.set(m.id, m);
-  return [...byId.values()].sort((a, b) => a.at - b.at);
+
+  const deadline = new Promise<void>((r) => setTimeout(r, 12_000));
+  await Promise.race([unwrapInFlight, deadline]);
+  return snapshotDms();
 }
 
 /** Group messages into per-peer threads, newest thread first. */

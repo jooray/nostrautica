@@ -7,7 +7,7 @@
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { fetchDms, sendDm, type DmMessage } from "$lib/events/dm.js";
-  import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -69,19 +69,35 @@
   }
 
   onMount(async () => {
+    // Cache-first: paint the name/avatar the People list already fetched, so the
+    // header isn't a bare npub while the network/signer is slow (user feedback
+    // 2026-07-17). Refresh in the background.
+    if (peer) profile = cachedProfiles([peer]).get(peer) ?? profile;
     await connectNdk();
     if (session.signer) void mutes.load(session.signer);
-    if (peer) profile = (await fetchProfiles([peer])).get(peer);
+    if (peer) {
+      void fetchProfiles([peer])
+        .then((m) => {
+          const p = m.get(peer);
+          if (p) profile = p;
+        })
+        .catch(() => {});
+    }
     await refresh();
     timer = setInterval(refresh, 5_000);
   });
   onDestroy(() => clearInterval(timer));
 
+  let sendSlow = $state(false);
   async function send() {
     const text = draft.trim();
     if (!text || !session.signer || !peer || sending) return;
     sending = true;
+    sendSlow = false;
     error = null;
+    // If the signer (esp. a remote Amber/bunker) is slow to sign+encrypt, say so
+    // rather than showing a silent spinner (user feedback 2026-07-17).
+    const slowTimer = setTimeout(() => (sendSlow = true), 6_000);
     try {
       await sendDm(session.signer, peer, text);
       const me = await session.signer.getPublicKey();
@@ -95,6 +111,8 @@
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
+      clearTimeout(slowTimer);
+      sendSlow = false;
       sending = false;
     }
   }
@@ -177,4 +195,7 @@
       {sending ? "…" : t("dmchat.send")}
     </button>
   </div>
+  {#if sendSlow}
+    <p class="muted" role="status" style="margin:0.4rem 0 0;font-size:0.85rem">{t("dmchat.signerSlow")}</p>
+  {/if}
 {/if}
