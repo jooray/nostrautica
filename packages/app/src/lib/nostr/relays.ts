@@ -47,10 +47,21 @@ export const NIP46_RELAYS = ENV_RELAYS ?? [
   "wss://relay.nsec.app",
 ];
 
-/** Fallback Blossom servers when an event/user configures none (spec §11). */
+/**
+ * Fallback Blossom servers when an event/user configures none (spec §11).
+ *
+ * The primary (first) MUST accept arbitrary BUD-02 blobs with permissive CORS —
+ * Nostrautica uploads AES-GCM CIPHERTEXT as `application/octet-stream`, and
+ * `uploadAndMirror` fails the whole upload if the primary rejects it. Both of
+ * these are the hzrd149 blossom-server implementation (same as our local test
+ * infra), which stores blobs by hash without media-type validation and sends
+ * `Access-Control-Allow-Origin: *`. (The previous defaults — blossom.primal.net
+ * and cdn.satellite.earth — 415'd encrypted octet-stream / required payment, so
+ * every intro-video upload failed: prod report 2026-07-17.)
+ */
 export const DEFAULT_BLOSSOM_SERVERS = ENV_BLOSSOM ?? [
-  "https://blossom.primal.net",
-  "https://cdn.satellite.earth",
+  "https://blossom.band",
+  "https://nostr.download",
 ];
 
 /**

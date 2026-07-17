@@ -77,7 +77,14 @@ export async function uploadMedia(
       }),
     ),
   );
-  const accepting = checks.filter((c) => c.ok || c.status === 0).map((c) => c.server);
+  // Servers whose preflight explicitly succeeded go FIRST (one becomes the upload
+  // primary); a `status === 0` preflight (network/CORS-blocked HEAD) is only kept
+  // as a fallback — otherwise a server that CORS-blocks its preflight but 415s the
+  // real PUT (e.g. blossom.primal.net) would become primary and fail the whole
+  // upload even when a good server was available (prod report 2026-07-17).
+  const preflightOk = checks.filter((c) => c.ok).map((c) => c.server);
+  const preflightUnknown = checks.filter((c) => !c.ok && c.status === 0).map((c) => c.server);
+  const accepting = [...preflightOk, ...preflightUnknown];
   if (accepting.length === 0) {
     const reason = checks.map((c) => `${c.server}: ${c.message ?? c.status}`).join("; ");
     throw new Error(`No Blossom server accepted the upload (${reason})`);
