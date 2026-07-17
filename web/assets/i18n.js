@@ -123,6 +123,7 @@
       "footer.participant_guide": "Participant guide",
       "footer.spec": "Technical specification",
       "footer.rights": "Free and open source, MIT licensed.",
+      "footer.source": "Source on GitHub",
       "footer.made": "Built on Nostr. No backend, no data silo, no permission required.",
 
       "a11y.toggle_theme_to_dark": "Switch to dark mode",
@@ -251,6 +252,7 @@
       "footer.participant_guide": "Príručka pre účastníkov",
       "footer.spec": "Technická špecifikácia",
       "footer.rights": "Slobodný a otvorený softvér, licencia MIT.",
+      "footer.source": "Zdrojový kód na GitHube",
       "footer.made": "Postavené na Nostri. Žiadny backend, žiadne úložisko dát, netreba dovolenie.",
 
       "a11y.toggle_theme_to_dark": "Prepnúť na tmavý režim",
@@ -379,6 +381,7 @@
       "footer.participant_guide": "Příručka pro účastníky",
       "footer.spec": "Technická specifikace",
       "footer.rights": "Svobodný a otevřený software, licence MIT.",
+      "footer.source": "Zdrojový kód na GitHubu",
       "footer.made": "Postaveno na Nostru. Žádný backend, žádné úložiště dat, není třeba svolení.",
 
       "a11y.toggle_theme_to_dark": "Přepnout na tmavý režim",

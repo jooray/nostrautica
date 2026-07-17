@@ -1,9 +1,8 @@
 # Marmot group chat — specification and implementation plan
 
 Status: **specification + phased plan. Phases 1, 2 (app side), 3 (coordinator admin bot), and
-4 (UI) are all implemented; packaging resolved (§2.1). Live-tested 2026-07-16 (see
-`docs/FEATURE-VERIFICATION-2026-07-16.md`): the attendee → coordinator direction works
-end-to-end against a real relay — the browser client publishes its 30443 key package +
+4 (UI) are all implemented; packaging resolved (§2.1). Live-tested 2026-07-16: the
+attendee → coordinator direction works end-to-end against a real relay — the browser client publishes its 30443 key package +
 10050/10002 relay lists, the coordinator's live watcher receives it and performs a genuine MLS
 Add + Welcome. But the coordinator → attendee direction does not complete client-side: two
 independent identities both stayed on "Setting up your secure chat…" indefinitely (40s+ across

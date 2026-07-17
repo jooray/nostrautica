@@ -148,9 +148,8 @@ videos, and (with a coordinator) their matches.
 > coordinator attached**, approving someone here does not currently reach
 > their device — their own app keeps showing "waiting for approval" even
 > though your admin screen shows them Approved, and they never see the
-> roster/directory. It reproduces every time in testing; see
-> [`FEATURE-VERIFICATION-2026-07-16.md`](FEATURE-VERIFICATION-2026-07-16.md)
-> gap G-2. Attaching a coordinator (§5) sidesteps it — approval and grants
+> roster/directory. It reproduces every time in testing. Attaching a
+> coordinator (§5) sidesteps it — approval and grants
 > route through the coordinator instead — so **attach a coordinator before
 > your event if you can**, even one running in matching=off mode, until this
 > is fixed.

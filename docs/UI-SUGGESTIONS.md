@@ -13,20 +13,17 @@ no collapsible raw error yet; 16 now complete including coordinator
 liveness; 20 now complete — see below). Still open: 23 (ongoing mobile
 testing).
 
-> **Update 2026-07-15 — the full UI redesign has since been delivered** (working tree,
-> not yet committed), superseding the incremental fixes below with the ground-up scheme in
-> [`REDESIGN-PLAN.md`](REDESIGN-PLAN.md): an event-scoped bottom nav
+> **Update 2026-07-15 — the full UI redesign has since been delivered**, superseding the
+> incremental fixes below with a ground-up scheme: an event-scoped bottom nav
 > (Overview / People / Matches / Updates / More), an Overview readiness journey with a
 > single next-action, confidence-first Matches ("Strong / Good match", reasoning-first,
 > raw scores behind a disclosure), a People roster with search + filter chips + initial
 > avatars, an operations-first Admin, a monochrome icon set (no calendar/clock), and a
 > per-event colour wash + serif titles. Items 1–6 and 49-style suggestions here are now
-> **realized in that redesign** rather than as spot edits. Verified end-to-end in
-> [`FEATURE-VERIFICATION-2026-07-15.md`](FEATURE-VERIFICATION-2026-07-15.md). The redesign
-> did **not** close two things this document cares about: raw-error rendering still exists
-> on three pages (the shared `ErrorState` is used on five), and a real bug now blocks intro
-> recording (see the verification doc, gap G1). New UI friction found during that pass is
-> appended, dated, at the bottom of this file.
+> **realized in that redesign** rather than as spot edits. The redesign did **not** close
+> two things this document cares about: raw-error rendering still exists on three pages
+> (the shared `ErrorState` is used on five), and a real bug now blocks intro recording.
+> New UI friction found during that pass is appended, dated, at the bottom of this file.
 
 Principles applied throughout: the most common action comes first and is the
 default; one primary action per screen; plain language over protocol
@@ -335,8 +332,7 @@ run).
 ## Observations from the 2026-07-15 redesign verification pass
 
 Appended (not rewritten) per this file's convention. Grounded in a live mobile-viewport
-run of the redesigned build; full context in
-[`FEATURE-VERIFICATION-2026-07-15.md`](FEATURE-VERIFICATION-2026-07-15.md).
+run of the redesigned build.
 
 - **[blocker] Intro recording fails before upload.** Record → review → *Use this* throws
   "must be an https URL" and nothing is submitted (verification gap G1). Since the whole
