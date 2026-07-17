@@ -204,8 +204,8 @@ A stranger can: open an invite link on a phone, register with just a display nam
 
 All phases **P0–P6 are implemented** (monorepo `packages/protocol`, `packages/app`, `packages/coordinator`, `e2e/`). Unit tests pass across packages (protocol + coordinator + app). A live reference deployment runs at `https://nostrautica.cypherpunk.today/` (app at `/app`, docs at `/docs`) with a Venice-backed coordinator. See SPECIFICATION.md §16 for as-built protocol/architecture notes; the key deltas from this plan:
 
-- **Coordinator store:** `node:sqlite` (built-in, Node ≥ 22.5) instead of `better-sqlite3` — avoids a native build; CI/Docker pin Node 24.
-- **Providers verified live (Venice):** STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; match `zai-org-glm-5-2`; embed `text-embedding-bge-m3` (all private-tier). Reasoning models require `venice_parameters.disable_thinking` + suppressing Venice's system prompt, and pair scores are clamped to [0,1].
+- **Coordinator store:** `node:sqlite` (built-in, Node ≥ 22.5) instead of `better-sqlite3` — avoids a native build; CI/Docker pinned to Node 22.
+- **Providers verified live (Venice):** STT `openai/whisper-large-v3`; summary `olafangensan-glm-4.7-flash-heretic`; match `deepseek-v4-flash` (non-private tier — the matching-benchmark winner, ≈45× cheaper than the private-tier alternative; see `docs/MATCHING-BENCHMARK.md`); embed `text-embedding-bge-m3` (private-tier). Reasoning models require `venice_parameters.disable_thinking` + suppressing Venice's system prompt, and pair scores are clamped to [0,1].
 - **Matching:** directional per-recipient reasoning (`reasoning_for_a`/`reasoning_for_b`).
 - **Co-organizers (multi-admin):** `21605` organizer grant (full key custody); manual approval routed through the coordinator via `21604 approve`.
 - **PWA:** automatic reload on new deploy (no prompt); relay-publish resilience (partial-success + benign-error guard); NIP-46 (Amber) session persistence.
