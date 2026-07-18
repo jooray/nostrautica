@@ -74,6 +74,32 @@ export function createMarmotClientMls(deps: {
 export class MarmotClientMls implements ChatMls {
   constructor(private readonly client: MarmotClient) {}
 
+  /**
+   * Per-group serialization of every STATE-MUTATING MLS op (invite / remove /
+   * ingest). Each builds a commit — or advances the ratchet — from the group's
+   * CURRENT epoch, so two running concurrently both fork off the same epoch: the
+   * classic MLS concurrent-commit hazard. Without this, approving two attendees
+   * back-to-back (their two `invite`s racing), or an `invite` racing the live
+   * kind-445 `ingest`, committed only one and silently dropped the other's Add —
+   * that member's Welcome was for a dead branch, so they sat on "Setting up…"
+   * forever and never saw messages. Reads (isMember/isEligible) don't need it.
+   */
+  private readonly chains = new Map<string, Promise<unknown>>();
+  private serialize<T>(groupId: string, fn: () => Promise<T>): Promise<T> {
+    const run = (this.chains.get(groupId) ?? Promise.resolve()).then(fn, fn);
+    // Tail swallows settlement so one op's rejection can't break the next; the
+    // caller still awaits `run` for the real result/error.
+    const tail = run.then(
+      () => {},
+      () => {},
+    );
+    this.chains.set(groupId, tail);
+    void tail.finally(() => {
+      if (this.chains.get(groupId) === tail) this.chains.delete(groupId);
+    });
+    return run;
+  }
+
   /** Load persisted groups into memory (call once at startup). */
   async loadAll(): Promise<void> {
     await this.client.groups.loadAll();
@@ -107,29 +133,40 @@ export class MarmotClientMls implements ChatMls {
   }
 
   async invite(mlsGroupIdHex: string, keyPackageEvent: AnyEvent): Promise<void> {
-    await this.client.groups.invite(mlsGroupIdHex, keyPackageEvent as never);
+    await this.serialize(mlsGroupIdHex, async () => {
+      // Re-check membership INSIDE the lock: a concurrent invite for this same
+      // pubkey (approval syncMember + the 30443 watcher both firing) may have
+      // added it while we waited our turn — adding twice would spend a second
+      // leaf and epoch for nothing.
+      if (getPubkeyLeafNodes((await this.client.groups.get(mlsGroupIdHex)).state, keyPackageEvent.pubkey).length > 0) return;
+      await this.client.groups.invite(mlsGroupIdHex, keyPackageEvent as never);
+    });
   }
 
   async removePubkeys(mlsGroupIdHex: string, pubkeys: string[]): Promise<void> {
-    const group = await this.client.groups.get(mlsGroupIdHex);
-    // Resolve each pubkey's remove-proposals against the live group context and
-    // flatten into one commit (UPSTREAM U7: proposeRemoveUser is an array-action
-    // that does not fit commit's single-proposal slot, so we resolve it by hand).
-    const ctx = group.session.proposalContext();
-    const extraProposals = [];
-    for (const pk of pubkeys) {
-      if (getPubkeyLeafNodes(group.state, pk).length === 0) continue; // no leaves → skip
-      const removes = await proposeRemoveUser(pk)(ctx);
-      extraProposals.push(...removes);
-    }
-    if (extraProposals.length === 0) return;
-    await this.client.groups.commit(mlsGroupIdHex, { extraProposals });
+    await this.serialize(mlsGroupIdHex, async () => {
+      const group = await this.client.groups.get(mlsGroupIdHex);
+      // Resolve each pubkey's remove-proposals against the live group context and
+      // flatten into one commit (UPSTREAM U7: proposeRemoveUser is an array-action
+      // that does not fit commit's single-proposal slot, so we resolve it by hand).
+      const ctx = group.session.proposalContext();
+      const extraProposals = [];
+      for (const pk of pubkeys) {
+        if (getPubkeyLeafNodes(group.state, pk).length === 0) continue; // no leaves → skip
+        const removes = await proposeRemoveUser(pk)(ctx);
+        extraProposals.push(...removes);
+      }
+      if (extraProposals.length === 0) return;
+      await this.client.groups.commit(mlsGroupIdHex, { extraProposals });
+    });
   }
 
   async ingest(mlsGroupIdHex: string, events: AnyEvent[]): Promise<void> {
-    // Drive the async ingest generator to completion; commits advance the epoch.
-    for await (const _ of this.client.groups.ingest(mlsGroupIdHex, events as never)) {
-      void _;
-    }
+    await this.serialize(mlsGroupIdHex, async () => {
+      // Drive the async ingest generator to completion; commits advance the epoch.
+      for await (const _ of this.client.groups.ingest(mlsGroupIdHex, events as never)) {
+        void _;
+      }
+    });
   }
 }
