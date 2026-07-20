@@ -774,7 +774,7 @@ export const messages = {
     "chat.backToEvent": "Back to event",
     "chat.handoff.link.title": "Use this chat in Whitenoise (or another Marmot client)",
     "chat.handoff.link.body":
-      "Already have an identity there? Paste its npub below to authorize it for this chat. The coordinator looks for its key package on this event's relays and on its own relay list, and adds it automatically; no key leaves this device.",
+      "Already have an identity there? Paste its npub below to authorize it — it'll join this chat automatically, no key leaves this device.",
     "chat.handoff.link.placeholder": "npub or hex pubkey",
     "chat.handoff.link.button": "Authorize",
     "chat.handoff.link.authorizing": "Authorizing…",
@@ -1690,7 +1690,7 @@ export const messages = {
     "chat.backToEvent": "Späť na podujatie",
     "chat.handoff.link.title": "Použite tento chat vo Whitenoise (alebo inom klientovi Marmot)",
     "chat.handoff.link.body":
-      "Máte tam už identitu? Vložte jej npub nižšie a autorizujte ju pre tento chat. Koordinátor jej key package vyhľadá na relayoch tejto akcie aj na jej vlastnom zozname relayov a automaticky ju pridá; žiadny kľúč neopúšťa toto zariadenie.",
+      "Máte tam už identitu? Vložte jej npub nižšie a autorizujte ju — automaticky sa pripojí do tohto chatu, žiadny kľúč neopúšťa toto zariadenie.",
     "chat.handoff.link.placeholder": "npub alebo hex pubkey",
     "chat.handoff.link.button": "Autorizovať",
     "chat.handoff.link.authorizing": "Autorizujem…",
@@ -2608,7 +2608,7 @@ export const messages = {
     "chat.backToEvent": "Zpět na akci",
     "chat.handoff.link.title": "Použijte tento chat ve Whitenoise (nebo jiném klientovi Marmot)",
     "chat.handoff.link.body":
-      "Máte tam už identitu? Vložte její npub níže a autorizujte ji pro tento chat. Koordinátor její key package vyhledá na relaycích této akce i na jejím vlastním seznamu relayů a automaticky ji přidá; žádný klíč neopouští toto zařízení.",
+      "Máte tam už identitu? Vložte její npub níže a autorizujte ji — automaticky se připojí do tohoto chatu, žádný klíč neopouští toto zařízení.",
     "chat.handoff.link.placeholder": "npub nebo hex pubkey",
     "chat.handoff.link.button": "Autorizovat",
     "chat.handoff.link.authorizing": "Autorizuji…",
