@@ -177,9 +177,22 @@ export class MarmotAdmin {
       this.log(`[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible`);
       return;
     }
-    await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
-    this.store.markKpConsumed(coordinate, kp.id);
-    this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
+    try {
+      await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
+      this.store.markKpConsumed(coordinate, kp.id);
+      this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
+    } catch (e) {
+      // A single malformed/incompatible key package (e.g. a proof version our
+      // vendored marmot-ts can't decode yet, from a newer peer client) must
+      // never take down the whole coordinator process — every OTHER event's
+      // chat and every OTHER attendee's add depends on this loop finishing
+      // (prod incident 2026-07-20: an uncaught throw here during startup
+      // backfill crashed the process). Left unconsumed, not ineligible, so
+      // it's retried (and can succeed) once the library gains support.
+      this.log(
+        `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} invite FAILED: ${e instanceof Error ? e.message : e}`,
+      );
+    }
   }
 
   /** Backfill every approved attendee into the group (config toggled on, §4.2). */

@@ -21,6 +21,7 @@ class FakeMls implements ChatMls {
   relays = new Map<string, string[]>();
   eligible = true;
   created = 0;
+  throwOnInvite = new Set<string>();
 
   async createGroup(): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }> {
     this.created++;
@@ -33,6 +34,9 @@ class FakeMls implements ChatMls {
     return this.members.get(group)?.has(pubkey) ?? false;
   }
   async invite(group: string, kp: AnyEvent): Promise<void> {
+    if (this.throwOnInvite.has(kp.pubkey)) {
+      throw new Error(`simulated: unsupported proof version 2 (${kp.pubkey})`);
+    }
     (this.members.get(group) ?? this.members.set(group, new Set()).get(group)!).add(kp.pubkey);
     this.invited.push(kp.pubkey);
   }
@@ -155,6 +159,29 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
 
     await admin.syncMember(COORD, ACCOUNT);
     expect(mls.invited.sort()).toEqual([ACCOUNT, CHATKEY].sort());
+  });
+
+  it("a key package that fails to invite (e.g. unsupported proof version) is logged, not thrown, and doesn't block other members or leave it wrongly marked ineligible", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp-good"), kpEvent(CHATKEY, "kp-bad")]);
+    mls.throwOnInvite.add(CHATKEY);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertAttendee({ coordinate: COORD, pubkey: CHATKEY, status: "approved", now: 1 });
+
+    // Neither backfillApproved nor syncMember should throw even though one
+    // member's invite fails deep inside the (real) marmot-ts engine.
+    await expect(admin.backfillApproved(COORD)).resolves.toBeUndefined();
+
+    expect(mls.invited).toEqual([ACCOUNT]); // the good one still got in
+    expect(store.isKpConsumed(COORD, "kp-good")).toBe(true);
+    expect(store.isKpConsumed(COORD, "kp-bad")).toBe(false); // not blackholed — eligible for retry
+
+    // A later retry (e.g. next coordinator restart) tries again rather than
+    // silently skipping it forever.
+    await admin.syncMember(COORD, CHATKEY);
+    expect(mls.invited).toEqual([ACCOUNT]);
   });
 
   it("the 30443 watcher adds an authorized author and ignores an unauthorized one", async () => {
