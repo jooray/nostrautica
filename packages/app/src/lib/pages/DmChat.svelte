@@ -54,32 +54,34 @@
   // People there), but always falls through to a real fetch on a cache miss
   // or a "not found" — the whole point is not to under-report from a merely
   // cold cache, which is why this was deferred rather than shipped earlier.
-  let sharedEvents = $state<string[]>([]);
+  let sharedEvents = $state<{ title: string; naddr: string }[]>([]);
 
   async function loadSharedEvents(peerPubkey: string): Promise<void> {
     try {
       const keys = await listEventKeys();
       const withEck = keys.filter((k) => k.eck.length > 0);
-      const names = await Promise.all(
+      const found = await Promise.all(
         withEck.map(async (k) => {
           try {
             const naddr = coordinateToNaddr(k.coordinate);
             const cachedR = cachedRoster(k.coordinate);
             if (cachedR?.attendees.some((a) => a.pubkey === peerPubkey)) {
-              return (
+              const title =
                 cachedEventContext(naddr)?.title ??
-                (await loadEventContext(naddr, { adoptLang: false })).title
-              );
+                (await loadEventContext(naddr, { adoptLang: false })).title;
+              return { title, naddr };
             }
             const ctx = cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
             const roster = await fetchRoster(ctx);
-            return roster?.attendees.some((a) => a.pubkey === peerPubkey) ? ctx.title : undefined;
+            return roster?.attendees.some((a) => a.pubkey === peerPubkey)
+              ? { title: ctx.title, naddr }
+              : undefined;
           } catch {
             return undefined; // one bad event must not blank the whole list
           }
         }),
       );
-      sharedEvents = names.filter((n): n is string => !!n);
+      sharedEvents = found.filter((e): e is { title: string; naddr: string } => !!e);
     } catch {
       sharedEvents = [];
     }
@@ -205,7 +207,13 @@
   </p>
   {#if sharedEvents.length}
     <p class="muted" style="margin:0 0 0.5rem;font-size:0.85rem">
-      {t("dmchat.sharedEvents")} {sharedEvents.join(", ")}
+      {t("dmchat.sharedEvents")}
+      {#each sharedEvents as e, i (e.naddr)}
+        {#if i > 0}<span>, </span>{/if}<button
+          style="background:none;border:none;padding:0;font:inherit;color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline"
+          onclick={() => router.go({ name: "event", naddr: e.naddr })}
+        >{e.title}</button>
+      {/each}
     </p>
   {/if}
   {#if muted}

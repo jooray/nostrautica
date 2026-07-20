@@ -19,7 +19,6 @@ export const messages = {
     "nav.login": "Log in",
     "nav.me": "Me",
     "nav.events": "Events",
-    "nav.create": "Create",
     "nav.settings": "Settings",
     "nav.back": "Back",
     "nav.backAria": "Back",
@@ -929,7 +928,6 @@ export const messages = {
     "nav.login": "Prihlásiť sa",
     "nav.me": "Ja",
     "nav.events": "Podujatia",
-    "nav.create": "Vytvoriť",
     "nav.settings": "Nastavenia",
     "nav.back": "Späť",
     "nav.backAria": "Späť",
@@ -1122,7 +1120,7 @@ export const messages = {
     "readiness.state.current": "Aktuálny krok",
     "readiness.state.upcoming": "Nasleduje",
 
-    "event.organizerAdmin": "Administrácia organizátora",
+    "event.organizerAdmin": "Administračné rozhranie udalosti",
     "event.recordIntro": "Nahrajte svoje predstavenie",
     "event.recordIntro.body":
       "Spojenia vznikajú z predstavovacích videí — nahrajte svoje, aby ste sa v nich objavili.",
@@ -1470,7 +1468,7 @@ export const messages = {
     "dmchat.send": "Odoslať",
 
     // Admin
-    "admin.title": "Administrácia organizátora",
+    "admin.title": "Administračné rozhranie udalosti",
     "admin.done": "Hotovo ✓",
     "admin.notOrganizer.title": "Na tomto zariadení nedržíte organizátorské kľúče tohto podujatia.",
     "admin.notOrganizer.body":
@@ -1846,7 +1844,6 @@ export const messages = {
     "nav.login": "Přihlásit se",
     "nav.me": "Já",
     "nav.events": "Akce",
-    "nav.create": "Vytvořit",
     "nav.settings": "Nastavení",
     "nav.back": "Zpět",
     "nav.backAria": "Zpět",
@@ -2039,7 +2036,7 @@ export const messages = {
     "readiness.state.current": "Aktuální krok",
     "readiness.state.upcoming": "Nadcházející",
 
-    "event.organizerAdmin": "Administrace organizátora",
+    "event.organizerAdmin": "Administrační rozhraní akce",
     "event.recordIntro": "Nahrajte své představení",
     "event.recordIntro.body":
       "Spojení vznikají z představení — nahrajte to své, abyste se v nich objevili.",
@@ -2385,7 +2382,7 @@ export const messages = {
     "dmchat.send": "Odeslat",
 
     // Administrace
-    "admin.title": "Administrace organizátora",
+    "admin.title": "Administrační rozhraní akce",
     "admin.done": "Hotovo ✓",
     "admin.notOrganizer.title": "Na tomto zařízení nemáte organizátorské klíče této akce.",
     "admin.notOrganizer.body":

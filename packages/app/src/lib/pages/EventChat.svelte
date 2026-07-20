@@ -272,13 +272,18 @@
 <div class="chat-head">
   <h1 class="disp">{t("chat.title")}</h1>
   <span class="badge">{t("chat.experimental")}</span>
-  <!-- All chats (this event's + every other event's + DMs) live one tap away
-       (user feedback 2026-07-20) — this tab itself stays the fast path
-       straight into THIS event's chat. -->
-  <button class="all-chats-link" onclick={() => router.go({ name: "dm" })}>
-    {t("chat.allConversations")}
-  </button>
 </div>
+
+<!-- All chats (this event's + every other event's + DMs) live one tap away
+     (user feedback 2026-07-20) — this tab itself stays the fast path straight
+     into THIS event's chat. A full-width row with its own icon reads as a
+     real destination, not a footnote (the earlier small corner text link
+     tested as easy to miss entirely). -->
+<button class="all-chats-btn" onclick={() => router.go({ name: "dm" })}>
+  <Icon name="people" size={18} />
+  <span>{t("chat.allConversations")}</span>
+  <Icon name="arrowUpRight" size={16} />
+</button>
 
 <!-- Coordinator-read + from-join-epoch disclosure (§4.5). Always shown. -->
 <div class="disclosure" role="note">
@@ -434,16 +439,33 @@
     border: 1px solid var(--border);
     color: var(--text-dim);
   }
-  .all-chats-link {
-    margin-left: auto;
-    background: none;
-    border: none;
-    padding: 0;
+  .all-chats-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    margin: 0.6rem 0 0;
+    padding: 0.6rem 0.75rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    color: var(--text);
     font: inherit;
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: var(--accent);
+    font-size: 0.88rem;
+    font-weight: 650;
     cursor: pointer;
+  }
+  .all-chats-btn span {
+    flex: 1;
+    text-align: left;
+  }
+  .all-chats-btn :global(svg:first-child) {
+    color: var(--accent);
+    flex: none;
+  }
+  .all-chats-btn :global(svg:last-child) {
+    color: var(--text-dim);
+    flex: none;
   }
   .disclosure {
     display: flex;
