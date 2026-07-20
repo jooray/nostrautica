@@ -101,6 +101,17 @@ import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
 
+/**
+ * Relays the Whitenoise Marmot/MLS client publishes key packages and group
+ * traffic to (confirmed via its own "seen on relays" key-package screen,
+ * 2026-07-20; mirrors the app-side constant in
+ * packages/app/src/lib/nostr/relays.ts). Ensured into every chat-enabled
+ * event's MLS routing state in `ensureChat` — including groups created
+ * before this was added — because a group's routing relays are baked in at
+ * creation and never re-derived from config.relays afterward.
+ */
+const WHITENOISE_RELAYS = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
+
 /** Marmot v2 wire kinds (MARMOT-GROUP-CHAT §1.2): addressable key package + group msg. */
 const KIND_KEY_PACKAGE = 30443;
 const KIND_GROUP_MESSAGE = 445;
@@ -1345,6 +1356,10 @@ export class Coordinator {
       description: state.scoringCtx.summary,
       relays: state.configRelays,
     });
+    // Self-heal: additively fold the Whitenoise relays into the group's own
+    // routing state, even for a group that already existed before this was
+    // added — a no-op once they're present, so safe to run on every install.
+    await this.marmot.ensureRelays(state.coordinate, WHITENOISE_RELAYS);
     await this.marmot.backfillApproved(state.coordinate);
     this.subscribeChat(state);
   }

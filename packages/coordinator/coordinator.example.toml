@@ -8,7 +8,11 @@
 ncryptsec_file = "coordinator.ncryptsec"
 
 [relays]
-default = ["wss://relay.primal.net", "wss://relay.damus.io"]
+# relay.damus.io dropped (2026-07-20): heavily rate-limited, was causing
+# key-package discovery failures. Whitenoise's own relays added so its
+# clients' 30443 key packages are found even when an event's own relay list
+# doesn't include them (fallback tier — see key-package-discovery.ts).
+default = ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"]
 
 [providers.venice]
 api_key_env = "VENICE_API_KEY"

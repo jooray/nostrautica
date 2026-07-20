@@ -15,9 +15,11 @@ import {
   getNostrGroupIdHex,
   getPubkeyLeafNodes,
 } from "@internet-privacy/marmot-ts/core";
-// `proposeRemoveUser` is NOT in marmot-ts's export map (UPSTREAM U7) — deep-import
-// it through the vendored package's `./lib/*` wildcard export.
+// `proposeRemoveUser`/`proposeUpdateMetadata` are NOT in marmot-ts's export map
+// (UPSTREAM U7) — deep-import them through the vendored package's `./lib/*`
+// wildcard export.
 import { proposeRemoveUser } from "@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js";
+import { proposeUpdateMetadata } from "@internet-privacy/marmot-ts/lib/client/group/proposals/update-metadata.js";
 import type { NostrNetworkInterface } from "@internet-privacy/marmot-ts/client";
 import type { Store } from "../store/db.js";
 import { makeMarmotStores } from "./stores.js";
@@ -47,6 +49,15 @@ export interface ChatMls {
   removePubkeys(mlsGroupIdHex: string, pubkeys: string[]): Promise<void>;
   /** Ingest kind-445 group traffic so the coordinator's state stays converged. */
   ingest(mlsGroupIdHex: string, events: AnyEvent[]): Promise<void>;
+  /** The group's current message-routing relays (marmot.transport.nostr.routing.v1). */
+  getRelays(mlsGroupIdHex: string): Promise<string[]>;
+  /**
+   * Additively ensure every relay in `relays` is part of the group's routing
+   * relays — a no-op if they're all already present. Never removes an existing
+   * relay: this is a self-heal for groups created before a relay was added to
+   * the app's defaults, not a way to narrow a group's reach.
+   */
+  ensureRelays(mlsGroupIdHex: string, relays: string[]): Promise<void>;
 }
 
 /** Build a real `MarmotClient`-backed {@link ChatMls} off the coordinator key. */
@@ -167,6 +178,33 @@ export class MarmotClientMls implements ChatMls {
       for await (const _ of this.client.groups.ingest(mlsGroupIdHex, events as never)) {
         void _;
       }
+    });
+  }
+
+  async getRelays(mlsGroupIdHex: string): Promise<string[]> {
+    const group = await this.client.groups.get(mlsGroupIdHex);
+    return group.relays ?? [];
+  }
+
+  async ensureRelays(mlsGroupIdHex: string, relays: string[]): Promise<void> {
+    await this.serialize(mlsGroupIdHex, async () => {
+      const group = await this.client.groups.get(mlsGroupIdHex);
+      const current = group.relays ?? [];
+      // Full-replacement semantics (proposeUpdateMetadata re-encodes the whole
+      // routing component), so the new list must be current ∪ relays, not just
+      // the new ones — otherwise this would silently drop the group's existing
+      // relays. De-dupe against BOTH current and within `relays` itself.
+      const have = new Set(current);
+      const union = [...current];
+      for (const r of relays) {
+        if (have.has(r)) continue;
+        have.add(r);
+        union.push(r);
+      }
+      if (union.length === current.length) return; // already routes to every relay we want
+      const ctx = group.session.proposalContext();
+      const proposals = await proposeUpdateMetadata({ relays: union })(ctx);
+      await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
     });
   }
 }

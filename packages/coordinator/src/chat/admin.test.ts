@@ -18,6 +18,7 @@ class FakeMls implements ChatMls {
   invited: string[] = [];
   removed: string[][] = [];
   ingested: AnyEvent[][] = [];
+  relays = new Map<string, string[]>();
   eligible = true;
   created = 0;
 
@@ -42,6 +43,15 @@ class FakeMls implements ChatMls {
   }
   async ingest(_group: string, events: AnyEvent[]): Promise<void> {
     this.ingested.push(events);
+  }
+  async getRelays(group: string): Promise<string[]> {
+    return this.relays.get(group) ?? [];
+  }
+  async ensureRelays(group: string, relays: string[]): Promise<void> {
+    const have = new Set(this.relays.get(group) ?? []);
+    const missing = relays.filter((r) => !have.has(r));
+    if (missing.length === 0) return;
+    this.relays.set(group, [...(this.relays.get(group) ?? []), ...missing]);
   }
 }
 

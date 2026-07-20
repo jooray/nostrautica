@@ -62,6 +62,7 @@ import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -638,7 +639,13 @@ export async function updateEventConfig(
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
-  const built = buildEventConfig({ ...ctx.config, ...changes });
+  // Turning chat on for an already-published event: fold in the Whitenoise
+  // relays up front too, same as at-creation (create.ts) — the coordinator's
+  // routing self-heal (ensureChat) covers the group's own MLS state, but the
+  // event's public 31600 relay list should already advertise them.
+  const relays =
+    changes.chat?.length ? unionRelays(ctx.config.relays, WHITENOISE_RELAYS) : ctx.config.relays;
+  const built = buildEventConfig({ ...ctx.config, ...changes, relays });
   const configEvent = finalizeEvent(
     {
       kind: built.kind,

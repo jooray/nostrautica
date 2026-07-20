@@ -88,6 +88,19 @@ export class MarmotAdmin {
     return g && g.status === "active" ? g : undefined;
   }
 
+  /**
+   * Self-heal a group's routing relays (marmot.transport.nostr.routing.v1):
+   * additively union in `relays`, a no-op if they're already all present.
+   * Fixes groups created before a relay (e.g. a peer client's own relay) was
+   * added to the coordinator's defaults — without this, an already-created
+   * group's baked-in routing state never picks up a later default change.
+   */
+  async ensureRelays(coordinate: string, relays: string[]): Promise<void> {
+    const group = this.activeGroup(coordinate);
+    if (!group) return;
+    await this.mls.ensureRelays(group.mls_group_id, relays);
+  }
+
   // ── authorized chat identities ─────────────────────────────────────────────
   /**
    * The chat identities eligible to be added for ONE account: the account key
