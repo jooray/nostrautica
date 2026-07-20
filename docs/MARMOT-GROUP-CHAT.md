@@ -524,7 +524,21 @@ unknown `chat` values are dropped; `pnpm check` green. No behavior anywhere yet.
   `connectAll` 445 subscription, `send`, `healIfEvicted`, `leaveAll`. Includes the
   `proposeRemoveUser` deep-import + `resolveRemoveUserProposals` array-flatten workaround
   (admin/co-admin path; the app member side only `leaveAll`s).
+- `session.svelte.ts` — the shared, event-scoped session store the shell owns (see below);
+  `client.ts` is dynamically imported from here, so the marmot chunk is still lazy.
 - `eventShell.showChat` = member ∧ `isMarmotChatEnabled(config)`.
+
+**Enrolment timing — prewarm (added 2026-07-20).** The session is started by the layout as
+soon as the shell resolves an approved member of a chat-enabled event, on *any* of that
+event's pages (`shouldPrewarmChat`, `chat/gate.ts`), and kept alive until the user leaves the
+event or logs out. It used to start on the Chat page's mount, which meant the kind-30443 key
+package — the thing the coordinator consumes to add a member (§4.2) — was only advertised at
+first open, so the Add happened *then*. MLS gives a new member nothing from before their Add,
+so every attendee's first visit to chat was an empty room with a "Setting up your secure
+chat…" wait, and anything announced between their approval and that first click was
+unreadable to them forever. Prewarming moves the Add to (as near as the app being open
+allows) approval time; the welcome and live 445 traffic land in the background, and
+`EventChat.svelte` is now a view over an already-joined session rather than its owner.
 
 **Signer round-trips per message = 0** (445 signed by a throwaway key, inner rumor unsigned) —
 the send path uses `client.groups.send`, never `signEvent`. **Needs live verification:**

@@ -13,6 +13,7 @@
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
+  import { fillHeight } from "$lib/components/fill-height.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -33,6 +34,8 @@
   let error = $state<unknown>(null);
   let timer: ReturnType<typeof setInterval> | undefined;
   let scroller = $state<HTMLDivElement | null>(null);
+  /** The composer row — reserved space under the transcript (see `fillHeight`). */
+  let composerEl = $state<HTMLElement | null>(null);
   let muteBusy = $state(false);
   const muted = $derived(!!peer && mutes.isMuted(peer));
 
@@ -161,10 +164,13 @@
     <ErrorState {error} />
   {/if}
 
+  <!-- The transcript takes the height actually left on screen (fillHeight), so
+       the composer sits just under it instead of floating above dead space. -->
   <div
     bind:this={scroller}
+    use:fillHeight={{ below: composerEl, min: 200 }}
     class="card"
-    style="height:50dvh;overflow-y:auto;display:flex;flex-direction:column;gap:0.5rem"
+    style="height:50dvh;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:0.5rem"
   >
     {#if loading}
       <p class="muted">{t("dmchat.decrypting")}</p>
@@ -186,7 +192,7 @@
     {/each}
   </div>
 
-  <div class="row" style="align-items:flex-end">
+  <div class="row" bind:this={composerEl} style="align-items:flex-end">
     <textarea
       rows="2"
       placeholder={t("dmchat.placeholder")}

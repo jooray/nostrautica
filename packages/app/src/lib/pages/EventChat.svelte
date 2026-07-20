@@ -1,8 +1,11 @@
 <script lang="ts">
   // Marmot group chat (MARMOT-GROUP-CHAT §7). Members-only, gated by
-  // eventShell.showChat (chat=marmot + coordinator). The whole marmot-ts stack is
-  // lazy-loaded here so chat-off events never pay for it. Alpha/experimental.
-  import { onMount, onDestroy } from "svelte";
+  // eventShell.showChat (chat=marmot + coordinator). The session itself is owned
+  // by the shell (chat/session.svelte.ts) and prewarmed as soon as the viewer is
+  // an approved member, so this page is a view over an already-running (usually
+  // already-joined) session. The marmot-ts stack stays lazily imported there, so
+  // chat-off events and non-members never pay for it. Alpha/experimental.
+  import { onMount, tick, untrack } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -14,6 +17,8 @@
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { receiveGrants } from "$lib/events/attendee.js";
   import { evaluateChatGate } from "$lib/chat/gate.js";
+  import { chatSession } from "$lib/chat/session.svelte.js";
+  import { fillHeight } from "$lib/components/fill-height.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -22,7 +27,6 @@
   import Avatar from "$lib/components/Avatar.svelte";
   import ChatHandoffCard from "$lib/components/ChatHandoffCard.svelte";
   import type { ChatMessage } from "$lib/chat/messages.js";
-  import type { MarmotChat } from "$lib/chat/client.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -41,21 +45,20 @@
   let { naddr }: { naddr: string } = $props();
 
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
-  let phase = $state<"loading" | "setup" | "ready" | "unavailable">("loading");
   let error = $state<unknown>(null);
   let sendError = $state<string | null>(null);
-  let messages = $state<ChatMessage[]>([]);
   let draft = $state("");
   let sending = $state(false);
   // Set once our own membership-resolve pass (grant fetch + shell re-sync) has run.
   let membershipKnown = $state(false);
-  // Latches once we've kicked off the chat session — prevents the reactive gate
-  // from starting it twice. Plain (non-reactive) on purpose.
-  let started = false;
-  // $state.raw: reactive by reference (so the handoff card appears once set)
-  // without deep-proxying the class instance.
-  let chat = $state.raw<MarmotChat | undefined>(undefined);
-  let chatPubkey = $state<string | undefined>(undefined);
+  // The session itself lives in the shell (chat/session.svelte.ts), started as
+  // soon as the shell knows we're an approved member — usually long before this
+  // page mounts. So this page reads it rather than owning it: no re-handshake on
+  // every visit, and the messages that arrived while the user was on other tabs
+  // are already here.
+  const chat = $derived(chatSession.chat);
+  const messages = $derived(chatSession.messages);
+  const chatPubkey = $derived(chatSession.chatPubkey);
   // Setup usually completes within seconds (member publishes key package →
   // coordinator adds them → welcome lands). If it's still spinning after a grace
   // period the coordinator may be slow/asleep or a socket dropped — surface a
@@ -96,75 +99,44 @@
     }
   });
 
-  onDestroy(() => chat?.dispose());
+  // No dispose here: the session outlives this page (it belongs to the event),
+  // and the layout tears it down when the user leaves the event or logs out.
 
   // Reactive membership gate (Bug 3). Re-evaluates whenever the event-shell's
   // roster/ECK/membership state resolves, so a late-resolving Add transitions the
   // page from "loading" into setup/ready instead of stranding on the negative.
   // The gate can only settle "unavailable" once membership is genuinely known.
-  $effect(() => {
-    if (started || error) return;
-    const gate = evaluateChatGate({
+  const gate = $derived(
+    evaluateChatGate({
       membershipKnown,
       shellNaddr: eventShell.naddr,
       naddr,
       loading: eventShell.loading,
       showChat: eventShell.showChat,
       hasSigner: !!session.signer,
-    });
-    if (gate === "loading") {
-      phase = "loading";
-    } else if (gate === "unavailable") {
-      phase = "unavailable";
-    } else {
-      // Member + chat enabled: start the session exactly once.
-      started = true;
-      void startChat();
-    }
+    }),
+  );
+
+  // The layout's prewarm normally has the session running already; this covers
+  // the deep-link case (straight to /chat, membership resolved here first) and
+  // skips the prewarm's deliberate delay. `ensure` is idempotent — a call for an
+  // already-running session adopts it instead of re-handshaking.
+  $effect(() => {
+    if (error || gate !== "enter" || !ctx || !session.signer) return;
+    const signer = session.signer;
+    const owner = session.pubkey;
+    const context = ctx;
+    // untrack: `ensure` reads (and settles) the session's own state; this effect
+    // should depend only on the gate/context above, not re-fire on its writes.
+    untrack(() => void chatSession.ensure(naddr, context, signer, owner).catch(() => {}));
   });
 
-  // Lazy-load the whole marmot stack and drive the member side of the protocol.
-  async function startChat() {
-    if (!ctx || !session.signer) {
-      phase = "unavailable";
-      return;
-    }
-    try {
-      phase = "setup";
-      const { MarmotChat } = await import("$lib/chat/client.js");
-      chat = await MarmotChat.create({ accountSigner: session.signer, ctx });
-      chatPubkey = chat.identity.pubkey;
-      chat.onMessage = (m) => {
-        // De-dupe by inner rumor id; keep chronological order. This also absorbs
-        // any echo of our own optimistically-appended message (Bug 4).
-        if (messages.some((x) => x.id === m.id)) return;
-        messages = [...messages, m].sort((a, b) => a.createdAt - b.createdAt);
-      };
-      // The coordinator adds us (and delivers the welcome) after we publish our key
-      // package, so the join usually lands seconds after start(). React to it: when
-      // a group appears we leave "setup" and enable composing. Without this the view
-      // stays on "Setting up your secure chat…" forever even once joined (gap G-3).
-      chat.onStateChange = () => {
-        if (phase === "setup") void syncPhase();
-      };
-      await chat.ensurePublished();
-      await chat.start();
-      // If a welcome hasn't arrived yet the group list is empty — stay in "setup"
-      // messaging until the coordinator adds us and the first welcome lands (then
-      // onStateChange flips us to "ready").
-      await syncPhase();
-    } catch (e) {
-      error = e;
-      phase = "unavailable";
-    }
-  }
-
-  // Flip to "ready" once we've joined a group (a nostr_group_id exists).
-  async function syncPhase() {
-    if (!chat) return;
-    const gid = await chat.nostrGroupId();
-    if (gid) phase = "ready";
-  }
+  const phase = $derived.by<"loading" | "setup" | "ready" | "unavailable">(() => {
+    if (error || chatSession.error) return "unavailable";
+    if (gate === "loading") return "loading";
+    if (gate === "unavailable") return "unavailable";
+    return chatSession.phase === "ready" ? "ready" : "setup";
+  });
 
   // Show the "taking longer than usual" hint if we're still in setup after a
   // grace period; clear it whenever we leave setup. Reruns cleanly on retry.
@@ -182,10 +154,7 @@
   // another chance to add us, and reopens the subscription sockets.
   async function retryChat() {
     setupSlow = false;
-    chat?.dispose();
-    chat = undefined;
-    chatPubkey = undefined;
-    await startChat();
+    await chatSession.retry();
   }
 
   async function send() {
@@ -194,7 +163,7 @@
     sending = true;
     sendError = null;
     try {
-      await chat.send(text);
+      await chatSession.send(text);
       draft = "";
     } catch {
       // Bug 5: surface the failure instead of silently swallowing it. A revoked
@@ -204,6 +173,49 @@
       sending = false;
     }
   }
+
+  // ── the message pane scrolls on its own ─────────────────────────────────────
+  // A long event's chat is long; letting it grow the page means the composer
+  // walks off the bottom and every visit lands you at the oldest message. The
+  // pane is a fixed-height scroller pinned to the newest message instead — but
+  // only while the reader is *at* the bottom: scrolling up to read history must
+  // not be yanked away by an arriving message. When one arrives while you're up
+  // there, a "new messages" button appears rather than a jump.
+  let listEl = $state<HTMLElement | null>(null);
+  /** The composer — reserved space under the pane (see `fillHeight`). */
+  let composerEl = $state<HTMLElement | null>(null);
+  /** Reader is at (or within a line or two of) the newest message. */
+  let atBottom = $state(true);
+  /** Messages arrived while the reader was scrolled up. */
+  let unseen = $state(false);
+
+  function scrollToLatest(behavior: ScrollBehavior = "smooth"): void {
+    listEl?.scrollTo({ top: listEl.scrollHeight, behavior });
+    unseen = false;
+  }
+
+  function onScroll(): void {
+    if (!listEl) return;
+    atBottom = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight < 60;
+    if (atBottom) unseen = false;
+  }
+
+  // Follow the tail as messages land (or as the history replay fills the pane on
+  // first paint — that one must be instant, not an animated crawl through the
+  // whole backlog).
+  let painted = false;
+  $effect(() => {
+    void messages.length;
+    if (!listEl) return;
+    const first = !painted;
+    painted = true;
+    if (untrack(() => atBottom)) {
+      // After the DOM has the new nodes.
+      void tick().then(() => scrollToLatest(first ? "instant" : "smooth"));
+    } else {
+      unseen = true;
+    }
+  });
 
   function dayLabel(ts: number): string {
     return new Date(ts * 1000).toLocaleDateString();
@@ -268,8 +280,8 @@
 </div>
 
 {#if phase === "unavailable"}
-  {#if error}
-    <ErrorState {error} />
+  {#if error || chatSession.error}
+    <ErrorState error={error ?? chatSession.error} />
   {:else}
     <div class="card"><p class="muted">{t("chat.unavailable")}</p>
       <button class="btn" onclick={() => router.go({ name: "event", naddr })}>{t("chat.backToEvent")}</button>
@@ -297,7 +309,20 @@
     </button>
   </div>
 
-  <div class="messages" class:irc={displayMode === "irc"} aria-live="polite">
+  <!-- A scroll container must be reachable by keyboard (WCAG 2.1.1) — the
+       noninteractive-tabindex rule doesn't account for scrollable regions. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <div
+    class="messages"
+    class:irc={displayMode === "irc"}
+    bind:this={listEl}
+    use:fillHeight={{ below: composerEl, min: 220 }}
+    onscroll={onScroll}
+    role="log"
+    aria-live="polite"
+    aria-label={t("chat.title")}
+    tabindex="0"
+  >
     {#if messages.length === 0}
       <div class="empty">
         {#if phase === "setup"}
@@ -350,7 +375,15 @@
     {/if}
   </div>
 
-  <form class="compose" onsubmit={(e) => { e.preventDefault(); void send(); }}>
+  {#if unseen}
+    <div class="jump-row">
+      <button class="btn inline jump" onclick={() => scrollToLatest()}>
+        {t("chat.jumpToLatest")}
+      </button>
+    </div>
+  {/if}
+
+  <form class="compose" bind:this={composerEl} onsubmit={(e) => { e.preventDefault(); void send(); }}>
     <textarea
       bind:value={draft}
       rows="1"
@@ -423,8 +456,29 @@
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
-    min-height: 40vh;
-    padding-bottom: 0.5rem;
+    /* Its own scroller, so the composer stays put and the page never grows with
+       the backlog. `fillHeight` replaces this with the measured remaining height;
+       the dvh value is the pre-action (and no-JS) fallback. */
+    height: 48dvh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0.25rem 0.5rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--bg-raised) 30%, transparent);
+  }
+  .jump-row {
+    display: flex;
+    justify-content: center;
+    margin-top: -0.6rem;
+    /* Sits over the pane's bottom edge without taking layout height from it. */
+    height: 0;
+  }
+  .jump {
+    transform: translateY(-0.4rem);
+    border-radius: 999px;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 0.35);
+    background: var(--bg-raised);
   }
   .messages.irc {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

@@ -1,6 +1,6 @@
 <script lang="ts">
   import "$lib/styles/app.css";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { tick } from "svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { eventNaddr, routeTitleKey } from "$lib/router/routes.js";
@@ -17,6 +17,8 @@
   import { prefetchIdentity } from "$lib/nostr/prefetch.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
+  import { chatSession } from "$lib/chat/session.svelte.js";
+  import { shouldPrewarmChat } from "$lib/chat/gate.js";
   import TopBar from "$lib/components/TopBar.svelte";
   import BottomNav from "$lib/components/BottomNav.svelte";
   import EventNav from "$lib/components/EventNav.svelte";
@@ -92,6 +94,45 @@
     if (!booted) return;
     void session.pubkey;
     void eventShell.sync(eventNaddr(router.route));
+  });
+
+  // Marmot chat prewarm (MARMOT-GROUP-CHAT §4.2). The coordinator can only add a
+  // member once that member has advertised a key package, and MLS hands a new
+  // member nothing from before their Add — so enrolling lazily on the first Chat
+  // open means the first thing an attendee ever sees there is an empty room, with
+  // any announcement made since their approval permanently unreadable. Start the
+  // session as soon as the shell resolves an approved member of a chat-enabled
+  // event, from whichever of its pages they're on, and keep it running in the
+  // background: the Add, the welcome and the live 445 traffic all land while they
+  // browse, so opening Chat paints an already-joined room. Deferred a beat so the
+  // ~220 kB marmot chunk never competes with the page's own first load.
+  $effect(() => {
+    if (!booted) return;
+    const naddr = eventNaddr(router.route);
+    const ctx = eventShell.ctx;
+    const signer = session.signer;
+    const owner = session.pubkey;
+    if (
+      !shouldPrewarmChat({
+        routeNaddr: naddr,
+        shellNaddr: eventShell.naddr,
+        hasCtx: !!ctx,
+        hasSigner: !!signer,
+        showChat: eventShell.showChat,
+      }) ||
+      !naddr ||
+      !ctx ||
+      !signer
+    ) {
+      // Leaving the event (or the account changed) — drop the live session; the
+      // group state and message history stay in IndexedDB.
+      untrack(() => chatSession.releaseUnless(naddr, owner));
+      return;
+    }
+    const id = setTimeout(() => {
+      void untrack(() => chatSession.ensure(naddr, ctx, signer, owner).catch(() => {}));
+    }, 1500);
+    return () => clearTimeout(id);
   });
 
   const evNaddr = $derived(eventNaddr(router.route));

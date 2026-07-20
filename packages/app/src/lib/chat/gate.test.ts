@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { evaluateChatGate, type ChatGateInput } from "./gate.js";
+import {
+  evaluateChatGate,
+  shouldPrewarmChat,
+  type ChatGateInput,
+  type ChatPrewarmInput,
+} from "./gate.js";
 
 const base: ChatGateInput = {
   membershipKnown: true,
@@ -57,5 +62,33 @@ describe("evaluateChatGate (Bug 3 reactive membership gate)", () => {
       showChat: true,
     };
     expect(evaluateChatGate(resolved)).toBe("enter");
+  });
+});
+
+describe("shouldPrewarmChat (background enrolment)", () => {
+  const warm: ChatPrewarmInput = {
+    routeNaddr: "naddr1",
+    shellNaddr: "naddr1",
+    hasCtx: true,
+    hasSigner: true,
+    showChat: true,
+  };
+
+  it("prewarms for an approved member of a chat-enabled event", () => {
+    expect(shouldPrewarmChat(warm)).toBe(true);
+  });
+
+  it("does not prewarm outside an event route", () => {
+    expect(shouldPrewarmChat({ ...warm, routeNaddr: undefined })).toBe(false);
+  });
+
+  it("waits for the shell to reflect THIS event (never enrols against a stale ctx)", () => {
+    expect(shouldPrewarmChat({ ...warm, shellNaddr: "naddr-other" })).toBe(false);
+  });
+
+  it("does not prewarm for a non-member, a chat-off event, or a logged-out viewer", () => {
+    expect(shouldPrewarmChat({ ...warm, showChat: false })).toBe(false);
+    expect(shouldPrewarmChat({ ...warm, hasSigner: false })).toBe(false);
+    expect(shouldPrewarmChat({ ...warm, hasCtx: false })).toBe(false);
   });
 });
