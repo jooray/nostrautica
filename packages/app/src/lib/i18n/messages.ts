@@ -778,6 +778,9 @@ export const messages = {
     "chat.handoff.copy": "Copy key",
     "chat.handoff.secretWarning":
       "Anyone with this key can read and post as you in your chats. Only scan it into your own device.",
+    "chat.display.label": "Chat style",
+    "chat.display.bubbles": "Bubbles",
+    "chat.display.irc": "IRC",
 
     // Create / Admin: group-chat toggle
     "chat.toggle.label": "Group chat (Marmot)",
@@ -1688,6 +1691,9 @@ export const messages = {
     "chat.handoff.copy": "Kopírovať kľúč",
     "chat.handoff.secretWarning":
       "Ktokoľvek s týmto kľúčom môže čítať a písať vo vašich chatoch ako vy. Naskenujte ho len do vlastného zariadenia.",
+    "chat.display.label": "Štýl chatu",
+    "chat.display.bubbles": "Bubliny",
+    "chat.display.irc": "IRC",
     // Vytvorenie / Správa: prepínač skupinového chatu
     "chat.toggle.label": "Skupinový chat (Marmot)",
     "chat.toggle.experimental": "Experimentálne",
