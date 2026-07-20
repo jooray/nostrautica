@@ -46,19 +46,27 @@ export function cachedLibrary(): MediaDescriptor[] | undefined {
   return cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.data;
 }
 
-/** The Blossom servers to use: event 31600 servers ∪ user 10063 servers ∪ default. */
-export async function resolveBlossomServers(
-  signer: AppSigner,
-  ctx: EventContext,
-): Promise<string[]> {
+/**
+ * The user's personal BUD-03 (kind 10063) Blossom server list, most-recent
+ * event wins.
+ */
+export async function fetchUserBlossomServers(signer: AppSigner): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
   const lists = await fetchEvents({ kinds: [KIND_BLOSSOM_SERVERS], authors: [pubkey] });
   const latest = lists.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  const userServers = latest
-    ? latest.tags.filter((t) => t[0] === "server").map((t) => t[1]!)
-    : [];
-  const merged = unionRelays(ctx.config.blossom, userServers, DEFAULT_BLOSSOM_SERVERS);
-  return merged;
+  return latest ? latest.tags.filter((t) => t[0] === "server").map((t) => t[1]!) : [];
+}
+
+/**
+ * The Blossom servers to use for ENCRYPTED media: event 31600 servers ∪
+ * default. Deliberately excludes the user's own kind 10063 list — that's a
+ * general-purpose pin (e.g. blossom.primal.net) meant for ordinary blobs, and
+ * several popular ones 415 on AES-GCM ciphertext (no BUD-02 content-type check
+ * we control), so honoring it here reliably breaks encrypted uploads (prod
+ * report 2026-07-20). Unencrypted uploads (uploadPublicImage) still honor it.
+ */
+export function resolveBlossomServers(ctx: EventContext): string[] {
+  return unionRelays(ctx.config.blossom, DEFAULT_BLOSSOM_SERVERS);
 }
 
 export interface SubmitMediaResult {
@@ -85,7 +93,7 @@ export async function uploadMedia(
     urls: [],
   });
 
-  const servers = await resolveBlossomServers(signer, ctx);
+  const servers = resolveBlossomServers(ctx);
   // BUD-06 preflight: keep only servers that will accept this ciphertext.
   const checks = await Promise.all(
     servers.map((s) =>
@@ -213,7 +221,7 @@ export async function prepareReuse(
   descriptor: MediaDescriptor,
   fresh: boolean,
 ): Promise<MediaDescriptor> {
-  const servers = await resolveBlossomServers(signer, ctx);
+  const servers = resolveBlossomServers(ctx);
   if (fresh) {
     const ciphertext = await downloadBlob(descriptor.url, descriptor.x);
     const re = await freshCopy(descriptor, ciphertext, []);

@@ -10,6 +10,7 @@ import { sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { uploadAndMirror } from "$lib/blossom/client.js";
+import { fetchUserBlossomServers } from "./submit.js";
 
 /** Two deterministic gradient hues derived from a seed string. */
 function hues(seed: string): [number, number] {
@@ -88,14 +89,21 @@ export async function cropScaleImage(
   }
 }
 
-/** Upload a public (unencrypted) image to Blossom; returns the primary URL. */
+/**
+ * Upload a public (unencrypted) image to Blossom; returns the primary URL.
+ * Unlike encrypted media (submit.ts resolveBlossomServers), this honors the
+ * user's own kind 10063 server list — ordinary images are exactly what those
+ * general-purpose pins are for, and don't hit the ciphertext content-type
+ * rejections encrypted uploads do.
+ */
 export async function uploadPublicImage(
   signer: AppSigner,
   blob: Blob,
   eventBlossom: string[] = [],
 ): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  const servers = unionRelays(eventBlossom, DEFAULT_BLOSSOM_SERVERS);
+  const userServers = await fetchUserBlossomServers(signer);
+  const servers = unionRelays(eventBlossom, userServers, DEFAULT_BLOSSOM_SERVERS);
   const { urls } = await uploadAndMirror(signer, servers, bytes, blob.type || "image/jpeg");
   return urls[0]!;
 }
