@@ -46,6 +46,9 @@
   let linking = $state(false);
   let linkError = $state<string | null>(null);
   let linked = $state(false);
+  // Kept so "authorize again" (re-check, e.g. after opening Whitenoise for the
+  // first time) can resend without the user re-pasting the npub.
+  let linkedPubkey = $state("");
 
   async function linkExisting(): Promise<void> {
     if (!linkInput.trim() || linking) return;
@@ -61,7 +64,25 @@
       if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error(t("chat.handoff.link.badNpub"));
       await sendChatKeyAttestation(signer, ctx, { op: "add", chatPubkey: pubkey });
       linked = true;
+      linkedPubkey = pubkey;
       linkInput = "";
+    } catch (e) {
+      linkError = e instanceof Error ? e.message : String(e);
+    } finally {
+      linking = false;
+    }
+  }
+
+  // Re-send the same attestation: harmless (the coordinator's upsert is
+  // idempotent) and re-triggers its key-package sync, which is exactly what
+  // "authorize again" needs if the first attempt ran before that identity had
+  // published a key package anywhere the coordinator could find it.
+  async function reauthorize(): Promise<void> {
+    if (!linkedPubkey || linking) return;
+    linking = true;
+    linkError = null;
+    try {
+      await sendChatKeyAttestation(signer, ctx, { op: "add", chatPubkey: linkedPubkey });
     } catch (e) {
       linkError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -101,6 +122,12 @@
     <p class="muted">{t("chat.handoff.link.body")}</p>
     {#if linked}
       <p class="muted linked-ok">{t("chat.handoff.link.success")}</p>
+      <div class="row">
+        <button class="btn inline" onclick={reauthorize} disabled={linking}>
+          {linking ? t("chat.handoff.link.authorizing") : t("chat.handoff.link.button")}
+        </button>
+      </div>
+      {#if linkError}<p class="muted warn" role="alert">{linkError}</p>{/if}
     {:else}
       <input
         placeholder={t("chat.handoff.link.placeholder")}

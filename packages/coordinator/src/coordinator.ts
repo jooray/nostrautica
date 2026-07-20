@@ -99,6 +99,7 @@ import { transcribeMedia } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef } from "./providers/types.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
+import { discoverKeyPackages } from "./chat/key-package-discovery.js";
 
 /** Marmot v2 wire kinds (MARMOT-GROUP-CHAT §1.2): addressable key package + group msg. */
 const KIND_KEY_PACKAGE = 30443;
@@ -1318,11 +1319,17 @@ export class Coordinator {
   // ── Marmot group chat (§4) ─────────────────────────────────────────────────
   private subscribedChat = new Set<string>();
 
-  /** Fetch kind-30443 key packages authored by the given chat identities (§4.2). */
+  /**
+   * Fetch kind-30443 key packages authored by the given chat identities
+   * (§4.2): first on the event's own relays (fast path — our own app's chat
+   * clients publish there), then, for anyone still missing one, on their own
+   * kind-10002 NIP-65 relays per the Marmot spec (key-package-discovery.ts) —
+   * a third-party Marmot client (e.g. Whitenoise) publishes ONLY there.
+   */
   private async fetchKeyPackages(coordinate: string, authors: string[]): Promise<NostrEvent[]> {
     const state = this.events.get(coordinate);
     if (!state || authors.length === 0) return [];
-    return this.deps.transport.fetch({ kinds: [KIND_KEY_PACKAGE], authors }, state.configRelays);
+    return discoverKeyPackages(this.deps.transport, authors, state.configRelays, this.deps.defaultRelays);
   }
 
   /**
