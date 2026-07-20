@@ -141,11 +141,12 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
 
   if (fiveSteps) {
     // --- processing ---
-    const introComplete = intro.state === "complete";
+    // Not gated on intro: the coordinator starts matching at approval time from
+    // the authored profile + public Nostr activity, no intro required (user
+    // feedback 2026-07-21). An intro just makes the resulting matches better —
+    // see the "intro" step's own nudge hint above.
     let processing: ReadinessStep;
-    if (!introComplete) {
-      processing = { id: "processing", state: "waiting", labelKey: LABEL.processing };
-    } else if (input.processed === true) {
+    if (input.processed === true) {
       processing = { id: "processing", state: "complete", labelKey: LABEL.processing };
     } else if (input.processed === false) {
       processing = {

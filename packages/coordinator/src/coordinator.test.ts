@@ -226,6 +226,7 @@ async function setup(
     matching?: "on" | "off";
     talks?: "off" | "on" | "prerecord-first";
     failTranscribe?: boolean;
+    transcribeError?: string;
   } = {},
 ): Promise<Harness> {
   const coordSk = generateSecretKey();
@@ -272,7 +273,7 @@ async function setup(
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
     transcribe: async (descriptor) => {
-      if (opts.failTranscribe) throw new Error("could not fetch blob (simulated)");
+      if (opts.failTranscribe) throw new Error(opts.transcribeError ?? "could not fetch blob (simulated)");
       const cached = store.getTranscript(descriptor.x);
       if (cached !== undefined) return cached;
       const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" });
@@ -1093,10 +1094,11 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
   it("surfaces a poisoned job to the organizer (21606 + status row) (Q12)", async () => {
     const h = await setup(0, { failTranscribe: true });
     const pk = await join(h, generateSecretKey(), "crypto");
-    // Exhaust the retry/backoff schedule so the process job poisons.
-    for (let i = 0; i < 8; i++) {
+    // Exhaust the long-tail retry/backoff schedule (jobs.ts) so the process job
+    // poisons — each iteration clears one step (the schedule tops out at 4h).
+    for (let i = 0; i < 30; i++) {
       await h.coordinator.jobs.drain();
-      h.clock.t += 120_000;
+      h.clock.t += 5 * 60 * 60_000;
     }
     // A 21606 coordinator-status gift wrap was published to E_id and decodes.
     const statuses = h.transport.published
@@ -1113,7 +1115,32 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // A queryable status row is recorded for the Admin UI (app-side follow-up).
     expect(h.store.poisonStatuses(h.coordinate).length).toBeGreaterThan(0);
   });
+
+  // ── billing errors get their own category, not the processing_error catch-all ─
+  it("classifies a depleted-provider-balance failure as provider_billing (2026-07-21)", async () => {
+    const h = await setup(0, {
+      failTranscribe: true,
+      transcribeError: 'Venice billing: insufficient balance (402) — Venice chat/completions: {"error":"insufficient balance"}',
+    });
+    await join(h, generateSecretKey(), "crypto");
+    for (let i = 0; i < 30; i++) {
+      await h.coordinator.jobs.drain();
+      h.clock.t += 5 * 60 * 60_000;
+    }
+    const s = lastCoordinatorStatus(h);
+    expect(s?.state).toBe("poison");
+    expect(s?.error_category).toBe("provider_billing");
+  });
 });
+
+function lastCoordinatorStatus(h: Harness) {
+  const statuses = h.transport.published
+    .filter((e) => e.kind === 1059)
+    .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+    .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+    .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
+  return statuses[statuses.length - 1];
+}
 
 function countPairs(store: Store, coordinate: string): number {
   return (store as any).db.prepare("SELECT COUNT(*) AS c FROM pairs WHERE coordinate = ?").get(coordinate).c;

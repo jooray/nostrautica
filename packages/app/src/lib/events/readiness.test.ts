@@ -35,10 +35,18 @@ describe("deriveReadiness", () => {
   it("new attendee with no intro → intro action-required, primary = record", () => {
     const r = deriveReadiness(base({ hasIntro: false, processed: undefined, matchesAvailable: false }));
     expect(stateOf(r, "intro")).toBe("action-required");
-    expect(stateOf(r, "processing")).toBe("waiting");
+    expect(stateOf(r, "processing")).toBe("checking");
     expect(stateOf(r, "matches")).toBe("waiting");
     expect(r.primary?.labelKey).toBe("readiness.cta.record");
     expect(r.primary?.route).toEqual({ name: "record", naddr: "naddr1xyz", talk: false });
+  });
+
+  it("processing and matches can complete without an intro — matching is not gated on it (2026-07-21)", () => {
+    const r = deriveReadiness(base({ hasIntro: false, processed: true, matchesAvailable: true }));
+    expect(stateOf(r, "intro")).toBe("action-required"); // still nudged, just not blocking
+    expect(stateOf(r, "processing")).toBe("complete");
+    expect(stateOf(r, "matches")).toBe("complete");
+    expect(r.matchesReady).toBe(true);
   });
 
   it("visitor → joined action-required, primary = join (wins over later steps)", () => {

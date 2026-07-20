@@ -1313,18 +1313,30 @@ export class Coordinator {
     }
   }
 
-  /** Fetch kind-0 + last N public posts (kinds 1, 6, 30023; reposts resolved). */
+  /**
+   * Fetch kind-0 + last N public posts (kinds 1, 6, 30023; reposts resolved).
+   * Kind-0 is fetched with its own uncapped query (it's a single replaceable
+   * event) so an active poster's note volume never crowds their profile bio
+   * out of a shared `limit` — it's prepended without consuming one of the N
+   * post slots. summarizeNostr() gives it special (labeled) treatment.
+   */
   async fetchNostrContext(state: EventState, pubkey: string, n: number): Promise<NostrPost[]> {
     if (n <= 0) return [];
-    const events = await this.deps.transport.fetch(
-      { kinds: [KIND_NOTE, KIND_REPOST, KIND_LONGFORM, KIND_PROFILE], authors: [pubkey], limit: n },
-      state.configRelays,
-    );
-    return events
-      .filter((e) => e.kind !== KIND_PROFILE)
+    const [profileEvents, postEvents] = await Promise.all([
+      this.deps.transport.fetch({ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }, state.configRelays),
+      this.deps.transport.fetch(
+        { kinds: [KIND_NOTE, KIND_REPOST, KIND_LONGFORM], authors: [pubkey], limit: n },
+        state.configRelays,
+      ),
+    ]);
+    const profile = profileEvents.sort((a, b) => b.created_at - a.created_at)[0];
+    const posts = postEvents
       .sort((a, b) => b.created_at - a.created_at)
       .slice(0, n)
       .map((e) => ({ kind: e.kind, content: e.content, created_at: e.created_at }));
+    return profile
+      ? [{ kind: profile.kind, content: profile.content, created_at: profile.created_at }, ...posts]
+      : posts;
   }
 
   // ── Marmot group chat (§4) ─────────────────────────────────────────────────
@@ -1644,6 +1656,9 @@ function applyCorrection(
  */
 function errorCategory(msg: string): string {
   const m = msg.toLowerCase();
+  if (m.includes("billing") || m.includes("insufficient balance") || m.includes("insufficient credit")) {
+    return "provider_billing";
+  }
   if (m.includes("contract")) return "provider_contract";
   if (m.includes("hash mismatch")) return "media_integrity";
   if (m.includes("fetch") || m.includes("blossom") || m.includes("network") || m.includes("timeout")) return "media_fetch";
