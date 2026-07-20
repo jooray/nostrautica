@@ -21,6 +21,7 @@
   import Icon from "$lib/components/icons/Icon.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
+  import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { joinSentAt, markJoinSent, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
   import {
@@ -375,6 +376,9 @@
   <h1>{t("join.title", { title: ctx.title })}</h1>
 
   {#if !session.loggedIn}
+    <!-- The event's language may have just auto-adopted (event-context.ts,
+         logged-out only) — this is the way back to a different one. -->
+    <div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem"><LanguageSwitch /></div>
     <!-- Nostr users are first-class: purple sign-in first, no form-reading
          needed (maintainer decision, revising UI-SUGGESTIONS #1). -->
     <button class="btn primary" onclick={() => (showSignIn = !showSignIn)}>

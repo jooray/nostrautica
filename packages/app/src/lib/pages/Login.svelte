@@ -6,6 +6,7 @@
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
+  import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -69,6 +70,7 @@
     <button class="btn primary" onclick={done}>{t("login.continue")}</button>
   </div>
 {:else}
+  <div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem"><LanguageSwitch /></div>
   <h1>{t("login.welcome")}</h1>
 
   {#if error}

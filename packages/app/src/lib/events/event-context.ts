@@ -16,6 +16,7 @@ import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
 import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 import { swr } from "$lib/cache/swr.js";
+import { session } from "$lib/signer/session.svelte.js";
 
 export interface EventContext {
   naddr: string;
@@ -100,8 +101,10 @@ export async function loadEventContext(
   // an explicit choice in Settings (spec §7.1). Cached-context re-entry is fine —
   // adoptEventLang is a no-op once an explicit choice exists. Background
   // prefetches pass adoptLang:false: warming another event's cache must not
-  // switch the UI language mid-page.
-  if (opts.adoptLang !== false) i18n.adoptEventLang(config.lang);
+  // switch the UI language mid-page. Logged-in accounts are excluded too — this
+  // is an onboarding nicety for someone arriving cold off an invite link, not a
+  // standing rule that browsing any event retunes an established account's UI.
+  if (opts.adoptLang !== false && !session.loggedIn) i18n.adoptEventLang(config.lang);
 
   // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.
   const profileEvent = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
