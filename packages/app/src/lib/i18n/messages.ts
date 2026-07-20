@@ -778,6 +778,16 @@ export const messages = {
     "chat.handoff.copy": "Copy key",
     "chat.handoff.secretWarning":
       "Anyone with this key can read and post as you in your chats. Only scan it into your own device.",
+    "chat.handoff.link.title": "Already on Whitenoise (or another Marmot client)?",
+    "chat.handoff.link.body":
+      "Authorize that identity instead of importing a new key — paste its npub below. Once it publishes a key package to this event's relays, the coordinator adds it automatically; no key leaves this device.",
+    "chat.handoff.link.placeholder": "npub or hex pubkey",
+    "chat.handoff.link.button": "Authorize",
+    "chat.handoff.link.authorizing": "Authorizing…",
+    "chat.handoff.link.success":
+      "Authorized. Open it in that client — it'll join once it publishes a key package to this event's relays.",
+    "chat.handoff.link.badNpub": "Enter an npub or 64-char hex pubkey",
+    "chat.handoff.link.relaysHint": "This event's relays (add them there if it doesn't join automatically):",
     "chat.display.label": "Chat style",
     "chat.display.bubbles": "Bubbles",
     "chat.display.irc": "IRC",
@@ -1691,6 +1701,16 @@ export const messages = {
     "chat.handoff.copy": "Kopírovať kľúč",
     "chat.handoff.secretWarning":
       "Ktokoľvek s týmto kľúčom môže čítať a písať vo vašich chatoch ako vy. Naskenujte ho len do vlastného zariadenia.",
+    "chat.handoff.link.title": "Už používate Whitenoise (alebo iného klienta Marmot)?",
+    "chat.handoff.link.body":
+      "Namiesto importovania nového kľúča túto identitu autorizujte — vložte jej npub nižšie. Keď zverejní key package na relayoch tejto akcie, koordinátor ju automaticky pridá; žiadny kľúč neopúšťa toto zariadenie.",
+    "chat.handoff.link.placeholder": "npub alebo hex pubkey",
+    "chat.handoff.link.button": "Autorizovať",
+    "chat.handoff.link.authorizing": "Autorizujem…",
+    "chat.handoff.link.success":
+      "Autorizované. Otvorte to v danom klientovi — pripojí sa, keď zverejní key package na relayoch tejto akcie.",
+    "chat.handoff.link.badNpub": "Zadajte npub alebo 64-znakový hex pubkey",
+    "chat.handoff.link.relaysHint": "Relaye tejto akcie (ak sa nepripojí automaticky, pridajte ich tam):",
     "chat.display.label": "Štýl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",
@@ -2606,6 +2626,16 @@ export const messages = {
     "chat.handoff.copy": "Kopírovat klíč",
     "chat.handoff.secretWarning":
       "Kdokoli s tímto klíčem může ve vašich chatech číst a psát jako vy. Naskenujte ho jen do vlastního zařízení.",
+    "chat.handoff.link.title": "Už používáte Whitenoise (nebo jiného klienta Marmot)?",
+    "chat.handoff.link.body":
+      "Místo importu nového klíče tuto identitu autorizujte — vložte její npub níže. Jakmile zveřejní key package na relaycích této akce, koordinátor ji automaticky přidá; žádný klíč neopouští toto zařízení.",
+    "chat.handoff.link.placeholder": "npub nebo hex pubkey",
+    "chat.handoff.link.button": "Autorizovat",
+    "chat.handoff.link.authorizing": "Autorizuji…",
+    "chat.handoff.link.success":
+      "Autorizováno. Otevřete to v daném klientovi — připojí se, jakmile zveřejní key package na relaycích této akce.",
+    "chat.handoff.link.badNpub": "Zadejte npub nebo 64znakový hex pubkey",
+    "chat.handoff.link.relaysHint": "Relaye této akce (pokud se nepřipojí automaticky, přidejte je tam):",
     "chat.display.label": "Styl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",

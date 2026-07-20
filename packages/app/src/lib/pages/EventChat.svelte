@@ -240,8 +240,14 @@
     });
   });
 
+  // The chat-key kind-0 (identity.ts buildChatKeyProfile) suffixes " (chat)" so
+  // OTHER Marmot clients can tell this npub is a device-only identity — useful
+  // context there, but redundant noise here where every sender in view already
+  // is one; strip it for our own display only (the published kind-0 keeps it).
   function nameOf(pubkey: string): string {
-    return profiles.get(pubkey)?.name?.trim() || pubkey.slice(0, 8);
+    const raw = profiles.get(pubkey)?.name?.trim();
+    if (!raw) return pubkey.slice(0, 8);
+    return raw.replace(/\s*\(chat\)\s*$/i, "");
   }
   // Deterministic per-sender hue (shared with Avatar's gradient) for the IRC
   // nick colour — same person always renders the same colour everywhere.
@@ -318,19 +324,17 @@
               <span class="irc-text">{m.content}</span>
             </p>
           {:else}
-            {@const showSender = !mine && (i === 0 || g.items[i - 1]!.pubkey !== m.pubkey)}
+            {@const showSender = i === 0 || g.items[i - 1]!.pubkey !== m.pubkey}
             <div class="msg" class:mine>
-              {#if !mine}
-                {#if showSender}
-                  <Avatar
-                    pubkey={m.pubkey}
-                    name={profiles.get(m.pubkey)?.name}
-                    picture={profiles.get(m.pubkey)?.picture}
-                    size={26}
-                  />
-                {:else}
-                  <span class="avatar-spacer" aria-hidden="true"></span>
-                {/if}
+              {#if showSender}
+                <Avatar
+                  pubkey={m.pubkey}
+                  name={profiles.get(m.pubkey)?.name}
+                  picture={profiles.get(m.pubkey)?.picture}
+                  size={26}
+                />
+              {:else}
+                <span class="avatar-spacer" aria-hidden="true"></span>
               {/if}
               <div class="col">
                 {#if showSender}<span class="sender">{nameOf(m.pubkey)}</span>{/if}
@@ -368,8 +372,13 @@
     <p class="send-error" role="alert">{sendError}</p>
   {/if}
 
-  {#if chat}
-    <ChatHandoffCard isAccountKey={chat.identity.isAccountKey} secretKey={chat.identity.secretKey} />
+  {#if chat && ctx && session.signer}
+    <ChatHandoffCard
+      isAccountKey={chat.identity.isAccountKey}
+      secretKey={chat.identity.secretKey}
+      signer={session.signer}
+      {ctx}
+    />
   {/if}
 {/if}
 
@@ -454,7 +463,11 @@
     justify-content: flex-start;
   }
   .msg.mine {
-    justify-content: flex-end;
+    /* Same avatar-then-col DOM order as everyone else — reversing the axis
+       (rather than swapping markup) puts the avatar on the right, hugging the
+       far edge, with justify-content: flex-start (inherited above) now
+       packing the whole group against that reversed start = the right side. */
+    flex-direction: row-reverse;
   }
   .avatar-spacer {
     width: 26px;
@@ -471,6 +484,10 @@
     font-weight: 650;
     color: var(--text-dim);
     margin: 0 0 0.15rem 0.2rem;
+  }
+  .msg.mine .sender {
+    margin: 0 0.2rem 0.15rem 0;
+    text-align: right;
   }
   .bubble {
     padding: 0.45rem 0.65rem;
