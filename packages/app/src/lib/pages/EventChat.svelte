@@ -252,14 +252,15 @@
     });
   });
 
-  // The chat-key kind-0 (identity.ts buildChatKeyProfile) suffixes " (chat)" so
-  // OTHER Marmot clients can tell this npub is a device-only identity — useful
-  // context there, but redundant noise here where every sender in view already
-  // is one; strip it for our own display only (the published kind-0 keeps it).
+  // The chat-key kind-0 (identity.ts buildChatKeyProfile) reads "Nostrautica
+  // <name> (chat)" so OTHER Marmot clients can tell this npub is an app-scoped
+  // child key, not a person — useful context there, but redundant noise here
+  // where every sender in view already is one; strip it for our own display
+  // only (the published kind-0 keeps the full branding).
   function nameOf(pubkey: string): string {
     const raw = profiles.get(pubkey)?.name?.trim();
     if (!raw) return pubkey.slice(0, 8);
-    return raw.replace(/\s*\(chat\)\s*$/i, "");
+    return raw.replace(/^Nostrautica\s+/i, "").replace(/\s*\(chat\)\s*$/i, "");
   }
   // Deterministic per-sender hue (shared with Avatar's gradient) for the IRC
   // nick colour — same person always renders the same colour everywhere.
@@ -271,6 +272,12 @@
 <div class="chat-head">
   <h1 class="disp">{t("chat.title")}</h1>
   <span class="badge">{t("chat.experimental")}</span>
+  <!-- All chats (this event's + every other event's + DMs) live one tap away
+       (user feedback 2026-07-20) — this tab itself stays the fast path
+       straight into THIS event's chat. -->
+  <button class="all-chats-link" onclick={() => router.go({ name: "dm" })}>
+    {t("chat.allConversations")}
+  </button>
 </div>
 
 <!-- Coordinator-read + from-join-epoch disclosure (§4.5). Always shown. -->
@@ -406,12 +413,7 @@
   {/if}
 
   {#if chat && ctx && session.signer}
-    <ChatHandoffCard
-      isAccountKey={chat.identity.isAccountKey}
-      secretKey={chat.identity.secretKey}
-      signer={session.signer}
-      {ctx}
-    />
+    <ChatHandoffCard signer={session.signer} {ctx} />
   {/if}
 {/if}
 
@@ -431,6 +433,17 @@
     border-radius: 999px;
     border: 1px solid var(--border);
     color: var(--text-dim);
+  }
+  .all-chats-link {
+    margin-left: auto;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--accent);
+    cursor: pointer;
   }
   .disclosure {
     display: flex;
@@ -455,7 +468,7 @@
   .messages {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.25rem;
     /* Its own scroller, so the composer stays put and the page never grows with
        the backlog. `fillHeight` replaces this with the measured remaining height;
        the dvh value is the pre-action (and no-JS) fallback. */
@@ -512,7 +525,7 @@
   }
   .msg {
     display: flex;
-    gap: 0.45rem;
+    gap: 0.4rem;
     align-items: flex-end;
     justify-content: flex-start;
   }
@@ -522,6 +535,12 @@
        far edge, with justify-content: flex-start (inherited above) now
        packing the whole group against that reversed start = the right side. */
     flex-direction: row-reverse;
+  }
+  /* Consecutive-same-sender messages get no gap of their own — .messages'
+     gap already separates them from the PRECEDING (different-sender) group;
+     stacking snugly here is what makes them read as one person talking. */
+  .msg + .msg {
+    margin-top: -0.2rem;
   }
   .avatar-spacer {
     width: 26px;
@@ -537,14 +556,15 @@
     font-size: 0.72rem;
     font-weight: 650;
     color: var(--text-dim);
-    margin: 0 0 0.15rem 0.2rem;
+    margin: 0 0 0.05rem 0.2rem;
+    line-height: 1.2;
   }
   .msg.mine .sender {
-    margin: 0 0.2rem 0.15rem 0;
+    margin: 0 0.2rem 0.05rem 0;
     text-align: right;
   }
   .bubble {
-    padding: 0.45rem 0.65rem;
+    padding: 0.35rem 0.6rem;
     border-radius: 14px;
     background: var(--bg-raised);
     border: 1px solid var(--border);
@@ -560,9 +580,9 @@
   .time {
     display: block;
     text-align: right;
-    font-size: 0.68rem;
+    font-size: 0.65rem;
     color: var(--text-dim);
-    margin-top: 0.15rem;
+    margin-top: 0.05rem;
   }
   /* IRC mode: plain log lines, no bubbles — `[time] <nick> text`. Nick colour
      is deterministic per sender (Avatar's hue) so the same person reads the

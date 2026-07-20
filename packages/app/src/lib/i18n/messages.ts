@@ -20,7 +20,6 @@ export const messages = {
     "nav.me": "Me",
     "nav.events": "Events",
     "nav.create": "Create",
-    "nav.messages": "Messages",
     "nav.settings": "Settings",
     "nav.back": "Back",
     "nav.backAria": "Back",
@@ -531,7 +530,6 @@ export const messages = {
     "qr.generating": "Generating QR…",
 
     // DM inbox
-    "dm.title": "Messages",
     "dm.loginToSee": "Log in to see your messages.",
     "dm.login": "Log in",
     "dm.loadFailed": "Couldn't load messages.",
@@ -539,6 +537,9 @@ export const messages = {
     "dm.empty":
       "No messages yet. Open someone's profile in an event's attendee list and tap Message to start a conversation. Messages are end-to-end encrypted and work with other Nostr messengers too.",
     "dm.youPrefix": "You: ",
+    // Unified Chat pane (group chats + DMs together)
+    "chats.groupSection": "Group chats",
+    "chats.dmSection": "Direct messages",
 
     // DM chat
     "dmchat.loginToSend": "Log in to send messages.",
@@ -756,6 +757,7 @@ export const messages = {
     // Marmot group chat (experimental)
     "chat.title": "Group chat",
     "chat.experimental": "Experimental",
+    "chat.allConversations": "All conversations",
     "chat.disclosure.body":
       "This chat is end-to-end encrypted (MLS/Marmot). The event coordinator operates and can read it, and each device sees only messages sent after it joined.",
     "chat.setup": "Setting up your secure chat… you'll join once the coordinator adds you.",
@@ -769,19 +771,9 @@ export const messages = {
     "chat.sendFailed": "Couldn't send. You may have been removed from this chat, or the connection dropped.",
     "chat.unavailable": "Group chat isn't available for this event, or you're not a member yet.",
     "chat.backToEvent": "Back to event",
-    "chat.handoff.title": "Take this chat to your phone",
-    "chat.handoff.body":
-      "Install Whitenoise, sign in with the key below, and this chat appears with push notifications. History starts from when your phone joins.",
-    "chat.handoff.chatKeyNote":
-      "This is a chat-only key generated for this app — not your main account key. It only unlocks your Marmot chats.",
-    "chat.handoff.reveal": "Show my chat key",
-    "chat.handoff.hide": "Hide",
-    "chat.handoff.copy": "Copy key",
-    "chat.handoff.secretWarning":
-      "Anyone with this key can read and post as you in your chats. Only scan it into your own device.",
-    "chat.handoff.link.title": "Already on Whitenoise (or another Marmot client)?",
+    "chat.handoff.link.title": "Use this chat in Whitenoise (or another Marmot client)",
     "chat.handoff.link.body":
-      "Authorize that identity instead of importing a new key — paste its npub below. The coordinator looks for its key package on this event's relays and on its own relay list, and adds it automatically; no key leaves this device.",
+      "Already have an identity there? Paste its npub below to authorize it for this chat. The coordinator looks for its key package on this event's relays and on its own relay list, and adds it automatically; no key leaves this device.",
     "chat.handoff.link.placeholder": "npub or hex pubkey",
     "chat.handoff.link.button": "Authorize",
     "chat.handoff.link.authorizing": "Authorizing…",
@@ -854,7 +846,7 @@ export const messages = {
     "title.posts": "Updates",
     "title.post": "Update",
     "title.eventMore": "More",
-    "title.dm": "Messages",
+    "title.dm": "Chat",
     "title.dmPeer": "Conversation",
     "title.notFound": "Not found",
 
@@ -937,7 +929,6 @@ export const messages = {
     "nav.me": "Ja",
     "nav.events": "Podujatia",
     "nav.create": "Vytvoriť",
-    "nav.messages": "Správy",
     "nav.settings": "Nastavenia",
     "nav.back": "Späť",
     "nav.backAria": "Späť",
@@ -1454,7 +1445,6 @@ export const messages = {
     "qr.generating": "Generuje sa QR…",
 
     // DM inbox
-    "dm.title": "Správy",
     "dm.loginToSee": "Ak chcete vidieť svoje správy, prihláste sa.",
     "dm.login": "Prihlásiť sa",
     "dm.loadFailed": "Správy sa nepodarilo načítať.",
@@ -1462,6 +1452,8 @@ export const messages = {
     "dm.empty":
       "Zatiaľ žiadne správy. Otvorte niekoho profil v zozname účastníkov podujatia a klepnite na Napísať správu, čím začnete konverzáciu. Správy sú koncovo šifrované a fungujú aj s inými Nostr aplikáciami na správy.",
     "dm.youPrefix": "Vy: ",
+    "chats.groupSection": "Skupinové chaty",
+    "chats.dmSection": "Priame správy",
 
     // DM chat
     "dmchat.loginToSend": "Ak chcete posielať správy, prihláste sa.",
@@ -1680,6 +1672,7 @@ export const messages = {
     // Marmot skupinový chat (experimentálne)
     "chat.title": "Skupinový chat",
     "chat.experimental": "Experimentálne",
+    "chat.allConversations": "Všetky konverzácie",
     "chat.disclosure.body":
       "Tento chat je end-to-end šifrovaný (MLS/Marmot). Koordinátor podujatia ho prevádzkuje a môže ho čítať a každé zariadenie vidí len správy odoslané po tom, ako sa pripojilo.",
     "chat.setup": "Nastavujeme váš zabezpečený chat… pripojíte sa, keď vás koordinátor pridá.",
@@ -1693,19 +1686,9 @@ export const messages = {
     "chat.sendFailed": "Správu sa nepodarilo odoslať. Možno vás z tohto chatu odstránili, alebo vypadlo spojenie.",
     "chat.unavailable": "Skupinový chat nie je pre toto podujatie dostupný, alebo ešte nie ste členom.",
     "chat.backToEvent": "Späť na podujatie",
-    "chat.handoff.title": "Vezmite si tento chat do telefónu",
-    "chat.handoff.body":
-      "Nainštalujte Whitenoise, prihláste sa kľúčom nižšie a tento chat sa zobrazí s upozorneniami. História začína od chvíle, keď sa telefón pripojí.",
-    "chat.handoff.chatKeyNote":
-      "Toto je kľúč len pre chat vygenerovaný touto aplikáciou — nie je to hlavný kľúč vášho účtu. Odomyká iba vaše Marmot chaty.",
-    "chat.handoff.reveal": "Zobraziť môj kľúč pre chat",
-    "chat.handoff.hide": "Skryť",
-    "chat.handoff.copy": "Kopírovať kľúč",
-    "chat.handoff.secretWarning":
-      "Ktokoľvek s týmto kľúčom môže čítať a písať vo vašich chatoch ako vy. Naskenujte ho len do vlastného zariadenia.",
-    "chat.handoff.link.title": "Už používate Whitenoise (alebo iného klienta Marmot)?",
+    "chat.handoff.link.title": "Použite tento chat vo Whitenoise (alebo inom klientovi Marmot)",
     "chat.handoff.link.body":
-      "Namiesto importovania nového kľúča túto identitu autorizujte — vložte jej npub nižšie. Koordinátor jej key package vyhľadá na relayoch tejto akcie aj na jej vlastnom zozname relayov a automaticky ju pridá; žiadny kľúč neopúšťa toto zariadenie.",
+      "Máte tam už identitu? Vložte jej npub nižšie a autorizujte ju pre tento chat. Koordinátor jej key package vyhľadá na relayoch tejto akcie aj na jej vlastnom zozname relayov a automaticky ju pridá; žiadny kľúč neopúšťa toto zariadenie.",
     "chat.handoff.link.placeholder": "npub alebo hex pubkey",
     "chat.handoff.link.button": "Autorizovať",
     "chat.handoff.link.authorizing": "Autorizujem…",
@@ -1778,7 +1761,7 @@ export const messages = {
     "title.posts": "Novinky",
     "title.post": "Novinka",
     "title.eventMore": "Viac",
-    "title.dm": "Správy",
+    "title.dm": "Chat",
     "title.dmPeer": "Konverzácia",
     "title.notFound": "Nenájdené",
 
@@ -1862,7 +1845,6 @@ export const messages = {
     "nav.me": "Já",
     "nav.events": "Akce",
     "nav.create": "Vytvořit",
-    "nav.messages": "Zprávy",
     "nav.settings": "Nastavení",
     "nav.back": "Zpět",
     "nav.backAria": "Zpět",
@@ -2376,7 +2358,6 @@ export const messages = {
     "qr.generating": "Generování QR…",
 
     // Schránka zpráv
-    "dm.title": "Zprávy",
     "dm.loginToSee": "Chcete-li vidět své zprávy, přihlaste se.",
     "dm.login": "Přihlásit se",
     "dm.loadFailed": "Zprávy se nepodařilo načíst.",
@@ -2384,6 +2365,8 @@ export const messages = {
     "dm.empty":
       "Zatím žádné zprávy. Otevřete něčí profil v seznamu účastníků akce a klepněte na Napsat zprávu, čímž zahájíte konverzaci. Zprávy jsou koncově šifrované a fungují i s jinými Nostr aplikacemi na zprávy.",
     "dm.youPrefix": "Vy: ",
+    "chats.groupSection": "Skupinové chaty",
+    "chats.dmSection": "Přímé zprávy",
 
     // Konverzace
     "dmchat.loginToSend": "Chcete-li posílat zprávy, přihlaste se.",
@@ -2605,6 +2588,7 @@ export const messages = {
     // Skupinový chat Marmot (experimentální)
     "chat.title": "Skupinový chat",
     "chat.experimental": "Experimentální",
+    "chat.allConversations": "Všechny konverzace",
     "chat.disclosure.body":
       "Tento chat je koncově šifrovaný (MLS/Marmot). Provozuje ho koordinátor akce, který ho může číst, a každé zařízení vidí jen zprávy odeslané od chvíle, kdy se připojilo.",
     "chat.setup": "Nastavujeme váš zabezpečený chat… připojíte se, jakmile vás koordinátor přidá.",
@@ -2619,19 +2603,9 @@ export const messages = {
     "chat.sendFailed": "Odeslání se nezdařilo. Možná jste byli z tohoto chatu odebráni, nebo vypadlo spojení.",
     "chat.unavailable": "Skupinový chat není pro tuto akci dostupný, nebo ještě nejste členem.",
     "chat.backToEvent": "Zpět na akci",
-    "chat.handoff.title": "Vezměte si tento chat do telefonu",
-    "chat.handoff.body":
-      "Nainstalujte Whitenoise, přihlaste se klíčem níže a tento chat se zobrazí i s oznámeními. Historie začíná od chvíle, kdy se k němu připojí telefon.",
-    "chat.handoff.chatKeyNote":
-      "Toto je klíč jen pro chat vygenerovaný touto aplikací — není to hlavní klíč vašeho účtu. Odemyká pouze vaše Marmot chaty.",
-    "chat.handoff.reveal": "Zobrazit můj klíč pro chat",
-    "chat.handoff.hide": "Skrýt",
-    "chat.handoff.copy": "Kopírovat klíč",
-    "chat.handoff.secretWarning":
-      "Kdokoli s tímto klíčem může ve vašich chatech číst a psát jako vy. Naskenujte ho jen do vlastního zařízení.",
-    "chat.handoff.link.title": "Už používáte Whitenoise (nebo jiného klienta Marmot)?",
+    "chat.handoff.link.title": "Použijte tento chat ve Whitenoise (nebo jiném klientovi Marmot)",
     "chat.handoff.link.body":
-      "Místo importu nového klíče tuto identitu autorizujte — vložte její npub níže. Koordinátor její key package vyhledá na relaycích této akce i na jejím vlastním seznamu relayů a automaticky ji přidá; žádný klíč neopouští toto zařízení.",
+      "Máte tam už identitu? Vložte její npub níže a autorizujte ji pro tento chat. Koordinátor její key package vyhledá na relaycích této akce i na jejím vlastním seznamu relayů a automaticky ji přidá; žádný klíč neopouští toto zařízení.",
     "chat.handoff.link.placeholder": "npub nebo hex pubkey",
     "chat.handoff.link.button": "Autorizovat",
     "chat.handoff.link.authorizing": "Autorizuji…",
@@ -2704,7 +2678,7 @@ export const messages = {
     "title.posts": "Novinky",
     "title.post": "Novinka",
     "title.eventMore": "Více",
-    "title.dm": "Zprávy",
+    "title.dm": "Chat",
     "title.dmPeer": "Konverzace",
     "title.notFound": "Nenalezeno",
 

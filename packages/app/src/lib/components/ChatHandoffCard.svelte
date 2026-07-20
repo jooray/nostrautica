@@ -1,46 +1,29 @@
 <script lang="ts">
-  // "Take this chat to your phone (Whitenoise)" hand-off (MARMOT-GROUP-CHAT §7).
-  // Local-key accounts export their own nsec; NIP-46/NIP-07 accounts export the
-  // chat *device* key (chat-only). The phone shows messages from when it joins.
+  // "Use this chat in another Marmot client" (MARMOT-GROUP-CHAT §7).
   //
-  // Second option (user feedback 2026-07-20): someone who already runs a Marmot
-  // client (Whitenoise) with their own long-term identity doesn't want to import
-  // a second one just for this event. The 21607 attestation the app already sends
-  // for its own device keys (attest.ts) is generic — it just binds
-  // account_pubkey -> ANY chat_pubkey — so authorizing an arbitrary EXISTING npub
-  // works with zero coordinator changes: once that identity publishes its own
-  // key package to this event's relays, the coordinator's watcher picks it up the
-  // same way it does for any other device (admin.ts eligibleChatAuthors).
-  import { nsecEncode, decode } from "nostr-tools/nip19";
+  // Originally this also offered exporting the web app's own chat key (nsec) to
+  // import elsewhere. Removed (user feedback 2026-07-20): that key already holds
+  // a leaf in this MLS group the moment chat is opened in the browser, and MLS
+  // rejects a second leaf for a credential that already has one (verified against
+  // the real ts-mls engine — "Commit cannot contain an Add proposal for someone
+  // already in the group"). So importing the SAME key into Whitenoise could never
+  // give it independent membership; the export was pure dead weight in the UI.
+  //
+  // What actually works: someone who already runs a Marmot client (Whitenoise)
+  // with their OWN separate identity can authorize that identity for this chat.
+  // The kind-21607 attestation the app already sends for its own device keys
+  // (attest.ts) is generic — it just binds account_pubkey -> ANY chat_pubkey — so
+  // authorizing an arbitrary EXISTING npub needs zero coordinator changes: once
+  // that identity publishes its own key package (found via this event's relays or
+  // its own NIP-65 list, key-package-discovery.ts), the coordinator's watcher
+  // picks it up the same way it does for any other device.
+  import { decode } from "nostr-tools/nip19";
   import { t } from "$lib/i18n/i18n.svelte.js";
-  import Icon from "$lib/components/icons/Icon.svelte";
-  import QrCode from "$lib/components/QrCode.svelte";
   import { sendChatKeyAttestation } from "$lib/chat/attest.js";
   import type { AppSigner } from "$lib/signer/types.js";
   import type { EventContext } from "$lib/events/event-context.js";
 
-  let {
-    isAccountKey,
-    secretKey,
-    signer,
-    ctx,
-  }: {
-    isAccountKey: boolean;
-    secretKey: Uint8Array;
-    signer: AppSigner;
-    ctx: EventContext;
-  } = $props();
-
-  let revealed = $state(false);
-  const nsec = $derived(revealed ? nsecEncode(secretKey) : "");
-
-  async function copy() {
-    try {
-      await navigator.clipboard.writeText(nsecEncode(secretKey));
-    } catch {
-      /* clipboard blocked — the QR + on-screen text remain */
-    }
-  }
+  let { signer, ctx }: { signer: AppSigner; ctx: EventContext } = $props();
 
   let linkInput = $state("");
   let linking = $state(false);
@@ -92,90 +75,40 @@
 </script>
 
 <section class="handoff card">
-  <div class="hd">
-    <Icon name="waypoint" size={20} />
-    <strong>{t("chat.handoff.title")}</strong>
-  </div>
-  <p class="muted">{t("chat.handoff.body")}</p>
-  {#if !isAccountKey}
-    <p class="muted note">{t("chat.handoff.chatKeyNote")}</p>
-  {/if}
-
-  {#if revealed}
-    <div class="qr">
-      <QrCode data={nsec} size={200} />
-    </div>
-    <code class="nsec">{nsec}</code>
+  <strong>{t("chat.handoff.link.title")}</strong>
+  <p class="muted">{t("chat.handoff.link.body")}</p>
+  {#if linked}
+    <p class="muted linked-ok">{t("chat.handoff.link.success")}</p>
     <div class="row">
-      <button class="btn" onclick={copy}>{t("chat.handoff.copy")}</button>
-      <button class="btn" onclick={() => (revealed = false)}>{t("chat.handoff.hide")}</button>
+      <button class="btn inline" onclick={reauthorize} disabled={linking}>
+        {linking ? t("chat.handoff.link.authorizing") : t("chat.handoff.link.button")}
+      </button>
     </div>
-    <p class="muted warn">{t("chat.handoff.secretWarning")}</p>
+    {#if linkError}<p class="muted warn" role="alert">{linkError}</p>{/if}
   {:else}
-    <button class="btn primary" onclick={() => (revealed = true)}>{t("chat.handoff.reveal")}</button>
+    <input
+      placeholder={t("chat.handoff.link.placeholder")}
+      bind:value={linkInput}
+      disabled={linking}
+    />
+    <div class="row">
+      <button class="btn inline" onclick={linkExisting} disabled={!linkInput.trim() || linking}>
+        {linking ? t("chat.handoff.link.authorizing") : t("chat.handoff.link.button")}
+      </button>
+    </div>
+    {#if linkError}<p class="muted warn" role="alert">{linkError}</p>{/if}
   {/if}
-
-  <div class="or-divider">{t("login.or")}</div>
-
-  <div class="link-existing">
-    <strong>{t("chat.handoff.link.title")}</strong>
-    <p class="muted">{t("chat.handoff.link.body")}</p>
-    {#if linked}
-      <p class="muted linked-ok">{t("chat.handoff.link.success")}</p>
-      <div class="row">
-        <button class="btn inline" onclick={reauthorize} disabled={linking}>
-          {linking ? t("chat.handoff.link.authorizing") : t("chat.handoff.link.button")}
-        </button>
-      </div>
-      {#if linkError}<p class="muted warn" role="alert">{linkError}</p>{/if}
-    {:else}
-      <input
-        placeholder={t("chat.handoff.link.placeholder")}
-        bind:value={linkInput}
-        disabled={linking}
-      />
-      <div class="row">
-        <button class="btn inline" onclick={linkExisting} disabled={!linkInput.trim() || linking}>
-          {linking ? t("chat.handoff.link.authorizing") : t("chat.handoff.link.button")}
-        </button>
-      </div>
-      {#if linkError}<p class="muted warn" role="alert">{linkError}</p>{/if}
-    {/if}
-    {#if ctx.config.relays.length}
-      <p class="muted relays-hint">
-        {t("chat.handoff.link.relaysHint")}
-        {ctx.config.relays.join(", ")}
-      </p>
-    {/if}
-  </div>
+  {#if ctx.config.relays.length}
+    <p class="muted relays-hint">
+      {t("chat.handoff.link.relaysHint")}
+      {ctx.config.relays.join(", ")}
+    </p>
+  {/if}
 </section>
 
 <style>
   .handoff {
     margin-top: 1.25rem;
-  }
-  .hd {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.4rem;
-  }
-  .note {
-    font-size: 0.85rem;
-  }
-  .qr {
-    display: grid;
-    place-items: center;
-    margin: 0.75rem 0;
-  }
-  .nsec {
-    display: block;
-    word-break: break-all;
-    font-size: 0.78rem;
-    padding: 0.4rem 0.55rem;
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: 8px;
   }
   .row {
     display: flex;
@@ -186,7 +119,7 @@
     font-size: 0.78rem;
     margin-top: 0.5rem;
   }
-  .link-existing input {
+  .handoff input {
     width: 100%;
     margin-top: 0.4rem;
   }

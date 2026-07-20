@@ -18,12 +18,16 @@
     <span class="ico"><Icon name="plus" size={24} /></span><span class="lbl">{t("nav.create")}</span>
   </button>
   {#if session.loggedIn}
+    <!-- "Chat" — unified group-chats + DMs (user feedback 2026-07-20: this
+         used to be DM-only "Messages" and disappeared entirely inside an
+         event since EventNav replaces this bar there; same label as
+         EventNav's own Chat tab now, since they lead to the same place. -->
     <button
       aria-current={active("dm") || active("dmPeer") ? "page" : undefined}
       class:active={active("dm") || active("dmPeer")}
       onclick={() => router.go({ name: "dm" })}
     >
-      <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.messages")}</span>
+      <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.chat")}</span>
     </button>
   {/if}
   <button

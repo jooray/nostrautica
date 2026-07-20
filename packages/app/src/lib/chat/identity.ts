@@ -19,6 +19,7 @@
  * `accountProofSigner` hook is uniform: `signAccountIdentityProof(req, sk)`.
  */
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
+import { npubEncode } from "nostr-tools/nip19";
 import type { EventTemplate } from "nostr-tools/pure";
 import { nip44Encrypt, nip44Decrypt, bytesToHex, KIND_PROFILE } from "@nostrautica/protocol";
 import {
@@ -147,7 +148,10 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
  * Build the locally-signed kind-0 profile a chat device key publishes so other
  * Marmot clients — and our own chat UI, which resolves sender names/avatars by
  * fetching the chat-identity pubkey's own kind-0 — render it sensibly (§3.2):
- * the account's display name/picture + a "(chat)" marker. Local-key identities
+ * the account's display name/picture, a "Nostrautica" + "(chat)" marker so it
+ * reads as an app-scoped child key rather than a person (user feedback
+ * 2026-07-20), and the real account's npub in `about` so anyone who runs into
+ * this key elsewhere can find who it actually belongs to. Local-key identities
  * don't need this (their kind-0 is the user's own).
  */
 export function buildChatKeyProfile(
@@ -155,10 +159,11 @@ export function buildChatKeyProfile(
   accountName: string | undefined,
   accountPicture?: string,
 ): ReturnType<typeof finalizeEvent> {
-  const name = (accountName?.trim() || "Nostrautica user") + " (chat)";
+  const name = `Nostrautica ${accountName?.trim() || "user"} (chat)`;
+  const npub = npubEncode(identity.account);
   const content = JSON.stringify({
     name,
-    about: "Marmot chat identity for a Nostrautica event. Messages are end-to-end encrypted.",
+    about: `Nostrautica MLS chat key for a Nostrautica event — not a person. Follow ${npub} for the main account this belongs to. Messages are end-to-end encrypted.`,
     ...(accountPicture ? { picture: accountPicture } : {}),
   });
   return identity.eventSigner.signEvent({

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
+import { npubEncode } from "nostr-tools/nip19";
 import { eventSignerFromKey, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
 import {
   signAccountIdentityProof,
@@ -56,7 +57,7 @@ describe("account identity proof signer", () => {
 });
 
 describe("buildChatKeyProfile", () => {
-  it("publishes a kind-0 with a (chat) marker, signed by the chat key", () => {
+  it("publishes a kind-0 branded as a Nostrautica chat child key, signed by the chat key", () => {
     const sk = generateSecretKey();
     const identity = {
       pubkey: getPublicKey(sk),
@@ -71,7 +72,23 @@ describe("buildChatKeyProfile", () => {
     expect(ev.kind).toBe(0);
     expect(ev.pubkey).toBe(getPublicKey(sk));
     expect(verifyEvent(ev)).toBe(true);
-    expect(JSON.parse(ev.content).name).toBe("Alice (chat)");
+    expect(JSON.parse(ev.content).name).toBe("Nostrautica Alice (chat)");
+  });
+
+  it("points `about` at the real account's npub, so the key doesn't read as its own person", () => {
+    const sk = generateSecretKey();
+    const identity = {
+      pubkey: getPublicKey(sk),
+      account: "a".repeat(64),
+      isAccountKey: false,
+      eventSigner: eventSignerFromKey(sk),
+      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
+      clientId: "web-1",
+      secretKey: sk,
+    } satisfies ChatIdentity;
+    const about = JSON.parse(buildChatKeyProfile(identity, "Alice").content).about as string;
+    expect(about).toContain(npubEncode("a".repeat(64)));
+    expect(about.toLowerCase()).toContain("not a person");
   });
 
   it("falls back to a generic name when the account name is empty", () => {
