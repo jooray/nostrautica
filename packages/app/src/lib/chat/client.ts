@@ -22,7 +22,8 @@ import { KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { resolveChatIdentity, type ChatIdentity } from "./identity.js";
+import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+import { resolveChatIdentity, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
 import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
 import {
@@ -108,7 +109,18 @@ export class MarmotChat {
    * attestation binding the chat key to the account. Idempotent.
    */
   async ensurePublished(): Promise<void> {
-    // Already a joined member? Publish NOTHING. Re-advertising a fresh kind-30443
+    // Device-key accounts: publish (or refresh) the chat key's own kind-0 so
+    // other Marmot clients — and our chat UI, which resolves sender names by
+    // fetching this exact pubkey's kind-0 — can show a name/picture instead of
+    // a bare pubkey. Unlike everything below, this is NOT gated on "already
+    // joined": a kind-0 is a plain profile note, not MLS state, so republishing
+    // it here every open also self-heals identities that joined before this
+    // existed (prod report 2026-07-20 — chat showed raw pubkeys for everyone).
+    if (!this.identity.isAccountKey) {
+      await this.ensureChatKeyProfile();
+    }
+
+    // Already a joined member? Publish NOTHING else. Re-advertising a fresh kind-30443
     // key package, or (for device-key accounts) re-sending an op:"add" 21607
     // attestation, prompts the coordinator to add us AGAIN — a new MLS Add commit,
     // a new epoch, a forked ratchet — after which our persisted group state is
@@ -145,6 +157,17 @@ export class MarmotChat {
         clientId: this.identity.clientId,
       });
     }
+  }
+
+  /** Publish the device chat key's own kind-0 (name/picture borrowed from the
+   *  real account's profile, marked "(chat)") — see {@link buildChatKeyProfile}. */
+  private async ensureChatKeyProfile(): Promise<void> {
+    const account = await fetchProfiles([this.identity.account]).catch(
+      () => new Map<string, ProfileMeta>(),
+    );
+    const meta = account.get(this.identity.account);
+    const ev = buildChatKeyProfile(this.identity, meta?.name, meta?.picture);
+    await publishSigned(ev as unknown as Parameters<typeof publishSigned>[0], this.relays).catch(() => {});
   }
 
   /** Publish the chat identity's 10050 (inbox) + 10002 (discovery) relay lists. */

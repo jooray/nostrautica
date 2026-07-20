@@ -87,4 +87,33 @@ describe("buildChatKeyProfile", () => {
     } satisfies ChatIdentity;
     expect(JSON.parse(buildChatKeyProfile(identity, "  ").content).name).toBe("Nostrautica user (chat)");
   });
+
+  it("carries the account's picture through when given", () => {
+    const sk = generateSecretKey();
+    const identity = {
+      pubkey: getPublicKey(sk),
+      account: "a".repeat(64),
+      isAccountKey: false,
+      eventSigner: eventSignerFromKey(sk),
+      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
+      clientId: "web-1",
+      secretKey: sk,
+    } satisfies ChatIdentity;
+    const content = JSON.parse(buildChatKeyProfile(identity, "Alice", "https://example.com/a.png").content);
+    expect(content.picture).toBe("https://example.com/a.png");
+  });
+
+  it("omits the picture field when none is given", () => {
+    const sk = generateSecretKey();
+    const identity = {
+      pubkey: getPublicKey(sk),
+      account: "a".repeat(64),
+      isAccountKey: false,
+      eventSigner: eventSignerFromKey(sk),
+      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
+      clientId: "web-1",
+      secretKey: sk,
+    } satisfies ChatIdentity;
+    expect(JSON.parse(buildChatKeyProfile(identity, "Alice").content)).not.toHaveProperty("picture");
+  });
 });

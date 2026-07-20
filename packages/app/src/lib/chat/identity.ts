@@ -145,18 +145,21 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
 
 /**
  * Build the locally-signed kind-0 profile a chat device key publishes so other
- * Marmot clients render it sensibly (§3.2): the account's display name + a
- * "(chat)" marker. Local-key identities don't need this (their kind-0 is the
- * user's own).
+ * Marmot clients — and our own chat UI, which resolves sender names/avatars by
+ * fetching the chat-identity pubkey's own kind-0 — render it sensibly (§3.2):
+ * the account's display name/picture + a "(chat)" marker. Local-key identities
+ * don't need this (their kind-0 is the user's own).
  */
 export function buildChatKeyProfile(
   identity: ChatIdentity,
   accountName: string | undefined,
+  accountPicture?: string,
 ): ReturnType<typeof finalizeEvent> {
   const name = (accountName?.trim() || "Nostrautica user") + " (chat)";
   const content = JSON.stringify({
     name,
     about: "Marmot chat identity for a Nostrautica event. Messages are end-to-end encrypted.",
+    ...(accountPicture ? { picture: accountPicture } : {}),
   });
   return identity.eventSigner.signEvent({
     kind: KIND_PROFILE,
