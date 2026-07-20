@@ -118,8 +118,13 @@ export async function mirror(
 }
 
 /**
- * Upload to the first server, then mirror to the rest (spec §8, §10.3). Returns
- * every URL the ciphertext is reachable at (primary first).
+ * Upload to the first server that accepts it, then mirror to the remaining
+ * candidates (spec §8, §10.3). Preflight only predicts which server is likely to
+ * accept the blob — a server preflight couldn't rule out (CORS-blocked HEAD) can
+ * still 415/CORS-block the real PUT, so a failed upload falls through to the next
+ * candidate instead of failing the whole operation (prod report 2026-07-20: a
+ * stale per-user/event Blossom server pinned an incompatible primary and had no
+ * fallback). Returns every URL the ciphertext is reachable at (primary first).
  */
 export async function uploadAndMirror(
   signer: AppSigner,
@@ -128,8 +133,21 @@ export async function uploadAndMirror(
   contentType: string,
 ): Promise<{ urls: string[]; sha256: string; primary: string }> {
   if (servers.length === 0) throw new Error("no Blossom servers configured");
-  const [primaryServer, ...rest] = servers;
-  const primary = await upload(signer, primaryServer!, ciphertext, contentType);
+  let primary: BlobDescriptor | undefined;
+  let rest: string[] = [];
+  const errors: string[] = [];
+  for (let i = 0; i < servers.length; i++) {
+    try {
+      primary = await upload(signer, servers[i]!, ciphertext, contentType);
+      rest = servers.slice(i + 1);
+      break;
+    } catch (e) {
+      errors.push(`${servers[i]}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (!primary) {
+    throw new Error(`Upload failed on every candidate server: ${errors.join("; ")}`);
+  }
   const urls = [primary.url];
   for (const server of rest) {
     const url = await mirror(signer, server, primary.url, primary.sha256);
