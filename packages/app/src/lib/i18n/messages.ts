@@ -547,6 +547,7 @@ export const messages = {
     "dmchat.invalidLink": "Invalid profile link.",
     "dmchat.title": "Chat",
     "dmchat.e2e": "End-to-end encrypted (NIP-17) — also readable in other Nostr messengers.",
+    "dmchat.sharedEvents": "Also attending:",
     "dmchat.decrypting": "Decrypting…",
     "dmchat.empty": "No messages yet — say hi.",
     "dmchat.signerSlow": "Waiting for your signer to sign & encrypt… if you use Amber or a bunker, make sure it's reachable.",
@@ -1461,6 +1462,7 @@ export const messages = {
     "dmchat.invalidLink": "Neplatný odkaz na profil.",
     "dmchat.title": "Konverzácia",
     "dmchat.e2e": "Koncovo šifrované (NIP‑17) — čitateľné aj v iných Nostr aplikáciách na správy.",
+    "dmchat.sharedEvents": "Tiež sa zúčastňuje:",
     "dmchat.decrypting": "Dešifruje sa…",
     "dmchat.empty": "Zatiaľ žiadne správy — pozdravte sa.",
     "dmchat.signerSlow": "Čaká sa, kým podpisovač podpíše a zašifruje… ak používate Amber alebo bunker, uistite sa, že je dostupný.",
@@ -2374,6 +2376,7 @@ export const messages = {
     "dmchat.invalidLink": "Neplatný odkaz na profil.",
     "dmchat.title": "Konverzace",
     "dmchat.e2e": "Koncově šifrováno (NIP-17) — čitelné i v jiných Nostr aplikacích na zprávy.",
+    "dmchat.sharedEvents": "Také se účastní:",
     "dmchat.decrypting": "Dešifrování…",
     "dmchat.empty": "Zatím žádné zprávy — pozdravte se.",
     "dmchat.signerSlow":

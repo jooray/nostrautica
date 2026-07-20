@@ -6,8 +6,12 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
+  import { coordinateToNaddr } from "@nostrautica/protocol";
   import { fetchDms, cachedDms, sendDm, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
+  import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
+  import { listEventKeys } from "$lib/events/keystore.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
@@ -38,6 +42,48 @@
   let composerEl = $state<HTMLElement | null>(null);
   let muteBusy = $state(false);
   const muted = $derived(!!peer && mutes.isMuted(peer));
+  // "Also attending: …" (user feedback 2026-07-20) — every event the CURRENT
+  // user holds a working key for (listEventKeys: local, network-free, and the
+  // authoritative "can I actually decrypt this event's data" answer — unlike
+  // recentEvents' role field, which is set at join-REQUEST time and stays
+  // "attendee" even for a request that was never approved) that also lists
+  // the peer on its roster. Deliberately fetchRoster, not fetchDirectory: a
+  // roster entry is a plain {pubkey, role}, so this needs no per-attendee
+  // profile/media/AI-profile decrypt, just a membership check. Cache-first
+  // per event (instant paint when the roster's already warm from visiting
+  // People there), but always falls through to a real fetch on a cache miss
+  // or a "not found" — the whole point is not to under-report from a merely
+  // cold cache, which is why this was deferred rather than shipped earlier.
+  let sharedEvents = $state<string[]>([]);
+
+  async function loadSharedEvents(peerPubkey: string): Promise<void> {
+    try {
+      const keys = await listEventKeys();
+      const withEck = keys.filter((k) => k.eck.length > 0);
+      const names = await Promise.all(
+        withEck.map(async (k) => {
+          try {
+            const naddr = coordinateToNaddr(k.coordinate);
+            const cachedR = cachedRoster(k.coordinate);
+            if (cachedR?.attendees.some((a) => a.pubkey === peerPubkey)) {
+              return (
+                cachedEventContext(naddr)?.title ??
+                (await loadEventContext(naddr, { adoptLang: false })).title
+              );
+            }
+            const ctx = cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
+            const roster = await fetchRoster(ctx);
+            return roster?.attendees.some((a) => a.pubkey === peerPubkey) ? ctx.title : undefined;
+          } catch {
+            return undefined; // one bad event must not blank the whole list
+          }
+        }),
+      );
+      sharedEvents = names.filter((n): n is string => !!n);
+    } catch {
+      sharedEvents = [];
+    }
+  }
 
   async function toggleMute() {
     if (!session.signer || !peer) return;
@@ -97,6 +143,7 @@
           if (p) profile = p;
         })
         .catch(() => {});
+      void loadSharedEvents(peer);
     }
     await refresh();
     timer = setInterval(refresh, 5_000);
@@ -156,6 +203,11 @@
   <p class="muted" style="margin:0 0 0.5rem">
     {t("dmchat.e2e")}
   </p>
+  {#if sharedEvents.length}
+    <p class="muted" style="margin:0 0 0.5rem;font-size:0.85rem">
+      {t("dmchat.sharedEvents")} {sharedEvents.join(", ")}
+    </p>
+  {/if}
   {#if muted}
     <p class="muted" role="status" style="margin:0 0 0.5rem">{t("mute.confirm")}</p>
   {/if}
