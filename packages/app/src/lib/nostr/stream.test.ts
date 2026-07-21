@@ -193,13 +193,8 @@ describe("streamEvents", () => {
   // purges them. streamEvents is the one place every fetch (cache-first AND
   // relay) funnels through, so the purge belongs here, not scattered across
   // every call site.
-  describe("purges an event that fails signature verification (audit APPK-1 self-heal)", () => {
-    it("drops it from the result and deletes it from the cache by BOTH its raw id and tagId", async () => {
-      // Regression: the first version of this fix only deleted by raw.id,
-      // which is a silent no-op for replaceable/addressable kinds (31600,
-      // 31923, ...) — cache-dexie keys those by tagId() ("kind:pubkey:d"),
-      // not the event hash. Reproduced live: the purge "succeeded" but the
-      // stale entry was still served on the very next fetch, forever.
+  describe("drops an event that fails signature verification (audit APPK-1)", () => {
+    it("excludes it from the result and keeps the valid ones", async () => {
       const h = streamEvents({ kinds: [1] });
       isVerifiedMock.mockImplementation((e: unknown) => (e as { id: string }).id !== "bad");
       currentSub.emit("event", fakeEvent({ id: "bad", tagId: "31600:pk:d-tag" }));
@@ -208,23 +203,52 @@ describe("streamEvents", () => {
       await vi.advanceTimersByTimeAsync(400);
       const events = await h.ready;
       expect(events.map((e: any) => e.id)).toEqual(["good"]);
-      expect(deleteEventIds).toHaveBeenCalledWith(["bad", "31600:pk:d-tag"]);
+      // The cache purge was removed: cache-dexie's deleteEventIds is a no-op
+      // for these keys (Dexie where({id: array}) is an equality match), and
+      // versioning the cache DB is what actually retired the bad rows.
+      expect(deleteEventIds).not.toHaveBeenCalled();
     });
 
-    it("a relay delivering the same id again with a real signature afterwards is accepted normally", async () => {
-      // Simulates the self-heal: a stale sig-less cache hit arrives first and
-      // is purged, then the live relay subscription delivers the SAME event id
-      // moments later — now with a signature — through the same callback.
+    it("verifies each event id only ONCE even when every relay delivers it", async () => {
+      // Five write relays by default: verifying per-copy made a Schnorr check
+      // run 5x per event, before the deduper could collapse them.
+      const h = streamEvents({ kinds: [1] });
+      currentSub.emit("event", fakeEvent({ id: "dup" }));
+      currentSub.emit("event", fakeEvent({ id: "dup" }));
+      currentSub.emit("event", fakeEvent({ id: "dup" }));
+      currentSub.emit("eose");
+      await vi.advanceTimersByTimeAsync(400);
+      await h.ready;
+      expect(isVerifiedMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("does NOT memoize failures — a bad-signature copy can't suppress the genuine event", async () => {
+      // Caching rejections would hand anyone a cheap censorship primitive:
+      // race us a same-id copy with a broken signature and the real event is
+      // dropped for the rest of the stream.
       const h = streamEvents({ kinds: [1] }, { onEvent: () => {} });
       isVerifiedMock.mockReturnValueOnce(false).mockReturnValue(true);
-      currentSub.emit("event", fakeEvent({ id: "e1" })); // stale cache hit — purged
-      currentSub.emit("event", fakeEvent({ id: "e1" })); // relay's real copy — accepted
+      currentSub.emit("event", fakeEvent({ id: "e1" })); // forged copy — rejected
+      currentSub.emit("event", fakeEvent({ id: "e1" })); // genuine copy — re-checked, accepted
       currentSub.emit("eose");
       await vi.advanceTimersByTimeAsync(400);
       const events = await h.ready;
       expect(events.map((e: any) => e.id)).toEqual(["e1"]);
-      expect(deleteEventIds).toHaveBeenCalledTimes(1);
+      expect(isVerifiedMock).toHaveBeenCalledTimes(2);
       h.stop();
+    });
+
+    it("an unverified event never reaches the deduper's latest-wins state", async () => {
+      // Verification must stay BEFORE the deduper: a forged replaceable event
+      // with a newer created_at would otherwise displace the genuine one and
+      // then be dropped, losing both.
+      const got: string[] = [];
+      streamEvents({ kinds: [31600] }, { onEvent: (e: any) => got.push(e.id) });
+      isVerifiedMock.mockImplementation((e: unknown) => (e as { id: string }).id !== "forged");
+      const tags = [["d", "x"]];
+      currentSub.emit("event", fakeEvent({ id: "real", kind: 31600, pubkey: "a", tags, created_at: 100 }));
+      currentSub.emit("event", fakeEvent({ id: "forged", kind: 31600, pubkey: "a", tags, created_at: 999 }));
+      expect(got).toEqual(["real"]);
     });
   });
 });
