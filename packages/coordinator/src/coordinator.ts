@@ -100,6 +100,28 @@ import type { LlmProvider, SttProvider, ModelRef } from "./providers/types.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
+import { sanitizeRelayUrls } from "./net/relay-urls.js";
+import {
+  sanitizeLlmText,
+  sanitizeAiProfile,
+  capAuthoredText,
+  MAX_NAME_CHARS,
+} from "./nostr/hygiene.js";
+import { MAX_INPUT_DURATION_SEC } from "./pipeline/audio.js";
+
+/** Default cap on simultaneously installed events (audit COORD-3). */
+const DEFAULT_MAX_EVENTS = 50;
+
+/** Media descriptors processed per submission (audit COORD-4); extras are skipped. */
+const MAX_MEDIA_PER_SUBMISSION = 4;
+
+/** Total media bytes downloaded per submission (audit COORD-4). */
+const MAX_SUBMISSION_MEDIA_BYTES = 500 * 1024 * 1024;
+
+/** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
+function effectiveMaxMediaSec(configured: number): number {
+  return configured > 0 ? configured : MAX_INPUT_DURATION_SEC;
+}
 
 /**
  * Relays the Whitenoise Marmot/MLS client publishes key packages and group
@@ -175,6 +197,22 @@ export interface CoordinatorDeps {
    */
   chatMls?: ChatMls;
   now?: () => number;
+  /** Injectable sleep for the live-wrap retry backoff (audit COORD-2). */
+  sleep?: (ms: number) => Promise<void>;
+  /** Backoff delays between live-wrap retries (COORD-2). Default [5s, 30s]. */
+  wrapRetryDelaysMs?: number[];
+  /** Max simultaneously installed events (audit COORD-3). Default 50. */
+  maxEvents?: number;
+  /**
+   * When non-empty, only install events whose E_id is listed (COORD-3).
+   * Hex pubkeys.
+   */
+  allowedEidPubkeys?: string[];
+  /**
+   * Billing policy evaluation (Part 3, COORD-3). Invoked at install time and its
+   * verdict logged — payment itself is not enforced by this daemon yet.
+   */
+  evaluateBilling?: (organizerPubkey: string, attendeeCount: number) => { state: string; reason?: string };
 }
 
 interface EventState {
@@ -193,6 +231,9 @@ interface EventState {
   /** Blossom origins media may be fetched from (audit C3 allowlist). Empty = derive from media urls, IP-guarded. */
   blossomOrigins: string[];
   lang: string;
+  /** Per-descriptor duration cap in seconds (audit COORD-4): the event's
+   *  max(max_video_sec, max_talk_sec); 0/unset ⇒ the built-in DEFAULT cap. */
+  maxMediaSec: number;
   /** Whether Marmot group chat is operative for this event (§1.3). */
   chat: boolean;
   scoringCtx: EventContextForScoring;
@@ -205,6 +246,10 @@ export class Coordinator {
   readonly jobs: JobRunner;
   private readonly coordPubkey: string;
   private readonly now: () => number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly wrapRetryDelaysMs: number[];
+  private readonly maxEvents: number;
+  private readonly allowedEidPubkeys: Set<string>;
   private readonly prefilter: PrefilterConfig;
   private readonly topK: number;
   private readonly batchSize: number;
@@ -217,6 +262,10 @@ export class Coordinator {
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
+    this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.wrapRetryDelaysMs = deps.wrapRetryDelaysMs ?? [5_000, 30_000];
+    this.maxEvents = deps.maxEvents ?? DEFAULT_MAX_EVENTS;
+    this.allowedEidPubkeys = new Set(deps.allowedEidPubkeys ?? []);
     this.coordPubkey = getPublicKey(deps.coordSk);
     this.prefilter = deps.prefilter ?? DEFAULT_PREFILTER;
     this.topK = deps.topK ?? 20;
@@ -371,16 +420,49 @@ export class Coordinator {
     backfill?: "full" | "recent";
   }): Promise<void> {
     const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
-    const relays = grant.configRelays.length ? grant.configRelays : this.deps.defaultRelays;
+    // Relay lists from untrusted input (grant, later the 31600) are validated:
+    // wss-only, well-formed, deduped, capped (audit COORD-16).
+    const grantRelays = sanitizeRelayUrls(grant.configRelays);
+    const relays = grantRelays.length ? grantRelays : this.deps.defaultRelays;
 
     // Load public config + event details for scoring context.
     const cfgEvents = await this.deps.transport.fetch(
       { kinds: [31600, 31923], authors: [eidPubkey], "#d": [identifier] },
       relays,
     );
-    const cfgEvent = cfgEvents.find((e) => e.kind === 31600);
+    // Newest config wins (audit COORD-14): relays return replaceable events in
+    // arbitrary order, so pick by created_at (id tiebreak) rather than first-found.
+    const cfgEvent = cfgEvents
+      .filter((e) => e.kind === 31600)
+      .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1))[0];
     const evtEvent = cfgEvents.find((e) => e.kind === 31923);
     const config = cfgEvent ? parseEventConfig(eidPubkey, cfgEvent.tags) : undefined;
+
+    // Install authorization (audit COORD-3): a 31600 that names a coordinator
+    // must name THIS one — otherwise the grant is for someone else's daemon and
+    // the event is rejected (also enforced on live config updates).
+    if (config?.coordinator && config.coordinator !== this.coordPubkey) {
+      log(
+        `[install] REJECTED ${grant.coordinate}: 31600 coordinator tag names ${short(config.coordinator)}, not this daemon (${short(this.coordPubkey)})`,
+      );
+      return;
+    }
+
+    // Billing policy signal (Part 3, COORD-3): not a gate yet — the verdict is
+    // logged so an operator sees when an event exceeds the configured free tier.
+    if (this.deps.evaluateBilling) {
+      try {
+        const verdict = this.deps.evaluateBilling(
+          eidPubkey,
+          this.deps.store.approvedAttendees(grant.coordinate).length,
+        );
+        if (verdict.state !== "ok") {
+          log(`[install] billing=${verdict.state} for ${grant.coordinate}${verdict.reason ? ` — ${verdict.reason}` : ""}`);
+        }
+      } catch (e) {
+        log(`[install] billing evaluation failed: ${e instanceof Error ? e.message : e}`);
+      }
+    }
 
     this.deps.store.upsertEvent({
       coordinate: grant.coordinate,
@@ -404,6 +486,7 @@ export class Coordinator {
       talks: config?.talks ?? "off",
       blossomOrigins: config?.blossom ?? [],
       lang: config?.lang ?? "en",
+      maxMediaSec: effectiveMaxMediaSec(Math.max(config?.maxVideoSec ?? 0, config?.maxTalkSec ?? 0)),
       chat: config ? isMarmotChatEnabled(config) : false,
       scoringCtx: {
         title: evtEvent?.tags.find((t) => t[0] === "title")?.[1] ?? "the event",

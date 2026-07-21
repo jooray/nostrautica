@@ -1193,7 +1193,13 @@ export class Store {
   }
 
   // ── marmot_chat_keys: authenticated account⇄chat-key bindings (§3.3) ────────
-  /** Record an authenticated chat-key attestation (op:add). Idempotent per key. */
+  /**
+   * Record an authenticated chat-key attestation (op:add). Idempotent per key.
+   * Ownership is pinned (audit COORD-10): a chat_pubkey already bound to a
+   * DIFFERENT account is never re-pointed — the upsert is refused and `false`
+   * returned, so an attendee can't steal (or clobber) another account's key
+   * binding by attesting the same chat_pubkey. Returns true when recorded.
+   */
   upsertChatKey(row: {
     coordinate: string;
     accountPubkey: string;
@@ -1201,13 +1207,14 @@ export class Store {
     clientId?: string | null;
     status?: "active" | "revoked";
     now: number;
-  }): void {
+  }): boolean {
+    const existing = this.getChatKey(row.coordinate, row.chatPubkey);
+    if (existing && existing.account_pubkey !== row.accountPubkey) return false;
     this.db
       .prepare(
         `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, status, updated_at)
          VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, COALESCE(:status, 'active'), :now)
          ON CONFLICT(coordinate, chat_pubkey) DO UPDATE SET
-           account_pubkey = excluded.account_pubkey,
            client_id = COALESCE(excluded.client_id, marmot_chat_keys.client_id),
            status = COALESCE(:status, marmot_chat_keys.status),
            updated_at = excluded.updated_at`,
@@ -1220,6 +1227,7 @@ export class Store {
         status: row.status ?? null,
         now: row.now,
       });
+    return true;
   }
 
   getChatKey(coordinate: string, chatPubkey: string): MarmotChatKeyRow | undefined {

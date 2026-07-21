@@ -26,7 +26,14 @@ export function parseCoordinate(coordinate: string): EventCoordinate {
   const kind = Number(coordinate.slice(0, first));
   const pubkey = coordinate.slice(first + 1, second);
   const identifier = coordinate.slice(second + 1);
-  if (!Number.isInteger(kind) || pubkey.length !== 64) {
+  // The pubkey must be canonical lowercase hex (every downstream comparison is
+  // case-sensitive) and the kind a NIP-01 16-bit integer (audit PROTO-5).
+  if (
+    !Number.isInteger(kind) ||
+    kind < 0 ||
+    kind > 65535 ||
+    !/^[0-9a-f]{64}$/.test(pubkey)
+  ) {
     throw new Error(`invalid coordinate: ${coordinate}`);
   }
   return { kind, pubkey, identifier };

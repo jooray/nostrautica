@@ -115,6 +115,24 @@ function all(tags: string[][], name: string): string[] {
   return tags.filter((t) => t[0] === name).map((t) => t[1]!).filter(Boolean);
 }
 
+/** Canonical lowercase-hex 32-byte pubkey (every downstream comparison is case-sensitive). */
+const HEX32 = /^[0-9a-f]{64}$/;
+
+/**
+ * Tag values that parse as URLs of the given protocol, dropping the rest
+ * (fail-soft, audit PROTO-5): relays must be wss:// and Blossom servers https://,
+ * anything else from a relay is ignored rather than surfaced to the client.
+ */
+function urlValues(tags: string[][], name: string, protocol: string): string[] {
+  return all(tags, name).filter((v) => {
+    try {
+      return new URL(v).protocol === protocol;
+    } catch {
+      return false;
+    }
+  });
+}
+
 const APPROVALS: Approval[] = ["manual", "invite", "manual+invite"];
 const VISIBILITIES: MatchVisibility[] = ["pair", "event"];
 const TALKS_MODES: TalksMode[] = ["off", "on", "prerecord-first"];

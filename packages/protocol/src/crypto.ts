@@ -47,17 +47,25 @@ export function generateEck(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32));
 }
 
-export function eckEncrypt(eck: Uint8Array, plaintext: string): string {
-  if (eck.length !== 32) throw new Error("ECK must be 32 bytes");
-  // Classic NIP-44 v2 caps a payload at 65,535 plaintext bytes (spec §7.4).
-  // Newer nostr-tools accepts larger extended-prefix payloads, but emitting one
-  // would break every classic NIP-44 decrypter — enforce the ceiling ourselves.
+// Classic NIP-44 v2 caps a payload at 65,535 plaintext bytes (spec §7.4).
+// Newer nostr-tools accepts larger extended-prefix payloads, but emitting one
+// would break every classic NIP-44 decrypter — enforce the ceiling at every
+// encrypt entry point (audit PROTO-3). Module-private: event-page.ts already
+// exports a NIP44_MAX_PLAINTEXT_BYTES for the public API.
+const NIP44_MAX_PLAINTEXT_BYTES = 65_535;
+
+function assertNip44Ceiling(plaintext: string): void {
   const bytes = utf8ToBytes(plaintext).length;
-  if (bytes > 65_535) {
+  if (bytes > NIP44_MAX_PLAINTEXT_BYTES) {
     throw new Error(
       `NIP-44 plaintext is ${bytes} bytes — the ceiling is 65535`,
     );
   }
+}
+
+export function eckEncrypt(eck: Uint8Array, plaintext: string): string {
+  if (eck.length !== 32) throw new Error("ECK must be 32 bytes");
+  assertNip44Ceiling(plaintext);
   return nip44v2.encrypt(plaintext, eck);
 }
 
@@ -74,6 +82,7 @@ export function nip44Encrypt(
   recipientPubkey: string,
   plaintext: string,
 ): string {
+  assertNip44Ceiling(plaintext);
   const convKey = getConversationKey(senderSk, recipientPubkey);
   return nip44v2.encrypt(plaintext, convKey);
 }
@@ -95,6 +104,7 @@ export function selfConversationKey(sk: Uint8Array): Uint8Array {
 }
 
 export function selfEncrypt(sk: Uint8Array, plaintext: string): string {
+  assertNip44Ceiling(plaintext);
   return nip44v2.encrypt(plaintext, selfConversationKey(sk));
 }
 
@@ -233,6 +243,11 @@ export function verifyInviteProof(
 /**
  * Stateless invite verification (spec §6.5): the proof's invite pubkey must hash
  * into the published 31601 set AND the signature must bind this attendee.
+ *
+ * This is a predicate over UNTRUSTED input (anyone can gift-wrap a 21600 join
+ * request to the public E_inbox), so malformed proof fields must return false,
+ * never throw — `inviteHash`'s hexToBytes would otherwise throw on a non-hex
+ * invite pubkey (audit PROTO-1).
  */
 export function isInviteValid(
   proof: InviteProof,
@@ -240,6 +255,12 @@ export function isInviteValid(
   coordinate: string,
   attendeePubkey: string,
 ): boolean {
+  if (
+    !/^[0-9a-f]{64}$/.test(proof.invitePubkey) ||
+    !/^[0-9a-f]{128}$/.test(proof.sig)
+  ) {
+    return false;
+  }
   return (
     publishedHashes.has(inviteHash(proof.invitePubkey)) &&
     verifyInviteProof(proof, coordinate, attendeePubkey)

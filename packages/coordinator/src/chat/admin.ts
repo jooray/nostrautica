@@ -130,6 +130,27 @@ export class MarmotAdmin {
     return [...authors];
   }
 
+  // ── watcher fast-path gate (audit COORD-17) ───────────────────────────────
+  // The 30443 watcher fires for EVERY key package anyone publishes on public
+  // relays; computing eligibleChatAuthors (a DB walk) per event is a DoS surface.
+  // Cache the eligible-author set per event and drop unknown authors before any
+  // DB hit. Invalidated on approve/attest/revoke via invalidateEligibility().
+  private readonly eligibleCache = new Map<string, Set<string>>();
+
+  /** Drop the cached eligible-author set (call on approve/attest/revoke). */
+  invalidateEligibility(coordinate: string): void {
+    this.eligibleCache.delete(coordinate);
+  }
+
+  private eligibleAuthorSet(coordinate: string): Set<string> {
+    let set = this.eligibleCache.get(coordinate);
+    if (!set) {
+      set = new Set(this.eligibleChatAuthors(coordinate));
+      this.eligibleCache.set(coordinate, set);
+    }
+    return set;
+  }
+
   // ── add paths ──────────────────────────────────────────────────────────────
   /**
    * Sync one approved attendee into the group: fetch the current 30443s for each
@@ -153,15 +174,16 @@ export class MarmotAdmin {
   /**
    * Handle a single kind-30443 from the watcher subscription (§4.2). The event's
    * author must be an approved attendee's authorized chat identity; otherwise it
-   * is ignored (an unauthenticated key package is never added).
+   * is ignored (an unauthenticated key package is never added). Unknown authors
+   * are dropped against the cached eligible set BEFORE any DB hit (COORD-17).
    */
   async handleKeyPackageEvent(coordinate: string, event: AnyEvent): Promise<void> {
-    const group = this.activeGroup(coordinate);
-    if (!group) return;
-    if (!this.eligibleChatAuthors(coordinate).includes(event.pubkey)) {
+    if (!this.eligibleAuthorSet(coordinate).has(event.pubkey)) {
       this.log(`[chat] ignored 30443 from ${event.pubkey.slice(0, 8)}: not an authorized chat identity`);
       return;
     }
+    const group = this.activeGroup(coordinate);
+    if (!group) return;
     await this.tryAddKeyPackage(coordinate, group.mls_group_id, event);
   }
 
@@ -208,7 +230,15 @@ export class MarmotAdmin {
    * AUTHOR the coordinator already bound via `unwrapRumor`, so the binding is
    * authenticated by the account key itself (§3.3). The account must be an enrolled
    * attendee of this event; an attestation from a stranger is rejected. Only when
-   * the account is approved is the new key actually synced into the group.
+   * the account is approved is the new key actually synced into the group — an
+   * "add" from a still-pending attendee (the enrol-at-approval-time flow) is
+   * *recorded* so it's picked up on approval, but never synced to the group until
+   * then. A "revoke" from a non-approved account is rejected outright.
+   *
+   * Revoke authorization (audit COORD-1): the target key must already be bound to
+   * THIS account (or be the account key itself) — an enrolled stranger can never
+   * evict another member's key. Rebinding a chat_pubkey already owned by another
+   * account is likewise refused at the store layer (audit COORD-10).
    *
    * @returns true if the attestation was accepted (recorded), false if rejected.
    */
@@ -224,7 +254,7 @@ export class MarmotAdmin {
       return false;
     }
     if (content.op === "add") {
-      this.store.upsertChatKey({
+      const recorded = this.store.upsertChatKey({
         coordinate,
         accountPubkey,
         chatPubkey: content.chat_pubkey,
@@ -232,12 +262,33 @@ export class MarmotAdmin {
         status: "active",
         now: this.now(),
       });
+      if (!recorded) {
+        this.log(
+          `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: chat key ${content.chat_pubkey.slice(0, 8)} already bound to another account`,
+        );
+        return false;
+      }
       this.log(`[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)}`);
+      this.invalidateEligibility(coordinate);
       if (attendee.status === "approved") await this.syncMember(coordinate, accountPubkey);
       return true;
     }
     // op === "revoke": drop the key and remove its leaves (lost device, §3.3).
+    // Only an APPROVED account may revoke, and only a key it owns (its own account
+    // key or a chat key already bound to it) — never another member's (COORD-1).
+    if (attendee.status !== "approved") {
+      this.log(`[chat] REJECTED 21607 revoke from ${accountPubkey.slice(0, 8)}: not an approved attendee`);
+      return false;
+    }
+    const bound = this.store.getChatKey(coordinate, content.chat_pubkey);
+    if (content.chat_pubkey !== accountPubkey && bound?.account_pubkey !== accountPubkey) {
+      this.log(
+        `[chat] REJECTED 21607 revoke from ${accountPubkey.slice(0, 8)}: chat key ${content.chat_pubkey.slice(0, 8)} is not bound to this account`,
+      );
+      return false;
+    }
     this.store.setChatKeyStatus(coordinate, content.chat_pubkey, "revoked", this.now());
+    this.invalidateEligibility(coordinate);
     const group = this.activeGroup(coordinate);
     if (group) await this.mls.removePubkeys(group.mls_group_id, [content.chat_pubkey]);
     this.log(`[chat] revoked chat key ${content.chat_pubkey.slice(0, 8)} for ${accountPubkey.slice(0, 8)}`);
@@ -258,6 +309,7 @@ export class MarmotAdmin {
     const pubkeys = [accountPubkey, ...chatKeys.map((k) => k.chat_pubkey)];
     await this.mls.removePubkeys(group.mls_group_id, pubkeys);
     for (const k of chatKeys) this.store.setChatKeyStatus(coordinate, k.chat_pubkey, "revoked", this.now());
+    this.invalidateEligibility(coordinate);
     this.log(`[chat] removed ${accountPubkey.slice(0, 8)} (+${chatKeys.length} chat key(s)) from ${coordinate}`);
   }
 

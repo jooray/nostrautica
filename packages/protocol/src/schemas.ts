@@ -9,7 +9,9 @@ export const PROTOCOL_VERSION = 1;
 
 const version = z.literal(1).or(z.number().int().positive()); // accept v1; forward-tolerant
 
-const hex32 = z.string().regex(/^[0-9a-f]{64}$/i, "expected 32-byte hex");
+// Lowercase-only (audit PROTO-6): every downstream comparison is case-sensitive,
+// so an uppercase-A-F pubkey that validated could never match anything.
+const hex32 = z.string().regex(/^[0-9a-f]{64}$/, "expected 32-byte hex");
 const base64 = z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, "expected base64");
 
 /**
@@ -92,12 +94,33 @@ export type MediaTranscript = z.infer<typeof mediaTranscriptSchema>;
 /** Upper bound on a text intro / authored transcript (spec F1, ~2000 chars). */
 export const MAX_INTRO_TEXT = 2000;
 
+// ── Boundary length caps (audit PROTO-4) ─────────────────────────────────────
+// These payloads are parsed straight off relays and most ride inside NIP-44
+// ciphertexts, so unbounded strings/arrays are a DoS vector and can push the
+// enclosing payload past the 65,535-byte NIP-44 ceiling. The caps are generous —
+// well above any legitimate value — while keeping worst-case payloads bounded.
+export const MAX_NAME = 200; // join-request / directory-entry display name
+export const MAX_MESSAGE = 2000; // join-request message
+export const MAX_ABOUT = 5000; // attendee profile bio
+export const MAX_LOOKING_FOR = 2000;
+export const MAX_SKILLS = 50; // skills array items
+export const MAX_SKILL = 200; // chars per skill
+export const MAX_LINKS = 20; // profile links array items
+export const MAX_URL = 2048; // chars per URL
+export const MAX_INVITE_LABEL = 100;
+export const MAX_INVITES = 10000; // 31601 invites array items
+export const MAX_REASONING = 2000; // per-match reasoning
+export const MAX_MATCHES = 100; // 31605 matches array items
+export const MAX_ROSTER = 2000; // 31604 attendees array items
+export const MAX_RELAYS = 30; // relay URL array items
+export const MAX_MEDIA = 20; // media descriptors per payload
+
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
-  about: z.string().default(""),
-  skills: z.array(z.string()).default([]),
-  looking_for: z.string().default(""),
-  links: z.array(z.string()).default([]),
+  about: z.string().max(MAX_ABOUT).default(""),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).default([]),
+  looking_for: z.string().max(MAX_LOOKING_FOR).default(""),
+  links: z.array(z.string().url().max(MAX_URL)).max(MAX_LINKS).default([]),
 });
 export type AttendeeProfile = z.infer<typeof attendeeProfileSchema>;
 
@@ -126,20 +149,22 @@ export type AiProfile = z.infer<typeof aiProfileSchema>;
 // ── 31601 Invite List content ────────────────────────────────────────────────
 export const inviteListContentSchema = z.object({
   v: version,
-  invites: z.array(
-    z.object({
-      h: hex32, // sha256(invite-pubkey) hex
-      label: z.string().optional(),
-    }),
-  ),
+  invites: z
+    .array(
+      z.object({
+        h: hex32, // sha256(invite-pubkey) hex
+        label: z.string().max(MAX_INVITE_LABEL).optional(),
+      }),
+    )
+    .max(MAX_INVITES),
 });
 export type InviteListContent = z.infer<typeof inviteListContentSchema>;
 
 // ── 21600 Join Request rumor content ─────────────────────────────────────────
 export const joinRequestContentSchema = z.object({
   v: version,
-  name: z.string(),
-  message: z.string().default(""),
+  name: z.string().max(MAX_NAME),
+  message: z.string().max(MAX_MESSAGE).default(""),
   rsvp_public: z.boolean().default(false),
 });
 export type JoinRequestContent = z.infer<typeof joinRequestContentSchema>;
@@ -148,7 +173,7 @@ export type JoinRequestContent = z.infer<typeof joinRequestContentSchema>;
 export const profileSubmissionContentSchema = z.object({
   v: version,
   profile: attendeeProfileSchema,
-  media: z.array(mediaDescriptorSchema).default([]),
+  media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
   // A plain-text intro (spec F1): an alternative to an audio/video intro for
   // attendees who can't/won't record. Feeds the ai_profile like a transcript,
   // but has NO media blob. Bounded so it can't bloat the encrypted submission.
@@ -223,7 +248,7 @@ export const coordinatorGrantContentSchema = z.object({
   a: z.string(),
   inbox_nsec: secretKeyHex, // hex privkey of E_inbox
   eck: z.array(eckVersionSchema),
-  config_relays: z.array(z.string()),
+  config_relays: z.array(z.string()).max(MAX_RELAYS),
 });
 export type CoordinatorGrantContent = z.infer<
   typeof coordinatorGrantContentSchema
@@ -300,7 +325,7 @@ export const organizerGrantContentSchema = z.object({
   eid_nsec: secretKeyHex, // E_id secret (hex) — lets a co-organizer edit the event
   einbox_nsec: secretKeyHex, // E_inbox secret (hex) — read submissions + approve
   eck: z.array(eckVersionSchema),
-  config_relays: z.array(z.string()),
+  config_relays: z.array(z.string()).max(MAX_RELAYS),
   granted_by: hex32,
 });
 export type OrganizerGrantContent = z.infer<typeof organizerGrantContentSchema>;
@@ -310,7 +335,7 @@ export const myProfileContentSchema = z.object({
   v: version,
   a: z.string().nullable(), // null = the reuse-library entry
   profile: attendeeProfileSchema.optional(),
-  media: z.array(mediaDescriptorSchema).default([]),
+  media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 
@@ -322,9 +347,9 @@ export const directoryEntryContentSchema = z
     // Display name from the join request: the roster must be able to show WHO
     // someone is even when their kind-0 is slow or unreachable on the event
     // relays (UX finding 2026-07-16). kind-0 stays the preferred source.
-    name: z.string().optional(),
+    name: z.string().max(MAX_NAME).optional(),
     profile: attendeeProfileSchema,
-    media: z.array(mediaDescriptorSchema).default([]),
+    media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
     ai_profile: aiProfileSchema.optional(), // appears when processing completes
     // Set when the subject corrected/hid fields of the generated ai_profile (F3):
     // viewers can be shown a subtle "edited by attendee" marker.
@@ -378,14 +403,16 @@ export type ChatKeyAttestationContent = z.infer<typeof chatKeyAttestationContent
 export const rosterContentSchema = z.object({
   v: version,
   eck_current: z.number().int().positive(),
-  attendees: z.array(
-    z.object({
-      pubkey: hex32,
-      d: z.string(), // entry's blinded d
-      role: z.enum(["attendee", "organizer"]),
-      chat_pubkey: hex32.optional(), // Marmot chat device key, when distinct (§4.4)
-    }),
-  ),
+  attendees: z
+    .array(
+      z.object({
+        pubkey: hex32,
+        d: z.string(), // entry's blinded d
+        role: z.enum(["attendee", "organizer"]),
+        chat_pubkey: hex32.optional(), // Marmot chat device key, when distinct (§4.4)
+      }),
+    )
+    .max(MAX_ROSTER),
 });
 export type RosterContent = z.infer<typeof rosterContentSchema>;
 
@@ -395,14 +422,14 @@ export const matchSchema = z.object({
   score: z.number(),
   similarity: z.number(),
   complementarity: z.number(),
-  reasoning: z.string(),
+  reasoning: z.string().max(MAX_REASONING),
 });
 export type Match = z.infer<typeof matchSchema>;
 
 export const matchListContentSchema = z.object({
   v: version,
   computed_at: z.number().int(),
-  matches: z.array(matchSchema),
+  matches: z.array(matchSchema).max(MAX_MATCHES),
 });
 export type MatchListContent = z.infer<typeof matchListContentSchema>;
 
@@ -489,7 +516,7 @@ export const userSettingsSchema = z.object({
   v: version,
   theme: z.enum(["light", "dark", "system"]).default("system"),
   language: z.string().default("en"),
-  relays: z.array(z.string()).default([]),
+  relays: z.array(z.string()).max(MAX_RELAYS).default([]),
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
@@ -569,12 +596,12 @@ export const coordinatorAnnounceSchema = z.object({
   about: z.string().max(2000).optional(),
   picture: z.string().max(2048).optional(),
   operator: z.string().max(200).optional(),
-  relays: z.array(z.string()).default([]),
+  relays: z.array(z.string()).max(MAX_RELAYS).default([]),
   features: z
     .object({
       matching: z.boolean().default(true),
       talks: z.boolean().default(false),
-      chat: z.array(z.string()).default([]),
+      chat: z.array(z.string()).max(MAX_RELAYS).default([]),
     })
     .default({}),
   // Per-role privacy disclosure (role → tier string, e.g. "private"/"non-private").
