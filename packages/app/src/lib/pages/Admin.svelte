@@ -413,6 +413,25 @@
     await navigator.clipboard.writeText(link);
   }
 
+  // Bulk export (user feedback 2026-07-22): mailing 200 invite links one at a
+  // time by hand doesn't scale — one-per-line text for pasting into a mail-merge
+  // tool, or the same as a downloadable file.
+  let copiedAllLinks = $state(false);
+  async function copyAllLinks() {
+    await navigator.clipboard.writeText(invites.map((inv) => inv.link).join("\n"));
+    copiedAllLinks = true;
+    setTimeout(() => (copiedAllLinks = false), 1500);
+  }
+  function downloadLinksFile() {
+    const text = invites.map((inv) => inv.link).join("\n");
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `nostrautica-invites-${naddr.slice(0, 12)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   let recomputing = $state(false);
   async function recomputeMatches() {
     if (!ctx?.config.coordinator) return;
@@ -908,6 +927,14 @@
         {generating ? t("admin.invites.generating") : t("admin.invites.generate")}
       </button>
     </div>
+    {#if invites.length > 1}
+      <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
+        <button class="btn inline" onclick={copyAllLinks}>
+          {copiedAllLinks ? t("admin.invites.copiedAll") : t("admin.invites.copyAll")}
+        </button>
+        <button class="btn inline" onclick={downloadLinksFile}>{t("admin.invites.download")}</button>
+      </div>
+    {/if}
     {#each invites as inv (inv.nsec)}
       <div class="card" style="background:var(--bg-elev2)">
         <div class="row" style="justify-content:space-between">
