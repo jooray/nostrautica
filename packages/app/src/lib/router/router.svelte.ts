@@ -19,6 +19,7 @@ function parentOf(route: Route): Route | null {
     case "attendees":
     case "matches":
     case "admin":
+    case "eventSettings":
     case "posts":
     case "eventMore":
       return { name: "event", naddr: route.naddr };

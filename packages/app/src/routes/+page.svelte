@@ -18,6 +18,7 @@
   import TalkDetail from "$lib/pages/TalkDetail.svelte";
   import MyProfile from "$lib/pages/MyProfile.svelte";
   import Admin from "$lib/pages/Admin.svelte";
+  import EventSettings from "$lib/pages/EventSettings.svelte";
   import Posts from "$lib/pages/Posts.svelte";
   import Post from "$lib/pages/Post.svelte";
   import EventMore from "$lib/pages/EventMore.svelte";
@@ -60,6 +61,8 @@
   {#key route.naddr}<MyProfile naddr={route.naddr} />{/key}
 {:else if route.name === "admin"}
   {#key route.naddr}<Admin naddr={route.naddr} />{/key}
+{:else if route.name === "eventSettings"}
+  {#key route.naddr}<EventSettings naddr={route.naddr} />{/key}
 {:else if route.name === "posts"}
   {#key route.naddr}<Posts naddr={route.naddr} />{/key}
 {:else if route.name === "post"}
