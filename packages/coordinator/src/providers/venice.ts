@@ -18,6 +18,22 @@ const DEFAULT_BASE = "https://api.venice.ai/api/v1";
 /** Venice STT hard limit: 25 MB (spec §9.4, §3.7). */
 export const VENICE_STT_MAX_BYTES = 25 * 1024 * 1024;
 
+/**
+ * A 402 (or a body naming an insufficient balance) is a billing problem, not a
+ * schema/network hiccup — the message is worded so coordinator.ts's
+ * errorCategory() classifies it as "provider_billing" rather than the
+ * catch-all "processing_error". Retrying immediately can't fix a depleted
+ * account; the job runner's long-tail backoff gives an operator time to top up
+ * before it poisons (user feedback 2026-07-21).
+ */
+async function httpError(res: Response, label: string): Promise<Error> {
+  const text = await res.text().catch(() => "");
+  if (res.status === 402 || /insufficient[_ ]?(balance|credit|funds)/i.test(text)) {
+    return new Error(`Venice billing: insufficient balance (${res.status}) — ${label}: ${text}`);
+  }
+  return new Error(`${label} failed: ${res.status} ${text}`);
+}
+
 export interface VeniceOptions {
   baseUrl?: string;
   payment: PaymentStrategy;
@@ -38,7 +54,7 @@ export class VeniceLlm implements LlmProvider {
 
   async models(): Promise<ModelInfo[]> {
     const res = await fetch(`${this.base}/models`, { headers: await this.headers() });
-    if (!res.ok) throw new Error(`Venice GET /models failed: ${res.status}`);
+    if (!res.ok) throw await httpError(res, "Venice GET /models");
     const body = (await res.json()) as { data?: any[] };
     const models = (body.data ?? []).map((m) => {
       const spec = m.model_spec ?? m.spec ?? {};
@@ -91,7 +107,7 @@ export class VeniceLlm implements LlmProvider {
       }),
     });
     if (!res.ok) {
-      throw new Error(`Venice chat/completions failed: ${res.status} ${await res.text()}`);
+      throw await httpError(res, "Venice chat/completions");
     }
     const body = (await res.json()) as any;
     await this.opts.payment.settle(res.headers);
@@ -125,7 +141,7 @@ export class VeniceLlm implements LlmProvider {
       headers: await this.headers(),
       body: JSON.stringify({ model: model ?? "text-embedding-bge-m3", input: texts }),
     });
-    if (!res.ok) throw new Error(`Venice embeddings failed: ${res.status}`);
+    if (!res.ok) throw await httpError(res, "Venice embeddings");
     const body = (await res.json()) as { data?: { embedding: number[] }[] };
     const embedModel = model ?? "text-embedding-bge-m3";
     return (body.data ?? []).map((d, i) => {
@@ -182,7 +198,7 @@ export class VeniceStt implements SttProvider {
       headers, // do NOT set Content-Type; fetch sets the multipart boundary
       body: form,
     });
-    if (!res.ok) throw new Error(`Venice STT failed: ${res.status} ${await res.text()}`);
+    if (!res.ok) throw await httpError(res, "Venice STT");
     const body = (await res.json()) as { text?: unknown; language?: unknown };
     if (body.text !== undefined && typeof body.text !== "string") {
       throw new ProviderContractError(this.id, "stt", opts?.model ?? "openai/whisper-large-v3", "text was not a string");
