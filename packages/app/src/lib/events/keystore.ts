@@ -375,19 +375,56 @@ export async function applyOrganizerGrant(
  */
 export async function lockEventKeysForLogout(
   encrypt: (plaintext: string) => Promise<string>,
+  decrypt: (ciphertext: string) => Promise<string>,
   owner?: string,
 ): Promise<void> {
   const o = ownerForRead(owner);
   if (!o) return;
+  const priorByCoordinate = new Map<string, LockedEventKeys>();
+  for (const l of await backend.lockedList(o)) priorByCoordinate.set(l.coordinate, l);
   for (const rec of await backend.list(o)) {
     try {
-      const ciphertext = await encrypt(JSON.stringify(toPublic(rec)));
+      let toLock = toPublic(rec);
+      const prior = priorByCoordinate.get(rec.coordinate);
+      if (prior) {
+        // NEVER clobber an existing snapshot. If a previous login failed to
+        // unlock (signer unreachable, user dismissed the NIP-46 prompt), the
+        // snapshot correctly stayed locked while the live store started empty —
+        // and anything written afterwards (e.g. a 21602 grant adding one ECK) is
+        // a STUB with no eidNsecHex. Blindly locking that stub over the real
+        // snapshot destroyed the organizer's E_id/E_inbox locally, leaving only
+        // the relay backup (events/recover.ts) between the user and a lost
+        // event. Decrypt the prior snapshot and merge instead — the same union
+        // unlockEventKeysForLogin performs, so the two directions can't drift.
+        const restored = JSON.parse(await decrypt(prior.ciphertext)) as EventKeys;
+        toLock = mergeEventKeys(toLock, restored);
+      }
+      const ciphertext = await encrypt(JSON.stringify(toLock));
       await backend.lockedPut({ owner: o, coordinate: rec.coordinate, ciphertext });
       await backend.delete(o, rec.coordinate);
     } catch {
-      /* left in plaintext; retried on the next logout */
+      /* left in plaintext, prior snapshot untouched; retried on the next logout */
     }
   }
+}
+
+/**
+ * Union two views of the same coordinate's keys. `primary` is the more current
+ * one (the live record); `fallback` fills gaps. Authority is never downgraded
+ * and an nsec present on either side always survives — losing key custody is
+ * the one outcome this module exists to prevent.
+ */
+function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
+  const byId = new Map<number, EckVersion>();
+  for (const v of fallback.eck) byId.set(v.id, v);
+  for (const v of primary.eck) byId.set(v.id, v); // current wins on conflict
+  return {
+    coordinate: primary.coordinate,
+    role: primary.role === "organizer" || fallback.role === "organizer" ? "organizer" : primary.role,
+    eck: [...byId.values()].sort((a, b) => a.id - b.id),
+    eidNsecHex: primary.eidNsecHex ?? fallback.eidNsecHex,
+    einboxNsecHex: primary.einboxNsecHex ?? fallback.einboxNsecHex,
+  };
 }
 
 /**
@@ -414,18 +451,11 @@ export async function unlockEventKeysForLogin(
     try {
       const restored = JSON.parse(await decrypt(locked.ciphertext)) as EventKeys;
       const existing = await backend.get(o, locked.coordinate);
-      const byId = new Map<number, EckVersion>();
-      for (const v of restored.eck) byId.set(v.id, v);
-      for (const v of existing?.eck ?? []) byId.set(v.id, v);
-      await backend.put({
-        coordinate: locked.coordinate,
-        // Never downgrade: organizer authority wins if either side has it.
-        role: existing?.role === "organizer" || restored.role === "organizer" ? "organizer" : restored.role,
-        eck: [...byId.values()].sort((a, b) => a.id - b.id),
-        eidNsecHex: existing?.eidNsecHex ?? restored.eidNsecHex,
-        einboxNsecHex: existing?.einboxNsecHex ?? restored.einboxNsecHex,
-        owner: o,
-      });
+      // Same union as the lock direction (see mergeEventKeys): anything written
+      // to the live store while the snapshot was locked is the more current
+      // view, and neither side's nsec or organizer role may be dropped.
+      const merged = existing ? mergeEventKeys(toPublic(existing), restored) : restored;
+      await backend.put({ ...merged, coordinate: locked.coordinate, owner: o });
       await backend.lockedDelete(o, locked.coordinate);
     } catch {
       /* undecryptable (or the signer isn't ready yet) — retried next login */

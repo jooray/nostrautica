@@ -256,12 +256,17 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
     expect(after.pubkey).toBe(before.pubkey); // restored — not forked into a new identity
   });
 
-  it("an unlock storage failure doesn't propagate into a concurrent resolveChatIdentity call", async () => {
-    // A reviewer flagged: if `unlockChatIdentityForLogin`'s own read throws (a
-    // storage error, not just an undecryptable snapshot), the resulting
-    // rejection must not crash an unrelated, concurrently-racing
-    // resolveChatIdentity — it should just fall through to minting a device
-    // key, not throw.
+  it("a failed unlock makes resolveChatIdentity FAIL CLOSED rather than mint a forked key", async () => {
+    // This test previously asserted the opposite — that the racing caller should
+    // "fall through to minting a device key". That expectation was the bug: a
+    // locked snapshot existing means the real device key is present and merely
+    // unreachable (signer offline, user dismissed the Amber prompt, transient
+    // storage error). Minting there forks the account's MLS credential — every
+    // other client sees a stranger and old group membership is lost — and the
+    // next logout then locks the fork over the still-good snapshot.
+    //
+    // Failing closed is recoverable (retry once the signer is back) and loud;
+    // forking is silent and permanent. Prefer the loud one.
     const account = "f".repeat(64);
     const fakeSigner = { getPublicKey: async () => account } as unknown as AppSigner;
     const inner = new InMemoryKvBackend();
@@ -277,15 +282,22 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
       clearPrefix: (p) => inner.clearPrefix(p),
     });
 
-    await resolveChatIdentity(fakeSigner); // establishes a device key
+    const before = await resolveChatIdentity(fakeSigner); // establishes a device key
     await lockChatIdentityForLogout(account, selfEncrypt);
 
     failNextLockedGet = true;
     const unlockPromise = unlockChatIdentityForLogin(account, selfDecrypt);
     const resolvePromise = resolveChatIdentity(fakeSigner); // races concurrently
 
-    await expect(unlockPromise).rejects.toThrow(); // the unlock itself still fails…
-    await expect(resolvePromise).resolves.toBeDefined(); // …but this caller does not
+    await expect(unlockPromise).rejects.toThrow(); // the unlock itself fails…
+    await expect(resolvePromise).rejects.toThrow(); // …and the racing caller refuses to mint
+
+    // The real key is untouched and still locked, so a later successful unlock
+    // restores the SAME identity rather than a fork.
+    const restored = await unlockChatIdentityForLogin(account, selfDecrypt).then(() =>
+      resolveChatIdentity(fakeSigner),
+    );
+    expect(restored.pubkey).toBe(before.pubkey);
   });
 
   it("a record that fails to encrypt is left in plaintext, not lost", async () => {

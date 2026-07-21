@@ -23,7 +23,13 @@ vi.mock("$lib/signer/keystore.js", () => ({
 // no-op to mock; the lock/unlock calls (audit UX-6) are spied on directly so
 // the wiring tests below can assert on them without touching real storage.
 const { lockEventKeysForLogout, unlockEventKeysForLogin } = vi.hoisted(() => ({
-  lockEventKeysForLogout: vi.fn(async (_encrypt: (pt: string) => Promise<string>, _owner?: string) => {}),
+  lockEventKeysForLogout: vi.fn(
+    async (
+      _encrypt: (pt: string) => Promise<string>,
+      _decrypt: (ct: string) => Promise<string>,
+      _owner?: string,
+    ) => {},
+  ),
   unlockEventKeysForLogin: vi.fn(async (_decrypt: (ct: string) => Promise<string>, _owner?: string) => {}),
 }));
 vi.mock("$lib/events/keystore.js", () => ({
@@ -142,7 +148,7 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
 
     await session.logout();
     expect(lockEventKeysForLogout).toHaveBeenCalledTimes(1);
-    expect(lockEventKeysForLogout.mock.calls[0]![1]).toBe(pubkey);
+    expect(lockEventKeysForLogout.mock.calls[0]![2]).toBe(pubkey); // owner is now the 3rd arg (decrypt added)
     expect(lockChatIdentityForLogout).toHaveBeenCalledTimes(1);
     expect(lockChatIdentityForLogout.mock.calls[0]![0]).toBe(pubkey);
     expect(session.loggedIn).toBe(false);

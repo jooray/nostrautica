@@ -67,10 +67,17 @@ class Session {
     // call site (`+layout.svelte`, audit UX-19) rather than gating first
     // paint, so slowness here doesn't reintroduce that regression.
     const pubkey = this.pubkey;
-    await unlockEventKeysForLogin((ct) => signer.nip44Decrypt(pubkey, ct), pubkey).catch(() => {});
-    await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch(
-      () => {},
-    );
+    // Never swallow these silently: a failed unlock leaves the live store empty
+    // while the real keys sit locked, and everything downstream then behaves as
+    // if this user had no keys. The failure itself is non-fatal (the snapshot is
+    // intact and the next login retries), but it must be diagnosable — an
+    // organizer reporting "my event vanished" needs to leave a trace.
+    await unlockEventKeysForLogin((ct) => signer.nip44Decrypt(pubkey, ct), pubkey).catch((e) => {
+      console.warn("[session] event-key unlock failed; keys remain locked, retried next login", e);
+    });
+    await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch((e) => {
+      console.warn("[session] chat-identity unlock failed; device key remains locked", e);
+    });
   }
 
   /** Try to restore a previous session (local key) from IndexedDB. */
@@ -157,9 +164,13 @@ class Session {
     if (this.signer && this.pubkey) {
       const signer = this.signer;
       const pubkey = this.pubkey;
-      await lockEventKeysForLogout((pt) => signer.nip44Encrypt(pubkey, pt), pubkey).catch(
-        () => {},
-      );
+      await lockEventKeysForLogout(
+        (pt) => signer.nip44Encrypt(pubkey, pt),
+        // Decrypt too: locking must MERGE with any existing snapshot rather than
+        // overwrite it, or a logout following a failed unlock destroys the keys.
+        (ct) => signer.nip44Decrypt(pubkey, ct),
+        pubkey,
+      ).catch(() => {});
       // Same for MLS/chat state — device key, group state, key packages,
       // decrypted history (audit UX-6).
       await lockChatIdentityForLogout(pubkey, (pt) => signer.nip44Encrypt(pubkey, pt)).catch(

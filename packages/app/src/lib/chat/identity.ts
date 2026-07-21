@@ -106,6 +106,20 @@ async function ensureChatDeviceKey(account: string): Promise<Uint8Array> {
   await unlockInFlight.get(account)?.catch(() => {});
   const existing = await loadChatDeviceKey(account);
   if (existing) return existing;
+  // FAIL CLOSED. `unlockInFlight` covers the timing race, but not a FAILED
+  // unlock: with a NIP-46 signer unreachable (or the user dismissing the Amber
+  // prompt) the decrypt throws, the snapshot correctly stays locked, and we
+  // arrive here with no device key — the one state where minting is exactly
+  // wrong. Generating a key now forks the account's MLS credential, which is
+  // the very outcome the comment above says this guard prevents, and the next
+  // logout would then lock the fork over the real snapshot. A locked snapshot
+  // means the real key exists and is merely unreachable right now: refuse, and
+  // let the caller retry once the signer is back.
+  if (await marmotKvBackend().get(lockedKey(account))) {
+    throw new Error(
+      "chat identity is locked and could not be unlocked — signer unavailable; not minting a new device key",
+    );
+  }
   const sk = generateSecretKey();
   await marmotKvBackend().set(deviceKeyKey(account), new Uint8Array(sk));
   return sk;
