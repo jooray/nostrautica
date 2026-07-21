@@ -31,8 +31,8 @@ export const DEFAULT_RELAYS = ENV_RELAYS ?? [
   "wss://nos.lol",
   "wss://relay.primal.net",
   "wss://relay.nostr.net",
-  "wss://offchain.pub",
   "wss://nostr.mom",
+  "wss://nostr.oxtr.dev",
 ];
 
 /**
@@ -40,7 +40,7 @@ export const DEFAULT_RELAYS = ENV_RELAYS ?? [
  * (relay.nostr.band was here until 2026-07-21, when it stopped accepting
  * connections entirely — every page load paid its full connect timeout.)
  */
-export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://nostr.oxtr.dev", "wss://purplerelay.com"];
+export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://purplerelay.com"];
 
 /**
  * Relays the Whitenoise Marmot/MLS client publishes its key packages and group
@@ -107,7 +107,7 @@ export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean
         { url: "wss://nos.lol", read: true, write: true },
         { url: "wss://relay.primal.net", read: true, write: true },
         { url: "wss://relay.nostr.net", read: true, write: true },
-        { url: "wss://offchain.pub", read: true, write: true },
+        { url: "wss://nostr.mom", read: true, write: true },
         { url: "wss://nostr.oxtr.dev", read: true, write: false },
       ];
 
