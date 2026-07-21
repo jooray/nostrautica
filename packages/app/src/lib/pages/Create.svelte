@@ -21,6 +21,8 @@
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
   import ImageCropper from "$lib/components/ImageCropper.svelte";
+  import CoordinatorPicker from "$lib/components/CoordinatorPicker.svelte";
+  import { attachCoordinator } from "$lib/events/organizer.js";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -45,6 +47,11 @@
   // then sees at least the organizer in People instead of an empty roster.
   let enrollSelf = $state(true);
   let chatEnabled = $state(false); // Marmot group chat (experimental); operative once a coordinator is attached
+  // Optional AI coordinator picked during creation (kind-31611 discovery). Null =
+  // create without one (attach later from Admin still works). When set, the event
+  // is created coordinator-less and then attached in the SAME submit, so it lands
+  // in the exact state as create-then-attach-from-Admin (see submit()).
+  let coordinatorPubkey = $state<string | null>(null);
   let matchVisibility = $state<"pair" | "event">("pair");
   let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
   let lang = $state<string>("en"); // ISO 639-1 event language (default English)
@@ -171,6 +178,21 @@
           appBase(),
         ).catch((e) => console.warn("organizer self-enrollment failed:", e));
       }
+      // Coordinator picked during creation: attach it now, AFTER self-enrollment,
+      // exactly mirroring "create, then go to Admin and attach" — attachCoordinator
+      // republishes 31600 with the coordinator tag and gift-wraps the 21603 grant
+      // (the coordinator's own subscription installs from there and backfills the
+      // enrollment). createEvent already persisted the E_id/E_inbox keys locally,
+      // so attach loads them from the keystore. Best-effort like enrollment: the
+      // event exists regardless, and a failure is recoverable from Admin — never a
+      // reason to leave the organizer on the form risking a duplicate create.
+      if (coordinatorPubkey) {
+        await attachCoordinator(
+          signer,
+          createdEventContext(result, createInput),
+          coordinatorPubkey,
+        ).catch((e) => console.warn("coordinator attach at creation failed:", e));
+      }
       created = result;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -222,10 +244,17 @@
         </div>
       </li>
       <li style="margin-top:0.75rem">
-        <strong>{t("create.step.coordinator")}</strong>
-        <p class="muted" style="margin:0.25rem 0">
-          {t("create.step.coordinator.body")}
-        </p>
+        {#if coordinatorPubkey}
+          <strong>{t("create.step.coordinator.attached")}</strong>
+          <p class="muted" style="margin:0.25rem 0">
+            {t("create.step.coordinator.attached.body")}
+          </p>
+        {:else}
+          <strong>{t("create.step.coordinator")}</strong>
+          <p class="muted" style="margin:0.25rem 0">
+            {t("create.step.coordinator.body")}
+          </p>
+        {/if}
       </li>
       <li style="margin-top:0.75rem">
         <strong>{t("create.step.approve")}</strong>
@@ -407,6 +436,14 @@
       {#if chatEnabled}
         <p class="muted" style="margin:0.25rem 0 0">{t("chat.toggle.needsCoordinator")}</p>
       {/if}
+    </div>
+    <div>
+      <div class="field-label">
+        {t("create.coordinator.title")}
+        <span class="muted" style="font-weight:400">{t("create.coordinator.optional")}</span>
+      </div>
+      <p class="muted" style="margin:0.25rem 0 0">{t("create.coordinator.body")}</p>
+      <CoordinatorPicker bind:selected={coordinatorPubkey} disabled={busy} />
     </div>
     <p class="muted">
       {t("create.rotationNote")}
