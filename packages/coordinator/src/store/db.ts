@@ -92,6 +92,12 @@ export interface TalkRow {
   revision: number;
   status: "pending" | "published" | "rejected";
   published_at: number;
+  /**
+   * The ECK version id the live 31610 was published under (audit COORD-7). The
+   * blinded `d` derives from the ECK, so deletion must address the entry under
+   * the ECK it was PUBLISHED with — after a rotation that's not the current one.
+   */
+  published_eck_id: number | null;
   updated_at: number;
 }
 
@@ -313,6 +319,7 @@ CREATE TABLE IF NOT EXISTS marmot_chat_keys (
 CREATE TABLE IF NOT EXISTS marmot_consumed_kps (
   coordinate TEXT NOT NULL,
   kp_event_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (coordinate, kp_event_id)
 );
 `;
@@ -366,6 +373,22 @@ export class Store {
     }
     try {
       this.db.exec("ALTER TABLE transcripts ADD COLUMN lang TEXT");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (COORD-7): the ECK version a talk's 31610 was published under,
+    // so post-rotation deletion addresses the OLD blinded d (and republish can
+    // move the entry to the new ECK).
+    try {
+      this.db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (COORD-24): consumption timestamps for TTL pruning. Existing rows
+    // backfill to 0, so the first prune after upgrade sweeps them (they're all
+    // older than any 30-day window by definition of being legacy).
+    try {
+      this.db.exec("ALTER TABLE marmot_consumed_kps ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
     } catch {
       /* column already exists */
     }
@@ -429,6 +452,11 @@ export class Store {
       .prepare("INSERT INTO seen_rumors (rumor_id, seen_at) VALUES (?, ?)")
       .run(rumorId, now);
     return true;
+  }
+
+  /** Read-only seen check (audit COORD-2): seen is recorded only AFTER handling. */
+  isRumorSeen(rumorId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM seen_rumors WHERE rumor_id = ?").get(rumorId);
   }
 
   // ── events (installed via 21603) ──────────────────────────────────────────
@@ -653,6 +681,18 @@ export class Store {
       .get(coordinate, pubkey, talkD) as TalkRow | undefined;
   }
 
+  /** Distinct talks (by `talk_d`) a speaker has submitted for an event (audit
+   *  COORD-4: caps unlimited talk submissions, one paid STT job per talk_d).
+   *  Excludes 'rejected' talks: the organizer already said no to those, so
+   *  they must free the speaker's quota back up rather than permanently
+   *  occupying a slot with no way to submit a replacement. */
+  countTalksBySpeaker(coordinate: string, pubkey: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS n FROM talks WHERE coordinate = ? AND pubkey = ? AND status != 'rejected'")
+      .get(coordinate, pubkey) as { n: number };
+    return row.n;
+  }
+
   setTalkTranscript(coordinate: string, pubkey: string, talkD: string, transcriptJson: string, now: number): void {
     this.db
       .prepare("UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
@@ -666,10 +706,19 @@ export class Store {
     status: "pending" | "published" | "rejected",
     publishedAt: number,
     now: number,
+    /** The ECK version id the 31610 was published under (COORD-7); recorded on publish. */
+    publishedEckId?: number | null,
   ): void {
     this.db
-      .prepare("UPDATE talks SET status = ?, published_at = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
-      .run(status, publishedAt, now, coordinate, pubkey, talkD);
+      .prepare("UPDATE talks SET status = ?, published_at = ?, published_eck_id = COALESCE(?, published_eck_id), updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
+      .run(status, publishedAt, publishedEckId ?? null, now, coordinate, pubkey, talkD);
+  }
+
+  /** Every 'published' talk of an event (COORD-7: republish under a rotated ECK). */
+  publishedTalksForEvent(coordinate: string): TalkRow[] {
+    return this.db
+      .prepare("SELECT * FROM talks WHERE coordinate = ? AND status = 'published'")
+      .all(coordinate) as unknown as TalkRow[];
   }
 
   /** Transcript texts of a speaker's talks (spec §9.2): fed into their ai_profile. */
@@ -863,16 +912,23 @@ export class Store {
   }
 
   // ── invite usage (first-come, single-use) ─────────────────────────────────
-  /** Record usage; returns true if this is the first use of the invite pubkey. */
+  /**
+   * Record usage; returns true if this is the first use of the invite pubkey.
+   * Atomic (audit COORD-25): the INSERT ... ON CONFLICT DO NOTHING is the claim —
+   * the PRIMARY KEY serializes concurrent claimants, so two simultaneous joins
+   * with the same invite can't both win the SELECT-then-INSERT race.
+   */
   claimInvite(coordinate: string, invitePubkey: string, usedBy: string, now: number): boolean {
+    const info = this.db
+      .prepare(
+        "INSERT INTO invite_usage (coordinate, invite_pubkey, used_by, used_at) VALUES (?, ?, ?, ?) ON CONFLICT(coordinate, invite_pubkey) DO NOTHING",
+      )
+      .run(coordinate, invitePubkey, usedBy, now);
+    if (info.changes > 0) return true; // we won the claim
     const existing = this.db
       .prepare("SELECT used_by FROM invite_usage WHERE coordinate = ? AND invite_pubkey = ?")
       .get(coordinate, invitePubkey) as { used_by: string } | undefined;
-    if (existing) return existing.used_by === usedBy; // idempotent for the same attendee
-    this.db
-      .prepare("INSERT INTO invite_usage (coordinate, invite_pubkey, used_by, used_at) VALUES (?, ?, ?, ?)")
-      .run(coordinate, invitePubkey, usedBy, now);
-    return true;
+    return existing?.used_by === usedBy; // idempotent for the same attendee
   }
 
   // ── jobs ──────────────────────────────────────────────────────────────────
@@ -1113,6 +1169,32 @@ export class Store {
       .all(coordinate) as any;
   }
 
+  /**
+   * Clear every poison status for an attendee (audit COORD-15): called when their
+   * pipeline later SUCCEEDS so the organizer-visible poison state recovers
+   * instead of staying red forever.
+   */
+  clearPoisonStatuses(coordinate: string, pubkey: string): number {
+    const info = this.db
+      .prepare("UPDATE job_status SET state = 'cleared', updated_at = ? WHERE coordinate = ? AND pubkey = ? AND state = 'poison'")
+      .run(Date.now(), coordinate, pubkey);
+    return Number(info.changes);
+  }
+
+  // ── TTL pruning (audit COORD-24) ──────────────────────────────────────────
+  /**
+   * Drop dedupe rows older than `maxAgeMs` (default 30 days): `seen_rumors`
+   * (by seen_at) and `marmot_consumed_kps` (by created_at). Both are idempotency
+   * ledgers whose entries are useless once the gift-wrap backfill window (days,
+   * not months) has passed. Run at startup + daily. Returns rows deleted.
+   */
+  pruneOldData(now: number, maxAgeMs = 30 * 24 * 60 * 60 * 1000): number {
+    const cutoff = now - maxAgeMs;
+    const rumors = this.db.prepare("DELETE FROM seen_rumors WHERE seen_at < ?").run(cutoff);
+    const kps = this.db.prepare("DELETE FROM marmot_consumed_kps WHERE created_at < ?").run(cutoff);
+    return Number(rumors.changes) + Number(kps.changes);
+  }
+
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────
   // The coordinator's MLS admin state. All secret-bearing values (the marmot_kv
   // `v` blobs) reuse the same at-rest NIP-44 protection as the event-key columns.
@@ -1193,7 +1275,13 @@ export class Store {
   }
 
   // ── marmot_chat_keys: authenticated account⇄chat-key bindings (§3.3) ────────
-  /** Record an authenticated chat-key attestation (op:add). Idempotent per key. */
+  /**
+   * Record an authenticated chat-key attestation (op:add). Idempotent per key.
+   * Ownership is pinned (audit COORD-10): a chat_pubkey already bound to a
+   * DIFFERENT account is never re-pointed — the upsert is refused and `false`
+   * returned, so an attendee can't steal (or clobber) another account's key
+   * binding by attesting the same chat_pubkey. Returns true when recorded.
+   */
   upsertChatKey(row: {
     coordinate: string;
     accountPubkey: string;
@@ -1201,13 +1289,14 @@ export class Store {
     clientId?: string | null;
     status?: "active" | "revoked";
     now: number;
-  }): void {
+  }): boolean {
+    const existing = this.getChatKey(row.coordinate, row.chatPubkey);
+    if (existing && existing.account_pubkey !== row.accountPubkey) return false;
     this.db
       .prepare(
         `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, status, updated_at)
          VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, COALESCE(:status, 'active'), :now)
          ON CONFLICT(coordinate, chat_pubkey) DO UPDATE SET
-           account_pubkey = excluded.account_pubkey,
            client_id = COALESCE(excluded.client_id, marmot_chat_keys.client_id),
            status = COALESCE(:status, marmot_chat_keys.status),
            updated_at = excluded.updated_at`,
@@ -1220,6 +1309,7 @@ export class Store {
         status: row.status ?? null,
         now: row.now,
       });
+    return true;
   }
 
   getChatKey(coordinate: string, chatPubkey: string): MarmotChatKeyRow | undefined {
@@ -1250,14 +1340,14 @@ export class Store {
 
   // ── marmot_consumed_kps: key-package add idempotency (§4.2) ─────────────────
   /** Returns true if this key-package event id is new (and records it); false if consumed. */
-  markKpConsumed(coordinate: string, kpEventId: string): boolean {
+  markKpConsumed(coordinate: string, kpEventId: string, now = Date.now()): boolean {
     const existing = this.db
       .prepare("SELECT 1 FROM marmot_consumed_kps WHERE coordinate = ? AND kp_event_id = ?")
       .get(coordinate, kpEventId);
     if (existing) return false;
     this.db
-      .prepare("INSERT INTO marmot_consumed_kps (coordinate, kp_event_id) VALUES (?, ?)")
-      .run(coordinate, kpEventId);
+      .prepare("INSERT INTO marmot_consumed_kps (coordinate, kp_event_id, created_at) VALUES (?, ?, ?)")
+      .run(coordinate, kpEventId, now);
     return true;
   }
 

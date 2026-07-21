@@ -22,9 +22,17 @@ import {
   loadNip46Session,
   clearKeystore,
 } from "./keystore.js";
-import { setActiveOwner } from "$lib/events/keystore.js";
+import {
+  setActiveOwner,
+  lockEventKeysForLogout,
+  unlockEventKeysForLogin,
+} from "$lib/events/keystore.js";
+import { lockChatIdentityForLogout, unlockChatIdentityForLogin } from "$lib/chat/identity.js";
 import { clearBlindingCache } from "$lib/events/blinding.js";
 import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
+import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+import { clearAllJoinSent } from "$lib/stores/join-sent.svelte.js";
+import { router } from "$lib/router/router.svelte.js";
 
 class Session {
   signer = $state<AppSigner | null>(null);
@@ -48,6 +56,21 @@ class Session {
     // Scope the persistent app-cache to this identity too (CACHING-PLAN §3.1),
     // so owner-scoped cachedX() reads resolve against the current owner.
     setActiveCacheOwner(this.pubkey);
+    // Decrypt any event-key + chat/MLS custody locked at a previous logout on
+    // this device (audit UX-6), before returning — in particular, chat state
+    // MUST resolve before anything calls `resolveChatIdentity`, or a
+    // remote-signer account with its device key still locked would mint a
+    // brand new one and fork its MLS credential (every other client would see
+    // it as a stranger, having lost its old group membership — not a
+    // recoverable race). Awaiting here is safe for boot latency too: a NIP-46
+    // restore's decrypt round-trip is already run in the background at the
+    // call site (`+layout.svelte`, audit UX-19) rather than gating first
+    // paint, so slowness here doesn't reintroduce that regression.
+    const pubkey = this.pubkey;
+    await unlockEventKeysForLogin((ct) => signer.nip44Decrypt(pubkey, ct), pubkey).catch(() => {});
+    await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch(
+      () => {},
+    );
   }
 
   /** Try to restore a previous session (local key) from IndexedDB. */
@@ -122,6 +145,27 @@ class Session {
   }
 
   async logout(): Promise<void> {
+    // Self-encrypt event-key custody (E_id/E_inbox nsecs, ECKs) into an
+    // on-device backup BEFORE tearing down the signer or clearing anything
+    // (audit UX-6). These keys were deliberately left in plaintext forever so
+    // an organizer could never lose them by logging out; this keeps that
+    // guarantee — decrypt requires a signer that can authenticate as this
+    // owner, so a shared device's next user can't just read them — while
+    // `adopt()` transparently restores them on the next login for this
+    // identity. Best-effort: a record that fails to encrypt (e.g. an
+    // unreachable NIP-46 signer) is left in plaintext rather than risked.
+    if (this.signer && this.pubkey) {
+      const signer = this.signer;
+      const pubkey = this.pubkey;
+      await lockEventKeysForLogout((pt) => signer.nip44Encrypt(pubkey, pt), pubkey).catch(
+        () => {},
+      );
+      // Same for MLS/chat state — device key, group state, key packages,
+      // decrypted history (audit UX-6).
+      await lockChatIdentityForLogout(pubkey, (pt) => signer.nip44Encrypt(pubkey, pt)).catch(
+        () => {},
+      );
+    }
     // Close the signer's transport first: the NIP-46 pool auto-reconnects, so
     // just dropping the reference keeps re-opening sockets to the signer
     // relays until reload. Defensive: local logout completes even if the
@@ -139,6 +183,11 @@ class Session {
     setActiveOwner(null);
     setActiveCacheOwner(null);
     clearBlindingCache();
+    // Not owner-scoped stores (audit UX-6): the previous identity's event
+    // titles/roles and "Pending" join markers must not linger for the next
+    // person on a shared device.
+    recentEvents.clear();
+    clearAllJoinSent();
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;
@@ -171,6 +220,12 @@ export async function consumeNsecFromHash(): Promise<boolean> {
     const rest = params.toString();
     const cleaned = rest ? `${path}?${rest}` : path || "#/";
     window.history.replaceState(null, "", cleaned);
+    // …and from the router's in-memory route (audit UX-12): navigating away
+    // pushes the current route onto the router stack, so a leftover `nsec`
+    // would put the secret BACK into the URL on in-app Back — exactly like
+    // Join.svelte's stripInviteCodeFromUrl clears `route.code`.
+    const route = router.route;
+    if (route.name === "login") route.nsec = undefined;
   }
   return true;
 }

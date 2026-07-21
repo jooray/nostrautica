@@ -30,14 +30,26 @@
       scripts so SvelteKit's inline bootstrap runs AND NIP-07 signer extensions
       (which inject inline content scripts) keep working; the app uses no {@html},
       so there is no untrusted-HTML injection vector. Kept as a meta so it applies
-      on any dumb static host and on nsite. Local e2e builds (VITE_NOSTRAUTICA_*
-      overrides) must also set PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" — plain-scheme
-      localhost infra is otherwise blocked; unset, the substitution is empty and
-      production CSP is unchanged.
+      on any dumb static host and on nsite.
+
+      font-src 'self' is a hard invariant (audit APPR-5): themed event routes
+      (chat/admin) render key material (invite nsecs), and CSS text-exfiltration
+      needs a REMOTE font — pinning fonts to same-origin keeps that exfil channel
+      shut even if another directive ever drifts open.
+
+      media-src includes https: because posts render inline <video> from Blossom
+      (APPR-11/UX-5); object-src/base-uri/form-action are belt-and-braces for a
+      client-side app with no plugins, no <base>, and no form posts.
+
+      WARNING: PUBLIC_CSP_EXTRA_CONNECT must NEVER be set in production builds
+      (APPR-11). Local e2e builds (VITE_NOSTRAUTICA_* overrides) set
+      PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" because plain-scheme localhost infra
+      is otherwise blocked; unset, the substitution is empty and production CSP
+      is unchanged.
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob: https:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
     />
     %sveltekit.head%
   </head>

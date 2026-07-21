@@ -84,73 +84,53 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
     // A submitted intro is a 21601 rumor to E_inbox, not a direct directory-entry
     // write (only the organizer/E_id, or a coordinator, publishes 31603) — in
     // this no-coordinator (Tier 1) flow the organizer must pull it in via
-    // "Re-process" before it reaches anyone else's directory read. The organizer
-    // is still on /admin from the approve step above. Select by POSITION, not by
-    // name text: a card's <strong>{req.name}</strong> can render blank when the
-    // attendee's kind-0 (published moments earlier by "create my identity")
-    // hasn't propagated to the relay yet by the time admin's pending-queue scan
-    // reads it (join-approve-directory finding, caching verification
-    // 2026-07-17) — unrelated to this test's actual subject, so don't depend on
-    // it. Cards are ordered by join-request rumor timestamp: organizer
-    // (self-enrolled at event creation) first, then Alice, then Bob.
-    // Republishing 3 relay events per approval/re-process, back to back, has an
-    // observed transient failure mode ("not enough relays received the event")
-    // under this test's concurrent load — the fixed offline queue (publish-queue.ts,
-    // caching verification 2026-07-17) durably holds it instead of losing it, but
-    // the queue only retries on the next page load or a browser "online" event,
-    // neither of which fires automatically mid-session. So retry the ACTUAL
-    // WRITE (re-process, then reload to flush any queued publish) up to 3 times,
-    // checking Bob's view after each attempt, instead of just re-reading.
-    let bobSeesAll = false;
-    for (let attempt = 0; attempt < 3 && !bobSeesAll; attempt++) {
-      // Select by POSITION, not by name text: a card's <strong>{req.name}</strong>
-      // can render blank when the attendee's kind-0 (published moments earlier by
-      // "create my identity") hasn't propagated to the relay yet by the time
-      // admin's pending-queue scan reads it (join-approve-directory finding,
-      // caching verification 2026-07-17) — unrelated to this test's actual
-      // subject, so don't depend on it. Cards are ordered by join-request rumor
-      // timestamp: organizer (self-enrolled at event creation) first, then
-      // Alice, then Bob.
-      await organizer.getByRole("button", { name: /^re-process$/i }).nth(1).click();
-      // The button's onclick isn't awaited by the click itself (fire-and-forget
-      // handler) — give the republish (roster read + three relay publishes) a
-      // moment.
-      await organizer.waitForTimeout(3_000);
-      // Reload (mirrors a real user refreshing) so `+layout.svelte`'s boot-time
-      // `flushQueue()` delivers anything that got queued instead of published.
-      await organizer.reload();
-      await organizer.getByText(/organizer admin/i).waitFor({ timeout: 15_000 });
-      await organizer.waitForTimeout(2_000);
-
-      // Bob reads Alice's directory entry — the roster decrypt + attendee detail
-      // path, not just her display name. Open each roster card by POSITION
-      // rather than by name: a freshly-created identity's kind-0 can lag the
-      // same "resolves on EOSE before a just-arrived event is surfaced" NDK
-      // hazard documented on `fetchEventsRelayOnly` in ndk.ts (cosmetic,
-      // self-heals, but makes name-text matching unreliable here). Card order
-      // is stable (roster/join order): organizer, Alice, Bob.
-      await bob.goto(`/#/e/${naddr}`);
-      await expect(bob.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
-      try {
-        await expect(async () => {
-          await bob.goto(`/#/e/${naddr}/attendees`);
-          await expect(bob.locator(".roster button.open")).toHaveCount(3, { timeout: 5_000 });
-          await bob.locator(".roster button.open").nth(1).click();
-          await expect(bob.getByText(marker, { exact: false })).toBeVisible({ timeout: 5_000 });
-        }).toPass({ timeout: 15_000, intervals: [3_000] });
-        bobSeesAll = true;
-      } catch {
-        if (attempt === 2) throw new Error(`Bob still can't read Alice's directory entry after ${attempt + 1} re-process attempts`);
+    // "Re-process". Target Alice's card by NAME, not position: the approved list
+    // is ordered by join-rumor created_at, and the organizer's own self-enrolled
+    // card does NOT reliably sort first (the enrollment rumor's timestamp can
+    // land before Alice's), so a `.nth(1)` re-process button sometimes hit the
+    // ORGANIZER's card instead — which has no intro, so Alice's entry never got
+    // the text (caching verification 2026-07-17: the sole remaining flake here).
+    // Her card's <strong>{req.name}</strong> comes from the join request, so it's
+    // present regardless of kind-0 propagation. Re-process re-reads the E_inbox
+    // before republishing (Admin.reprocess → fresh fetchPending), so it threads
+    // Alice's just-submitted intro into her 31603 entry without a page reload.
+    // Bob reads Alice's entry via the roster decrypt + attendee-detail path. The
+    // attendees list sorts by resolved NAME (falling back to raw pubkey hex until
+    // a name resolves), so POSITION isn't stable there the way it is on the admin
+    // page — open every roster card in turn and stop at the marker instead. Drive
+    // Alice's re-process click INSIDE the retry loop (each click re-reads pending
+    // fresh) so a slow relay propagation of her intro or the republished entry
+    // just costs another iteration rather than failing outright.
+    const aliceAdminCard = organizer.locator(".card", { hasText: "Directory Alice" });
+    await bob.goto(`/#/e/${naddr}`);
+    await expect(bob.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
+    await expect(async () => {
+      await aliceAdminCard.getByRole("button", { name: /^re-process$/i }).click();
+      await organizer.waitForTimeout(1_000); // let the fetch + three relay publishes land
+      await bob.goto(`/#/e/${naddr}/attendees`);
+      const openButtons = bob.locator(".roster button.open");
+      await expect(openButtons).toHaveCount(3, { timeout: 5_000 });
+      const n = await openButtons.count();
+      for (let i = 0; i < n; i++) {
+        await openButtons.nth(i).click();
+        if (await bob.getByText(marker, { exact: false }).count()) return; // found it
+        await bob.goBack();
+        await expect(openButtons).toHaveCount(3, { timeout: 5_000 });
       }
-    }
+      throw new Error("marker not found on any roster card yet");
+    }).toPass({ timeout: 30_000, intervals: [2_000] });
 
     // Revoke: organizer removes Alice specifically. Scope both the trigger and
-    // the inline confirm click to HER card — Bob's own (untouched) "Revoke"
-    // button must not be ambiguous with hers. Select by position (organizer,
-    // Alice, Bob — see the name-matching note above) rather than by name text.
+    // the inline confirm click to HER card by NAME, not by an "approved ✓" text
+    // filter: clicking Revoke swaps the card to the confirm copy (Revoke/Keep),
+    // which drops "Approved ✓" — so a `.card` filtered on that text would
+    // re-resolve to a DIFFERENT card mid-flow (Bob's) once Alice's changes. Her
+    // name (<strong>{req.name}</strong>, from the join request) stays put through
+    // the confirm and revoked states, so it's the stable anchor for all three
+    // steps. Bob's untouched "Revoke" button never gets mistaken for hers.
     await organizer.goto(`/#/e/${naddr}/admin`);
     await expect(organizer.getByText(/approved ✓/i)).toHaveCount(3, { timeout: 15_000 });
-    const aliceCard = organizer.locator(".card", { hasText: /approved ✓/i }).nth(1);
+    const aliceCard = organizer.locator(".card", { hasText: "Directory Alice" });
     await aliceCard.getByRole("button", { name: /^revoke$/i }).click();
     await expect(aliceCard.getByText(/keep/i)).toBeVisible();
     await aliceCard.getByRole("button", { name: /^revoke$/i }).click();

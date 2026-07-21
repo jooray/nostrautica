@@ -9,8 +9,69 @@ import { sha256Hex } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { buildAuthEvent, authHeader } from "./auth.js";
 
+/**
+ * Operation timeouts (UX-7): a hung Blossom server must never wedge Record's
+ * "Uploading…" or MediaPlayer's "Decrypting…" forever. Uploads get the biggest
+ * budget — videos can be large on slow links; downloads and preflights are
+ * small/fast, so a server that can't answer promptly is simply skipped.
+ */
+export const PREFLIGHT_TIMEOUT_MS = 10_000;
+export const UPLOAD_TIMEOUT_MS = 60_000;
+export const MIRROR_TIMEOUT_MS = 30_000;
+export const DOWNLOAD_TIMEOUT_MS = 20_000;
+
+/**
+ * Run `work` bounded by an AbortController timeout (UX-7). The timer both
+ * aborts the underlying fetch and rejects with a plain Error (never a bare
+ * AbortError), so callers' existing catch paths work and even a fetch
+ * implementation that ignores the signal still settles.
+ */
+async function withTimeout<T>(
+  label: string,
+  timeoutMs: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([work(controller.signal), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  label: string,
+): Promise<Response> {
+  return withTimeout(label, timeoutMs, (signal) => fetch(url, { ...init, signal }));
+}
+
 function trimServer(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+/**
+ * A Blossom server URL the app will talk to (audit APPR-8): https: only. The
+ * protocol package already drops non-https URLs from the 31600 parse, but
+ * server lists also arrive via the user's (unvalidated) kind 10063 tags and
+ * announcements already on relays predate the schema rule — filter at the app
+ * boundary too.
+ */
+export function isAcceptedBlossomUrl(url: string): boolean {
+  try {
+    return new URL(url).protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export interface PreflightResult {
@@ -31,15 +92,20 @@ export async function preflight(
 ): Promise<PreflightResult> {
   const auth = await buildAuthEvent(signer, { verb: "upload", sha256: blob.sha256 });
   try {
-    const res = await fetch(`${trimServer(server)}/upload`, {
-      method: "HEAD",
-      headers: {
-        Authorization: authHeader(auth),
-        "X-SHA-256": blob.sha256,
-        "X-Content-Length": String(blob.size),
-        "X-Content-Type": blob.type,
+    const res = await fetchWithTimeout(
+      `${trimServer(server)}/upload`,
+      {
+        method: "HEAD",
+        headers: {
+          Authorization: authHeader(auth),
+          "X-SHA-256": blob.sha256,
+          "X-Content-Length": String(blob.size),
+          "X-Content-Type": blob.type,
+        },
       },
-    });
+      PREFLIGHT_TIMEOUT_MS,
+      `Preflight at ${server}`,
+    );
     return {
       server,
       ok: res.ok,
@@ -67,14 +133,19 @@ export async function upload(
 ): Promise<BlobDescriptor> {
   const sha256 = sha256Hex(ciphertext);
   const auth = await buildAuthEvent(signer, { verb: "upload", sha256 });
-  const res = await fetch(`${trimServer(server)}/upload`, {
-    method: "PUT",
-    headers: {
-      Authorization: authHeader(auth),
-      "Content-Type": contentType,
+  const res = await fetchWithTimeout(
+    `${trimServer(server)}/upload`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: authHeader(auth),
+        "Content-Type": contentType,
+      },
+      body: ciphertext as unknown as BodyInit,
     },
-    body: ciphertext as unknown as BodyInit,
-  });
+    UPLOAD_TIMEOUT_MS,
+    `Upload to ${server}`,
+  );
   if (!res.ok) {
     throw new Error(
       `Upload to ${server} failed: ${res.status} ${res.headers.get("X-Reason") ?? res.statusText}`,
@@ -101,14 +172,19 @@ export async function mirror(
 ): Promise<string | null> {
   const auth = await buildAuthEvent(signer, { verb: "upload", sha256 });
   try {
-    const res = await fetch(`${trimServer(server)}/mirror`, {
-      method: "PUT",
-      headers: {
-        Authorization: authHeader(auth),
-        "Content-Type": "application/json",
+    const res = await fetchWithTimeout(
+      `${trimServer(server)}/mirror`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: authHeader(auth),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ url: sourceUrl }),
       },
-      body: JSON.stringify({ url: sourceUrl }),
-    });
+      MIRROR_TIMEOUT_MS,
+      `Mirror to ${server}`,
+    );
     if (!res.ok) return null;
     const blob = (await res.json().catch(() => ({}))) as { url?: string };
     return blob.url ?? `${trimServer(server)}/${sha256}`;
@@ -118,8 +194,13 @@ export async function mirror(
 }
 
 /**
- * Upload to the first server, then mirror to the rest (spec §8, §10.3). Returns
- * every URL the ciphertext is reachable at (primary first).
+ * Upload to the first server that accepts it, then mirror to the remaining
+ * candidates (spec §8, §10.3). Preflight only predicts which server is likely to
+ * accept the blob — a server preflight couldn't rule out (CORS-blocked HEAD) can
+ * still 415/CORS-block the real PUT, so a failed upload falls through to the next
+ * candidate instead of failing the whole operation (prod report 2026-07-20: a
+ * stale per-user/event Blossom server pinned an incompatible primary and had no
+ * fallback). Returns every URL the ciphertext is reachable at (primary first).
  */
 export async function uploadAndMirror(
   signer: AppSigner,
@@ -128,37 +209,115 @@ export async function uploadAndMirror(
   contentType: string,
 ): Promise<{ urls: string[]; sha256: string; primary: string }> {
   if (servers.length === 0) throw new Error("no Blossom servers configured");
-  const [primaryServer, ...rest] = servers;
-  const primary = await upload(signer, primaryServer!, ciphertext, contentType);
-  const urls = [primary.url];
-  for (const server of rest) {
-    const url = await mirror(signer, server, primary.url, primary.sha256);
-    if (url) urls.push(url);
+  let primary: BlobDescriptor | undefined;
+  let rest: string[] = [];
+  const errors: string[] = [];
+  for (let i = 0; i < servers.length; i++) {
+    try {
+      primary = await upload(signer, servers[i]!, ciphertext, contentType);
+      rest = servers.slice(i + 1);
+      break;
+    } catch (e) {
+      errors.push(`${servers[i]}: ${e instanceof Error ? e.message : String(e)}`);
+    }
   }
+  if (!primary) {
+    throw new Error(`Upload failed on every candidate server: ${errors.join("; ")}`);
+  }
+  // Mirrors race in parallel (UX-7): a hung mirror used to serialize the whole
+  // operation behind its timeout while healthy mirrors waited idle.
+  const mirrored = await Promise.all(
+    rest.map((server) => mirror(signer, server, primary.url, primary.sha256)),
+  );
+  const urls = [primary.url, ...mirrored.filter((u): u is string => !!u)];
   return { urls, sha256: primary.sha256, primary: primary.url };
 }
 
 /**
+ * Hard cap on a media download (audit APPR-4): a malicious directory entry can
+ * point at a multi-GB endpoint, and a whole-file `arrayBuffer()` would take the
+ * tab down. 250 MB is far above any legit intro/talk video.
+ */
+export const MAX_MEDIA_DOWNLOAD_BYTES = 250 * 1024 * 1024;
+
+export interface DownloadOptions {
+  /** Abort past this many bytes (default {@link MAX_MEDIA_DOWNLOAD_BYTES}). */
+  maxBytes?: number;
+  /**
+   * The descriptor's claimed ciphertext size, when known — a claim already past
+   * the cap is rejected without any network traffic.
+   */
+  expectedSize?: number;
+}
+
+/**
+ * Read a response body with a running byte counter, aborting past `maxBytes`.
+ * Content-Length is checked up front when present; the streamed count is the
+ * real guard (a lying/chunked endpoint is caught mid-stream).
+ */
+async function readCapped(res: Response, maxBytes: number, url: string): Promise<Uint8Array> {
+  const contentLength = Number(res.headers.get("content-length") ?? 0);
+  if (contentLength > maxBytes) {
+    throw new Error(`blob is ${contentLength} bytes — over the ${maxBytes}-byte cap (${url})`);
+  }
+  const reader = res.body?.getReader();
+  if (!reader) {
+    // No stream API (old webview): whole-read, then enforce the cap on the result.
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    if (bytes.length > maxBytes) {
+      throw new Error(`blob is ${bytes.length} bytes — over the ${maxBytes}-byte cap (${url})`);
+    }
+    return bytes;
+  }
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`blob passed the ${maxBytes}-byte download cap — aborted (${url})`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+/**
  * Download a blob's ciphertext, trying each mirror URL in turn. Verifies the
- * ciphertext hash against the expected sha256 (x).
+ * ciphertext hash against the expected sha256 (x). Downloads are size-capped
+ * (audit APPR-4) — an over-cap mirror is skipped like any other failure.
  */
 export async function downloadBlob(
   urls: string[],
   expectedSha256: string,
+  opts: DownloadOptions = {},
 ): Promise<Uint8Array> {
+  const maxBytes = opts.maxBytes ?? MAX_MEDIA_DOWNLOAD_BYTES;
+  if (opts.expectedSize !== undefined && opts.expectedSize > maxBytes) {
+    throw new Error(
+      `refusing to download: the descriptor claims ${opts.expectedSize} bytes, over the ${maxBytes}-byte cap`,
+    );
+  }
   let lastErr: unknown;
   for (const url of urls) {
     try {
-      const res = await fetch(url);
-      if (!res.ok) {
-        lastErr = new Error(`${res.status} from ${url}`);
-        continue;
-      }
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (sha256Hex(bytes) !== expectedSha256) {
-        lastErr = new Error(`hash mismatch from ${url}`);
-        continue;
-      }
+      // The timeout spans headers AND the streamed body (UX-7) — a server that
+      // stalls mid-stream is skipped like any other failure.
+      const bytes = await withTimeout(`Download from ${url}`, DOWNLOAD_TIMEOUT_MS, async (signal) => {
+        const res = await fetch(url, { signal });
+        if (!res.ok) throw new Error(`${res.status} from ${url}`);
+        const bytes = await readCapped(res, maxBytes, url);
+        if (sha256Hex(bytes) !== expectedSha256) throw new Error(`hash mismatch from ${url}`);
+        return bytes;
+      });
       return bytes;
     } catch (e) {
       lastErr = e;

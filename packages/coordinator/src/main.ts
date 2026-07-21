@@ -10,12 +10,13 @@ import {
   resolveIdentity,
   veniceApiKey,
   buildAnnounceContent,
+  evaluateBilling,
 } from "./config.js";
 import { Store } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
 import { buildCoordinatorAnnounce } from "./nostr/publisher.js";
 import { Coordinator, type Transport } from "./coordinator.js";
-import { verifyFfmpeg } from "./pipeline/audio.js";
+import { verifyFfmpeg, sweepStaleTempDirs } from "./pipeline/audio.js";
 import { verifyModelPrivacy } from "./providers/privacy.js";
 import { ApiKeyPayment } from "./providers/payment.js";
 import { VeniceLlm, VeniceStt } from "./providers/venice.js";
@@ -34,6 +35,10 @@ async function main(): Promise<void> {
     throw new Error("ffmpeg not found — install ffmpeg (and ffprobe) and retry");
   });
 
+  // Sweep ffmpeg temp dirs a previous crash left behind (audit COORD-23).
+  const swept = await sweepStaleTempDirs().catch(() => 0);
+  if (swept > 0) console.log(`[coordinator] swept ${swept} stale temp dir(s)`);
+
   const coordSk = resolveIdentity(config);
   const coordPubkey = getPublicKey(coordSk);
   console.log(`[coordinator] identity ${npubEncode(coordPubkey)}`);
@@ -43,6 +48,11 @@ async function main(): Promise<void> {
   // Built before the provider layer so it can back the Cashu payment journal
   // (audit H8): proof reservations must be durable across a crash.
   const store = new Store(dbPath, coordSk);
+
+  // TTL-prune the dedupe ledgers at boot + daily (audit COORD-24).
+  store.pruneOldData(Date.now());
+  const pruneTimer = setInterval(() => store.pruneOldData(Date.now()), 24 * 60 * 60 * 1000);
+  pruneTimer.unref();
 
   // STT stays on Venice/local — Routstr has no STT today (spec §9.4).
   const apiKey = veniceApiKey(config);
@@ -62,21 +72,27 @@ async function main(): Promise<void> {
   const nodeUrl = config.providers.routstr?.node_url;
   if (nodeUrl) {
     const r = config.providers.routstr!;
-    llm = new RoutstrLlm({
-      nodeUrl,
-      payment: new CashuPayment({
-        mintUrl: r.mint ?? "",
-        walletDbPath: r.wallet_db ?? "cashu-wallet.json",
-        // Durable journal (audit H8): reservations survive a crash mid-request.
-        journal: store,
-      }),
+    const payment = new CashuPayment({
+      mintUrl: r.mint ?? "",
+      walletDbPath: r.wallet_db ?? "cashu-wallet.json",
+      // Durable journal (audit H8): reservations survive a crash mid-request.
+      journal: store,
     });
+    // Reconcile interrupted reservations from a previous run (audit COORD-5):
+    // reserved-but-unsettled proofs are quarantined as ambiguous, never lost.
+    const quarantined = payment.reconcileJournal();
+    if (quarantined > 0) {
+      console.log(`[coordinator] cashu: quarantined ${quarantined} interrupted reservation(s) as ambiguous`);
+    }
+    llm = new RoutstrLlm({ nodeUrl, payment });
     console.log(`[coordinator] LLM: Routstr ${nodeUrl} (Cashu)`);
   } else {
     if (!veniceOpts) throw new Error("No Venice API key and no Routstr node configured");
     llm = new VeniceLlm(veniceOpts);
     console.log("[coordinator] LLM: Venice");
-    await verifyModelPrivacy(llm, config);
+    await verifyModelPrivacy(llm, config, console, {
+      allowUnverified: config.security.allow_unverified_model_privacy,
+    });
   }
 
   const stt: SttProvider =
@@ -121,6 +137,11 @@ async function main(): Promise<void> {
     topK: config.matching.top_k,
     batchSize: config.matching.batch_size,
     chatMls,
+    // Install authorization + unsolicited-install caps (audit COORD-3).
+    maxEvents: config.security.max_events,
+    allowedEidPubkeys: config.security.allowed_eid_pubkeys,
+    // Billing policy signal (Part 3, COORD-3): evaluated + logged at install.
+    evaluateBilling: (organizer, attendeeCount) => evaluateBilling(config, organizer, attendeeCount),
   });
 
   await coordinator.start();

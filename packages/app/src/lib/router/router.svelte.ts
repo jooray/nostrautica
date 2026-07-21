@@ -40,7 +40,7 @@ function parentOf(route: Route): Route | null {
   }
 }
 
-class Router {
+export class Router {
   route = $state<Route>({ name: "home" });
   private stack: Route[] = [];
   private goingBack = false;
@@ -53,12 +53,22 @@ class Router {
 
   private sync(): void {
     const next = parseHash(window.location.hash);
+    const nextHash = buildHash(next);
     if (this.goingBack) {
       this.goingBack = false;
-    } else if (buildHash(this.route) !== buildHash(next)) {
-      // Push the screen we're leaving (cap the depth, avoid immediate dupes).
-      this.stack.push(this.route);
-      if (this.stack.length > 50) this.stack.shift();
+    } else if (buildHash(this.route) !== nextHash) {
+      const top = this.stack[this.stack.length - 1];
+      if (top !== undefined && buildHash(top) === nextHash) {
+        // The hashchange landed exactly on our stack top: that's a browser/
+        // system BACK (Android), not a forward navigation. Pop instead of
+        // pushing the screen we're leaving — pushing here made the in-app
+        // Back button and the system Back ping-pong between two pages (UX-8).
+        this.stack.pop();
+      } else {
+        // Push the screen we're leaving (cap the depth, avoid immediate dupes).
+        this.stack.push(this.route);
+        if (this.stack.length > 50) this.stack.shift();
+      }
     }
     // Perf baseline (§1.3): page cache-paint/network-settled deltas measure from
     // here. Cheap and UI-free.

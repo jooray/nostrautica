@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { i18n, pluralCategory } from "./i18n.svelte.js";
+import { messages } from "./messages.js";
 
 describe("i18n interpolation", () => {
   it("substitutes {name} placeholders", () => {
@@ -17,6 +18,12 @@ describe("i18n interpolation", () => {
     expect(i18n.t("join.title", { title: "DevConf" })).toBe("Pripojiť sa: DevConf");
     i18n.set("en");
   });
+
+  it("translates with params in Czech", () => {
+    i18n.set("cs");
+    expect(i18n.t("join.title", { title: "DevConf" })).toBe("Připojit se: DevConf");
+    i18n.set("en");
+  });
 });
 
 describe("plural categories", () => {
@@ -32,6 +39,65 @@ describe("plural categories", () => {
     expect(pluralCategory("sk", 4)).toBe("few");
     expect(pluralCategory("sk", 5)).toBe("many");
     expect(pluralCategory("sk", 0)).toBe("many");
+  });
+
+  it("czech: 1 / 2-4 / 5+", () => {
+    expect(pluralCategory("cs", 1)).toBe("one");
+    expect(pluralCategory("cs", 2)).toBe("few");
+    expect(pluralCategory("cs", 4)).toBe("few");
+    expect(pluralCategory("cs", 5)).toBe("many");
+    expect(pluralCategory("cs", 0)).toBe("many");
+  });
+});
+
+describe("message catalog completeness", () => {
+  // `en` is the source of truth for the key set (spec: messages.ts top comment).
+  // Slavic locales (sk/cs) additionally define a `.few` form for every `.one`/
+  // `.many` plural family, since they need the 1 / 2-4 / 5+ split; English only
+  // ever needs one/many. So sk and cs should have IDENTICAL key sets to each
+  // other, and both should be supersets of en's key set.
+  const enKeys = Object.keys(messages.en);
+  const skKeys = Object.keys(messages.sk);
+  const csKeys = Object.keys(messages.cs);
+
+  it("every en key exists in sk and cs", () => {
+    const skSet = new Set(skKeys);
+    const csSet = new Set(csKeys);
+    const missingFromSk = enKeys.filter((k) => !skSet.has(k));
+    const missingFromCs = enKeys.filter((k) => !csSet.has(k));
+    expect(missingFromSk).toEqual([]);
+    expect(missingFromCs).toEqual([]);
+  });
+
+  it("sk and cs have exactly the same key set (same plural families)", () => {
+    const skSet = new Set(skKeys);
+    const csSet = new Set(csKeys);
+    const missingFromCs = skKeys.filter((k) => !csSet.has(k));
+    const extraInCs = csKeys.filter((k) => !skSet.has(k));
+    expect(missingFromCs).toEqual([]);
+    expect(extraInCs).toEqual([]);
+  });
+
+  it("no duplicate keys within a locale", () => {
+    for (const [locale, keys] of Object.entries({ en: enKeys, sk: skKeys, cs: csKeys })) {
+      const seen = new Set<string>();
+      const dupes = keys.filter((k) => (seen.has(k) ? true : (seen.add(k), false)));
+      expect(dupes, `duplicate keys in ${locale}`).toEqual([]);
+    }
+  });
+
+  it("every .one plural family has matching .few and .many forms in sk and cs", () => {
+    const oneKeys = enKeys.filter((k) => k.endsWith(".one"));
+    expect(oneKeys.length).toBeGreaterThan(0);
+    const skSet = new Set(skKeys);
+    const csSet = new Set(csKeys);
+    for (const key of oneKeys) {
+      const base = key.slice(0, -".one".length);
+      for (const suffix of [".few", ".many"] as const) {
+        expect(skSet.has(base + suffix), `sk missing ${base}${suffix}`).toBe(true);
+        expect(csSet.has(base + suffix), `cs missing ${base}${suffix}`).toBe(true);
+      }
+    }
   });
 });
 
@@ -78,6 +144,10 @@ describe("i18n plural resolution", () => {
     expect(i18n.tp("attendees.count", 1)).toBe("1 účastník");
     expect(i18n.tp("attendees.count", 3)).toBe("3 účastníci");
     expect(i18n.tp("attendees.count", 5)).toBe("5 účastníkov");
+    i18n.set("cs");
+    expect(i18n.tp("attendees.count", 1)).toBe("1 účastník");
+    expect(i18n.tp("attendees.count", 3)).toBe("3 účastníci");
+    expect(i18n.tp("attendees.count", 5)).toBe("5 účastníků");
     i18n.set("en");
   });
 });

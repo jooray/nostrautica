@@ -19,7 +19,12 @@ import {
   getEventHash,
 } from "nostr-tools/pure";
 import type { UnsignedEvent } from "nostr-tools/pure";
-import { KIND_GIFT_WRAP, KIND_SEAL, type RumorKind } from "@nostrautica/protocol";
+import {
+  KIND_GIFT_WRAP,
+  KIND_SEAL,
+  RUMOR_MAX_CLOCK_SKEW_SEC,
+  type RumorKind,
+} from "@nostrautica/protocol";
 import type { Rumor, GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 
@@ -94,6 +99,12 @@ export async function signerUnwrap(
   const rumor = JSON.parse(rumorJson) as Rumor;
   // Bind the rumor's claimed author to the seal's verified author (NIP-59).
   if (rumor.pubkey !== seal.pubkey) throw new Error("rumor/seal author mismatch");
+  // created_at is unauthenticated but drives first-come/latest-wins ordering
+  // (invite approval, replaceable events): clamp future-dated rumors to at most
+  // now + skew (PROTO-8), mirroring the protocol package's unwrapRumor clamp so
+  // the signer path gets the same protection.
+  const maxCreatedAt = Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC;
+  if (rumor.created_at > maxCreatedAt) rumor.created_at = maxCreatedAt;
   return rumor;
 }
 

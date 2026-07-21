@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import {
   toNsec,
@@ -11,6 +11,10 @@ import {
   importCredential,
 } from "./backup.js";
 import { bytesToHex } from "@nostrautica/protocol";
+
+// NIP-49 scrypt takes several seconds per call and the whole suite runs in
+// parallel — the default 5 s test timeout is too tight under CPU contention.
+vi.setConfig({ testTimeout: 30000 });
 
 describe("nsec round-trip", () => {
   it("encodes and decodes", () => {

@@ -5,7 +5,7 @@
  * hash checks.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { safeFetch, isBlockedAddress, SafeFetchError } from "./safe-fetch.js";
+import { safeFetch, isBlockedAddress, SafeFetchError, pinnedLookup } from "./safe-fetch.js";
 
 const ALLOW = "https://blossom.example";
 
@@ -38,6 +38,49 @@ describe("isBlockedAddress", () => {
     for (const ip of ["1.1.1.1", "8.8.8.8", "203.0.115.7", "2606:4700:4700::1111"]) {
       expect(isBlockedAddress(ip), ip).toBe(false);
     }
+  });
+
+  it("blocks v4-smuggling transition mechanisms (COORD-6): NAT64, 6to4, Teredo", () => {
+    for (const ip of [
+      "64:ff9b::7f00:1", // NAT64 (64:ff9b::/96) of 127.0.0.1
+      "64:ff9b::ffff:a00:1", // NAT64 shape within the /96
+      "2002:0a00:0001::1", // 6to4 of 10.0.0.1
+      "2002:7f00:0001::", // 6to4 of 127.0.0.1
+      "2001:0000:4136:e378:8000:63bf:3fff:fdd2", // Teredo
+    ]) {
+      expect(isBlockedAddress(ip), ip).toBe(true);
+    }
+    // Non-transition 2001 space (e.g. documentation 2001:db8::) is not blocked.
+    expect(isBlockedAddress("2001:db8::1")).toBe(false);
+  });
+});
+
+describe("pinnedLookup (audit COORD-6)", () => {
+  it("returns ONLY the pre-validated addresses, ignoring the queried hostname", () => {
+    const lookup = pinnedLookup([{ address: "93.184.216.34", family: 4 }]);
+    const cb = vi.fn();
+    lookup("rebinding.attacker.example", { all: true }, cb);
+    expect(cb).toHaveBeenCalledWith(null, [{ address: "93.184.216.34", family: 4 }]);
+    const cbSingle = vi.fn();
+    lookup("rebinding.attacker.example", {}, cbSingle);
+    expect(cbSingle).toHaveBeenCalledWith(null, "93.184.216.34", 4);
+  });
+
+  it("safeFetch passes a pinned dispatcher to fetch (no re-resolution)", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(streamResponse(10));
+    await safeFetch("https://1.1.1.1/ok", { maxBytes: 100 });
+    const init = spy.mock.calls[0]![1] as any;
+    expect(init.dispatcher).toBeDefined(); // connection pinned to the validated IP
+  });
+
+  it("a hostname re-resolving to a private IP is rejected (lookupFn injection)", async () => {
+    // First resolution is public… then the attacker flips DNS to loopback.
+    const lookupFn = vi.fn(async () => [{ address: "10.0.0.9", family: 4 }]) as any;
+    await expect(
+      safeFetch("https://rebind.example/x", { maxBytes: 100, lookupFn }),
+    ).rejects.toMatchObject({ retryable: false });
+    const spy = vi.spyOn(globalThis, "fetch");
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

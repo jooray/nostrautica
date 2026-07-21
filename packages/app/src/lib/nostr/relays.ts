@@ -17,15 +17,41 @@ const ENV_BLOSSOM = (import.meta.env?.VITE_NOSTRAUTICA_BLOSSOM as string | undef
   .map((s) => s.trim())
   .filter(Boolean);
 
-/** App default relays — sensible, widely-reachable public relays. */
+/**
+ * App default relays — free, open-write, widely-reachable public relays.
+ *
+ * Probed 2026-07-21 (connect + NIP-11 `limitation` + a live kind-31600 read).
+ * Two relays were serving events one day and refusing connections the next
+ * (damus 503, nostr.band timeout), and a two-relay default meant a single
+ * outage left effectively one relay carrying the app — so the set is wider now
+ * and deliberately spread across operators. Anything requiring payment or auth
+ * is excluded: attendees must be able to publish without an account somewhere.
+ */
 export const DEFAULT_RELAYS = ENV_RELAYS ?? [
-  "wss://relay.primal.net",
-  "wss://relay.damus.io",
   "wss://nos.lol",
+  "wss://relay.primal.net",
+  "wss://relay.nostr.net",
+  "wss://nostr.mom",
+  "wss://nostr.oxtr.dev",
 ];
 
-/** Read-oriented relay included in defaults for discovery breadth. */
-export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://relay.nostr.band"];
+/**
+ * Read-oriented relays included in defaults for discovery breadth.
+ * (relay.nostr.band was here until 2026-07-21, when it stopped accepting
+ * connections entirely — every page load paid its full connect timeout.)
+ */
+export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://purplerelay.com"];
+
+/**
+ * Relays the Whitenoise Marmot/MLS client publishes its key packages and group
+ * traffic to (confirmed via its own "seen on relays" key-package screen,
+ * 2026-07-20). Without these in a chat-enabled event's relay set, the
+ * coordinator never discovers a Whitenoise attendee's key package, and even a
+ * found one can't route group messages back to a Whitenoise client whose own
+ * relay list doesn't overlap ours. Unioned into new chat-enabled events'
+ * relays at creation (create.ts) so both directions work by default.
+ */
+export const WHITENOISE_RELAYS = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
 
 /**
  * Relays advertised in the `nostrconnect://` URI (NIP-46). Dedicated signer
@@ -41,7 +67,6 @@ export const NIP46_RELAYS = ENV_RELAYS ?? [
   // Subscribed in parallel (SimplePool) — the signer publishes its reply to all
   // of them, so any one working relay is enough; a failed socket (e.g. the
   // often-flaky relay.nsec.app, kept for signers that default to it) is harmless.
-  "wss://relay.damus.io",
   "wss://relay.primal.net",
   "wss://nos.lol",
   "wss://relay.nsec.app",
@@ -72,17 +97,18 @@ export const DEFAULT_BLOSSOM_SERVERS = ENV_BLOSSOM ?? [
  * so local e2e keeps working.
  */
 export const DM_RELAY_LIST: string[] =
-  ENV_RELAYS ?? ["wss://relay.primal.net", "wss://relay.damus.io", "wss://nos.lol"];
+  ENV_RELAYS ?? ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.nostr.net"];
 
 /** NIP-65 relay-list defaults published for new users (spec §5.4 item 2). */
 export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean }[] =
   ENV_RELAYS
     ? ENV_RELAYS.map((url) => ({ url, read: true, write: true }))
     : [
-        { url: "wss://relay.primal.net", read: true, write: true },
-        { url: "wss://relay.damus.io", read: true, write: true },
         { url: "wss://nos.lol", read: true, write: true },
-        { url: "wss://relay.nostr.band", read: true, write: false },
+        { url: "wss://relay.primal.net", read: true, write: true },
+        { url: "wss://relay.nostr.net", read: true, write: true },
+        { url: "wss://nostr.mom", read: true, write: true },
+        { url: "wss://nostr.oxtr.dev", read: true, write: false },
       ];
 
 /** Union of relay URL lists, de-duplicated, preserving first-seen order. */

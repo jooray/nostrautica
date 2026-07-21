@@ -1,6 +1,6 @@
 <script lang="ts">
   import "$lib/styles/app.css";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { tick } from "svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { eventNaddr, routeTitleKey } from "$lib/router/routes.js";
@@ -9,14 +9,18 @@
   import { theme } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
+  import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
+  import { install } from "$lib/stores/install.svelte.js";
   import { hydrateAppCache } from "$lib/cache/persist.js";
   import { prefetchIdentity } from "$lib/nostr/prefetch.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
+  import { chatSession } from "$lib/chat/session.svelte.js";
+  import { shouldPrewarmChat } from "$lib/chat/gate.js";
   import TopBar from "$lib/components/TopBar.svelte";
   import BottomNav from "$lib/components/BottomNav.svelte";
   import EventNav from "$lib/components/EventNav.svelte";
@@ -37,21 +41,47 @@
     online.init();
     recentEvents.init();
     router.init();
+    // UX-21: capture beforeinstallprompt synchronously — it fires once, early,
+    // and never waits for the async boot below (registerPwa inits it too,
+    // idempotently, as a backstop). SW-independent.
+    install.init();
     // Warm the persistent app-cache mirror BEFORE booting so every page's
     // cachedX() helper paints on first render (CACHING-PLAN §1.1). Bounded to
     // 1500 ms internally, so a slow/broken IDB never blocks boot.
     await hydrateAppCache();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
     await consumeNsecFromHash();
-    if (!session.loggedIn) await session.restore().catch(() => {});
+    // UX-19: never gate the shell on a NIP-46 reconnect — a dead signer relay
+    // otherwise burns connect (12s) + getPublicKey (12s) before `booted`,
+    // delaying queue-flush/prefetch/registration behind it. Local/nip07
+    // restores are local-only and fast, so those stay awaited (first paint
+    // remains logged-in); nip46 restores in the background and pages react to
+    // session.loggedIn flipping (Home/Me already render it reactively).
+    const method = session.loggedIn
+      ? undefined
+      : await loadLoginMethod().catch(() => undefined);
+    let restored: Promise<boolean>;
+    if (session.loggedIn) {
+      restored = Promise.resolve(true);
+    } else if (method === "nip46") {
+      // Background — the 2×12s worst case must not block the shell.
+      restored = session.restore().catch(() => false);
+    } else {
+      // Local/nip07 (or no) restore: local-only and fast — keep it awaited.
+      restored = session.restore().catch(() => false);
+      await restored;
+    }
     installQueueFlusher();
     void flushQueue();
     registerPwa();
     booted = true;
     // Identity-scoped warmers (§2.15): grants, recovery, own kind-0, follows,
     // mutes, DM relay list, blind seed (local only), one DM inbox scan. Silent
-    // (fire-and-forget) and silent-signer-guarded inside the warmer.
-    if (session.signer) prefetchIdentity(session.signer);
+    // (fire-and-forget) and silent-signer-guarded inside the warmer. Fires once
+    // the (possibly background) restore has settled.
+    void restored.then(() => {
+      if (session.signer) prefetchIdentity(session.signer);
+    });
   });
 
   // Per-route document title, focus management, and a polite announcement (A2).
@@ -92,6 +122,45 @@
     if (!booted) return;
     void session.pubkey;
     void eventShell.sync(eventNaddr(router.route));
+  });
+
+  // Marmot chat prewarm (MARMOT-GROUP-CHAT §4.2). The coordinator can only add a
+  // member once that member has advertised a key package, and MLS hands a new
+  // member nothing from before their Add — so enrolling lazily on the first Chat
+  // open means the first thing an attendee ever sees there is an empty room, with
+  // any announcement made since their approval permanently unreadable. Start the
+  // session as soon as the shell resolves an approved member of a chat-enabled
+  // event, from whichever of its pages they're on, and keep it running in the
+  // background: the Add, the welcome and the live 445 traffic all land while they
+  // browse, so opening Chat paints an already-joined room. Deferred a beat so the
+  // ~220 kB marmot chunk never competes with the page's own first load.
+  $effect(() => {
+    if (!booted) return;
+    const naddr = eventNaddr(router.route);
+    const ctx = eventShell.ctx;
+    const signer = session.signer;
+    const owner = session.pubkey;
+    if (
+      !shouldPrewarmChat({
+        routeNaddr: naddr,
+        shellNaddr: eventShell.naddr,
+        hasCtx: !!ctx,
+        hasSigner: !!signer,
+        showChat: eventShell.showChat,
+      }) ||
+      !naddr ||
+      !ctx ||
+      !signer
+    ) {
+      // Leaving the event (or the account changed) — drop the live session; the
+      // group state and message history stay in IndexedDB.
+      untrack(() => chatSession.releaseUnless(naddr, owner));
+      return;
+    }
+    const id = setTimeout(() => {
+      void untrack(() => chatSession.ensure(naddr, ctx, signer, owner).catch(() => {}));
+    }, 1500);
+    return () => clearTimeout(id);
   });
 
   const evNaddr = $derived(eventNaddr(router.route));

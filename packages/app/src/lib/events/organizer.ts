@@ -61,7 +61,9 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -265,11 +267,11 @@ export async function approveAttendee(
   );
 
   // 3. Roster (31604): add this attendee, republish the whole index.
-  const roster = await loadRoster(ctx, eckBytes, keys.eck);
+  const { roster, at: rosterAt } = await loadRoster(ctx, eckBytes, keys.eck);
   if (!roster.attendees.some((a) => a.pubkey === req.attendeePubkey)) {
     roster.attendees.push({ pubkey: req.attendeePubkey, d: entryD, role });
   }
-  const rosterEvent = buildRosterEvent(ctx, eidSk, eckBytes, eck.id, roster);
+  const rosterEvent = buildRosterEvent(ctx, eidSk, eckBytes, eck.id, roster, rosterAt);
 
   await Promise.all([
     publishOrQueue(grantWrap as any, ctx.config.relays),
@@ -288,26 +290,35 @@ export async function approveAttendee(
  * just-published/just-arrived event is surfaced (same hazard documented on
  * `fetchEventsRelayOnly` in ndk.ts) — use the relay-only variant here, same as
  * the other must-not-miss reads (grants, pending queue) already do.
+ *
+ * Returns the base event's `at` (created_at) too: the republish must carry a
+ * created_at STRICTLY GREATER than the roster it read, or a same-second RMW loop
+ * (e.g. "Approve all", where three publishes can land in one wall-clock second)
+ * produces sibling replaceable events with equal created_at, and NIP-01's
+ * tie-break (keep the lowest id) can leave a stale, fewer-attendee roster winning
+ * — silently dropping the last-added attendee. See buildRosterEvent.
  */
 export async function loadRoster(
   ctx: EventContext,
   eckBytes: Uint8Array,
   eckVersions: EckVersion[],
-): Promise<RosterContent> {
+): Promise<{ roster: RosterContent; at: number }> {
   const publisher = directoryPublisher(ctx);
   const { identifier } = splitCoordinate(ctx.coordinate);
   const events = await fetchEventsRelayOnly(
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
     ctx.config.relays,
   );
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
+  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   const currentId = eckVersions.reduce((m, v) => Math.max(m, v.id), 1);
-  if (!latest) return { v: 1, eck_current: currentId, attendees: [] };
+  const at = latest?.created_at ?? 0;
+  if (!latest) return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };
   try {
     const { eckDecrypt } = await import("@nostrautica/protocol");
-    return JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    return { roster: JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent, at };
   } catch {
-    return { v: 1, eck_current: currentId, attendees: [] };
+    return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };
   }
 }
 
@@ -317,13 +328,18 @@ function buildRosterEvent(
   eckBytes: Uint8Array,
   eckId: number,
   roster: RosterContent,
+  baseCreatedAt = 0,
 ): VerifiedEvent {
   const { identifier } = splitCoordinate(ctx.coordinate);
   const content: RosterContent = { ...roster, eck_current: eckId };
+  // Strictly newer than the roster we read (baseCreatedAt) so this republish
+  // always wins the replaceable-event race — see loadRoster. Clamp to now so a
+  // steady state (base far in the past) still uses the wall clock.
+  const createdAt = Math.max(Math.floor(Date.now() / 1000), baseCreatedAt + 1);
   return finalizeEvent(
     {
       kind: KIND_ROSTER,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt,
       tags: [
         ["d", identifier],
         ["a", ctx.coordinate],
@@ -546,7 +562,7 @@ export async function revokeAttendeeClient(
 
   // 3. Read the current roster, drop the removed attendee, re-encrypt everyone
   //    else's directory entry under the new ECK, and re-grant to each.
-  const roster = await loadRoster(ctx, prevEckBytes, keys.eck);
+  const { roster, at: rosterAt } = await loadRoster(ctx, prevEckBytes, keys.eck);
   const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
   const publisher = directoryPublisher(ctx);
   const newRoster: RosterContent = { v: 1, eck_current: newId, attendees: [] };
@@ -596,7 +612,7 @@ export async function revokeAttendeeClient(
     pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
   }
 
-  pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster), ctx.config.relays));
+  pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
   await Promise.all(pubs);
 }
 
@@ -625,7 +641,13 @@ export async function updateEventConfig(
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
-  const built = buildEventConfig({ ...ctx.config, ...changes });
+  // Turning chat on for an already-published event: fold in the Whitenoise
+  // relays up front too, same as at-creation (create.ts) — the coordinator's
+  // routing self-heal (ensureChat) covers the group's own MLS state, but the
+  // event's public 31600 relay list should already advertise them.
+  const relays =
+    changes.chat?.length ? unionRelays(ctx.config.relays, WHITENOISE_RELAYS) : ctx.config.relays;
+  const built = buildEventConfig({ ...ctx.config, ...changes, relays });
   const configEvent = finalizeEvent(
     {
       kind: built.kind,

@@ -107,6 +107,25 @@ export const configSchema = z.object({
       free_organizers: z.array(z.string()).default([]),
     })
     .default({}),
+  // Daemon-side security policy (audit COORD-3/COORD-20). Install is
+  // protocol-level, so unsolicited 21603 grants are bounded here.
+  security: z
+    .object({
+      /** Max simultaneously installed events; installs beyond the cap are rejected. */
+      max_events: z.number().int().positive().default(50),
+      /**
+       * When non-empty, only install events whose E_id (hex pubkey) is listed.
+       * Empty (default) = accept any E_id-authenticated install.
+       */
+      allowed_eid_pubkeys: z.array(z.string()).default([]),
+      /**
+       * Escape hatch for startup model-privacy verification (audit COORD-20):
+       * when GET /models can't be fetched, startup normally ABORTS if any role
+       * has require_private (fail closed). Set true to boot anyway (warn only).
+       */
+      allow_unverified_model_privacy: z.boolean().default(false),
+    })
+    .default({}),
 });
 
 export type CoordinatorConfig = z.infer<typeof configSchema>;

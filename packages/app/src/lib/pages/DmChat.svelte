@@ -6,13 +6,19 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { fetchDms, cachedDms, sendDm, type DmMessage } from "$lib/events/dm.js";
+  import { coordinateToNaddr } from "@nostrautica/protocol";
+  import { fetchDms, cachedDms, sendDm, mergeOptimisticDms, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
+  import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
+  import { listEventKeys } from "$lib/events/keystore.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
+  import { fillHeight } from "$lib/components/fill-height.js";
+  import { outbox } from "$lib/stores/outbox.svelte.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -33,8 +39,54 @@
   let error = $state<unknown>(null);
   let timer: ReturnType<typeof setInterval> | undefined;
   let scroller = $state<HTMLDivElement | null>(null);
+  /** The composer row — reserved space under the transcript (see `fillHeight`). */
+  let composerEl = $state<HTMLElement | null>(null);
   let muteBusy = $state(false);
   const muted = $derived(!!peer && mutes.isMuted(peer));
+  // "Also attending: …" (user feedback 2026-07-20) — every event the CURRENT
+  // user holds a working key for (listEventKeys: local, network-free, and the
+  // authoritative "can I actually decrypt this event's data" answer — unlike
+  // recentEvents' role field, which is set at join-REQUEST time and stays
+  // "attendee" even for a request that was never approved) that also lists
+  // the peer on its roster. Deliberately fetchRoster, not fetchDirectory: a
+  // roster entry is a plain {pubkey, role}, so this needs no per-attendee
+  // profile/media/AI-profile decrypt, just a membership check. Cache-first
+  // per event (instant paint when the roster's already warm from visiting
+  // People there), but always falls through to a real fetch on a cache miss
+  // or a "not found" — the whole point is not to under-report from a merely
+  // cold cache, which is why this was deferred rather than shipped earlier.
+  let sharedEvents = $state<{ title: string; naddr: string }[]>([]);
+
+  async function loadSharedEvents(peerPubkey: string): Promise<void> {
+    try {
+      const keys = await listEventKeys();
+      const withEck = keys.filter((k) => k.eck.length > 0);
+      const found = await Promise.all(
+        withEck.map(async (k) => {
+          try {
+            const naddr = coordinateToNaddr(k.coordinate);
+            const cachedR = cachedRoster(k.coordinate);
+            if (cachedR?.attendees.some((a) => a.pubkey === peerPubkey)) {
+              const title =
+                cachedEventContext(naddr)?.title ??
+                (await loadEventContext(naddr, { adoptLang: false })).title;
+              return { title, naddr };
+            }
+            const ctx = cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
+            const roster = await fetchRoster(ctx);
+            return roster?.attendees.some((a) => a.pubkey === peerPubkey)
+              ? { title: ctx.title, naddr }
+              : undefined;
+          } catch {
+            return undefined; // one bad event must not blank the whole list
+          }
+        }),
+      );
+      sharedEvents = found.filter((e): e is { title: string; naddr: string } => !!e);
+    } catch {
+      sharedEvents = [];
+    }
+  }
 
   async function toggleMute() {
     if (!session.signer || !peer) return;
@@ -55,8 +107,11 @@
       const mine = all.filter((m) => m.peer === peer);
       const atBottom =
         !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-      // Merge: relay results replace optimistic entries with the same text+minute.
-      messages = mine;
+      // Merge (audit UX-3): keep optimistic local echoes until the memo holds a
+      // matching copy — otherwise a just-sent DM vanishes on the next 5s poll
+      // until its self-wrap round-trips (and a queued offline send would never
+      // show at all).
+      messages = mergeOptimisticDms(mine, messages);
       error = null;
       if (atBottom) {
         await tick();
@@ -94,6 +149,7 @@
           if (p) profile = p;
         })
         .catch(() => {});
+      void loadSharedEvents(peer);
     }
     await refresh();
     timer = setInterval(refresh, 5_000);
@@ -111,11 +167,21 @@
     // rather than showing a silent spinner (user feedback 2026-07-17).
     const slowTimer = setTimeout(() => (sendSlow = true), 6_000);
     try {
-      await sendDm(session.signer, peer, text);
+      const published = await sendDm(session.signer, peer, text);
       const me = await session.signer.getPublicKey();
+      // Offline / all publish retries failed → the wrap sits in the durable
+      // queue; mark it honestly (audit UX-4) instead of implying delivery.
+      if (!published) outbox.noteQueued();
       messages = [
         ...messages,
-        { id: `local-${Date.now()}`, peer, from: me, text, at: Math.floor(Date.now() / 1000) },
+        {
+          id: `local-${Date.now()}`,
+          peer,
+          from: me,
+          text,
+          at: Math.floor(Date.now() / 1000),
+          ...(published ? {} : { queued: true }),
+        },
       ];
       draft = "";
       await tick();
@@ -153,6 +219,17 @@
   <p class="muted" style="margin:0 0 0.5rem">
     {t("dmchat.e2e")}
   </p>
+  {#if sharedEvents.length}
+    <p class="muted" style="margin:0 0 0.5rem;font-size:0.85rem">
+      {t("dmchat.sharedEvents")}
+      {#each sharedEvents as e, i (e.naddr)}
+        {#if i > 0}<span>, </span>{/if}<button
+          style="background:none;border:none;padding:0;font:inherit;color:var(--accent);font-weight:600;cursor:pointer;text-decoration:underline"
+          onclick={() => router.go({ name: "event", naddr: e.naddr })}
+        >{e.title}</button>
+      {/each}
+    </p>
+  {/if}
   {#if muted}
     <p class="muted" role="status" style="margin:0 0 0.5rem">{t("mute.confirm")}</p>
   {/if}
@@ -161,10 +238,13 @@
     <ErrorState {error} />
   {/if}
 
+  <!-- The transcript takes the height actually left on screen (fillHeight), so
+       the composer sits just under it instead of floating above dead space. -->
   <div
     bind:this={scroller}
+    use:fillHeight={{ below: composerEl, min: 200 }}
     class="card"
-    style="height:50dvh;overflow-y:auto;display:flex;flex-direction:column;gap:0.5rem"
+    style="height:50dvh;overflow-y:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:0.5rem"
   >
     {#if loading}
       <p class="muted">{t("dmchat.decrypting")}</p>
@@ -180,13 +260,13 @@
       >
         <span style="white-space:pre-wrap;word-break:break-word">{m.text}</span>
         <span class="muted" style="display:block;font-size:0.7rem;text-align:right">
-          {fmt(m.at)}
+          {#if m.queued}{t("dmchat.queued")} · {/if}{fmt(m.at)}
         </span>
       </div>
     {/each}
   </div>
 
-  <div class="row" style="align-items:flex-end">
+  <div class="row" bind:this={composerEl} style="align-items:flex-end">
     <textarea
       rows="2"
       placeholder={t("dmchat.placeholder")}

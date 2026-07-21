@@ -11,19 +11,24 @@
 </script>
 
 <nav class="bottom-nav" aria-label={t("nav.primary")}>
+  <!-- "Create" dropped from the tab bar (user feedback 2026-07-20): very few
+       people create an event, and Home already offers it prominently (empty
+       state, "create another", zero-events state) — a whole tab slot for a
+       rare action crowded out the ones people actually reach for daily. -->
   <button aria-current={active("home") ? "page" : undefined} class:active={active("home")} onclick={() => router.go({ name: "home" })}>
     <span class="ico"><Icon name="star" size={24} /></span><span class="lbl">{t("nav.events")}</span>
   </button>
-  <button aria-current={active("create") ? "page" : undefined} class:active={active("create")} onclick={() => router.go({ name: "create" })}>
-    <span class="ico"><Icon name="plus" size={24} /></span><span class="lbl">{t("nav.create")}</span>
-  </button>
   {#if session.loggedIn}
+    <!-- "Chat" — unified group-chats + DMs (user feedback 2026-07-20: this
+         used to be DM-only "Messages" and disappeared entirely inside an
+         event since EventNav replaces this bar there; same label as
+         EventNav's own Chat tab now, since they lead to the same place. -->
     <button
       aria-current={active("dm") || active("dmPeer") ? "page" : undefined}
       class:active={active("dm") || active("dmPeer")}
       onclick={() => router.go({ name: "dm" })}
     >
-      <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.messages")}</span>
+      <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.chat")}</span>
     </button>
   {/if}
   <button

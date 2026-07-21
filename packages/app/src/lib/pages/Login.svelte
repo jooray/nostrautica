@@ -2,10 +2,11 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList } from "$lib/events/nostr-actions.js";
-  import { uploadPublicImage } from "$lib/media/image.js";
+  import { uploadPublicImage, prepareAvatarImage } from "$lib/media/image.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
+  import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -33,7 +34,13 @@
         const signer = session.signer;
         if (signer) {
           let picture: string | undefined;
-          if (picFile) picture = await uploadPublicImage(signer, picFile).catch(() => undefined);
+          if (picFile) {
+            // Downscale + EXIF-strip before upload (audit APPR-3). A bad image
+            // aborts here with a readable error — the raw original is never
+            // uploaded; an upload failure still proceeds photo-less.
+            const avatar = await prepareAvatarImage(picFile);
+            picture = await uploadPublicImage(signer, avatar).catch(() => undefined);
+          }
           if (newName.trim() || picture) {
             await publishProfile(signer, { name: newName.trim() || undefined, picture }).catch(() => {});
           }
@@ -69,6 +76,7 @@
     <button class="btn primary" onclick={done}>{t("login.continue")}</button>
   </div>
 {:else}
+  <div style="display:flex;justify-content:flex-end;margin-bottom:0.5rem"><LanguageSwitch /></div>
   <h1>{t("login.welcome")}</h1>
 
   {#if error}

@@ -20,9 +20,18 @@ RUN pnpm install --frozen-lockfile --filter @nostrautica/coordinator... \
   && pnpm --filter @nostrautica/protocol build \
   && pnpm --filter @nostrautica/coordinator build
 
+# Run as a dedicated non-root user (audit COORD-19). /data is chowned so the
+# SQLite volume is writable; a named volume initialized from the image keeps
+# this ownership (for a bind mount, chown the host dir to uid 10001).
+RUN groupadd --system --gid 10001 nostrautica \
+  && useradd --system --gid nostrautica --uid 10001 --no-create-home nostrautica \
+  && mkdir -p /data \
+  && chown -R nostrautica:nostrautica /data /app
+
 # SQLite cache/queue lives on a volume (loss re-derives, never corrupts — §9.1).
 VOLUME ["/data"]
 ENV NOSTRAUTICA_COORDINATOR_DB=/data/coordinator.sqlite
 
+USER nostrautica
 ENTRYPOINT ["node", "packages/coordinator/dist/main.js"]
 CMD ["/data/coordinator.toml"]

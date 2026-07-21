@@ -20,8 +20,19 @@ export interface PoisonInfo {
 }
 
 export interface JobRunnerOptions {
+  /** Legacy knobs: exponential doubling `baseBackoffMs * 2^(attempt-1)`, capped
+   *  at `maxAttempts` tries. Overridden by `backoffScheduleMs` when given; used
+   *  as the schedule's whole shape when either is set without it (tests rely on
+   *  this exact formula for fast, deterministic fixtures). */
   maxAttempts?: number;
   baseBackoffMs?: number;
+  /** Explicit per-attempt backoff (ms), most recent entry repeats once exhausted.
+   *  Poison fires once every entry has been tried and failed once more. Defaults
+   *  to a long tail so a transient outage (a flaky provider response, a
+   *  depleted balance that gets topped up hours later) resolves on its own
+   *  instead of poisoning in under 20s and waiting on a human to click retry
+   *  (user feedback 2026-07-21). */
+  backoffScheduleMs?: number[];
   /** Lease duration for a claimed job (audit H1). Default 5 minutes. */
   leaseMs?: number;
   now?: () => number;
@@ -29,20 +40,47 @@ export interface JobRunnerOptions {
   onPoison?: (info: PoisonInfo) => void;
 }
 
+/** 1s, 10s, 100s, six tries ~1h apart, then every 4h until ~3 days have elapsed. */
+function buildDefaultBackoffSchedule(): number[] {
+  const HOUR = 60 * 60_000;
+  const THREE_DAYS = 3 * 24 * HOUR;
+  const schedule = [1_000, 10_000, 100_000];
+  for (let i = 0; i < 6; i++) schedule.push(HOUR);
+  let total = schedule.reduce((a, b) => a + b, 0);
+  while (total < THREE_DAYS) {
+    schedule.push(4 * HOUR);
+    total += 4 * HOUR;
+  }
+  return schedule;
+}
+
+const DEFAULT_BACKOFF_SCHEDULE_MS = buildDefaultBackoffSchedule();
+
 export class JobRunner {
   private handlers = new Map<string, JobHandler>();
   private readonly maxAttempts: number;
-  private readonly baseBackoffMs: number;
+  private readonly backoffSchedule: number[];
   private readonly leaseMs: number;
   private readonly now: () => number;
   private readonly onPoison?: (info: PoisonInfo) => void;
 
   constructor(private readonly store: Store, opts: JobRunnerOptions = {}) {
-    this.maxAttempts = opts.maxAttempts ?? 5;
-    this.baseBackoffMs = opts.baseBackoffMs ?? 1000;
+    this.backoffSchedule =
+      opts.backoffScheduleMs ??
+      (opts.maxAttempts !== undefined || opts.baseBackoffMs !== undefined
+        ? Array.from({ length: (opts.maxAttempts ?? 5) - 1 }, (_, i) => (opts.baseBackoffMs ?? 1000) * 2 ** i)
+        : DEFAULT_BACKOFF_SCHEDULE_MS);
+    this.maxAttempts = opts.maxAttempts ?? this.backoffSchedule.length + 1;
     this.leaseMs = opts.leaseMs ?? 5 * 60_000;
     this.now = opts.now ?? (() => Date.now());
     this.onPoison = opts.onPoison;
+  }
+
+  /** Backoff for the Nth failed attempt (1-indexed); the last schedule entry repeats. */
+  private backoffForAttempt(attempts: number): number {
+    if (this.backoffSchedule.length === 0) return 0;
+    const idx = Math.min(attempts, this.backoffSchedule.length) - 1;
+    return this.backoffSchedule[idx]!;
   }
 
   register(type: string, handler: JobHandler): void {
@@ -90,7 +128,7 @@ export class JobRunner {
     } catch (err) {
       const attempts = job.attempts + 1;
       const poison = attempts >= this.maxAttempts;
-      const backoff = this.baseBackoffMs * 2 ** (attempts - 1);
+      const backoff = this.backoffForAttempt(attempts);
       const msg = err instanceof Error ? err.message : String(err);
       const t = new Date().toISOString().slice(11, 19);
       console.warn(

@@ -22,6 +22,8 @@ export interface DmMessage {
   from: string; // author (== peer for received, == me for sent)
   text: string;
   at: number; // rumor created_at (wrap timestamps are randomized, NIP-59)
+  /** Optimistic local echo only: the send landed in the offline queue (UX-4). */
+  queued?: boolean;
 }
 
 export interface DmThread {
@@ -61,12 +63,16 @@ export async function fetchDmRelays(pubkey: string): Promise<string[]> {
  * NIP-17 messages reach the recipient's other clients and the sender's own
  * sent-history copy lands on the sender's inboxes (audit G4). Missing 10050s
  * degrade gracefully to the default relays.
+ *
+ * Returns true when both wraps went out immediately, false when either landed
+ * in the durable offline queue (audit UX-4) — the UI marks the message "queued,
+ * will send when online" instead of implying it was delivered.
  */
 export async function sendDm(
   signer: AppSigner,
   recipient: string,
   text: string,
-): Promise<void> {
+): Promise<boolean> {
   const me = await signer.getPublicKey();
   const input = {
     kind: KIND_DM as typeof KIND_DM,
@@ -79,10 +85,11 @@ export async function sendDm(
   ]);
   const toRecipient = await signerWrap(signer, recipient, input);
   const toSelf = await signerWrap(signer, me, input);
-  await Promise.all([
+  const published = await Promise.all([
     publishOrQueue(toRecipient as never, selectDmRelays(recipientRelays)),
     publishOrQueue(toSelf as never, selectDmRelays(selfRelays)),
   ]);
+  return published.every(Boolean);
 }
 
 /**
@@ -93,9 +100,19 @@ export async function sendDm(
 // changes, and the 5s DM poll otherwise re-runs a signer decrypt per wrap per
 // tick — for a remote signer (Amber/NIP-46) that's a prompt-or-roundtrip storm,
 // and one unreachable bunker relay froze the DM screens entirely (user report
-// 2026-07-16). `null` = not a DM of ours; cached failures don't retry.
+// 2026-07-16). `null` = decrypted fine but not a DM of ours — a DEFINITIVE
+// outcome. Memoization happens only after the outcome is known (mirrors the
+// receiveGrants policy in attendee.ts, audit APPK-5): a FAILED unwrap (signer
+// timeout, offline Amber, corrupt wrap) is NOT memoized — a transient signer
+// error must not permanently hide a genuine DM across reloads (audit UX-4).
+// Failures are instead retried on the next scan, bounded per session by
+// `unwrapAttempts` so a truly undecryptable wrap doesn't cost a signer
+// round-trip on every 5s tick forever.
 let unwrapCacheOwner = "";
 const unwrapCache = new Map<string, DmMessage | null>();
+/** In-memory per-wrap failure counts (session-scoped, never persisted). */
+const unwrapAttempts = new Map<string, number>();
+const MAX_UNWRAP_ATTEMPTS = 5;
 // Only one unwrap loop runs at a time — the 5s poll must not stack loops on top
 // of a slow signer.
 let unwrapInFlight: Promise<void> | null = null;
@@ -126,6 +143,7 @@ export function cachedDms(me: string): DmMessage[] {
 
 function hydrateUnwrapCache(me: string): void {
   unwrapCache.clear();
+  unwrapAttempts.clear();
   const memo = cacheGet<DmMemo>(DMWRAPS_KEY, me)?.data ?? {};
   for (const [id, m] of Object.entries(memo)) unwrapCache.set(id, m);
   unwrapCacheOwner = me;
@@ -186,6 +204,8 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
     unwrapInFlight = (async () => {
       for (const wrap of events) {
         if (unwrapCache.has(wrap.id)) continue;
+        // Bounded retries for past failures (see the memo policy above).
+        if ((unwrapAttempts.get(wrap.id) ?? 0) >= MAX_UNWRAP_ATTEMPTS) continue;
         try {
           const rumor = await signerUnwrap(signer, wrap);
           if (rumor.kind !== KIND_DM) {
@@ -210,8 +230,10 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
             at: rumor.created_at,
           });
         } catch {
-          // not for us / not decryptable / different rumor family — skip for good
-          unwrapCache.set(wrap.id, null);
+          // Transient (signer timeout, offline) or foreign/corrupt — NOT
+          // memoized: the next scan retries it, up to MAX_UNWRAP_ATTEMPTS per
+          // session, so one bad signer moment can't hide a real DM for good.
+          unwrapAttempts.set(wrap.id, (unwrapAttempts.get(wrap.id) ?? 0) + 1);
         }
       }
     })().finally(() => {
@@ -224,6 +246,30 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const deadline = new Promise<void>((r) => setTimeout(r, 12_000));
   await Promise.race([unwrapInFlight, deadline]);
   return snapshotDms();
+}
+
+/**
+ * Merge relay-derived messages with optimistic local echoes (audit UX-3). A sent
+ * DM's self-wrap takes a poll cycle to round-trip — and a queued offline send
+ * isn't on relays at all — so wholesale replacing the render list with the memo
+ * snapshot makes a just-sent message vanish until the next scan. Keep a local
+ * echo (`local-*` id) until a memo entry with the same text and an approximate
+ * timestamp exists; that copy then takes over (stable rumor id, no duplicate).
+ * Pure so the merge policy is unit-tested.
+ */
+export function mergeOptimisticDms(relay: DmMessage[], local: DmMessage[]): DmMessage[] {
+  const kept = local.filter(
+    (l) =>
+      l.id.startsWith("local-") &&
+      !relay.some(
+        (r) =>
+          r.peer === l.peer &&
+          r.from === l.from &&
+          r.text === l.text &&
+          Math.abs(r.at - l.at) <= 600, // rumor created_at ≈ send time
+      ),
+  );
+  return [...relay, ...kept].sort((a, b) => a.at - b.at);
 }
 
 /** Group messages into per-peer threads, newest thread first. */

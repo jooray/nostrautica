@@ -10,7 +10,8 @@ import {
   type CoordinatorAnnounce,
 } from "@nostrautica/protocol";
 import { npubEncode } from "nostr-tools/nip19";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { streamEvents } from "$lib/nostr/stream.js";
+import { onlyVerified } from "$lib/nostr/verify.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 
 export interface DiscoveredCoordinator {
@@ -42,10 +43,22 @@ export async function fetchCoordinators(
   if (!opts.force && hit && Math.floor(Date.now() / 1000) - hit.at < COORDINATORS_TTL_SEC) {
     return hit.data;
   }
-  const events = await fetchEvents({ kinds: [KIND_COORDINATOR_ANNOUNCE] }).catch(() => []);
+  // streamEvents, not fetchEvents: NDK's aggregated EOSE needs ≥2 relays before
+  // it arms its timer, so on a single-relay stack (or a coordinator-less event)
+  // fetchEvents hangs forever — and Admin.svelte awaits this in Promise.allSettled,
+  // so a hang means its network-settled mark never fires. streamEvents settles at
+  // first-EOSE+grace or the 8 s hard timeout, whichever comes first (see stream.ts).
+  const events = await streamEvents(
+    { kinds: [KIND_COORDINATOR_ANNOUNCE] },
+    { timeoutMs: 8000 },
+  ).ready.catch(() => []);
+  // Authority boundary (audit APPK-1): re-verify before the latest-per-pubkey
+  // pick — announcements are self-published, but a FORGED one (bad sig) is not
+  // even self-published.
+  const verified = onlyVerified(events);
   // Latest per pubkey (replaceable, but relays may return stale copies).
   const latest = new Map<string, (typeof events)[number]>();
-  for (const e of events) {
+  for (const e of verified) {
     const prev = latest.get(e.pubkey);
     if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latest.set(e.pubkey, e);
   }
@@ -79,18 +92,32 @@ export function pricingLabel(a: CoordinatorAnnounce): string {
 }
 
 /**
+ * A coordinator-announcement/billing URL safe to render as a link (audits
+ * APPR-1/APPR-2): https: only. `javascript:`/`data:` parse fine with `new URL()`
+ * and would otherwise become clickable script execution in Admin. Anything
+ * unparseable or non-https is dropped (returns undefined → the UI hides it).
+ */
+export function httpsUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" ? u.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Append the event identifier to a coordinator's checkout URL so the checkout
  * page knows what's being paid for (user request 2026-07-17). Merges with any
- * existing query; falls back to the raw URL if it can't be parsed.
+ * existing query. Returns null (link hidden) for anything that isn't an
+ * absolute https: URL (audit APPR-2) — the previous fallthrough let a
+ * `javascript:` URL sail straight into an <a href>.
  */
-export function checkoutUrlForEvent(checkoutUrl: string, naddr: string): string {
-  try {
-    const u = new URL(checkoutUrl);
-    u.searchParams.set("event", naddr);
-    return u.toString();
-  } catch {
-    // Relative or malformed — append manually.
-    const sep = checkoutUrl.includes("?") ? "&" : "?";
-    return `${checkoutUrl}${sep}event=${encodeURIComponent(naddr)}`;
-  }
+export function checkoutUrlForEvent(checkoutUrl: string, naddr: string): string | null {
+  const safe = httpsUrl(checkoutUrl);
+  if (!safe) return null;
+  const u = new URL(safe);
+  u.searchParams.set("event", naddr);
+  return u.toString();
 }

@@ -64,9 +64,19 @@ async function allQueued(): Promise<QueuedItem[]> {
   return items;
 }
 
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+// Backoff between publish attempts within a live session. NDK's "not enough
+// relays received the event" is usually transient under concurrent publishes,
+// so a couple of quick retries land the event without waiting for the next page
+// load (spec §10.4 — the durable queue only flushes on boot/reconnect/interval).
+const PUBLISH_BACKOFFS_MS = [500, 2000];
+
 /**
  * Publish an event, falling back to the durable queue if it fails. Returns true
- * if it went out immediately, false if it was queued for later.
+ * if it went out immediately, false if it was queued for later. When online,
+ * retries up to 3 times with backoff (~500 ms, ~2 s) before persisting — a
+ * transiently-failed publish otherwise sits invisible until the next flush.
  */
 export async function publishOrQueue(
   event: VerifiedEvent,
@@ -74,11 +84,15 @@ export async function publishOrQueue(
 ): Promise<boolean> {
   const online = typeof navigator === "undefined" || navigator.onLine;
   if (online) {
-    try {
-      await publishSigned(event, relays);
-      return true;
-    } catch {
-      /* fall through to queue */
+    // Offline skips retries entirely (below); online gets 1 + PUBLISH_BACKOFFS_MS.length tries.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await publishSigned(event, relays);
+        return true;
+      } catch {
+        if (attempt >= PUBLISH_BACKOFFS_MS.length) break; // exhausted — fall through to queue
+        await sleep(PUBLISH_BACKOFFS_MS[attempt]);
+      }
     }
   }
   // Callers routinely pass a relays array straight off Svelte $state (e.g.
@@ -110,10 +124,22 @@ export async function flushQueue(): Promise<{ sent: number; remaining: number }>
   return { sent, remaining };
 }
 
+/** How often the in-session flusher re-attempts a non-empty queue. */
+const FLUSH_INTERVAL_MS = 60_000;
+
 /** Wire automatic flushing on reconnect. Call once at app boot. */
 export function installQueueFlusher(): void {
   if (typeof window === "undefined") return;
   window.addEventListener("online", () => {
     void flushQueue();
   });
+  // Besides "online", drain within a live session: publishOrQueue's retries
+  // cover transient failures, but a publish that fails all attempts (or lands
+  // offline) still needs a periodic sweep so it doesn't wait for the next boot.
+  // A getAll a minute is cheap; only flush when there's actually something queued.
+  setInterval(() => {
+    void allQueued().then((items) => {
+      if (items.length > 0) void flushQueue();
+    });
+  }, FLUSH_INTERVAL_MS);
 }

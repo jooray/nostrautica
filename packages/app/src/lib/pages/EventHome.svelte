@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -67,6 +67,41 @@
 
   const installHintId = "event-page";
 
+  // Pending-approval re-scan (audit UX-9): a join request sent from another
+  // device (or this page, then left open) used to show "Pending" until a full
+  // reload. While the marker says we're waiting, re-scan grants on a slow
+  // interval so an approval lands on its own; cleared on destroy/approval.
+  let grantPoll: ReturnType<typeof setInterval> | undefined;
+  onDestroy(() => clearInterval(grantPoll));
+
+  function startGrantPolling() {
+    if (grantPoll) return;
+    grantPoll = setInterval(() => {
+      void (async () => {
+        if (!ctx || !session.signer) return;
+        await receiveGrants(session.signer).catch(() => {});
+        const nowApproved = await isApproved(ctx.coordinate).catch(() => false);
+        if (!nowApproved) return;
+        clearInterval(grantPoll);
+        grantPoll = undefined;
+        approved = true;
+        requestPending = false;
+        clearJoinSent(ctx.coordinate);
+        // The ECK just landed: the public pass ran keyless — re-fetch so
+        // members-only page sections and posts decrypt, and warm the tabs.
+        const [pageRes, postsRes] = await Promise.allSettled([
+          fetchEventPage(ctx),
+          fetchEventPosts(ctx),
+        ]);
+        if (pageRes.status === "fulfilled") page = pageRes.value;
+        if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
+        prefetchAttendeesTab(ctx, session.signer);
+        prefetchEventContent(ctx, session.signer);
+        void readinessStore.load(ctx, session.signer);
+      })();
+    }, 20_000);
+  }
+
   onMount(async () => {
     try {
       await connectNdk();
@@ -105,7 +140,11 @@
       approved = await isApproved(ctx.coordinate);
       // The join-sent marker outlives a reload; approval supersedes it (P2).
       if (approved) clearJoinSent(ctx.coordinate);
-      else requestPending = joinSentAt(ctx.coordinate) !== undefined;
+      else {
+        requestPending = joinSentAt(ctx.coordinate) !== undefined;
+        // Keep watching for the approval while the page stays open (UX-9).
+        if (requestPending) startGrantPolling();
+      }
       const keys = await loadEventKeys(ctx.coordinate);
       organizer = keys?.role === "organizer";
       roleResolved = true;

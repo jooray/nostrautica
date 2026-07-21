@@ -9,7 +9,8 @@
 import { sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
-import { uploadAndMirror } from "$lib/blossom/client.js";
+import { uploadAndMirror, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
+import { fetchUserBlossomServers } from "./submit.js";
 
 /** Two deterministic gradient hues derived from a seed string. */
 function hues(seed: string): [number, number] {
@@ -50,6 +51,54 @@ export function defaultEventIcon(seed: string, label = ""): string {
 </svg>`);
 }
 
+/** Avatars upload as a 512px square JPEG (audit APPR-3). */
+export const AVATAR_SIZE = 512;
+
+/**
+ * Square-crop + scale a profile photo for upload (audit APPR-3). A camera
+ * original is megabytes at full resolution and carries EXIF metadata (incl.
+ * GPS); every roster row would then download the full file. The canvas
+ * decode/re-encode strips EXIF BY CONSTRUCTION (canvas pixels have no metadata)
+ * and bounds the file to a 512px JPEG.
+ *
+ * FAIL CLOSED, unlike {@link cropScaleImage}'s upload-as-is fallback: an
+ * undecodable or unprocessable image is a readable ERROR, never a silent upload
+ * of the raw original — the raw file is exactly what this exists to keep off
+ * Blossom.
+ */
+export async function prepareAvatarImage(file: Blob): Promise<Blob> {
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error("That photo couldn't be read — please choose a different one.");
+  }
+  try {
+    // Cover-crop math (same construction as cropScaleImage): center-crop the
+    // largest square the source covers, scaled to AVATAR_SIZE.
+    const scale = Math.max(AVATAR_SIZE / bitmap.width, AVATAR_SIZE / bitmap.height);
+    const sw = AVATAR_SIZE / scale;
+    const sh = AVATAR_SIZE / scale;
+    const sx = (bitmap.width - sw) / 2;
+    const sy = (bitmap.height - sh) / 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = AVATAR_SIZE;
+    canvas.height = AVATAR_SIZE;
+    const c2d = canvas.getContext("2d");
+    if (!c2d) throw new Error("no 2d canvas context");
+    c2d.drawImage(bitmap, sx, sy, sw, sh, 0, 0, AVATAR_SIZE, AVATAR_SIZE);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.9),
+    );
+    if (!blob) throw new Error("canvas encode failed");
+    return blob;
+  } catch {
+    throw new Error("That photo couldn't be processed — please choose a different one.");
+  } finally {
+    bitmap?.close?.();
+  }
+}
+
 /**
  * Center-crop ("cover") + scale an image to an exact target size on a canvas.
  * The create form crops uploads to the aspect ratio the pages actually render
@@ -88,14 +137,24 @@ export async function cropScaleImage(
   }
 }
 
-/** Upload a public (unencrypted) image to Blossom; returns the primary URL. */
+/**
+ * Upload a public (unencrypted) image to Blossom; returns the primary URL.
+ * Unlike encrypted media (submit.ts resolveBlossomServers), this honors the
+ * user's own kind 10063 server list — ordinary images are exactly what those
+ * general-purpose pins are for, and don't hit the ciphertext content-type
+ * rejections encrypted uploads do.
+ */
 export async function uploadPublicImage(
   signer: AppSigner,
   blob: Blob,
   eventBlossom: string[] = [],
 ): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  const servers = unionRelays(eventBlossom, DEFAULT_BLOSSOM_SERVERS);
+  const userServers = await fetchUserBlossomServers(signer);
+  // https: only (audit APPR-8) — backstop for event-config/10063 URLs.
+  const servers = unionRelays(eventBlossom, userServers, DEFAULT_BLOSSOM_SERVERS).filter(
+    isAcceptedBlossomUrl,
+  );
   const { urls } = await uploadAndMirror(signer, servers, bytes, blob.type || "image/jpeg");
   return urls[0]!;
 }

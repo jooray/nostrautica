@@ -30,6 +30,7 @@
     cachedCoordinators,
     pricingLabel,
     checkoutUrlForEvent,
+    httpsUrl,
     type DiscoveredCoordinator,
   } from "$lib/events/coordinators.js";
   import { fetchPendingTalks, cachedPendingTalks, type PendingTalk } from "$lib/events/talks.js";
@@ -82,18 +83,33 @@
   let copiedNpub = $state(false);
   let coordLastSeen = $state<number | undefined>(undefined);
   let destroyed = false;
-  onDestroy(() => (destroyed = true));
+  // Join-queue auto-refresh (audit UX-9): a request that arrives while Admin is
+  // open used to need a manual Refresh. Poll slowly; cleared on destroy.
+  let queuePoll: ReturnType<typeof setInterval> | undefined;
+  onDestroy(() => {
+    destroyed = true;
+    clearInterval(queuePoll);
+  });
 
   // Approved = anyone in the roster OR approved just now. Reading the roster makes
   // approval persist across refreshes (it's not just session state).
   function isApprovedNow(pubkey: string): boolean {
     return approvedSet.has(pubkey) || rosterApproved.has(pubkey);
   }
+  // Pubkeys revoked this session. A just-revoked attendee keeps their card in the
+  // Approved section (rendering "Revoked ✓"), so the outcome stays visible even
+  // once a background refresh drops them from the roster — otherwise the card
+  // would silently flip into the pending queue as a fresh, re-approvable request
+  // (their join 21601 is still on the relay), which is both confusing and racy
+  // (caching verification 2026-07-17: the e2e revoke assertion never caught the
+  // transient "Revoked ✓" because the refresh moved the card first). Excluded
+  // from pendingRequests for the same reason.
+  let revokedSet = $state<Set<string>>(new Set());
   const pendingRequests = $derived(
-    pending.filter((p) => !isApprovedNow(p.attendeePubkey)),
+    pending.filter((p) => !isApprovedNow(p.attendeePubkey) && !revokedSet.has(p.attendeePubkey)),
   );
   const approvedRequests = $derived(
-    pending.filter((p) => isApprovedNow(p.attendeePubkey)),
+    pending.filter((p) => isApprovedNow(p.attendeePubkey) || revokedSet.has(p.attendeePubkey)),
   );
 
   // The organizer is a participant of their own event only if they've enrolled
@@ -126,6 +142,16 @@
       enrollError = e instanceof Error ? e.message : String(e);
     } finally {
       enrollingSelf = false;
+    }
+  }
+
+  // Refresh-button/interval entry point (audit UX-27): a rejected refresh must
+  // surface on the shared error card, never as an unhandled rejection.
+  async function refreshGuarded() {
+    try {
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -224,13 +250,20 @@
       // Then run all refreshes in parallel — they're independent — updating each
       // slice as it lands. The relay-only scan semantics are untouched.
       refreshing = true;
-      await Promise.allSettled([
-        refresh(),
-        loadUpdates(),
+      // Liveness + coordinator discovery paint no user-facing strap slice, so let
+      // them finish silently in the background (§2.11): clear the "Refreshing…"
+      // affordance as soon as the user-facing slices (pending + updates) settle,
+      // rather than lingering for the slowest background member. network-settled
+      // (finally) still waits for everything, so perf marks stay meaningful.
+      const background = Promise.allSettled([
         refreshLiveness(),
         !ctx.config.coordinator ? loadCoordinators() : Promise.resolve(),
       ]);
+      await Promise.allSettled([refresh(), loadUpdates()]);
       refreshing = false;
+      await background;
+      // Keep the join queue fresh while the page stays open (UX-9).
+      queuePoll = setInterval(() => void refreshGuarded(), 30_000);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -342,6 +375,8 @@
       .sort((a, b) => b.at - a.at);
     return withBilling[0]?.billing;
   });
+  // checkoutUrlForEvent returns null for non-https URLs (audit APPR-2) — the
+  // link is simply hidden then.
   const billingCheckoutUrl = $derived(
     billing?.checkout_url ? checkoutUrlForEvent(billing.checkout_url, naddr) : undefined,
   );
@@ -546,12 +581,23 @@
   }
 
   async function reprocess(req: PendingRequest) {
-    if (!ctx || !session.signer) return;
+    if (!ctx || !session.signer || !keys) return;
     try {
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "reprocess", { pubkey: req.attendeePubkey });
       } else {
-        await approveAttendee(session.signer, ctx, req); // re-publishes the entry
+        // Re-process exists to pull in a submission that landed AFTER approval —
+        // typically a text intro the attendee typed once they were in. approveAttendee
+        // threads req.introText into the 31603 entry, so it must act on a FRESH
+        // fetchPending: the in-memory `req` predates that submission (this admin
+        // page hasn't re-read the E_inbox since it loaded), and republishing the
+        // stale req drops the new intro entirely (caching verification 2026-07-17:
+        // this is why the e2e directory-loop marker never reached the attendee).
+        // Fetch-fresh-before-publish, same as the other read-modify-write paths.
+        const fresh = await fetchPending(ctx, keys);
+        const latest = fresh.find((r) => r.attendeePubkey === req.attendeePubkey) ?? req;
+        pending = fresh; // keep the rendered queue in sync with what we just re-read
+        await approveAttendee(session.signer, ctx, latest); // re-publishes the entry
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -559,6 +605,9 @@
   }
 
   let approvingAll = $state(false);
+  // Per-request busy guard (audit UX-27): a double-tap must not fire two
+  // approvals (two roster republishes racing latest-wins).
+  let approving = $state<Set<string>>(new Set());
   async function approveAll() {
     approvingAll = true;
     try {
@@ -570,6 +619,8 @@
 
   async function approve(req: PendingRequest) {
     if (!ctx || !session.signer) return;
+    if (approving.has(req.attendeePubkey)) return;
+    approving = new Set([...approving, req.attendeePubkey]);
     try {
       if (ctx.config.coordinator) {
         // Route through the coordinator so IT grants + publishes the directory
@@ -581,10 +632,11 @@
       approvedSet = new Set([...approvedSet, req.attendeePubkey]);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      approving = new Set([...approving].filter((p) => p !== req.attendeePubkey));
     }
   }
 
-  let revokedSet = $state<Set<string>>(new Set());
   // Inline, screenshotable revoke confirmation (no window.confirm) — the attendee
   // card swaps to the consequence copy + Revoke/Keep while this holds a pubkey.
   let confirmingRevoke = $state<string | null>(null);
@@ -837,9 +889,11 @@
   <p class="muted">{t("admin.loading")}</p>
 {:else}
   {#if refreshing}
-    <!-- Subtle refresh affordance over the cached paint (§2.11) — not a spinner. -->
+    <!-- Subtle refresh affordance over the cached paint (§2.11) — not a spinner.
+         "Refreshing…", not admin.loading ("Loading pending requests…"): the page
+         is already painted, so the loading copy would be wrong over it. -->
     <p class="muted" role="status" aria-live="polite" style="font-size:0.8rem;margin:0 0 0.35rem">
-      {t("admin.loading")}
+      {t("admin.refreshing")}
     </p>
   {/if}
   <div class="row" style="justify-content:space-between">
@@ -850,7 +904,7 @@
     >
       {tp("admin.pending", pendingRequests.length)}
     </button>
-    <button class="btn inline" onclick={refresh}>{t("admin.refresh")}</button>
+    <button class="btn inline" onclick={() => void refreshGuarded()}>{t("admin.refresh")}</button>
   </div>
 
   <!-- Operations first (§9): urgent join requests render above everything else,
@@ -939,7 +993,11 @@
           </div>
         {/if}
         {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
-        <button class="btn primary" onclick={() => approve(req)}>{t("admin.requests.approve")}</button>
+        <button
+          class="btn primary"
+          onclick={() => approve(req)}
+          disabled={approving.has(req.attendeePubkey)}
+        >{t("admin.requests.approve")}</button>
       </div>
     {/each}
   </div>
@@ -1376,8 +1434,11 @@
                 </div>
               </div>
               <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
-                {#if c.announce.terms_url}
-                  <a class="btn inline" href={c.announce.terms_url} target="_blank" rel="noopener noreferrer">{t("admin.coordinator.terms")}</a>
+                <!-- terms_url comes from a SELF-PUBLISHED announcement: render
+                     only a parseable https: URL (audit APPR-1) — announcements
+                     already on relays predate the schema's https validation. -->
+                {#if httpsUrl(c.announce.terms_url)}
+                  <a class="btn inline" href={httpsUrl(c.announce.terms_url)} target="_blank" rel="noopener noreferrer">{t("admin.coordinator.terms")}</a>
                 {/if}
                 <button class="btn inline primary" onclick={() => attachPubkey(c.pubkey)} disabled={attaching}>
                   {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attachThis")}

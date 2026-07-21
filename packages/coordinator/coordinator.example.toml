@@ -8,7 +8,11 @@
 ncryptsec_file = "coordinator.ncryptsec"
 
 [relays]
-default = ["wss://relay.primal.net", "wss://relay.damus.io"]
+# relay.damus.io dropped (2026-07-20): heavily rate-limited, was causing
+# key-package discovery failures. Whitenoise's own relays added so its
+# clients' 30443 key packages are found even when an event's own relay list
+# doesn't include them (fallback tier — see key-package-discovery.ts).
+default = ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"]
 
 [providers.venice]
 api_key_env = "VENICE_API_KEY"
@@ -74,3 +78,15 @@ model = "free"                    # free | per_user | per_event | negotiated | e
 # checkout_url = "https://…/checkout"   # the app appends ?event=<naddr>
 # currency = "sats"
 # free_organizers = ["npub1…"]    # always-free (community). PRIVATE — never announced.
+
+# ── Daemon-side security policy ───────────────────────────────────────────────
+# Installation is protocol-level (any E_id can gift-wrap a 21603 grant to this
+# daemon), so unsolicited installs are bounded here.
+[security]
+max_events = 50                   # reject installs beyond this many simultaneous events
+# allowed_eid_pubkeys = ["<hex>"]  # when non-empty, ONLY install events whose
+                                  # E_id (hex pubkey) is listed (private coordinator)
+# allow_unverified_model_privacy = true
+                                  # escape hatch (default false = fail CLOSED):
+                                  # boot even when GET /models can't be fetched
+                                  # while a role has require_private set

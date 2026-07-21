@@ -28,7 +28,7 @@ import {
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { saveEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 import { generateInvites, approveAttendee } from "./organizer.js";
@@ -86,7 +86,12 @@ export async function createEvent(
   const eck = generateEck();
   const d = slug(input.title);
   const coordinate = makeCoordinate(eidPubkey, d);
-  const relays = input.relays?.length ? input.relays : DEFAULT_RELAYS;
+  const baseRelays = input.relays?.length ? input.relays : DEFAULT_RELAYS;
+  // Marmot chat groups route messages only to the relays baked into the group at
+  // creation (§ MLS routing component, not re-derived from config later), so a
+  // chat-enabled event must include the Whitenoise client's relays up front or
+  // Whitenoise attendees never see the group's traffic (prod report 2026-07-20).
+  const relays = input.chat?.length ? unionRelays(baseRelays, WHITENOISE_RELAYS) : baseRelays;
 
   // 1. kind 0 for E_id — the event's public profile (name/logo).
   const kind0 = finalizeEvent(

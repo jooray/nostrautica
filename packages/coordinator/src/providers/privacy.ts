@@ -9,6 +9,9 @@
  *     the reference deployment's non-private match tier — spec §16.4).
  *   - model missing from the catalogue           → warning (ids are volatile,
  *     spec §15; embedding models may be listed under another type).
+ *   - catalogue UNFETCHABLE + any role requiring private → hard error (fail
+ *     closed, audit COORD-20) unless the operator explicitly sets
+ *     `security.allow_unverified_model_privacy = true`.
  *
  * Extracted from main.ts so it can be unit-tested with a mock provider without
  * booting the daemon.
@@ -23,11 +26,25 @@ export async function verifyModelPrivacy(
   llm: LlmProvider,
   config: CoordinatorConfig,
   logger: { warn: (m: string) => void } = console,
+  opts: { allowUnverified?: boolean } = {},
 ): Promise<void> {
   let all;
   try {
     all = await llm.models();
   } catch (err) {
+    // Fail CLOSED (audit COORD-20): when a role requires a private-tier model we
+    // cannot verify without the catalogue, so booting would risk sending attendee
+    // data to a non-private model. Only an explicit config escape hatch overrides.
+    const gated = ROLES.filter(
+      (role) => config.models[role].provider === "venice" && roleRequiresPrivate(config, role),
+    );
+    if (gated.length > 0 && !opts.allowUnverified) {
+      throw new Error(
+        `could not verify model privacy (GET /models failed: ${err}) — role(s) ` +
+          `${gated.map((r) => `models.${r}`).join(", ")} require private-tier models. ` +
+          `Fix connectivity, or explicitly boot unverified with security.allow_unverified_model_privacy = true`,
+      );
+    }
     logger.warn(`[coordinator] could not verify model privacy (GET /models failed): ${err}`);
     return;
   }

@@ -6,17 +6,40 @@
  * ffmpeg is assumed present and verified at startup (spec §9).
  */
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile, readFile, rm, readdir } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** Hard limits for attacker-controlled media (audit C3). */
 export const FFMPEG_TIMEOUT_MS = 120_000; // wall-clock kill for a hung/adversarial input
 export const MAX_INPUT_DURATION_SEC = 2 * 60 * 60; // cap decoded duration (codec-bomb guard)
+/** Cap on accumulated ffmpeg stderr (audit COORD-23): keep only the tail. */
+export const MAX_STDERR_BYTES = 64 * 1024;
+/** Stale temp-dir sweep: dirs older than this are removed at startup (COORD-23). */
+export const STALE_TEMP_DIR_AGE_MS = 24 * 60 * 60 * 1000;
 
 /** Verify ffmpeg is available (called at startup). */
 export async function verifyFfmpeg(): Promise<void> {
   await run("ffmpeg", ["-version"]);
+}
+
+/**
+ * Remove `nostrautica-*` temp dirs older than `maxAgeMs` (audit COORD-23): a
+ * crash between mkdtemp and the finally-rm leaks the dir; sweep them at startup.
+ * Returns the number of dirs removed.
+ */
+export async function sweepStaleTempDirs(maxAgeMs = STALE_TEMP_DIR_AGE_MS, now = Date.now()): Promise<number> {
+  let removed = 0;
+  const entries = await readdir(tmpdir(), { withFileTypes: true }).catch(() => []);
+  for (const e of entries) {
+    if (!e.isDirectory() || !e.name.startsWith("nostrautica-")) continue;
+    const path = join(tmpdir(), e.name);
+    const st = await stat(path).catch(() => undefined);
+    if (!st || now - st.mtimeMs < maxAgeMs) continue;
+    await rm(path, { recursive: true, force: true }).catch(() => {});
+    removed++;
+  }
+  return removed;
 }
 
 /**
@@ -38,6 +61,7 @@ function run(
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     let outLen = 0;
+    let errLen = 0;
     let settled = false;
     const kill = () => {
       try {
@@ -69,7 +93,18 @@ function run(
       }
       out.push(d);
     });
-    child.stderr.on("data", (d) => err.push(d));
+    // stderr is diagnostics only (audit COORD-23): an endlessly-chatty ffmpeg on
+    // adversarial input must not grow memory — keep only the LAST ~64 KB.
+    child.stderr.on("data", (d: Buffer) => {
+      err.push(d);
+      errLen += d.length;
+      if (errLen > MAX_STDERR_BYTES) {
+        const merged = Buffer.concat(err).subarray(-MAX_STDERR_BYTES);
+        err.length = 0;
+        err.push(merged);
+        errLen = merged.length;
+      }
+    });
     child.on("error", (e) => {
       if (settled) return;
       settled = true;

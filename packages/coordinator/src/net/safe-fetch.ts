@@ -7,6 +7,11 @@
  *   - allows only `https:` URLs (and, when configured, only Blossom origins);
  *   - resolves every hostname and rejects loopback / private / link-local /
  *     multicast / reserved addresses — re-checked on each manual redirect;
+ *   - pins the connection to the ALREADY-VALIDATED addresses via a custom
+ *     dispatcher lookup (audit COORD-6): fetch() never re-resolves the name,
+ *     so a DNS-rebinding race between the policy check and the connect can't
+ *     swap in a private address (SNI/Host stay correct — only the lookup is
+ *     overridden);
  *   - disables automatic redirects and follows at most `maxRedirects` manually;
  *   - enforces a wall-clock timeout and a hard streamed-byte cap.
  *
@@ -15,6 +20,7 @@
  */
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { Agent, type Dispatcher } from "undici";
 
 export interface SafeFetchOptions {
   /** Exact allowed origins (e.g. "https://blossom.example"). Empty = any public https host. */
@@ -23,6 +29,8 @@ export interface SafeFetchOptions {
   maxBytes: number;
   timeoutMs?: number;
   maxRedirects?: number;
+  /** Injectable DNS resolver (tests); defaults to node:dns lookup. */
+  lookupFn?: typeof lookup;
 }
 
 export class SafeFetchError extends Error {
@@ -66,21 +74,48 @@ function isBlockedV4(ip: string): boolean {
   return false;
 }
 
+/** Expand an IPv6 address (with `::` compression) to its 8 hextets; null if unparseable. */
+function expandV6(ip: string): number[] | null {
+  if (ip.includes(".")) return null; // embedded v4 handled by the caller
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const head = (halves[0] ?? "").split(":").filter((s) => s !== "");
+  const tail = halves.length === 2 ? (halves[1] ?? "").split(":").filter((s) => s !== "") : [];
+  if (head.length + tail.length > 8) return null;
+  const parts =
+    halves.length === 2
+      ? [...head, ...Array(8 - head.length - tail.length).fill("0"), ...tail]
+      : head;
+  if (parts.length !== 8) return null;
+  const out = parts.map((h) => parseInt(h, 16));
+  return out.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? out : null;
+}
+
 function isBlockedV6(ip: string): boolean {
   if (ip === "::" || ip === "::1") return true; // unspecified + loopback
   // IPv4-mapped (::ffff:a.b.c.d) — evaluate the embedded v4.
   const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (mapped) return isBlockedV4(mapped[1]!);
-  const first = ip.split(":")[0] ?? "";
-  const head = parseInt(first || "0", 16);
-  if ((head & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
-  if ((head & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
-  if ((head & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  const h = expandV6(ip);
+  if (!h) return true; // unparseable → block
+  if ((h[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  if ((h[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((h[0]! & 0xff00) === 0xff00) return true; // ff00::/8 multicast
+  // Transition/translation mechanisms that can smuggle a blocked v4 (COORD-6):
+  if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0x0000) return true; // 64:ff9b::/96 NAT64
+  if (h[0] === 0x2002) return true; // 2002::/16 6to4
+  if (h[0] === 0x2001 && h[1] === 0x0000) return true; // 2001::/32 Teredo
   return false;
 }
 
+interface ValidatedTarget {
+  url: URL;
+  /** The already policy-validated addresses the connection is pinned to (COORD-6). */
+  addresses: { address: string; family: 4 | 6 }[];
+}
+
 /** Validate a single URL against scheme, origin allowlist, and resolved-IP policy. */
-async function validateTarget(raw: string, opts: SafeFetchOptions): Promise<URL> {
+async function validateTarget(raw: string, opts: SafeFetchOptions): Promise<ValidatedTarget> {
   let url: URL;
   try {
     url = new URL(raw);
@@ -98,15 +133,20 @@ async function validateTarget(raw: string, opts: SafeFetchOptions): Promise<URL>
   // Resolve the hostname; reject if ANY resolved address is non-public. If the host
   // is already an IP literal, isIP short-circuits DNS.
   const host = url.hostname.replace(/^\[|\]$/g, "");
-  let addresses: { address: string }[];
+  let addresses: { address: string; family: 4 | 6 }[];
   if (isIP(host)) {
-    addresses = [{ address: host }];
+    addresses = [{ address: host, family: isIP(host) as 4 | 6 }];
   } else {
+    const resolve = opts.lookupFn ?? lookup;
+    let resolved: { address: string; family: number }[];
     try {
-      addresses = await lookup(host, { all: true });
+      resolved = await resolve(host, { all: true });
     } catch {
       throw new SafeFetchError(`DNS resolution failed`, true);
     }
+    addresses = resolved
+      .filter((a) => isIP(a.address) !== 0)
+      .map((a) => ({ address: a.address, family: isIP(a.address) as 4 | 6 }));
   }
   if (addresses.length === 0) throw new SafeFetchError(`no addresses resolved`, true);
   for (const { address } of addresses) {
@@ -114,7 +154,34 @@ async function validateTarget(raw: string, opts: SafeFetchOptions): Promise<URL>
       throw new SafeFetchError(`resolved to a blocked (private/loopback/reserved) address`, false);
     }
   }
-  return url;
+  return { url, addresses };
+}
+
+/**
+ * A dns.lookup-compatible callback that returns ONLY the given (already
+ * policy-validated) addresses (audit COORD-6). Used as the dispatcher's lookup
+ * so the actual connection can never resolve the hostname to anything else —
+ * DNS rebinding between the policy check and the connect is impossible by
+ * construction. SNI and the Host header still use the real hostname.
+ */
+export function pinnedLookup(addresses: { address: string; family: 4 | 6 }[]) {
+  return (
+    _hostname: string,
+    options: { all?: boolean },
+    callback: (...args: any[]) => void,
+  ): void => {
+    if (options.all) {
+      callback(null, addresses);
+    } else {
+      const first = addresses[0]!;
+      callback(null, first.address, first.family);
+    }
+  };
+}
+
+/** A dispatcher that connects only to the validated addresses (COORD-6). */
+export function pinnedDispatcher(addresses: { address: string; family: 4 | 6 }[]): Dispatcher {
+  return new Agent({ connect: { lookup: pinnedLookup(addresses) } });
 }
 
 /**
@@ -128,20 +195,33 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
   let current = raw;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
-    const url = await validateTarget(current, opts);
+    const { url, addresses } = await validateTarget(current, opts);
+    // Pin this hop's connection to the validated addresses (COORD-6): fetch()
+    // would otherwise re-resolve the hostname and lose the race against a
+    // rebinding attacker.
+    const dispatcher = pinnedDispatcher(addresses);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res: Response;
     try {
-      res = await fetch(url, { redirect: "manual", signal: controller.signal });
+      res = await fetch(url, {
+        redirect: "manual",
+        signal: controller.signal,
+        // The installed undici@7 Dispatcher is structurally compatible with the
+        // global fetch's dispatcher option but typed against a different
+        // undici-types version — cast through unknown.
+        dispatcher: dispatcher as unknown as NonNullable<RequestInit["dispatcher"]>,
+      });
     } catch (e) {
       clearTimeout(timer);
+      await dispatcher.close().catch(() => {});
       throw new SafeFetchError(`network error: ${e instanceof Error ? e.message : String(e)}`, true);
     }
 
     // Manual redirect handling: re-validate the next hop.
     if (res.status >= 300 && res.status < 400) {
       clearTimeout(timer);
+      await dispatcher.close().catch(() => {});
       const loc = res.headers.get("location");
       if (!loc) throw new SafeFetchError(`redirect without Location`, false);
       if (hop === maxRedirects) throw new SafeFetchError(`too many redirects`, false);
@@ -150,6 +230,7 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
     }
     if (!res.ok) {
       clearTimeout(timer);
+      await dispatcher.close().catch(() => {});
       throw new SafeFetchError(`HTTP ${res.status}`, res.status >= 500 || res.status === 429);
     }
 
@@ -157,6 +238,7 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
     const declared = Number(res.headers.get("content-length") ?? "");
     if (Number.isFinite(declared) && declared > opts.maxBytes) {
       clearTimeout(timer);
+      await dispatcher.close().catch(() => {});
       throw new SafeFetchError(`declared size ${declared} exceeds cap ${opts.maxBytes}`, false);
     }
 
@@ -164,6 +246,7 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
       return await readCapped(res, opts.maxBytes);
     } finally {
       clearTimeout(timer);
+      await dispatcher.close().catch(() => {});
     }
   }
   throw new SafeFetchError(`too many redirects`, false);

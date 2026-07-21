@@ -53,7 +53,7 @@
       list.push({ icon: "horn", label: t("nav.updates"), go: { name: "posts", naddr } });
     }
     if (session.loggedIn) {
-      list.push({ icon: "chat", label: t("nav.messages"), go: { name: "dm" } });
+      list.push({ icon: "chat", label: t("nav.chat"), go: { name: "dm" } });
     }
     if (eventShell.isOrganizer) {
       list.push({ icon: "sliders", label: t("more.manageEvent"), go: { name: "admin", naddr } });

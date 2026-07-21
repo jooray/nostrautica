@@ -22,12 +22,16 @@ import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 /** The correction body an attendee edits — `v`/`a` are filled in from the ctx. */
 export type CorrectionInput = Omit<ProfileCorrectionContent, "v" | "a">;
 
-/** Publish a 21608 profile correction to the event's E_inbox (gift-wrapped). */
+/**
+ * Publish a 21608 profile correction to the event's E_inbox (gift-wrapped).
+ * Returns true when it went out immediately, false when queued for the offline
+ * flush (audit UX-15) so the UI can say "will send when you're back online".
+ */
 export async function submitProfileCorrection(
   signer: AppSigner,
   ctx: EventContext,
   input: CorrectionInput,
-): Promise<void> {
+): Promise<boolean> {
   const content = profileCorrectionContentSchema.parse({
     v: 1,
     a: ctx.coordinate,
@@ -38,5 +42,5 @@ export async function submitProfileCorrection(
     content,
     tags: [["a", ctx.coordinate]],
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  return publishOrQueue(wrap as any, ctx.config.relays);
 }

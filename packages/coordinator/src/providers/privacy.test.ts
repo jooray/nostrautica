@@ -96,3 +96,43 @@ describe("verifyModelPrivacy (spec §16.4 startup check)", () => {
     await expect(verifyModelPrivacy(mockLlm(catalogue), cfg, { warn: vi.fn() })).resolves.toBeUndefined();
   });
 });
+
+describe("verifyModelPrivacy — catalogue unfetchable (audit COORD-20, fail closed)", () => {
+  const failingLlm: LlmProvider = {
+    id: "venice",
+    models: async () => {
+      throw new Error("connect ECONNREFUSED");
+    },
+    completeStructured: async () => ({ value: {} as any, usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 } }),
+  };
+
+  it("ABORTS startup when a require_private role can't be verified", async () => {
+    // summary has require_private (provider default true) → fail closed.
+    await expect(verifyModelPrivacy(failingLlm, makeConfig(), { warn: vi.fn() })).rejects.toThrow(
+      /could not verify model privacy/,
+    );
+  });
+
+  it("boots with a warning when NO role requires private", async () => {
+    const warn = vi.fn();
+    const cfg = configSchema.parse({
+      relays: { default: ["wss://r"] },
+      providers: { venice: { require_private: false } },
+      models: {
+        summary: { provider: "venice", model: "s" },
+        match: { provider: "venice", model: "m" },
+        embed: { provider: "venice", model: "e" },
+      },
+    });
+    await expect(verifyModelPrivacy(failingLlm, cfg, { warn })).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not verify model privacy"));
+  });
+
+  it("the explicit escape hatch (allowUnverified) boots with a warning", async () => {
+    const warn = vi.fn();
+    await expect(
+      verifyModelPrivacy(failingLlm, makeConfig(), { warn }, { allowUnverified: true }),
+    ).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not verify model privacy"));
+  });
+});

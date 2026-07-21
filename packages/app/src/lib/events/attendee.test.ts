@@ -6,12 +6,13 @@
  * key claiming to be that authority is rejected. Pure crypto, no relays.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import {
   makeCoordinate,
   bytesToHex,
   bytesToBase64,
   generateEck,
+  KIND_EVENT_CONFIG,
   KIND_KEY_GRANT,
   KIND_ORGANIZER_GRANT,
   type EventConfig,
@@ -21,7 +22,8 @@ import {
 } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches } from "./attendee.js";
+import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants } from "./attendee.js";
+import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 
 // Cache-path setup (CACHING-PLAN §2.3): mock the relay stream so fetchMatches
 // runs against a fixed 31605, and inject an in-memory keystore for the ECK.
@@ -30,22 +32,31 @@ import {
   __setKeystoreBackend,
   setActiveOwner,
   saveEventKeys,
+  loadEventKeys,
   type KeystoreBackend,
 } from "./keystore.js";
 import {
   __setPersistBackend,
   __resetPersistForTests,
   setActiveCacheOwner,
+  cacheGet,
+  cacheSet,
+  ANON,
   type CacheEntry,
   type PersistBackend,
 } from "$lib/cache/persist.js";
 
-const { streamEvents } = vi.hoisted(() => ({ streamEvents: vi.fn() }));
+const { streamEvents, fetchEvents, fetchEventsRelayOnly } = vi.hoisted(() => ({
+  streamEvents: vi.fn(),
+  fetchEvents: vi.fn(),
+  fetchEventsRelayOnly: vi.fn(),
+}));
 vi.mock("$lib/nostr/stream.js", () => ({ streamEvents }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents: vi.fn(), fetchEventsRelayOnly: vi.fn() }));
+vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly }));
 
 function memKeystore(): KeystoreBackend {
   const composite = new Map<string, { owner: string; coordinate: string } & Record<string, unknown>>();
+  const locked = new Map<string, { owner: string; coordinate: string; ciphertext: string }>();
   return {
     async get(o, c) {
       return composite.get(`${o} ${c}`) as never;
@@ -56,6 +67,9 @@ function memKeystore(): KeystoreBackend {
     async list(o) {
       return [...composite.values()].filter((r) => r.owner === o) as never;
     },
+    async delete(o, c) {
+      composite.delete(`${o} ${c}`);
+    },
     async legacyGet() {
       return undefined;
     },
@@ -63,6 +77,15 @@ function memKeystore(): KeystoreBackend {
       return [];
     },
     async legacyDelete() {},
+    async lockedPut(rec) {
+      locked.set(`${rec.owner} ${rec.coordinate}`, rec);
+    },
+    async lockedList(o) {
+      return [...locked.values()].filter((r) => r.owner === o);
+    },
+    async lockedDelete(o, c) {
+      locked.delete(`${o} ${c}`);
+    },
   };
 }
 
@@ -343,5 +366,119 @@ describe("fetchMatches cache write-through (§2.3)", () => {
     // Owner-scoped: another identity can't read this match list.
     setActiveCacheOwner("2".repeat(64));
     expect(cachedMatches(coordinate)).toBeUndefined();
+  });
+});
+
+describe("APPK-5 — grant memoization + config relay set", () => {
+  const eidSk = generateSecretKey();
+  const eid = getPublicKey(eidSk);
+  const coordSk = generateSecretKey();
+  const coordinator = getPublicKey(coordSk);
+  const inbox = getPublicKey(generateSecretKey());
+  const coordinate = makeCoordinate(eid, "cypherpunk-2026");
+  const attendee = LocalSigner.generate();
+  let attendeePk: string;
+
+  /** A real, validly-signed 31600 for the event (latest-wins candidate). */
+  function signedConfig(at = 1_700_000_000) {
+    return finalizeEvent(
+      {
+        kind: KIND_EVENT_CONFIG,
+        created_at: at,
+        tags: [
+          ["d", "cypherpunk-2026"],
+          ["inbox", inbox],
+          ["coordinator", coordinator],
+        ],
+        content: "",
+      },
+      eidSk,
+    );
+  }
+
+  /** A genuine 21602 key grant gift-wrapped to the attendee by the coordinator. */
+  async function keyGrantWrap(eckId = 1) {
+    const grant: KeyGrantContent = {
+      v: 1,
+      a: coordinate,
+      role: "attendee",
+      eck: [{ id: eckId, key: bytesToBase64(generateEck()) }],
+      granted_by: coordinator,
+    };
+    return signerWrap(new LocalSigner(coordSk), attendeePk, {
+      kind: KIND_KEY_GRANT,
+      content: grant,
+    });
+  }
+
+  const memoHas = (wrapId: string) =>
+    cacheGet<Record<string, true>>("grantwraps")?.data?.[wrapId] === true;
+
+  beforeEach(async () => {
+    attendeePk = await attendee.getPublicKey();
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    __setKeystoreBackend(memKeystore());
+    setActiveOwner(attendeePk);
+    setActiveCacheOwner(attendeePk);
+    fetchEvents.mockReset();
+    fetchEventsRelayOnly.mockReset();
+  });
+
+  it("config-unavailable grant is NOT memoized — it authenticates on a later scan", async () => {
+    const wrap = await keyGrantWrap();
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    fetchEvents.mockResolvedValue([]); // the 31600 is nowhere fetchable yet
+
+    // Scan 1: the grant can't be authenticated without the config…
+    expect(await receiveGrants(attendee)).toEqual([]);
+    expect(await loadEventKeys(coordinate)).toBeUndefined();
+    // …and crucially the wrap is NOT memoized, so the next scan retries it.
+    expect(memoHas(wrap.id)).toBe(false);
+
+    // The 31600 becomes fetchable; scan 2 authenticates the same wrap.
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([1]);
+    expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  it("a forged grant WITH a fetchable config is a definitive negative — memoized", async () => {
+    // Sealed by an arbitrary attacker key but claiming granted_by = coordinator.
+    const attacker = LocalSigner.generate();
+    const forged: KeyGrantContent = {
+      v: 1,
+      a: coordinate,
+      role: "attendee",
+      eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+      granted_by: coordinator,
+    };
+    const wrap = await signerWrap(attacker, attendeePk, {
+      kind: KIND_KEY_GRANT,
+      content: forged,
+    });
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+
+    expect(await receiveGrants(attendee)).toEqual([]);
+    expect(await loadEventKeys(coordinate)).toBeUndefined();
+    // Definitively rejected WITH a config in hand: never retried, never prompts
+    // the signer for this wrap again.
+    expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  it("fetches the config from the event's recorded relay hints ∪ defaults (custom-relay event)", async () => {
+    // The event lives on a custom relay; a prior context load recorded the hint.
+    cacheSet(`relayhints:${coordinate}`, ["wss://custom-relay.example"], 1, ANON);
+    const wrap = await keyGrantWrap(2);
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([2]);
+
+    // The config fetch targeted the event's own relay ∪ the app defaults.
+    const relays = fetchEvents.mock.calls[0]![1] as string[];
+    expect(relays).toEqual(expect.arrayContaining(["wss://custom-relay.example", ...DEFAULT_RELAYS]));
   });
 });

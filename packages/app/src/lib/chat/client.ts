@@ -13,7 +13,8 @@
  * written to the verified marmot-ts API surface; the final live pass verifies it.
  */
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
-import { getNostrGroupIdHex } from "@internet-privacy/marmot-ts/core";
+import type { GroupRumorHistory } from "@internet-privacy/marmot-ts/client";
+import { getNostrGroupIdHex, getPubkeyLeafNodes } from "@internet-privacy/marmot-ts/core";
 // `proposeRemoveUser` is not in marmot-ts's export map (UPSTREAM U7) — deep-import
 // it through the vendored package's `./lib/*` wildcard export.
 import { proposeRemoveUser } from "@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js";
@@ -21,13 +22,18 @@ import { KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { resolveChatIdentity, type ChatIdentity } from "./identity.js";
-import { makeMarmotStores, marmotKvBackend } from "./stores.js";
+import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+import { resolveChatIdentity, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
+import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
 import {
   buildChatSend,
   decodeApplicationMessage,
   roundTripChatRumor,
+  rumorToChatMessage,
+  CHAT_KIND_TEXT,
+  CHAT_KIND_REACTION,
+  CHAT_KIND_EDIT,
   type ChatMessage,
 } from "./messages.js";
 import { sendChatKeyAttestation } from "./attest.js";
@@ -50,7 +56,7 @@ export interface MarmotChatOptions {
  */
 export class MarmotChat {
   readonly identity: ChatIdentity;
-  private readonly client: MarmotClient<undefined, undefined>;
+  private readonly client: MarmotClient<GroupRumorHistory, undefined>;
   private readonly ctx: EventContext;
   private readonly accountSigner: AppSigner;
   private connection?: { unsubscribe(): void };
@@ -59,6 +65,8 @@ export class MarmotChat {
   /** Serializes the startup join and every welcome-driven join so two runs don't race the same welcome. */
   private joining?: Promise<void>;
   private readonly boundGroups = new Set<string>();
+  /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
+  private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
   onMessage?: ChatMessageHandler;
   onStateChange?: () => void;
 
@@ -67,8 +75,10 @@ export class MarmotChat {
     this.ctx = ctx;
     this.accountSigner = accountSigner;
     // Shared IndexedDB backend; namespacing is per chat identity.
-    const stores = makeMarmotStores(marmotKvBackend(), identity.pubkey);
-    this.client = new MarmotClient<undefined, undefined>({
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, identity.pubkey);
+    this.eventGroups = stores.eventGroupStore;
+    this.client = new MarmotClient<GroupRumorHistory, undefined>({
       // Structural EventSigner (identity.ts) — checked structurally by marmot.
       signer: identity.eventSigner as unknown as MarmotClientCtorSigner,
       accountProofSigner: identity.accountProofSigner,
@@ -77,6 +87,10 @@ export class MarmotChat {
       keyPackageStore: stores.keyPackageStore,
       inviteStore: stores.inviteStore,
       rewindStore: stores.rewindStore,
+      // Durable decrypted-message history so past + while-offline messages survive
+      // a navigation/reload (§5). marmot auto-saves every ingested/sent application
+      // message here; we replay it on bind (see replayHistory).
+      historyFactory: makeMarmotHistoryFactory(backend, identity.pubkey),
       clientId: identity.clientId,
     });
   }
@@ -98,6 +112,30 @@ export class MarmotChat {
    * attestation binding the chat key to the account. Idempotent.
    */
   async ensurePublished(): Promise<void> {
+    // Device-key accounts: publish (or refresh) the chat key's own kind-0 so
+    // other Marmot clients — and our chat UI, which resolves sender names by
+    // fetching this exact pubkey's kind-0 — can show a name/picture instead of
+    // a bare pubkey. Unlike everything below, this is NOT gated on "already
+    // joined": a kind-0 is a plain profile note, not MLS state, so republishing
+    // it here every open also self-heals identities that joined before this
+    // existed (prod report 2026-07-20 — chat showed raw pubkeys for everyone).
+    if (!this.identity.isAccountKey) {
+      await this.ensureChatKeyProfile();
+    }
+
+    // Already a joined member OF THIS EVENT's group (APPK-3)? Publish NOTHING
+    // else. Re-advertising a fresh kind-30443 key package, or (for device-key
+    // accounts) re-sending an op:"add" 21607 attestation, prompts the coordinator
+    // to add us AGAIN — a new MLS Add commit, a new epoch, a forked ratchet —
+    // after which our persisted group state is behind the group and the live 445
+    // stream is undecryptable. That is the "re-adds me every time I open chat, so
+    // I never see messages" bug. Persisted group state is authoritative; identity
+    // (re)publish is only for the not-yet-joined first run and the eviction-heal
+    // path (healIfEvicted, §5), both of which reach here with NO group FOR THIS
+    // EVENT — a group from ANOTHER event must not suppress this event's
+    // bootstrap.
+    const joined = await this.currentEventGroups();
+    if (joined.length > 0) return;
     await this.ensureRelayLists();
     // Publish (or confirm) the kind-30443 key package on the event relays under
     // this device's stable slot. This is what the coordinator's watcher adds.
@@ -124,6 +162,17 @@ export class MarmotChat {
         clientId: this.identity.clientId,
       });
     }
+  }
+
+  /** Publish the device chat key's own kind-0 (name/picture borrowed from the
+   *  real account's profile, marked "(chat)") — see {@link buildChatKeyProfile}. */
+  private async ensureChatKeyProfile(): Promise<void> {
+    const account = await fetchProfiles([this.identity.account]).catch(
+      () => new Map<string, ProfileMeta>(),
+    );
+    const meta = account.get(this.identity.account);
+    const ev = buildChatKeyProfile(this.identity, meta?.name, meta?.picture);
+    await publishSigned(ev as unknown as Parameters<typeof publishSigned>[0], this.relays).catch(() => {});
   }
 
   /** Publish the chat identity's 10050 (inbox) + 10002 (discovery) relay lists. */
@@ -161,11 +210,12 @@ export class MarmotChat {
    */
   private async ensureKeyPackageOnRelays(): Promise<void> {
     try {
-      // Only relevant while we're still waiting to be added: a client that already
-      // holds a joined group is a member and needs no key-package re-advertisement.
-      // Scoping to the not-yet-joined case also means we never republish a fresh
-      // key package for an existing member (which could prompt a redundant re-add).
-      const groups = await this.client.groups.loadAll().catch(() => []);
+      // Only relevant while we're still waiting to be added TO THIS EVENT
+      // (APPK-3): a client that already holds this event's group is a member
+      // and needs no key-package re-advertisement. Scoping to the not-yet-joined
+      // case also means we never republish a fresh key package for an existing
+      // member (which could prompt a redundant re-add).
+      const groups = await this.currentEventGroups();
       if (groups.length > 0) return;
       const found = await fetchEventsRelayOnly(
         {
@@ -234,7 +284,16 @@ export class MarmotChat {
     await this.joining;
   }
 
-  /** Join any welcome we hold the key package for. */
+  /**
+   * Join pending welcomes — but ONLY ones bound to this event's coordinator
+   * (audit APPK-2). A welcome's `rumor.pubkey` is the cryptographically
+   * verified seal author (NIP-59 rumor/seal author binding, enforced by the
+   * gift-wrap unwrap), so requiring it to equal the signed 31600's coordinator
+   * rejects the stray-group attack: anyone can fetch the public kind-30443 key
+   * package and gift-wrap a Welcome for THEIR OWN MLS group, but they cannot
+   * seal it as the event's coordinator. Non-matching invites stay unread — a
+   * different event's session (same identity) may own them (APPK-3).
+   */
   async joinPending(): Promise<void> {
     // Move any received gift wraps to "unread" (idempotent), then join every
     // *unread* welcome we still hold the key package for. We iterate `getUnread()`
@@ -244,11 +303,50 @@ export class MarmotChat {
     // silently skip exactly the late-arriving welcome this path exists to join.
     await this.client.invites.decryptGiftWraps().catch(() => []);
     const unread = await this.client.invites.getUnread().catch(() => []);
+    const coordinator = this.ctx.config.coordinator;
     for (const invite of unread) {
       try {
+        if (!coordinator || invite.pubkey !== coordinator) {
+          console.warn(
+            "marmot: ignoring welcome not sealed by the event's coordinator",
+            invite.id,
+          );
+          continue;
+        }
         const joinable = await this.client.canJoinInvite(invite);
         if (!joinable) continue;
-        await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
+        const { group } = await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
+        const joined = group as unknown as MarmotGroupLike;
+        // Defense in depth: the joined group's roster must actually contain the
+        // coordinator's leaf — a welcome that passed the seal check but yielded
+        // a coordinator-less group is purged locally (no self-remove publish:
+        // we owe a hostile group no traffic) and never recorded.
+        if (!groupHasMember(joined, coordinator)) {
+          console.warn(
+            "marmot: joined group lacks the event coordinator — purging it",
+            invite.id,
+          );
+          await this.client.groups.destroy(group.id).catch(() => {});
+          continue;
+        }
+        // APPK-3: bind this event's coordinate to the joined group so every
+        // later bind/send/membership check targets THIS event's room only.
+        // Never OVERWRITE an existing different binding: a welcome carries no
+        // event coordinate, so with two chat events on the SAME coordinator a
+        // late welcome for the other event is indistinguishable — clobbering
+        // would hijack a working room. (Protocol-level limitation; the first
+        // verified join wins. Both rooms are at least legitimate rooms of this
+        // user with this coordinator — never attacker groups, per the checks
+        // above.)
+        const joinedId = getNostrGroupIdHex(group.state);
+        const existing = await this.recordedEventGroupId();
+        if (existing && existing !== joinedId) {
+          console.warn(
+            "marmot: joined a second coordinator-verified group — keeping this event's existing binding",
+          );
+        } else if (!existing) {
+          await this.eventGroups.setItem(this.ctx.coordinate, joinedId).catch(() => {});
+        }
         await this.client.invites.markAsRead(invite.id).catch(() => {});
       } catch (err) {
         console.warn("marmot: welcome join failed", err);
@@ -256,9 +354,46 @@ export class MarmotChat {
     }
   }
 
-  /** Attach message/state listeners to every loaded group (idempotent per group). */
+  /** The nostr_group_id recorded for THIS event's verified join, if any. */
+  private async recordedEventGroupId(): Promise<string | undefined> {
+    return (await this.eventGroups.getItem(this.ctx.coordinate).catch(() => null)) ?? undefined;
+  }
+
+  /**
+   * The joined group(s) belonging to the CURRENT event — at most one in
+   * practice (audit APPK-3). Everything that binds, sends, replays, or checks
+   * membership goes through here instead of `groups.loadAll()` so attending
+   * two chat-enabled events never mixes messages or misdelivers a send.
+   *
+   * Migration: installs that joined before event scoping have no recorded
+   * binding. Exactly one joined group whose roster contains this event's
+   * coordinator is adopted (and the binding recorded); zero or ambiguous
+   * matches adopt nothing rather than guessing the wrong room.
+   */
+  private async currentEventGroups(): Promise<MarmotGroupLike[]> {
+    const all = (await this.client.groups.loadAll().catch(() => [])) as MarmotGroupLike[];
+    const recorded = await this.recordedEventGroupId();
+    if (recorded) return all.filter((g) => safeGroupIdHex(g) === recorded);
+    const coordinator = this.ctx.config.coordinator;
+    if (!coordinator) return [];
+    const verified = all.filter((g) => groupHasMember(g, coordinator));
+    if (verified.length === 1) {
+      const group = verified[0]!;
+      const id = safeGroupIdHex(group);
+      if (id) await this.eventGroups.setItem(this.ctx.coordinate, id).catch(() => {});
+      return [group];
+    }
+    if (verified.length > 1) {
+      console.warn(
+        "marmot: multiple coordinator-verified groups and no recorded binding — refusing to guess",
+      );
+    }
+    return [];
+  }
+
+  /** Attach message/state listeners to THIS EVENT's group(s) (idempotent). */
   private async bindAllGroups(): Promise<void> {
-    const groups = await this.client.groups.loadAll();
+    const groups = await this.currentEventGroups();
     for (const group of groups) {
       if (this.boundGroups.has(group.idStr)) continue;
       this.boundGroups.add(group.idStr);
@@ -271,19 +406,50 @@ export class MarmotChat {
         }
       });
       group.on("stateChanged", () => this.onStateChange?.());
+      // Paint the durable history for this group immediately, so a re-open shows
+      // the whole conversation (not just what arrives live after this mount). The
+      // live `connectAll` backfill then adds anything sent while we were away; both
+      // flow through onMessage, which de-dupes by rumor id (§5).
+      await this.replayHistory(group);
     }
   }
 
-  /** The nostr_group_id (hex) for the first joined group, for a 445 `#h` filter. */
+  /**
+   * Emit every persisted decrypted message for a group through `onMessage`. marmot
+   * auto-saves each ingested/sent application message into `group.history`
+   * (KeyValueRumorHistoryBackend, IndexedDB), so this is a local read — no relay,
+   * no re-decrypt of past ciphertext (which the forward-only ratchet couldn't do
+   * anyway). Best-effort: a missing/empty history just yields nothing.
+   */
+  private async replayHistory(group: {
+    history?: { queryRumors(filters: unknown): Promise<unknown[]> };
+  }): Promise<void> {
+    try {
+      const rumors = await group.history?.queryRumors({
+        kinds: [CHAT_KIND_TEXT, CHAT_KIND_REACTION, CHAT_KIND_EDIT],
+      });
+      for (const rumor of rumors ?? []) {
+        try {
+          this.onMessage?.(rumorToChatMessage(rumor as Parameters<typeof rumorToChatMessage>[0]));
+        } catch (err) {
+          console.warn("marmot: dropped malformed history rumor", err);
+        }
+      }
+    } catch (err) {
+      console.warn("marmot: history replay failed", err);
+    }
+  }
+
+  /** The nostr_group_id (hex) of THIS EVENT's group, for a 445 `#h` filter. */
   async nostrGroupId(): Promise<string | undefined> {
-    const groups = await this.client.groups.loadAll();
+    const groups = await this.currentEventGroups();
     const group = groups[0];
     return group ? getNostrGroupIdHex(group.state) : undefined;
   }
 
-  /** Send a kind-9 chat message to the joined group. Convergence-gated (§2). */
+  /** Send a kind-9 chat message to THIS EVENT's group. Convergence-gated (§2). */
   async send(text: string): Promise<void> {
-    const groups = await this.client.groups.loadAll();
+    const groups = await this.currentEventGroups();
     const group = groups[0];
     if (!group) throw new Error("no joined chat group yet");
     const { rumor, intent } = buildChatSend(this.identity.pubkey, text);
@@ -308,9 +474,10 @@ export class MarmotChat {
    * true when a heal republish was issued.
    */
   async healIfEvicted(): Promise<boolean> {
-    const groups = await this.client.groups.loadAll().catch(() => []);
+    const groups = await this.currentEventGroups();
     if (groups.length > 0) return false;
-    // No group state — (re)publish identity artifacts to trigger a fresh add.
+    // No group state FOR THIS EVENT (APPK-3) — (re)publish identity artifacts
+    // to trigger a fresh add.
     await this.ensurePublished();
     return true;
   }
@@ -354,3 +521,35 @@ export async function resolveRemoveUserProposals(
 // ── Structural helper types (avoid naming non-hoisted applesauce types) ───────
 type MarmotClientCtorSigner = ConstructorParameters<typeof MarmotClient>[0]["signer"];
 type MarmotClientCtorNetwork = ConstructorParameters<typeof MarmotClient>[0]["network"];
+
+/** The slice of a marmot `MarmotGroup` this wrapper uses (structural — tests fake it). */
+interface MarmotGroupLike {
+  id: Uint8Array;
+  idStr: string;
+  state: Parameters<typeof getNostrGroupIdHex>[0];
+  history?: { queryRumors(filters: unknown): Promise<unknown[]> };
+  on: (event: string, fn: (...args: any[]) => void) => void;
+}
+
+/** nostr_group_id hex for a group, or undefined when the state can't yield one. */
+function safeGroupIdHex(group: MarmotGroupLike): string | undefined {
+  try {
+    return getNostrGroupIdHex(group.state);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * True when `pubkey` holds at least one leaf in the group's MLS roster — the
+ * account-identity-proof binding (marmot-ts maps each credential to a nostr
+ * pubkey). Used for post-join coordinator verification (audit APPK-2) and the
+ * pre-event-scoping migration (audit APPK-3).
+ */
+function groupHasMember(group: MarmotGroupLike, pubkey: string): boolean {
+  try {
+    return getPubkeyLeafNodes(group.state, pubkey).length > 0;
+  } catch {
+    return false;
+  }
+}

@@ -7,10 +7,11 @@
  * → no double-spend, never dropped → no loss).
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
+import { getEncodedTokenV4 } from "@cashu/cashu-ts";
 import { Store } from "../store/db.js";
 import { CashuPayment } from "./cashu.js";
 
@@ -20,6 +21,8 @@ const SENT = [
   { id: "00a", amount: 4, secret: "s-sent-2", C: "c2" },
 ];
 const CHANGE = [{ id: "00a", amount: 1, secret: "s-change-1", C: "c3" }];
+/** CHANGE with a well-formed keyset id + C (hex) for token encoding round-trips. */
+const CHANGE_ENC = [{ id: "00a1b2c3d4e5f607", amount: 1, secret: "s-change-1", C: "ab".repeat(32) }];
 
 describe("H8 — Cashu journal durability", () => {
   const tmpDirs: string[] = [];
@@ -122,5 +125,67 @@ describe("H8 — Cashu journal durability", () => {
     // Read path transparently decrypts.
     expect(store.cashuJournalEntry("req-6")!.sent_proofs).toEqual(SENT);
     store.close();
+  });
+});
+
+describe("COORD-5 — Cashu request-failure + settle ordering", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpPath(name: string): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-cashu5-"));
+    tmpDirs.push(dir);
+    return join(dir, name);
+  }
+
+  it("fail() quarantines the in-flight reservation as ambiguous (proofs neither lost nor re-credited)", async () => {
+    const store = new Store(":memory:");
+    store.cashuReserve("req-f1", MINT, 8, SENT);
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: tmpPath("w.json"), journal: store });
+    (payment as any).pendingRequestId = "req-f1"; // a prepare() happened
+
+    await payment.fail();
+    expect((payment as any).pendingRequestId).toBeUndefined();
+    const entry = store.cashuJournalEntry("req-f1")!;
+    expect(entry.state).toBe("ambiguous");
+    expect(entry.sent_proofs).toEqual(SENT); // still recorded, never re-credited
+    store.close();
+  });
+
+  it("settle() journals the change proofs BEFORE redeeming them into the wallet", async () => {
+    const store = new Store(":memory:");
+    store.cashuReserve("req-s1", MINT, 8, SENT);
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: tmpPath("w.json"), journal: store });
+    (payment as any).pendingRequestId = "req-s1";
+    (payment as any).loaded = true; // skip the mint keyset fetch (offline test)
+
+    // A well-formed change token; the mint is unreachable, so wallet.receive
+    // throws — but the change must ALREADY be in the durable journal.
+    const changeToken = getEncodedTokenV4({ mint: MINT, proofs: CHANGE_ENC as any });
+    await payment.settle(new Headers({ "X-Cashu": changeToken }));
+
+    const entry = store.cashuJournalEntry("req-s1")!;
+    expect(entry.state).toBe("settled");
+    expect(entry.change_proofs).toEqual(CHANGE_ENC); // survived the receive crash
+    store.close();
+  });
+
+  it("settle() with no change closes the reservation", async () => {
+    const store = new Store(":memory:");
+    store.cashuReserve("req-s2", MINT, 8, SENT);
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: tmpPath("w.json"), journal: store });
+    (payment as any).pendingRequestId = "req-s2";
+    await payment.settle(new Headers());
+    expect(store.cashuJournalEntry("req-s2")!.state).toBe("settled");
+    store.close();
+  });
+
+  it("the wallet file is written owner-only (mode 0600)", () => {
+    const walletPath = tmpPath("wallet.json");
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath });
+    (payment as any).save({ mint: MINT, proofs: [] });
+    const mode = statSync(walletPath).mode & 0o777;
+    expect(mode).toBe(0o600);
   });
 });

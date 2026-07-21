@@ -5,6 +5,15 @@
  * present on login/settings/key-backup/DM routes (those routes carry no event
  * naddr; see `eventNaddr` in router/routes.ts). Switching events swaps the
  * element's content atomically, so a second event's CSS can never bleed in.
+ *
+ * SECURITY INVARIANT (audit APPR-5): themed routes are ORGANIZER-CONTROLLED CSS
+ * territory — the organizer's 31609 stylesheet is live there. CSS can exfiltrate
+ * page text (attribute-selector + background/font tricks), so NO KEY MATERIAL
+ * may ever be rendered on a themed route: no nsec, no E_id/E_inbox secrets, no
+ * ECK. (The pre-audit nsec-export UI was removed for exactly this reason; the
+ * invite links Admin renders are single-use invite codes, an accepted UX
+ * trade-off.) font-src 'self' in the CSP (app.html) is the load-bearing second
+ * layer that keeps remote-font exfiltration closed — do not loosen it.
  */
 import { loadEventContext, cachedEventContext } from "./event-context.js";
 import { parseCoordinate } from "@nostrautica/protocol";

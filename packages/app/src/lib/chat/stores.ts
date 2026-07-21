@@ -25,9 +25,15 @@
 import type { GenericKeyValueStore } from "@internet-privacy/marmot-ts/utils";
 import type { SerializedClientState } from "@internet-privacy/marmot-ts/core";
 import type { StoredKeyPackage, StoredInviteEntry } from "@internet-privacy/marmot-ts/client";
+import { makeKeyValueRumorHistoryFactory } from "@internet-privacy/marmot-ts/extra";
 
 /** Unit-separator between identity, namespace, and the user key (never in a hex/base64 key). */
 const SEP = "\x1f";
+
+/** The full-key prefix `namespacedStore` uses for everything under one chat identity. */
+export function identityPrefix(identity: string): string {
+  return `${identity}${SEP}`;
+}
 
 /** The four logical stores a `MarmotClient` needs (§5), namespaced per identity. */
 export const MARMOT_NAMESPACES = {
@@ -35,6 +41,10 @@ export const MARMOT_NAMESPACES = {
   keyPackage: "key-package",
   invites: "invites",
   rewind: "rewind",
+  // Decrypted-message history is further sub-namespaced per group (`history:<id>`).
+  history: "history",
+  // Event-coordinate → nostr_group_id binding (APPK-3 event scoping), one per event.
+  eventGroups: "event-groups",
 } as const;
 
 /**
@@ -92,6 +102,14 @@ export interface MarmotStores {
   keyPackageStore: GenericKeyValueStore<StoredKeyPackage>;
   inviteStore: GenericKeyValueStore<StoredInviteEntry>;
   rewindStore: GenericKeyValueStore<Uint8Array>;
+  /**
+   * Event-coordinate → nostr_group_id (hex) bindings recorded at join time
+   * (audit APPK-3). MLS group state is namespaced per IDENTITY, not per event,
+   * so without this mapping two chat-enabled events would share one pool of
+   * joined groups — and `loadAll()[0]` could route a message to the wrong
+   * event's room. Written only for coordinator-verified joins (audit APPK-2).
+   */
+  eventGroupStore: GenericKeyValueStore<string>;
 }
 
 /** Build the four typed marmot stores for one chat identity over a backend. */
@@ -101,7 +119,30 @@ export function makeMarmotStores(backend: MarmotKvBackend, identity: string): Ma
     keyPackageStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.keyPackage),
     inviteStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.invites),
     rewindStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.rewind),
+    eventGroupStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.eventGroups),
   };
+}
+
+/** Lowercase hex of a byte array (for the per-group history namespace). */
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}
+
+/**
+ * A durable decrypted-message history factory for the MarmotClient (§5 message
+ * persistence). marmot auto-saves every application message it ingests OR sends
+ * into `group.history`; backing that with IndexedDB (one namespace per group,
+ * under this chat identity) is what makes past + while-offline messages survive a
+ * navigation/reload — without it, `messages` lived only in the page's memory and
+ * every chat re-open started blank. Each rumor is keyed by its own id, so relay
+ * backfill re-ingesting the same message overwrites in place instead of dup'ing.
+ */
+export function makeMarmotHistoryFactory(backend: MarmotKvBackend, identity: string) {
+  return makeKeyValueRumorHistoryFactory((groupId) =>
+    namespacedStore(backend, identity, `${MARMOT_NAMESPACES.history}:${toHex(groupId)}`),
+  );
 }
 
 // ── In-memory backend (tests + the marmot in-memory parity path) ──────────────
@@ -191,6 +232,12 @@ export class IndexedDbKvBackend implements MarmotKvBackend {
 let sharedBackend: MarmotKvBackend | undefined;
 export function marmotKvBackend(): MarmotKvBackend {
   return (sharedBackend ??= new IndexedDbKvBackend());
+}
+
+/** Swap the shared backend (tests only, no IndexedDB in the test env). Pass
+ *  `null` to restore the production IndexedDB backend. */
+export function __setMarmotKvBackendForTests(b: MarmotKvBackend | null): void {
+  sharedBackend = b ?? undefined;
 }
 
 /** Convenience: the four production stores for a chat identity, IndexedDB-backed. */

@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
+import { getEpoch } from "@internet-privacy/marmot-ts/core";
 import type {
   NostrNetworkInterface,
   PublishResponse,
@@ -122,6 +123,41 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
       // Remove them (real MLS Remove via the flatten workaround).
       await mls.removePubkeys(ids.mlsGroupIdHex, [memberPub]);
       expect(await mls.isMember(ids.mlsGroupIdHex, memberPub)).toBe(false);
+    },
+    30_000,
+  );
+
+  it(
+    "ensureRelays additively unions new relays into the group's routing state, idempotently",
+    async () => {
+      const network = new FakeNetwork();
+      const coordSk = generateSecretKey();
+      const coordStore = new Store(":memory:", coordSk);
+      const { mls, client } = createMarmotClientMls({ store: coordStore, coordSk, network });
+      const epochOf = async (idHex: string) => getEpoch((await client.groups.get(idHex)).state as never);
+
+      const ids = await mls.createGroup({ name: "Devcon chat", description: "hi", relays: RELAYS });
+      expect(new Set(await mls.getRelays(ids.mlsGroupIdHex))).toEqual(new Set(RELAYS));
+
+      // A no-op when every relay is already present — no epoch-bumping commit.
+      const epochBefore = await epochOf(ids.mlsGroupIdHex);
+      await mls.ensureRelays(ids.mlsGroupIdHex, RELAYS);
+      expect(new Set(await mls.getRelays(ids.mlsGroupIdHex))).toEqual(new Set(RELAYS));
+      expect(await epochOf(ids.mlsGroupIdHex)).toBe(epochBefore);
+
+      // Adds new relays without dropping the existing one; bumps the epoch (a real commit).
+      const whitenoise = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
+      await mls.ensureRelays(ids.mlsGroupIdHex, whitenoise);
+      expect(new Set(await mls.getRelays(ids.mlsGroupIdHex))).toEqual(
+        new Set([...RELAYS, ...whitenoise]),
+      );
+      expect(await epochOf(ids.mlsGroupIdHex)).toBeGreaterThan(epochBefore);
+
+      // Calling again with an overlapping set only appends the genuinely new one.
+      await mls.ensureRelays(ids.mlsGroupIdHex, [...whitenoise, "wss://relay.new.example"]);
+      expect(new Set(await mls.getRelays(ids.mlsGroupIdHex))).toEqual(
+        new Set([...RELAYS, ...whitenoise, "wss://relay.new.example"]),
+      );
     },
     30_000,
   );

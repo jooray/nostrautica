@@ -171,4 +171,78 @@ describe("pipeline artifacts + job status (audit H7 / Q12)", () => {
     expect(store.poisonStatuses("31923:aaaa:ev")).toHaveLength(0);
     store.close();
   });
+
+  it("clearPoisonStatuses recovers every poisoned stage for an attendee (COORD-15)", () => {
+    const store = new Store();
+    const pk = "b".repeat(64);
+    for (const stage of ["process_attendee", "match_recompute"]) {
+      store.recordJobStatus({
+        coordinate: "31923:aaaa:ev", stage, pubkey: pk,
+        state: "poison", attempts: 5, error_category: "processing_error", retryable: 1, updated_at: 10,
+      });
+    }
+    // Another attendee's poison is untouched.
+    store.recordJobStatus({
+      coordinate: "31923:aaaa:ev", stage: "process_attendee", pubkey: "c".repeat(64),
+      state: "poison", attempts: 5, error_category: "processing_error", retryable: 1, updated_at: 10,
+    });
+    expect(store.clearPoisonStatuses("31923:aaaa:ev", pk)).toBe(2);
+    const remaining = store.poisonStatuses("31923:aaaa:ev");
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]!.pubkey).toBe("c".repeat(64));
+    store.close();
+  });
+});
+
+describe("chat-key binding ownership (audit COORD-10)", () => {
+  const CO = "31923:aaaa:ev";
+  const A = "a".repeat(64);
+  const B = "b".repeat(64);
+  const KEY = "c".repeat(64);
+
+  it("a chat_pubkey bound to account A cannot be re-pointed to account B", () => {
+    const store = new Store();
+    expect(store.upsertChatKey({ coordinate: CO, accountPubkey: A, chatPubkey: KEY, now: 1 })).toBe(true);
+    // The steal attempt is refused and the binding is untouched.
+    expect(store.upsertChatKey({ coordinate: CO, accountPubkey: B, chatPubkey: KEY, now: 2 })).toBe(false);
+    const row = store.getChatKey(CO, KEY)!;
+    expect(row.account_pubkey).toBe(A);
+    expect(row.updated_at).toBe(1);
+    // The OWNER may update its own binding (idempotent re-attest).
+    expect(store.upsertChatKey({ coordinate: CO, accountPubkey: A, chatPubkey: KEY, clientId: "dev-1", now: 3 })).toBe(true);
+    expect(store.getChatKey(CO, KEY)!.client_id).toBe("dev-1");
+    store.close();
+  });
+});
+
+describe("invite claim atomicity (audit COORD-25)", () => {
+  it("the INSERT is the claim: first writer wins, a rival loses, same-attendee is idempotent", () => {
+    const store = new Store();
+    const invite = "i".repeat(64);
+    const alice = "a".repeat(64);
+    const bob = "b".repeat(64);
+    expect(store.claimInvite("31923:aaaa:ev", invite, alice, 1)).toBe(true);
+    expect(store.claimInvite("31923:aaaa:ev", invite, bob, 2)).toBe(false); // lost the race
+    expect(store.claimInvite("31923:aaaa:ev", invite, alice, 3)).toBe(true); // idempotent re-delivery
+    store.close();
+  });
+});
+
+describe("TTL pruning (audit COORD-24)", () => {
+  it("prunes seen_rumors and consumed key packages older than 30 days, keeps fresh rows", () => {
+    const store = new Store();
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = 100 * DAY;
+    store.markRumorSeen("old-rumor", now - 40 * DAY);
+    store.markRumorSeen("fresh-rumor", now - 5 * DAY);
+    store.markKpConsumed("31923:aaaa:ev", "old-kp", now - 90 * DAY);
+    store.markKpConsumed("31923:aaaa:ev", "fresh-kp", now - 1 * DAY);
+
+    expect(store.pruneOldData(now)).toBe(2);
+    expect(store.isRumorSeen("old-rumor")).toBe(false);
+    expect(store.isRumorSeen("fresh-rumor")).toBe(true);
+    expect(store.isKpConsumed("31923:aaaa:ev", "old-kp")).toBe(false);
+    expect(store.isKpConsumed("31923:aaaa:ev", "fresh-kp")).toBe(true);
+    store.close();
+  });
 });

@@ -9,7 +9,8 @@
  *
  * Pluralization: `tp("key", n, params)` picks a plural form by suffixing the key
  * with the locale's category (`.one` / `.few` / `.many`) and exposes the count as
- * `{n}`. Slovak has three forms (1 / 2–4 / 5+); English collapses to one / many.
+ * `{n}`. Slovak and Czech have three forms (1 / 2–4 / 5+); English collapses to
+ * one / many.
  */
 import { messages, LOCALES, type Locale, type MessageKey } from "./messages.js";
 
@@ -23,10 +24,10 @@ function detect(): Locale {
 
 export type PluralCategory = "one" | "few" | "many";
 
-/** Plural category for a count, per locale (en: 1 / other; sk: 1 / 2–4 / 5+). */
+/** Plural category for a count, per locale (en: 1 / other; sk/cs: 1 / 2–4 / 5+). */
 export function pluralCategory(locale: Locale, n: number): PluralCategory {
   const abs = Math.abs(n);
-  if (locale === "sk") {
+  if (locale === "sk" || locale === "cs") {
     if (abs === 1) return "one";
     if (abs >= 2 && abs <= 4) return "few";
     return "many";

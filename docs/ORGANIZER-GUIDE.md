@@ -144,15 +144,16 @@ matches) and **Revoke**.
 Approved attendees get access to the encrypted roster, other people's intro
 videos, and (with a coordinator) their matches.
 
-> **Known issue as of this pass (2026-07-16):** when an event has **no
-> coordinator attached**, approving someone here does not currently reach
-> their device — their own app keeps showing "waiting for approval" even
-> though your admin screen shows them Approved, and they never see the
-> roster/directory. It reproduces every time in testing. Attaching a
-> coordinator (§5) sidesteps it — approval and grants
-> route through the coordinator instead — so **attach a coordinator before
-> your event if you can**, even one running in matching=off mode, until this
-> is fixed.
+> **Update (2026-07-17):** the no-coordinator approval bug described in an
+> earlier pass of this guide is fixed — approving someone without a
+> coordinator attached now reaches their device normally. Attaching a
+> coordinator (§5) is still worthwhile for auto-approval and matches, but is
+> no longer required just to make manual approval work.
+>
+> One remaining rough edge: if you update your own typed intro text after
+> being approved, other attendees only pick it up once you (or the
+> coordinator) **re-process** your entry from the People list here — it
+> doesn't propagate automatically yet.
 
 ### Removing someone
 

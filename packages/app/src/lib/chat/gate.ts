@@ -30,6 +30,37 @@ export interface ChatGateInput {
   hasSigner: boolean;
 }
 
+export interface ChatPrewarmInput {
+  /** The event naddr of the current route, if any (`eventNaddr(router.route)`). */
+  routeNaddr: string | undefined;
+  /** `eventShell.naddr` — the event the shell currently reflects. */
+  shellNaddr: string | undefined;
+  /** `eventShell.ctx` is loaded. */
+  hasCtx: boolean;
+  /** A signer is present. */
+  hasSigner: boolean;
+  /** `eventShell.showChat` — approved member AND chat enabled for this event. */
+  showChat: boolean;
+}
+
+/**
+ * Should the shell start the Marmot session in the background for the current
+ * route? True exactly when the shell has settled on an approved member of a
+ * chat-enabled event and reflects the route we're on.
+ *
+ * Enrolment is what this buys: the coordinator can only add a member once that
+ * member's kind-30443 key package exists, and MLS gives the new member nothing
+ * from before their Add. Waiting for the Chat tab therefore guarantees a first
+ * visit to an empty room. Prewarming on any of the event's pages moves the Add
+ * to approval time (or as close as the app being open allows), so the room is
+ * already joined — and already receiving — by the time it is opened.
+ */
+export function shouldPrewarmChat(i: ChatPrewarmInput): boolean {
+  if (!i.routeNaddr) return false;
+  if (i.shellNaddr !== i.routeNaddr) return false; // shell still on another event
+  return i.hasCtx && i.hasSigner && i.showChat;
+}
+
 export function evaluateChatGate(i: ChatGateInput): ChatGate {
   // Membership is UNKNOWN until our resolve pass has run AND the shell reflects
   // THIS event and isn't mid-sync. Until then keep loading — never latch a

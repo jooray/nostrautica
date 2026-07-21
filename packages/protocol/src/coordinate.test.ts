@@ -29,6 +29,22 @@ describe("coordinates", () => {
     expect(back.coordinate).toBe(coord);
     expect(back.relays).toEqual(["wss://relay.example"]);
   });
+
+  it("rejects a non-hex or wrong-case pubkey (PROTO-5)", () => {
+    expect(() => parseCoordinate("31923:" + "z".repeat(64) + ":ev")).toThrow();
+    expect(() => parseCoordinate("31923:" + "A".repeat(64) + ":ev")).toThrow();
+    expect(() => parseCoordinate("31923:" + "a".repeat(63) + ":ev")).toThrow();
+    expect(() => parseCoordinate("31923:" + "a".repeat(65) + ":ev")).toThrow();
+  });
+
+  it("rejects kinds outside the NIP-01 16-bit range (PROTO-5)", () => {
+    expect(() => parseCoordinate("-1:" + pubkey + ":ev")).toThrow();
+    expect(() => parseCoordinate("65536:" + pubkey + ":ev")).toThrow();
+    expect(() => parseCoordinate("3.5:" + pubkey + ":ev")).toThrow();
+    expect(() => parseCoordinate("abc:" + pubkey + ":ev")).toThrow();
+    expect(parseCoordinate("0:" + pubkey + ":ev").kind).toBe(0);
+    expect(parseCoordinate("65535:" + pubkey + ":ev").kind).toBe(65535);
+  });
 });
 
 describe("event config (kind 31600)", () => {
@@ -251,5 +267,50 @@ describe("event config (kind 31600)", () => {
     expect(Number.isNaN(parsed.maxVideoSec)).toBe(false);
     expect(parsed.nostrContext).toBe(0);
     expect(parsed.eck).toBe(1); // clamped to a valid ≥1 version
+  });
+
+  // ── PROTO-5: inbox/coordinator pubkeys + relay/blossom URL validation ──────
+  it("validates the inbox/coordinator pubkeys (fail-soft)", () => {
+    // A malformed inbox is treated as missing → the required-tag throw fires.
+    expect(() => parseEventConfig(pubkey, [["d", "ev"], ["inbox", "nothex"]])).toThrow();
+    expect(() =>
+      parseEventConfig(pubkey, [["d", "ev"], ["inbox", "B".repeat(64)]]),
+    ).toThrow();
+    // A malformed coordinator is dropped (optional tag → absent), never surfaced.
+    const parsed = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["coordinator", "nothex"],
+    ]);
+    expect(parsed.coordinator).toBeUndefined();
+    const upper = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["coordinator", "C".repeat(64)], // uppercase hex: dropped like any invalid value
+    ]);
+    expect(upper.coordinator).toBeUndefined();
+    // A valid coordinator still parses.
+    const ok = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["coordinator", "c".repeat(64)],
+    ]);
+    expect(ok.coordinator).toBe("c".repeat(64));
+  });
+
+  it("keeps only wss:// relay tags and https:// blossom tags", () => {
+    const parsed = parseEventConfig(pubkey, [
+      ["d", "ev"],
+      ["inbox", "b".repeat(64)],
+      ["relay", "wss://relay.a"],
+      ["relay", "https://not-a-relay.example"],
+      ["relay", "http://relay.b"],
+      ["relay", "not a url"],
+      ["blossom", "https://blossom.a"],
+      ["blossom", "http://blossom.b"],
+      ["blossom", "wss://nope"],
+    ]);
+    expect(parsed.relays).toEqual(["wss://relay.a"]);
+    expect(parsed.blossom).toEqual(["https://blossom.a"]);
   });
 });

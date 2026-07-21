@@ -5,6 +5,7 @@
  * none yet (same never-override policy as the 10002 relay list).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 import type { VerifiedEvent } from "nostr-tools/pure";
 
@@ -21,14 +22,17 @@ import { DM_RELAY_LIST } from "$lib/nostr/relays.js";
 
 /** A stand-in signer that records what it was asked to sign. */
 function fakeSigner() {
+  const sk = generateSecretKey();
+  const pubkey = getPublicKey(sk);
   const signed: { kind: number; tags: string[][]; content: string }[] = [];
   return {
+    sk,
     signer: {
       method: "local" as const,
-      getPublicKey: async () => "a".repeat(64),
+      getPublicKey: async () => pubkey,
       signEvent: async (tpl: { kind: number; tags: string[][]; content: string }) => {
         signed.push(tpl);
-        return { ...tpl, id: "x", pubkey: "a".repeat(64), sig: "s" } as unknown as VerifiedEvent;
+        return { ...tpl, id: "x", pubkey, sig: "s" } as unknown as VerifiedEvent;
       },
       nip44Encrypt: async () => "",
       nip44Decrypt: async () => "",
@@ -68,8 +72,14 @@ describe("ensureDmRelayList (never-override policy)", () => {
   });
 
   it("never overrides an existing 10050", async () => {
-    fetchEvents.mockResolvedValue([{ kind: KIND_DM_RELAY_LIST, created_at: 1, tags: [], content: "" }]);
-    const { signer, signed } = fakeSigner();
+    const { signer, signed, sk } = fakeSigner();
+    // The existing-list read is signature-verified at the boundary (audit
+    // APPK-1), so the relay's 10050 must be a genuinely signed event.
+    const existing = finalizeEvent(
+      { kind: KIND_DM_RELAY_LIST, created_at: 1, tags: [], content: "" },
+      sk,
+    );
+    fetchEvents.mockResolvedValue([existing]);
     const published = await ensureDmRelayList(signer);
     expect(published).toBe(false);
     expect(publishOrQueue).not.toHaveBeenCalled();

@@ -250,19 +250,33 @@ export interface NostrPost {
   created_at: number;
 }
 
-/** Hash of the nostr-context inputs (pubkey + the posts fed in + output language). */
+/** Hash of the nostr-context inputs (pubkey + the posts fed in + output language).
+ *  FULL post content is hashed (audit COORD-22) — two different posts that share a
+ *  40-char prefix must not collide onto the same cached summary. */
 export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en"): string {
   const canonical = JSON.stringify({
     pubkey,
     lang: (lang || "en").toLowerCase(),
-    ids: posts.map((p) => `${p.kind}:${p.created_at}:${p.content.slice(0, 40)}`),
+    ids: posts.map((p) => `${p.kind}:${p.created_at}:${p.content}`),
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
 
+/** Extract the "about" bio from a kind-0 metadata event's JSON content, if any. */
+function extractProfileBio(content: string): string | undefined {
+  try {
+    const parsed = JSON.parse(content);
+    const about = typeof parsed?.about === "string" ? parsed.about.trim() : "";
+    return about || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Summarize an attendee's recent public activity with the cheap summary model.
- * Returns undefined when there's nothing to summarize (nostr_context=0 or empty).
+ * Returns undefined when there's nothing to summarize (nostr_context=0 or empty,
+ * or the only input is a kind-0 event with no usable "about" bio).
  */
 export async function summarizeNostr(
   llm: LlmProvider,
@@ -272,10 +286,15 @@ export async function summarizeNostr(
   lang = "en",
 ): Promise<string | undefined> {
   if (posts.length === 0) return undefined;
-  const user = [
-    "Recent public posts by this person (newest first):",
-    ...posts.slice(0, 100).map((p) => `- ${p.content.replace(/\s+/g, " ").slice(0, 300)}`),
-  ].join("\n");
+  const lines = posts.slice(0, 100).flatMap((p) => {
+    if (p.kind === 0) {
+      const bio = extractProfileBio(p.content);
+      return bio ? [`- Profile bio: ${bio.replace(/\s+/g, " ").slice(0, 300)}`] : [];
+    }
+    return [`- ${p.content.replace(/\s+/g, " ").slice(0, 300)}`];
+  });
+  if (lines.length === 0) return undefined;
+  const user = ["Recent public posts by this person (newest first):", ...lines].join("\n");
   const base = (lang || "en").toLowerCase();
   const langNote =
     base === "en"

@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import { MockLlm } from "../providers/mock.js";
 import { ProviderContractError } from "../providers/types.js";
-import { buildAiProfile, summarizeNostr, translateProfileFields } from "./profile.js";
+import { buildAiProfile, summarizeNostr, translateProfileFields, nostrInputsHash } from "./profile.js";
 import type { AttendeeProfile } from "@nostrautica/protocol";
 
 const matchModel = { provider: "mock", model: "mock-strong" };
@@ -98,6 +98,45 @@ describe("Q9 — summarizeNostr validates provider output", () => {
       { kind: 1, content: "gm", created_at: 1 },
     ]);
     expect(out).toBe("Builds privacy tools.");
+  });
+
+  it("folds a kind-0 profile's about bio into the prompt as a labeled line, not raw JSON", async () => {
+    let capturedUser = "";
+    const llm = new MockLlm((req: any) => {
+      capturedUser = req.user;
+      return { summary: "Works on Nostr clients." };
+    });
+    const out = await summarizeNostr(llm, summaryModel, "pk", [
+      { kind: 0, content: JSON.stringify({ name: "sam", about: "Builds Nostr clients." }), created_at: 2 },
+    ]);
+    expect(out).toBe("Works on Nostr clients.");
+    expect(capturedUser).toContain("Profile bio: Builds Nostr clients.");
+    expect(capturedUser).not.toContain("{\"name\"");
+  });
+
+  it("skips the LLM call entirely when the only input is a kind-0 event with no usable bio", async () => {
+    let called = false;
+    const llm = new MockLlm(() => {
+      called = true;
+      return { summary: "n/a" };
+    });
+    const out = await summarizeNostr(llm, summaryModel, "pk", [
+      { kind: 0, content: JSON.stringify({ name: "sam" }), created_at: 2 },
+    ]);
+    expect(out).toBeUndefined();
+    expect(called).toBe(false);
+  });
+});
+
+describe("nostrInputsHash (audit COORD-22)", () => {
+  it("hashes FULL post content — a shared 40-char prefix never collides", () => {
+    const shared = "we should all meet at https://conference.example and talk about ";
+    const a = nostrInputsHash("pk", [{ kind: 1, content: `${shared}ZK proofs`, created_at: 1 }]);
+    const b = nostrInputsHash("pk", [{ kind: 1, content: `${shared}UX design`, created_at: 1 }]);
+    expect(a).not.toBe(b);
+    // Same content → stable hash (cache hit).
+    const a2 = nostrInputsHash("pk", [{ kind: 1, content: `${shared}ZK proofs`, created_at: 1 }]);
+    expect(a2).toBe(a);
   });
 });
 

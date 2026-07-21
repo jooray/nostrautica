@@ -38,14 +38,28 @@ import {
 import { Store } from "./store/db.js";
 import { Coordinator, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
+import type { ChatMls } from "./chat/mls.js";
+import type { PrefilterConfig } from "./matching/prefilter.js";
+import { talkBlindedD } from "./nostr/publisher.js";
 
 class FakeTransport implements Transport {
   published: NostrEvent[] = [];
   seed: NostrEvent[] = [];
+  /** Recorded subscriptions (COORD-8/COORD-29 tests): filter, relays, handler, closed. */
+  subs: { filter: any; relays?: string[]; onEvent: (e: NostrEvent) => void; closed: boolean }[] = [];
+  /** Recorded fetch filters (COORD-29 tests). */
+  fetches: any[] = [];
+  /** Throw on the next N publishes (COORD-2 failure injection). */
+  failPublishes = 0;
   async publish(event: NostrEvent): Promise<void> {
+    if (this.failPublishes > 0) {
+      this.failPublishes--;
+      throw new Error("simulated relay outage");
+    }
     this.published.push(event);
   }
   async fetch(filter: any): Promise<NostrEvent[]> {
+    this.fetches.push(filter);
     return [...this.seed, ...this.published].filter((e) => {
       if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
       if (filter.authors && !filter.authors.includes(e.pubkey)) return false;
@@ -56,8 +70,12 @@ class FakeTransport implements Transport {
       return true;
     });
   }
-  subscribe(): () => void {
-    return () => {};
+  subscribe(filter: any, onEvent: (e: NostrEvent) => void, relays?: string[]): () => void {
+    const sub = { filter, relays, onEvent, closed: false };
+    this.subs.push(sub);
+    return () => {
+      sub.closed = true;
+    };
   }
 }
 
@@ -226,6 +244,21 @@ async function setup(
     matching?: "on" | "off";
     talks?: "off" | "on" | "prerecord-first";
     failTranscribe?: boolean;
+    /** Seed max_video_sec/max_talk_sec tags (COORD-4). */
+    maxVideoSec?: number;
+    maxTalkSec?: number;
+    /** Enable Marmot chat on the seeded 31600 (needs chatMls too). */
+    chat?: boolean;
+    chatMls?: ChatMls;
+    /** Install guards (COORD-3). */
+    maxEvents?: number;
+    allowedEidPubkeys?: string[];
+    /** A different coordinator tag for the seeded 31600 (COORD-3). */
+    foreignCoordinator?: string;
+    /** Extra seed events, built with the harness keys (COORD-14: a second 31600). */
+    extraSeed?: (keys: { eidPubkey: string; d: string }) => NostrEvent[];
+    /** Prefilter override (COORD-13). */
+    prefilter?: PrefilterConfig;
   } = {},
 ): Promise<Harness> {
   const coordSk = generateSecretKey();
@@ -240,12 +273,14 @@ async function setup(
 
   // Pass the identity key so the whole pipeline runs against at-rest-encrypted
   // event-key columns (F1) — exactly like production.
+  const coordPubkey = getPublicKey(coordSk);
   const store = new Store(":memory:", coordSk);
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ...(opts.chat ? [["chat", "marmot"], ["coordinator", opts.foreignCoordinator ?? coordPubkey]] : opts.foreignCoordinator ? [["coordinator", opts.foreignCoordinator]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 1, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
+    ...(opts.extraSeed?.({ eidPubkey, d }) ?? []),
   );
 
   const counters: Counters = { nostrSummary: 0, batchCalls: [], reverseCalls: [], translateCalls: 0 };
@@ -258,7 +293,10 @@ async function setup(
     default: "generic",
   });
 
-  const clock = { t: 1_700_000_000_000 };
+  // Start at real time: wrapRumor stamps rumors with the wall clock, and the
+  // coordinator rejects rumors future-dated > 15 min (audit COORD-11) — a fixed
+  // past epoch would make every test rumor look future-dated.
+  const clock = { t: Date.now() };
   const coordinator = new Coordinator({
     store, transport, coordSk, llm, stt,
     sttModel: "mock",
@@ -268,11 +306,17 @@ async function setup(
     translateModel: { provider: "mock", model: "mock-cheap" },
     defaultRelays: ["wss://test"],
     batchSize: opts.batchSize,
+    prefilter: opts.prefilter,
+    chatMls: opts.chatMls,
+    maxEvents: opts.maxEvents,
+    allowedEidPubkeys: opts.allowedEidPubkeys,
     now: () => clock.t,
+    // No real backoff sleeps in tests (COORD-2 retries run inline).
+    sleep: async () => {},
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
     transcribe: async (descriptor) => {
-      if (opts.failTranscribe) throw new Error("could not fetch blob (simulated)");
+      if (opts.failTranscribe) throw new Error(opts.transcribeError ?? "could not fetch blob (simulated)");
       const cached = store.getTranscript(descriptor.x);
       if (cached !== undefined) return cached;
       const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" });
@@ -1093,10 +1137,11 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
   it("surfaces a poisoned job to the organizer (21606 + status row) (Q12)", async () => {
     const h = await setup(0, { failTranscribe: true });
     const pk = await join(h, generateSecretKey(), "crypto");
-    // Exhaust the retry/backoff schedule so the process job poisons.
-    for (let i = 0; i < 8; i++) {
+    // Exhaust the long-tail retry/backoff schedule (jobs.ts) so the process job
+    // poisons — each iteration clears one step (the schedule tops out at 4h).
+    for (let i = 0; i < 30; i++) {
       await h.coordinator.jobs.drain();
-      h.clock.t += 120_000;
+      h.clock.t += 5 * 60 * 60_000;
     }
     // A 21606 coordinator-status gift wrap was published to E_id and decodes.
     const statuses = h.transport.published
@@ -1113,7 +1158,32 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // A queryable status row is recorded for the Admin UI (app-side follow-up).
     expect(h.store.poisonStatuses(h.coordinate).length).toBeGreaterThan(0);
   });
+
+  // ── billing errors get their own category, not the processing_error catch-all ─
+  it("classifies a depleted-provider-balance failure as provider_billing (2026-07-21)", async () => {
+    const h = await setup(0, {
+      failTranscribe: true,
+      transcribeError: 'Venice billing: insufficient balance (402) — Venice chat/completions: {"error":"insufficient balance"}',
+    });
+    await join(h, generateSecretKey(), "crypto");
+    for (let i = 0; i < 30; i++) {
+      await h.coordinator.jobs.drain();
+      h.clock.t += 5 * 60 * 60_000;
+    }
+    const s = lastCoordinatorStatus(h);
+    expect(s?.state).toBe("poison");
+    expect(s?.error_category).toBe("provider_billing");
+  });
 });
+
+function lastCoordinatorStatus(h: Harness) {
+  const statuses = h.transport.published
+    .filter((e) => e.kind === 1059)
+    .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+    .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+    .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
+  return statuses[statuses.length - 1];
+}
 
 function countPairs(store: Store, coordinate: string): number {
   return (store as any).db.prepare("SELECT COUNT(*) AS c FROM pairs WHERE coordinate = ?").get(coordinate).c;
@@ -1297,5 +1367,674 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     // The reprocess folds the talk transcript in — the ai_profile is regenerated.
     const attendee = h.store.getAttendee(h.coordinate, pk)!;
     expect(attendee.ai_profile_json).toBeTruthy();
+  });
+});
+
+/** Decode every gift-wrapped kind-21602 key grant addressed to `recipientSk`. */
+function grantsTo(h: Harness, recipientSk: Uint8Array) {
+  return h.transport.published
+    .filter((e) => e.kind === 1059)
+    .map((e) => {
+      try {
+        return unwrapRumor(e as any, recipientSk);
+      } catch {
+        return null;
+      }
+    })
+    .filter((r): r is NonNullable<typeof r> => !!r && r.kind === 21602);
+}
+
+/** Build + send a join-request wrap (no submission), returning the wrap + pubkey. */
+async function joinOnly(
+  h: Harness,
+  attendeeSk: Uint8Array,
+  name: string,
+  opts: { created_at?: number } = {},
+): Promise<{ wrap: any; pubkey: string }> {
+  const attendeePubkey = getPublicKey(attendeeSk);
+  const inboxPk = getPublicKey(h.einboxSk);
+  const inviteSk = h.invites[h.nextInvite++]!;
+  const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
+  const wrap = wrapRumor(attendeeSk, inboxPk, {
+    kind: KIND_JOIN_REQUEST,
+    content: { v: 1, name, message: "", rsvp_public: false },
+    tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    ...(opts.created_at !== undefined ? { created_at: opts.created_at } : {}),
+  });
+  await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+  return { wrap, pubkey: attendeePubkey };
+}
+
+describe("audit COORD-2 — rumor handling is failure-safe", () => {
+  it("a transient publish failure leaves the rumor unseen; the retry re-grants and recovers", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+
+    // Every publish fails: three inline attempts (5s/30s backoffs are no-op-slept
+    // in tests) all fail → the rumor is left UNSEEN for the startup rescan.
+    h.transport.failPublishes = 99;
+    const { wrap, pubkey } = await joinOnly(h, sk, "crypto");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    // …but the attendee row IS approved (attempt 1 got that far), so a plain
+    // re-delivery must still re-send the grant (idempotent re-grant path).
+    expect(h.store.getAttendee(h.coordinate, pubkey)?.status).toBe("approved");
+
+    // "Startup rescan": the same wrap re-arrives after the outage clears.
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(grantsTo(h, sk)).toHaveLength(1);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(true);
+
+    // A further duplicate is a no-op (dedupe): still exactly one grant.
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(grantsTo(h, sk)).toHaveLength(1);
+  });
+
+  it("an in-memory retry recovers a one-off publish failure within the live handler", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    h.transport.failPublishes = 1; // the first grant publish fails once
+    const { pubkey } = await joinOnly(h, sk, "crypto");
+    expect(grantsTo(h, sk)).toHaveLength(1); // attempt 2 (re-grant path) got it out
+    expect(h.store.getAttendee(h.coordinate, pubkey)?.status).toBe("approved");
+  });
+
+  it("a repeated organizer approve re-grants the ECK (idempotent)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const { pubkey } = await joinOnly(h, sk, "crypto");
+    expect(grantsTo(h, sk)).toHaveLength(1);
+    await admin(h, "approve", { pubkey });
+    expect(grantsTo(h, sk)).toHaveLength(2); // re-granted, no error
+  });
+});
+
+describe("audit COORD-3 — install authorization + unsolicited-install caps", () => {
+  it("rejects an install whose 31600 names a DIFFERENT coordinator", async () => {
+    const foreign = getPublicKey(generateSecretKey());
+    const h = await setup(0, { foreignCoordinator: foreign });
+    // installEvent rejected the event: no state, no stored event, joins are no-ops.
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    const sk = generateSecretKey();
+    const { pubkey } = await joinOnly(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined();
+  });
+
+  it("a live 31600 re-pointing at another coordinator uninstalls the event", async () => {
+    const h = await setup();
+    const foreign = getPublicKey(generateSecretKey());
+    await h.coordinator.handleConfigUpdate(h.coordinate, {
+      kind: 31600,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "cfg-foreign",
+      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", foreign]],
+      content: "",
+      sig: "",
+    } as any);
+    const sk = generateSecretKey();
+    const { pubkey } = await joinOnly(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined(); // uninstalled → no-op
+  });
+
+  it("rejects installs beyond the security.max_events cap", async () => {
+    const h = await setup(0, { maxEvents: 1 }); // the setup event fills the slot
+    const eid2 = generateSecretKey();
+    const coord2 = makeCoordinate(getPublicKey(eid2), "second-event");
+    const einbox2 = generateSecretKey();
+    const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 1,
+        a: coord2,
+        inbox_nsec: bytesToHex(einbox2),
+        eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        config_relays: [],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined(); // rejected by the cap
+  });
+
+  it("rejects installs from an E_id not in security.allowed_eid_pubkeys", async () => {
+    // Non-empty allowlist that does NOT contain the granting E_id → rejected.
+    const h = await setup(0, { allowedEidPubkeys: [getPublicKey(generateSecretKey())] });
+    const eid2 = generateSecretKey();
+    const coord2 = makeCoordinate(getPublicKey(eid2), "foreign-event");
+    const einbox2 = generateSecretKey();
+    const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 1,
+        a: coord2,
+        inbox_nsec: bytesToHex(einbox2),
+        eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        config_relays: [],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined(); // not on the allowlist
+  });
+
+  it("sanitizes grant config_relays (audit COORD-16): wss-only, deduped", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const coord2 = makeCoordinate(getPublicKey(eid2), "relay-check");
+    const einbox2 = generateSecretKey();
+    const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 1,
+        a: coord2,
+        inbox_nsec: bytesToHex(einbox2),
+        eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        config_relays: ["ws://insecure.example", "wss://ok.example/", "wss://ok.example"],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(JSON.parse(h.store.getEvent(coord2)!.config_relays)).toEqual(["wss://ok.example"]);
+  });
+});
+
+describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
+  it("caps media descriptors per submission at 4 (extras skipped)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const media = [0, 1, 2, 3, 4].map((i) => mediaDesc(100 + i, String(i).repeat(64), "video/webm"));
+    const pk = await joinCustom(h, sk, "tester", ["zk"], { media });
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.media).toHaveLength(4);
+  });
+
+  it("skips transcription of media over the event's duration cap", async () => {
+    // max_video_sec=90, max_talk_sec=900 → the per-descriptor cap is 900s.
+    const h = await setup(0, { maxVideoSec: 90, maxTalkSec: 900 });
+    const sk = generateSecretKey();
+    const overLong = { ...mediaDesc(500, "1".repeat(64), "video/webm"), duration: 1000 };
+    const pk = await joinCustom(h, sk, "tester", ["zk"], { media: [overLong] });
+    await h.coordinator.jobs.drain();
+    expect(h.stt.calls).toBe(0); // never transcribed
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.transcripts ?? []).toHaveLength(0);
+
+    // A within-cap descriptor IS transcribed.
+    const sk2 = generateSecretKey();
+    const ok = { ...mediaDesc(500, "2".repeat(64), "video/webm"), duration: 800 };
+    await joinCustom(h, sk2, "tester2", ["ux"], { media: [ok] });
+    await h.coordinator.jobs.drain();
+    expect(h.stt.calls).toBe(1);
+  });
+
+  it("caps total downloaded bytes per submission at 500 MB", async () => {
+    const h = await setup();
+    const BIG = 300 * 1024 * 1024;
+    h.stt.setTranscript(String(BIG), "big file transcript");
+    const sk = generateSecretKey();
+    const media = [
+      mediaDesc(BIG, "a".repeat(64), "video/webm"),
+      mediaDesc(BIG, "b".repeat(64), "video/webm"), // over the cumulative budget
+    ];
+    await joinCustom(h, sk, "tester", ["zk"], { media });
+    await h.coordinator.jobs.drain();
+    expect(h.stt.calls).toBe(1); // only the first descriptor was transcribed
+  });
+
+  it("skips the paid ai_profile call when ALL inputs are empty", async () => {
+    const h = await setup(); // nostr_context=0
+    const sk = generateSecretKey();
+    const { pubkey } = await joinOnly(h, sk, "quiet attendee"); // no submission at all
+    await h.coordinator.jobs.drain();
+    expect(h.llm.completeCalls).toBe(0); // nothing to ground a profile in → no call
+    const attendee = h.store.getAttendee(h.coordinate, pubkey)!;
+    const ai = JSON.parse(attendee.ai_profile_json!);
+    expect(ai).toEqual({ summary: "", skills: [], interests: [], offers: [], seeks: [] });
+  });
+
+  it("caps distinct talk submissions per speaker at 10 — editing an existing talk stays unaffected", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    for (let i = 0; i < 11; i++) {
+      await submitTalk(h, speakerSk, {
+        talkD: `t${i}`,
+        title: `Talk ${i}`,
+        media: talkMedia(700, i.toString(16).padStart(2, "0").repeat(32)),
+      });
+    }
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
+    expect(h.store.getTalk(h.coordinate, pk, "t10")).toBeUndefined(); // the 11th was ignored
+    expect(h.store.getTalk(h.coordinate, pk, "t9")).toBeDefined();
+
+    // Editing one of the 10 already-accepted talks is never blocked by the cap.
+    await submitTalk(h, speakerSk, {
+      talkD: "t0",
+      title: "Talk 0 (revised)",
+      media: talkMedia(700, "0".repeat(64)),
+      revision: 1,
+    });
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
+    expect(h.store.getTalk(h.coordinate, pk, "t0")!.title).toBe("Talk 0 (revised)");
+  });
+
+  it("a rejected talk frees its quota slot back up — a new submission is accepted", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    for (let i = 0; i < 10; i++) {
+      await submitTalk(h, speakerSk, {
+        talkD: `t${i}`,
+        title: `Talk ${i}`,
+        media: talkMedia(700, i.toString(16).padStart(2, "0").repeat(32)),
+      });
+    }
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
+    // At the cap: an 11th distinct talk is ignored.
+    await submitTalk(h, speakerSk, {
+      talkD: "t10",
+      title: "Talk 10",
+      media: talkMedia(700, "0a".repeat(32)),
+    });
+    expect(h.store.getTalk(h.coordinate, pk, "t10")).toBeUndefined();
+
+    // The organizer rejects one of the 10 — that frees a slot, not a permanent lock-out.
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t0" });
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(9);
+
+    // Distinct content from the ignored attempt above (a byte-identical
+    // resubmission within the same wall-clock second would hash to the same
+    // rumor id and get silently deduped — a test-harness artifact, not
+    // something a real resubmission would hit).
+    await submitTalk(h, speakerSk, {
+      talkD: "t10",
+      title: "Talk 10 (resubmitted)",
+      media: talkMedia(700, "0b".repeat(32)),
+    });
+    expect(h.store.getTalk(h.coordinate, pk, "t10")).toBeDefined();
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
+  });
+});
+
+describe("audit COORD-7 — talks survive ECK rotation", () => {
+  it("rotation republishes published talks under the new ECK and deletes the old-ECK copy; reject deletes at the publish-time ECK", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Talk", media: talkMedia(700, "ab".repeat(32)) });
+    await h.coordinator.jobs.drain();
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    expect(publishedTalks(h)).toHaveLength(1);
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.published_eck_id).toBe(1);
+
+    // Revoke someone else → ECK rotation.
+    const otherSk = generateSecretKey();
+    const otherPk = await join(h, otherSk, "design");
+    await admin(h, "revoke", { pubkey: otherPk });
+
+    // The talk was republished under the NEW ECK (eck tag id 2)…
+    const talkEvents = h.transport.published.filter((e) => e.kind === KIND_TALK);
+    const last = talkEvents[talkEvents.length - 1]!;
+    expect(last.tags.find((t) => t[0] === "eck")?.[1]).toBe("2");
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.published_eck_id).toBe(2);
+    // …and the OLD-ECK copy was deleted (deletion addressed at the OLD blinded d).
+    const coordPub = getPublicKey(h.coordSk);
+    const oldD = talkBlindedD(h.eck, h.coordinate, pk, "t1");
+    expect(
+      h.transport.published.some(
+        (e) => e.kind === KIND_DELETION && e.tags.some((t) => t[0] === "a" && t[1] === `${KIND_TALK}:${coordPub}:${oldD}`),
+      ),
+    ).toBe(true);
+
+    // A reject AFTER rotation deletes at the publish-time (new) ECK's address.
+    const newEck = base64ToBytes(h.coordinator.eckOf(h.coordinate).find((v) => v.id === 2)!.key);
+    const newD = talkBlindedD(newEck, h.coordinate, pk, "t1");
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t1" });
+    expect(
+      h.transport.published.some(
+        (e) => e.kind === KIND_DELETION && e.tags.some((t) => t[0] === "a" && t[1] === `${KIND_TALK}:${coordPub}:${newD}`),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("audit COORD-8 — relay handover re-creates subscriptions", () => {
+  it("a 31600 relay change closes the old inbox sub and re-subscribes on the new relays", async () => {
+    const h = await setup();
+    const inboxSubsBefore = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubsBefore).toHaveLength(1);
+
+    await h.coordinator.handleConfigUpdate(h.coordinate, {
+      kind: 31600,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "cfg-relays",
+      tags: [
+        ["d", "cypherpunk"],
+        ["inbox", getPublicKey(h.einboxSk)],
+        ["relay", "wss://new.relay"],
+        ["matching", "on"],
+      ],
+      content: "",
+      sig: "",
+    } as any);
+
+    const inboxSubs = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs).toHaveLength(2);
+    expect(inboxSubs[0]!.closed).toBe(true); // old sub closed
+    expect(inboxSubs[1]!.closed).toBe(false);
+    expect(inboxSubs[1]!.relays).toEqual(["wss://new.relay"]);
+  });
+});
+
+/** A minimal ChatMls stub (COORD-9 tests). */
+class StubMls implements ChatMls {
+  invited: string[] = [];
+  removed: string[][] = [];
+  failIsMember = false;
+  async createGroup() {
+    return { mlsGroupIdHex: "mls-1", nostrGroupIdHex: "ng-1" };
+  }
+  async isEligible() {
+    return true;
+  }
+  async isMember() {
+    if (this.failIsMember) throw new Error("simulated MLS outage");
+    return false;
+  }
+  async invite(_g: string, kp: any) {
+    this.invited.push(kp.pubkey);
+  }
+  async removePubkeys(_g: string, pks: string[]) {
+    this.removed.push(pks);
+  }
+  async ingest() {}
+  async getRelays() {
+    return [];
+  }
+  async ensureRelays() {}
+}
+
+describe("audit COORD-9 — MLS membership runs through the durable job runner", () => {
+  it("approval enqueues chat_sync_member; the member is added on drain", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto"); // auto-approved → job enqueued
+    h.transport.seed.push({ kind: 30443, pubkey: pk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    await h.coordinator.jobs.drain();
+    expect(mls.invited).toEqual([pk]);
+  });
+
+  it("a persistently failing sync poisons and surfaces a 21606 to the organizer", async () => {
+    const mls = new StubMls();
+    mls.failIsMember = true;
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    h.transport.seed.push({ kind: 30443, pubkey: pk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    await h.coordinator.jobs.drain(); // attempt 1 fails, long-tail backoff begins
+    expect(mls.invited).toEqual([]);
+    // Burn through the retry schedule (virtual clock) until the job poisons.
+    for (let i = 0; i < 60 && !h.store.poisonStatuses(h.coordinate).some((p) => p.stage === "chat_sync_member"); i++) {
+      h.clock.t += 4 * 60 * 60_000; // 4h per step — past every schedule backoff
+      await h.coordinator.jobs.drain();
+    }
+    const poisoned = h.store.poisonStatuses(h.coordinate);
+    expect(poisoned.some((p) => p.stage === "chat_sync_member")).toBe(true);
+    // …and a 21606 status wrap went to the organizer.
+    const statusWraps = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => {
+        try {
+          return unwrapRumor(e as any, h.eidSk);
+        } catch {
+          return null;
+        }
+      })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS);
+    expect(statusWraps.length).toBeGreaterThan(0);
+  });
+
+  it("revoke enqueues chat_revoke_member; the member's keys are MLS-removed on drain", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    expect(mls.removed).toEqual([[pk]]);
+  });
+});
+
+describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () => {
+  it("drops a rumor future-dated > 15 min past the coordinator's clock", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    // The protocol layer clamps a future-dated rumor to wall-now+15min (PROTO-8);
+    // the coordinator re-checks against its OWN clock at ingestion (defense in
+    // depth). With the daemon clock 1h behind the wall clock, a fresh rumor
+    // (real-time stamped) is >15 min ahead of it → dropped with a log.
+    h.clock.t = Date.now() - 60 * 60_000;
+    const { pubkey } = await joinOnly(h, sk, "future");
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined(); // dropped
+  });
+
+  it("startup backfills the coordinator inbox's FULL history (since=0)", async () => {
+    const coordSk = generateSecretKey();
+    const coordPub = getPublicKey(coordSk);
+    const eidSk = generateSecretKey();
+    const eidPub = getPublicKey(eidSk);
+    const einboxSk = generateSecretKey();
+    const coordinate = makeCoordinate(eidPub, "backfilled-event");
+    const store = new Store(":memory:", coordSk);
+    const transport = new FakeTransport();
+    // A grant "sent during the outage" — only a since=0 fetch would see it.
+    transport.seed.push(
+      wrapRumor(eidSk, coordPub, {
+        kind: KIND_COORDINATOR_GRANT,
+        content: {
+          v: 1,
+          a: coordinate,
+          inbox_nsec: bytesToHex(einboxSk),
+          eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+          config_relays: [],
+        },
+      }) as any,
+    );
+    const coordinator = new Coordinator({
+      store,
+      transport,
+      coordSk,
+      llm: new MockLlm(() => ({})),
+      stt: new MockStt(),
+      sttModel: "mock",
+      summaryModel: { provider: "mock", model: "mock-cheap" },
+      matchModel: { provider: "mock", model: "mock-strong" },
+      embedModel: { provider: "mock", model: "mock-embed" },
+      translateModel: { provider: "mock", model: "mock-cheap" },
+      defaultRelays: ["wss://test"],
+      sleep: async () => {},
+    });
+    await coordinator.start();
+    expect(store.getEvent(coordinate)).toBeDefined(); // the backfilled grant installed
+  });
+});
+
+describe("audit COORD-12 — publish-boundary output hygiene", () => {
+  it("match-list reasoning is URL-neutralized and capped at 2000 chars", async () => {
+    const h = await setup();
+    const aSk = generateSecretKey();
+    const bSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    const bPk = await join(h, bSk, "design");
+    await h.coordinator.jobs.drain(); // let the real pipeline finish first
+    // Now plant a pair whose stored reasoning carries an injected link + oversized
+    // text — the publish boundary must sanitize it (the store is the LLM's output
+    // cache; poisoning it simulates a successful prompt injection).
+    h.store.putPair({
+      coordinate: h.coordinate,
+      a: aPk,
+      b: bPk,
+      inputsHash: "h1",
+      score: 0.99,
+      similarity: 0.5,
+      complementarity: 0.9,
+      reasoningForA: `Meet them! https://evil.example/phish ${"x".repeat(3000)}`,
+      reasoningForB: "ok",
+      now: 1,
+    });
+    h.coordinator.jobs.enqueue("publish_matches", "pub-hygiene", { coordinate: h.coordinate, pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    const cryptoD = blindedD(h.eck, h.coordinate, aPk);
+    const listEvent = h.transport.published
+      .filter((e) => e.kind === KIND_MATCH_LIST && e.tags.find((t) => t[0] === "d")?.[1] === cryptoD)
+      .at(-1)!;
+    const list = matchListContentSchema.parse(JSON.parse(nip44Decrypt(aSk, getPublicKey(h.coordSk), listEvent.content)));
+    expect(list.matches[0]!.reasoning).not.toContain("https://");
+    expect(list.matches[0]!.reasoning).toContain("evil.example"); // readable, unclickable
+    expect(list.matches[0]!.reasoning.length).toBeLessThanOrEqual(2000);
+  });
+
+  it("the published ai_profile is URL-neutralized at the directory boundary", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    // Store a (fresh) ai_profile carrying an injected link, then re-publish via a correction.
+    const attendee = h.store.getAttendee(h.coordinate, pk)!;
+    h.store.upsertAttendee({
+      coordinate: h.coordinate,
+      pubkey: pk,
+      aiProfileJson: JSON.stringify({
+        summary: "see https://evil.example for my portfolio",
+        skills: ["zk"],
+        interests: [],
+        offers: [],
+        seeks: [],
+      }),
+      aiSourceRevision: attendee.source_revision,
+      now: h.clock.t,
+    });
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 1, a: h.coordinate },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.ai_profile?.summary).toBe("see evil.example for my portfolio");
+  });
+});
+
+describe("audit COORD-13 — roster embeddings are cached by profile hash + model", () => {
+  it("a second recompute with unchanged profiles re-embeds nothing", async () => {
+    const h = await setup(0, { prefilter: { threshold: 1, topM: 5, randomN: 1 } });
+    const aSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const callsAfterFirst = h.llm.embedCalls;
+    expect(callsAfterFirst).toBeGreaterThan(0); // prefilter kicked in (roster > threshold)
+
+    h.coordinator.jobs.enqueue("match_recompute", "re-embed-check", { coordinate: h.coordinate, pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    expect(h.llm.embedCalls).toBe(callsAfterFirst); // all embeddings came from the cache
+  });
+});
+
+describe("audit COORD-14 — install picks the newest 31600", () => {
+  it("a newer 31600 wins over an older one regardless of fetch order", async () => {
+    const h = await setup(0, {
+      // A NEWER config (created_at 2 > the default seed's 1) with matching OFF.
+      extraSeed: ({ eidPubkey, d }) => [
+        {
+          kind: 31600,
+          pubkey: eidPubkey,
+          created_at: 2,
+          id: "e2-newer",
+          sig: "",
+          content: "",
+          tags: [["d", d], ["inbox", "f".repeat(64)], ["matching", "off"]],
+        } as any,
+      ],
+    });
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // matching=off won → no AI pipeline ran at all.
+    expect(h.llm.completeCalls).toBe(0);
+  });
+});
+
+describe("audit COORD-15 — poison status clears on later success", () => {
+  it("a successful pipeline run clears the attendee's recorded poison status", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    h.store.recordJobStatus({
+      coordinate: h.coordinate,
+      stage: "process_attendee",
+      pubkey: pk,
+      state: "poison",
+      attempts: 5,
+      error_category: "media_fetch",
+      retryable: 1,
+      updated_at: 1,
+    });
+    expect(h.store.poisonStatuses(h.coordinate)).toHaveLength(1);
+    await h.coordinator.jobs.drain(); // the pipeline succeeds
+    expect(h.store.poisonStatuses(h.coordinate)).toHaveLength(0);
+  });
+});
+
+describe("audit COORD-28 — talk jobs re-check talks mode at execution", () => {
+  it("a queued process_talk job runs no STT after talks are turned off", async () => {
+    const h = await setup(0, { talks: "on" });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain(); // intro processed; baseline
+    const sttBaseline = h.stt.calls;
+    await submitTalk(h, sk, { talkD: "t1", title: "Talk", media: talkMedia(700, "9a".repeat(32)) });
+    // Talks turned OFF before the queued job runs.
+    await h.coordinator.handleConfigUpdate(h.coordinate, {
+      kind: 31600,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "cfg-talks-off",
+      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"]],
+      content: "",
+      sig: "",
+    } as any);
+    await h.coordinator.jobs.drain();
+    expect(h.stt.calls).toBe(sttBaseline); // no paid STT for the queued talk
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.transcript_json).toBeNull();
+  });
+});
+
+describe("audit COORD-29 — invite hashes are cached per event", () => {
+  it("joins reuse the cached 31601; a new 31601 on the config sub invalidates it", async () => {
+    const h = await setup();
+    const inviteFetches = () => h.transport.fetches.filter((f) => f.kinds?.includes(31601)).length;
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    expect(inviteFetches()).toBe(1); // the second join hit the cache
+
+    // A new invite list arrives on the config subscription → cache invalidated.
+    const configSub = h.transport.subs.find((s) => s.filter.kinds?.includes(31600))!;
+    configSub.onEvent({
+      kind: 31601,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "inv-2",
+      tags: [["d", "cypherpunk"]],
+      content: "{}",
+      sig: "",
+    } as any);
+    await join(h, generateSecretKey(), "code");
+    expect(inviteFetches()).toBe(2); // refetched after invalidation
   });
 });
