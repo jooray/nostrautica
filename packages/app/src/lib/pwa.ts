@@ -22,8 +22,8 @@ const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 export function registerPwa(): void {
   if (typeof window === "undefined") return;
-  // Capture beforeinstallprompt early — it fires once, before any event page
-  // mounts (UI-SUGGESTIONS #24). Independent of service-worker support.
+  // Backstop for the layout's synchronous install.init() (UX-21): capture
+  // beforeinstallprompt even if registerPwa is the first to run. Idempotent.
   install.init();
   if (!("serviceWorker" in navigator)) return;
 

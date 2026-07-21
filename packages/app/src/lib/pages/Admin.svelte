@@ -30,6 +30,7 @@
     cachedCoordinators,
     pricingLabel,
     checkoutUrlForEvent,
+    httpsUrl,
     type DiscoveredCoordinator,
   } from "$lib/events/coordinators.js";
   import { fetchPendingTalks, cachedPendingTalks, type PendingTalk } from "$lib/events/talks.js";
@@ -82,7 +83,13 @@
   let copiedNpub = $state(false);
   let coordLastSeen = $state<number | undefined>(undefined);
   let destroyed = false;
-  onDestroy(() => (destroyed = true));
+  // Join-queue auto-refresh (audit UX-9): a request that arrives while Admin is
+  // open used to need a manual Refresh. Poll slowly; cleared on destroy.
+  let queuePoll: ReturnType<typeof setInterval> | undefined;
+  onDestroy(() => {
+    destroyed = true;
+    clearInterval(queuePoll);
+  });
 
   // Approved = anyone in the roster OR approved just now. Reading the roster makes
   // approval persist across refreshes (it's not just session state).
@@ -135,6 +142,16 @@
       enrollError = e instanceof Error ? e.message : String(e);
     } finally {
       enrollingSelf = false;
+    }
+  }
+
+  // Refresh-button/interval entry point (audit UX-27): a rejected refresh must
+  // surface on the shared error card, never as an unhandled rejection.
+  async function refreshGuarded() {
+    try {
+      await refresh();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
     }
   }
 
@@ -245,6 +262,8 @@
       await Promise.allSettled([refresh(), loadUpdates()]);
       refreshing = false;
       await background;
+      // Keep the join queue fresh while the page stays open (UX-9).
+      queuePoll = setInterval(() => void refreshGuarded(), 30_000);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -356,6 +375,8 @@
       .sort((a, b) => b.at - a.at);
     return withBilling[0]?.billing;
   });
+  // checkoutUrlForEvent returns null for non-https URLs (audit APPR-2) — the
+  // link is simply hidden then.
   const billingCheckoutUrl = $derived(
     billing?.checkout_url ? checkoutUrlForEvent(billing.checkout_url, naddr) : undefined,
   );
@@ -584,6 +605,9 @@
   }
 
   let approvingAll = $state(false);
+  // Per-request busy guard (audit UX-27): a double-tap must not fire two
+  // approvals (two roster republishes racing latest-wins).
+  let approving = $state<Set<string>>(new Set());
   async function approveAll() {
     approvingAll = true;
     try {
@@ -595,6 +619,8 @@
 
   async function approve(req: PendingRequest) {
     if (!ctx || !session.signer) return;
+    if (approving.has(req.attendeePubkey)) return;
+    approving = new Set([...approving, req.attendeePubkey]);
     try {
       if (ctx.config.coordinator) {
         // Route through the coordinator so IT grants + publishes the directory
@@ -606,6 +632,8 @@
       approvedSet = new Set([...approvedSet, req.attendeePubkey]);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
+    } finally {
+      approving = new Set([...approving].filter((p) => p !== req.attendeePubkey));
     }
   }
 
@@ -876,7 +904,7 @@
     >
       {tp("admin.pending", pendingRequests.length)}
     </button>
-    <button class="btn inline" onclick={refresh}>{t("admin.refresh")}</button>
+    <button class="btn inline" onclick={() => void refreshGuarded()}>{t("admin.refresh")}</button>
   </div>
 
   <!-- Operations first (§9): urgent join requests render above everything else,
@@ -965,7 +993,11 @@
           </div>
         {/if}
         {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
-        <button class="btn primary" onclick={() => approve(req)}>{t("admin.requests.approve")}</button>
+        <button
+          class="btn primary"
+          onclick={() => approve(req)}
+          disabled={approving.has(req.attendeePubkey)}
+        >{t("admin.requests.approve")}</button>
       </div>
     {/each}
   </div>
@@ -1402,8 +1434,11 @@
                 </div>
               </div>
               <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
-                {#if c.announce.terms_url}
-                  <a class="btn inline" href={c.announce.terms_url} target="_blank" rel="noopener noreferrer">{t("admin.coordinator.terms")}</a>
+                <!-- terms_url comes from a SELF-PUBLISHED announcement: render
+                     only a parseable https: URL (audit APPR-1) — announcements
+                     already on relays predate the schema's https validation. -->
+                {#if httpsUrl(c.announce.terms_url)}
+                  <a class="btn inline" href={httpsUrl(c.announce.terms_url)} target="_blank" rel="noopener noreferrer">{t("admin.coordinator.terms")}</a>
                 {/if}
                 <button class="btn inline primary" onclick={() => attachPubkey(c.pubkey)} disabled={attaching}>
                   {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attachThis")}

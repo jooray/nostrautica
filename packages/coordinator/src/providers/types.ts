@@ -116,6 +116,12 @@ export interface PaymentStrategy {
   // orthogonal to providers
   prepare(req: { estimateTokens?: number }): Promise<Record<string, string>>; // → HTTP headers
   settle(responseHeaders: Headers): Promise<void>; // e.g. bank Cashu change
+  /**
+   * The request FAILED after prepare() (network error, non-2xx) so settle() will
+   * never run (audit COORD-5): the strategy must account for the reserved proofs —
+   * re-credit them or quarantine the reservation as ambiguous for reconcile.
+   */
+  fail?(): Promise<void>;
 }
 
 /** Which provider + model to use for a given role (spec §9.4 model routing). */

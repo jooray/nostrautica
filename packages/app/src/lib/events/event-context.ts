@@ -13,6 +13,7 @@ import {
   type EventConfig,
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
+import { onlyVerified } from "$lib/nostr/verify.js";
 import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 import { swr } from "$lib/cache/swr.js";
@@ -43,6 +44,19 @@ function tag(tags: string[][], name: string): string | undefined {
 // into any event sub-page paints instantly instead of awaiting a relay round-trip.
 function ctxKey(naddr: string): string {
   return `ctx:${naddr}`;
+}
+
+// Coordinate → the event's home relays, recorded whenever a context is loaded
+// (audit APPK-5): grant authentication (attendee.ts fetchEventConfig) runs
+// without an event page open and would otherwise only know DEFAULT_RELAYS, so a
+// custom-relay event's 31600 could never be fetched. Anon scope (public data).
+function relayHintsKey(coordinate: string): string {
+  return `relayhints:${coordinate}`;
+}
+
+/** The event's home relays as last seen, or [] when never recorded. */
+export function eventRelayHints(coordinate: string): string[] {
+  return cacheGet<string[]>(relayHintsKey(coordinate), ANON)?.data ?? [];
 }
 
 /** The already-loaded context for an naddr, if any (no network). */
@@ -86,10 +100,13 @@ export async function loadEventContext(
   if (relays.length) addRelays(relays);
   const { pubkey, identifier } = parseCoordinate(coordinate);
 
+  // Authority boundary (audit APPK-1): these fetches feed latest-by-created_at
+  // picks the whole app trusts, so every candidate is signature-re-verified
+  // here even though NDK already validates relay traffic.
   const [configEvents, eventEvents, profileEvents] = await Promise.all([
-    fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }),
-    fetchEvents({ kinds: [KIND_CALENDAR_EVENT], authors: [pubkey], "#d": [identifier] }),
-    fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }),
+    fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
+    fetchEvents({ kinds: [KIND_CALENDAR_EVENT], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
+    fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }).then(onlyVerified),
   ]);
 
   const configEvent = configEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
@@ -97,6 +114,10 @@ export async function loadEventContext(
   const config = parseEventConfig(pubkey, configEvent.tags);
   // Pull in the event's own home relays for subsequent operations.
   if (config.relays.length) addRelays(config.relays);
+  // Record the home relays for relay-less contexts (grant authentication, §8).
+  if (config.relays.length) {
+    cacheSet(relayHintsKey(coordinate), config.relays, configEvent.created_at ?? 0, ANON);
+  }
   // The UI follows the event's language for this session unless the user has made
   // an explicit choice in Settings (spec §7.1). Cached-context re-entry is fine —
   // adoptEventLang is a no-op once an explicit choice exists. Background

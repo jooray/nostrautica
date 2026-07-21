@@ -1,0 +1,143 @@
+/**
+ * Relay URL acceptance (audit APPR-8): only wss:// relays are added to the pool;
+ * plaintext ws:// is loopback-only (the local e2e/dev stack).
+ *
+ * Also covers UX-1: `fetchEvents`/`fetchEventsRelayOnly` are time-bounded —
+ * built on the streamEvents collector (first-EOSE+grace, 8s hard cap), they
+ * resolve with partial results instead of hanging when no relay ever EOSEs
+ * (dead-relay majority, e.g. conference Wi-Fi with WSS blocked).
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { isAcceptedRelayUrl, fetchEvents, fetchEventsRelayOnly, __setNdkForTests } from "./ndk.js";
+import type NDK from "@nostr-dev-kit/ndk";
+
+describe("isAcceptedRelayUrl (APPR-8)", () => {
+  it("accepts wss:// relay URLs", () => {
+    expect(isAcceptedRelayUrl("wss://relay.primal.net")).toBe(true);
+    expect(isAcceptedRelayUrl("wss://nos.lol/")).toBe(true);
+  });
+
+  it("rejects plaintext ws:// to remote hosts", () => {
+    expect(isAcceptedRelayUrl("ws://evil-relay.example")).toBe(false);
+    expect(isAcceptedRelayUrl("ws://203.0.113.7:7777")).toBe(false);
+  });
+
+  it("accepts ws:// on loopback only (local e2e/dev relay)", () => {
+    expect(isAcceptedRelayUrl("ws://localhost:7777")).toBe(true);
+    expect(isAcceptedRelayUrl("ws://127.0.0.1:7777")).toBe(true);
+    expect(isAcceptedRelayUrl("ws://[::1]:7777")).toBe(true);
+  });
+
+  it("rejects non-relay schemes and malformed URLs", () => {
+    expect(isAcceptedRelayUrl("https://not-a-relay.example")).toBe(false);
+    expect(isAcceptedRelayUrl("javascript:alert(1)")).toBe(false);
+    expect(isAcceptedRelayUrl("not a url")).toBe(false);
+    expect(isAcceptedRelayUrl("")).toBe(false);
+  });
+});
+
+// ── UX-1: time-bounded fetchEvents (through the real streamEvents collector) ──
+
+type Handler = (...args: unknown[]) => void;
+class FakeSub {
+  handlers = new Map<string, Handler[]>();
+  stopped = 0;
+  on(name: string, fn: Handler) {
+    const list = this.handlers.get(name) ?? [];
+    list.push(fn);
+    this.handlers.set(name, list);
+  }
+  emit(name: string, ...args: unknown[]) {
+    for (const fn of this.handlers.get(name) ?? []) fn(...args);
+  }
+  stop() {
+    this.stopped++;
+  }
+}
+
+let currentSub: FakeSub;
+let capturedOpts: Record<string, unknown> | undefined;
+
+function fakeNdk() {
+  return {
+    subscribe: (_filters: unknown, opts: Record<string, unknown>) => {
+      capturedOpts = opts;
+      currentSub = new FakeSub();
+      return currentSub;
+    },
+    pool: { connectedRelays: () => [] },
+  } as unknown as NDK;
+}
+
+let seq = 0;
+function fakeEvent(raw: Partial<{ id: string; kind: number; pubkey: string; created_at: number; tags: string[][] }>) {
+  const full = {
+    id: raw.id ?? `id${seq++}`,
+    kind: raw.kind ?? 1,
+    pubkey: raw.pubkey ?? "pk",
+    created_at: raw.created_at ?? 1,
+    tags: raw.tags ?? [],
+  };
+  return { rawEvent: () => full, ...full };
+}
+
+describe("fetchEvents / fetchEventsRelayOnly (UX-1: time-bounded)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    __setNdkForTests(fakeNdk());
+    capturedOpts = undefined;
+  });
+  afterEach(() => {
+    __setNdkForTests(null);
+    vi.useRealTimers();
+  });
+
+  it("resolves on EOSE + grace with the deduped snapshot", async () => {
+    const p = fetchEvents({ kinds: [1] });
+    currentSub.emit("event", fakeEvent({ id: "a" }));
+    currentSub.emit("event", fakeEvent({ id: "a" })); // same id from a second relay
+    currentSub.emit("event", fakeEvent({ id: "b" }));
+    currentSub.emit("eose");
+    await vi.advanceTimersByTimeAsync(400);
+    const events = await p;
+    expect(events.map((e) => e.id).sort()).toEqual(["a", "b"]);
+    expect(currentSub.stopped).toBeGreaterThan(0);
+  });
+
+  it("a never-EOSE fetch resolves at the hard timeout with partial results", async () => {
+    const p = fetchEvents({ kinds: [1] });
+    currentSub.emit("event", fakeEvent({ id: "partial" }));
+    await vi.advanceTimersByTimeAsync(8000);
+    const events = await p;
+    expect(events.map((e) => e.id)).toEqual(["partial"]);
+    expect(currentSub.stopped).toBeGreaterThan(0);
+  });
+
+  it("zero connected relays and zero events: resolves empty, never hangs", async () => {
+    const p = fetchEvents({ kinds: [1] });
+    await vi.advanceTimersByTimeAsync(8000);
+    await expect(p).resolves.toEqual([]);
+  });
+
+  it("honours a caller-provided timeoutMs", async () => {
+    const p = fetchEvents({ kinds: [1] }, undefined, { timeoutMs: 1500 });
+    await vi.advanceTimersByTimeAsync(1500);
+    await expect(p).resolves.toEqual([]);
+  });
+
+  it("fetchEventsRelayOnly subscribes with ONLY_RELAY cache usage", async () => {
+    const p = fetchEventsRelayOnly({ kinds: [1059] });
+    expect(capturedOpts?.cacheUsage).toBe("ONLY_RELAY");
+    currentSub.emit("eose");
+    await vi.advanceTimersByTimeAsync(400);
+    await expect(p).resolves.toEqual([]);
+  });
+
+  it("plain fetchEvents keeps the cache-first default (no ONLY_RELAY)", async () => {
+    const p = fetchEvents({ kinds: [1] });
+    expect(capturedOpts?.cacheUsage).toBeUndefined();
+    currentSub.emit("eose");
+    await vi.advanceTimersByTimeAsync(400);
+    await expect(p).resolves.toEqual([]);
+  });
+});

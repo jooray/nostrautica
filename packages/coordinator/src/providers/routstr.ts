@@ -56,24 +56,35 @@ export class RoutstrLlm implements LlmProvider {
       "Content-Type": "application/json",
       ...(await this.opts.payment.prepare({ estimateTokens: req.maxTokens })),
     };
-    const res = await fetch(`${this.base()}/chat/completions`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        model: req.model,
-        temperature: req.temperature ?? 0.2,
-        max_tokens: req.maxTokens,
-        messages: [
-          { role: "system", content: req.system },
-          { role: "user", content: req.user },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: { name: req.schemaName, strict: true, schema: req.schema },
-        },
-      }),
-    });
-    if (!res.ok) throw new Error(`Routstr chat/completions failed: ${res.status} ${await res.text()}`);
+    let res: Response;
+    try {
+      res = await fetch(`${this.base()}/chat/completions`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: req.model,
+          temperature: req.temperature ?? 0.2,
+          max_tokens: req.maxTokens,
+          messages: [
+            { role: "system", content: req.system },
+            { role: "user", content: req.user },
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: { name: req.schemaName, strict: true, schema: req.schema },
+          },
+        }),
+      });
+    } catch (e) {
+      // Network failure after prepare(): the reserved proofs never reach a
+      // settle() — account for them (audit COORD-5).
+      await this.opts.payment.fail?.().catch(() => {});
+      throw e;
+    }
+    if (!res.ok) {
+      await this.opts.payment.fail?.().catch(() => {}); // COORD-5, as above
+      throw new Error(`Routstr chat/completions failed: ${res.status} ${await res.text()}`);
+    }
     const body = (await res.json()) as any;
     // Change proofs (if any) come back in response headers — settle the wallet.
     await this.opts.payment.settle(res.headers);

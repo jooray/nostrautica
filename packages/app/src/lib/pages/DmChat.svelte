@@ -7,7 +7,7 @@
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { coordinateToNaddr } from "@nostrautica/protocol";
-  import { fetchDms, cachedDms, sendDm, type DmMessage } from "$lib/events/dm.js";
+  import { fetchDms, cachedDms, sendDm, mergeOptimisticDms, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
@@ -18,6 +18,7 @@
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import { fillHeight } from "$lib/components/fill-height.js";
+  import { outbox } from "$lib/stores/outbox.svelte.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -106,8 +107,11 @@
       const mine = all.filter((m) => m.peer === peer);
       const atBottom =
         !scroller || scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 60;
-      // Merge: relay results replace optimistic entries with the same text+minute.
-      messages = mine;
+      // Merge (audit UX-3): keep optimistic local echoes until the memo holds a
+      // matching copy — otherwise a just-sent DM vanishes on the next 5s poll
+      // until its self-wrap round-trips (and a queued offline send would never
+      // show at all).
+      messages = mergeOptimisticDms(mine, messages);
       error = null;
       if (atBottom) {
         await tick();
@@ -163,11 +167,21 @@
     // rather than showing a silent spinner (user feedback 2026-07-17).
     const slowTimer = setTimeout(() => (sendSlow = true), 6_000);
     try {
-      await sendDm(session.signer, peer, text);
+      const published = await sendDm(session.signer, peer, text);
       const me = await session.signer.getPublicKey();
+      // Offline / all publish retries failed → the wrap sits in the durable
+      // queue; mark it honestly (audit UX-4) instead of implying delivery.
+      if (!published) outbox.noteQueued();
       messages = [
         ...messages,
-        { id: `local-${Date.now()}`, peer, from: me, text, at: Math.floor(Date.now() / 1000) },
+        {
+          id: `local-${Date.now()}`,
+          peer,
+          from: me,
+          text,
+          at: Math.floor(Date.now() / 1000),
+          ...(published ? {} : { queued: true }),
+        },
       ];
       draft = "";
       await tick();
@@ -246,7 +260,7 @@
       >
         <span style="white-space:pre-wrap;word-break:break-word">{m.text}</span>
         <span class="muted" style="display:block;font-size:0.7rem;text-align:right">
-          {fmt(m.at)}
+          {#if m.queued}{t("dmchat.queued")} · {/if}{fmt(m.at)}
         </span>
       </div>
     {/each}

@@ -19,6 +19,7 @@
   import PostView from "$lib/components/PostView.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
+  import { outbox } from "$lib/stores/outbox.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
 
   let { naddr, npub }: { naddr: string; npub: string } = $props();
@@ -39,6 +40,10 @@
   let error = $state<unknown>(null);
   let confirmMute = $state(false);
   let showAnyway = $state(false);
+  // Hard route failure (audit UX-23): an undecodable npub must render an error,
+  // not an interactive empty profile whose Follow would publish ["p", ""].
+  let invalidNpub = $state(false);
+  let followQueued = $state(false); // follow sits in the offline outbox (UX-15)
   const muted = $derived(!!pubkey && mutes.isMuted(pubkey));
 
   onMount(async () => {
@@ -110,7 +115,15 @@
       if (session.signer) {
         void mutes.load(session.signer);
         const me = await session.signer.getPublicKey();
-        following = isFollowing(await fetchFollowTags(session.signer), pubkey);
+        // Bound the follow-list fetch (audit UX-10): an unbounded fetch on a bad
+        // network left the Follow button at "…" forever. On timeout we enable
+        // the button anyway — followUser's empty-list guard surfaces any real
+        // failure readably on tap.
+        const tags = await Promise.race([
+          fetchFollowTags(session.signer),
+          new Promise<null>((r) => setTimeout(() => r(null), 8_000)),
+        ]);
+        if (tags) following = isFollowing(tags, pubkey);
         followKnown = true;
         followsYou = (await fetchFollowersOf(me, [pubkey])).has(pubkey);
         blindingKey = await deriveBlindingKey(session.signer);
@@ -121,7 +134,10 @@
       }
       perfMark("Attendee", "network-settled");
     } catch (e) {
-      if (!kind0 && !entry) error = e instanceof Error ? e.message : String(e);
+      // A decode failure above leaves pubkey empty — hard-fail the route
+      // instead of rendering an interactive empty profile (audit UX-23).
+      if (!pubkey) invalidNpub = true;
+      else if (!kind0 && !entry) error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
       followKnown = true;
@@ -130,10 +146,16 @@
 
   async function follow() {
     if (!session.signer) return router.go({ name: "login" });
+    if (!pubkey) return; // never publish a ["p", ""] tag (audit UX-23)
     busy = true;
     try {
-      await followUser(session.signer, pubkey);
+      const published = await followUser(session.signer, pubkey);
       following = true;
+      // Queued for the offline flush, not published yet (audit UX-15).
+      if (!published) {
+        followQueued = true;
+        outbox.noteQueued();
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -196,7 +218,13 @@
 
 {#if error}<ErrorState {error} />{/if}
 
-{#if loading}
+{#if invalidNpub}
+  <!-- No interactive shell for a malformed link (audit UX-23). -->
+  <div class="card warn" role="alert">
+    <strong>{t("attendee.error.badNpub")}</strong>
+    <p class="muted" style="margin:0.25rem 0 0">{t("attendee.error.badNpub.body")}</p>
+  </div>
+{:else if loading}
   <!-- Never render a bare "Attendee + Follow" shell while data is in flight
        (user feedback 2026-07-16) — show that we're working. -->
   <div class="card" role="status" aria-label={t("app.loading")}>
@@ -305,6 +333,9 @@
     >
       {t("attendee.message")}
     </button>
+    {#if followQueued}
+      <p class="muted" role="status" style="width:100%;margin:0">{t("sync.queued")}</p>
+    {/if}
     {#if muted}
       <button class="btn" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
     {:else}

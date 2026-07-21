@@ -16,6 +16,12 @@ export const messages = {
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — you can still browse cached people and matches; changes will sync when you reconnect.",
+
+    // Background sync (audit UX-15)
+    "sync.queued": "Saved — will send when you're back online.",
+    "outbox.pending.one": "{n} change waiting to send",
+    "outbox.pending.many": "{n} changes waiting to send",
+
     "nav.login": "Log in",
     "nav.me": "Me",
     "nav.events": "Events",
@@ -439,6 +445,7 @@ export const messages = {
     "attendee.recentPosts": "Recent posts",
     "attendee.name": "Attendee",
     "attendee.error.badNpub": "bad npub",
+    "attendee.error.badNpub.body": "This profile link isn't valid — check the link and try again.",
     "attendee.translated": "Translated",
     "attendee.showOriginal": "show original",
     "attendee.showTranslation": "show translation",
@@ -552,6 +559,7 @@ export const messages = {
     "dmchat.signerSlow": "Waiting for your signer to sign & encrypt… if you use Amber or a bunker, make sure it's reachable.",
     "dmchat.placeholder": "Write a message…",
     "dmchat.send": "Send",
+    "dmchat.queued": "queued",
 
     // Admin
     "admin.title": "Organizer admin",
@@ -925,6 +933,13 @@ export const messages = {
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Bez pripojenia — stále si môžete prezerať uložených ľudí a spojenia; zmeny sa zosynchronizujú po opätovnom pripojení.",
+
+    // Synchronizácia na pozadí (audit UX-15)
+    "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
+    "outbox.pending.one": "{n} zmena čaká na odoslanie",
+    "outbox.pending.few": "{n} zmeny čakajú na odoslanie",
+    "outbox.pending.many": "{n} zmien čaká na odoslanie",
+
     "nav.login": "Prihlásiť sa",
     "nav.me": "Ja",
     "nav.events": "Podujatia",
@@ -1352,6 +1367,7 @@ export const messages = {
     "attendee.recentPosts": "Nedávne príspevky",
     "attendee.name": "Účastník",
     "attendee.error.badNpub": "neplatný npub",
+    "attendee.error.badNpub.body": "Tento odkaz na profil nie je platný — skontrolujte ho a skúste to znova.",
     "attendee.translated": "Preložené",
     "attendee.showOriginal": "zobraziť originál",
     "attendee.showTranslation": "zobraziť preklad",
@@ -1466,6 +1482,7 @@ export const messages = {
     "dmchat.signerSlow": "Čaká sa, kým podpisovač podpíše a zašifruje… ak používate Amber alebo bunker, uistite sa, že je dostupný.",
     "dmchat.placeholder": "Napíšte správu…",
     "dmchat.send": "Odoslať",
+    "dmchat.queued": "čaká na odoslanie",
 
     // Admin
     "admin.title": "Administračné rozhranie udalosti",
@@ -1841,6 +1858,13 @@ export const messages = {
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — stále si můžete prohlížet uložené lidi a spojení; změny se synchronizují po opětovném připojení.",
+
+    // Synchronizace na pozadí (audit UX-15)
+    "sync.queued": "Uloženo — odešle se po obnovení připojení.",
+    "outbox.pending.one": "{n} změna čeká na odeslání",
+    "outbox.pending.few": "{n} změny čekají na odeslání",
+    "outbox.pending.many": "{n} změn čeká na odeslání",
+
     "nav.login": "Přihlásit se",
     "nav.me": "Já",
     "nav.events": "Akce",
@@ -2267,6 +2291,7 @@ export const messages = {
     "attendee.recentPosts": "Nedávné příspěvky",
     "attendee.name": "Účastník",
     "attendee.error.badNpub": "neplatný npub",
+    "attendee.error.badNpub.body": "Tento odkaz na profil není platný — zkontrolujte ho a zkuste to znovu.",
     "attendee.translated": "Přeloženo",
     "attendee.showOriginal": "zobrazit originál",
     "attendee.showTranslation": "zobrazit překlad",
@@ -2380,6 +2405,7 @@ export const messages = {
       "Čeká se, až podpisovač podepíše a zašifruje… pokud používáte Amber nebo bunker, ujistěte se, že je dostupný.",
     "dmchat.placeholder": "Napište zprávu…",
     "dmchat.send": "Odeslat",
+    "dmchat.queued": "čeká na odeslání",
 
     // Administrace
     "admin.title": "Administrační rozhraní akce",

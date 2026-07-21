@@ -134,4 +134,30 @@ describe("discoverKeyPackages", () => {
     const result = await discoverKeyPackages(t, ["alice"], ["wss://event-relay.example"], []);
     expect(result.map((e) => e.id)).toEqual(["kp-fresh"]);
   });
+
+  it("sanitizes untrusted 10002 `r` tags (audit COORD-16): wss-only, capped per author", async () => {
+    const t = new RelayScopedFake();
+    const relayList = ev({
+      kind: KIND_RELAY_LIST,
+      pubkey: "hostile",
+      tags: [
+        ["r", "ws://insecure.example"], // dropped: not wss
+        ["r", "not a url"], // dropped: malformed
+        // 8 valid wss relays — only the first 5 are fanned out to.
+        ...Array.from({ length: 8 }, (_, i): string[] => ["r", `wss://fan-${i}.example`]),
+      ],
+    });
+    t.seed("wss://event-relay.example", relayList);
+    const kp = ev({ id: "kp-fan", kind: KIND_KEY_PACKAGE, pubkey: "hostile" });
+    t.seed("wss://fan-4.example", kp); // within the cap → still discovered
+
+    const result = await discoverKeyPackages(t, ["hostile"], ["wss://event-relay.example"], []);
+    expect(result.map((e) => e.id)).toEqual(["kp-fan"]);
+    // The insecure/malformed relays were never queried (no events there anyway),
+    // and relays past the cap are out of reach by construction.
+    const beyondCap = ev({ id: "kp-beyond", kind: KIND_KEY_PACKAGE, pubkey: "hostile" });
+    t.seed("wss://fan-7.example", beyondCap);
+    const again = await discoverKeyPackages(t, ["hostile"], ["wss://event-relay.example"], []);
+    expect(again.map((e) => e.id)).toEqual(["kp-fan"]);
+  });
 });

@@ -169,4 +169,44 @@ describe("invite proofs (spec §6.5)", () => {
     const tampered = { ...proof, sig: bytesToHex(new Uint8Array(64)) };
     expect(verifyInviteProof(tampered, coord, attendee)).toBe(false);
   });
+
+  it("isInviteValid returns false (never throws) on malformed proof fields (PROTO-1)", () => {
+    const published = new Set<string>();
+    // Non-hex / uppercase / wrong-length invite pubkey — inviteHash's hexToBytes
+    // would have thrown on these before the fix.
+    expect(isInviteValid({ invitePubkey: "nothex", sig: "ab".repeat(64) }, published, coord, attendee)).toBe(false);
+    expect(isInviteValid({ invitePubkey: "A".repeat(64), sig: "ab".repeat(64) }, published, coord, attendee)).toBe(false);
+    expect(isInviteValid({ invitePubkey: "a".repeat(63), sig: "ab".repeat(64) }, published, coord, attendee)).toBe(false);
+    // Malformed signature (non-hex / wrong length).
+    expect(isInviteValid({ invitePubkey: "a".repeat(64), sig: "nothex" }, published, coord, attendee)).toBe(false);
+    expect(isInviteValid({ invitePubkey: "a".repeat(64), sig: "ab" }, published, coord, attendee)).toBe(false);
+    expect(() =>
+      isInviteValid({ invitePubkey: "nothex", sig: "zz" }, published, coord, attendee),
+    ).not.toThrow();
+  });
+});
+
+describe("NIP-44 plaintext ceiling (65,535 bytes, PROTO-3)", () => {
+  const tooBig = "x".repeat(65_536); // 65,536 UTF-8 bytes
+
+  it("eckEncrypt rejects an over-ceiling plaintext", () => {
+    expect(() => eckEncrypt(generateEck(), tooBig)).toThrow(/ceiling is 65535/);
+  });
+
+  it("nip44Encrypt rejects an over-ceiling plaintext", () => {
+    const sender = generateSecretKey();
+    expect(() =>
+      nip44Encrypt(sender, getPublicKey(generateSecretKey()), tooBig),
+    ).toThrow(/ceiling is 65535/);
+  });
+
+  it("selfEncrypt rejects an over-ceiling plaintext", () => {
+    expect(() => selfEncrypt(generateSecretKey(), tooBig)).toThrow(/ceiling is 65535/);
+  });
+
+  it("a plaintext exactly at the ceiling still round-trips", () => {
+    const eck = generateEck();
+    const atCeiling = "x".repeat(65_535);
+    expect(eckDecrypt(eck, eckEncrypt(eck, atCeiling))).toBe(atCeiling);
+  });
 });

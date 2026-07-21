@@ -1,9 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, getEventHash, finalizeEvent } from "nostr-tools/pure";
 import {
   wrapRumor,
   unwrapRumor,
+  nip44Encrypt,
+  KIND_GIFT_WRAP,
   KIND_JOIN_REQUEST,
+  KIND_SEAL,
+  RUMOR_MAX_CLOCK_SKEW_SEC,
   joinRequestContentSchema,
 } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
@@ -64,5 +68,46 @@ describe("signer-based gift wrap ↔ protocol raw-key gift wrap", () => {
     });
     const wrongSigner = LocalSigner.generate();
     await expect(signerUnwrap(wrongSigner, wrap)).rejects.toBeDefined();
+  });
+
+  it("clamps a future-dated rumor's created_at (PROTO-8)", async () => {
+    const sender = LocalSigner.generate();
+    const recipient = LocalSigner.generate();
+    const recipientPk = await recipient.getPublicKey();
+    const senderPk = await sender.getPublicKey();
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 3 * 24 * 60 * 60; // 3 days ahead — wins any latest-wins pick
+
+    // Hand-build a NIP-59 wrap whose rumor is future-dated (signerWrap's exact
+    // construction, but with a chosen rumor created_at).
+    const rumorBase = {
+      pubkey: senderPk,
+      created_at: future,
+      kind: KIND_JOIN_REQUEST,
+      tags: [] as string[][],
+      content: JSON.stringify(payload),
+    };
+    const rumor = { ...rumorBase, id: getEventHash(rumorBase) };
+    const seal = await sender.signEvent({
+      kind: KIND_SEAL,
+      created_at: now - 60,
+      tags: [],
+      content: await sender.nip44Encrypt(recipientPk, JSON.stringify(rumor)),
+    });
+    const otSk = generateSecretKey();
+    const wrap = finalizeEvent(
+      {
+        kind: KIND_GIFT_WRAP,
+        created_at: now - 60,
+        tags: [["p", recipientPk]],
+        content: nip44Encrypt(otSk, recipientPk, JSON.stringify(seal)),
+      },
+      otSk,
+    );
+
+    const unwrapped = await signerUnwrap(recipient, wrap as never);
+    // Clamped to at most now + skew — the 3-day head start is gone.
+    expect(unwrapped.created_at).toBeLessThanOrEqual(now + RUMOR_MAX_CLOCK_SKEW_SEC);
+    expect(unwrapped.created_at).toBeLessThan(future);
   });
 });

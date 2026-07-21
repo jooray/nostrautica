@@ -5,11 +5,12 @@
  * We sign events with the app's own signer (see signer/), then hand the already
  * signed event to NDK for publishing — NDK is our relay transport, not our signer.
  */
-import NDK, { NDKEvent, NDKRelaySet, NDKSubscriptionCacheUsage } from "@nostr-dev-kit/ndk";
+import NDK, { NDKEvent, NDKRelaySet } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
 import NDKCacheAdapterDexie from "@nostr-dev-kit/cache-dexie";
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { DEFAULT_RELAYS, DEFAULT_READ_RELAYS, unionRelays } from "./relays.js";
+import { streamEvents } from "./stream.js";
 
 /**
  * A relay filter using plain numeric kinds (Nostrautica's custom kinds aren't in
@@ -30,6 +31,14 @@ export interface Filter {
 
 let ndk: NDK | null = null;
 
+/**
+ * Seconds a `created_at` may run ahead of our clock before NDK drops the event
+ * (audit APPK-1). Ordering-sensitive picks (latest 31600/31923/roster) are
+ * latest-by-created_at, so a forged far-future timestamp would win every
+ * "latest" pick; 15 min passes honest clock skew but rejects those.
+ */
+const FUTURE_TIMESTAMP_GRACE_SEC = 900;
+
 /** Get (lazily creating) the NDK singleton. Safe to call before connect(). */
 export function getNdk(): NDK {
   if (ndk) return ndk;
@@ -40,6 +49,14 @@ export function getNdk(): NDK {
         ? new NDKCacheAdapterDexie({ dbName: "nostrautica-cache" })
         : undefined,
     autoConnectUserRelays: false,
+    // Audit APPK-1: NDK's default signature-validation ratio decays toward 0.1
+    // per relay after ~100 validated events — a malicious relay could then feed
+    // us forged E_id/coordinator events. Pin the ratio at 1 so EVERY relay event
+    // is signature-verified, always. The authority boundaries additionally
+    // re-verify the events they trust (see nostr/verify.ts).
+    initialValidationRatio: 1,
+    lowestValidationRatio: 1,
+    futureTimestampGrace: FUTURE_TIMESTAMP_GRACE_SEC,
   });
   return ndk;
 }
@@ -51,10 +68,28 @@ export async function connectNdk(): Promise<NDK> {
   return instance;
 }
 
+/**
+ * A relay URL the app will actually open (audit APPR-8): `wss://` only —
+ * plaintext `ws://` to a remote host would expose all event traffic to
+ * interception. The one exception is loopback (`ws://localhost` / `127.0.0.1` /
+ * `[::1]`), which the local e2e/dev stack uses for its dockerized relay.
+ */
+export function isAcceptedRelayUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "wss:") return true;
+    if (u.protocol !== "ws:") return false;
+    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
 /** Add relay URLs to the pool at runtime (event 31600 relays, user 10002). */
 export function addRelays(urls: string[]): void {
   const instance = getNdk();
   for (const url of urls) {
+    if (!isAcceptedRelayUrl(url)) continue;
     try {
       instance.addExplicitRelay(url);
     } catch {
@@ -108,16 +143,24 @@ export function subscribe(
   return sub;
 }
 
-/** One-shot fetch of matching events (uses cache first, then relays). */
+/** One-shot fetch of matching events (uses cache first, then relays).
+ *
+ * UX-1: implemented on the streamEvents collector, NOT NDK's `fetchEvents` —
+ * NDK's aggregated EOSE needs ≥2 EOSEs from ≥50% of CONNECTED relays and never
+ * fires with zero connected, so a dead-relay majority (conference Wi-Fi with
+ * WSS blocked) hung every cold-visit screen forever. The collector settles at
+ * first-EOSE+grace / all-connected-relays-EOSE+grace / an 8s hard timeout,
+ * whichever comes first, resolving with whatever arrived (partial results).
+ * Cache-first semantics are unchanged: the default CACHE_FIRST subscription
+ * feeds dexie hits through the same event stream, so a timeout never turns a
+ * cache hit into "nothing exists" (and callers treat empty as fail-soft).
+ */
 export async function fetchEvents(
   filters: Filter | Filter[],
   relays?: string[],
+  opts: { timeoutMs?: number; graceMs?: number } = {},
 ): Promise<NDKEvent[]> {
-  const set = await getNdk().fetchEvents(filters as unknown as NDKFilter | NDKFilter[], {
-    closeOnEose: true,
-    relaySet: relaySet(relays),
-  });
-  return [...set];
+  return streamEvents(filters, { relays, ...opts }).ready;
 }
 
 /**
@@ -125,17 +168,19 @@ export async function fetchEvents(
  * must-not-miss reads (gift-wrap grants): with the async cache adapter in the
  * loop, fetchEvents can resolve on EOSE before a relay event that already
  * arrived is surfaced — the grant then sits invisible until some later fetch.
+ * Time-bounded exactly like `fetchEvents` (UX-1).
  */
 export async function fetchEventsRelayOnly(
   filters: Filter | Filter[],
   relays?: string[],
+  opts: { timeoutMs?: number; graceMs?: number } = {},
 ): Promise<NDKEvent[]> {
-  const set = await getNdk().fetchEvents(filters as unknown as NDKFilter | NDKFilter[], {
-    closeOnEose: true,
-    cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY,
-    relaySet: relaySet(relays),
-  });
-  return [...set];
+  return streamEvents(filters, { relays, relayOnly: true, ...opts }).ready;
+}
+
+/** Test-only: swap the NDK singleton (pass null to restore lazy creation). */
+export function __setNdkForTests(instance: NDK | null): void {
+  ndk = instance;
 }
 
 export { NDKEvent };

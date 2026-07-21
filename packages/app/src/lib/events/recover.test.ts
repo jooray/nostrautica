@@ -45,6 +45,9 @@ function memBackend() {
     async list(o) {
       return [...composite.values()].filter((r) => r.owner === o);
     },
+    async delete(o, c) {
+      composite.delete(k(o, c));
+    },
     async legacyGet() {
       return undefined;
     },
@@ -52,6 +55,11 @@ function memBackend() {
       return [];
     },
     async legacyDelete() {},
+    async lockedPut() {},
+    async lockedList() {
+      return [];
+    },
+    async lockedDelete() {},
   };
   return { backend, composite };
 }

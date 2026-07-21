@@ -14,6 +14,7 @@ import type {
   Subscribable,
 } from "@internet-privacy/marmot-ts/client";
 import { INBOX_RELAY_LIST_KIND } from "@internet-privacy/marmot-ts/core";
+import { sanitizeRelayUrls } from "../net/relay-urls.js";
 
 /** Any Nostr event shape (structurally shared between nostr-tools and applesauce). */
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
@@ -94,9 +95,10 @@ export function makeChatNetwork(opts: ChatNetworkOptions): NostrNetworkInterface
         (a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0),
       )[0];
       if (!latest) return defaultRelays;
-      const relays = latest.tags
-        .filter((t) => t[0] === "relay" && typeof t[1] === "string")
-        .map((t) => t[1]!);
+      // Untrusted input (audit COORD-16): wss-only, well-formed, deduped, capped.
+      const relays = sanitizeRelayUrls(
+        latest.tags.filter((t) => t[0] === "relay" && typeof t[1] === "string").map((t) => t[1]!),
+      );
       return relays.length ? relays : defaultRelays;
     },
   };

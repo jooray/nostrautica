@@ -16,6 +16,7 @@
   import { submitProfileCorrection, type CorrectionInput } from "$lib/events/correction.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { outbox } from "$lib/stores/outbox.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -25,6 +26,7 @@
   let error = $state<unknown>(null);
   let busy = $state(false);
   let saved = $state(false);
+  let saveQueued = $state(false); // correction sits in the offline outbox (UX-15)
 
   // Editable copies of each generated field. List fields are edited as one item
   // per line; summary is free text. `initial` is the loaded baseline so only
@@ -103,9 +105,15 @@
     busy = true;
     error = null;
     saved = false;
+    saveQueued = false;
     try {
-      await submitProfileCorrection(session.signer, ctx, buildCorrection());
+      const published = await submitProfileCorrection(session.signer, ctx, buildCorrection());
       saved = true;
+      // Queued for the offline flush, not sent yet (audit UX-15) — say so.
+      if (!published) {
+        saveQueued = true;
+        outbox.noteQueued();
+      }
     } catch (e) {
       error = e;
     } finally {
@@ -195,7 +203,8 @@
       </button>
       {#if saved}<span class="badge" role="status">{t("profile.saved")}</span>{/if}
     </div>
-    {#if saved}<p class="muted small">{t("profile.saved.hint")}</p>{/if}
+    {#if saved && !saveQueued}<p class="muted small">{t("profile.saved.hint")}</p>{/if}
+    {#if saveQueued}<p class="muted small" role="status">{t("sync.queued")}</p>{/if}
   </div>
 {/if}
 

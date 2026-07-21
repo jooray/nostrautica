@@ -4,6 +4,7 @@
   import { eventNaddr } from "$lib/router/routes.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import OutboxIndicator from "$lib/components/OutboxIndicator.svelte";
 
   function toggleTheme() {
     theme.set(theme.effective === "dark" ? "light" : "dark");
@@ -24,6 +25,7 @@
     {#if !onEvent}
       <a class="brand" href="#/" aria-label={t("nav.homeAria")}>{t("app.brand")}</a>
     {/if}
+    <OutboxIndicator />
   </div>
   <button
     class="btn inline theme-toggle"

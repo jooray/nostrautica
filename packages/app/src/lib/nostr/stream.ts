@@ -7,6 +7,11 @@
  * This exists because NDK's aggregated EOSE requires ≥2 relays (and ≥50% of the
  * connected set) before it even arms its own timer — a 2-relay set with one dead
  * relay stalls `fetchEvents` indefinitely.
+ *
+ * UX-18: besides the aggregated "eose" and the hard cap, the stream also settles
+ * early once EVERY CONNECTED relay in the set has individually EOSEd (via NDK's
+ * per-relay `eoseReceived` hook) + grace — a dead relay no longer forces the
+ * full timeout on every read in a chain (roster→directory→profiles ≈ 16-24s).
  */
 import { NDKSubscriptionCacheUsage } from "@nostr-dev-kit/ndk";
 import type { NDKEvent, NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
@@ -82,6 +87,11 @@ export function streamEvents(
     settle(); // a stopped stream must never leave `ready` pending
   };
 
+  const armGrace = () => {
+    if (settled || stopped || graceTimer) return;
+    graceTimer = setTimeout(settle, graceMs);
+  };
+
   try {
     sub = getNdk().subscribe(filters as unknown as NDKFilter | NDKFilter[], {
       closeOnEose: false,
@@ -105,6 +115,31 @@ export function streamEvents(
       if (graceTimer) clearTimeout(graceTimer);
       graceTimer = setTimeout(settle, graceMs);
     });
+    // UX-18: NDK's "eose" above is AGGREGATED — it needs ≥2 EOSEs from ≥50% of
+    // the connected relays, so a 2-relay set with one dead relay pays the full
+    // hard timeout on every read (and reads chain: roster→directory→profiles).
+    // NDK 3.0.3 emits no per-relay EOSE event, but `eoseReceived(relay)` is its
+    // per-relay hook (public method, called exactly once per relay EOSE). Wrap
+    // it to resolve early once EVERY CONNECTED relay in the set has EOSEd:
+    // `relaysMissingEose()` minus the disconnected ones must be empty. Dead
+    // relays simply stop mattering; the grace window + hard cap still apply,
+    // and live `onEvent` callers keep receiving late events regardless.
+    const origEoseReceived = sub.eoseReceived?.bind(sub);
+    if (typeof origEoseReceived === "function" && typeof sub.relaysMissingEose === "function") {
+      sub.eoseReceived = (relay: Parameters<typeof origEoseReceived>[0]) => {
+        origEoseReceived(relay);
+        if (settled || stopped || graceTimer) return;
+        try {
+          if ((sub?.eosesSeen?.size ?? 0) === 0) return; // nothing executed yet
+          const missing = sub?.relaysMissingEose() ?? [];
+          if (missing.length === 0) return; // all EOSEd → aggregated eose handles it
+          const connected = new Set(getNdk().pool.connectedRelays().map((r) => r.url));
+          if (missing.every((url) => !connected.has(url))) armGrace();
+        } catch {
+          /* NDK internals shifted — aggregated eose + hard timeout still bound us */
+        }
+      };
+    }
     hardTimer = setTimeout(stop, timeoutMs);
   } catch {
     stop(); // subscribe failed (no relays?) — resolve with whatever we have

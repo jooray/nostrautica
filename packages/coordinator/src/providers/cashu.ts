@@ -58,7 +58,8 @@ export class CashuPayment implements PaymentStrategy {
     return { mint: this.opts.mintUrl, proofs: [] };
   }
   private save(file: WalletFile): void {
-    writeFileSync(this.opts.walletDbPath, JSON.stringify(file, null, 2));
+    // Bearer money at rest: owner-read/write only (audit COORD-5).
+    writeFileSync(this.opts.walletDbPath, JSON.stringify(file, null, 2), { mode: 0o600 });
   }
 
   private async ensureLoaded(): Promise<void> {
@@ -106,19 +107,42 @@ export class CashuPayment implements PaymentStrategy {
       await this.ensureLoaded();
       try {
         const decoded = getDecodedToken(changeToken);
+        // Journal the change proofs BEFORE redeeming them into the wallet file
+        // (audit COORD-5): a crash mid-receive then leaves the change accounted
+        // for in the durable journal instead of lost with the token string.
+        const changeProofs = (decoded.proofs ?? []) as Proof[];
+        if (requestId && this.opts.journal && changeProofs.length > 0) {
+          this.opts.journal.cashuSettle(requestId, changeProofs);
+        }
         banked = await this.wallet.receive(decoded);
         const file = this.load();
         file.proofs = [...file.proofs, ...banked];
         this.save(file);
       } catch {
-        // Malformed / already-spent change — nothing to bank.
-        banked = [];
+        // Malformed / already-spent change — nothing to bank in the wallet; any
+        // change proofs journaled above stay recoverable there (COORD-5).
       }
     }
-    // Close out the journal reservation (request completed). Records the banked
-    // change so it survives a later crash even though it's already in the wallet.
+    // Close out the journal reservation (request completed). Idempotent: when the
+    // change was already journaled above this is a no-op; it also covers the
+    // no-change case (settled with empty change).
     if (requestId && this.opts.journal) {
       this.opts.journal.cashuSettle(requestId, banked);
+    }
+  }
+
+  /**
+   * The request failed after prepare() (audit COORD-5): settle() will never run
+   * for this reservation. Whether the node redeemed the proofs is unknowable
+   * locally (a network error may or may not have reached it), so quarantine the
+   * reservation as `ambiguous` — the proofs stay recorded in the journal (not
+   * lost) and are never re-credited to the wallet (no double-spend).
+   */
+  async fail(): Promise<void> {
+    const requestId = this.pendingRequestId;
+    this.pendingRequestId = undefined;
+    if (requestId && this.opts.journal) {
+      this.opts.journal.cashuMarkAmbiguous(requestId);
     }
   }
 

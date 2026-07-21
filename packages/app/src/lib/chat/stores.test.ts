@@ -87,4 +87,22 @@ describe("makeMarmotStores", () => {
     expect(await stores.rewindStore.keys()).toEqual(["r"]);
     expect(await stores.inviteStore.keys()).toEqual(["i"]);
   });
+
+  it("eventGroupStore binds event coordinates per identity, not across identities (APPK-3)", async () => {
+    const backend = new InMemoryKvBackend();
+    const a = makeMarmotStores(backend, idA).eventGroupStore;
+    const b = makeMarmotStores(backend, idB).eventGroupStore;
+    const coordA = "31923:" + "e".repeat(64) + ":event-a";
+    const coordB = "31923:" + "f".repeat(64) + ":event-b";
+
+    await a.setItem(coordA, "gid-a");
+    await a.setItem(coordB, "gid-b");
+    // One identity can hold a binding per event…
+    expect(await a.getItem(coordA)).toBe("gid-a");
+    expect(await a.getItem(coordB)).toBe("gid-b");
+    // …and the same coordinate under another identity is independent.
+    expect(await b.getItem(coordA)).toBeNull();
+    await b.setItem(coordA, "gid-other");
+    expect(await a.getItem(coordA)).toBe("gid-a");
+  });
 });

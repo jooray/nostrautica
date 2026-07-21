@@ -56,6 +56,39 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.poisonJobs()).toHaveLength(1);
   });
 
+  it("the DEFAULT schedule is a long tail (COORD-15): quick retries, then ~hourly, poison only after ~3 days", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now });
+    let attempts = 0;
+    runner.register("flaky", async () => {
+      attempts++;
+      throw new Error("boom");
+    });
+    runner.enqueue("flaky", "k", {});
+
+    // Quick early retries: 1s, 10s, 100s.
+    await runner.drain();
+    expect(attempts).toBe(1);
+    for (const backoff of [1_000, 10_000, 100_000]) {
+      clock.advance(backoff);
+      await runner.drain();
+    }
+    expect(attempts).toBe(4);
+    // Then ~hourly — still retrying 5 hours in, NOT poisoned at ~31s like before.
+    clock.advance(5 * 60 * 60_000);
+    await runner.drain();
+    expect(attempts).toBeGreaterThan(4);
+    expect(store.poisonJobs()).toHaveLength(0);
+    // The tail spans ~3 days before poisoning (advance past each backoff in steps —
+    // a frozen clock only makes the NEXT due attempt runnable per drain).
+    for (let i = 0; i < 60 && store.poisonJobs().length === 0; i++) {
+      clock.advance(4 * 60 * 60_000);
+      await runner.drain();
+    }
+    expect(store.poisonJobs()).toHaveLength(1);
+  });
+
   it("a handler can enqueue follow-up jobs", async () => {
     const store = new Store();
     const runner = new JobRunner(store, { now: () => 0 });

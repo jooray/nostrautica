@@ -9,7 +9,7 @@
 import { sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
-import { uploadAndMirror } from "$lib/blossom/client.js";
+import { uploadAndMirror, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
 import { fetchUserBlossomServers } from "./submit.js";
 
 /** Two deterministic gradient hues derived from a seed string. */
@@ -49,6 +49,54 @@ export function defaultEventIcon(seed: string, label = ""): string {
 <rect width="96" height="96" rx="22" fill="url(#g)"/>
 <text x="48" y="63" font-family="system-ui,sans-serif" font-size="46" font-weight="700" fill="hsl(${h1.toFixed(0)},80%,80%)" text-anchor="middle">${initial}</text>
 </svg>`);
+}
+
+/** Avatars upload as a 512px square JPEG (audit APPR-3). */
+export const AVATAR_SIZE = 512;
+
+/**
+ * Square-crop + scale a profile photo for upload (audit APPR-3). A camera
+ * original is megabytes at full resolution and carries EXIF metadata (incl.
+ * GPS); every roster row would then download the full file. The canvas
+ * decode/re-encode strips EXIF BY CONSTRUCTION (canvas pixels have no metadata)
+ * and bounds the file to a 512px JPEG.
+ *
+ * FAIL CLOSED, unlike {@link cropScaleImage}'s upload-as-is fallback: an
+ * undecodable or unprocessable image is a readable ERROR, never a silent upload
+ * of the raw original — the raw file is exactly what this exists to keep off
+ * Blossom.
+ */
+export async function prepareAvatarImage(file: Blob): Promise<Blob> {
+  let bitmap: ImageBitmap | undefined;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error("That photo couldn't be read — please choose a different one.");
+  }
+  try {
+    // Cover-crop math (same construction as cropScaleImage): center-crop the
+    // largest square the source covers, scaled to AVATAR_SIZE.
+    const scale = Math.max(AVATAR_SIZE / bitmap.width, AVATAR_SIZE / bitmap.height);
+    const sw = AVATAR_SIZE / scale;
+    const sh = AVATAR_SIZE / scale;
+    const sx = (bitmap.width - sw) / 2;
+    const sy = (bitmap.height - sh) / 2;
+    const canvas = document.createElement("canvas");
+    canvas.width = AVATAR_SIZE;
+    canvas.height = AVATAR_SIZE;
+    const c2d = canvas.getContext("2d");
+    if (!c2d) throw new Error("no 2d canvas context");
+    c2d.drawImage(bitmap, sx, sy, sw, sh, 0, 0, AVATAR_SIZE, AVATAR_SIZE);
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.9),
+    );
+    if (!blob) throw new Error("canvas encode failed");
+    return blob;
+  } catch {
+    throw new Error("That photo couldn't be processed — please choose a different one.");
+  } finally {
+    bitmap?.close?.();
+  }
 }
 
 /**
@@ -103,7 +151,10 @@ export async function uploadPublicImage(
 ): Promise<string> {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const userServers = await fetchUserBlossomServers(signer);
-  const servers = unionRelays(eventBlossom, userServers, DEFAULT_BLOSSOM_SERVERS);
+  // https: only (audit APPR-8) — backstop for event-config/10063 URLs.
+  const servers = unionRelays(eventBlossom, userServers, DEFAULT_BLOSSOM_SERVERS).filter(
+    isAcceptedBlossomUrl,
+  );
   const { urls } = await uploadAndMirror(signer, servers, bytes, blob.type || "image/jpeg");
   return urls[0]!;
 }

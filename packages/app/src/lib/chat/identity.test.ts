@@ -1,7 +1,22 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
-import { eventSignerFromKey, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
+import {
+  eventSignerFromKey,
+  buildChatKeyProfile,
+  resolveChatIdentity,
+  loadChatDeviceKey,
+  lockChatIdentityForLogout,
+  unlockChatIdentityForLogin,
+  type ChatIdentity,
+} from "./identity.js";
+import {
+  makeMarmotStores,
+  marmotKvBackend,
+  InMemoryKvBackend,
+  __setMarmotKvBackendForTests,
+} from "./stores.js";
+import type { AppSigner } from "$lib/signer/types.js";
 import {
   signAccountIdentityProof,
   accountIdentityProofSigningDigest,
@@ -132,5 +147,101 @@ describe("buildChatKeyProfile", () => {
       secretKey: sk,
     } satisfies ChatIdentity;
     expect(JSON.parse(buildChatKeyProfile(identity, "Alice").content)).not.toHaveProperty("picture");
+  });
+});
+
+describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", () => {
+  beforeEach(() => {
+    __setMarmotKvBackendForTests(new InMemoryKvBackend());
+  });
+  afterEach(() => {
+    __setMarmotKvBackendForTests(null);
+  });
+
+  // Stand-in for the caller's real self-encrypt (NIP-44 to the account's own
+  // pubkey) — the crypto itself is proven in packages/protocol; these tests
+  // only need something reversible to prove the lock/unlock plumbing.
+  const selfEncrypt = async (pt: string) => `enc:${pt}`;
+  const selfDecrypt = async (ct: string) => {
+    if (!ct.startsWith("enc:")) throw new Error("bad ciphertext");
+    return ct.slice(4);
+  };
+
+  it("is a no-op when chat was never used on this device", async () => {
+    const account = "a".repeat(64);
+    await expect(lockChatIdentityForLogout(account, selfEncrypt)).resolves.toBeUndefined();
+    await expect(unlockChatIdentityForLogin(account, selfDecrypt)).resolves.toBeUndefined();
+  });
+
+  it("round-trips a local-key account's chat state, including binary values", async () => {
+    const account = "a".repeat(64);
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, account);
+    await stores.groupStateStore.setItem("g1", { epoch: 1 } as never);
+    await stores.rewindStore.setItem("g1", new Uint8Array([1, 2, 3]));
+
+    await lockChatIdentityForLogout(account, selfEncrypt);
+    // Plaintext is gone once locked.
+    expect(await stores.groupStateStore.getItem("g1")).toBeNull();
+    expect(await stores.rewindStore.getItem("g1")).toBeNull();
+
+    await unlockChatIdentityForLogin(account, selfDecrypt);
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1 });
+    expect(await stores.rewindStore.getItem("g1")).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it("round-trips a remote-signer account's device key without forking its MLS identity", async () => {
+    const account = "b".repeat(64);
+    const fakeSigner = { getPublicKey: async () => account } as unknown as AppSigner; // no getSecretKey → device-key path
+    const before = await resolveChatIdentity(fakeSigner);
+    expect(before.isAccountKey).toBe(false);
+
+    await lockChatIdentityForLogout(account, selfEncrypt);
+    expect(await loadChatDeviceKey(account)).toBeUndefined(); // plaintext gone
+
+    await unlockChatIdentityForLogin(account, selfDecrypt);
+    const after = await resolveChatIdentity(fakeSigner);
+    // Restored the SAME chat identity — not a freshly-minted, forked one.
+    expect(after.pubkey).toBe(before.pubkey);
+  });
+
+  it("a snapshot that fails to decrypt is left in place for a later retry", async () => {
+    const account = "c".repeat(64);
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, account);
+    await stores.groupStateStore.setItem("g1", { epoch: 1 } as never);
+    await lockChatIdentityForLogout(account, selfEncrypt);
+
+    await unlockChatIdentityForLogin(account, async () => {
+      throw new Error("wrong owner");
+    });
+    expect(await stores.groupStateStore.getItem("g1")).toBeNull(); // not restored
+
+    // The snapshot wasn't consumed — a later login with the right signer works.
+    await unlockChatIdentityForLogin(account, selfDecrypt);
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1 });
+  });
+
+  it("a record that fails to encrypt is left in plaintext, not lost", async () => {
+    const account = "d".repeat(64);
+    const stores = makeMarmotStores(marmotKvBackend(), account);
+    await stores.groupStateStore.setItem("g1", { epoch: 1 } as never);
+
+    await lockChatIdentityForLogout(account, async () => {
+      throw new Error("signer unreachable");
+    });
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1 });
+  });
+
+  it("locking is scoped to the given account only", async () => {
+    const a = "a".repeat(64);
+    const b = "b".repeat(64);
+    const backend = marmotKvBackend();
+    await makeMarmotStores(backend, a).groupStateStore.setItem("g1", { epoch: 1 } as never);
+    await makeMarmotStores(backend, b).groupStateStore.setItem("g1", { epoch: 2 } as never);
+
+    await lockChatIdentityForLogout(a, selfEncrypt);
+    expect(await makeMarmotStores(backend, a).groupStateStore.getItem("g1")).toBeNull();
+    expect(await makeMarmotStores(backend, b).groupStateStore.getItem("g1")).toEqual({ epoch: 2 });
   });
 });

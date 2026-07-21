@@ -105,3 +105,24 @@ describe("renderMarkdown — features", () => {
     expect(renderMarkdown("- not a list because\nthis line is plain")).toContain("<p>");
   });
 });
+
+describe("renderMarkdown — autolink stays out of emitted tags (audit APPR-6)", () => {
+  it("does not splice an <a> inside an emitted img's alt attribute", () => {
+    const html = renderMarkdown("![x https://e.com](https://ok.png)");
+    expect(html).toBe('<p><img src="https://ok.png" alt="x https://e.com" loading="lazy" /></p>');
+  });
+
+  it("does not nest an <a> inside an emitted link's text", () => {
+    const html = renderMarkdown("[a https://e.com b](https://ok)");
+    expect(html).toBe(
+      '<p><a href="https://ok" target="_blank" rel="noopener">a https://e.com b</a></p>',
+    );
+  });
+
+  it("still autolinks genuine bare urls around emitted tags", () => {
+    const html = renderMarkdown("see https://a.com and ![x https://e.com](https://ok.png) done");
+    expect(html).toBe(
+      '<p>see <a href="https://a.com" target="_blank" rel="noopener">https://a.com</a> and <img src="https://ok.png" alt="x https://e.com" loading="lazy" /> done</p>',
+    );
+  });
+});

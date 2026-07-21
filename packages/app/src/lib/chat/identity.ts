@@ -21,13 +21,20 @@
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
 import type { EventTemplate } from "nostr-tools/pure";
-import { nip44Encrypt, nip44Decrypt, bytesToHex, KIND_PROFILE } from "@nostrautica/protocol";
+import {
+  nip44Encrypt,
+  nip44Decrypt,
+  bytesToHex,
+  bytesToBase64,
+  base64ToBytes,
+  KIND_PROFILE,
+} from "@nostrautica/protocol";
 import {
   signAccountIdentityProof,
   type AccountIdentityProofSigner,
 } from "@internet-privacy/marmot-ts/core";
 import type { AppSigner } from "$lib/signer/types.js";
-import { marmotKvBackend } from "./stores.js";
+import { marmotKvBackend, identityPrefix } from "./stores.js";
 
 /**
  * The applesauce `EventSigner` shape marmot-ts expects. Declared structurally so
@@ -96,6 +103,101 @@ async function ensureClientId(chatPubkey: string): Promise<string> {
   const id = "web-" + bytesToHex(generateSecretKey()).slice(0, 16);
   await backend.set(clientIdKey(chatPubkey), id);
   return id;
+}
+
+const LOCKED_NS = "__chat_locked__";
+function lockedKey(account: string): string {
+  return `${LOCKED_NS}\x1f${account}`;
+}
+
+/** JSON-safe round-trip for values that may hold a `Uint8Array` anywhere in
+ *  their structure (raw device keys, marmot's rewind tree, MLS secrets) —
+ *  everything else in marmot's persisted state is already JSON-native. */
+function replacer(_key: string, value: unknown): unknown {
+  return value instanceof Uint8Array ? { __u8__: bytesToBase64(value) } : value;
+}
+function reviver(_key: string, value: unknown): unknown {
+  if (value && typeof value === "object" && "__u8__" in (value as Record<string, unknown>)) {
+    return base64ToBytes((value as { __u8__: string }).__u8__);
+  }
+  return value;
+}
+
+/**
+ * Every raw backend key this account's chat identity touches: the namespaced
+ * state under the account pubkey itself (local-key accounts, whose chat
+ * identity IS the account key) plus — when a dedicated device key was ever
+ * persisted (remote-signer accounts) — that key's own storage slot, its
+ * client-id slot, and its namespaced state too. Neither slot exists until
+ * chat has actually been used, so an account that never opened chat yields
+ * nothing to lock.
+ */
+async function chatKeysFor(account: string): Promise<string[]> {
+  const backend = marmotKvBackend();
+  const keys = new Set<string>(await backend.keysWithPrefix(identityPrefix(account)));
+  const deviceKey = await loadChatDeviceKey(account);
+  if (deviceKey) {
+    const chatPubkey = getPublicKey(deviceKey);
+    for (const k of await backend.keysWithPrefix(identityPrefix(chatPubkey))) keys.add(k);
+    keys.add(deviceKeyKey(account));
+    keys.add(clientIdKey(chatPubkey));
+  }
+  return [...keys];
+}
+
+/**
+ * Self-encrypt this account's MLS/chat state (device key, group state, key
+ * packages, decrypted message history) into one on-device snapshot and drop
+ * the plaintext (audit UX-6) — same guarantee as
+ * `events/keystore.ts#lockEventKeysForLogout`: nothing is lost (the encrypted
+ * snapshot survives logout), nothing sits in the clear for the next person on
+ * a shared device to read. `encrypt` is the caller's self-encrypt (NIP-44 to
+ * the ACCOUNT's own pubkey, not the chat identity's — so unlock always knows
+ * where to look regardless of which chat identity a session resolves to).
+ * A no-op if chat was never used on this device for this account.
+ */
+export async function lockChatIdentityForLogout(
+  account: string,
+  encrypt: (plaintext: string) => Promise<string>,
+): Promise<void> {
+  const backend = marmotKvBackend();
+  const keys = await chatKeysFor(account);
+  if (keys.length === 0) return;
+  try {
+    const dump: Record<string, unknown> = {};
+    for (const key of keys) dump[key] = await backend.get(key);
+    const ciphertext = await encrypt(JSON.stringify(dump, replacer));
+    await backend.set(lockedKey(account), ciphertext);
+    for (const key of keys) await backend.del(key);
+  } catch {
+    /* left in plaintext (e.g. signer unreachable) — retried next logout */
+  }
+}
+
+/**
+ * Reverse of {@link lockChatIdentityForLogout}: decrypt this account's locked
+ * chat snapshot back into live storage (audit UX-6). Call on login/restore
+ * BEFORE anything resolves a chat identity — otherwise a remote-signer
+ * account with no device key restored yet would mint a brand new one
+ * (`resolveChatIdentity` → `ensureChatDeviceKey`), forking its MLS credential:
+ * every other client would see it as a stranger, having lost its old group
+ * membership. Undecryptable (wrong/no signer yet) leaves the snapshot in
+ * place for a later retry rather than losing it.
+ */
+export async function unlockChatIdentityForLogin(
+  account: string,
+  decrypt: (ciphertext: string) => Promise<string>,
+): Promise<void> {
+  const backend = marmotKvBackend();
+  const ciphertext = await backend.get(lockedKey(account));
+  if (typeof ciphertext !== "string") return;
+  try {
+    const dump = JSON.parse(await decrypt(ciphertext), reviver) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(dump)) await backend.set(key, value);
+    await backend.del(lockedKey(account));
+  } catch {
+    /* undecryptable (or the signer isn't ready yet) — retried next login */
+  }
 }
 
 /** Build an applesauce-shaped `EventSigner` over a raw 32-byte key. */

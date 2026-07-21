@@ -47,7 +47,7 @@ export async function sendJoinRequest(
   ctx: EventContext,
   input: JoinInput,
   blindingKey: Uint8Array,
-): Promise<void> {
+): Promise<boolean> {
   const attendeePubkey = await signer.getPublicKey();
   const inboxPubkey = ctx.config.inbox;
   const relays = ctx.config.relays;
@@ -127,5 +127,9 @@ export async function sendJoinRequest(
     wraps.push(publishOrQueue(rsvp, relays));
   }
 
-  await Promise.all(wraps);
+  const published = await Promise.all(wraps);
+  // True when every publish went out immediately; false when anything landed in
+  // the durable offline queue (audit UX-15) so the UI can say "will send when
+  // you're back online" instead of implying the organizer already has it.
+  return published.every(Boolean);
 }

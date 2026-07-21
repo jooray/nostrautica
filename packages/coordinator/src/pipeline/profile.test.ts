@@ -8,7 +8,7 @@
 import { describe, it, expect } from "vitest";
 import { MockLlm } from "../providers/mock.js";
 import { ProviderContractError } from "../providers/types.js";
-import { buildAiProfile, summarizeNostr, translateProfileFields } from "./profile.js";
+import { buildAiProfile, summarizeNostr, translateProfileFields, nostrInputsHash } from "./profile.js";
 import type { AttendeeProfile } from "@nostrautica/protocol";
 
 const matchModel = { provider: "mock", model: "mock-strong" };
@@ -125,6 +125,18 @@ describe("Q9 — summarizeNostr validates provider output", () => {
     ]);
     expect(out).toBeUndefined();
     expect(called).toBe(false);
+  });
+});
+
+describe("nostrInputsHash (audit COORD-22)", () => {
+  it("hashes FULL post content — a shared 40-char prefix never collides", () => {
+    const shared = "we should all meet at https://conference.example and talk about ";
+    const a = nostrInputsHash("pk", [{ kind: 1, content: `${shared}ZK proofs`, created_at: 1 }]);
+    const b = nostrInputsHash("pk", [{ kind: 1, content: `${shared}UX design`, created_at: 1 }]);
+    expect(a).not.toBe(b);
+    // Same content → stable hash (cache hit).
+    const a2 = nostrInputsHash("pk", [{ kind: 1, content: `${shared}ZK proofs`, created_at: 1 }]);
+    expect(a2).toBe(a);
   });
 });
 

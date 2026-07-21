@@ -84,7 +84,15 @@ export class NostrClient {
           // republishes of 31605 lists otherwise fail every retry against
           // strfry's "replaced: have newer event".
           const reason = String((err as Error)?.message ?? err);
-          if (/\b(duplicate|replaced)\b/i.test(reason)) return "already-stored";
+          if (/\b(duplicate|replaced)\b/i.test(reason)) {
+            // Logged at debug (audit COORD-27): with clock skew or a second
+            // coordinator instance running, "replaced: have newer" can silently
+            // drop the GENUINELY newest event — make the path observable.
+            console.debug(
+              `[nostr] kind ${event.kind} ${event.id.slice(0, 8)} already-stored (${reason.slice(0, 80)}) — treating as success`,
+            );
+            return "already-stored";
+          }
           throw err;
         }),
       ),

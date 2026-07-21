@@ -30,6 +30,11 @@ import { makeKeyValueRumorHistoryFactory } from "@internet-privacy/marmot-ts/ext
 /** Unit-separator between identity, namespace, and the user key (never in a hex/base64 key). */
 const SEP = "\x1f";
 
+/** The full-key prefix `namespacedStore` uses for everything under one chat identity. */
+export function identityPrefix(identity: string): string {
+  return `${identity}${SEP}`;
+}
+
 /** The four logical stores a `MarmotClient` needs (§5), namespaced per identity. */
 export const MARMOT_NAMESPACES = {
   groupState: "group-state",
@@ -38,6 +43,8 @@ export const MARMOT_NAMESPACES = {
   rewind: "rewind",
   // Decrypted-message history is further sub-namespaced per group (`history:<id>`).
   history: "history",
+  // Event-coordinate → nostr_group_id binding (APPK-3 event scoping), one per event.
+  eventGroups: "event-groups",
 } as const;
 
 /**
@@ -95,6 +102,14 @@ export interface MarmotStores {
   keyPackageStore: GenericKeyValueStore<StoredKeyPackage>;
   inviteStore: GenericKeyValueStore<StoredInviteEntry>;
   rewindStore: GenericKeyValueStore<Uint8Array>;
+  /**
+   * Event-coordinate → nostr_group_id (hex) bindings recorded at join time
+   * (audit APPK-3). MLS group state is namespaced per IDENTITY, not per event,
+   * so without this mapping two chat-enabled events would share one pool of
+   * joined groups — and `loadAll()[0]` could route a message to the wrong
+   * event's room. Written only for coordinator-verified joins (audit APPK-2).
+   */
+  eventGroupStore: GenericKeyValueStore<string>;
 }
 
 /** Build the four typed marmot stores for one chat identity over a backend. */
@@ -104,6 +119,7 @@ export function makeMarmotStores(backend: MarmotKvBackend, identity: string): Ma
     keyPackageStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.keyPackage),
     inviteStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.invites),
     rewindStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.rewind),
+    eventGroupStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.eventGroups),
   };
 }
 
@@ -216,6 +232,12 @@ export class IndexedDbKvBackend implements MarmotKvBackend {
 let sharedBackend: MarmotKvBackend | undefined;
 export function marmotKvBackend(): MarmotKvBackend {
   return (sharedBackend ??= new IndexedDbKvBackend());
+}
+
+/** Swap the shared backend (tests only, no IndexedDB in the test env). Pass
+ *  `null` to restore the production IndexedDB backend. */
+export function __setMarmotKvBackendForTests(b: MarmotKvBackend | null): void {
+  sharedBackend = b ?? undefined;
 }
 
 /** Convenience: the four production stores for a chat identity, IndexedDB-backed. */

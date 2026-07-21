@@ -161,20 +161,33 @@ export async function processAttendee(
   //    event language), content-addressed (audit H7): a crash between generating the
   //    profile and publishing/translating it never re-bills the model — the finished
   //    artifact is looked up by its stage + canonical-input hash on retry.
-  const profileInputs = { transcripts, profile: input.profile, nostrSummary, lang: deps.lang };
-  const profileModelKey = `${deps.matchModel.provider}:${deps.matchModel.model}`;
-  const profileKey = profileInputsHash(profileInputs, profileModelKey);
-  let aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
-  if (!aiProfile) {
-    aiProfile = await buildAiProfile(deps.llm, deps.matchModel, profileInputs);
-    deps.store.putArtifact({
-      stage: "ai_profile",
-      inputsHash: profileKey,
-      provider: deps.matchModel.provider,
-      model: deps.matchModel.model,
-      output: aiProfile,
-      now: now(),
-    });
+  //    Empty-input skip (audit COORD-4): with NO inputs at all (no profile fields,
+  //    no transcripts, no nostr summary) don't pay for a model call that could only
+  //    confabulate — publish the empty profile instead.
+  const profileEmpty =
+    !input.profile.about.trim() &&
+    input.profile.skills.length === 0 &&
+    !input.profile.looking_for.trim() &&
+    input.profile.links.length === 0;
+  let aiProfile: AiProfileType | undefined;
+  if (profileEmpty && transcripts.length === 0 && !nostrSummary) {
+    aiProfile = { summary: "", skills: [], interests: [], offers: [], seeks: [] };
+  } else {
+    const profileInputs = { transcripts, profile: input.profile, nostrSummary, lang: deps.lang };
+    const profileModelKey = `${deps.matchModel.provider}:${deps.matchModel.model}`;
+    const profileKey = profileInputsHash(profileInputs, profileModelKey);
+    aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
+    if (!aiProfile) {
+      aiProfile = await buildAiProfile(deps.llm, deps.matchModel, profileInputs);
+      deps.store.putArtifact({
+        stage: "ai_profile",
+        inputsHash: profileKey,
+        provider: deps.matchModel.provider,
+        model: deps.matchModel.model,
+        output: aiProfile,
+        now: now(),
+      });
+    }
   }
 
   // 4. If the user's authored fields aren't already in the event language, publish

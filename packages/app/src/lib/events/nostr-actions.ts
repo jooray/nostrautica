@@ -11,6 +11,7 @@ import {
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { ONBOARDING_RELAY_LIST, DM_RELAY_LIST } from "$lib/nostr/relays.js";
 import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
@@ -18,7 +19,10 @@ import { t } from "$lib/i18n/i18n.svelte.js";
 
 async function latest(kind: number, pubkey: string) {
   const events = await fetchEvents({ kinds: [kind], authors: [pubkey] });
-  return events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // These reads feed merge-then-republish of the user's own lists — re-verify
+  // before the latest-wins pick (audit APPK-1) so a forged "own" event can't
+  // be merged and re-signed.
+  return onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
 }
 
 /** Fetch existing kind-0, merge edited fields, publish (spec §5.4 item 1). */
@@ -100,20 +104,27 @@ export async function fetchFollowTags(signer: AppSigner): Promise<Tag[]> {
  * an empty fetch is indistinguishable from a failed fetch, and publishing
  * "just the new target" would look exactly like a wiped follow list. Keys the
  * app generates are seeded via `seedFollows` so they never hit this.
+ *
+ * Returns true when the kind-3 went out immediately, false when it was queued
+ * for the offline flush (audit UX-15).
  */
-export async function followUser(signer: AppSigner, target: string): Promise<void> {
-  const existing = await fetchFollowTags(signer);
-  if (!existing.some((tag) => tag[0] === "p")) {
+export async function followUser(signer: AppSigner, target: string): Promise<boolean> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_CONTACTS, pubkey);
+  const existingTags = (existing?.tags as Tag[]) ?? [];
+  if (!existingTags.some((tag) => tag[0] === "p")) {
     throw new Error(t("error.followListGuard"));
   }
-  const merged = mergeFollowTags(existing, [target]);
+  const merged = mergeFollowTags(existingTags, [target]);
   const event = await signer.signEvent({
     kind: KIND_CONTACTS,
     created_at: Math.floor(Date.now() / 1000),
     tags: merged,
-    content: "", // preserve-nothing content; kind-3 content is legacy relay JSON
+    // Carry the existing content through (audit UX-16): kind-3 content is legacy
+    // relay-metadata JSON other clients still read — republishing "" wiped it.
+    content: existing?.content ?? "",
   });
-  await publishOrQueue(event);
+  return publishOrQueue(event);
 }
 
 /**

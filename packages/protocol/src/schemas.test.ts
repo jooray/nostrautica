@@ -5,6 +5,7 @@ import {
   profileSubmissionContentSchema,
   keyGrantContentSchema,
   coordinatorGrantContentSchema,
+  organizerGrantContentSchema,
   adminCommandContentSchema,
   inviteListContentSchema,
   myProfileContentSchema,
@@ -18,6 +19,26 @@ import {
   mediaTranscriptSchema,
   profileCorrectionContentSchema,
   chatKeyAttestationContentSchema,
+  attendeeProfileSchema,
+  userSettingsSchema,
+  coordinatorAnnounceSchema,
+  coordinatorBillingSchema,
+  coordinatorPricingSchema,
+  MAX_NAME,
+  MAX_MESSAGE,
+  MAX_ABOUT,
+  MAX_LOOKING_FOR,
+  MAX_SKILLS,
+  MAX_SKILL,
+  MAX_LINKS,
+  MAX_URL,
+  MAX_INVITE_LABEL,
+  MAX_INVITES,
+  MAX_REASONING,
+  MAX_MATCHES,
+  MAX_ROSTER,
+  MAX_RELAYS,
+  MAX_MEDIA,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -236,6 +257,27 @@ describe("schema validation rejects malformed payloads", () => {
     ).toThrow();
   });
 
+  it("rejects uppercase hex pubkeys (PROTO-6: downstream comparisons are case-sensitive)", () => {
+    expect(() =>
+      keyGrantContentSchema.parse({
+        v: 1,
+        a: "x",
+        role: "attendee",
+        eck: [],
+        granted_by: "A".repeat(64),
+      }),
+    ).toThrow();
+    expect(() =>
+      keyGrantContentSchema.parse({
+        v: 1,
+        a: "x",
+        role: "attendee",
+        eck: [],
+        granted_by: "aA".repeat(32), // mixed case
+      }),
+    ).toThrow();
+  });
+
   it("rejects an unknown media kind", () => {
     expect(() => mediaDescriptorSchema.parse({ ...descriptor, kind: "audio" })).toThrow();
   });
@@ -425,4 +467,240 @@ describe("F3 — profile correction (21608) + ai_profile_edited on 31603", () =>
       ai_profile_edited: true,
       updated_at: 1_700_000_000,
     }));
+});
+
+// ── PROTO-4: boundary length caps (DoS / NIP-44-ceiling overflow) ────────────
+describe("boundary length caps (PROTO-4)", () => {
+  const emptyProfile = { about: "", skills: [], looking_for: "", links: [] };
+
+  it("21600 join request: name ≤ MAX_NAME, message ≤ MAX_MESSAGE", () => {
+    roundTrips(joinRequestContentSchema, {
+      v: 1,
+      name: "n".repeat(MAX_NAME),
+      message: "m".repeat(MAX_MESSAGE),
+    });
+    expect(() =>
+      joinRequestContentSchema.parse({ v: 1, name: "n".repeat(MAX_NAME + 1) }),
+    ).toThrow();
+    expect(() =>
+      joinRequestContentSchema.parse({ v: 1, name: "ok", message: "m".repeat(MAX_MESSAGE + 1) }),
+    ).toThrow();
+  });
+
+  it("attendee profile: about/looking_for/skills/links caps, boundary values accepted", () => {
+    const maxUrl = "https://example.com/" + "u".repeat(MAX_URL - "https://example.com/".length);
+    roundTrips(attendeeProfileSchema, {
+      about: "a".repeat(MAX_ABOUT),
+      skills: Array(MAX_SKILLS).fill("s".repeat(MAX_SKILL)),
+      looking_for: "l".repeat(MAX_LOOKING_FOR),
+      links: Array(MAX_LINKS).fill(maxUrl),
+    });
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, about: "a".repeat(MAX_ABOUT + 1) }),
+    ).toThrow();
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, looking_for: "l".repeat(MAX_LOOKING_FOR + 1) }),
+    ).toThrow();
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, skills: Array(MAX_SKILLS + 1).fill("s") }),
+    ).toThrow();
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, skills: ["s".repeat(MAX_SKILL + 1)] }),
+    ).toThrow();
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, links: Array(MAX_LINKS + 1).fill("https://example.com") }),
+    ).toThrow();
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, links: ["not-a-url"] }),
+    ).toThrow();
+    expect(() =>
+      attendeeProfileSchema.parse({ ...emptyProfile, links: [maxUrl + "x"] }),
+    ).toThrow();
+  });
+
+  it("31601 invite list: label ≤ MAX_INVITE_LABEL, invites ≤ MAX_INVITES", () => {
+    roundTrips(inviteListContentSchema, {
+      v: 1,
+      invites: Array(MAX_INVITES).fill({ h: hex, label: "l".repeat(MAX_INVITE_LABEL) }),
+    });
+    expect(() =>
+      inviteListContentSchema.parse({
+        v: 1,
+        invites: [{ h: hex, label: "l".repeat(MAX_INVITE_LABEL + 1) }],
+      }),
+    ).toThrow();
+    expect(() =>
+      inviteListContentSchema.parse({ v: 1, invites: Array(MAX_INVITES + 1).fill({ h: hex }) }),
+    ).toThrow();
+  });
+
+  it("31605 match list: reasoning ≤ MAX_REASONING, matches ≤ MAX_MATCHES", () => {
+    const match = {
+      pubkey: hex,
+      score: 0.5,
+      similarity: 0.5,
+      complementarity: 0.5,
+      reasoning: "r".repeat(MAX_REASONING),
+    };
+    roundTrips(matchListContentSchema, {
+      v: 1,
+      computed_at: 1,
+      matches: Array(MAX_MATCHES).fill(match),
+    });
+    expect(() =>
+      matchListContentSchema.parse({
+        v: 1,
+        computed_at: 1,
+        matches: [{ ...match, reasoning: "r".repeat(MAX_REASONING + 1) }],
+      }),
+    ).toThrow();
+    expect(() =>
+      matchListContentSchema.parse({
+        v: 1,
+        computed_at: 1,
+        matches: Array(MAX_MATCHES + 1).fill(match),
+      }),
+    ).toThrow();
+  });
+
+  it("31604 roster: attendees ≤ MAX_ROSTER", () => {
+    const attendee = { pubkey: hex, d: "deadbeef", role: "attendee" };
+    roundTrips(rosterContentSchema, {
+      v: 1,
+      eck_current: 1,
+      attendees: Array(MAX_ROSTER).fill(attendee),
+    });
+    expect(() =>
+      rosterContentSchema.parse({
+        v: 1,
+        eck_current: 1,
+        attendees: Array(MAX_ROSTER + 1).fill(attendee),
+      }),
+    ).toThrow();
+  });
+
+  it("21603/21605 grants: config_relays ≤ MAX_RELAYS", () => {
+    roundTrips(coordinatorGrantContentSchema, {
+      v: 1,
+      a: "31923:" + hex + ":ev",
+      inbox_nsec: hex,
+      eck: [{ id: 1, key: b64_32 }],
+      config_relays: Array(MAX_RELAYS).fill("wss://relay.example"),
+    });
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 1,
+        a: "31923:" + hex + ":ev",
+        inbox_nsec: hex,
+        eck: [{ id: 1, key: b64_32 }],
+        config_relays: Array(MAX_RELAYS + 1).fill("wss://relay.example"),
+      }),
+    ).toThrow();
+    expect(() =>
+      organizerGrantContentSchema.parse({
+        v: 1,
+        a: "31923:" + hex + ":ev",
+        eid_nsec: hex,
+        einbox_nsec: hex,
+        eck: [{ id: 1, key: b64_32 }],
+        config_relays: Array(MAX_RELAYS + 1).fill("wss://relay.example"),
+        granted_by: hex,
+      }),
+    ).toThrow();
+  });
+
+  it("relay URL arrays elsewhere (user settings, coordinator announcement) ≤ MAX_RELAYS", () => {
+    roundTrips(userSettingsSchema, { v: 1, relays: Array(MAX_RELAYS).fill("wss://r") });
+    expect(() =>
+      userSettingsSchema.parse({ v: 1, relays: Array(MAX_RELAYS + 1).fill("wss://r") }),
+    ).toThrow();
+    roundTrips(coordinatorAnnounceSchema, {
+      v: 1,
+      name: "coord",
+      relays: Array(MAX_RELAYS).fill("wss://r"),
+      features: { matching: true, talks: false, chat: Array(MAX_RELAYS).fill("wss://r") },
+    });
+    expect(() =>
+      coordinatorAnnounceSchema.parse({
+        v: 1,
+        name: "coord",
+        relays: Array(MAX_RELAYS + 1).fill("wss://r"),
+      }),
+    ).toThrow();
+    expect(() =>
+      coordinatorAnnounceSchema.parse({
+        v: 1,
+        name: "coord",
+        features: { matching: true, talks: false, chat: Array(MAX_RELAYS + 1).fill("wss://r") },
+      }),
+    ).toThrow();
+  });
+
+  it("terms_url / checkout_url are https-only at the schema boundary (audit APPR-1/APPR-2)", () => {
+    for (const bad of [
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "vbscript:msgbox(1)",
+      "http://example.com/terms", // plaintext http, not just non-URL schemes
+      "not a url",
+    ]) {
+      expect(() => coordinatorAnnounceSchema.parse({ v: 1, name: "coord", terms_url: bad })).toThrow();
+      expect(() => coordinatorBillingSchema.parse({ state: "ok", checkout_url: bad })).toThrow();
+      expect(() =>
+        coordinatorPricingSchema.parse({ model: "per_user", checkout_url: bad }),
+      ).toThrow();
+    }
+    roundTrips(coordinatorAnnounceSchema, {
+      v: 1,
+      name: "coord",
+      terms_url: "https://example.com/terms",
+    });
+    roundTrips(coordinatorBillingSchema, {
+      state: "payment_required",
+      checkout_url: "https://example.com/pay",
+    });
+    roundTrips(coordinatorPricingSchema, {
+      model: "per_user",
+      checkout_url: "https://example.com/pay",
+    });
+    // Both fields stay optional — a free/no-terms coordinator omits them.
+    roundTrips(coordinatorAnnounceSchema, { v: 1, name: "coord" });
+    roundTrips(coordinatorBillingSchema, { state: "ok" });
+  });
+
+  it("31603 directory entry: name ≤ MAX_NAME and profile caps apply", () => {
+    const base = { v: 1, pubkey: hex, profile: emptyProfile, media: [], updated_at: 1 };
+    roundTrips(directoryEntryContentSchema, { ...base, name: "n".repeat(MAX_NAME) });
+    expect(() =>
+      directoryEntryContentSchema.parse({ ...base, name: "n".repeat(MAX_NAME + 1) }),
+    ).toThrow();
+    expect(() =>
+      directoryEntryContentSchema.parse({
+        ...base,
+        profile: { ...emptyProfile, about: "a".repeat(MAX_ABOUT + 1) },
+      }),
+    ).toThrow();
+  });
+
+  it("media arrays are capped at MAX_MEDIA (21601 / 31602 / 31603)", () => {
+    roundTrips(profileSubmissionContentSchema, {
+      v: 1,
+      profile: emptyProfile,
+      media: Array(MAX_MEDIA).fill(descriptor),
+    });
+    const tooMany = Array(MAX_MEDIA + 1).fill(descriptor);
+    expect(() =>
+      profileSubmissionContentSchema.parse({ v: 1, profile: emptyProfile, media: tooMany }),
+    ).toThrow();
+    expect(() => myProfileContentSchema.parse({ v: 1, a: null, media: tooMany })).toThrow();
+    expect(() =>
+      directoryEntryContentSchema.parse({
+        v: 1,
+        pubkey: hex,
+        profile: emptyProfile,
+        media: tooMany,
+        updated_at: 1,
+      }),
+    ).toThrow();
+  });
 });

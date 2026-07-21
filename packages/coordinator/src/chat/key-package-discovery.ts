@@ -22,9 +22,13 @@
  */
 import type { Event as NostrEvent } from "nostr-tools/core";
 import { KIND_RELAY_LIST } from "@nostrautica/protocol";
+import { sanitizeRelayUrls } from "../net/relay-urls.js";
 
 /** Addressable MLS key-package event (Marmot / NIP-104). */
 const KIND_KEY_PACKAGE = 30443;
+
+/** Per-author fan-out cap for NIP-65 lookups (audit COORD-16). */
+const MAX_NIP65_RELAYS_PER_AUTHOR = 5;
 
 export interface KeyPackageTransport {
   fetch(filter: unknown, relays?: string[]): Promise<NostrEvent[]>;
@@ -64,10 +68,16 @@ export async function discoverKeyPackages(
 
   const extraLists = await Promise.all(
     [...latest.values()].map((e) => {
-      const relays = e.tags
-        .filter((t) => t[0] === "r")
-        .map((t) => t[1])
-        .filter((u): u is string => !!u);
+      // Untrusted input (audit COORD-16): wss-only, well-formed, deduped — and
+      // capped per author so a hostile 10002 can't fan the daemon out to
+      // arbitrary endpoints.
+      const relays = sanitizeRelayUrls(
+        e.tags
+          .filter((t) => t[0] === "r")
+          .map((t) => t[1])
+          .filter((u): u is string => !!u),
+        MAX_NIP65_RELAYS_PER_AUTHOR,
+      );
       if (relays.length === 0) return Promise.resolve<NostrEvent[]>([]);
       return transport.fetch({ kinds: [KIND_KEY_PACKAGE], authors: [e.pubkey] }, relays);
     }),

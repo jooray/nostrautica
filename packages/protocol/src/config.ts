@@ -165,7 +165,12 @@ export function parseEventConfig(
   tags: string[][],
 ): EventConfig {
   const d = first(tags, "d");
-  const inbox = first(tags, "inbox");
+  // The inbox/coordinator pubkeys are accepted only in canonical lowercase hex
+  // (audit PROTO-5): an invalid inbox is treated as missing (required structural
+  // tag → throw, as today), an invalid coordinator is dropped (optional → absent)
+  // — the same fail-soft style the parser uses for other bad values.
+  const inboxRaw = first(tags, "inbox");
+  const inbox = inboxRaw && HEX32.test(inboxRaw) ? inboxRaw : undefined;
   if (!d || !inbox) throw new Error("31600 config missing d or inbox");
   const approvalRaw = first(tags, "approval");
   const approval: Approval = APPROVALS.includes(approvalRaw as Approval)
@@ -189,13 +194,14 @@ export function parseEventConfig(
       chat.push(backend as ChatBackend);
     }
   }
+  const coordinatorRaw = first(tags, "coordinator");
   return {
     d,
     eidPubkey,
     inbox,
-    coordinator: first(tags, "coordinator"),
-    relays: all(tags, "relay"),
-    blossom: all(tags, "blossom"),
+    coordinator: coordinatorRaw && HEX32.test(coordinatorRaw) ? coordinatorRaw : undefined,
+    relays: urlValues(tags, "relay", "wss:"),
+    blossom: urlValues(tags, "blossom", "https:"),
     // 0 is a valid parsed value (UNLIMITED_SEC) — intTag only falls back to the
     // default when the tag is absent/non-numeric/negative, never for 0 itself.
     maxVideoSec: intTag(tags, "max_video_sec", 90),

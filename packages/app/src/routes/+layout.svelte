@@ -9,10 +9,12 @@
   import { theme } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
+  import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
+  import { install } from "$lib/stores/install.svelte.js";
   import { hydrateAppCache } from "$lib/cache/persist.js";
   import { prefetchIdentity } from "$lib/nostr/prefetch.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
@@ -39,21 +41,47 @@
     online.init();
     recentEvents.init();
     router.init();
+    // UX-21: capture beforeinstallprompt synchronously — it fires once, early,
+    // and never waits for the async boot below (registerPwa inits it too,
+    // idempotently, as a backstop). SW-independent.
+    install.init();
     // Warm the persistent app-cache mirror BEFORE booting so every page's
     // cachedX() helper paints on first render (CACHING-PLAN §1.1). Bounded to
     // 1500 ms internally, so a slow/broken IDB never blocks boot.
     await hydrateAppCache();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
     await consumeNsecFromHash();
-    if (!session.loggedIn) await session.restore().catch(() => {});
+    // UX-19: never gate the shell on a NIP-46 reconnect — a dead signer relay
+    // otherwise burns connect (12s) + getPublicKey (12s) before `booted`,
+    // delaying queue-flush/prefetch/registration behind it. Local/nip07
+    // restores are local-only and fast, so those stay awaited (first paint
+    // remains logged-in); nip46 restores in the background and pages react to
+    // session.loggedIn flipping (Home/Me already render it reactively).
+    const method = session.loggedIn
+      ? undefined
+      : await loadLoginMethod().catch(() => undefined);
+    let restored: Promise<boolean>;
+    if (session.loggedIn) {
+      restored = Promise.resolve(true);
+    } else if (method === "nip46") {
+      // Background — the 2×12s worst case must not block the shell.
+      restored = session.restore().catch(() => false);
+    } else {
+      // Local/nip07 (or no) restore: local-only and fast — keep it awaited.
+      restored = session.restore().catch(() => false);
+      await restored;
+    }
     installQueueFlusher();
     void flushQueue();
     registerPwa();
     booted = true;
     // Identity-scoped warmers (§2.15): grants, recovery, own kind-0, follows,
     // mutes, DM relay list, blind seed (local only), one DM inbox scan. Silent
-    // (fire-and-forget) and silent-signer-guarded inside the warmer.
-    if (session.signer) prefetchIdentity(session.signer);
+    // (fire-and-forget) and silent-signer-guarded inside the warmer. Fires once
+    // the (possibly background) restore has settled.
+    void restored.then(() => {
+      if (session.signer) prefetchIdentity(session.signer);
+    });
   });
 
   // Per-route document title, focus management, and a polite announcement (A2).

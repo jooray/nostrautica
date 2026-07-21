@@ -22,10 +22,10 @@ export const MAX_NAME_CHARS = 200;
 export const MAX_PROFILE_FIELD_CHARS = 4000;
 export const MAX_LIST_ITEMS = 64;
 
-/** Truncate on a word boundary at `max` chars (appends an ellipsis marker). */
+/** Truncate on a word boundary so the result (with ellipsis marker) fits `max`. */
 export function truncateWords(text: string, max = MAX_LLM_TEXT_CHARS): string {
   if (text.length <= max) return text;
-  const cut = text.slice(0, max);
+  const cut = text.slice(0, max - 1); // room for the ellipsis — never exceed max
   const lastSpace = cut.search(/\s+\S*$/);
   return (lastSpace > max * 0.5 ? cut.slice(0, lastSpace) : cut).trimEnd() + "…";
 }

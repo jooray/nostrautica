@@ -24,4 +24,11 @@ describe("resolveBlossomServers (encrypted media)", () => {
     const servers = resolveBlossomServers(ctxWith(["https://event-configured.example"]));
     expect(servers).not.toContain("https://blossom.primal.net");
   });
+
+  it("drops non-https event-configured servers (audit APPR-8)", () => {
+    const servers = resolveBlossomServers(
+      ctxWith(["http://insecure.example", "not a url", "https://event-configured.example"]),
+    );
+    expect(servers).toEqual(["https://event-configured.example", ...DEFAULT_BLOSSOM_SERVERS]);
+  });
 });

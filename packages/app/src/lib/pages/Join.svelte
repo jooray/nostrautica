@@ -14,7 +14,7 @@
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import { parseCoordinate } from "@nostrautica/protocol";
   import { fetchProfiles } from "$lib/events/social.js";
-  import { uploadPublicImage } from "$lib/media/image.js";
+  import { uploadPublicImage, prepareAvatarImage } from "$lib/media/image.js";
   import { loadLibrary, prepareReuse, loadSelfCopy } from "$lib/media/submit.js";
   import type { MediaDescriptor } from "@nostrautica/protocol";
   import BackupCard from "$lib/components/BackupCard.svelte";
@@ -31,6 +31,7 @@
     prefetchGrants,
   } from "$lib/nostr/prefetch.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { outbox } from "$lib/stores/outbox.svelte.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
 
@@ -68,6 +69,7 @@
   let error = $state<string | null>(null);
   let busy = $state(false);
   let sent = $state(false);
+  let sentQueued = $state(false); // join request is in the offline outbox (UX-15)
   let approved = $state(false);
   let showSignIn = $state(false);
   let destroyed = false;
@@ -152,19 +154,27 @@
 
   // Poll for the ECK grant while the page is open — invite codes are usually
   // instant, manual approval can land minutes later, and the user shouldn't have
-  // to re-open the event to find out (UI-SUGGESTIONS #4).
+  // to re-open the event to find out (UI-SUGGESTIONS #4). Guarded so a resubmit
+  // (or the mount-time restore plus a fresh submit) never stacks two loops
+  // (audit UX-2).
+  let polling = false;
   async function pollForGrant() {
-    if (!ctx || !session.signer) return;
-    const coordinate = ctx.coordinate;
-    const fast = code ? 10 : 0; // 1.5s cadence first, then relax to 5s
-    for (let i = 0; !approved && !destroyed; i++) {
-      await new Promise((r) => setTimeout(r, i < fast ? 1500 : 5000));
-      await receiveGrants(session.signer).catch(() => {});
-      approved = await isApproved(coordinate);
-    }
-    if (approved) {
-      clearJoinSent(coordinate); // marker served its purpose
-      void checkIntro();
+    if (!ctx || !session.signer || polling) return;
+    polling = true;
+    try {
+      const coordinate = ctx.coordinate;
+      const fast = code ? 10 : 0; // 1.5s cadence first, then relax to 5s
+      for (let i = 0; !approved && !destroyed; i++) {
+        await new Promise((r) => setTimeout(r, i < fast ? 1500 : 5000));
+        await receiveGrants(session.signer).catch(() => {});
+        approved = await isApproved(coordinate);
+      }
+      if (approved) {
+        clearJoinSent(coordinate); // marker served its purpose
+        void checkIntro();
+      }
+    } finally {
+      polling = false;
     }
   }
 
@@ -239,9 +249,12 @@
         displayName = newName.trim();
         about = newAbout.trim();
         // Upload the chosen photo to public Blossom (needs the just-created signer).
+        // Downscale + EXIF-strip first (audit APPR-3); a bad image aborts with a
+        // readable error — the raw original is never uploaded.
         let picture: string | undefined;
         if (newPicFile) {
-          picture = await uploadPublicImage(signer, newPicFile, ctx.config.blossom);
+          const avatar = await prepareAvatarImage(newPicFile);
+          picture = await uploadPublicImage(signer, avatar, ctx.config.blossom);
         }
         // Only for a key WE generated do we publish kind-0 (§5.4).
         await publishProfile(signer, { name: displayName, about, picture });
@@ -279,7 +292,7 @@
         }
       }
 
-      await sendJoinRequest(
+      const published = await sendJoinRequest(
         signer,
         ctx,
         {
@@ -298,10 +311,18 @@
       );
 
       sent = true;
+      // Queued for the offline flush rather than published (audit UX-15): say so
+      // — the organizer can't approve what hasn't reached them yet.
+      sentQueued = !published;
+      if (sentQueued) outbox.noteQueued();
       markJoinSent(ctx.coordinate); // survives reload → waiting state, not pristine form (P2)
       recentEvents.record({ coordinate: ctx.coordinate, naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
-      await pollForGrant();
+      // Fire-and-forget (audit UX-2): awaiting the poll here would hold
+      // `busy = true` for the whole approval wait, so the "send again" escape
+      // hatch came back with a permanently disabled submit button. The poll
+      // loop is internally guarded against duplicates.
+      void pollForGrant();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -348,6 +369,9 @@
 {:else if sent}
   <h1>{t("join.requestSent")}</h1>
   <div class="card">
+    {#if sentQueued}
+      <p class="muted" role="status">{t("sync.queued")}</p>
+    {/if}
     <p>
       {#if code}
         {t("join.waiting.invite")}

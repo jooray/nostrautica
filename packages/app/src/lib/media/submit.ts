@@ -25,7 +25,7 @@ import { signerWrap } from "$lib/events/giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
-import { preflight, uploadAndMirror, mirror, downloadBlob } from "$lib/blossom/client.js";
+import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // The self-copy (31602) and reuse library are decrypted private data, cached
@@ -54,7 +54,13 @@ export async function fetchUserBlossomServers(signer: AppSigner): Promise<string
   const pubkey = await signer.getPublicKey();
   const lists = await fetchEvents({ kinds: [KIND_BLOSSOM_SERVERS], authors: [pubkey] });
   const latest = lists.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  return latest ? latest.tags.filter((t) => t[0] === "server").map((t) => t[1]!) : [];
+  // The 10063 tags are user/relay-supplied and unvalidated — https: only (APPR-8).
+  return latest
+    ? latest.tags
+        .filter((t) => t[0] === "server")
+        .map((t) => t[1]!)
+        .filter(isAcceptedBlossomUrl)
+    : [];
 }
 
 /**
@@ -66,7 +72,9 @@ export async function fetchUserBlossomServers(signer: AppSigner): Promise<string
  * report 2026-07-20). Unencrypted uploads (uploadPublicImage) still honor it.
  */
 export function resolveBlossomServers(ctx: EventContext): string[] {
-  return unionRelays(ctx.config.blossom, DEFAULT_BLOSSOM_SERVERS);
+  // https: only (audit APPR-8) — the protocol parse validates too; this is the
+  // app-side backstop for configs/relays that predate or bypass it.
+  return unionRelays(ctx.config.blossom, DEFAULT_BLOSSOM_SERVERS).filter(isAcceptedBlossomUrl);
 }
 
 export interface SubmitMediaResult {

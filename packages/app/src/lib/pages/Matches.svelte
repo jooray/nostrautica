@@ -6,7 +6,8 @@
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchMatches, fetchDirectory, cachedMatches, cachedDirectory } from "$lib/events/attendee.js";
+  import { fetchMatches, fetchDirectory, cachedMatches, cachedDirectory, isApproved } from "$lib/events/attendee.js";
+  import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
@@ -36,6 +37,10 @@
   let loading = $state(matches.length === 0);
   let error = $state<unknown>(null);
   let noCoordinator = $state(false);
+  // Explicit access states (audit UX-11): a logged-out or non-member deep link
+  // used to render "No matches yet…" — indistinguishable from a member with an
+  // empty list. "visitor" = signed in, no ECK and no pending join marker.
+  let access = $state<"unknown" | "visitor" | "pending" | "member">("unknown");
 
   if (matches.length) perfMark("Matches", "cache-paint");
 
@@ -47,7 +52,13 @@
         noCoordinator = true;
         return;
       }
-      if (!session.signer) return;
+      if (!session.signer) return; // access stays "unknown" → login prompt below
+      access = (await isApproved(ctx.coordinate).catch(() => false))
+        ? "member"
+        : joinSentAt(ctx.coordinate) !== undefined
+          ? "pending"
+          : "visitor";
+      if (access !== "member") return; // the match list needs the ECK anyway
       void mutes.load(session.signer);
       // The match list is the page — paint it as soon as it lands. The directory
       // and kind-0 profiles only enrich names/avatars; they fill in reactively.

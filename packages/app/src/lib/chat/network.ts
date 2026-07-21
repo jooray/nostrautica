@@ -7,7 +7,7 @@
  */
 import { NDKEvent } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
-import { getNdk, relaySet } from "$lib/nostr/ndk.js";
+import { getNdk, relaySet, fetchEvents, type Filter } from "$lib/nostr/ndk.js";
 import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 
 /** A per-relay publish result (marmot's `PublishResponse`). */
@@ -60,11 +60,10 @@ export function createMarmotNetwork(): MarmotNetwork {
     },
 
     async request(relays, filters) {
-      const set = await getNdk().fetchEvents(filters, {
-        closeOnEose: true,
-        relaySet: relaySet(relays),
-      });
-      return [...set].map((e) => e.rawEvent());
+      // Bounded fetch (UX-1): NDK's own fetchEvents can hang on a dead-relay
+      // majority; the wrapper resolves with partial results at the timeout.
+      const events = await fetchEvents(filters as unknown as Filter | Filter[], relays);
+      return events.map((e) => e.rawEvent());
     },
 
     subscription(relays, filters) {
@@ -92,8 +91,8 @@ export function createMarmotNetwork(): MarmotNetwork {
     async getUserInboxRelays(pubkey) {
       // NIP-17 kind-10050 inbox relay list: where this user receives gift-wrapped
       // welcomes (the transport target for a 444/1059 to them).
-      const set = await getNdk().fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey], limit: 1 });
-      const latest = [...set].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+      const events = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey], limit: 1 });
+      const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
       if (!latest) return [];
       return latest.tags
         .filter((t) => t[0] === "relay" && typeof t[1] === "string")

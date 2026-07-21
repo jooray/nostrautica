@@ -38,7 +38,9 @@
   aria-hidden="true"
 >
   {#if showImage}
-    <img src={picture} alt="" onerror={() => (broken = true)} />
+    <!-- lazy + async: a long roster must not eagerly fetch/decode every photo
+         (audit APPR-3 perf) -->
+    <img src={picture} alt="" loading="lazy" decoding="async" onerror={() => (broken = true)} />
   {:else}
     <span class="initials">{initials}</span>
   {/if}

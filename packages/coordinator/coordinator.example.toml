@@ -78,3 +78,15 @@ model = "free"                    # free | per_user | per_event | negotiated | e
 # checkout_url = "https://…/checkout"   # the app appends ?event=<naddr>
 # currency = "sats"
 # free_organizers = ["npub1…"]    # always-free (community). PRIVATE — never announced.
+
+# ── Daemon-side security policy ───────────────────────────────────────────────
+# Installation is protocol-level (any E_id can gift-wrap a 21603 grant to this
+# daemon), so unsolicited installs are bounded here.
+[security]
+max_events = 50                   # reject installs beyond this many simultaneous events
+# allowed_eid_pubkeys = ["<hex>"]  # when non-empty, ONLY install events whose
+                                  # E_id (hex pubkey) is listed (private coordinator)
+# allow_unverified_model_privacy = true
+                                  # escape hatch (default false = fail CLOSED):
+                                  # boot even when GET /models can't be fetched
+                                  # while a role has require_private set

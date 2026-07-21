@@ -37,10 +37,19 @@ function inline(s: string): string {
           ? `<a href="${url}" target="_blank" rel="noopener">${text}</a>`
           : m,
       )
-      // bare urls (never inside an emitted attribute — those follow `="`)
+      // bare urls — but NOT inside an already-emitted tag (e.g. the alt="…" of
+      // an <img> emitted above) or inside an emitted <a> (audit APPR-6). The
+      // source was HTML-escaped first, so raw `<`/`>` only ever come from OUR
+      // tags: an unclosed `<` before the match means "inside a tag", and an
+      // unclosed `<a ` means "inside a link" (nesting <a> is invalid HTML).
       .replace(
         /(^|\s)(https?:\/\/[^\s<>"')]+)/g,
-        (_m, pre, url) => `${pre}<a href="${url}" target="_blank" rel="noopener">${url}</a>`,
+        (m, pre, url, offset: number, whole: string) => {
+          const before = whole.slice(0, offset);
+          if (before.lastIndexOf("<") > before.lastIndexOf(">")) return m;
+          if (before.lastIndexOf("<a ") > before.lastIndexOf("</a>")) return m;
+          return `${pre}<a href="${url}" target="_blank" rel="noopener">${url}</a>`;
+        },
       )
   );
 }

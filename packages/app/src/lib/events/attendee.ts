@@ -37,11 +37,13 @@ import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
-import { addEckVersions, loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
+import { addEckVersions, applyOrganizerGrant, loadEventKeys, currentEck } from "./keystore.js";
 import { directoryPublisher } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { streamEvents, type StreamHandle } from "$lib/nostr/stream.js";
-import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import { onlyVerified } from "$lib/nostr/verify.js";
+import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
+import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { eventRelayHints } from "./event-context.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 /**
@@ -115,19 +117,30 @@ export function authenticateKeyGrant(
   return true;
 }
 
-/** Fetch and parse the latest signed 31600 config for an event coordinate. */
-async function fetchEventConfig(coordinate: string): Promise<EventConfig | undefined> {
+/**
+ * Fetch and parse the latest signed 31600 config for an event coordinate.
+ * `relayHints` are the event's own relays when the caller knows them (audit
+ * APPK-5): an event living on custom relays is unreachable via DEFAULT_RELAYS
+ * alone, which used to make its grants permanently unauthenticatable. Hints
+ * are unioned with the defaults, never trusted exclusively.
+ */
+async function fetchEventConfig(
+  coordinate: string,
+  relayHints: string[] = [],
+): Promise<EventConfig | undefined> {
   let coord;
   try {
     coord = parseCoordinate(coordinate);
   } catch {
     return undefined;
   }
+  const relays = unionRelays(relayHints, DEFAULT_RELAYS);
   const events = await fetchEvents(
     { kinds: [KIND_EVENT_CONFIG], authors: [coord.pubkey], "#d": [coord.identifier] },
-    DEFAULT_RELAYS,
+    relays,
   );
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
+  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);
@@ -189,20 +202,29 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   )) as unknown as GiftWrap[];
 
   const coordinates = new Set<string>();
-  // Per-wrap unwrap memo (CACHING-PLAN §2.3), owner-scoped, persisted: a wrap we
-  // have ALREADY unwrapped once never needs `signerUnwrap` again on a re-scan —
-  // the #1 Amber/NIP-46 prompt/latency saver. The relay-only fetch above still
-  // runs every time (HARD CONSTRAINT 1: must-not-miss semantics untouched); this
-  // only skips the redundant per-wrap signer round-trip. Transient unwrap
-  // failures are NOT memoized, so a real grant that failed to decrypt is retried.
+  // Per-wrap memo (CACHING-PLAN §2.3), owner-scoped, persisted: a wrap whose
+  // processing reached a DEFINITIVE outcome never needs `signerUnwrap` again on
+  // a re-scan — the #1 Amber/NIP-46 prompt/latency saver. The relay-only fetch
+  // above still runs every time (HARD CONSTRAINT 1: must-not-miss semantics
+  // untouched). Memoization happens only AFTER the outcome is known (audit
+  // APPK-5): a transient signer failure, or a 21602 whose 31600 config can't be
+  // fetched right now, is NOT memoized, so the next scan retries it.
   const memo: Record<string, true> = { ...(cacheGet<Record<string, true>>("grantwraps")?.data ?? {}) };
   let memoDirty = false;
   // Cache the (network-fetched) signed 31600 per coordinate so multiple grants
   // for one event only cost a single config lookup.
   const configCache = new Map<string, EventConfig | undefined>();
-  const configFor = async (coordinate: string): Promise<EventConfig | undefined> => {
+  const configFor = async (
+    coordinate: string,
+    relayHints: string[] = [],
+  ): Promise<EventConfig | undefined> => {
     if (!configCache.has(coordinate)) {
-      configCache.set(coordinate, await fetchEventConfig(coordinate));
+      // A fetch/relay failure is not a definitive "no config" — collapse it to
+      // undefined (config-absent) so the caller treats the grant as retryable.
+      configCache.set(
+        coordinate,
+        await fetchEventConfig(coordinate, relayHints).catch(() => undefined),
+      );
     }
     return configCache.get(coordinate);
   };
@@ -212,7 +234,8 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     // relay can return extra wraps — the successful unwrap below proves the wrap
     // was actually sealed to us, this is just a cheap early guard.
     if (!wrap.tags.some((tg) => tg[0] === "p" && tg[1] === pubkey)) continue;
-    // Already unwrapped in a prior scan/session — skip the signer round-trip.
+    // Already definitively processed in a prior scan/session — skip the signer
+    // round-trip.
     if (memo[wrap.id]) continue;
     let rumor;
     try {
@@ -220,56 +243,85 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     } catch {
       continue; // transient/foreign — NOT memoized, retried next scan
     }
-    // Successfully unwrapped: never signer-decrypt this wrap again.
-    memo[wrap.id] = true;
-    memoDirty = true;
     if (rumor.kind === KIND_ORGANIZER_GRANT) {
       // Co-organizer custody: store the full event keys so this device can admin.
       let grant;
       try {
         grant = organizerGrantContentSchema.parse(JSON.parse(rumor.content));
       } catch {
-        continue; /* malformed */
+        memo[wrap.id] = true; // malformed — definitive, never re-try
+        memoDirty = true;
+        continue;
       }
-      const config = await configFor(grant.a);
+      const config = await configFor(grant.a, grant.config_relays);
+      // authenticateOrganizerGrant enforces the E_id authority checks even when
+      // the config is unavailable (it only widens the inbox check), so pass/fail
+      // here is always a definitive outcome — safe to memoize either way.
       if (!authenticateOrganizerGrant(rumor, grant, config)) {
         console.warn(
           "[receiveGrants] ignored forged/invalid organizer grant (21605) for",
           grant.a,
         );
+        memo[wrap.id] = true;
+        memoDirty = true;
         continue;
       }
-      await saveEventKeys({
-        coordinate: grant.a,
-        role: "organizer",
+      // Union the granted ECK versions into any existing record (audit APPK-4):
+      // an authentic-but-stale 21605 processed after a fresher 21602 must not
+      // clobber the record back to older versions — only role/secrets update.
+      await applyOrganizerGrant(grant.a, {
         eck: grant.eck,
         eidNsecHex: grant.eid_nsec,
         einboxNsecHex: grant.einbox_nsec,
       });
       coordinates.add(grant.a);
+      memo[wrap.id] = true;
+      memoDirty = true;
       continue;
     }
-    if (rumor.kind !== KIND_KEY_GRANT) continue;
-    let grant;
-    try {
-      grant = keyGrantContentSchema.parse(JSON.parse(rumor.content));
-    } catch {
-      continue;
-    }
-    const config = await configFor(grant.a);
-    if (!authenticateKeyGrant(rumor, grant, config)) {
-      console.warn(
-        "[receiveGrants] ignored forged/invalid key grant (21602) for",
+    if (rumor.kind === KIND_KEY_GRANT) {
+      let grant;
+      try {
+        grant = keyGrantContentSchema.parse(JSON.parse(rumor.content));
+      } catch {
+        memo[wrap.id] = true; // malformed — definitive
+        memoDirty = true;
+        continue;
+      }
+      const config = await configFor(grant.a, eventRelayHints(grant.a));
+      if (!config) {
+        // The event's signed 31600 isn't fetchable right now (transient relay
+        // gap, or an event living on relays we haven't recorded yet), and
+        // authenticateKeyGrant can't establish the granting authority without
+        // it. This is NOT a definitive negative — leave the wrap un-memoized so
+        // the next scan retries (audit APPK-5).
+        continue;
+      }
+      if (!authenticateKeyGrant(rumor, grant, config)) {
+        console.warn(
+          "[receiveGrants] ignored forged/invalid key grant (21602) for",
+          grant.a,
+        );
+        // Definitive negative WITH a successfully fetched config — memoize.
+        memo[wrap.id] = true;
+        memoDirty = true;
+        continue;
+      }
+      await addEckVersions(
         grant.a,
+        grant.eck,
+        grant.role === "organizer" ? "organizer" : "attendee",
       );
+      coordinates.add(grant.a);
+      memo[wrap.id] = true;
+      memoDirty = true;
       continue;
     }
-    await addEckVersions(
-      grant.a,
-      grant.eck,
-      grant.role === "organizer" ? "organizer" : "attendee",
-    );
-    coordinates.add(grant.a);
+    // Any other successfully-unwrapped wrap (a DM, a chat welcome, …) is not a
+    // grant — definitively not this scanner's business, so memoize it and never
+    // spend a signer round-trip on it here again.
+    memo[wrap.id] = true;
+    memoDirty = true;
   }
   // The full-history scan completed without throwing (a fetch failure would have
   // rejected above), so later scans can safely narrow to the live-overlap window.
@@ -320,7 +372,8 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
     { relays: ctx.config.relays },
   ).ready;
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
+  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   if (!latest) return { v: 1, eck_current: 1, attendees: [] };
   try {
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(eck, latest.content)));
@@ -350,6 +403,51 @@ export function cachedDirectoryEntry(
   return cachedDirectory(coordinate)?.find((e) => e.pubkey === pubkey);
 }
 
+/**
+ * Max values per `#d` filter (UX-22): relays with filter-size limits silently
+ * truncate or reject a single REQ carrying hundreds of roster d-tags — the
+ * roster then showed fewer people with no error. Chunk big rosters and merge
+ * the chunk results instead.
+ */
+const D_FILTER_CHUNK_SIZE = 50;
+
+function chunkDs(ds: string[]): string[][] {
+  if (ds.length <= D_FILTER_CHUNK_SIZE) return [ds];
+  const out: string[][] = [];
+  for (let i = 0; i < ds.length; i += D_FILTER_CHUNK_SIZE) {
+    out.push(ds.slice(i, i + D_FILTER_CHUNK_SIZE));
+  }
+  return out;
+}
+
+/**
+ * Stream directory-entry events for a (possibly large) blinded-d list: one
+ * streamEvents per `#d` chunk (UX-22), combined into a single handle. The
+ * merged `ready` snapshot dedupes by event id; latest-wins per blinded d is
+ * applied by the callers, exactly as with a single stream.
+ */
+function streamDirectoryEvents(
+  publisher: string,
+  ds: string[],
+  relays: string[] | undefined,
+  onEvent?: StreamOptions["onEvent"],
+): StreamHandle {
+  const parts = chunkDs(ds).map((chunk) =>
+    streamEvents(
+      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": chunk },
+      { relays, ...(onEvent ? { onEvent } : {}) },
+    ),
+  );
+  return {
+    ready: Promise.all(parts.map((p) => p.ready)).then((sets) => {
+      const byId = new Map<string, (typeof sets)[number][number]>();
+      for (const events of sets) for (const e of events) byId.set(e.id, e);
+      return [...byId.values()];
+    }),
+    stop: () => parts.forEach((p) => p.stop()),
+  };
+}
+
 /** Fetch + decrypt every directory entry listed in the roster. */
 export async function fetchDirectory(
   ctx: EventContext,
@@ -361,10 +459,9 @@ export async function fetchDirectory(
 
   const publisher = directoryPublisher(ctx);
   const ds = roster.attendees.map((a) => a.d);
-  const events = await streamEvents(
-    { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": ds },
-    { relays: ctx.config.relays },
-  ).ready;
+  // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
+  // relay filter-size limits and silently return fewer people.
+  const events = await streamDirectoryEvents(publisher, ds, ctx.config.relays).ready;
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
@@ -455,10 +552,8 @@ export async function streamDirectory(
   const startStream = (ds: string[]): StreamHandle => {
     inner?.stop();
     currentDs = ds;
-    inner = streamEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": ds },
-      { relays: ctx.config.relays, onEvent: onDirEvent },
-    );
+    // Chunked #d filters (UX-22); the composite handle stops/settles them all.
+    inner = streamDirectoryEvents(publisher, ds, ctx.config.relays, onDirEvent);
     return inner;
   };
   const dsChanged = (ds: string[]): boolean =>

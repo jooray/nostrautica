@@ -23,12 +23,18 @@ function dismissed(id: string): boolean {
 
 class InstallState {
   private deferred: BeforeInstallPromptEvent | null = null;
+  private initialized = false;
   /** True once a captured prompt is available (Chrome/Android). */
   canPrompt = $state(false);
 
-  /** Capture the deferred prompt. Called once from registerPwa() at boot. */
+  /**
+   * Capture the deferred prompt. Idempotent: called synchronously at the top of
+   * the layout's onMount (UX-21 — `beforeinstallprompt` fires early and never
+   * waits for the async boot), with registerPwa() as a backstop.
+   */
   init(): void {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || this.initialized) return;
+    this.initialized = true;
     window.addEventListener("beforeinstallprompt", (e) => {
       e.preventDefault(); // keep it; show our own hint instead
       this.deferred = e as BeforeInstallPromptEvent;

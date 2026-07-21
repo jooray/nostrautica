@@ -2,7 +2,7 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList } from "$lib/events/nostr-actions.js";
-  import { uploadPublicImage } from "$lib/media/image.js";
+  import { uploadPublicImage, prepareAvatarImage } from "$lib/media/image.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
@@ -34,7 +34,13 @@
         const signer = session.signer;
         if (signer) {
           let picture: string | undefined;
-          if (picFile) picture = await uploadPublicImage(signer, picFile).catch(() => undefined);
+          if (picFile) {
+            // Downscale + EXIF-strip before upload (audit APPR-3). A bad image
+            // aborts here with a readable error — the raw original is never
+            // uploaded; an upload failure still proceeds photo-less.
+            const avatar = await prepareAvatarImage(picFile);
+            picture = await uploadPublicImage(signer, avatar).catch(() => undefined);
+          }
           if (newName.trim() || picture) {
             await publishProfile(signer, { name: newName.trim() || undefined, picture }).catch(() => {});
           }

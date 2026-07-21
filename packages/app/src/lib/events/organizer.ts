@@ -61,6 +61,7 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
@@ -308,7 +309,8 @@ export async function loadRoster(
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
     ctx.config.relays,
   );
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
+  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   const currentId = eckVersions.reduce((m, v) => Math.max(m, v.id), 1);
   const at = latest?.created_at ?? 0;
   if (!latest) return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };

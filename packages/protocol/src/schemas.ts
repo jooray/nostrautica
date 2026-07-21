@@ -30,17 +30,18 @@ function base64Bytes(nBytes: number, label: string) {
   return base64.refine((s) => decodedByteLength(s) === nBytes, `expected ${nBytes}-byte base64 (${label})`);
 }
 
-/** An https: URL (C3: block non-https media/fetch targets at the boundary). */
-const httpsUrl = z
-  .string()
-  .url()
-  .refine((u) => {
+/** An https: URL (C3: block non-https media/fetch targets at the boundary; audit
+ *  APPR-1/APPR-2: this is the schema-boundary half — callers that render a URL
+ *  as a clickable link additionally re-check the scheme at render time). */
+function httpsUrl(maxLen?: number) {
+  return (maxLen === undefined ? z.string() : z.string().max(maxLen)).url().refine((u) => {
     try {
       return new URL(u).protocol === "https:";
     } catch {
       return false;
     }
   }, "must be an https URL");
+}
 
 // ── Media descriptor (spec §6.2) ─────────────────────────────────────────────
 // `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an
@@ -49,7 +50,7 @@ const httpsUrl = z
 export const mediaDescriptorSchema = z
   .object({
     kind: z.enum(["intro", "talk"]),
-    url: z.array(httpsUrl).min(1),
+    url: z.array(httpsUrl()).min(1),
     x: hex32, // sha256 of ciphertext
     ox: hex32, // sha256 of plaintext
     size: z.number().int().nonnegative(),
@@ -554,7 +555,7 @@ export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 export const coordinatorBillingSchema = z.object({
   state: z.enum(["ok", "payment_required", "grace"]),
   reason: z.string().max(500).optional(), // human message ("exceeds 20-user free tier")
-  checkout_url: z.string().max(2048).optional(),
+  checkout_url: httpsUrl(2048).optional(),
   due: z.number().nonnegative().optional(), // amount, optional (may be negotiated)
   currency: z.string().max(16).optional(),
   grace_until: z.number().int().optional(), // unix; matching continues until then
@@ -585,7 +586,7 @@ export const coordinatorPricingSchema = z.object({
   model: z.enum(["free", "per_user", "per_event", "negotiated", "external"]),
   free_up_to_users: z.number().int().nonnegative().optional(),
   summary: z.string().max(280).optional(), // one-line human pricing summary
-  checkout_url: z.string().max(2048).optional(),
+  checkout_url: httpsUrl(2048).optional(),
   currency: z.string().max(16).optional(),
 });
 export type CoordinatorPricing = z.infer<typeof coordinatorPricingSchema>;
@@ -606,7 +607,7 @@ export const coordinatorAnnounceSchema = z.object({
     .default({}),
   // Per-role privacy disclosure (role → tier string, e.g. "private"/"non-private").
   privacy: z.record(z.string(), z.string()).optional(),
-  terms_url: z.string().max(2048).optional(),
+  terms_url: httpsUrl(2048).optional(),
   pricing: coordinatorPricingSchema.optional(),
 });
 export type CoordinatorAnnounce = z.infer<typeof coordinatorAnnounceSchema>;
