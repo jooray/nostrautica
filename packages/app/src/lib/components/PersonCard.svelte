@@ -17,6 +17,7 @@
     onOpen,
     trailing,
     actions,
+    last = false,
   }: {
     pubkey: string;
     name: string;
@@ -25,10 +26,14 @@
     onOpen: () => void;
     trailing?: Snippet;
     actions?: Snippet;
+    /** True for the true last row of the list (audit UX-30: with a virtualized
+     *  roster the DOM's last child isn't necessarily the list's last item, so
+     *  `:last-child` can no longer decide this — the caller knows). */
+    last?: boolean;
   } = $props();
 </script>
 
-<div class="person">
+<div class="person" class:last>
   <button class="open" onclick={onOpen}>
     <Avatar {pubkey} {name} {picture} size={40} />
     <span class="meta">
@@ -47,7 +52,7 @@
     gap: 0.4rem;
     border-bottom: 1px solid var(--border);
   }
-  .person:last-child {
+  .person.last {
     border-bottom: none;
   }
   .open {

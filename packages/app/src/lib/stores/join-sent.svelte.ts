@@ -46,3 +46,13 @@ export function clearJoinSent(coordinate: string): void {
     write(store);
   }
 }
+
+/** Wipe every marker (audit UX-6: logout must not leave "Pending" ghosts
+ *  visible to the next person on a shared device). */
+export function clearAllJoinSent(): void {
+  try {
+    localStorage.removeItem(KEY);
+  } catch {
+    /* private mode — best effort */
+  }
+}

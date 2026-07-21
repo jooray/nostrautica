@@ -682,10 +682,13 @@ export class Store {
   }
 
   /** Distinct talks (by `talk_d`) a speaker has submitted for an event (audit
-   *  COORD-4: caps unlimited talk submissions, one paid STT job per talk_d). */
+   *  COORD-4: caps unlimited talk submissions, one paid STT job per talk_d).
+   *  Excludes 'rejected' talks: the organizer already said no to those, so
+   *  they must free the speaker's quota back up rather than permanently
+   *  occupying a slot with no way to submit a replacement. */
   countTalksBySpeaker(coordinate: string, pubkey: string): number {
     const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM talks WHERE coordinate = ? AND pubkey = ?")
+      .prepare("SELECT COUNT(*) AS n FROM talks WHERE coordinate = ? AND pubkey = ? AND status != 'rejected'")
       .get(coordinate, pubkey) as { n: number };
     return row.n;
   }

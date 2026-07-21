@@ -30,6 +30,8 @@ import {
 import { lockChatIdentityForLogout, unlockChatIdentityForLogin } from "$lib/chat/identity.js";
 import { clearBlindingCache } from "$lib/events/blinding.js";
 import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
+import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+import { clearAllJoinSent } from "$lib/stores/join-sent.svelte.js";
 import { router } from "$lib/router/router.svelte.js";
 
 class Session {
@@ -181,6 +183,11 @@ class Session {
     setActiveOwner(null);
     setActiveCacheOwner(null);
     clearBlindingCache();
+    // Not owner-scoped stores (audit UX-6): the previous identity's event
+    // titles/roles and "Pending" join markers must not linger for the next
+    // person on a shared device.
+    recentEvents.clear();
+    clearAllJoinSent();
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;

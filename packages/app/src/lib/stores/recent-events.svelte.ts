@@ -122,6 +122,15 @@ class RecentEvents {
     if (typeof localStorage !== "undefined") localStorage.setItem(KEY, JSON.stringify(next));
     this.list = next;
   }
+
+  /** Wipe the whole list (audit UX-6: logout must not leave the previous
+   *  identity's event titles + roles visible to the next person on a shared
+   *  device — this list isn't owner-scoped, so a full clear is the only
+   *  correct option, not just a per-owner filter). */
+  clear(): void {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(KEY);
+    this.list = [];
+  }
 }
 
 export const recentEvents = new RecentEvents();

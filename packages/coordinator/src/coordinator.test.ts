@@ -1618,6 +1618,43 @@ describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
     expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
     expect(h.store.getTalk(h.coordinate, pk, "t0")!.title).toBe("Talk 0 (revised)");
   });
+
+  it("a rejected talk frees its quota slot back up — a new submission is accepted", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    for (let i = 0; i < 10; i++) {
+      await submitTalk(h, speakerSk, {
+        talkD: `t${i}`,
+        title: `Talk ${i}`,
+        media: talkMedia(700, i.toString(16).padStart(2, "0").repeat(32)),
+      });
+    }
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
+    // At the cap: an 11th distinct talk is ignored.
+    await submitTalk(h, speakerSk, {
+      talkD: "t10",
+      title: "Talk 10",
+      media: talkMedia(700, "0a".repeat(32)),
+    });
+    expect(h.store.getTalk(h.coordinate, pk, "t10")).toBeUndefined();
+
+    // The organizer rejects one of the 10 — that frees a slot, not a permanent lock-out.
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t0" });
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(9);
+
+    // Distinct content from the ignored attempt above (a byte-identical
+    // resubmission within the same wall-clock second would hash to the same
+    // rumor id and get silently deduped — a test-harness artifact, not
+    // something a real resubmission would hit).
+    await submitTalk(h, speakerSk, {
+      talkD: "t10",
+      title: "Talk 10 (resubmitted)",
+      media: talkMedia(700, "0b".repeat(32)),
+    });
+    expect(h.store.getTalk(h.coordinate, pk, "t10")).toBeDefined();
+    expect(h.store.countTalksBySpeaker(h.coordinate, pk)).toBe(10);
+  });
 });
 
 describe("audit COORD-7 — talks survive ECK rotation", () => {

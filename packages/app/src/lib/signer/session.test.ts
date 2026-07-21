@@ -42,6 +42,17 @@ vi.mock("$lib/chat/identity.js", () => ({
   unlockChatIdentityForLogin,
 }));
 
+// Not-owner-scoped localStorage residues (audit UX-6) — spied on so the wiring
+// test can assert logout() actually clears them.
+const { recentEventsClear, clearAllJoinSent } = vi.hoisted(() => ({
+  recentEventsClear: vi.fn(),
+  clearAllJoinSent: vi.fn(),
+}));
+vi.mock("$lib/stores/recent-events.svelte.js", () => ({
+  recentEvents: { clear: recentEventsClear },
+}));
+vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent }));
+
 import { consumeNsecFromHash, session } from "./session.svelte.js";
 import { router } from "$lib/router/router.svelte.js";
 import { buildHash } from "$lib/router/routes.js";
@@ -104,12 +115,21 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
     unlockEventKeysForLogin.mockClear();
     lockChatIdentityForLogout.mockClear();
     unlockChatIdentityForLogin.mockClear();
+    recentEventsClear.mockClear();
+    clearAllJoinSent.mockClear();
   });
 
   it("does not lock on a logout when nobody is logged in", async () => {
     await session.logout();
     expect(lockEventKeysForLogout).not.toHaveBeenCalled();
     expect(lockChatIdentityForLogout).not.toHaveBeenCalled();
+  });
+
+  it("logout clears non-owner-scoped residues (recent events, join-sent markers)", async () => {
+    await session.createLocalKey();
+    await session.logout();
+    expect(recentEventsClear).toHaveBeenCalledTimes(1);
+    expect(clearAllJoinSent).toHaveBeenCalledTimes(1);
   });
 
   it("login unlocks, logout locks — both scoped to the same pubkey", async () => {

@@ -85,8 +85,25 @@ export async function loadChatDeviceKey(account: string): Promise<Uint8Array | u
   return stored instanceof Uint8Array ? new Uint8Array(stored) : undefined;
 }
 
+/**
+ * `unlockChatIdentityForLogin` in flight, per account (audit UX-6 race). Login
+ * doesn't wait for it (a NIP-46 decrypt round-trips over relays, and
+ * `+layout.svelte`'s UX-19 fix deliberately runs `session.restore()` in the
+ * background rather than gating first paint) — so `session.loggedIn` can go
+ * true, and a chat prewarm can call `resolveChatIdentity`, WHILE the real
+ * device key is still mid-restore. Without this, `ensureChatDeviceKey` would
+ * see "no device key yet" and mint a fresh one — forking the account's MLS
+ * credential (every other client sees a stranger; old group membership lost).
+ */
+const unlockInFlight = new Map<string, Promise<void>>();
+
 /** Generate + persist a fresh chat device key for an account (once per install). */
 async function ensureChatDeviceKey(account: string): Promise<Uint8Array> {
+  // Let a real key restore first, if one's landing. Only WAIT for it to settle
+  // — an unlock failure (e.g. a storage error) is that caller's problem, not
+  // this unrelated one's; swallow it here rather than letting it propagate
+  // into a concurrent resolveChatIdentity that has nothing to do with it.
+  await unlockInFlight.get(account)?.catch(() => {});
   const existing = await loadChatDeviceKey(account);
   if (existing) return existing;
   const sk = generateSecretKey();
@@ -188,15 +205,28 @@ export async function unlockChatIdentityForLogin(
   account: string,
   decrypt: (ciphertext: string) => Promise<string>,
 ): Promise<void> {
-  const backend = marmotKvBackend();
-  const ciphertext = await backend.get(lockedKey(account));
-  if (typeof ciphertext !== "string") return;
+  // Registered SYNCHRONOUSLY (before any await) so a concurrent
+  // `resolveChatIdentity` call — however early it races in — can always see
+  // this in-flight restore and wait for it (see `unlockInFlight`'s doc comment).
+  const run = (async () => {
+    const backend = marmotKvBackend();
+    const ciphertext = await backend.get(lockedKey(account));
+    if (typeof ciphertext !== "string") return;
+    try {
+      const dump = JSON.parse(await decrypt(ciphertext), reviver) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(dump)) await backend.set(key, value);
+      await backend.del(lockedKey(account));
+    } catch {
+      /* undecryptable (or the signer isn't ready yet) — retried next login */
+    }
+  })();
+  unlockInFlight.set(account, run);
   try {
-    const dump = JSON.parse(await decrypt(ciphertext), reviver) as Record<string, unknown>;
-    for (const [key, value] of Object.entries(dump)) await backend.set(key, value);
-    await backend.del(lockedKey(account));
-  } catch {
-    /* undecryptable (or the signer isn't ready yet) — retried next login */
+    await run;
+  } finally {
+    // Only clear if we're still the current entry — a newer overlapping call
+    // for the same account (rapid logout/login) owns the slot otherwise.
+    if (unlockInFlight.get(account) === run) unlockInFlight.delete(account);
   }
 }
 

@@ -306,6 +306,13 @@ export const messages = {
     "join.loading": "Loading event…",
     "join.youreIn": "You're in",
     "join.recordIntro": "Record your intro",
+    "join.whyIntro.summary": "Why record an intro?",
+    "join.whyIntro.intro": "Optional, but recommended — it helps in a few ways:",
+    "join.whyIntro.matches": "Better matches — the more you share, the more the matching has to work with.",
+    "join.whyIntro.vibe":
+      "A feel for who you'd click with — people can play your intro and see if you'd vibe together. Matching isn't just projects and skills — it's also a feeling AI can't capture on its own.",
+    "join.whyIntro.recognize":
+      "Recognizing each other — a video intro means you'll actually recognize your matches when you spot them in the crowd.",
     "join.goToOverview": "Go to event overview",
     "join.seeWhosHere": "See who's here",
     "join.backupIdentity": "Back up your new identity",
@@ -1225,6 +1232,13 @@ export const messages = {
     "join.loading": "Načítava sa podujatie…",
     "join.youreIn": "Ste vnútri",
     "join.recordIntro": "Nahrať predstavenie",
+    "join.whyIntro.summary": "Prečo nahrať predstavenie?",
+    "join.whyIntro.intro": "Nepovinné, ale odporúčané — pomôže to v niekoľkých smeroch:",
+    "join.whyIntro.matches": "Lepšie zhody — čím viac o sebe prezradíte, tým má párovanie s čím pracovať.",
+    "join.whyIntro.vibe":
+      "Pocit, s kým by ste si sadli — ostatní si môžu prehrať vaše predstavenie a zistiť, či by ste si sadli. Párovanie nie je len o projektoch a zručnostiach — je to aj pocit, ktorý AI sama o sebe nedokáže zachytiť.",
+    "join.whyIntro.recognize":
+      "Spoznáte sa navzájom — video predstavenie znamená, že svoje zhody naozaj spoznáte, keď ich stretnete v dave.",
     "join.goToOverview": "Prejsť na prehľad podujatia",
     "join.seeWhosHere": "Pozrite, kto je tu",
     "join.backupIdentity": "Zálohujte si novú identitu",
@@ -2150,6 +2164,13 @@ export const messages = {
     "join.loading": "Načítání akce…",
     "join.youreIn": "Jste uvnitř",
     "join.recordIntro": "Nahrát představení",
+    "join.whyIntro.summary": "Proč nahrát představení?",
+    "join.whyIntro.intro": "Nepovinné, ale doporučené — pomůže to v několika ohledech:",
+    "join.whyIntro.matches": "Lepší shody — čím víc o sobě prozradíte, tím má párování s čím pracovat.",
+    "join.whyIntro.vibe":
+      "Pocit, s kým byste si sedli — ostatní si mohou přehrát vaše představení a zjistit, jestli byste si sedli. Párování není jen o projektech a dovednostech — je to i pocit, který AI sama o sobě nedokáže zachytit.",
+    "join.whyIntro.recognize":
+      "Poznáte se navzájem — video představení znamená, že své shody opravdu poznáte, když je potkáte v davu.",
     "join.goToOverview": "Přejít na přehled akce",
     "join.seeWhosHere": "Podívejte se, kdo tu je",
     "join.backupIdentity": "Zazálohujte si novou identitu",

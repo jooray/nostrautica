@@ -351,6 +351,17 @@
       <button class="btn" onclick={() => router.go({ name: "event", naddr })}>
         {t("join.goToOverview")}
       </button>
+      <details style="margin-top:0.25rem">
+        <summary class="muted" style="cursor:pointer">{t("join.whyIntro.summary")}</summary>
+        <div class="stack" style="margin-top:0.5rem">
+          <p class="muted">{t("join.whyIntro.intro")}</p>
+          <ul class="muted" style="margin:0;padding-left:1.1rem">
+            <li>{t("join.whyIntro.matches")}</li>
+            <li>{t("join.whyIntro.vibe")}</li>
+            <li>{t("join.whyIntro.recognize")}</li>
+          </ul>
+        </div>
+      </details>
     {:else}
       <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
         {t("join.goToOverview")}

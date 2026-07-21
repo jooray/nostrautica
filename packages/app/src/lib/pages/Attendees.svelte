@@ -15,6 +15,7 @@
   import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
+  import VirtualList from "$lib/components/VirtualList.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
@@ -278,42 +279,45 @@
     </div>
   {:else}
     <div class="card roster">
-      {#each visible as e (e.pubkey)}
-        <PersonCard
-          pubkey={e.pubkey}
-          name={nameOf(e.pubkey, e.profile.about)}
-          line={cardAbout(e) || e.ai_profile?.summary}
-          picture={profiles.get(e.pubkey)?.picture}
-          onOpen={() => open(e.pubkey)}
-        >
-          {#snippet trailing()}
-            {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
-            {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
-          {/snippet}
-          {#snippet actions()}
-            {#if session.loggedIn && e.pubkey !== session.pubkey}
-              <button
-                class="btn inline icon-btn"
-                aria-pressed={wantToMeet(e.pubkey)}
-                class:primary={wantToMeet(e.pubkey)}
-                title={t("attendees.filter.wantToMeet")}
-                aria-label={t("attendees.filter.wantToMeet")}
-                onclick={() => toggleWantToMeet(e.pubkey)}
-              >
-                <Icon name="star" size={16} />
-              </button>
-              <button
-                class="btn inline icon-btn"
-                title={t("matches.message")}
-                aria-label={t("matches.message")}
-                onclick={() => message(e.pubkey)}
-              >
-                <Icon name="send" size={16} />
-              </button>
-            {/if}
-          {/snippet}
-        </PersonCard>
-      {/each}
+      <VirtualList items={visible} itemHeight={60} getKey={(e) => e.pubkey}>
+        {#snippet row(e)}
+          <PersonCard
+            pubkey={e.pubkey}
+            name={nameOf(e.pubkey, e.profile.about)}
+            line={cardAbout(e) || e.ai_profile?.summary}
+            picture={profiles.get(e.pubkey)?.picture}
+            onOpen={() => open(e.pubkey)}
+            last={e.pubkey === visible[visible.length - 1]?.pubkey}
+          >
+            {#snippet trailing()}
+              {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
+              {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
+            {/snippet}
+            {#snippet actions()}
+              {#if session.loggedIn && e.pubkey !== session.pubkey}
+                <button
+                  class="btn inline icon-btn"
+                  aria-pressed={wantToMeet(e.pubkey)}
+                  class:primary={wantToMeet(e.pubkey)}
+                  title={t("attendees.filter.wantToMeet")}
+                  aria-label={t("attendees.filter.wantToMeet")}
+                  onclick={() => toggleWantToMeet(e.pubkey)}
+                >
+                  <Icon name="star" size={16} />
+                </button>
+                <button
+                  class="btn inline icon-btn"
+                  title={t("matches.message")}
+                  aria-label={t("matches.message")}
+                  onclick={() => message(e.pubkey)}
+                >
+                  <Icon name="send" size={16} />
+                </button>
+              {/if}
+            {/snippet}
+          </PersonCard>
+        {/snippet}
+      </VirtualList>
     </div>
   {/if}
 {/if}

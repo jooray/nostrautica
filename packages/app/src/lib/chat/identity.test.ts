@@ -222,6 +222,72 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
     expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1 });
   });
 
+  it("resolveChatIdentity waits for an in-flight unlock instead of forking the device key", async () => {
+    // Reproduces the race a reviewer found: adopt() doesn't block session.loggedIn
+    // on the chat-identity unlock finishing (a NIP-46 decrypt round-trips over
+    // relays, and +layout.svelte's UX-19 fix runs restore() in the background
+    // rather than gate first paint on it) — so a chat prewarm can call
+    // resolveChatIdentity WHILE the real device key is still mid-restore. Without
+    // the unlockInFlight guard, ensureChatDeviceKey would see "none yet" and mint
+    // a fresh one, forking the account's MLS credential.
+    const account = "e".repeat(64);
+    const fakeSigner = { getPublicKey: async () => account } as unknown as AppSigner;
+
+    const before = await resolveChatIdentity(fakeSigner); // establishes the real device key
+    await lockChatIdentityForLogout(account, selfEncrypt);
+    expect(await loadChatDeviceKey(account)).toBeUndefined(); // locked away
+
+    // The unlock starts but its decrypt (a NIP-46 round trip in production) is slow.
+    let releaseDecrypt!: () => void;
+    const gate = new Promise<void>((resolve) => (releaseDecrypt = resolve));
+    const slowDecrypt = async (ct: string) => {
+      await gate;
+      return selfDecrypt(ct);
+    };
+    const unlockPromise = unlockChatIdentityForLogin(account, slowDecrypt);
+
+    // A chat prewarm races in while the unlock is still pending.
+    const resolvePromise = resolveChatIdentity(fakeSigner);
+
+    releaseDecrypt();
+    await unlockPromise;
+    const after = await resolvePromise;
+
+    expect(after.pubkey).toBe(before.pubkey); // restored — not forked into a new identity
+  });
+
+  it("an unlock storage failure doesn't propagate into a concurrent resolveChatIdentity call", async () => {
+    // A reviewer flagged: if `unlockChatIdentityForLogin`'s own read throws (a
+    // storage error, not just an undecryptable snapshot), the resulting
+    // rejection must not crash an unrelated, concurrently-racing
+    // resolveChatIdentity — it should just fall through to minting a device
+    // key, not throw.
+    const account = "f".repeat(64);
+    const fakeSigner = { getPublicKey: async () => account } as unknown as AppSigner;
+    const inner = new InMemoryKvBackend();
+    let failNextLockedGet = false;
+    __setMarmotKvBackendForTests({
+      get: (k) =>
+        failNextLockedGet && k.includes("__chat_locked__")
+          ? ((failNextLockedGet = false), Promise.reject(new Error("storage read failure")))
+          : inner.get(k),
+      set: (k, v) => inner.set(k, v),
+      del: (k) => inner.del(k),
+      keysWithPrefix: (p) => inner.keysWithPrefix(p),
+      clearPrefix: (p) => inner.clearPrefix(p),
+    });
+
+    await resolveChatIdentity(fakeSigner); // establishes a device key
+    await lockChatIdentityForLogout(account, selfEncrypt);
+
+    failNextLockedGet = true;
+    const unlockPromise = unlockChatIdentityForLogin(account, selfDecrypt);
+    const resolvePromise = resolveChatIdentity(fakeSigner); // races concurrently
+
+    await expect(unlockPromise).rejects.toThrow(); // the unlock itself still fails…
+    await expect(resolvePromise).resolves.toBeDefined(); // …but this caller does not
+  });
+
   it("a record that fails to encrypt is left in plaintext, not lost", async () => {
     const account = "d".repeat(64);
     const stores = makeMarmotStores(marmotKvBackend(), account);
