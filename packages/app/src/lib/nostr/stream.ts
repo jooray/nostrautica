@@ -114,7 +114,17 @@ export function streamEvents(
       // through this same callback moments later — no separate migration,
       // reload, or re-login needed.
       if (!isVerified(raw as never)) {
-        void getNdk().cacheAdapter?.deleteEventIds?.([raw.id]);
+        // cache-dexie keys replaceable/addressable events (everything in the
+        // 10000-19999 and 30000-39999 ranges — which is most of what this app
+        // fetches: 31600, 31923, 31603, 31605...) by `tagId()`
+        // ("kind:pubkey:d-tag"), NOT the raw event hash `raw.id`. Deleting by
+        // `raw.id` alone is a silent no-op for those — verified against
+        // cache-dexie's own setEvent()/deleteEventIds() source, and against a
+        // live incident where a stale cache entry survived this exact purge
+        // call. Delete both keys so the fix is correct for replaceable AND
+        // regular (non-replaceable) kinds without needing to special-case them.
+        const ids = [raw.id, e.tagId()];
+        void getNdk().cacheAdapter?.deleteEventIds?.(ids);
         return;
       }
       if (!deduper.accept(raw)) return;

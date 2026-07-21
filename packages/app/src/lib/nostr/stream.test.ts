@@ -54,7 +54,9 @@ vi.mock("./verify.js", () => ({ isVerified: isVerifiedMock }));
 import { streamEvents } from "./stream.js";
 
 let seq = 0;
-function fakeEvent(raw: Partial<{ id: string; kind: number; pubkey: string; created_at: number; tags: string[][] }>) {
+function fakeEvent(
+  raw: Partial<{ id: string; kind: number; pubkey: string; created_at: number; tags: string[][]; tagId: string }>,
+) {
   const full = {
     id: raw.id ?? `id${seq++}`,
     kind: raw.kind ?? 1,
@@ -62,7 +64,13 @@ function fakeEvent(raw: Partial<{ id: string; kind: number; pubkey: string; crea
     created_at: raw.created_at ?? 1,
     tags: raw.tags ?? [],
   };
-  return { rawEvent: () => full, ...full };
+  // NDKEvent.tagId(): the raw event id for regular kinds, but
+  // "kind:pubkey:d-tag" for replaceable/addressable ones — cache-dexie keys
+  // its store by THIS, not the raw id (see stream.ts's purge comment).
+  // Defaults to something visibly different from `id` so a test that only
+  // asserts on `id` would fail loudly instead of passing by accident.
+  const tagId = raw.tagId ?? `tag:${full.id}`;
+  return { rawEvent: () => full, tagId: () => tagId, ...full };
 }
 
 beforeEach(() => {
@@ -186,16 +194,21 @@ describe("streamEvents", () => {
   // relay) funnels through, so the purge belongs here, not scattered across
   // every call site.
   describe("purges an event that fails signature verification (audit APPK-1 self-heal)", () => {
-    it("drops it from the result and deletes it from the cache", async () => {
+    it("drops it from the result and deletes it from the cache by BOTH its raw id and tagId", async () => {
+      // Regression: the first version of this fix only deleted by raw.id,
+      // which is a silent no-op for replaceable/addressable kinds (31600,
+      // 31923, ...) — cache-dexie keys those by tagId() ("kind:pubkey:d"),
+      // not the event hash. Reproduced live: the purge "succeeded" but the
+      // stale entry was still served on the very next fetch, forever.
       const h = streamEvents({ kinds: [1] });
       isVerifiedMock.mockImplementation((e: unknown) => (e as { id: string }).id !== "bad");
-      currentSub.emit("event", fakeEvent({ id: "bad" }));
+      currentSub.emit("event", fakeEvent({ id: "bad", tagId: "31600:pk:d-tag" }));
       currentSub.emit("event", fakeEvent({ id: "good" }));
       currentSub.emit("eose");
       await vi.advanceTimersByTimeAsync(400);
       const events = await h.ready;
       expect(events.map((e: any) => e.id)).toEqual(["good"]);
-      expect(deleteEventIds).toHaveBeenCalledWith(["bad"]);
+      expect(deleteEventIds).toHaveBeenCalledWith(["bad", "31600:pk:d-tag"]);
     });
 
     it("a relay delivering the same id again with a real signature afterwards is accepted normally", async () => {
