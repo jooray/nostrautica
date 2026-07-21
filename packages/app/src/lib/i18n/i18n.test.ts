@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { i18n, pluralCategory } from "./i18n.svelte.js";
 import { messages } from "./messages.js";
 
@@ -132,6 +132,50 @@ describe("event-language adoption (spec §7.1)", () => {
     i18n.adoptEventLang("sk");
     expect(i18n.locale).toBe("en");
     i18n.explicit = false;
+  });
+});
+
+describe("init() (a returning visitor reloading the app)", () => {
+  // Neither global exists under this package's vitest "node" environment
+  // (no jsdom) — minimal stubs, same pattern as other test files in this repo
+  // (e.g. ndk.test.ts stubbing globalThis.indexedDB).
+  const originalDocument = (globalThis as { document?: unknown }).document;
+  const originalLocalStorage = (globalThis as { localStorage?: unknown }).localStorage;
+  const store = new Map<string, string>();
+
+  beforeEach(() => {
+    (globalThis as { document?: unknown }).document = { documentElement: { lang: "en" } };
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+  });
+  afterEach(() => {
+    store.clear();
+    i18n.explicit = false;
+    i18n.locale = "en";
+    (globalThis as { document?: unknown }).document = originalDocument;
+    (globalThis as { localStorage?: unknown }).localStorage = originalLocalStorage;
+  });
+
+  it("restores a persisted explicit choice AND updates <html lang> to match", () => {
+    // Regression: init() correctly restored i18n.locale (so every visible
+    // string was already localized), but never touched
+    // document.documentElement.lang — only set()/adoptEventLang() did. A
+    // returning Slovak-locale visitor kept <html lang="en"> forever after
+    // their first reload, which is what screen readers and the browser's own
+    // offer-to-translate prompt read, independent of the (correct) UI text.
+    localStorage.setItem("nostrautica:lang", "sk");
+    i18n.init();
+    expect(i18n.locale).toBe("sk");
+    expect(i18n.explicit).toBe(true);
+    expect(document.documentElement.lang).toBe("sk");
+  });
+
+  it("also sets <html lang> on the browser-detected (non-explicit) path", () => {
+    i18n.init(); // no stored choice — falls through to detect()
+    expect(document.documentElement.lang).toBe(i18n.locale);
   });
 });
 
