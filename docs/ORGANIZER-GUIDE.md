@@ -8,11 +8,10 @@ and why. This guide takes you from nothing to a running event.
 ## What you'll do
 
 1. Create your identity (once).
-2. Create the event.
+2. Create the event — optionally attaching an AI coordinator right there, or later.
 3. Share the event — open link, invite codes, or both.
 4. Approve attendees (or let invite codes auto-approve them).
-5. Optionally attach an AI coordinator for matchmaking.
-6. Post updates, customize your event page, and run the event.
+5. Post updates, customize your event page, and run the event.
 
 Everything runs in your browser. There is no server to set up — the app
 stores event data, encrypted, on the open Nostr network. Your browser holds
@@ -60,6 +59,14 @@ Choose **Create an event** and fill in the form:
 - **Event language** — see below.
 - **AI matchmaking** — set to *On* if you plan to attach a coordinator (§5).
   You can attach the coordinator later; leave the setting on now.
+- **AI coordinator** (optional) — pick one right here on the create form, the
+  same discovery list described in §5, so an invite-code event can
+  auto-approve and start matching from the moment it goes live. Skip it and
+  attach one later from **Admin → Settings** if you'd rather decide after
+  seeing how the event fills up — nothing else on this form depends on it.
+
+  ![Picking a coordinator on the create form](images/organizer/01b-create-coordinator-light.png)
+
 - **Join as a participant yourself** — checked by default: you're enrolled
   like any attendee, so the first person who joins sees at least you in
   **People** instead of an empty list (and you can be matched too, once you
@@ -103,15 +110,22 @@ Capture the link — every attendee uses it.
 ## 3. Open the admin screen and share
 
 Tap **Open organizer admin** (also reachable any time from **More → Manage
-event**). This is your control panel, and it's ordered the way a live event
-actually runs — **operations first**: a status line (pending count, with a
-one-tap jump) and the **join requests** sit at the very top, so admitting people
-never means scrolling past setup. Below that come the things you touch less
-often — **Communicate** (posts/updates), **People** (approved attendees), and
-**Event setup** (invite codes, coordinator, co-organizers, event page,
-appearance). Fresh event, no requests yet:
+event**). Your control panel is split into two tabs, so running the event day
+to day never means scrolling past one-time setup:
 
-![Admin overview, operations-first](images/organizer/03-admin-empty-light.png)
+- **Administration** — the tab you land on, and the one you'll return to most:
+  a status line (pending count, with a one-tap jump), **join requests** at the
+  very top so admitting people is never buried, invite-code generation, the
+  approved-attendees list (revoke/re-process), talk moderation, and
+  **Communicate** (posts/updates).
+- **Settings** — the one-time-per-event stuff: the AI coordinator (§5), event
+  page menu & layout, appearance/theme CSS, prerecorded talks mode, group
+  chat, and co-organizers. If you picked a coordinator on the create form
+  (§2), it's already showing as attached here.
+
+Fresh event, no requests yet:
+
+![Admin overview, Administration tab](images/organizer/03-admin-empty-light.png)
 
 You have two kinds of links to share:
 
@@ -176,10 +190,14 @@ profile of each attendee, and computes who should meet whom. Without it, the
 event still fully works — roster, videos, follows — there are just no automatic
 matches, and invite links need your manual approval.
 
-In the admin **AI coordinator** section you **pick a coordinator from the list**
-— each announces itself on Nostr with its name, features, a privacy disclosure
-(which AI steps leave the secure enclave), and its pricing (the reference one is
-**Free**). Tap **Use this coordinator**:
+You can pick one right on the create form (§2) so it's live from the start, or
+attach one later — same discovery list either way, just relocated: on an
+existing event it's under **Admin → Settings → AI coordinator**, not
+Administration (that tab is for things you do repeatedly; attaching a
+coordinator is one-time setup). Either way you **pick a coordinator from the
+list** — each announces itself on Nostr with its name, features, a privacy
+disclosure (which AI steps leave the secure enclave), and its pricing (the
+reference one is **Free**). Tap **Use this coordinator**:
 
 ![Choosing a coordinator from the discovery list](images/organizer/05a-coordinator-picker-light.png)
 
@@ -191,13 +209,14 @@ see it confirmed:
 
 > **Paid coordinators.** A coordinator may charge (AI matchmaking costs scale
 > with attendee count), so a listing can show a price or a free tier (e.g.
-> "up to 20 attendees free"). If payment is ever needed, the admin screen shows
-> a **Payment required** banner with a checkout link — the current reference
-> coordinator is free.
+> "up to 20 attendees free"). If payment is ever needed, the Settings screen
+> shows a **Payment required** banner with a checkout link — the current
+> reference coordinator is free.
 
 The coordinator only ever *reads* event content — it can never act as the event
 or approve people beyond the rules you set. Once attached, an **↻ Recompute all
-matches** button appears; use it after a burst of new attendees.
+matches** button appears on the **Administration** tab (it's a recurring action,
+not setup); use it after a burst of new attendees.
 
 > Running the coordinator is a separate, technical step (a small daemon that
 > needs `ffmpeg` and an LLM/STT provider key). See
@@ -235,7 +254,7 @@ hasn't joined yet sees it:
 
 ### Customize the event page and its look
 
-Two more controls live in **Event setup**:
+Two more controls live in **Admin → Settings**:
 
 - **Event page** (kind 31608) — build a custom menu and arrange sections
   (which posts show where) for the public event page, instead of the default
@@ -250,25 +269,27 @@ Two more controls live in **Event setup**:
 
 ## 6.5 Talks and group chat (both new, both optional)
 
-**Prerecorded talks.** In **Event setup → Prerecorded talks**, switch it *On*
+**Prerecorded talks.** In **Admin → Settings → Prerecorded talks**, switch it *On*
 (or *Prerecord-first*, which puts Talks ahead of People in attendees' nav —
 good for a "watch ahead, meet at the venue" format) and **Save**. Approved
 attendees can then submit short talks from the same composer used for intros.
 
-> **Known gap as of this pass (2026-07-16):** there is currently no screen in
-> admin to review or publish a submitted talk — attendees can submit, but
-> nothing in the app lets you move a talk from "submitted" to "visible to
-> attendees." Every talk you enable this round will need that moderation step
-> once it ships; track it in the gap report (G-1) before promising this
-> feature to attendees.
+Submitted talks don't go live by themselves. A **Talks moderation** card
+further down **Administration** lists everything waiting for review — **Preview**
+each one, then **Publish** it so attendees can watch, or **Reject** it.
+Nothing an attendee submits is visible to anyone else until you act on it here
+(and publishing needs a coordinator attached, same as the rest of admin).
 
-**Group chat (Marmot, experimental).** In **Event setup**, toggle **Group
+**Group chat (Marmot, experimental).** In **Admin → Settings**, toggle **Group
 chat** and save — it needs a coordinator attached (the coordinator operates
 the encrypted group: adding people as they're approved, removing them on
 revoke). Once on, approved attendees get a **Chat** tab: a single
-end-to-end-encrypted room for the whole event, separate from 1:1 messages.
+end-to-end-encrypted room for the whole event, separate from 1:1 messages —
+a normal running conversation, nothing for them to configure.
 
 ![Group chat toggle in admin](images/organizer/11-chat-toggle-light.png)
+
+![The Chat tab, mid-conversation](images/organizer/chat-conversation-light.png)
 
 This is early: joining the group can take a little while server-side even
 once toggled on, and it's marked *Experimental* in the UI on purpose — don't
@@ -281,13 +302,18 @@ lean on it as the only way to reach attendees during an event yet. Posts
   lists refresh as new intros are processed.
 - **Recompute matches** — after a rush of arrivals, tap **↻ Recompute all
   matches** (coordinator required).
-- **Co-organizers** — in the **Co-organizers** card, add someone by their
-  npub to share full organizer control (edit event, approve, manage the
+- **Co-organizers** — in **Admin → Settings → Co-organizers**, add someone by
+  their npub to share full organizer control (edit event, approve, manage the
   coordinator). Their keys are gift-wrapped to them; they get access next time
   they open the event. This is also your safety net if your browser dies.
 - **Encourage intros early.** Matches only exist for people who recorded an
   intro — the single best thing you can do for match quality is get everyone to
-  record before the event starts.
+  record before the event starts. Recording is optional for attendees, and the
+  app tells them so, but it's worth pushing: a recorded intro gives the AI more
+  to work with, lets other attendees preview whether they'd actually vibe with
+  a match before walking up to them — matching isn't only projects and skills,
+  it's also a feeling AI can't capture on its own — and if it's a video, it
+  helps people recognize their matches in person.
 
 ## Troubleshooting & FAQ
 

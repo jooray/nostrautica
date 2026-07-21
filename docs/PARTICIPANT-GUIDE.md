@@ -79,9 +79,18 @@ email you a recovery link or make a password-protected file.)
 
 ## 3. Record your intro
 
-This is the important part — **no intro, no matches**. From the event page, tap
+This is the part that makes the matching good. It is **optional** — without one
+you are still matched, from your public Nostr activity and profile bio — but an
+intro gives the matching far more to work with. From the event page, tap
 **Record / update your intro**. You get three ways to introduce yourself — pick
 whichever suits you:
+
+> **Why bother?** Recording an intro is optional, but recommended. It gives
+> the matching more to work with, so you get better matches. Other attendees
+> can play it back and get a feel for whether you'd actually click — matching
+> isn't only projects and skills, it's also a feeling that AI can't capture on
+> its own. And if you record video, people will actually recognize you from it
+> when they spot you in the crowd.
 
 - **Video** (the default) — tap **Enable camera**, then **● Record**. Talk for
   up to a minute: who you are, what you're working on, what you're looking for.
@@ -101,6 +110,15 @@ intros) — and you have to tick a box confirming you've read that. Nobody
 outside this event's attendees can ever see the intro itself.
 
 ![Recording your intro — video, audio, and text modes](images/participant/09-record-light.png)
+
+**Already recorded one for a different event?** If you have, this screen
+shows a **reuse gallery** above the recorder — every video, audio, or text
+intro you've made at any past event, each with a quick preview so you can
+tell them apart. Reuse a video or audio clip as-is, or **Fresh copy** to
+re-encrypt it for this event without re-recording; for text, **Use this
+text** drops it into the composer so you can send it as-is or tweak it
+first. Nothing here is linked back to where you originally recorded it —
+the library only remembers what you made, not which event it was for.
 
 Video and audio intros get an automatic transcript once the organizer's
 matchmaking service has processed them — on your own or anyone else's page,
@@ -215,18 +233,20 @@ your conversation shows up there too. It isn't locked to this event.
 
 If the organizer has turned on **Group chat**, a **Chat** tab appears once
 you're approved — a single encrypted room for the whole event, separate from
-one-to-one messages. It's genuinely end-to-end encrypted (a protocol called
-Marmot/MLS), though the organizer's matchmaking service operates the group
-(adds and removes people as they're approved or revoked) and can read it — the
-app tells you this up front, every time you open the tab. Each device only
-sees messages sent after it joined, so a new phone won't see old history.
+one-to-one messages. It works like any chat: messages appear in the room as
+people send them, day separators mark the passage of time, and you can switch
+between a bubble view and a compact IRC-style log from a toggle above the
+messages. It's genuinely end-to-end encrypted (a protocol called Marmot/MLS),
+though the organizer's matchmaking service operates the group (adds and
+removes people as they're approved or revoked) and can read it — the app
+tells you this up front, every time you open the tab. Each device only sees
+messages sent after it joined, so a new phone won't see old history.
 
-![Group chat](images/participant/30-event-chat-setup-light.png)
+![Group chat, mid-conversation](images/participant/chat-conversation-light.png)
 
-Want push notifications instead of checking the tab? Tap **Show my chat key**
-and follow the steps to open the same conversation in
-[Whitenoise](https://github.com/parres-hq/whitenoise), a dedicated Marmot chat
-app — history there starts from whenever your phone joins.
+Marmot is an open protocol, and the same conversation is meant to eventually
+be reachable from other Marmot-compatible chat apps, not just this one — that
+interop is planned but isn't something to rely on today.
 
 This feature is marked **Experimental** for a reason: it's new, and joining
 the group can take a little while (or occasionally need a retry) before
@@ -251,7 +271,7 @@ key, open one of them, choose "log in with a key", and paste it in — you're
 already there.
 
 One more thing: **More → Settings** has a dark mode and a language switch
-(English / Slovenčina), and your choice sticks:
+(English / Slovenčina / Čeština), and your choice sticks:
 
 ![Settings](images/app/settings-light.png)
 
@@ -291,8 +311,8 @@ they open the attendee list — nothing:
   people, the admin screen, everything — comes back too, automatically, from
   that one key; you don't need a separate backup of the event itself.
 
-- **No matches are showing yet.** Record your intro first — no intro, no
-  matches. After that, matches take a little while to compute and need a few
+- **No matches are showing yet.** Recording an intro is the biggest single
+  improvement you can make here. After that, matches take a little while to compute and need a few
   other people to have joined and recorded too. Check back soon.
 
 - **I don't see the attendee list / videos.** You have to be approved first. If
