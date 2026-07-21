@@ -10,8 +10,8 @@ import { chromium } from "@playwright/test";
 import { mkdirSync, copyFileSync, existsSync } from "node:fs";
 
 const BASE_URL = process.env.NOSTRAUTICA_URL ?? "http://localhost:4173";
-const DOCS = "/Users/juraj/projects/nostrautica/docs/images";
-const WEB = "/Users/juraj/projects/nostrautica/web/assets/screenshots";
+const DOCS = process.env.NOSTRAUTICA_DOCS_DIR ?? "/Users/juraj/projects/nostrautica/docs/images";
+const WEB = process.env.NOSTRAUTICA_WEB_DIR ?? "/Users/juraj/projects/nostrautica/web/assets/screenshots";
 
 const LAUNCH_ARGS = [
   "--disable-features=LocalNetworkAccessChecks,PrivateNetworkAccessSendPreflights,PrivateNetworkAccessRespectPreflightResults",

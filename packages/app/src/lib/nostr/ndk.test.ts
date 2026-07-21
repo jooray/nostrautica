@@ -8,7 +8,19 @@
  * (dead-relay majority, e.g. conference Wi-Fi with WSS blocked).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { isAcceptedRelayUrl, fetchEvents, fetchEventsRelayOnly, __setNdkForTests } from "./ndk.js";
+
+// Real cache-dexie strips `sig` by default (`saveSig` option, default false) —
+// verified against node_modules/.pnpm/@nostr-dev-kit+cache-dexie*/…/index.js.
+// Spy on the constructor so a regression (forgetting `saveSig: true`) fails
+// loudly instead of silently breaking every cache-served event's
+// re-verification (audit APPK-1) — reproduced live: a config event served
+// from the Dexie cache came back with no `sig` at all, so `onlyVerified()`
+// rejected it and `loadEventContext` threw "Event config (31600) not found"
+// even for the organizer's own just-created event.
+const { DexieMock } = vi.hoisted(() => ({ DexieMock: vi.fn().mockImplementation(() => ({})) }));
+vi.mock("@nostr-dev-kit/cache-dexie", () => ({ default: DexieMock }));
+
+import { isAcceptedRelayUrl, fetchEvents, fetchEventsRelayOnly, getNdk, __setNdkForTests } from "./ndk.js";
 import type NDK from "@nostr-dev-kit/ndk";
 
 describe("isAcceptedRelayUrl (APPR-8)", () => {
@@ -139,5 +151,25 @@ describe("fetchEvents / fetchEventsRelayOnly (UX-1: time-bounded)", () => {
     currentSub.emit("eose");
     await vi.advanceTimersByTimeAsync(400);
     await expect(p).resolves.toEqual([]);
+  });
+});
+
+describe("getNdk cache adapter config (audit APPK-1 regression)", () => {
+  const originalIndexedDB = (globalThis as { indexedDB?: unknown }).indexedDB;
+
+  beforeEach(() => {
+    __setNdkForTests(null);
+    DexieMock.mockClear();
+    (globalThis as { indexedDB?: unknown }).indexedDB = {};
+  });
+  afterEach(() => {
+    __setNdkForTests(null);
+    (globalThis as { indexedDB?: unknown }).indexedDB = originalIndexedDB;
+  });
+
+  it("persists event signatures in the Dexie cache — onlyVerified() can't pass a sig-less cache hit", () => {
+    getNdk();
+    expect(DexieMock).toHaveBeenCalledTimes(1);
+    expect(DexieMock.mock.calls[0]![0]).toMatchObject({ saveSig: true });
   });
 });

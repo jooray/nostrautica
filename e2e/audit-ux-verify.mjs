@@ -34,12 +34,16 @@ async function newUser(page, name) {
   await page.getByText(/you're in/i).waitFor({ timeout: 20000 });
 }
 
-async function waitForWithReload(page, locator, timeout = 20000) {
-  try {
-    await locator.waitFor({ timeout });
-  } catch {
-    await page.reload();
-    await locator.waitFor({ timeout });
+async function waitForWithReload(page, locator, timeout = 20000, retries = 3) {
+  for (let i = 0; ; i++) {
+    try {
+      await locator.waitFor({ timeout });
+      return;
+    } catch (e) {
+      if (i >= retries) throw e;
+      await page.reload();
+      await page.waitForTimeout(1500);
+    }
   }
 }
 
@@ -61,13 +65,18 @@ async function main() {
   const naddr = shareLink.match(/#\/e\/([^/\s]+)/)?.[1];
   if (!naddr) throw new Error("no naddr captured");
   console.log(`[verify] event naddr: ${naddr}`);
+  // The 31600 publish goes through the durable outbox queue (audit UX-15) —
+  // "event created" shows optimistically before the relay round-trip settles.
+  // A fresh session (no local cache) needs it actually on the relay.
+  await olga.waitForTimeout(4000);
 
   // ---- one attendee: capture the new "Why record an intro?" section ----
   const ninaCtx = await browser.newContext(desktop);
   const nina = await ninaCtx.newPage();
+  nina.on("pageerror", (e) => console.log("[nina pageerror]", e.message));
   await nina.goto(`/#/e/${naddr}/join`);
   const ninaNameField = nina.getByLabel(/display name/i);
-  await ninaNameField.waitFor({ timeout: 15000 });
+  await waitForWithReload(nina, ninaNameField, 15000);
   await ninaNameField.fill("Nina Newcomer");
   await nina.getByRole("button", { name: /create identity.*join/i }).click();
   await nina.getByText(/request sent/i).waitFor({ timeout: 20000 });
@@ -79,8 +88,8 @@ async function main() {
   await olga.getByText(/approved ✓/i).first().waitFor({ timeout: 20000 });
   console.log("[verify] Nina approved");
 
-  await nina.goto(`/#/e/${naddr}`);
-  await nina.getByText(/you're in/i).waitFor({ timeout: 20000 });
+  await nina.goto(`/#/e/${naddr}/join`);
+  await waitForWithReload(nina, nina.getByText(/you're in/i), 20000);
   await nina.waitForTimeout(500);
   await nina.screenshot({ path: `${OUT_DIR}/join-why-intro-collapsed-light.png` });
   console.log("[verify] shot: join-why-intro-collapsed-light.png");
@@ -90,7 +99,7 @@ async function main() {
   await nina.waitForTimeout(300);
   await nina.screenshot({ path: `${OUT_DIR}/join-why-intro-expanded-light.png` });
   console.log("[verify] shot: join-why-intro-expanded-light.png");
-  const whyIntroText = await nina.locator("details").innerText();
+  const whyIntroText = await nina.locator("details[open]").innerText();
   console.log("[verify] why-intro body:", JSON.stringify(whyIntroText));
 
   // ---- seed N more attendees (manual approval, no intro recording) ----
@@ -100,23 +109,37 @@ async function main() {
     const page = await ctx.newPage();
     await page.goto(`/#/e/${naddr}/join`);
     const nf = page.getByLabel(/display name/i);
-    await nf.waitFor({ timeout: 15000 });
+    await waitForWithReload(page, nf, 15000);
     await nf.fill(`Attendee ${i}`);
     await page.getByRole("button", { name: /create identity.*join/i }).click();
     await page.getByText(/request sent/i).waitFor({ timeout: 20000 });
     await ctx.close();
   }
 
-  // Organizer approves everyone (loop "Approve" until none left).
+  // Organizer approves everyone (loop "Approve" until none left, reloading
+  // periodically so late-arriving join requests get picked up too).
   await olga.goto(`/#/e/${naddr}/admin`);
-  await olga.waitForTimeout(1000);
+  await waitForWithReload(olga, olga.getByRole("button", { name: /^approve$/i }).first(), 15000, 4);
   let approvedCount = 0;
-  for (let i = 0; i < ATTENDEE_COUNT + 2; i++) {
+  let emptyStreak = 0;
+  for (let i = 0; i < ATTENDEE_COUNT * 3 && emptyStreak < 3; i++) {
     const btn = olga.getByRole("button", { name: /^approve$/i }).first();
-    if (!(await btn.count())) break;
-    await btn.click();
-    await olga.waitForTimeout(400);
-    approvedCount++;
+    if (await btn.count()) {
+      try {
+        await btn.click({ timeout: 5000 });
+        approvedCount++;
+        emptyStreak = 0;
+      } catch {
+        // The pending-request list re-rendered mid-click (a new request
+        // arrived, or the button re-enabled after its own approve call) —
+        // not a failure, just retry against whatever's there next iteration.
+      }
+      await olga.waitForTimeout(600);
+    } else {
+      emptyStreak++;
+      await olga.reload();
+      await olga.waitForTimeout(1500);
+    }
   }
   console.log(`[verify] approved ${approvedCount} more attendees`);
   await olga.waitForTimeout(2000);

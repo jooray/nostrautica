@@ -46,7 +46,13 @@ export function getNdk(): NDK {
     explicitRelayUrls: unionRelays(DEFAULT_RELAYS, DEFAULT_READ_RELAYS),
     cacheAdapter:
       typeof indexedDB !== "undefined"
-        ? new NDKCacheAdapterDexie({ dbName: "nostrautica-cache" })
+        ? // saveSig: true — cache-dexie strips `sig` by default (saves a little
+          // storage). Without it, `onlyVerified()`'s authority-boundary
+          // re-verification (audit APPK-1) rejects EVERY cache-served event —
+          // sig-less can never pass verifyEvent() — breaking the app's own
+          // cache-first architecture (a config/roster read that hits the local
+          // cache instead of a fresh relay reply throws "not found").
+          new NDKCacheAdapterDexie({ dbName: "nostrautica-cache", saveSig: true })
         : undefined,
     autoConnectUserRelays: false,
     // Audit APPK-1: NDK's default signature-validation ratio decays toward 0.1
