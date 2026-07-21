@@ -11,13 +11,15 @@
     uploadMedia,
     submitProfileAndMedia,
     loadSelfCopy,
-    loadLibrary,
+    loadLibraryFull,
     cachedLibrary,
+    cachedTextLibrary,
     cachedSelfCopy,
     prepareReuse,
   } from "$lib/media/submit.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -56,7 +58,12 @@
   let recorded = $state<{ blob: Blob; url: string; durationSec: number } | null>(null);
   let busy = $state(false);
   let done = $state(false);
+  // Cross-event reuse library (spec §6.2): recorded intros + authored text intros
+  // the user made at ANY previous event, offered here so they needn't redo one.
   let library = $state<MediaDescriptor[]>(cachedLibrary() ?? []);
+  let textLibrary = $state<string[]>(cachedTextLibrary() ?? []);
+  // Only intros are reusable AS an intro (a stored talk clip isn't an intro).
+  const introLibrary = $derived(library.filter((m) => m.kind === "intro"));
   let textIntro = $state(
     cachedCtx ? (cachedSelfCopy(cachedCtx.coordinate)?.introText ?? "") : "",
   );
@@ -76,7 +83,7 @@
   const unlimited = $derived(maxSec === UNLIMITED_SEC);
   const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
 
-  if (cachedCtx && (library.length || textIntro)) perfMark("Record", "cache-paint");
+  if (cachedCtx && (library.length || textLibrary.length || textIntro)) perfMark("Record", "cache-paint");
 
   onMount(async () => {
     try {
@@ -97,7 +104,9 @@
       }
       if (session.signer) {
         const bk = await deriveBlindingKey(session.signer);
-        library = await loadLibrary(session.signer, bk);
+        const lib = await loadLibraryFull(session.signer, bk);
+        library = lib.media;
+        textLibrary = lib.texts;
         const self = await loadSelfCopy(session.signer, ctx, bk);
         if (self?.introText) textIntro = self.introText;
       }
@@ -293,6 +302,17 @@
     }
   }
 
+  /**
+   * Reuse a previous TEXT intro. There's no blob to re-key (the "fresh copy"
+   * distinction is media-only), so we load the chosen text into the composer and
+   * switch to text mode: the user can submit it as-is or tweak it first, then the
+   * normal text-submit path runs.
+   */
+  function useTextFromLibrary(text: string) {
+    textIntro = text;
+    switchMode("text");
+  }
+
   async function reuse(descriptor: MediaDescriptor, fresh: boolean) {
     if (!ctx || !session.signer) return;
     busy = true;
@@ -423,19 +443,37 @@
     </label>
   </div>
 
-  {#if !talk && mode !== "text" && library.length > 0 && !recorded}
+  <!-- Cross-event reuse gallery (F1 reuse): every intro the user recorded or wrote
+       for ANY previous event, with an inline preview so they can tell them apart.
+       Independent of the current mode tab — reuse bypasses the live composer. -->
+  {#if !talk && !recorded && (introLibrary.length > 0 || textLibrary.length > 0)}
     <div class="card">
       <h2>{t("record.reuse.title")}</h2>
       <p class="muted">{t("record.reuse.body")}</p>
-      {#each library as m (m.x)}
-        <div class="row" style="justify-content:space-between;margin-top:0.5rem">
-          <span class="badge">{m.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")} · {m.duration ?? "?"}s</span>
-          <div class="row">
-            <button class="btn inline" onclick={() => reuse(m, false)} disabled={!canSubmit}>{t("record.reuse.reuse")}</button>
-            <button class="btn inline" onclick={() => reuse(m, true)} disabled={!canSubmit}>{t("record.reuse.fresh")}</button>
+      <div class="gallery">
+        {#each introLibrary as m (m.x)}
+          <div class="reuse-item">
+            <span class="badge">
+              {m.m.startsWith("audio/") ? t("record.reuse.audioLabel") : t("record.reuse.videoLabel")}{#if m.duration} · {m.duration}s{/if}
+            </span>
+            <!-- On-demand: MediaPlayer decrypts + plays only when clicked. -->
+            <MediaPlayer descriptor={m} />
+            <div class="row" style="flex-wrap:wrap">
+              <button class="btn inline" onclick={() => reuse(m, false)} disabled={!canSubmit}>{t("record.reuse.reuse")}</button>
+              <button class="btn inline" onclick={() => reuse(m, true)} disabled={!canSubmit}>{t("record.reuse.fresh")}</button>
+            </div>
           </div>
-        </div>
-      {/each}
+        {/each}
+        {#each textLibrary as txt, i (i)}
+          <div class="reuse-item">
+            <span class="badge">{t("record.reuse.textLabel")}</span>
+            <p class="excerpt">{txt}</p>
+            <div class="row">
+              <button class="btn inline" onclick={() => useTextFromLibrary(txt)}>{t("record.reuse.useText")}</button>
+            </div>
+          </div>
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -546,5 +584,35 @@
     height: 100%;
     background: var(--accent);
     transition: width 80ms linear;
+  }
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .reuse-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+    border-radius: 12px;
+    background: var(--bg-elev2);
+  }
+  .reuse-item .badge {
+    align-self: flex-start;
+  }
+  .excerpt {
+    margin: 0;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    /* Show enough of the text to recognize it without letting a long intro
+       dominate the gallery card. */
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 </style>

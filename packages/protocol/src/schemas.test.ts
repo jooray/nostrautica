@@ -39,6 +39,8 @@ import {
   MAX_ROSTER,
   MAX_RELAYS,
   MAX_MEDIA,
+  MAX_LIBRARY_TEXTS,
+  MAX_INTRO_TEXT,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -124,6 +126,13 @@ describe("every §7 payload round-trips through JSON", () => {
       media: [descriptor],
     });
     roundTrips(myProfileContentSchema, { v: 1, a: null, media: [descriptor] });
+    // Library variant carrying cross-event reusable TEXT intros (F1 reuse).
+    roundTrips(myProfileContentSchema, {
+      v: 1,
+      a: null,
+      media: [],
+      intro_texts: ["Hi, I build Nostr tools.", "Second intro"],
+    });
   });
 
   it("31603 directory entry", () =>
@@ -693,6 +702,23 @@ describe("boundary length caps (PROTO-4)", () => {
       profileSubmissionContentSchema.parse({ v: 1, profile: emptyProfile, media: tooMany }),
     ).toThrow();
     expect(() => myProfileContentSchema.parse({ v: 1, a: null, media: tooMany })).toThrow();
+    // The reuse text library is likewise bounded (count + per-item length).
+    expect(() =>
+      myProfileContentSchema.parse({
+        v: 1,
+        a: null,
+        media: [],
+        intro_texts: Array(MAX_LIBRARY_TEXTS + 1).fill("x"),
+      }),
+    ).toThrow();
+    expect(() =>
+      myProfileContentSchema.parse({
+        v: 1,
+        a: null,
+        media: [],
+        intro_texts: ["x".repeat(MAX_INTRO_TEXT + 1)],
+      }),
+    ).toThrow();
     expect(() =>
       directoryEntryContentSchema.parse({
         v: 1,

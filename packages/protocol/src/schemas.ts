@@ -95,6 +95,11 @@ export type MediaTranscript = z.infer<typeof mediaTranscriptSchema>;
 /** Upper bound on a text intro / authored transcript (spec F1, ~2000 chars). */
 export const MAX_INTRO_TEXT = 2000;
 
+/** How many authored text intros the cross-event reuse library retains (F1 reuse).
+ *  Bounded (like MAX_MEDIA) so the self-encrypted library entry can't grow past the
+ *  NIP-44 ceiling; the loader keeps the most recent ones and drops older overflow. */
+export const MAX_LIBRARY_TEXTS = 20;
+
 // ── Boundary length caps (audit PROTO-4) ─────────────────────────────────────
 // These payloads are parsed straight off relays and most ride inside NIP-44
 // ciphertexts, so unbounded strings/arrays are a DoS vector and can push the
@@ -332,11 +337,17 @@ export const organizerGrantContentSchema = z.object({
 export type OrganizerGrantContent = z.infer<typeof organizerGrantContentSchema>;
 
 // ── 31602 My Event Profile / intro library (self-encrypted) ──────────────────
+// The `a:null` reuse-library entry is a SINGLE per-user store (its `d` is blinded
+// over the literal "library", NOT over an event coordinate), so it spans every
+// event the user joins. `intro_texts` carries authored TEXT intros for cross-event
+// reuse — the text counterpart of the reusable `media` descriptors. It lives only
+// on the `a:null` entry; per-event self-copies (a = coordinate) leave it unset.
 export const myProfileContentSchema = z.object({
   v: version,
   a: z.string().nullable(), // null = the reuse-library entry
   profile: attendeeProfileSchema.optional(),
   media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
+  intro_texts: z.array(z.string().max(MAX_INTRO_TEXT)).max(MAX_LIBRARY_TEXTS).optional(),
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 

@@ -119,6 +119,9 @@ export const messages = {
     "create.step.coordinator": "Optional: attach an AI coordinator",
     "create.step.coordinator.body":
       "Enables matchmaking and instant invite-link approval — done from the admin screen, or skip it and approve people yourself.",
+    "create.step.coordinator.attached": "AI coordinator attached ✓",
+    "create.step.coordinator.attached.body":
+      "It starts building matches and processing intros within a few minutes. You can change or remove it later from the admin screen.",
     "create.step.approve": "Approve people as they ask to join",
     "create.step.approve.body":
       "Requests appear on the admin screen (invite links can skip this).",
@@ -170,6 +173,14 @@ export const messages = {
     "create.talks.prerecordFirst":
       "Prerecord-first — same, but Talks is the featured tab: the format is watch ahead, meet at the venue",
     "create.field.maxTalk": "Max talk length (minutes)",
+    "create.coordinator.title": "AI coordinator",
+    "create.coordinator.optional": "(optional)",
+    "create.coordinator.body":
+      "Attach one now to enable matchmaking, talks, and instant invite-link approval from the moment your event goes live. You can also skip this and attach one later from the admin screen.",
+    "create.coordinator.selected": "Selected ✓",
+    "create.coordinator.clear": "Clear",
+    "create.coordinator.use": "Use this coordinator",
+    "create.coordinator.invalidKey": "That's not a valid coordinator npub or hex key.",
     "create.rotationNote":
       "Note: key rotation is forward-only — anyone who ever held a decryption key can decrypt content published while it was current, forever (spec §4.2).",
     "create.creating": "Creating…",
@@ -370,11 +381,15 @@ export const messages = {
     "record.kind.talk": "talk",
     "record.backToEvent": "Back to event",
     "record.loginFirst": "Log in first",
-    "record.reuse.title": "Reuse a previous video",
+    "record.reuse.title": "Reuse a previous intro",
     "record.reuse.body":
-      "No re-upload needed — or make a fresh copy that isn't linkable across events.",
+      "Pick an intro you recorded or wrote at another event — reuse it as-is, or make a fresh copy that isn't linkable across events.",
     "record.reuse.reuse": "Reuse",
     "record.reuse.fresh": "Fresh copy",
+    "record.reuse.videoLabel": "Video",
+    "record.reuse.audioLabel": "Audio",
+    "record.reuse.textLabel": "Text",
+    "record.reuse.useText": "Use this text",
     "record.recorded": "{sec}s recorded.",
     "record.reRecord": "Re-record",
     "record.uploading": "Uploading…",
@@ -602,6 +617,14 @@ export const messages = {
     "admin.section.people": "People",
     "admin.section.setup": "Event setup",
     "admin.section.health": "Health",
+    "admin.tab.manage": "Administration",
+    "admin.tab.settings": "Settings",
+    "admin.settings.title": "Event settings",
+    "admin.settings.loading": "Loading…",
+    "admin.coordinator.attachHint":
+      "No coordinator attached. Attach one in Event settings to enable matching, talks, and group chat.",
+    "admin.coordinator.attachedManage":
+      "Attaching or swapping the coordinator is done here; running-event actions like recompute and billing live on the Administration tab.",
     "admin.checkingStatus": "Checking status",
     "admin.posts.title": "Event posts",
     "admin.posts.body":
@@ -864,6 +887,7 @@ export const messages = {
     "admin.talks.mod.reject": "Reject",
     "admin.talks.mod.revision": "rev {n}",
     "title.admin": "Manage event",
+    "title.eventSettings": "Event settings",
     "title.posts": "Updates",
     "title.post": "Update",
     "title.eventMore": "More",
@@ -1050,6 +1074,9 @@ export const messages = {
     "create.step.coordinator": "Voliteľné: pripojte AI koordinátora",
     "create.step.coordinator.body":
       "Umožní párovanie a okamžité schvaľovanie cez pozývacie odkazy — nastavíte to v administrácii, alebo to preskočte a schvaľujte ľudí sami.",
+    "create.step.coordinator.attached": "AI koordinátor pripojený ✓",
+    "create.step.coordinator.attached.body":
+      "Do niekoľkých minút začne vytvárať spojenia a spracúvať predstavenia. Neskôr ho môžete zmeniť alebo odstrániť v administrácii.",
     "create.step.approve": "Schvaľujte ľudí, keď žiadajú o pripojenie",
     "create.step.approve.body":
       "Žiadosti sa zobrazia v administrácii (pozývacie odkazy to môžu preskočiť).",
@@ -1101,6 +1128,14 @@ export const messages = {
     "create.field.enrollSelf": "Pridať sa medzi účastníkov",
     "create.enrollSelf.body":
       "Zobrazíte sa v zozname ľudí ako každý iný účastník, takže prvý prihlásený nebude sám. Vaše meno a bio z profilu vidia iba schválení účastníci.",
+    "create.coordinator.title": "AI koordinátor",
+    "create.coordinator.optional": "(voliteľné)",
+    "create.coordinator.body":
+      "Pripojte ho hneď a od spustenia podujatia získate párovanie, prednášky a okamžité schvaľovanie cez pozývacie odkazy. Môžete to aj preskočiť a koordinátora pripojiť neskôr v administrácii.",
+    "create.coordinator.selected": "Vybraté ✓",
+    "create.coordinator.clear": "Zrušiť",
+    "create.coordinator.use": "Použiť tohto koordinátora",
+    "create.coordinator.invalidKey": "Toto nie je platný npub ani hex kľúč koordinátora.",
     "create.rotationNote":
       "Poznámka: rotácia kľúčov je len dopredná — ktokoľvek, kto niekedy držal dešifrovací kľúč, dokáže navždy dešifrovať obsah zverejnený počas jeho platnosti (špec. §4.2).",
     "create.creating": "Vytvára sa…",
@@ -1304,11 +1339,15 @@ export const messages = {
     "record.kind.talk": "prednáška",
     "record.backToEvent": "Späť na podujatie",
     "record.loginFirst": "Najprv sa prihláste",
-    "record.reuse.title": "Znova použiť predchádzajúce video",
+    "record.reuse.title": "Znova použiť predchádzajúce predstavenie",
     "record.reuse.body":
-      "Netreba nahrávať znova — alebo si spravte čerstvú kópiu, ktorá nie je prepojiteľná medzi podujatiami.",
+      "Vyberte si predstavenie, ktoré ste nahrali alebo napísali na inom podujatí — použite ho tak, ako je, alebo si spravte čerstvú kópiu, ktorá nie je prepojiteľná medzi podujatiami.",
     "record.reuse.reuse": "Použiť znova",
     "record.reuse.fresh": "Čerstvá kópia",
+    "record.reuse.videoLabel": "Video",
+    "record.reuse.audioLabel": "Zvuk",
+    "record.reuse.textLabel": "Text",
+    "record.reuse.useText": "Použiť tento text",
     "record.recorded": "Nahrané {sec}s.",
     "record.reRecord": "Nahrať znova",
     "record.uploading": "Nahráva sa…",
@@ -1540,6 +1579,14 @@ export const messages = {
     "admin.section.people": "Ľudia",
     "admin.section.setup": "Nastavenie podujatia",
     "admin.section.health": "Stav",
+    "admin.tab.manage": "Administrácia",
+    "admin.tab.settings": "Nastavenia",
+    "admin.settings.title": "Nastavenia podujatia",
+    "admin.settings.loading": "Načítava sa…",
+    "admin.coordinator.attachHint":
+      "Nie je pripojený žiadny koordinátor. Pripojte ho v Nastaveniach podujatia, aby ste povolili spájanie, prednášky a skupinový chat.",
+    "admin.coordinator.attachedManage":
+      "Pripojenie alebo výmena koordinátora sa robí tu; akcie počas podujatia ako prepočet a platby nájdete na karte Administrácia.",
     "admin.checkingStatus": "Overuje sa stav",
     "admin.posts.title": "Príspevky podujatia",
     "admin.posts.body":
@@ -1801,6 +1848,7 @@ export const messages = {
     "admin.talks.mod.reject": "Zamietnuť",
     "admin.talks.mod.revision": "rev {n}",
     "title.admin": "Správa podujatia",
+    "title.eventSettings": "Nastavenia podujatia",
     "title.posts": "Novinky",
     "title.post": "Novinka",
     "title.eventMore": "Viac",
@@ -1988,6 +2036,9 @@ export const messages = {
     "create.step.coordinator": "Volitelné: připojte AI koordinátora",
     "create.step.coordinator.body":
       "Umožní párování a okamžité schvalování přes pozvánkové odkazy — nastavíte to v administraci, nebo to přeskočte a schvalujte lidi sami.",
+    "create.step.coordinator.attached": "AI koordinátor připojen ✓",
+    "create.step.coordinator.attached.body":
+      "Během několika minut začne vytvářet spojení a zpracovávat představení. Později ho můžete změnit nebo odebrat v administraci.",
     "create.step.approve": "Schvalujte lidi, jakmile žádají o připojení",
     "create.step.approve.body":
       "Žádosti se zobrazí v administraci (pozvánkové odkazy to mohou přeskočit).",
@@ -2039,6 +2090,14 @@ export const messages = {
     "create.talks.prerecordFirst":
       "Nejprve nahrávka — stejné, ale Přednášky jsou hlavní záložka: formát je „podívejte se předem, setkejte se na místě“",
     "create.field.maxTalk": "Max. délka přednášky (minuty)",
+    "create.coordinator.title": "AI koordinátor",
+    "create.coordinator.optional": "(volitelné)",
+    "create.coordinator.body":
+      "Připojte ho hned a od spuštění akce získáte párování, přednášky a okamžité schvalování přes pozvánkové odkazy. Můžete to i přeskočit a koordinátora připojit později v administraci.",
+    "create.coordinator.selected": "Vybráno ✓",
+    "create.coordinator.clear": "Zrušit",
+    "create.coordinator.use": "Použít tohoto koordinátora",
+    "create.coordinator.invalidKey": "Toto není platný npub ani hex klíč koordinátora.",
     "create.rotationNote":
       "Poznámka: rotace klíčů funguje jen dopředně — kdokoli, kdo někdy držel dešifrovací klíč, dokáže navždy dešifrovat obsah zveřejněný v době jeho platnosti (spec. §4.2).",
     "create.creating": "Vytváření…",
@@ -2241,11 +2300,15 @@ export const messages = {
     "record.kind.talk": "přednáška",
     "record.backToEvent": "Zpět na akci",
     "record.loginFirst": "Nejprve se přihlaste",
-    "record.reuse.title": "Znovu použít předchozí video",
+    "record.reuse.title": "Znovu použít předchozí představení",
     "record.reuse.body":
-      "Není třeba znovu nahrávat — nebo si vytvořte čerstvou kopii, která není propojitelná mezi akcemi.",
+      "Vyberte si představení, které jste nahráli nebo napsali na jiné akci — použijte ho tak, jak je, nebo si vytvořte čerstvou kopii, která není propojitelná mezi akcemi.",
     "record.reuse.reuse": "Použít znovu",
     "record.reuse.fresh": "Čerstvá kopie",
+    "record.reuse.videoLabel": "Video",
+    "record.reuse.audioLabel": "Zvuk",
+    "record.reuse.textLabel": "Text",
+    "record.reuse.useText": "Použít tento text",
     "record.recorded": "Nahráno {sec}s.",
     "record.reRecord": "Nahrát znovu",
     "record.uploading": "Nahrávání…",
@@ -2476,6 +2539,14 @@ export const messages = {
     "admin.section.people": "Lidé",
     "admin.section.setup": "Nastavení akce",
     "admin.section.health": "Stav",
+    "admin.tab.manage": "Administrace",
+    "admin.tab.settings": "Nastavení",
+    "admin.settings.title": "Nastavení akce",
+    "admin.settings.loading": "Načítání…",
+    "admin.coordinator.attachHint":
+      "Není připojen žádný koordinátor. Připojte ho v Nastavení akce, abyste povolili párování, přednášky a skupinový chat.",
+    "admin.coordinator.attachedManage":
+      "Připojení nebo výměna koordinátora se provádí zde; akce během akce jako přepočet a platby najdete na kartě Administrace.",
     "admin.checkingStatus": "Kontrola stavu",
     "admin.posts.title": "Příspěvky akce",
     "admin.posts.body":
@@ -2740,6 +2811,7 @@ export const messages = {
     "admin.talks.mod.reject": "Zamítnout",
     "admin.talks.mod.revision": "rev {n}",
     "title.admin": "Správa akce",
+    "title.eventSettings": "Nastavení akce",
     "title.posts": "Novinky",
     "title.post": "Novinka",
     "title.eventMore": "Více",
