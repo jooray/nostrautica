@@ -32,6 +32,37 @@ export interface Filter {
 let ndk: NDK | null = null;
 
 /**
+ * Dexie cache DB name. BUMP THIS whenever a change makes already-persisted
+ * entries unusable — cache-dexie can neither delete nor refresh a bad row
+ * (see the comment in getNdk), so a rename is the only reliable reset.
+ *
+ * v2 (2026-07-21): entries written before `saveSig: true` carry no signature
+ * and fail the APPK-1 re-verification on every read, permanently wedging any
+ * browser that used the app before that fix.
+ */
+const CACHE_DB_NAME = "nostrautica-cache-v2";
+
+/** DB names retired by a CACHE_DB_NAME bump — dropped once, on startup. */
+const LEGACY_CACHE_DB_NAMES = ["nostrautica-cache"];
+
+/**
+ * Delete retired cache DBs so a rename doesn't leave the old (often multi-MB)
+ * IndexedDB database behind forever. Best-effort and non-blocking: a blocked
+ * delete (another tab still holds the DB open) just retries on the next load,
+ * and any failure is irrelevant — the app never reads these again.
+ */
+export function dropLegacyCacheDb(): void {
+  if (typeof indexedDB === "undefined") return;
+  for (const name of LEGACY_CACHE_DB_NAMES) {
+    try {
+      indexedDB.deleteDatabase(name);
+    } catch {
+      /* storage denied / private mode — harmless, it's already unreachable */
+    }
+  }
+}
+
+/**
  * Seconds a `created_at` may run ahead of our clock before NDK drops the event
  * (audit APPK-1). Ordering-sensitive picks (latest 31600/31923/roster) are
  * latest-by-created_at, so a forged far-future timestamp would win every
@@ -42,6 +73,7 @@ const FUTURE_TIMESTAMP_GRACE_SEC = 900;
 /** Get (lazily creating) the NDK singleton. Safe to call before connect(). */
 export function getNdk(): NDK {
   if (ndk) return ndk;
+  dropLegacyCacheDb();
   ndk = new NDK({
     explicitRelayUrls: unionRelays(DEFAULT_RELAYS, DEFAULT_READ_RELAYS),
     cacheAdapter:
@@ -51,12 +83,29 @@ export function getNdk(): NDK {
           // re-verification (audit APPK-1) rejects EVERY cache-served event —
           // sig-less can never pass verifyEvent() — breaking the app's own
           // cache-first architecture (a config/roster read that hits the local
-          // cache instead of a fresh relay reply throws "not found"). Existing
-          // sig-less entries from before this was set don't need a migration —
-          // stream.ts's central verify-on-arrival purges any event that fails
-          // verification (cache or relay, this field or a forged one) the
-          // first time it's touched, so a stale cache self-heals in place.
-          new NDKCacheAdapterDexie({ dbName: "nostrautica-cache", saveSig: true })
+          // cache instead of a fresh relay reply throws "not found").
+          //
+          // The DB name is versioned because entries written before saveSig was
+          // set are UNFIXABLE IN PLACE, for two independent reasons found while
+          // debugging the 2026-07-21 incident (both verified against
+          // cache-dexie 2.7.8's source and a live production cache dump):
+          //
+          //  1. Nothing can delete them. deleteEventIds() runs
+          //     `db.events.where({ id: eventIds }).delete()` — but Dexie's
+          //     object form of where() is an EQUALITY match, comparing the `id`
+          //     column against the whole array as a single key. It never
+          //     matches a string id, so the row survives in IndexedDB and is
+          //     reloaded into the in-memory cache on the next page load.
+          //  2. Nothing overwrites them either. When a relay delivers the real,
+          //     validly-signed copy of an event NDK already served from cache,
+          //     NDK treats it as a duplicate and calls setEventDup() (relay
+          //     provenance only) instead of setEvent(), so the sig-less row is
+          //     never rewritten.
+          //
+          // Hence the rename: start clean rather than fight a cache that can be
+          // neither purged nor refreshed. The old DB is dropped on startup
+          // (see dropLegacyCacheDb) so it doesn't linger as dead storage.
+          new NDKCacheAdapterDexie({ dbName: CACHE_DB_NAME, saveSig: true })
         : undefined,
     autoConnectUserRelays: false,
     // Audit APPK-1: NDK's default signature-validation ratio decays toward 0.1

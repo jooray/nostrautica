@@ -164,10 +164,13 @@ describe("fetchEvents / fetchEventsRelayOnly (UX-1: time-bounded)", () => {
 describe("getNdk cache adapter config (audit APPK-1 regression)", () => {
   const originalIndexedDB = (globalThis as { indexedDB?: unknown }).indexedDB;
 
+  const deleteDatabase = vi.fn();
+
   beforeEach(() => {
     __setNdkForTests(null);
     DexieMock.mockClear();
-    (globalThis as { indexedDB?: unknown }).indexedDB = {};
+    deleteDatabase.mockClear();
+    (globalThis as { indexedDB?: unknown }).indexedDB = { deleteDatabase };
   });
   afterEach(() => {
     __setNdkForTests(null);
@@ -178,5 +181,23 @@ describe("getNdk cache adapter config (audit APPK-1 regression)", () => {
     getNdk();
     expect(DexieMock).toHaveBeenCalledTimes(1);
     expect(DexieMock.mock.calls[0]![0]).toMatchObject({ saveSig: true });
+  });
+
+  // Incident 2026-07-21: pre-saveSig rows are unfixable in place — cache-dexie's
+  // deleteEventIds can't remove them (Dexie's where({id: array}) is an equality
+  // match against the whole array, never a string id) and NDK's setEventDup
+  // means a relay's real copy never overwrites them. The versioned DB name is
+  // the actual fix; pointing it back at the old name would silently re-wedge
+  // every browser that ever loaded the app before saveSig shipped.
+  it("uses a cache DB name that is NOT the poisoned pre-saveSig one", () => {
+    getNdk();
+    const dbName = (DexieMock.mock.calls[0]![0] as { dbName: string }).dbName;
+    expect(dbName).not.toBe("nostrautica-cache");
+    expect(dbName).toMatch(/^nostrautica-cache-v\d+$/);
+  });
+
+  it("drops the retired cache DB on startup so the rename doesn't strand dead storage", () => {
+    getNdk();
+    expect(deleteDatabase).toHaveBeenCalledWith("nostrautica-cache");
   });
 });
