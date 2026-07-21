@@ -29,6 +29,7 @@ class FakeSub {
 
 let currentSub: FakeSub;
 let connectedUrls: string[] = [];
+const deleteEventIds = vi.fn(async (_ids: string[]) => {});
 vi.mock("./ndk.js", () => ({
   getNdk: () => ({
     subscribe: () => {
@@ -36,9 +37,19 @@ vi.mock("./ndk.js", () => ({
       return currentSub;
     },
     pool: { connectedRelays: () => connectedUrls.map((url) => ({ url })) },
+    cacheAdapter: { deleteEventIds },
   }),
   relaySet: () => undefined,
 }));
+
+// Real signature verification is `./verify.js`'s own concern (crypto correctness,
+// not this collector's job) — default every fake event to "verified" so the
+// existing tests below (which never construct real signed events) are
+// unaffected, and flip it per-test to exercise the purge-on-arrival path.
+const { isVerifiedMock } = vi.hoisted(() => ({
+  isVerifiedMock: vi.fn((..._args: unknown[]) => true),
+}));
+vi.mock("./verify.js", () => ({ isVerified: isVerifiedMock }));
 
 import { streamEvents } from "./stream.js";
 
@@ -57,6 +68,8 @@ function fakeEvent(raw: Partial<{ id: string; kind: number; pubkey: string; crea
 beforeEach(() => {
   vi.useFakeTimers();
   connectedUrls = [];
+  isVerifiedMock.mockReset().mockReturnValue(true);
+  deleteEventIds.mockClear();
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -164,5 +177,41 @@ describe("streamEvents", () => {
     currentSub.emit("event", fakeEvent({ id: "partial" }));
     await vi.advanceTimersByTimeAsync(8000);
     await expect(h.ready).resolves.toHaveLength(1);
+  });
+
+  // Audit APPK-1 + incident 2026-07-21: cache-dexie shipped without `saveSig`
+  // for a window, so browsers that used the app then have cached events with
+  // no signature — onlyVerified() rejects those forever unless something
+  // purges them. streamEvents is the one place every fetch (cache-first AND
+  // relay) funnels through, so the purge belongs here, not scattered across
+  // every call site.
+  describe("purges an event that fails signature verification (audit APPK-1 self-heal)", () => {
+    it("drops it from the result and deletes it from the cache", async () => {
+      const h = streamEvents({ kinds: [1] });
+      isVerifiedMock.mockImplementation((e: unknown) => (e as { id: string }).id !== "bad");
+      currentSub.emit("event", fakeEvent({ id: "bad" }));
+      currentSub.emit("event", fakeEvent({ id: "good" }));
+      currentSub.emit("eose");
+      await vi.advanceTimersByTimeAsync(400);
+      const events = await h.ready;
+      expect(events.map((e: any) => e.id)).toEqual(["good"]);
+      expect(deleteEventIds).toHaveBeenCalledWith(["bad"]);
+    });
+
+    it("a relay delivering the same id again with a real signature afterwards is accepted normally", async () => {
+      // Simulates the self-heal: a stale sig-less cache hit arrives first and
+      // is purged, then the live relay subscription delivers the SAME event id
+      // moments later — now with a signature — through the same callback.
+      const h = streamEvents({ kinds: [1] }, { onEvent: () => {} });
+      isVerifiedMock.mockReturnValueOnce(false).mockReturnValue(true);
+      currentSub.emit("event", fakeEvent({ id: "e1" })); // stale cache hit — purged
+      currentSub.emit("event", fakeEvent({ id: "e1" })); // relay's real copy — accepted
+      currentSub.emit("eose");
+      await vi.advanceTimersByTimeAsync(400);
+      const events = await h.ready;
+      expect(events.map((e: any) => e.id)).toEqual(["e1"]);
+      expect(deleteEventIds).toHaveBeenCalledTimes(1);
+      h.stop();
+    });
   });
 });

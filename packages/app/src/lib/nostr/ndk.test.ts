@@ -20,6 +20,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 const { DexieMock } = vi.hoisted(() => ({ DexieMock: vi.fn().mockImplementation(() => ({})) }));
 vi.mock("@nostr-dev-kit/cache-dexie", () => ({ default: DexieMock }));
 
+// streamEvents (audit APPK-1 self-heal, see stream.test.ts) now verifies every
+// event's real signature before accepting it — this file's fake events don't
+// carry one, so default verification to "pass" here; it's not what these
+// UX-1 timing tests are about.
+const { isVerifiedMock } = vi.hoisted(() => ({ isVerifiedMock: vi.fn((..._args: unknown[]) => true) }));
+vi.mock("./verify.js", () => ({ isVerified: isVerifiedMock }));
+
 import { isAcceptedRelayUrl, fetchEvents, fetchEventsRelayOnly, getNdk, __setNdkForTests } from "./ndk.js";
 import type NDK from "@nostr-dev-kit/ndk";
 

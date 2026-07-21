@@ -51,7 +51,11 @@ export function getNdk(): NDK {
           // re-verification (audit APPK-1) rejects EVERY cache-served event —
           // sig-less can never pass verifyEvent() — breaking the app's own
           // cache-first architecture (a config/roster read that hits the local
-          // cache instead of a fresh relay reply throws "not found").
+          // cache instead of a fresh relay reply throws "not found"). Existing
+          // sig-less entries from before this was set don't need a migration —
+          // stream.ts's central verify-on-arrival purges any event that fails
+          // verification (cache or relay, this field or a forged one) the
+          // first time it's touched, so a stale cache self-heals in place.
           new NDKCacheAdapterDexie({ dbName: "nostrautica-cache", saveSig: true })
         : undefined,
     autoConnectUserRelays: false,

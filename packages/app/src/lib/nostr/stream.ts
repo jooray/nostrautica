@@ -17,6 +17,7 @@ import { NDKSubscriptionCacheUsage } from "@nostr-dev-kit/ndk";
 import type { NDKEvent, NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
 import { getNdk, relaySet, type Filter } from "./ndk.js";
 import { EventDeduper, type MinimalEvent } from "./dedupe.js";
+import { isVerified } from "./verify.js";
 
 export interface StreamOptions {
   relays?: string[];
@@ -102,6 +103,20 @@ export function streamEvents(
     sub.on("event", (e: NDKEvent) => {
       if (stopped) return;
       const raw = e.rawEvent() as unknown as MinimalEvent;
+      // Central signature check (audit APPK-1 + incident 2026-07-21): every
+      // fetch in the app funnels through here, cache hit or fresh relay event
+      // alike. An event that doesn't verify — most commonly a stale cache
+      // entry from before cache-dexie was configured to persist `sig`, but
+      // equally a genuinely forged/poisoned one — is purged from the cache and
+      // dropped as if it had never arrived. A live subscription keeps running
+      // past this point, so a relay serving the real, validly-signed event
+      // (which it always will, for a stale-cache miss) still delivers it
+      // through this same callback moments later — no separate migration,
+      // reload, or re-login needed.
+      if (!isVerified(raw as never)) {
+        void getNdk().cacheAdapter?.deleteEventIds?.([raw.id]);
+        return;
+      }
       if (!deduper.accept(raw)) return;
       byId.set(raw.id, e);
       try {
