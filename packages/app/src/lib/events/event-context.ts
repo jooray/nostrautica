@@ -33,6 +33,8 @@ export interface EventContext {
   hashtags: string[];
   /** created_at of the 31600 config event — the latest-wins stamp for the cache. */
   configAt?: number;
+  /** Newest created_at across the public events that make up this context. */
+  contextAt?: number;
 }
 
 function tag(tags: string[][], name: string): string | undefined {
@@ -81,7 +83,7 @@ export async function ensureEventContext(
     ctxKey(naddr),
     () => loadEventContext(naddr),
     (ctx, source) => apply(ctx, source),
-    { scope: ANON, atOf: (c) => c.configAt ?? 0 },
+    { scope: ANON, atOf: (c) => c.contextAt ?? c.configAt ?? 0 },
   );
 }
 
@@ -152,9 +154,19 @@ export async function loadEventContext(
     location: evt ? tag(evt.tags, "location") : undefined,
     hashtags: evt ? evt.tags.filter((t) => t[0] === "t").map((t) => t[1]!) : [],
     configAt: configEvent.created_at,
+    contextAt: Math.max(
+      configEvent.created_at ?? 0,
+      evt?.created_at ?? 0,
+      profileEvent?.created_at ?? 0,
+    ),
   };
   // Write-through to the persistent anon cache (§2.1); latest-wins on the config
   // event's created_at so a background refresh never regresses to an older config.
-  cacheSet(ctxKey(naddr), ctx, ctx.configAt ?? 0, ANON);
+  cacheSet(ctxKey(naddr), ctx, ctx.contextAt ?? ctx.configAt ?? 0, ANON);
   return ctx;
+}
+
+/** Write an organizer-published metadata edit through to the public context cache. */
+export function cacheEventContext(ctx: EventContext, at: number): void {
+  cacheSet(ctxKey(ctx.naddr), { ...ctx, contextAt: at }, at, ANON);
 }

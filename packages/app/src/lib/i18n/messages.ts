@@ -607,6 +607,12 @@ export const messages = {
     "admin.posts.body":
       "Announcements and posts shown on the event page. Markdown works. Public posts are standard Nostr long-form under the event's identity; members-only posts are encrypted to approved attendees.",
     "admin.posts.edit": "Edit",
+    "admin.metadata.title": "Event details",
+    "admin.metadata.body":
+      "Edit the public event information. Existing event and invite links stay the same.",
+    "admin.metadata.saving": "Saving…",
+    "admin.metadata.save": "Save event details",
+    "admin.metadata.saved": "Saved ✓",
     "admin.page.title": "Menu & layout",
     "admin.page.body":
       "Customize the event page: a menu of links (to posts or any URL) and the sections shown below the header. Members-only items are encrypted — visitors don't even see they exist.",
@@ -1539,6 +1545,12 @@ export const messages = {
     "admin.posts.body":
       "Oznámenia a príspevky zobrazené na stránke podujatia. Markdown funguje. Verejné príspevky sú štandardné dlhé Nostr príspevky pod identitou podujatia; príspevky len pre členov sú zašifrované pre schválených účastníkov.",
     "admin.posts.edit": "Upraviť",
+    "admin.metadata.title": "Podrobnosti podujatia",
+    "admin.metadata.body":
+      "Upravte verejné informácie o podujatí. Existujúce odkazy na podujatie a pozvánky zostanú rovnaké.",
+    "admin.metadata.saving": "Ukladá sa…",
+    "admin.metadata.save": "Uložiť podrobnosti podujatia",
+    "admin.metadata.saved": "Uložené ✓",
     "admin.page.title": "Menu a rozloženie",
     "admin.page.body":
       "Prispôsobte stránku podujatia: menu odkazov (na príspevky alebo akúkoľvek URL) a sekcie pod hlavičkou. Položky len pre členov sú zašifrované — návštevníci ani nevidia, že existujú.",
@@ -2469,6 +2481,12 @@ export const messages = {
     "admin.posts.body":
       "Oznámení a příspěvky zobrazené na stránce akce. Markdown funguje. Veřejné příspěvky jsou standardní dlouhé Nostr příspěvky pod identitou akce; příspěvky jen pro členy jsou zašifrovány pro schválené účastníky.",
     "admin.posts.edit": "Upravit",
+    "admin.metadata.title": "Podrobnosti akce",
+    "admin.metadata.body":
+      "Upravte veřejné informace o akci. Stávající odkazy na akci a pozvánky zůstanou stejné.",
+    "admin.metadata.saving": "Ukládání…",
+    "admin.metadata.save": "Uložit podrobnosti akce",
+    "admin.metadata.saved": "Uloženo ✓",
     "admin.page.title": "Menu a rozložení",
     "admin.page.body":
       "Přizpůsobte stránku akce: menu odkazů (na příspěvky nebo jakoukoli URL) a sekce zobrazené pod hlavičkou. Položky jen pro členy jsou zašifrovány — návštěvníci ani nevidí, že existují.",

@@ -1,6 +1,6 @@
 {
   "name": "@nostrautica/app",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "description": "Nostrautica PWA — static SvelteKit client (relays + Blossom only).",
   "license": "MIT",
   "type": "module",

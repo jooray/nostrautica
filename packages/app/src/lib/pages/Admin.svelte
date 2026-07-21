@@ -23,6 +23,7 @@
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses, cachedCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
+  import { updateEventMetadata } from "$lib/events/event-metadata.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import {
@@ -63,6 +64,9 @@
   } from "@nostrautica/protocol";
   import PostEditor from "$lib/components/PostEditor.svelte";
   import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
+  import ImageCropper from "$lib/components/ImageCropper.svelte";
+  import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
+  import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -83,6 +87,115 @@
   let copiedNpub = $state(false);
   let coordLastSeen = $state<number | undefined>(undefined);
   let destroyed = false;
+
+  // Public NIP-52 metadata. Saving republishes the same addressable event, so
+  // the coordinate and every existing invite/share link remain unchanged.
+  let metadataTitle = $state("");
+  let metadataSummary = $state("");
+  let metadataStart = $state("");
+  let metadataEnd = $state("");
+  let metadataLocation = $state("");
+  let metadataIcon = $state("");
+  let metadataBanner = $state("");
+  let metadataSeededFor = $state<string | null>(null);
+  let metadataBusy = $state(false);
+  let metadataSaved = $state(false);
+  let metadataUploading = $state<"icon" | "banner" | null>(null);
+  let metadataCropFile = $state<File | null>(null);
+  let metadataCropWhich = $state<"icon" | "banner">("icon");
+  const metadataPreviewIcon = $derived(
+    metadataIcon.trim() || defaultEventIcon(metadataTitle, metadataTitle),
+  );
+  const metadataPreviewBanner = $derived(
+    metadataBanner.trim() || defaultEventBanner(metadataTitle),
+  );
+  const metadataEndBeforeStart = $derived(
+    !!metadataEnd &&
+      !!metadataStart &&
+      new Date(metadataEnd).getTime() <= new Date(metadataStart).getTime(),
+  );
+
+  function localDateTime(unix?: number): string {
+    if (!unix) return "";
+    const date = new Date(unix * 1000);
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+    return local.toISOString().slice(0, 16);
+  }
+
+  $effect(() => {
+    if (!ctx || metadataSeededFor === ctx.coordinate) return;
+    metadataTitle = ctx.title;
+    metadataSummary = ctx.summary;
+    metadataStart = localDateTime(ctx.start);
+    metadataEnd = localDateTime(ctx.end);
+    metadataLocation = ctx.location ?? "";
+    metadataIcon = ctx.icon ?? "";
+    metadataBanner = ctx.banner ?? "";
+    metadataSeededFor = ctx.coordinate;
+  });
+
+  function pickMetadataImage(e: Event, which: "icon" | "banner") {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    metadataCropWhich = which;
+    metadataCropFile = file;
+  }
+
+  async function uploadMetadataImage(blob: Blob) {
+    if (!ctx || !session.signer) return;
+    const which = metadataCropWhich;
+    metadataCropFile = null;
+    metadataUploading = which;
+    error = null;
+    try {
+      const url = await uploadPublicImage(session.signer, blob, ctx.config.blossom);
+      if (which === "icon") metadataIcon = url;
+      else metadataBanner = url;
+    } catch (e) {
+      error = t("create.error.uploadFailed", {
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      metadataUploading = null;
+    }
+  }
+
+  async function saveMetadata() {
+    if (!ctx || !metadataTitle.trim() || !metadataStart) return;
+    if (metadataEndBeforeStart) {
+      error = t("create.error.endBeforeStart");
+      return;
+    }
+    metadataBusy = true;
+    metadataSaved = false;
+    error = null;
+    try {
+      ctx = await updateEventMetadata(ctx, {
+        title: metadataTitle.trim(),
+        summary: metadataSummary.trim(),
+        start: Math.floor(new Date(metadataStart).getTime() / 1000),
+        end: metadataEnd ? Math.floor(new Date(metadataEnd).getTime() / 1000) : undefined,
+        location: metadataLocation.trim() || undefined,
+        icon: metadataIcon.trim() || undefined,
+        banner: metadataBanner.trim() || undefined,
+      });
+      recentEvents.record({
+        coordinate: ctx.coordinate,
+        naddr: ctx.naddr,
+        title: ctx.title,
+        icon: ctx.icon,
+        role: "organizer",
+      });
+      metadataSaved = true;
+      setTimeout(() => (metadataSaved = false), 1500);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      metadataBusy = false;
+    }
+  }
   // Join-queue auto-refresh (audit UX-9): a request that arrives while Admin is
   // open used to need a manual Refresh. Poll slowly; cleared on destroy.
   let queuePoll: ReturnType<typeof setInterval> | undefined;
@@ -1180,6 +1293,102 @@
 
   <h2 class="section-head">{t("admin.section.setup")}</h2>
 
+  <div class="card stack">
+    <div>
+      <div class="field-label">{t("admin.metadata.title")}</div>
+      <p class="muted" style="margin:0.25rem 0 0">{t("admin.metadata.body")}</p>
+    </div>
+    <div>
+      <label for="metadata-title">{t("create.field.title")}</label>
+      <input id="metadata-title" bind:value={metadataTitle} />
+    </div>
+    <div>
+      <label for="metadata-summary">{t("create.field.summary")}</label>
+      <textarea id="metadata-summary" rows="3" bind:value={metadataSummary}></textarea>
+    </div>
+    <div class="row" style="gap:0.75rem;align-items:flex-start;flex-wrap:wrap">
+      <div style="flex:1;min-width:180px">
+        <label for="metadata-start">{t("create.field.start")}</label>
+        <input id="metadata-start" type="datetime-local" class="datetime-input" bind:value={metadataStart} />
+      </div>
+      <div style="flex:1;min-width:180px">
+        <label for="metadata-end">{t("create.field.end")}</label>
+        <input
+          id="metadata-end"
+          type="datetime-local"
+          class="datetime-input"
+          bind:value={metadataEnd}
+          min={metadataStart}
+          aria-invalid={metadataEndBeforeStart}
+        />
+        {#if metadataEndBeforeStart}
+          <p class="muted" style="margin:0.25rem 0 0;color:var(--danger)">
+            {t("create.error.endBeforeStart")}
+          </p>
+        {/if}
+      </div>
+    </div>
+    <div>
+      <label for="metadata-location">{t("create.field.location")}</label>
+      <input id="metadata-location" bind:value={metadataLocation} />
+    </div>
+    <div>
+      <div class="field-label">
+        {t("create.field.images")}
+        <span class="muted" style="font-weight:400">{t("create.field.images.optional")}</span>
+      </div>
+      <div class="row" style="align-items:flex-start;gap:0.75rem">
+        <div style="flex:none;text-align:center">
+          <img
+            src={metadataPreviewIcon}
+            alt={t("create.iconAlt")}
+            style="width:64px;height:64px;border-radius:14px;object-fit:cover"
+          />
+          <div style="margin-top:0.35rem">
+            <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
+              {metadataUploading === "icon" ? "…" : t("create.icon")}
+              <input type="file" accept="image/*" onchange={(e) => pickMetadataImage(e, "icon")} style="display:none" />
+            </label>
+          </div>
+        </div>
+        <div style="flex:1">
+          <img
+            src={metadataPreviewBanner}
+            alt={t("create.bannerAlt")}
+            style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover"
+          />
+          <div class="row" style="margin-top:0.35rem">
+            <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
+              {metadataUploading === "banner" ? "…" : t("create.banner")}
+              <input type="file" accept="image/*" onchange={(e) => pickMetadataImage(e, "banner")} style="display:none" />
+            </label>
+            {#if metadataIcon || metadataBanner}
+              <button
+                class="btn inline"
+                style="font-size:0.8rem;padding:0.3rem 0.6rem"
+                onclick={() => {
+                  metadataIcon = "";
+                  metadataBanner = "";
+                }}
+              >{t("create.reset")}</button>
+            {/if}
+          </div>
+        </div>
+      </div>
+      <p class="muted">{t("create.images.body")}</p>
+    </div>
+    <div class="row">
+      <button
+        class="btn inline primary"
+        onclick={saveMetadata}
+        disabled={metadataBusy || metadataUploading !== null || !metadataTitle.trim() || !metadataStart || metadataEndBeforeStart}
+      >
+        {metadataBusy ? t("admin.metadata.saving") : t("admin.metadata.save")}
+      </button>
+      {#if metadataSaved}<span class="muted">{t("admin.metadata.saved")}</span>{/if}
+    </div>
+  </div>
+
   <div class="card">
     <div class="field-label">{t("admin.page.title")}</div>
     <p class="muted">{t("admin.page.body")}</p>
@@ -1333,6 +1542,16 @@
       {#if pageSaved}<span class="muted">{t("admin.page.saved")}</span>{/if}
     </div>
   </div>
+
+  {#if metadataCropFile}
+    <ImageCropper
+      file={metadataCropFile}
+      aspect={metadataCropWhich === "icon" ? 1 : 2.5}
+      outWidth={metadataCropWhich === "icon" ? 512 : 1500}
+      onConfirm={uploadMetadataImage}
+      onCancel={() => (metadataCropFile = null)}
+    />
+  {/if}
 
   <div class="card">
     <div class="field-label">{t("admin.theme.title")}</div>
