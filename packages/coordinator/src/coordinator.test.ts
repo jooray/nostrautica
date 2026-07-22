@@ -1491,6 +1491,37 @@ describe("audit P0-3 — duplicate rumors don't execute concurrently", () => {
   });
 });
 
+describe("audit P0-7 — stale scoring output can't undo a revocation", () => {
+  it("a score returned after an attendee is revoked does not recreate their deleted pair", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const designSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designPk = await join(h, designSk, "design");
+    await h.coordinator.jobs.drain();
+    // Both directions were scored during the initial pipeline.
+    const dir = h.store.getPairDirection(h.coordinate, cryptoPk, designPk);
+    expect(dir).toBeDefined();
+    const inputsHash = dir!.inputs_hash;
+
+    // Revoke the cryptographer — this deletes their pairs.
+    await admin(h, "revoke", { pubkey: cryptoPk });
+    await h.coordinator.jobs.drain();
+    expect(h.store.getPairDirection(h.coordinate, cryptoPk, designPk)).toBeUndefined();
+
+    // A score_batch enqueued BEFORE the revoke now runs for the stale pair. The
+    // batch scores fine, but recording must be discarded (the attendee is no
+    // longer approved) rather than recreating the pair revocation just removed.
+    h.coordinator.jobs.enqueue("score_batch", "stale-after-revoke", {
+      coordinate: h.coordinate,
+      pairs: [{ a: cryptoPk, b: designPk, inputsHash }],
+    });
+    await h.coordinator.jobs.drain();
+
+    expect(h.store.getPairDirection(h.coordinate, cryptoPk, designPk)).toBeUndefined(); // pre-fix: recreated
+  });
+});
+
 describe("audit COORD-3 — install authorization + unsolicited-install caps", () => {
   it("rejects an install whose 31600 names a DIFFERENT coordinator", async () => {
     const foreign = getPublicKey(generateSecretKey());

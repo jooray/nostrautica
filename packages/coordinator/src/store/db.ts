@@ -693,10 +693,33 @@ export class Store {
     return row.n;
   }
 
-  setTalkTranscript(coordinate: string, pubkey: string, talkD: string, transcriptJson: string, now: number): void {
-    this.db
-      .prepare("UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
-      .run(transcriptJson, now, coordinate, pubkey, talkD);
+  /**
+   * Attach a transcript to a talk, but only if the row's current media still
+   * matches the media the transcript was produced from (audit P0-7). `expectedX`
+   * is the media sha256 the STT ran against; a newer talk revision that
+   * re-recorded the media changes the row's `media_json.x`, so a slow STT result
+   * for the OLD recording finishing after the new one lands is discarded rather
+   * than attached to the wrong media. Returns true if the transcript was written.
+   */
+  setTalkTranscript(
+    coordinate: string,
+    pubkey: string,
+    talkD: string,
+    transcriptJson: string,
+    now: number,
+    expectedX?: string,
+  ): boolean {
+    const info =
+      expectedX === undefined
+        ? this.db
+            .prepare("UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
+            .run(transcriptJson, now, coordinate, pubkey, talkD)
+        : this.db
+            .prepare(
+              "UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ? AND json_extract(media_json, '$.x') = ?",
+            )
+            .run(transcriptJson, now, coordinate, pubkey, talkD, expectedX);
+    return info.changes > 0;
   }
 
   setTalkStatus(

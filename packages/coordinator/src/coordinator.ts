@@ -1239,7 +1239,22 @@ export class Coordinator {
         source: "stt",
         updated_at: this.now(),
       };
-      this.deps.store.setTalkTranscript(coordinate, pubkey, talkD, JSON.stringify(transcript), this.now());
+      // Compare-and-set on the media x captured before the STT await (audit P0-7):
+      // if a newer talk revision re-recorded the media while STT ran, the row's
+      // current media x no longer matches and this stale transcript is discarded
+      // rather than attached to the wrong (newer) recording.
+      const written = this.deps.store.setTalkTranscript(
+        coordinate,
+        pubkey,
+        talkD,
+        JSON.stringify(transcript),
+        this.now(),
+        media.x,
+      );
+      if (!written) {
+        log(`[talk] discarded stale transcript for ${short(pubkey)} "${talk.title}": media changed since STT started`);
+        return;
+      }
       log(`[talk] transcribed "${talk.title}" for ${short(pubkey)}`);
     }
     // If this talk is already published, refresh its 31610 with the new transcript.
@@ -1438,6 +1453,10 @@ export class Coordinator {
     const scored: CandidatePair[] = [];
     for (const [candId, ds] of scores) {
       const p = pairById.get(candId)!;
+      if (!this.bothApproved(coordinate, p.a, p.b)) {
+        log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: an attendee was revoked during scoring`);
+        continue;
+      }
       recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
       scored.push(p);
       log(
@@ -1494,6 +1513,10 @@ export class Coordinator {
     const scored: CandidatePair[] = [];
     for (const [targetId, ds] of scores) {
       const p = pairByTarget.get(targetId)!;
+      if (!this.bothApproved(coordinate, p.a, p.b)) {
+        log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: an attendee was revoked during scoring`);
+        continue;
+      }
       recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
       scored.push(p);
       log(
@@ -1509,6 +1532,20 @@ export class Coordinator {
   private loadAiProfile(coordinate: string, pubkey: string) {
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     return attendee?.ai_profile_json ? JSON.parse(attendee.ai_profile_json) : undefined;
+  }
+
+  /**
+   * Both endpoints of a pair are still approved (audit P0-7). Scoring captures
+   * candidates, awaits the provider, then writes pairs — if either attendee was
+   * revoked during that call, `revokeAttendee` already deleted their pairs, and
+   * recording the returned score would recreate a pair revocation just removed.
+   * Rechecked immediately before the write so a stale score is discarded instead.
+   */
+  private bothApproved(coordinate: string, a: string, b: string): boolean {
+    return (
+      this.deps.store.getAttendee(coordinate, a)?.status === "approved" &&
+      this.deps.store.getAttendee(coordinate, b)?.status === "approved"
+    );
   }
 
   /** Display name from the join request (B1), for name-aware match reasoning. */

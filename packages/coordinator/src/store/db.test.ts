@@ -246,3 +246,42 @@ describe("TTL pruning (audit COORD-24)", () => {
     store.close();
   });
 });
+
+describe("talk transcript compare-and-set (audit P0-7)", () => {
+  function seedTalk(store: Store, x: string, revision: number, now: number) {
+    store.upsertTalk({
+      coordinate: "c",
+      pubkey: "p",
+      talkD: "d",
+      title: "t",
+      description: "",
+      speakersJson: "[]",
+      mediaJson: JSON.stringify({ x }),
+      lang: "en",
+      revision,
+      mediaX: x,
+      now,
+    });
+  }
+
+  it("discards a stale transcript when the talk's media changed since STT started", () => {
+    const store = new Store();
+    seedTalk(store, "X1", 1, 1);
+    // STT for the current media (X1) writes successfully.
+    expect(
+      store.setTalkTranscript("c", "p", "d", JSON.stringify({ x: "X1", text: "one" }), 2, "X1"),
+    ).toBe(true);
+    expect(JSON.parse(store.getTalk("c", "p", "d")!.transcript_json!).text).toBe("one");
+
+    // Re-record: a new revision with new media X2 (upsertTalk drops the transcript).
+    seedTalk(store, "X2", 2, 3);
+    expect(store.getTalk("c", "p", "d")!.transcript_json).toBeNull();
+
+    // A slow STT result for the OLD media X1 finishing now must be discarded.
+    expect(
+      store.setTalkTranscript("c", "p", "d", JSON.stringify({ x: "X1", text: "stale" }), 4, "X1"),
+    ).toBe(false);
+    expect(store.getTalk("c", "p", "d")!.transcript_json).toBeNull(); // not re-attached
+    store.close();
+  });
+});
