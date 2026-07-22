@@ -1226,18 +1226,27 @@ export class Store {
     return Number(info.changes);
   }
 
-  // ── TTL pruning (audit COORD-24) ──────────────────────────────────────────
+  // ── TTL pruning (audit COORD-24 / P0-1) ───────────────────────────────────
   /**
-   * Drop dedupe rows older than `maxAgeMs` (default 30 days): `seen_rumors`
-   * (by seen_at) and `marmot_consumed_kps` (by created_at). Both are idempotency
-   * ledgers whose entries are useless once the gift-wrap backfill window (days,
-   * not months) has passed. Run at startup + daily. Returns rows deleted.
+   * Drop `marmot_consumed_kps` older than `maxAgeMs` (default 30 days). These are
+   * event-scoped, single-use key-package receipts safe to age out past the
+   * gift-wrap backfill window.
+   *
+   * `seen_rumors` is deliberately NOT pruned here (audit P0-1 interim guard). The
+   * coordinator inbox is re-scanned from `since: 0` on every startup, and fresh
+   * event installs backfill full history — an unbounded horizon. Pruning the
+   * dedupe ledger at 30 days made any command older than the TTL look new on the
+   * next rescan and re-execute (an old revoke rotating the ECK again, an old
+   * recompute re-billing a provider). Retaining the ledger trades bounded storage
+   * (small rows, low command volume) for correctness. This is a band-aid: the
+   * durable fix is a monotonic command/install-generation model (deferred), which
+   * would let the ledger be safely bounded again. Run at startup + daily; returns
+   * rows deleted.
    */
   pruneOldData(now: number, maxAgeMs = 30 * 24 * 60 * 60 * 1000): number {
     const cutoff = now - maxAgeMs;
-    const rumors = this.db.prepare("DELETE FROM seen_rumors WHERE seen_at < ?").run(cutoff);
     const kps = this.db.prepare("DELETE FROM marmot_consumed_kps WHERE created_at < ?").run(cutoff);
-    return Number(rumors.changes) + Number(kps.changes);
+    return Number(kps.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────

@@ -228,8 +228,8 @@ describe("invite claim atomicity (audit COORD-25)", () => {
   });
 });
 
-describe("TTL pruning (audit COORD-24)", () => {
-  it("prunes seen_rumors and consumed key packages older than 30 days, keeps fresh rows", () => {
+describe("TTL pruning (audit COORD-24 / P0-1)", () => {
+  it("prunes old consumed key packages but RETAINS seen_rumors (replay guard)", () => {
     const store = new Store();
     const DAY = 24 * 60 * 60 * 1000;
     const now = 100 * DAY;
@@ -238,8 +238,10 @@ describe("TTL pruning (audit COORD-24)", () => {
     store.markKpConsumed("31923:aaaa:ev", "old-kp", now - 90 * DAY);
     store.markKpConsumed("31923:aaaa:ev", "fresh-kp", now - 1 * DAY);
 
-    expect(store.pruneOldData(now)).toBe(2);
-    expect(store.isRumorSeen("old-rumor")).toBe(false);
+    // Only the stale key package is pruned; seen_rumors are kept so a since:0
+    // inbox rescan can't resurrect an old command past the old 30-day TTL (P0-1).
+    expect(store.pruneOldData(now)).toBe(1);
+    expect(store.isRumorSeen("old-rumor")).toBe(true); // retained (was pruned pre-fix)
     expect(store.isRumorSeen("fresh-rumor")).toBe(true);
     expect(store.isKpConsumed("31923:aaaa:ev", "old-kp")).toBe(false);
     expect(store.isKpConsumed("31923:aaaa:ev", "fresh-kp")).toBe(true);
