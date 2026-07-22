@@ -25,6 +25,7 @@ import {
   decryptMembersPost,
   encryptMembersPost,
   type EckVersion,
+  supersedes,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
@@ -56,6 +57,7 @@ export interface EventPost {
 
 /** The slice of a Nostr event this module needs (pure/testable). */
 export interface RawPostEvent {
+  id: string;
   kind: number;
   pubkey: string;
   created_at: number;
@@ -78,7 +80,7 @@ export function dedupePostsByD(events: RawPostEvent[]): RawPostEvent[] {
     const d = tag(e.tags, "d") ?? "";
     const key = `${e.pubkey}:${d}`;
     const seen = byKey.get(key);
-    if (!seen || e.created_at > seen.created_at) byKey.set(key, e);
+    if (!seen || supersedes(e, seen)) byKey.set(key, e);
   }
   return [...byKey.values()];
 }

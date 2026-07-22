@@ -63,6 +63,8 @@ import {
   type RosterContent,
   type MatchMatrixContent,
   type MatchListContent,
+  pickLatest,
+  supersedes,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
@@ -477,10 +479,10 @@ export class Coordinator {
       relays,
     );
     // Newest config wins (audit COORD-14): relays return replaceable events in
-    // arbitrary order, so pick by created_at (id tiebreak) rather than first-found.
-    const cfgEvent = cfgEvents
-      .filter((e) => e.kind === 31600)
-      .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? 1 : -1))[0];
+    // arbitrary order. Pick with the shared §3.1 comparator — higher created_at,
+    // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
+    // disagreed with the convention and with every other reader.
+    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31600));
     const evtEvent = cfgEvents.find((e) => e.kind === 31923);
     const config = cfgEvent ? parseEventConfig(eidPubkey, cfgEvent.tags) : undefined;
 
@@ -1100,7 +1102,7 @@ export class Coordinator {
       ...(transcripts.length ? { transcripts: transcripts.map((t) => ({ ...t, text: capAuthoredText(t.text, 8000) })) } : {}),
       ...(introText ? { intro_text: capAuthoredText(introText) } : {}),
       updated_at: Math.floor(this.now() / 1000),
-    });
+    }, this.nextCreatedAt);
     await this.deps.transport.publish(entry, state.configRelays);
   }
 
@@ -1123,7 +1125,7 @@ export class Coordinator {
         role: a.role === "organizer" ? "organizer" : "attendee",
       })),
     };
-    const event = buildRoster(this.publishKeys(state), state.coordinate, roster);
+    const event = buildRoster(this.publishKeys(state), state.coordinate, roster, this.nextCreatedAt);
     await this.deps.transport.publish(event, state.configRelays);
   }
 
@@ -1331,7 +1333,7 @@ export class Coordinator {
       status: "published",
       published_at: publishedAt,
     };
-    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, content);
+    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
     await this.deps.transport.publish(event, state.configRelays);
     // Record the publish-time ECK id (audit COORD-7): post-rotation deletion must
     // address the entry under the ECK it was published with, not the current one.
@@ -1583,7 +1585,7 @@ export class Coordinator {
     if (!state || state.matching === "off") return; // never publish lists when matching is off (H4)
     const list = buildMatchList(this.deps.store, coordinate, pubkey, this.topK, Math.floor(this.now() / 1000));
     if (list.matches.length === 0) return;
-    const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, sanitizeMatchList(list));
+    const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, sanitizeMatchList(list), this.nextCreatedAt);
     await this.deps.transport.publish(event, state.configRelays);
     log(`[match] published list for ${short(pubkey)} — ${list.matches.length} match(es)`);
     // Publish the event-wide matrix (31606) only when visibility is "event" (H4).
@@ -1612,7 +1614,7 @@ export class Coordinator {
       }
     }
     const content: MatchMatrixContent = { v: 2, computed_at: Math.floor(this.now() / 1000), pairs };
-    const event = buildMatchMatrix(this.publishKeys(state), state.coordinate, content);
+    const event = buildMatchMatrix(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
     await this.deps.transport.publish(event, state.configRelays);
     log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
   }
@@ -1740,7 +1742,7 @@ export class Coordinator {
       if (state.matching === "on") {
         const list = buildMatchList(this.deps.store, state.coordinate, a.pubkey, this.topK, Math.floor(this.now() / 1000));
         if (list.matches.length > 0) {
-          const event = buildMatchListEvent(this.publishKeys(state), state.coordinate, a.pubkey, sanitizeMatchList(list));
+          const event = buildMatchListEvent(this.publishKeys(state), state.coordinate, a.pubkey, sanitizeMatchList(list), this.nextCreatedAt);
           await this.deps.transport.publish(event, state.configRelays);
         }
       }
@@ -1794,7 +1796,7 @@ export class Coordinator {
       { kinds: [KIND_INVITE_LIST], authors: [state.eidPubkey], "#d": [parseCoordinate(state.coordinate).identifier] },
       state.configRelays,
     );
-    const latest = events.sort((a, b) => b.created_at - a.created_at)[0];
+    const latest = pickLatest(events);
     let hashes = new Set<string>();
     if (latest) {
       try {
@@ -1957,6 +1959,30 @@ export class Coordinator {
   private inviteHashCache = new Map<string, Set<string>>();
 
   /**
+   * Monotonic-publish watermark per replaceable address `${kind}:${d}` (NIP §3.2).
+   * In-memory: the coordinator re-derives it from published events after a restart
+   * only implicitly (a restart re-publishes with a fresh wall clock, which — being
+   * a later second than anything it published before the restart — stays monotonic
+   * in practice; the map closes the same-process, same-second gap that actually
+   * produced §3.1 ties). A durable column is a later refinement.
+   */
+  private lastPublishedAt = new Map<string, number>();
+
+  /**
+   * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:
+   * `max(now, previous_for_that_address + 1)`. Handed to every replaceable
+   * publisher builder so two updates to the same address in the same wall-clock
+   * second get strictly increasing timestamps instead of colliding.
+   */
+  private nextCreatedAt = (kind: number, d: string): number => {
+    const key = `${kind}:${d}`;
+    const now = Math.floor(this.now() / 1000);
+    const ts = Math.max(now, (this.lastPublishedAt.get(key) ?? 0) + 1);
+    this.lastPublishedAt.set(key, ts);
+    return ts;
+  };
+
+  /**
    * Open a subscription for `coordinate`, closing the previous one when its key
    * (inbox/group + relay set) changed (COORD-8 relay handover). The closer is
    * once-guarded and registered for stop().
@@ -2048,9 +2074,22 @@ export class Coordinator {
     if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
     const d = event.tags.find((t) => t[0] === "d")?.[1];
     if (d !== state.identifier) return; // wrong event
-    // Replaceable ordering: ignore an older-or-equal config than the one applied.
-    if (event.created_at < state.configCreatedAt) return;
-    if (event.created_at === state.configCreatedAt && state.configEventId && event.id <= state.configEventId) return;
+    // Replaceable ordering (§3.1): ignore a config that does not SUPERSEDE the one
+    // already applied — strictly newer, or same created_at with a lower id. v1
+    // rejected `id <=` (kept the HIGHER id on a tie); v2 keeps the lowest id, in
+    // step with installEvent and the app.
+    if (state.configEventId) {
+      if (
+        !supersedes(
+          { id: event.id, created_at: event.created_at },
+          { id: state.configEventId, created_at: state.configCreatedAt },
+        )
+      ) {
+        return;
+      }
+    } else if (event.created_at < state.configCreatedAt) {
+      return;
+    }
 
     let config: EventConfig;
     try {

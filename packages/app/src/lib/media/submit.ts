@@ -19,6 +19,7 @@ import {
   mediaDescriptorSchema,
   type MediaDescriptor,
   type AttendeeProfile,
+  pickLatest,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
@@ -321,7 +322,7 @@ export async function loadSelfCopy(
     authors: [pubkey],
     "#d": [d],
   });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(events);
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
@@ -357,7 +358,7 @@ export async function loadLibraryFull(
     authors: [pubkey],
     "#d": [libD],
   });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(events);
   if (!latest) return { media: [], texts: [] };
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);

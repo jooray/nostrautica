@@ -27,6 +27,8 @@ import {
   parsePayloadSafe,
   isNewerProtocolVersion,
   NewerProtocolVersionError,
+  pickLatest,
+  supersedes,
   type DirectoryEntryContent,
   type RosterContent,
   type MatchListContent,
@@ -144,7 +146,7 @@ async function fetchEventConfig(
     relays,
   );
   // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(onlyVerified(events));
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);
@@ -405,7 +407,7 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
     { relays: ctx.config.relays },
   ).ready;
   // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(onlyVerified(events));
   if (!latest) return { v: 2, eck_current: 1, attendees: [] };
   // The roster is authored by the coordinator (or E_id) — a trusted authority
   // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
@@ -509,7 +511,7 @@ export async function fetchDirectory(
     const d = e.tags.find((t) => t[0] === "d")?.[1];
     if (!d) continue;
     const prev = latestByD.get(d);
-    if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latestByD.set(d, e);
+    if (!prev || supersedes(e, prev)) latestByD.set(d, e);
   }
 
   const entries: DirectoryEntryContent[] = [];
@@ -552,9 +554,13 @@ export async function streamDirectory(
   // Accumulate by PUBKEY (one entry per attendee), latest-wins by created_at, so
   // we can seed from the cached snapshot and a background refresh never flashes
   // the list down to fewer people (CACHING-PLAN §2.3, §3.4).
-  const byPk = new Map<string, { entry: DirectoryEntryContent; at: number }>();
+  // Track the winning event's (created_at, id) per pubkey so replacement follows
+  // the SAME §3.1 rule as fetchDirectory (higher created_at, then lowest id) —
+  // v1's `>=` here silently disagreed with fetchDirectory's `>` on ties. The
+  // cached seed has no source event, so id "" / at 0 loses to any real event.
+  const byPk = new Map<string, { entry: DirectoryEntryContent; at: number; id: string }>();
   const cached = cachedDirectory(coord);
-  if (cached) for (const e of cached) byPk.set(e.pubkey, { entry: e, at: 0 });
+  if (cached) for (const e of cached) byPk.set(e.pubkey, { entry: e, at: 0, id: "" });
   const snapshot = () => [...byPk.values()].map((v) => v.entry);
   let newestAt = 0;
 
@@ -569,13 +575,15 @@ export async function streamDirectory(
     if (!flushTimer) flushTimer = setTimeout(flush, 60);
   };
 
-  const onDirEvent = (e: { tags: string[][]; content: string; created_at?: number }) => {
+  const onDirEvent = (e: { id: string; tags: string[][]; content: string; created_at?: number }) => {
     if (!e.tags.some((tg) => tg[0] === "d")) return;
     const at = e.created_at ?? 0;
     try {
       const entry = directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content)));
       const prev = byPk.get(entry.pubkey);
-      if (!prev || at >= prev.at) byPk.set(entry.pubkey, { entry, at });
+      if (!prev || supersedes({ id: e.id, created_at: at }, { id: prev.id, created_at: prev.at })) {
+        byPk.set(entry.pubkey, { entry, at, id: e.id });
+      }
       if (at > newestAt) newestAt = at;
       scheduleFlush();
     } catch {
@@ -686,7 +694,7 @@ export async function fetchMatches(
     { kinds: [KIND_MATCH_LIST], authors: [coordinator], "#d": [d] },
     { relays: ctx.config.relays },
   ).ready;
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(events);
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(coordinator, latest.content);

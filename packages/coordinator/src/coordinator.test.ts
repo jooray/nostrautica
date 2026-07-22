@@ -1078,6 +1078,29 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
   });
 
+  it("on a created_at tie, the LOWEST-id 31600 wins (NIP §3.1 flip; converges either arrival order)", async () => {
+    const mkCfg = (h: Awaited<ReturnType<typeof setup>>, id: string, matching: "on" | "off") => ({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 500,
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", matching]],
+      content: "", id, sig: "",
+    });
+    const applied = (h: Awaited<ReturnType<typeof setup>>) =>
+      JSON.parse(h.store.getEvent(h.coordinate)!.config_json).matching as string;
+
+    // Deliver high-id first, then low-id: the lower id supersedes on the tie.
+    const hA = await setup(0);
+    await hA.coordinator.handleConfigUpdate(hA.coordinate, mkCfg(hA, "ffff", "off") as any);
+    await hA.coordinator.handleConfigUpdate(hA.coordinate, mkCfg(hA, "0000", "on") as any);
+    expect(applied(hA)).toBe("on"); // low id "0000" won
+
+    // Reverse arrival order on a fresh event: same winner (the higher id never
+    // displaces the already-applied lower one).
+    const hB = await setup(0);
+    await hB.coordinator.handleConfigUpdate(hB.coordinate, mkCfg(hB, "0000", "on") as any);
+    await hB.coordinator.handleConfigUpdate(hB.coordinate, mkCfg(hB, "ffff", "off") as any);
+    expect(applied(hB)).toBe("on"); // "ffff" did NOT supersede "0000"
+  });
+
   it("ignores a stale or wrong-author 31600 update (H5)", async () => {
     const h = await setup(0, { matchVisibility: "pair" });
     await join(h, generateSecretKey(), "crypto");

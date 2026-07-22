@@ -11,6 +11,7 @@ import {
   naddrToCoordinate,
   parseCoordinate,
   type EventConfig,
+  pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
@@ -111,7 +112,7 @@ export async function loadEventContext(
     fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }).then(onlyVerified),
   ]);
 
-  const configEvent = configEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const configEvent = pickLatest(configEvents);
   if (!configEvent) throw new Error("Event config (31600) not found");
   const config = parseEventConfig(pubkey, configEvent.tags);
   // Pull in the event's own home relays for subsequent operations.

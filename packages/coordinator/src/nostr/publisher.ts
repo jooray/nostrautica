@@ -38,17 +38,32 @@ export interface PublishKeys {
   eckId: number;
 }
 
+/**
+ * Resolves the `created_at` for a replaceable publish (NIP §3.2, monotonic
+ * publishing). Given the (kind, `d`) address, returns
+ * `max(now, last_published_for_that_address + 1)` so successive business updates
+ * to the same address never collide on the same second (which §3.1 would then
+ * have to tie-break) and never regress. The builders derive the blinded `d`
+ * themselves and hand it here; the coordinator supplies the stateful
+ * implementation. The default (used by unit tests and any stateless caller) is a
+ * plain wall clock.
+ */
+export type CreatedAtFor = (kind: number, d: string) => number;
+
+const wallClockCreatedAt: CreatedAtFor = () => Math.floor(Date.now() / 1000);
+
 /** kind 31603 directory entry (ECK, blinded d over ECK). */
 export function buildDirectoryEntry(
   keys: PublishKeys,
   coordinate: string,
   entry: DirectoryEntryContent,
+  createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
   const d = blindedD(keys.eck, coordinate, entry.pubkey);
   return finalizeEvent(
     {
       kind: KIND_DIRECTORY_ENTRY,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt(KIND_DIRECTORY_ENTRY, d),
       tags: [
         ["d", d],
         ["a", coordinate],
@@ -66,12 +81,13 @@ export function buildRoster(
   keys: PublishKeys,
   coordinate: string,
   roster: RosterContent,
+  createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
   const { identifier } = parseCoordinate(coordinate);
   return finalizeEvent(
     {
       kind: KIND_ROSTER,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt(KIND_ROSTER, identifier),
       tags: [
         ["d", identifier],
         ["a", coordinate],
@@ -90,12 +106,13 @@ export function buildMatchListEvent(
   coordinate: string,
   recipientPubkey: string,
   content: MatchListContent,
+  createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
   const d = blindedD(keys.eck, coordinate, recipientPubkey);
   return finalizeEvent(
     {
       kind: KIND_MATCH_LIST,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt(KIND_MATCH_LIST, d),
       tags: [
         ["d", d],
         ["a", coordinate],
@@ -113,12 +130,13 @@ export function buildMatchMatrix(
   keys: PublishKeys,
   coordinate: string,
   content: MatchMatrixContent,
+  createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
   const { identifier } = parseCoordinate(coordinate);
   return finalizeEvent(
     {
       kind: KIND_MATCH_MATRIX,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt(KIND_MATCH_MATRIX, identifier),
       tags: [
         ["d", identifier],
         ["a", coordinate],
@@ -146,12 +164,13 @@ export function buildTalkEntry(
   keys: PublishKeys,
   coordinate: string,
   content: TalkContent,
+  createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
   const d = talkBlindedD(keys.eck, coordinate, content.pubkey, content.talk_d);
   return finalizeEvent(
     {
       kind: KIND_TALK,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt(KIND_TALK, d),
       tags: [
         ["d", d],
         ["a", coordinate],
@@ -183,11 +202,12 @@ export function buildCoordinatorStatus(
 export function buildCoordinatorAnnounce(
   coordSk: Uint8Array,
   content: CoordinatorAnnounce,
+  createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
   return finalizeEvent(
     {
       kind: KIND_COORDINATOR_ANNOUNCE,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: createdAt(KIND_COORDINATOR_ANNOUNCE, COORDINATOR_ANNOUNCE_D),
       tags: [
         ["d", COORDINATOR_ANNOUNCE_D],
         ["v", "2"],

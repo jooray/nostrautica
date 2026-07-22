@@ -8,6 +8,7 @@ import {
   KIND_COORDINATOR_ANNOUNCE,
   coordinatorAnnounceSchema,
   type CoordinatorAnnounce,
+  supersedes,
 } from "@nostrautica/protocol";
 import { npubEncode, decode } from "nostr-tools/nip19";
 import { streamEvents } from "$lib/nostr/stream.js";
@@ -60,7 +61,7 @@ export async function fetchCoordinators(
   const latest = new Map<string, (typeof events)[number]>();
   for (const e of verified) {
     const prev = latest.get(e.pubkey);
-    if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latest.set(e.pubkey, e);
+    if (!prev || supersedes(e, prev)) latest.set(e.pubkey, e);
   }
   const out: DiscoveredCoordinator[] = [];
   for (const e of latest.values()) {

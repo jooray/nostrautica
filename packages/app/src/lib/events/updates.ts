@@ -8,7 +8,7 @@
  * on edits so ordering doesn't jump when an update is corrected.
  */
 import { finalizeEvent } from "nostr-tools";
-import { KIND_LONGFORM, parseCoordinate, hexToBytes } from "@nostrautica/protocol";
+import { KIND_LONGFORM, parseCoordinate, hexToBytes, supersedes } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
@@ -37,7 +37,7 @@ export async function fetchEventUpdates(coordinate: string): Promise<EventUpdate
   for (const e of events) {
     const d = tag(e.tags, "d") ?? "";
     const seen = byD.get(d);
-    if (!seen || (e.created_at ?? 0) > (seen.created_at ?? 0)) byD.set(d, e);
+    if (!seen || supersedes(e, seen)) byD.set(d, e);
   }
 
   return [...byD.entries()]

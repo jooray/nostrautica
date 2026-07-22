@@ -54,6 +54,7 @@ import {
   type MediaDescriptor,
   type EckVersion,
   type RosterContent,
+  pickLatest,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -478,7 +479,7 @@ export async function generateInvites(
     { kinds: [KIND_INVITE_LIST], authors: [ctx.config.eidPubkey], "#d": [splitCoordinate(ctx.coordinate).identifier] },
     ctx.config.relays,
   );
-  const latest = existing.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(existing);
   let invites: { h: string; label?: string }[] = [];
   if (latest) {
     try {
