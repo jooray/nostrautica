@@ -1,5 +1,10 @@
 # Nostrautica — Implementation Plan
 
+> **Historical plan.** This document records implementation sequencing and dated
+> decisions. It is not normative and may describe unimplemented or superseded work.
+> Use `SPECIFICATION.md`, `PROTOCOL-REGISTRY.md`, and current source/tests for
+> shipped behavior.
+
 Companion to `SPECIFICATION.md` (the spec is normative; section references like §6.3 point there). This document tells the implementer **what to build, in what order, and how to know it works**.
 
 ## 0. Repository layout & toolchain
@@ -11,7 +16,7 @@ nostrautica/
 ├── packages/
 │   ├── protocol/                # shared: kinds, schemas, crypto — ZERO UI/server deps
 │   │   └── src/
-│   │       ├── kinds.ts         # kind constants (31600–31609, 21600–21604, standard)
+│   │       ├── kinds.ts         # custom kind constants (see PROTOCOL-REGISTRY.md)
 │   │       ├── schemas.ts       # zod schemas for every payload in spec §7
 │   │       ├── crypto.ts        # eckEncrypt/Decrypt, blindedD, AES-GCM media,
 │   │       │                    #   invite sig make/verify, giftwrap helpers, nip44 self
@@ -27,7 +32,7 @@ nostrautica/
 │   │       └── pages/
 │   └── coordinator/             # Node daemon
 │       └── src/
-│           ├── providers/       # types.ts + venice.ts + routstr.ts + local-whisper.ts
+│           ├── providers/       # types.ts + Venice/Routstr adapters (local Whisper was planned, not shipped)
 │           ├── pipeline/        # job stages (spec §9.2)
 │           ├── matching/        # pair scoring, embeddings prefilter (spec §9.3)
 │           ├── store/           # better-sqlite3 schema + migrations
@@ -192,7 +197,7 @@ Acceptance:
 12. **Invite single-use is eventually consistent** — first-come by rumor `created_at`; duplicates go to the manual queue, never auto-reject.
 13. **Blossom uploads:** always BUD-06 preflight (limits vary per server); mirror with BUD-04; auth events are kind 24242 with `t`, `x`, `expiration`.
 14. **`#/login?nsec=` must be stripped from the URL/history immediately** after key import.
-15. **Custom kinds:** re-check 31600–31609 / 21600–21604 against the NIPs registry before first public release (unassigned as of 2026-07).
+15. **Custom kinds:** historical range; current custom kinds are 31600–31611 / 21600–21609. See `PROTOCOL-REGISTRY.md` and re-check the NIPs registry before release.
 
 ## 4. Definition of done (v1)
 
@@ -267,4 +272,4 @@ Gotchas (this phase): 31600 `content` must stay untouched (theme lives in 31609 
 ### Remaining / manual-verification items
 - Playwright e2e specs are scaffolded (`e2e/`); the full-loop specs run against the dockerized relay + Blossom (`docker/docker-compose.yml`) and are gated behind `NOSTRAUTICA_E2E_RELAY`.
 - nsite deploy (`nsyte`) is wired in CI but the primary reference deploy currently targets a classic static host (nginx). On that host `sw.js` is served with a long `max-age`; PWA updates still work because the SW update check bypasses the HTTP cache, but serving `sw.js`/`index.html` as `no-cache` (spec §10.2) is preferred.
-- Custom kinds (`31600–31609`, `21600–21605`) remain to be re-checked against the NIPs registry before public release.
+- Custom kinds (`31600–31611`, `21600–21609`) remain to be re-checked against the NIPs registry before public release; see `PROTOCOL-REGISTRY.md`.

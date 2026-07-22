@@ -117,9 +117,9 @@ Chcete prevádzkovať vlastného, alebo vám bol daný konkrétny? Rozbaľte **A
 
 > **Platení koordinátori.** Koordinátor môže byť spoplatnený (náklady na AI párovanie rastú s počtom účastníkov), takže záznam môže zobrazovať cenu alebo bezplatnú úroveň (napr. „do 20 účastníkov zadarmo"). Ak je niekedy potrebná platba, obrazovka Nastavení zobrazí banner **Vyžaduje sa platba** s odkazom na platbu — súčasný referenčný koordinátor je zdarma.
 
-Koordinátor obsah podujatia iba *číta* — nikdy nemôže konať namiesto podujatia ani schvaľovať ľudí nad rámec pravidiel, ktoré ste nastavili. Po pripojení sa na karte **Administrácia** objaví tlačidlo **↻ Prepočítať všetky spojenia** (je to opakovaná akcia, nie nastavenie); použite ho po nápore nových účastníkov.
+Koordinátor nemôže podpisovať ako podujatie ani meniť verejné záznamy podujatia, konfigurácie či pozvánok, pretože nikdy nedostane `E_id`. Po pripojení však drží `E_inbox` a ECK: číta prihlášky a médiá, pri platných pozvánkach môže vydať delegované granty `21602`, publikuje adresár, zoznam účastníkov, spojenia, prednášky a stav a spravuje experimentálny Marmot chat. Vyberte si operátora, ktorému dôverujete s touto právomocou. Na karte **Administrácia** sa objaví tlačidlo **↻ Prepočítať všetky spojenia** (je to opakovaná akcia, nie nastavenie); použite ho po nápore nových účastníkov.
 
-> Spustenie koordinátora je samostatný, technický krok (malý démon, ktorý potrebuje `ffmpeg` a kľúč k poskytovateľovi LLM/prepisu reči). Pozrite si [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml) a README repozitára. Jeho relaye nasmerujte na ten istý relay, ktorý používa vaše podujatie.
+> Spustenie koordinátora je samostatný, technický krok (malý démon, ktorý potrebuje `ffmpeg` a kľúč k poskytovateľovi LLM/prepisu reči). Pozrite si [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml), [operačnú príručku](COORDINATOR-OPERATOR-GUIDE.md) a README repozitára. Jeho relaye nasmerujte na ten istý relay, ktorý používa vaše podujatie.
 
 ## 6. Zverejňovanie príspevkov pre účastníkov
 

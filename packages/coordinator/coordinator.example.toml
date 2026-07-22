@@ -19,13 +19,13 @@ api_key_env = "VENICE_API_KEY"
 require_private = true            # default privacy policy: private/TEE-tier models only;
                                   # overridable per role via models.<role>.require_private
 
-# [providers.routstr]              # v2 (P6), Cashu-paid decentralized nodes
+# [providers.routstr]              # optional experimental global LLM provider
 # node_url = "https://api.routstr.com/v1"
 # mint = "https://mint.example"
 # wallet_db = "cashu-wallet.sqlite"
 
 [stt]
-provider = "venice-stt"           # or "local-whisper"
+provider = "venice-stt"           # only implemented STT provider
 model = "openai/whisper-large-v3"
 
 # Resolve these against GET /models at runtime — never hardcode volatile ids.
@@ -69,15 +69,15 @@ name = "Nostrautica coordinator"
 # operator = "npub1… or a contact string"
 # terms_url = "https://…/terms"
 
-# ── Billing policy (Part 3) — payment is NOT handled yet; this only shapes the ──
-# announce and the `billing` signal in the 21606 status. Default: free.
+# ── Billing policy — payment is NOT handled or enforced yet. The current daemon ──
+# evaluates this at install and logs it; it is not an admission gate. Default: free.
 [pricing]
 model = "free"                    # free | per_user | per_event | negotiated | external
 # free_up_to_users = 20           # optional soft/hard free tier
 # summary = "Up to 20 attendees free; larger events by quote."
 # checkout_url = "https://…/checkout"   # the app appends ?event=<naddr>
 # currency = "sats"
-# free_organizers = ["npub1…"]    # always-free (community). PRIVATE — never announced.
+# free_organizers = ["<E_id hex pubkey>"] # always-free E_id allowlist; PRIVATE.
 
 # ── Daemon-side security policy ───────────────────────────────────────────────
 # Installation is protocol-level (any E_id can gift-wrap a 21603 grant to this

@@ -25,18 +25,26 @@ Observations about awkward UX go into a local `docs/internal/UI-SUGGESTIONS.md`
 
 ```sh
 # From the repo root
-docker compose -f docker/docker-compose.yml up -d   # strfry relay :7777, blossom :3000
+# Relay on :7777. Start it with compose, or use the local relay script below.
+docker compose -f docker/docker-compose.yml up -d
 
 pnpm install
 pnpm --filter @nostrautica/protocol build
-# Point the app at the local infra AND relax the CSP for plain-scheme localhost
-# (ws:/http: are otherwise blocked). PUBLIC_CSP_EXTRA_CONNECT is needed at BUILD
-# time and again for `preview` (it SSRs the shell per request).
+# The media flow requires HTTPS Blossom URLs. Create a throwaway cert, start the
+# local Blossom process with its HTTPS public origin, then front it with the TLS proxy.
+mkdir -p /tmp/nostrautica-tls
+openssl req -x509 -newkey rsa:2048 -keyout /tmp/nostrautica-tls/key.pem \
+  -out /tmp/nostrautica-tls/cert.pem -days 3 -nodes -subj "/CN=localhost"
+BLOSSOM_PUBLIC_BASE_URL=https://localhost:8443 node e2e/local-infra/blossom.mjs &
+node e2e/local-infra/https-proxy.mjs &
+
+# Point the app at local relay + HTTPS Blossom. PUBLIC_CSP_EXTRA_CONNECT is needed
+# at BUILD time and again for preview (it renders the shell per request).
 VITE_NOSTRAUTICA_RELAYS=ws://localhost:7777 \
-VITE_NOSTRAUTICA_BLOSSOM=http://localhost:3000 \
-PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" \
+VITE_NOSTRAUTICA_BLOSSOM=https://localhost:8443 \
+PUBLIC_CSP_EXTRA_CONNECT=" ws: https://localhost:8443" \
 pnpm --filter @nostrautica/app build
-PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" \
+PUBLIC_CSP_EXTRA_CONNECT=" ws: https://localhost:8443" \
 pnpm --filter @nostrautica/app preview --port 4173 --strictPort   # the app under test
 
 No docker? `node e2e/local-infra/relay.mjs` + `node e2e/local-infra/blossom.mjs`
@@ -45,10 +53,10 @@ semantics when needed.
 ```
 
 - App URL: `http://localhost:4173` (override with `NOSTRAUTICA_URL`).
-- Relay: `ws://localhost:7777` · Blossom: `http://localhost:3000`.
+- Relay: `ws://localhost:7777` · Blossom: `https://localhost:8443` through the local TLS proxy.
 - Set `NOSTRAUTICA_E2E_RELAY=1` when running the scripted Playwright suite in `e2e/`.
 
-#### HTTPS Blossom for the record flow (required since the C3 hardening)
+#### Why HTTPS Blossom is the default above
 
 The media descriptor schema now accepts only `https://` blob URLs (audit C3 —
 SSRF hardening). `e2e/local-infra/blossom.mjs` is plain HTTP by default, so
@@ -56,22 +64,8 @@ SSRF hardening). `e2e/local-infra/blossom.mjs` is plain HTTP by default, so
 URL") unless its upload responses are https. Front it with a local
 TLS-terminating proxy and point it at that origin:
 
-```sh
-# One-time: a throwaway self-signed cert.
-openssl req -x509 -newkey rsa:2048 -keyout /tmp/nostrautica-tls/key.pem \
-  -out /tmp/nostrautica-tls/cert.pem -days 3 -nodes -subj "/CN=localhost"
-
-# blossom.mjs on :3000 (its upload responses now point at the https origin
-# below instead of hardcoding its own http://localhost:3000), an https proxy
-# on :8443 in front of it.
-BLOSSOM_PUBLIC_BASE_URL=https://localhost:8443 node e2e/local-infra/blossom.mjs &
-node e2e/local-infra/https-proxy.mjs &   # ~20-line https→http proxy to :3000, self-signed cert
-
-# Build the app pointed at the https origin, and trust the self-signed cert:
-VITE_NOSTRAUTICA_BLOSSOM=https://localhost:8443 \
-PUBLIC_CSP_EXTRA_CONNECT=" ws: http: https://localhost:8443" \
-pnpm --filter @nostrautica/app build
-```
+The commands above already create this environment. `http://localhost:3000` is
+useful only for text-only diagnostics; its media descriptor URLs are rejected.
 
 Chromium (headed or Playwright) additionally needs `--ignore-certificate-errors`
 (and `ignoreHTTPSErrors: true` in Playwright context options) to accept the

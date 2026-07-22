@@ -68,9 +68,12 @@ text, ktoré ste kedy vytvorili na ktoromkoľvek podujatí, s rýchlym náhľado
 aby ste ich vedeli rozlíšiť. Video alebo zvuk môžete použiť tak, ako je, alebo
 cez **Nová kópia** ho pre toto podujatie znova zašifrovať bez nového
 nahrávania; pri texte vás **Použiť tento text** rovno prenesie do editora,
-odkiaľ ho pošlete tak, ako je, alebo si ho ešte upravíte. Nič tu nie je
-prepojené s tým, kde ste to pôvodne nahrali — knižnica si pamätá len to, čo
-ste vytvorili, nie pre ktoré podujatie to bolo.
+odkiaľ ho pošlete tak, ako je, alebo si ho ešte upravíte. Miestna knižnica
+neukladá ani nezobrazuje pôvodné podujatie. Pri bežnom opätovnom použití videa
+alebo zvuku však zostáva rovnaký zašifrovaný blob, takže jeho verejný hash môže
+prepojiť vašu účasť medzi podujatiami. **Nová kópia** médium znovu zašifruje
+novým kľúčom a IV, vytvorí nový hash a zabráni tomuto konkrétnemu prepojeniu.
+Nevymaže však inú metadátu ani už zverejnené kópie.
 
 Video a zvukové predstavenia dostanú automatický prepis, keď ich spracuje organizátorova párovacia služba — na svojej alebo cudzej stránke klepnite pod prehrávačom na **Zobraziť prepis**, aby ste si to mohli prečítať popri sledovaní alebo v tom vyhľadávať, prípadne keď práve nemôžete počúvať:
 

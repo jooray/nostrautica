@@ -117,8 +117,11 @@ intro you've made at any past event, each with a quick preview so you can
 tell them apart. Reuse a video or audio clip as-is, or **Fresh copy** to
 re-encrypt it for this event without re-recording; for text, **Use this
 text** drops it into the composer so you can send it as-is or tweak it
-first. Nothing here is linked back to where you originally recorded it —
-the library only remembers what you made, not which event it was for.
+first. The local library does not store or show the source event. Ordinary
+video/audio reuse keeps the same encrypted blob, however, so its public
+ciphertext hash can link your presence across events. **Fresh copy** re-encrypts
+the media with a new key and IV, producing a new hash and avoiding that specific
+linkage. It cannot erase other metadata or copies already published.
 
 Video and audio intros get an automatic transcript once the organizer's
 matchmaking service has processed them — on your own or anyone else's page,

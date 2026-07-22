@@ -117,9 +117,9 @@ Chcete provozovat vlastního, nebo vám byl dán konkrétní? Rozbalte **Nebo vl
 
 > **Placení koordinátoři.** Koordinátor může být zpoplatněný (náklady na AI párování rostou s počtem účastníků), takže záznam může ukazovat cenu nebo bezplatnou úroveň (např. „do 20 účastníků zdarma"). Je-li kdy potřeba platba, obrazovka Nastavení zobrazí banner **Vyžaduje se platba** s odkazem na platbu — současný referenční koordinátor je zdarma.
 
-Koordinátor obsah akce jen *čte* — nikdy nemůže jednat jako akce ani schvalovat lidi nad rámec pravidel, která jste nastavili. Po připojení se na záložce **Administrace** objeví tlačítko **↻ Přepočítat všechna spojení** (je to opakovaná akce, ne nastavení); použijte ho po náporu nových účastníků.
+Koordinátor nemůže podepisovat jako akce ani měnit veřejné záznamy akce, konfigurace či pozvánek, protože nikdy nedostane `E_id`. Po připojení však drží `E_inbox` a ECK: čte přihlášky a média, při platných pozvánkách může vydat delegované granty `21602`, publikuje adresář, seznam účastníků, spojení, přednášky a stav a spravuje experimentální Marmot chat. Vyberte si operátora, kterému s touto pravomocí důvěřujete. Na záložce **Administrace** se objeví tlačítko **↻ Přepočítat všechna spojení** (je to opakovaná akce, ne nastavení); použijte ho po náporu nových účastníků.
 
-> Spuštění koordinátora je samostatný, technický krok (malý démon, který potřebuje `ffmpeg` a klíč k poskytovateli LLM/přepisu řeči). Podívejte se na [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml) a README repozitáře. Jeho relaye nasměrujte na stejný relay, který používá vaše akce.
+> Spuštění koordinátora je samostatný, technický krok (malý démon, který potřebuje `ffmpeg` a klíč k poskytovateli LLM/přepisu řeči). Podívejte se na [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml), [operační příručku](COORDINATOR-OPERATOR-GUIDE.md) a README repozitáře. Jeho relaye nasměrujte na stejný relay, který používá vaše akce.
 
 ## 6. Zveřejňování příspěvků pro účastníky
 

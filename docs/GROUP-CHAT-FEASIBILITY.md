@@ -1,5 +1,10 @@
 # Per-event group chat — feasibility study
 
+> **Archived research.** This document records a 2026-07 feasibility decision and
+> is superseded for current behavior by `MARMOT-GROUP-CHAT.md`, `SPECIFICATION.md`
+> §7.5, and `PROTOCOL-REGISTRY.md`. Only Marmot is currently implemented; NIP-17
+> group chat and dual-backend selection are not supported configuration.
+
 Status: research document, 2026-07-14; **revised 2026-07-15 per owner decision** — the
 ECK-encrypted web-only chat is dropped (rejected: web-only, §2.5) and NIP-17 group
 messages are promoted from "rejected" to a researched first-class option alongside
@@ -133,7 +138,7 @@ a stale snapshot of the same protocol; one wire-format divergence matters to us 
   private material. **Losing this state is fatal for that client**: it can no longer
   decrypt anything and cannot self-recover — it must be re-welcomed by an admin. On the
   coordinator (Node), state goes in its SQLite alongside everything else — but note this
-  breaks the coordinator's current "DB loss only re-costs money" property (§9.1): losing
+  broke the previous "DB loss only re-costs money" claim (§9.1): losing
   the coordinator DB now loses group admin/membership state. Back it up, and always have
   a second (human, mobile-client) admin.
 - **Bundle**: est. ~300–400 KB gzipped incl. ts-mls + @noble deps. Acceptable if

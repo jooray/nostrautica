@@ -213,15 +213,20 @@ see it confirmed:
 > shows a **Payment required** banner with a checkout link — the current
 > reference coordinator is free.
 
-The coordinator only ever *reads* event content — it can never act as the event
-or approve people beyond the rules you set. Once attached, an **↻ Recompute all
-matches** button appears on the **Administration** tab (it's a recurring action,
-not setup); use it after a burst of new attendees.
+The coordinator cannot sign as the event or change public event/config/invite
+records because it never receives `E_id`. Once attached, however, it receives
+`E_inbox` and ECK custody: it reads submissions and media, can issue delegated
+`21602` attendee grants for valid invite flow, publishes directory entries,
+rosters, matches, talks, and status, and administers experimental Marmot chat.
+Choose an operator you trust with that authority. An **↻ Recompute all matches**
+button appears on the **Administration** tab (it's a recurring action, not setup);
+use it after a burst of new attendees.
 
 > Running the coordinator is a separate, technical step (a small daemon that
 > needs `ffmpeg` and an LLM/STT provider key). See
-> [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml)
-> and the repo README. Point its relays at the same relay your event uses.
+> [`packages/coordinator/coordinator.example.toml`](../packages/coordinator/coordinator.example.toml),
+> [the operator guide](COORDINATOR-OPERATOR-GUIDE.md), and the repo README. Point
+> its relays at the same relay your event uses.
 
 ## 6. Post to your attendees
 

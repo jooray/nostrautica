@@ -1,17 +1,17 @@
 # Marmot group chat — specification and implementation plan
 
-Status: **specification + phased plan. Phases 1, 2 (app side), 3 (coordinator admin bot), and
-4 (UI) are all implemented; packaging resolved (§2.1). Live-tested 2026-07-16: the
-attendee → coordinator direction works end-to-end against a real relay — the browser client publishes its 30443 key package +
-10050/10002 relay lists, the coordinator's live watcher receives it and performs a genuine MLS
-Add + Welcome. But the coordinator → attendee direction does not complete client-side: two
-independent identities both stayed on "Setting up your secure chat…" indefinitely (40s+ across
-repeated reloads, and 32s continuously without reload) after the coordinator's confirmed
-server-side add, so no 445 message round-trip or revoke-lockout could be exercised. Phase 5
-(live e2e + hardening) is accordingly still open — see §8.** Successor to the analysis in
-[GROUP-CHAT-FEASIBILITY.md](GROUP-CHAT-FEASIBILITY.md) (read it first for the option analysis
-and the multi-client reasoning; this document fixes the design and turns it into buildable
-phases). Cross-reference stub: SPECIFICATION.md §7.5.
+> **Current implementation note (2026-07-22):** This document contains design and
+> historical phase material. Current behavior is Marmot-only and experimental.
+> The authoritative event-to-group binding is optional `nostr_group_id` in the
+> ECK-encrypted roster. Remote-signer chat device keys are backed up by default in
+> a self-encrypted `31602`; only identity is restored, never MLS epoch/history.
+> See `SPECIFICATION.md` §7.5 and `PROTOCOL-REGISTRY.md` for current protocol facts.
+
+Status: **historical specification + phased plan.** The 2026-07-16 live-test report below is
+historical evidence, not a statement of current behavior. Current source includes later roster
+group routing, device-key backup, and cold-cache self-healing changes; remaining limitations are
+tracked in `SPECIFICATION.md`, `THREAT-MODEL.md`, and the audit/test suite. This document is the
+successor to the archived option analysis in [GROUP-CHAT-FEASIBILITY.md](GROUP-CHAT-FEASIBILITY.md).
 
 Sources verified for this document (2026-07-15): the canonical Marmot protocol spec
 (`marmot-protocol/marmot`, current head), `marmot-ts` v0.6.0 (`marmot-protocol/marmot-ts`,
@@ -76,8 +76,8 @@ it lacks the mandatory `marmot.account-identity-proof.v1` leaf (see §2, Packagi
 | 9 / 7 / 1009 | inner app payloads (chat text / reaction / edit) — *unsigned Nostr-shaped rumors inside MLS*, `pubkey` = sender's chat identity, no `sig` | MLS authenticates | never published bare |
 | **21607** | **new Nostrautica rumor kind: chat-key attestation** (§3.3) — gift-wrapped attendee → coordinator | account key seals (kind 13) | coordinator inbox |
 
-The 31600–31609 addressable block is full; nothing new is needed there. 21607 is the next
-free slot in the 21600–21606 rumor block and extends it to 21600–21607
+Historical allocation note: the original design considered 21607 the next free rumor slot.
+Current custom-kind allocation is 31600–31611 and 21600–21609; see `PROTOCOL-REGISTRY.md`.
 (`packages/protocol/src/kinds.ts`, `RUMOR_KINDS`).
 
 ### 1.3 The `chat` config tag
@@ -344,7 +344,7 @@ mls_group_id, nostr_group_id, created_at, status), `marmot_kv` (the three
 `marmot_chat_keys` (coordinate, account_pubkey, chat_pubkey, client_id, status),
 `marmot_consumed_kps` (coordinate, kp_event_id).
 
-**This breaks SPECIFICATION.md §9.1's "DB loss only re-costs money."** Losing the coordinator
+**This broke the previous specification's "DB loss only re-costs money" claim.** Losing the coordinator
 DB now loses the group's only admin: nobody can add or remove members again, ever (MLS state
 is not reconstructible). Mitigations, all required: (a) documented DB backup for coordinator
 operators (the MLS state is small and changes on commits only); (b) **second admin** — offer
@@ -390,11 +390,11 @@ freezes. A slim "chat-admin-only" coordinator mode is deliberately out of v1 (§
   cryptographically gone for that client — forward secrecy, not a bug. The stale deaf leaf is
   garbage-collected by the coordinator (remove leaves whose key-package ref was superseded by
   a heal re-add from the same identity, or on next revoke sweep).
-- **Cross-device reality**: MLS state never syncs; NIP-EE/Marmot track each client as a
-  separate member. Every device = its own leaf, own 30443 slot (`clientId`), own join epoch,
-  own history window. There is **no history sync, ever** — MIP-06 multi-device (pairing,
-  External Commit) is an unimplementable draft and marmot-ts ships none of it. UI copy must
-  say "each device sees messages from when it joined."
+- **Cross-device reality**: for NIP-07/NIP-46 accounts, a fresh browser first restores
+  the same self-encrypted chat device key from the account's relay backup when available.
+  Each browser/device still has its own 30443 slot (`clientId`), MLS leaf, join epoch,
+  and history window. There is **no history sync**: UI copy must say "each device sees
+  messages from when it joined." The backup carries identity only, not MLS state.
 - **Same mechanism, three faces**: second browser, evicted browser, and new phone are all
   "new key package appears → coordinator adds it." This is why the auto-add bot is
   load-bearing and not a convenience.
@@ -633,9 +633,10 @@ label kept until marmot-ts reaches a version its authors call production-ready.
 
 Questions (decisions needed, none block Phase 0–1):
 
-1. **Chat-key backup**: include the chat device key in the existing encrypted backup flow by
-   default, or keep it install-local (lost device = heal loop, new identity npub in the
-   group)? Recommendation: include it — losing it silently forks the user's chat identity.
+1. **Chat-key backup (implemented):** NIP-07/NIP-46 chat device keys are backed up by
+   default as strict self-encrypted `31602` entries with `a:null` and a blinded
+   `chat-device-key` `d`. Only the 32-byte identity key is stored; MLS group/epoch
+   state and history remain per-device. Backup fetch failure is not proof of absence.
 2. **Nav layout**: Chat as sixth-tab-with-collapse (recommended, §7) vs More-menu row.
 3. **Coordinator group read access**: keep the coordinator as a plain reading member
    (required for auto-commit duty and simplest), or additionally surface a per-event "chat
@@ -655,7 +656,7 @@ Risks (accepted or mitigated, honestly):
   from-scratch TS MLS far less battle-tested than OpenMLS. Mitigation: exact pin,
   upgrade-as-audit, experimental label in UI, upstream engagement (we are early adopters and
   should behave like contributors). We would be the **first production web Marmot client**.
-- **Coordinator now holds unlosable state** (§4.3). "DB loss re-costs money" becomes "DB loss
+- **Coordinator now holds unlosable state** (§4.3). The previous "DB loss re-costs money" claim becomes "DB loss
   orphans the chat's admin." Mitigation: backups + second admin; residual risk real.
 - **Kind-number skew** (§1.1): anything still speaking merged-NIP-EE 443/10051 won't see our
   key packages. We bet on the living Marmot v2 spec (as MDK and marmot-ts do) and rely on
