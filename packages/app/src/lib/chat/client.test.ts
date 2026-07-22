@@ -227,6 +227,14 @@ describe("MarmotChat.start() — late welcome (G-3)", () => {
   });
 
   it("joins a welcome that arrives AFTER start(), not just ones present up front", async () => {
+    // The roster names this event's group id (fail-closed binding, NIP §10.4): a
+    // joined welcome only binds once a verified roster id matches it.
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-welcome-1",
+      attendees: [],
+    });
     const chat = await MarmotChat.create({ accountSigner, ctx });
     let stateChanges = 0;
     chat.onStateChange = () => stateChanges++;
@@ -274,6 +282,12 @@ describe("MarmotChat.send() — optimistic own-message echo (Bug 4)", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("surfaces the sender's own message locally, exactly once", async () => {
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-welcome-send",
+      attendees: [],
+    });
     const chat = await MarmotChat.create({ accountSigner, ctx });
     const seen: { id: string; content: string; pubkey: string }[] = [];
     chat.onMessage = (m) => seen.push(m);
@@ -353,6 +367,13 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
   }
 
   it("sends only to the current event's recorded group, never a foreign one", async () => {
+    // Fail-closed binding: the roster must name this event's group before it binds.
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-event-a",
+      attendees: [],
+    });
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.start();
     lastClient.invites.deliver({ id: "welcome-a", nostrGroupId: "gid-event-a" });
@@ -370,6 +391,12 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
   });
 
   it("a second verified join does not clobber this event's existing binding", async () => {
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-event-a",
+      attendees: [],
+    });
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.start();
     lastClient.invites.deliver({ id: "welcome-a", nostrGroupId: "gid-event-a" });
@@ -444,6 +471,70 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
     // No roster ground truth → operate on none rather than risk the wrong room.
     expect(await chat.nostrGroupId()).toBeUndefined();
     await expect(chat.send("oops")).rejects.toThrow("no joined chat group yet");
+  });
+});
+
+// ── Unbound-candidate Welcome routing, fail-closed (NIP §10.4). A joined welcome
+// is an UNBOUND CANDIDATE until a verified roster nostr_group_id matches it: no
+// binding, no routing, no send target. Roster outage keeps chat "setting up".
+describe("MarmotChat unbound-candidate routing (fail-closed, NIP §10.4)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+
+  it("keeps a joined welcome unbound during a roster outage (no id, fetch fails)", async () => {
+    // No cached roster and fetchRoster yields nothing (outage): the welcome joins
+    // marmot's pool but must never bind — chat stays in setup, and a send throws.
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "welcome-outage", nostrGroupId: "gid-outage" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-outage"]));
+
+    expect(await chat.nostrGroupId()).toBeUndefined();
+    await expect(chat.send("must not route to an unverified group")).rejects.toThrow(
+      "no joined chat group yet",
+    );
+    expect(lastClient.groups.send).not.toHaveBeenCalled();
+  });
+
+  it("never routes a candidate whose id the roster does not name (wrong-event welcome)", async () => {
+    // The roster names gid-right, but the welcome we joined is gid-wrong (another
+    // same-coordinator event's group). It must never be adopted as this event's room.
+    shared.rosters.set(coord, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-right",
+      attendees: [],
+    });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "welcome-wrong", nostrGroupId: "gid-wrong" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-wrong"]));
+
+    // gid-wrong joined, but the roster names gid-right (which we do NOT hold) → unbound.
+    expect(await chat.nostrGroupId()).toBeUndefined();
+    await expect(chat.send("wrong room")).rejects.toThrow("no joined chat group yet");
+  });
+
+  it("binds the candidate once the roster arrives naming it (repair path)", async () => {
+    // Join with no roster id yet → unbound. Then the roster publishes the id that
+    // matches the joined group → currentEventGroups() repairs the binding.
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "welcome-late", nostrGroupId: "gid-late" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-late"]));
+    expect(await chat.nostrGroupId()).toBeUndefined();
+
+    // The roster catches up and names this event's group.
+    shared.rosters.set(coord, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-late",
+      attendees: [],
+    });
+    expect(await chat.nostrGroupId()).toBe("gid-late");
+    await chat.send("now that we're bound");
+    expect(lastClient.groups.send).toHaveBeenCalledOnce();
   });
 });
 

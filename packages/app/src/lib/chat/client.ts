@@ -339,31 +339,36 @@ export class MarmotChat {
           await this.client.groups.destroy(group.id).catch(() => {});
           continue;
         }
-        // APPK-3: bind this event's coordinate to the joined group so every
-        // later bind/send/membership check targets THIS event's room only.
+        // APPK-3 / NIP §10.4: bind this event's coordinate to the joined group so
+        // every later bind/send/membership check targets THIS event's room only.
         // A welcome carries no event coordinate, so with two chat events on the
         // SAME coordinator a welcome for the OTHER event is indistinguishable at
-        // the MLS layer. Ground truth now exists: the coordinator advertises this
-        // event's MLS routing id on the (member-only, ECK) roster. Bind only when
-        // the joined group IS this event's roster group; when the roster names a
-        // different id, this welcome belongs to another same-coordinator event —
-        // leave the group joined for that event's session to claim, but never
-        // bind it here. When the roster carries no id yet (old coordinator), fall
-        // back to first-verified-wins, and let currentEventGroups() reconcile once
-        // the roster republishes.
+        // the MLS layer. Ground truth is the coordinator-advertised `nostr_group_id`
+        // on the (member-only, ECK) roster.
+        //
+        // FAIL-CLOSED: a binding is ONLY ever created from a verified roster id
+        // that matches this joined group. Until then the group stays an UNBOUND
+        // CANDIDATE — joined in marmot's pool but never bound, so currentEventGroups()
+        // gives it no listener, no history replay, no display, and no send target.
+        // The old code recorded a first-verified-wins binding whenever the roster
+        // carried no id yet; that could silently adopt another same-coordinator
+        // event's (or an unverified) group as this event's room. currentEventGroups()
+        // repairs the binding later, once the roster (re)publishes the id and matches.
         const joinedId = getNostrGroupIdHex(group.state);
         const advertised = cachedRoster(this.ctx.coordinate)?.nostr_group_id;
         const existing = await this.recordedEventGroupId();
-        if (advertised && joinedId !== advertised) {
-          console.warn(
-            "marmot: joined group is not this event's roster group — not binding it to this event",
-          );
-        } else if (existing && existing !== joinedId) {
-          console.warn(
-            "marmot: joined a second coordinator-verified group — keeping this event's existing binding",
-          );
-        } else if (!existing) {
+        if (existing) {
+          if (existing !== joinedId) {
+            console.warn(
+              "marmot: joined another group — keeping this event's existing verified binding",
+            );
+          }
+        } else if (advertised && joinedId === advertised) {
           await this.eventGroups.setItem(this.ctx.coordinate, joinedId).catch(() => {});
+        } else {
+          console.warn(
+            "marmot: joined group left as an unbound candidate (no verified roster id match yet)",
+          );
         }
         await this.client.invites.markAsRead(invite.id).catch(() => {});
       } catch (err) {
@@ -420,7 +425,19 @@ export class MarmotChat {
           .catch(() => undefined);
         liveAdvertised = await this.liveRosterFetch;
       }
-      if (liveAdvertised && liveAdvertised !== recorded) {
+      // FAIL-CLOSED (NIP §10.4): with NO roster id available at all — cold/stale
+      // cache AND a failed or id-less live fetch — we cannot confirm the recorded
+      // binding still names this event's group. Refuse to route rather than trust an
+      // unverifiable binding (a binding is only ever created from a verified roster
+      // id, but a legacy pre-fix install may hold a fail-open one). Chat stays
+      // "setting up" until the roster republishes the id.
+      if (!liveAdvertised) {
+        console.warn(
+          "marmot: no roster-advertised group id to confirm the recorded binding — refusing to route (fail-closed)",
+        );
+        return [];
+      }
+      if (liveAdvertised !== recorded) {
         const match = all.filter((g) => safeGroupIdHex(g) === liveAdvertised);
         if (match.length > 0) {
           // We hold this event's real group — re-point the binding to it.
