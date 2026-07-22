@@ -165,7 +165,7 @@ export function buildMatchList(
       complementarity: r.complementarity,
       reasoning: r.reasoning,
     }));
-  return { v: 1, computed_at: now, matches };
+  return { v: 2, computed_at: now, matches };
 }
 
 /** Pubkeys whose match list must be republished after scoring these pairs. */

@@ -161,7 +161,7 @@ export async function createEvent(
 
   // 4. Self-encrypted organizer key backup (30078 eventkeys, spec §7.3).
   const backup: EventKeysBackup = {
-    v: 1,
+    v: 2,
     a: coordinate, // so a fresh device can restore into the coordinate-keyed keystore
     eid_nsec: bytesToHex(eidSk),
     einbox_nsec: bytesToHex(einboxSk),

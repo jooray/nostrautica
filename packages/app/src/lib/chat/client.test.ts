@@ -395,7 +395,7 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
     // Legacy install: joined group, no recorded coordinate→group binding. The
     // roster now names THIS event's group id, so it binds by that — not by a guess.
     shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
-      v: 1,
+      v: 2,
       eck_current: 1,
       nostr_group_id: "gid-legacy",
       attendees: [],
@@ -413,7 +413,7 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
     // by the old guess — that guess is exactly what could misroute a send, so with
     // ground truth absent we now refuse rather than risk the wrong room.
     shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
-      v: 1,
+      v: 2,
       eck_current: 1,
       attendees: [],
     });
@@ -467,8 +467,8 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     const { InMemoryKvBackend } = await import("./stores.js");
     shared.backend = new (InMemoryKvBackend as new () => unknown)();
     shared.groups = [joinedGroup(1, "gid-A"), joinedGroup(2, "gid-B")];
-    shared.rosters.set(coordA, { v: 1, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
-    shared.rosters.set(coordB, { v: 1, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
+    shared.rosters.set(coordA, { v: 2, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
+    shared.rosters.set(coordB, { v: 2, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
 
     const chatA = await MarmotChat.create({ accountSigner, ctx: ctxA });
     const clientA = lastClient;
@@ -497,7 +497,7 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     const backend = new InMemoryKvBackend();
     shared.backend = backend;
     shared.groups = [joinedGroup(1, "gid-A"), joinedGroup(2, "gid-B")];
-    shared.rosters.set(coordA, { v: 1, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
+    shared.rosters.set(coordA, { v: 2, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
     // Seed a WRONG binding: event A points at event B's group (the exact pre-fix
     // mis-bind — nothing re-points a present-but-wrong binding on its own). Identity
     // pubkey is "c"*64 (identity mock); the store key is <identity>␟<ns>␟<coordinate>.
@@ -525,7 +525,7 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     const backend = new InMemoryKvBackend();
     shared.backend = backend;
     shared.groups = [joinedGroup(1, "gid-A"), joinedGroup(2, "gid-B")];
-    shared.rosters.set(coordA, { v: 1, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
+    shared.rosters.set(coordA, { v: 2, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
     shared.staleCache.add(coordA);
     const identity = "c".repeat(64);
     await backend.set(`${identity}${MARMOT_NAMESPACES.eventGroups}${coordA}`, "gid-B");
@@ -553,7 +553,7 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     // We only hold event A's group; event B's real group (gid-B) is NOT joined,
     // and B's roster cache is also cold.
     shared.groups = [joinedGroup(1, "gid-A")];
-    shared.rosters.set(coordB, { v: 1, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
+    shared.rosters.set(coordB, { v: 2, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
     shared.staleCache.add(coordB);
     const identity = "c".repeat(64);
     await backend.set(`${identity}${MARMOT_NAMESPACES.eventGroups}${coordB}`, "gid-A");
@@ -575,7 +575,7 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     shared.backend = backend;
     // We only hold event A's group; event B's real group (gid-B) is NOT joined.
     shared.groups = [joinedGroup(1, "gid-A")];
-    shared.rosters.set(coordB, { v: 1, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
+    shared.rosters.set(coordB, { v: 2, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
     const identity = "c".repeat(64);
     // Event B is mis-bound to A's group. The roster says B is gid-B, which we don't
     // hold → refuse to route (never fall back to the recorded, wrong group A).

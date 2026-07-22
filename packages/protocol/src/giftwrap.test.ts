@@ -44,7 +44,7 @@ describe("gift wrap (NIP-59)", () => {
     const inboxSk = generateSecretKey();
     const inboxPk = getPublicKey(inboxSk);
 
-    const payload = { v: 1, name: "Alice", message: "let me in", rsvp_public: false };
+    const payload = { v: 2, name: "Alice", message: "let me in", rsvp_public: false };
     const wrap = wrapRumor(sender, inboxPk, {
       kind: KIND_JOIN_REQUEST,
       content: payload,
@@ -71,7 +71,7 @@ describe("gift wrap (NIP-59)", () => {
     const inboxPk = getPublicKey(generateSecretKey());
     const wrap = wrapRumor(sender, inboxPk, {
       kind: KIND_JOIN_REQUEST,
-      content: { v: 1, name: "x" },
+      content: { v: 2, name: "x" },
     });
     expect(() => unwrapRumor(wrap, generateSecretKey())).toThrow();
   });
@@ -93,7 +93,7 @@ describe("gift wrap (NIP-59)", () => {
       created_at: 1,
       kind: KIND_JOIN_REQUEST,
       tags: [],
-      content: JSON.stringify({ v: 1, name: "mallory" }),
+      content: JSON.stringify({ v: 2, name: "mallory" }),
     };
     const rumorWithId = { ...forgedRumor, id: getEventHash(forgedRumor) };
     const seal = finalizeEvent(
@@ -113,7 +113,7 @@ describe("gift wrap (NIP-59)", () => {
     const now = Math.floor(Date.now() / 1000);
     const wrap = wrapRumor(generateSecretKey(), getPublicKey(generateSecretKey()), {
       kind: KIND_JOIN_REQUEST,
-      content: { v: 1, name: "x" },
+      content: { v: 2, name: "x" },
     });
     expect(wrap.created_at).toBeLessThanOrEqual(now + 5);
     expect(wrap.created_at).toBeGreaterThanOrEqual(now - 2 * 24 * 60 * 60 - 5);
@@ -185,7 +185,7 @@ describe("unwrap boundary validation (PROTO-2)", () => {
       created_at: 1,
       kind: KIND_JOIN_REQUEST,
       tags: [["a", "31923:" + "a".repeat(64) + ":ev"]],
-      content: JSON.stringify({ v: 1, name: "honest" }),
+      content: JSON.stringify({ v: 2, name: "honest" }),
     };
     const rumor = { ...unsigned, id: getEventHash(unsigned) };
     const unwrapped = unwrapRumor(
@@ -204,7 +204,7 @@ describe("rumor created_at clamping (PROTO-8)", () => {
     const now = Math.floor(Date.now() / 1000);
     const wrap = wrapRumor(generateSecretKey(), getPublicKey(inboxSk), {
       kind: KIND_JOIN_REQUEST,
-      content: { v: 1, name: "time traveler" },
+      content: { v: 2, name: "time traveler" },
       created_at: now + 2 * 86400, // 2 days in the future
     });
     const rumor = unwrapRumor(wrap, inboxSk);
@@ -221,7 +221,7 @@ describe("rumor created_at clamping (PROTO-8)", () => {
     for (const ts of [now - 86400, now, now + 5 * 60 /* within the 15-min skew */]) {
       const wrap = wrapRumor(generateSecretKey(), getPublicKey(inboxSk), {
         kind: KIND_JOIN_REQUEST,
-        content: { v: 1, name: "x" },
+        content: { v: 2, name: "x" },
         created_at: ts,
       });
       expect(unwrapRumor(wrap, inboxSk).created_at).toBe(ts);

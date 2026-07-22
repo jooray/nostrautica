@@ -121,13 +121,13 @@ describe("event config (kind 31600)", () => {
     expect(offBuilt.tags.find((t) => t[0] === "talks")).toBeUndefined();
     expect(parseEventConfig(pubkey, offBuilt.tags).talks).toBe("off");
     // a config with NO talks tag at all parses as "off" (normal event unchanged)
-    expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)]]).talks).toBe("off");
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)]]).talks).toBe("off");
     // on → emitted + parsed
     const onBuilt = buildEventConfig({ ...base, talks: "on" });
     expect(onBuilt.tags).toContainEqual(["talks", "on"]);
     expect(parseEventConfig(pubkey, onBuilt.tags).talks).toBe("on");
     // an unrecognized talks value degrades to "off" (never throws)
-    expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)], ["talks", "bogus"]]).talks).toBe("off");
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)], ["talks", "bogus"]]).talks).toBe("off");
   });
 
   it("omits the chat tag when off (default) but round-trips marmot", () => {
@@ -153,7 +153,7 @@ describe("event config (kind 31600)", () => {
     expect(offBuilt.tags.find((t) => t[0] === "chat")).toBeUndefined();
     expect(parseEventConfig(pubkey, offBuilt.tags).chat).toEqual([]);
     // a config with NO chat tag parses as [] (normal event unchanged)
-    expect(parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)]]).chat).toEqual([]);
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)]]).chat).toEqual([]);
     // marmot → emitted + parsed
     const onBuilt = buildEventConfig({ ...base, chat: ["marmot"] });
     expect(onBuilt.tags).toContainEqual(["chat", "marmot"]);
@@ -163,7 +163,7 @@ describe("event config (kind 31600)", () => {
   it("drops unknown chat values and de-duplicates known ones", () => {
     // unknown backend → dropped (never surfaced), keeps the known one once
     const parsed = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["chat", "signal"], // unknown backend
       ["chat", "marmot"],
@@ -174,7 +174,7 @@ describe("event config (kind 31600)", () => {
 
   it("isMarmotChatEnabled requires both the chat tag and a coordinator", () => {
     const withCoord = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["coordinator", "c".repeat(64)],
       ["chat", "marmot"],
@@ -182,7 +182,7 @@ describe("event config (kind 31600)", () => {
     expect(isMarmotChatEnabled(withCoord)).toBe(true);
     // chat=marmot but no coordinator → parsed (kept) but NOT operative
     const noCoord = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["chat", "marmot"],
     ]);
@@ -190,7 +190,7 @@ describe("event config (kind 31600)", () => {
     expect(isMarmotChatEnabled(noCoord)).toBe(false);
     // coordinator but no chat → not operative
     const noChat = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["coordinator", "c".repeat(64)],
     ]);
@@ -199,7 +199,7 @@ describe("event config (kind 31600)", () => {
 
   it("defaults sensibly when tags are missing", () => {
     const parsed = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
     ]);
     expect(parsed.approval).toBe("manual");
@@ -212,7 +212,7 @@ describe("event config (kind 31600)", () => {
   // ── Q7: malformed config degrades to defaults, never NaN / bad enums ────────
   it("clamps out-of-range enums to their documented defaults", () => {
     const parsed = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["approval", "everyone"], // not a valid Approval
       ["match_visibility", "world"], // not a valid MatchVisibility
@@ -246,7 +246,7 @@ describe("event config (kind 31600)", () => {
     expect(parsedUnlimited.maxTalkSec).toBe(UNLIMITED_SEC);
     // An event with the tag entirely absent (legacy/backward-compat) still falls
     // back to the spec defaults, NOT unlimited — omission and "0" mean different things.
-    const legacy = parseEventConfig(pubkey, [["d", "ev"], ["inbox", "b".repeat(64)]]);
+    const legacy = parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)]]);
     expect(legacy.maxVideoSec).toBe(90);
     expect(legacy.maxTalkSec).toBe(900);
     // A normal capped event (90/900) still round-trips exactly as before.
@@ -257,7 +257,7 @@ describe("event config (kind 31600)", () => {
 
   it("falls back to defaults for non-numeric / negative numeric tags (never NaN)", () => {
     const parsed = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["max_video_sec", "not-a-number"],
       ["nostr_context", "-5"],
@@ -272,26 +272,26 @@ describe("event config (kind 31600)", () => {
   // ── PROTO-5: inbox/coordinator pubkeys + relay/blossom URL validation ──────
   it("validates the inbox/coordinator pubkeys (fail-soft)", () => {
     // A malformed inbox is treated as missing → the required-tag throw fires.
-    expect(() => parseEventConfig(pubkey, [["d", "ev"], ["inbox", "nothex"]])).toThrow();
+    expect(() => parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "nothex"]])).toThrow();
     expect(() =>
-      parseEventConfig(pubkey, [["d", "ev"], ["inbox", "B".repeat(64)]]),
+      parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "B".repeat(64)]]),
     ).toThrow();
     // A malformed coordinator is dropped (optional tag → absent), never surfaced.
     const parsed = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["coordinator", "nothex"],
     ]);
     expect(parsed.coordinator).toBeUndefined();
     const upper = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["coordinator", "C".repeat(64)], // uppercase hex: dropped like any invalid value
     ]);
     expect(upper.coordinator).toBeUndefined();
     // A valid coordinator still parses.
     const ok = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["coordinator", "c".repeat(64)],
     ]);
@@ -300,7 +300,7 @@ describe("event config (kind 31600)", () => {
 
   it("keeps only wss:// relay tags and https:// blossom tags", () => {
     const parsed = parseEventConfig(pubkey, [
-      ["d", "ev"],
+      ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["relay", "wss://relay.a"],
       ["relay", "https://not-a-relay.example"],

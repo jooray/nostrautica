@@ -1090,7 +1090,7 @@ export class Coordinator {
       links: profile.links.slice(0, 32).map((l) => capAuthoredText(l, 500)),
     };
     const entry = buildDirectoryEntry(this.publishKeys(state), state.coordinate, {
-      v: 1,
+      v: 2,
       pubkey,
       ...(attendee?.display_name ? { name: capAuthoredText(attendee.display_name, MAX_NAME_CHARS) } : {}),
       profile: cappedProfile,
@@ -1114,7 +1114,7 @@ export class Coordinator {
     const group = this.deps.store.getMarmotGroup(state.coordinate);
     const nostrGroupId = group?.status === "active" ? group.nostr_group_id : undefined;
     const roster: RosterContent = {
-      v: 1,
+      v: 2,
       eck_current: this.currentEck(state).id,
       ...(nostrGroupId ? { nostr_group_id: nostrGroupId } : {}),
       attendees: approved.map((a) => ({
@@ -1318,7 +1318,7 @@ export class Coordinator {
     const publishedAt =
       talk.published_at > 0 ? talk.published_at : Math.floor(this.now() / 1000);
     const content: TalkContent = {
-      v: 1,
+      v: 2,
       pubkey,
       talk_d: talkD,
       title: talk.title,
@@ -1611,7 +1611,7 @@ export class Coordinator {
         pairs.push({ a, b, score: row.score });
       }
     }
-    const content: MatchMatrixContent = { v: 1, computed_at: Math.floor(this.now() / 1000), pairs };
+    const content: MatchMatrixContent = { v: 2, computed_at: Math.floor(this.now() / 1000), pairs };
     const event = buildMatchMatrix(this.publishKeys(state), state.coordinate, content);
     await this.deps.transport.publish(event, state.configRelays);
     log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
@@ -2166,7 +2166,7 @@ export class Coordinator {
       updated_at: this.now(),
     });
     const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
-      v: 1,
+      v: 2,
       a: coordinate,
       ...(pubkey ? { pubkey } : {}),
       stage: info.type,

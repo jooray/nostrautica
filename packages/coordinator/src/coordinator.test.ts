@@ -278,8 +278,8 @@ async function setup(
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ...(opts.chat ? [["chat", "marmot"], ["coordinator", opts.foreignCoordinator ?? coordPubkey]] : opts.foreignCoordinator ? [["coordinator", opts.foreignCoordinator]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
-    { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 1, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ...(opts.chat ? [["chat", "marmot"], ["coordinator", opts.foreignCoordinator ?? coordPubkey]] : opts.foreignCoordinator ? [["coordinator", opts.foreignCoordinator]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d }) ?? []),
   );
 
@@ -341,13 +341,13 @@ async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Pr
 
   const joinWrap = wrapRumor(attendeeSk, inboxPk, {
     kind: KIND_JOIN_REQUEST,
-    content: { v: 1, name: f.about, message: "", rsvp_public: false },
+    content: { v: 2, name: f.about, message: "", rsvp_public: false },
     tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
   });
   const subWrap = wrapRumor(attendeeSk, inboxPk, {
     kind: KIND_PROFILE_SUBMISSION,
     content: {
-      v: 1,
+      v: 2,
       profile: { about: f.about, skills: f.skills, looking_for: "", links: [] },
       media: [{
         kind: "intro", url: ["https://blob/x"],
@@ -377,7 +377,7 @@ async function resubmitIntro(h: Harness, attendeeSk: Uint8Array, fixture: Fixtur
   const subWrap = wrapRumor(attendeeSk, inboxPk, {
     kind: KIND_PROFILE_SUBMISSION,
     content: {
-      v: 1,
+      v: 2,
       profile: { about: f.about, skills: f.skills, looking_for: "", links: [] },
       media: [{
         kind: "intro", url: ["https://blob/x2"],
@@ -408,13 +408,13 @@ async function joinCustom(
   const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
   const joinWrap = wrapRumor(attendeeSk, inboxPk, {
     kind: KIND_JOIN_REQUEST,
-    content: { v: 1, name: about, message: "", rsvp_public: false },
+    content: { v: 2, name: about, message: "", rsvp_public: false },
     tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
   });
   const subWrap = wrapRumor(attendeeSk, inboxPk, {
     kind: KIND_PROFILE_SUBMISSION,
     content: {
-      v: 1,
+      v: 2,
       profile: { about, skills, looking_for: "", links: [] },
       media: opts.media ?? [],
       ...(opts.introText ? { intro_text: opts.introText } : {}),
@@ -523,7 +523,7 @@ describe("F3 — ai_profile correction / hide (U9)", () => {
     const inboxPk = getPublicKey(h.einboxSk);
     const wrap = wrapRumor(attendeeSk, inboxPk, {
       kind: KIND_PROFILE_CORRECTION,
-      content: { v: 1, a: h.coordinate, ...content },
+      content: { v: 2, a: h.coordinate, ...content },
       tags: [["a", h.coordinate]],
     });
     await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
@@ -605,7 +605,7 @@ describe("F3 — ai_profile correction / hide (U9)", () => {
     // so it is re-applied at publish time.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 1, a: h.coordinate, cmd: "reprocess", args: { pubkey: pk } },
+      content: { v: 2, a: h.coordinate, cmd: "reprocess", args: { pubkey: pk } },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -780,7 +780,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Organizer (E_id) sends a 21604 revoke admin command for the cryptographer.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 1, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -884,7 +884,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const coordinate2 = makeCoordinate(getPublicKey(eid2Sk), "second-event");
     const inbox2Sk = generateSecretKey();
     const grantContent = {
-      v: 1,
+      v: 2,
       a: coordinate2,
       inbox_nsec: bytesToHex(inbox2Sk),
       eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -901,6 +901,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
       content: "",
       tags: [
         ["d", "second-event"],
+        ["v", "2"],
         ["inbox", getPublicKey(inbox2Sk)],
         ["coordinator", getPublicKey(h.coordSk)],
       ],
@@ -1019,7 +1020,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Revoke the cryptographer.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 1, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -1069,7 +1070,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const eidPubkey = getPublicKey(h.eidSk);
     const newer = {
       kind: 31600, pubkey: eidPubkey, created_at: 100,
-      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
       content: "", id: "cfg-2", sig: "",
     } as any;
     await h.coordinator.handleConfigUpdate(h.coordinate, newer);
@@ -1087,13 +1088,13 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const attacker = generateSecretKey();
     await h.coordinator.handleConfigUpdate(h.coordinate, {
       kind: 31600, pubkey: getPublicKey(attacker), created_at: 100,
-      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
       content: "", id: "forged", sig: "",
     } as any);
     // Older-than-applied (created_at < install's 1) → ignored.
     await h.coordinator.handleConfigUpdate(h.coordinate, {
       kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 0,
-      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
       content: "", id: "stale", sig: "",
     } as any);
     await h.coordinator.jobs.drain();
@@ -1115,7 +1116,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Manual reprocess (fresh dedupe key → the job DOES run) must hit the caches.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 1, a: h.coordinate, cmd: "reprocess", args: { pubkey: cryptoPk } },
+      content: { v: 2, a: h.coordinate, cmd: "reprocess", args: { pubkey: cryptoPk } },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -1255,7 +1256,7 @@ async function submitTalk(
   const wrap = wrapRumor(speakerSk, inboxPk, {
     kind: KIND_TALK_SUBMISSION,
     content: {
-      v: 1,
+      v: 2,
       a: h.coordinate,
       talk_d: args.talkD,
       title: args.title,
@@ -1276,7 +1277,7 @@ let adminNonce = 0;
 async function admin(h: Harness, cmd: string, args: Record<string, unknown>): Promise<void> {
   const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
     kind: KIND_ADMIN_COMMAND,
-    content: { v: 1, a: h.coordinate, cmd, args: { ...args, _n: adminNonce++ } },
+    content: { v: 2, a: h.coordinate, cmd, args: { ...args, _n: adminNonce++ } },
   });
   await h.coordinator.handleCoordinatorWrap(wrap as any);
 }
@@ -1413,7 +1414,7 @@ async function joinOnly(
   const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
   const wrap = wrapRumor(attendeeSk, inboxPk, {
     kind: KIND_JOIN_REQUEST,
-    content: { v: 1, name, message: "", rsvp_public: false },
+    content: { v: 2, name, message: "", rsvp_public: false },
     tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
     ...(opts.created_at !== undefined ? { created_at: opts.created_at } : {}),
   });
@@ -1479,7 +1480,7 @@ describe("audit P0-3 — duplicate rumors don't execute concurrently", () => {
     // subscription callbacks pass the read-only seen check and grant in parallel.
     const wrap = wrapRumor(attendeeSk, inboxPk, {
       kind: KIND_JOIN_REQUEST,
-      content: { v: 1, name: "crypto", message: "", rsvp_public: false },
+      content: { v: 2, name: "crypto", message: "", rsvp_public: false },
       tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
     });
     await Promise.all([
@@ -1501,7 +1502,7 @@ describe("audit P0-2 — profile submissions are latest-wins on out-of-order del
     const mkSub = (about: string, createdAt: number) =>
       wrapRumor(sk, inboxPk, {
         kind: KIND_PROFILE_SUBMISSION,
-        content: { v: 1, profile: { about, skills: [], looking_for: "", links: [] }, media: [] },
+        content: { v: 2, profile: { about, skills: [], looking_for: "", links: [] }, media: [] },
         tags: [["a", h.coordinate]],
         created_at: createdAt,
       });
@@ -1567,7 +1568,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
       pubkey: getPublicKey(h.eidSk),
       created_at: 2,
       id: "cfg-foreign",
-      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", foreign]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", foreign]],
       content: "",
       sig: "",
     } as any);
@@ -1584,7 +1585,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
     const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
       kind: KIND_COORDINATOR_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: coord2,
         inbox_nsec: bytesToHex(einbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -1604,7 +1605,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
     const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
       kind: KIND_COORDINATOR_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: coord2,
         inbox_nsec: bytesToHex(einbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -1631,6 +1632,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
       content: "",
       tags: [
         ["d", "relay-check"],
+        ["v", "2"],
         ["inbox", getPublicKey(einbox2)],
         ["coordinator", getPublicKey(h.coordSk)],
       ],
@@ -1638,7 +1640,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
     const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
       kind: KIND_COORDINATOR_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: coord2,
         inbox_nsec: bytesToHex(einbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -1662,7 +1664,7 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
     const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
       kind: KIND_COORDINATOR_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: coord2,
         inbox_nsec: bytesToHex(inbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -1685,7 +1687,7 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
       id: `cfg-${d}`,
       sig: "",
       content: "",
-      tags: [["d", d], ...tags],
+      tags: [["d", d], ["v", "2"], ...tags],
     } as any);
   }
 
@@ -1913,6 +1915,7 @@ describe("audit COORD-8 — relay handover re-creates subscriptions", () => {
       id: "cfg-relays",
       tags: [
         ["d", "cypherpunk"],
+        ["v", "2"],
         ["inbox", getPublicKey(h.einboxSk)],
         ["relay", "wss://new.relay"],
         ["matching", "on"],
@@ -2037,7 +2040,7 @@ describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () =
       wrapRumor(eidSk, coordPub, {
         kind: KIND_COORDINATOR_GRANT,
         content: {
-          v: 1,
+          v: 2,
           a: coordinate,
           inbox_nsec: bytesToHex(einboxSk),
           eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -2055,6 +2058,7 @@ describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () =
       content: "",
       tags: [
         ["d", "backfilled-event"],
+        ["v", "2"],
         ["inbox", getPublicKey(einboxSk)],
         ["coordinator", coordPub],
       ],
@@ -2134,7 +2138,7 @@ describe("audit COORD-12 — publish-boundary output hygiene", () => {
     });
     const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
       kind: KIND_PROFILE_CORRECTION,
-      content: { v: 1, a: h.coordinate },
+      content: { v: 2, a: h.coordinate },
       tags: [["a", h.coordinate]],
     });
     await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
@@ -2172,7 +2176,7 @@ describe("audit COORD-14 — install picks the newest 31600", () => {
           id: "e2-newer",
           sig: "",
           content: "",
-          tags: [["d", d], ["inbox", "f".repeat(64)], ["matching", "off"]],
+          tags: [["d", d], ["v", "2"], ["inbox", "f".repeat(64)], ["matching", "off"]],
         } as any,
       ],
     });
@@ -2219,7 +2223,7 @@ describe("audit COORD-28 — talk jobs re-check talks mode at execution", () => 
       pubkey: getPublicKey(h.eidSk),
       created_at: 2,
       id: "cfg-talks-off",
-      tags: [["d", "cypherpunk"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"]],
       content: "",
       sig: "",
     } as any);
@@ -2278,7 +2282,7 @@ describe("audit COORD-29 — invite hashes are cached per event", () => {
       id: "inv-fresh",
       tags: [["d", "cypherpunk"]],
       content: JSON.stringify({
-        v: 1,
+        v: 2,
         invites: [...h.invites, freshInviteSk].map((sk) => ({ h: inviteHash(getPublicKey(sk)) })),
       }),
       sig: "",
@@ -2292,7 +2296,7 @@ describe("audit COORD-29 — invite hashes are cached per event", () => {
       h.coordinate,
       wrapRumor(attendeeSk, inboxPk, {
         kind: KIND_JOIN_REQUEST,
-        content: { v: 1, name: "fresh-code-holder", message: "", rsvp_public: false },
+        content: { v: 2, name: "fresh-code-holder", message: "", rsvp_public: false },
         tags: [["a", h.coordinate], ["invite", getPublicKey(freshInviteSk), proof.sig]],
       }) as any,
     );
@@ -2320,7 +2324,7 @@ describe("audit COORD-29 — invite hashes are cached per event", () => {
       h.coordinate,
       wrapRumor(attendeeSk, inboxPk, {
         kind: KIND_JOIN_REQUEST,
-        content: { v: 1, name: "no code", message: "", rsvp_public: false },
+        content: { v: 2, name: "no code", message: "", rsvp_public: false },
         tags: [["a", h.coordinate]], // no ["invite", ...] tag
       }) as any,
     );
@@ -2339,7 +2343,7 @@ describe("audit COORD-29 — invite hashes are cached per event", () => {
       h.coordinate,
       wrapRumor(secondAttendeeSk, inboxPk, {
         kind: KIND_JOIN_REQUEST,
-        content: { v: 1, name: "reused code", message: "", rsvp_public: false },
+        content: { v: 2, name: "reused code", message: "", rsvp_public: false },
         tags: [["a", h.coordinate], ["invite", getPublicKey(dupeInviteSk), dupeProof.sig]],
       }) as any,
     );

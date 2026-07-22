@@ -77,7 +77,7 @@ export async function publishChatDeviceKeyBackup(
   const blindingKey = await deriveBlindingKey(signer);
   const d = blindedDLiteral(blindingKey, DEVICE_KEY_LITERAL);
   const content = {
-    v: 1,
+    v: 2,
     a: null,
     chat_device_key: bytesToBase64(new Uint8Array(deviceKey)),
   };

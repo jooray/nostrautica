@@ -1,13 +1,100 @@
 /**
  * Zod schemas for every encrypted/JSON payload in spec §7. Every payload is
- * versioned (`"v": 1`). These validate what we parse off relays before trusting
- * it — malformed or hostile payloads are rejected at the boundary.
+ * versioned (`"v": 2`, wire v2). These validate what we parse off relays before
+ * trusting it — malformed or hostile payloads are rejected at the boundary.
+ *
+ * Wire v2 (NIP §2, decisions D1/D2) is a STRICT, flag-day parse: `v` must be
+ * exactly `2`. v1's forward-tolerant `z.number().int().positive()` is gone —
+ * a future breaking payload would have been silently misparsed as v1. A payload
+ * declaring a higher `v` is now REJECTED and, when it comes from a trusted
+ * authority, surfaced as an "update the app" prompt (see the version helpers
+ * below).
  */
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
-const version = z.literal(1).or(z.number().int().positive()); // accept v1; forward-tolerant
+/** The public-event `["v", …]` tag value for this protocol version ("2"). */
+export const PROTOCOL_VERSION_TAG = String(PROTOCOL_VERSION);
+
+// Strict wire version (NIP §2, D1): exactly `2`, not "any positive integer".
+const version = z.literal(PROTOCOL_VERSION);
+
+/**
+ * Thrown when a payload/event declares an integer protocol version strictly
+ * NEWER than this client understands (`v > PROTOCOL_VERSION`). Distinct from a
+ * generic malformed-payload error so callers can tell "from the future" (prompt
+ * the user to update, NIP §2 / D2) apart from "hostile/garbled" (drop silently).
+ */
+export class NewerProtocolVersionError extends Error {
+  readonly newerVersion: number;
+  constructor(newerVersion: number) {
+    super(
+      `payload requires protocol v${newerVersion}; this client speaks v${PROTOCOL_VERSION} — update required`,
+    );
+    this.name = "NewerProtocolVersionError";
+    this.newerVersion = newerVersion;
+  }
+}
+
+/** The integer `v` of a raw JSON payload object, or undefined when absent/non-integer. */
+export function readPayloadVersion(raw: unknown): number | undefined {
+  if (raw && typeof raw === "object" && "v" in raw) {
+    const v = (raw as { v: unknown }).v;
+    if (typeof v === "number" && Number.isInteger(v)) return v;
+  }
+  return undefined;
+}
+
+/** The integer version from a public event's `["v", …]` tag, or undefined. */
+export function readEventVersionTag(tags: string[][]): number | undefined {
+  const raw = tags.find((t) => t[0] === "v")?.[1];
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : undefined;
+}
+
+/**
+ * True when a public event carries exactly `["v","2"]`. Readers of public custom
+ * kinds MUST ignore events failing this (NIP §2): an absent or mismatched tag
+ * means the event is not a v2 event this client can trust.
+ */
+export function hasCurrentVersionTag(tags: string[][]): boolean {
+  return readEventVersionTag(tags) === PROTOCOL_VERSION;
+}
+
+/** True when a raw payload declares an integer `v` strictly newer than this client. */
+export function isNewerProtocolVersion(raw: unknown): boolean {
+  const v = readPayloadVersion(raw);
+  return v !== undefined && v > PROTOCOL_VERSION;
+}
+
+/** True when a public event's `["v", …]` tag names a version newer than this client. */
+export function isNewerVersionTag(tags: string[][]): boolean {
+  const v = readEventVersionTag(tags);
+  return v !== undefined && v > PROTOCOL_VERSION;
+}
+
+/**
+ * Discriminated parse result: distinguishes a NEWER-version payload (update the
+ * app, D2) from a generic invalid one, so a caller reading from a trusted
+ * authority key can drive the update prompt rather than silently dropping the
+ * event. On the happy path this is just `schema.parse` with a typed wrapper.
+ */
+export type ParseResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: "newer-version"; version: number }
+  | { ok: false; reason: "invalid"; error: z.ZodError };
+
+export function parsePayloadSafe<T>(schema: z.ZodType<T>, raw: unknown): ParseResult<T> {
+  const res = schema.safeParse(raw);
+  if (res.success) return { ok: true, value: res.data };
+  const v = readPayloadVersion(raw);
+  if (v !== undefined && v > PROTOCOL_VERSION) {
+    return { ok: false, reason: "newer-version", version: v };
+  }
+  return { ok: false, reason: "invalid", error: res.error };
+}
 
 // Lowercase-only (audit PROTO-6): every downstream comparison is case-sensitive,
 // so an uppercase-A-F pubkey that validated could never match anything.
@@ -672,7 +759,15 @@ export const coordinatorAnnounceSchema = z.object({
 });
 export type CoordinatorAnnounce = z.infer<typeof coordinatorAnnounceSchema>;
 
-/** Parse-and-validate helper that throws a descriptive error on mismatch. */
+/**
+ * Parse-and-validate helper. Throws `NewerProtocolVersionError` when the payload
+ * declares an integer `v` newer than this client (so callers can prompt an
+ * update, NIP §2 / D2), and the underlying `ZodError` otherwise.
+ */
 export function parsePayload<T>(schema: z.ZodType<T>, raw: unknown): T {
-  return schema.parse(raw);
+  const res = schema.safeParse(raw);
+  if (res.success) return res.data;
+  const v = readPayloadVersion(raw);
+  if (v !== undefined && v > PROTOCOL_VERSION) throw new NewerProtocolVersionError(v);
+  throw res.error;
 }

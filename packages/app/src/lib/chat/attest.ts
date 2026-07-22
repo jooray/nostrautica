@@ -35,7 +35,7 @@ export function buildChatKeyAttestationContent(
   input: AttestationInput,
 ): ChatKeyAttestationContent {
   return chatKeyAttestationContentSchema.parse({
-    v: 1,
+    v: 2,
     a: coordinate,
     op: input.op,
     chat_pubkey: input.chatPubkey,

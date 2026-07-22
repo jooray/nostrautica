@@ -64,7 +64,7 @@ export async function sendJoinRequest(
   }
 
   const joinContent = {
-    v: 1,
+    v: 2,
     name: input.name,
     message: input.message ?? "",
     rsvp_public: !!input.rsvpPublic,
@@ -81,7 +81,7 @@ export async function sendJoinRequest(
   // Optional profile submission (21601) — profile text + any media reused at join.
   if (input.profile) {
     const submission = {
-      v: 1,
+      v: 2,
       profile: input.profile,
       media: input.media ?? [],
     };
@@ -97,7 +97,7 @@ export async function sendJoinRequest(
   // Self-copy (31602) — the attendee's own queryable record, blinded d over the
   // self-conversation key (spec §6.6, §7.3).
   const selfContent = {
-    v: 1,
+    v: 2,
     a: ctx.coordinate,
     profile: input.profile,
     media: input.media ?? [],

@@ -288,7 +288,7 @@ export async function publishMembersPost(
   const d = input.d ?? randomPostD();
   const publishedAt = input.publishedAt ?? now;
   const ciphertext = encryptMembersPost(base64ToBytes(eck.key), {
-    v: 1,
+    v: 2,
     title: input.title,
     summary: input.summary || undefined,
     image: input.image || undefined,
@@ -303,7 +303,7 @@ export async function publishMembersPost(
       // No `a` tag and no cleartext metadata (spec §7.4).
       tags: [
         ["d", d],
-        ["v", "1"],
+        ["v", "2"],
         ["eck", String(eck.id)],
       ],
       content: ciphertext,

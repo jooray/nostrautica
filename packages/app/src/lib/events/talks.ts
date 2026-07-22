@@ -251,7 +251,7 @@ export async function submitTalk(
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_TALK_SUBMISSION,
     content: {
-      v: 1,
+      v: 2,
       a: ctx.coordinate,
       talk_d: args.talkId,
       title: args.title,

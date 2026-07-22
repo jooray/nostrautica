@@ -75,11 +75,11 @@ function enc(
     created_at,
     tags: [
       ["d", d],
-      ["v", "1"],
+      ["v", "2"],
       ["eck", String(eckId)],
     ],
     content: encryptMembersPost(eck, {
-      v: 1,
+      v: 2,
       title: overrides.title ?? "secret",
       published_at: overrides.published_at ?? created_at,
       content: overrides.content ?? "members body",

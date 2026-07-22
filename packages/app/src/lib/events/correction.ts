@@ -33,7 +33,7 @@ export async function submitProfileCorrection(
   input: CorrectionInput,
 ): Promise<boolean> {
   const content = profileCorrectionContentSchema.parse({
-    v: 1,
+    v: 2,
     a: ctx.coordinate,
     ...input,
   });

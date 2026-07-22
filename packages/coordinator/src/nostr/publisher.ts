@@ -53,7 +53,7 @@ export function buildDirectoryEntry(
         ["d", d],
         ["a", coordinate],
         ["eck", String(keys.eckId)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(entry)),
     },
@@ -76,7 +76,7 @@ export function buildRoster(
         ["d", identifier],
         ["a", coordinate],
         ["eck", String(keys.eckId)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(roster)),
     },
@@ -99,7 +99,7 @@ export function buildMatchListEvent(
       tags: [
         ["d", d],
         ["a", coordinate],
-        ["v", "1"],
+        ["v", "2"],
       ],
       // Encrypted to the recipient so only the pair's two members read reasoning.
       content: nip44Encrypt(keys.coordSk, recipientPubkey, JSON.stringify(content)),
@@ -123,7 +123,7 @@ export function buildMatchMatrix(
         ["d", identifier],
         ["a", coordinate],
         ["eck", String(keys.eckId)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(content)),
     },
@@ -156,7 +156,7 @@ export function buildTalkEntry(
         ["d", d],
         ["a", coordinate],
         ["eck", String(keys.eckId)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(content)),
     },
@@ -190,7 +190,7 @@ export function buildCoordinatorAnnounce(
       created_at: Math.floor(Date.now() / 1000),
       tags: [
         ["d", COORDINATOR_ANNOUNCE_D],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: JSON.stringify(content),
     },
@@ -209,7 +209,7 @@ export function buildKeyGrant(
   return wrapRumor(coordSk, attendeePubkey, {
     kind: KIND_KEY_GRANT,
     content: {
-      v: 1,
+      v: 2,
       a: coordinate,
       role,
       eck,

@@ -11,6 +11,7 @@
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
+  import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
@@ -187,6 +188,14 @@
 
 <div class="app-shell">
   <TopBar />
+  {#if updatePrompt.needed}
+    <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
+      {t("update.available")}
+      <button type="button" class="btn" style="margin-left:0.5rem" onclick={() => updatePrompt.update()}>
+        {t("update.action")}
+      </button>
+    </div>
+  {/if}
   {#if !online.isOnline}
     <div class="card warn" style="margin:0.5rem 0" role="status" aria-live="polite">
       {t("app.offline")}

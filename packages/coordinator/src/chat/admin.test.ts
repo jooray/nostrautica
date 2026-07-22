@@ -80,7 +80,7 @@ function freshStore(): Store {
 }
 
 function attest(op: "add" | "revoke", chatPubkey = CHATKEY): ChatKeyAttestationContent {
-  return { v: 1, a: COORD, op, chat_pubkey: chatPubkey };
+  return { v: 2, a: COORD, op, chat_pubkey: chatPubkey };
 }
 
 describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {

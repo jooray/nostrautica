@@ -150,7 +150,7 @@ describe("C2 — authenticateKeyGrant (21602)", () => {
   const config = makeConfig(eid, inbox, coordinator);
 
   const grant: KeyGrantContent = {
-    v: 1,
+    v: 2,
     a: coordinate,
     role: "attendee",
     eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -218,7 +218,7 @@ describe("C2 — authenticateOrganizerGrant (21605)", () => {
   const config = makeConfig(eid, inbox);
 
   const grant: OrganizerGrantContent = {
-    v: 1,
+    v: 2,
     a: coordinate,
     eid_nsec: bytesToHex(eidSk),
     einbox_nsec: bytesToHex(einboxSk),
@@ -285,7 +285,7 @@ describe("C2 — end-to-end unwrap + authenticate (no relays)", () => {
     // E_id (the authority) seals a real organizer grant to the recipient.
     const eidSigner = new LocalSigner(eidSk);
     const goodGrant: OrganizerGrantContent = {
-      v: 1,
+      v: 2,
       a: coordinate,
       eid_nsec: bytesToHex(eidSk),
       einbox_nsec: bytesToHex(einboxSk),
@@ -334,7 +334,7 @@ describe("fetchMatches cache write-through (§2.3)", () => {
     getPublicKey: async () => OWNER,
     nip44Decrypt: async () =>
       JSON.stringify({
-        v: 1,
+        v: 2,
         computed_at: 500,
         matches: [
           { pubkey: PEER, score: 0.9, similarity: 0.8, complementarity: 0.7, reasoning: "good" },
@@ -387,6 +387,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
         created_at: at,
         tags: [
           ["d", "cypherpunk-2026"],
+          ["v", "2"],
           ["inbox", inbox],
           ["coordinator", coordinator],
         ],
@@ -399,7 +400,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
   /** A genuine 21602 key grant gift-wrapped to the attendee by the coordinator. */
   async function keyGrantWrap(eckId = 1) {
     const grant: KeyGrantContent = {
-      v: 1,
+      v: 2,
       a: coordinate,
       role: "attendee",
       eck: [{ id: eckId, key: bytesToBase64(generateEck()) }],
@@ -447,7 +448,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     // Sealed by an arbitrary attacker key but claiming granted_by = coordinator.
     const attacker = LocalSigner.generate();
     const forged: KeyGrantContent = {
-      v: 1,
+      v: 2,
       a: coordinate,
       role: "attendee",
       eck: [{ id: 1, key: bytesToBase64(generateEck()) }],

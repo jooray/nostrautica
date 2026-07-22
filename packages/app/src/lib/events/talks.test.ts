@@ -18,7 +18,7 @@ function sub(
   title = "Talk",
 ): RawTalkSubmission {
   const content = {
-    v: 1,
+    v: 2,
     a: "31600:host:conf",
     talk_d: talkD,
     title,

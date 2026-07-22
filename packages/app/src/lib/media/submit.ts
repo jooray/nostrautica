@@ -179,7 +179,7 @@ export async function submitProfileAndMedia(
 
   // 21601 → E_inbox (gift-wrapped).
   const submission = {
-    v: 1,
+    v: 2,
     profile: args.profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
@@ -193,7 +193,7 @@ export async function submitProfileAndMedia(
   // 31602 self-copy (blinded d over the self-conversation key). Keeps the
   // attendee's own device holding their authored text intro too.
   const selfContent = {
-    v: 1,
+    v: 2,
     a: ctx.coordinate,
     profile: args.profile,
     media: args.media,
@@ -255,7 +255,7 @@ export async function addToLibrary(
   const cappedTexts = mergedTexts.slice(-MAX_LIBRARY_TEXTS);
 
   const content = {
-    v: 1,
+    v: 2,
     a: null,
     media: mergedMedia,
     ...(cappedTexts.length ? { intro_texts: cappedTexts } : {}),

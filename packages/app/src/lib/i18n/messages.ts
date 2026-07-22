@@ -17,6 +17,12 @@ export const messages = {
     "app.offline":
       "Offline — you can still browse cached people and matches; changes will sync when you reconnect.",
 
+    // App update available (NIP §2 / D2): a trusted authority published a payload
+    // in a newer protocol version than this build understands.
+    "update.available":
+      "A newer version of the app is required to read this event. Please update.",
+    "update.action": "Update now",
+
     // Background sync (audit UX-15)
     "sync.queued": "Saved — will send when you're back online.",
     "outbox.pending.one": "{n} change waiting to send",
@@ -980,6 +986,11 @@ export const messages = {
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Bez pripojenia — stále si môžete prezerať uložených ľudí a spojenia; zmeny sa zosynchronizujú po opätovnom pripojení.",
+
+    // Dostupná aktualizácia aplikácie (NIP §2 / D2)
+    "update.available":
+      "Na zobrazenie tejto udalosti je potrebná novšia verzia aplikácie. Aktualizujte ju, prosím.",
+    "update.action": "Aktualizovať",
 
     // Synchronizácia na pozadí (audit UX-15)
     "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
@@ -1952,6 +1963,11 @@ export const messages = {
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — stále si můžete prohlížet uložené lidi a spojení; změny se synchronizují po opětovném připojení.",
+
+    // Dostupná aktualizace aplikace (NIP §2 / D2)
+    "update.available":
+      "K zobrazení této události je potřeba novější verze aplikace. Aktualizujte ji, prosím.",
+    "update.action": "Aktualizovat",
 
     // Synchronizace na pozadí (audit UX-15)
     "sync.queued": "Uloženo — odešle se po obnovení připojení.",

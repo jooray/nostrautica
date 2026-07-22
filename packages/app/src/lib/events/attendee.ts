@@ -24,6 +24,9 @@ import {
   matchListContentSchema,
   parseCoordinate,
   parseEventConfig,
+  parsePayloadSafe,
+  isNewerProtocolVersion,
+  NewerProtocolVersionError,
   type DirectoryEntryContent,
   type RosterContent,
   type MatchListContent,
@@ -45,6 +48,7 @@ import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
 
 /**
  * Authenticate a received 21605 Organizer Grant (spec §8, audit finding C2).
@@ -144,7 +148,11 @@ async function fetchEventConfig(
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);
-  } catch {
+  } catch (e) {
+    // The config is E_id-signed (onlyVerified + authored by coord.pubkey) — a
+    // trusted authority. A newer protocol version here means this client is stale
+    // (NIP §2 / D2): prompt an update instead of silently dropping the event.
+    if (e instanceof NewerProtocolVersionError) updatePrompt.flag();
     return undefined;
   }
 }
@@ -250,7 +258,12 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
       // Co-organizer custody: store the full event keys so this device can admin.
       let grant;
       try {
-        grant = organizerGrantContentSchema.parse(JSON.parse(rumor.content));
+        const raw = JSON.parse(rumor.content);
+        // A grant sealed by the E_id/coordinator authority (rumor.pubkey is bound
+        // by signerUnwrap) that carries a newer protocol version means this client
+        // is stale (NIP §2 / D2) — prompt an update. Still definitive: memoize.
+        if (isNewerProtocolVersion(raw)) updatePrompt.flag();
+        grant = organizerGrantContentSchema.parse(raw);
       } catch {
         memo[wrap.id] = true; // malformed — definitive, never re-try
         memoDirty = true;
@@ -285,7 +298,11 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     if (rumor.kind === KIND_KEY_GRANT) {
       let grant;
       try {
-        grant = keyGrantContentSchema.parse(JSON.parse(rumor.content));
+        const raw = JSON.parse(rumor.content);
+        // Newer-protocol grant from the authenticated E_id/coordinator authority:
+        // prompt an update (NIP §2 / D2) before dropping it.
+        if (isNewerProtocolVersion(raw)) updatePrompt.flag();
+        grant = keyGrantContentSchema.parse(raw);
       } catch {
         memo[wrap.id] = true; // malformed — definitive
         memoDirty = true;
@@ -389,14 +406,23 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
   ).ready;
   // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
   const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  if (!latest) return { v: 1, eck_current: 1, attendees: [] };
+  if (!latest) return { v: 2, eck_current: 1, attendees: [] };
+  // The roster is authored by the coordinator (or E_id) — a trusted authority
+  // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
+  // (prompt an update, NIP §2 / D2) from a garbled one (drop).
+  let raw: unknown;
   try {
-    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(eck, latest.content)));
-    cacheSet(rosterKey(ctx.coordinate), roster, latest.created_at ?? 0);
-    return roster;
+    raw = JSON.parse(eckDecrypt(eck, latest.content));
   } catch {
     return undefined;
   }
+  const parsed = parsePayloadSafe(rosterContentSchema, raw);
+  if (!parsed.ok) {
+    if (parsed.reason === "newer-version") updatePrompt.flag();
+    return undefined;
+  }
+  cacheSet(rosterKey(ctx.coordinate), parsed.value, latest.created_at ?? 0);
+  return parsed.value;
 }
 
 // The decrypted directory entries survive reloads too (owner-scoped) so the

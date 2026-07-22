@@ -223,7 +223,7 @@ export async function approveAttendee(
   // to be E_id (or the coordinator). Sealing with the organizer's personal key
   // would be rejected as forged (the no-coordinator approval path).
   const grant = {
-    v: 1,
+    v: 2,
     a: ctx.coordinate,
     role,
     eck: keys.eck,
@@ -237,7 +237,7 @@ export async function approveAttendee(
   // 2. Directory entry (31603) under ECK, blinded d over ECK, signed by E_id.
   const entryD = blindedD(eckBytes, ctx.coordinate, req.attendeePubkey);
   const entryContent = {
-    v: 1,
+    v: 2,
     pubkey: req.attendeePubkey,
     ...(req.name ? { name: req.name } : {}),
     profile: req.profile ?? { about: "", skills: [], looking_for: "", links: [] },
@@ -259,7 +259,7 @@ export async function approveAttendee(
         ["d", entryD],
         ["a", ctx.coordinate],
         ["eck", String(eck.id)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(eckBytes, JSON.stringify(entryContent)),
     },
@@ -313,12 +313,12 @@ export async function loadRoster(
   const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   const currentId = eckVersions.reduce((m, v) => Math.max(m, v.id), 1);
   const at = latest?.created_at ?? 0;
-  if (!latest) return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };
+  if (!latest) return { roster: { v: 2, eck_current: currentId, attendees: [] }, at };
   try {
     const { eckDecrypt } = await import("@nostrautica/protocol");
     return { roster: JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent, at };
   } catch {
-    return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };
+    return { roster: { v: 2, eck_current: currentId, attendees: [] }, at };
   }
 }
 
@@ -344,7 +344,7 @@ function buildRosterEvent(
         ["d", identifier],
         ["a", ctx.coordinate],
         ["eck", String(eckId)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(eckBytes, JSON.stringify(content)),
     },
@@ -374,7 +374,7 @@ export async function sendAdminCommand(
   const eidSk = hexToBytes(keys.eidNsecHex);
   const wrap = wrapRumor(eidSk, ctx.config.coordinator, {
     kind: KIND_ADMIN_COMMAND,
-    content: { v: 1, a: ctx.coordinate, cmd, args },
+    content: { v: 2, a: ctx.coordinate, cmd, args },
   });
   await publishOrQueue(wrap as any, ctx.config.relays);
 }
@@ -400,7 +400,7 @@ export async function addCoOrganizer(
   const wrap = wrapRumor(eidSk, coOrganizerPubkey, {
     kind: KIND_ORGANIZER_GRANT,
     content: {
-      v: 1,
+      v: 2,
       a: ctx.coordinate,
       eid_nsec: keys.eidNsecHex,
       einbox_nsec: keys.einboxNsecHex,
@@ -507,8 +507,8 @@ export async function generateInvites(
     {
       kind: KIND_INVITE_LIST,
       created_at: Math.floor(Date.now() / 1000),
-      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "1"]],
-      content: JSON.stringify({ v: 1, invites }),
+      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "2"]],
+      content: JSON.stringify({ v: 2, invites }),
     },
     eidSk,
   );
@@ -565,7 +565,7 @@ export async function revokeAttendeeClient(
   const { roster, at: rosterAt } = await loadRoster(ctx, prevEckBytes, keys.eck);
   const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
   const publisher = directoryPublisher(ctx);
-  const newRoster: RosterContent = { v: 1, eck_current: newId, attendees: [] };
+  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
   const pubs: Promise<unknown>[] = [publishOrQueue(deletion, ctx.config.relays)];
 
   for (const a of remaining) {
@@ -589,7 +589,7 @@ export async function revokeAttendeeClient(
         {
           kind: KIND_DIRECTORY_ENTRY,
           created_at: Math.floor(Date.now() / 1000),
-          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "1"]],
+          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
           content: eckEncrypt(newEckBytes, JSON.stringify(content)),
         },
         eidSk,
@@ -602,7 +602,7 @@ export async function revokeAttendeeClient(
     const grantWrap = wrapRumor(eidSk, a.pubkey, {
       kind: KIND_KEY_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: ctx.coordinate,
         role: a.role,
         eck: keys.eck,
@@ -689,7 +689,7 @@ export async function attachCoordinator(
   const grantWrap = wrapRumor(eidSk, coordinatorPubkey, {
     kind: KIND_COORDINATOR_GRANT,
     content: {
-      v: 1,
+      v: 2,
       a: ctx.coordinate,
       inbox_nsec: keys.einboxNsecHex,
       eck: keys.eck,

@@ -54,6 +54,7 @@ function signedConfig(at: number, relays: string[] = []) {
       created_at: at,
       tags: [
         ["d", IDENT],
+        ["v", "2"],
         ["inbox", inbox],
         ...relays.map((r) => ["relay", r]),
       ],

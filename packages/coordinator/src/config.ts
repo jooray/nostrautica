@@ -198,7 +198,7 @@ export function buildAnnounceContent(config: CoordinatorConfig): CoordinatorAnno
     ...(p.currency ? { currency: p.currency } : {}),
   };
   return {
-    v: 1,
+    v: 2,
     name: config.coordinator.name,
     ...(config.coordinator.about ? { about: config.coordinator.about } : {}),
     ...(config.coordinator.picture ? { picture: config.coordinator.picture } : {}),

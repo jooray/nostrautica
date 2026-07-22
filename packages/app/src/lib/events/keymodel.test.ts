@@ -33,7 +33,7 @@ describe("walking-skeleton key model", () => {
     // Organizer publishes the attendee's directory entry under ECK, blinded d.
     const entryD = blindedD(eck, coordinate, attendeePk);
     const entryPlain = {
-      v: 1,
+      v: 2,
       pubkey: attendeePk,
       profile: { about: "cryptographer", skills: ["zk"], looking_for: "designer", links: [] },
       media: [],
@@ -45,7 +45,7 @@ describe("walking-skeleton key model", () => {
     const grantWrap = await signerWrap(organizer, attendeePk, {
       kind: KIND_KEY_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: coordinate,
         role: "attendee",
         eck: [{ id: 1, key: bytesToBase64(eck) }],

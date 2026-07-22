@@ -5,6 +5,12 @@
  */
 import { KIND_EVENT_CONFIG } from "./kinds.js";
 import { makeCoordinate } from "./coordinate.js";
+import {
+  PROTOCOL_VERSION,
+  PROTOCOL_VERSION_TAG,
+  readEventVersionTag,
+  NewerProtocolVersionError,
+} from "./schemas.js";
 
 /**
  * Sentinel for "no length cap" on `max_video_sec`/`max_talk_sec` (recorder UI
@@ -71,7 +77,7 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
   const tags: string[][] = [
     ["d", cfg.d],
     ["a", coordinate],
-    ["v", "1"],
+    ["v", PROTOCOL_VERSION_TAG],
     ["inbox", cfg.inbox],
   ];
   if (cfg.coordinator) tags.push(["coordinator", cfg.coordinator]);
@@ -172,6 +178,13 @@ export function parseEventConfig(
   const inboxRaw = first(tags, "inbox");
   const inbox = inboxRaw && HEX32.test(inboxRaw) ? inboxRaw : undefined;
   if (!d || !inbox) throw new Error("31600 config missing d or inbox");
+  // Strict wire version (NIP §2): a public custom-kind reader MUST ignore a config
+  // whose `v` tag is absent or ≠ "2". A NEWER integer version is classified so the
+  // app can prompt an update from this trusted (E_id-signed) authority (D2);
+  // anything else is a plain parse failure the caller drops.
+  const vtag = readEventVersionTag(tags);
+  if (vtag !== undefined && vtag > PROTOCOL_VERSION) throw new NewerProtocolVersionError(vtag);
+  if (vtag !== PROTOCOL_VERSION) throw new Error(`31600 config: unsupported v tag ${vtag ?? "<absent>"}`);
   const approvalRaw = first(tags, "approval");
   const approval: Approval = APPROVALS.includes(approvalRaw as Approval)
     ? (approvalRaw as Approval)
