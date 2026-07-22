@@ -22,7 +22,7 @@ import {
 } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants } from "./attendee.js";
+import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants, MAX_GRANT_WRAPS } from "./attendee.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 
 // Cache-path setup (CACHING-PLAN §2.3): mock the relay stream so fetchMatches
@@ -465,6 +465,31 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     // Definitively rejected WITH a config in hand: never retried, never prompts
     // the signer for this wrap again.
     expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  it("bounds the persisted grant memo, evicting oldest-inserted entries (App-7)", async () => {
+    // Seed the memo above the cap with synthetic, insertion-ordered old entries.
+    const seeded: Record<string, true> = {};
+    for (let i = 0; i < MAX_GRANT_WRAPS + 50; i++) seeded[`old${i}`] = true;
+    cacheSet("grantwraps", seeded, 1); // owner-scoped to the active owner (attendeePk)
+
+    // A fresh non-grant wrap that unwraps successfully gets memoized (line ~323),
+    // making the write dirty and triggering the cap.
+    const other = await signerWrap(new LocalSigner(coordSk), attendeePk, {
+      kind: 14,
+      content: { hello: "world" },
+    });
+    fetchEventsRelayOnly.mockResolvedValue([other]);
+    fetchEvents.mockResolvedValue([]);
+
+    await receiveGrants(attendee);
+
+    const memo = cacheGet<Record<string, true>>("grantwraps")!.data;
+    const keys = Object.keys(memo);
+    expect(keys.length).toBe(MAX_GRANT_WRAPS); // pre-fix: MAX_GRANT_WRAPS + 51 (unbounded)
+    expect(memo[other.id]).toBe(true); // newest entry retained
+    expect(memo["old0"]).toBeUndefined(); // oldest-inserted evicted
+    expect(memo[`old${MAX_GRANT_WRAPS + 49}`]).toBe(true); // recent-old retained
   });
 
   it("fetches the config from the event's recorded relay hints ∪ defaults (custom-relay event)", async () => {

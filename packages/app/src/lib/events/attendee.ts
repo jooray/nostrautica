@@ -184,6 +184,9 @@ function markGrantsBackfilled(pubkey: string): void {
  * a clean device. Later scans use the narrow live-overlap window. This mirrors the
  * coordinator's fresh-install vs. recent backfill.
  */
+/** Cap on the persisted grant-wrap memo (audit App-7), mirroring the DM memo. */
+export const MAX_GRANT_WRAPS = 5000;
+
 export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
   const fullBackfill = !hasBackfilledGrants(pubkey);
@@ -326,7 +329,19 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   // The full-history scan completed without throwing (a fetch failure would have
   // rejected above), so later scans can safely narrow to the live-overlap window.
   if (fullBackfill) markGrantsBackfilled(pubkey);
-  if (memoDirty) cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
+  if (memoDirty) {
+    // Bound the memo (audit App-7): unlike the DM memo this had no cap, so it
+    // grew one entry per gift wrap ever seen (grants AND every skipped DM/chat
+    // welcome) and never aged. Evict oldest-inserted entries past the cap — a
+    // re-encountered wrap just costs one extra signer unwrap next scan (a perf
+    // cost, never a correctness one), mirroring the DM memo's 3000-cap policy.
+    const keys = Object.keys(memo);
+    if (keys.length > MAX_GRANT_WRAPS) {
+      const keep = new Set(keys.slice(-MAX_GRANT_WRAPS));
+      for (const k of keys) if (!keep.has(k)) delete memo[k];
+    }
+    cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
+  }
   return [...coordinates];
 }
 
