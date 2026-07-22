@@ -818,12 +818,35 @@ export class Coordinator {
       : undefined;
 
     const publishedInviteHashes = await this.fetchInviteHashes(state);
-    const decision = evaluateEntitlement([this.inviteChecker], {
+    let decision = evaluateEntitlement([this.inviteChecker], {
       coordinate: state.coordinate,
       attendeePubkey,
       invite,
       publishedInviteHashes,
     }, this.now());
+
+    // A code that fails validation against the CACHED hash set is not
+    // necessarily invalid — the cache is populated lazily and invalidated only
+    // by the config subscription delivering the new 31601 (audit COORD-29). A
+    // code generated moments ago can lose this race: relay propagation +
+    // subscription delivery hasn't caught up yet, or (rarer, but not
+    // self-healing) the invalidating 31601 never reached this daemon's config
+    // relays at all, in which case the cache would otherwise stay stale
+    // forever. One bypass re-fetch, only on THIS specific failure reason (not
+    // "no invite proof" or "already used", where a re-fetch changes nothing),
+    // closes both without paying a relay round-trip on every join.
+    if (!decision.grant && decision.reason === "invalid invite proof") {
+      const freshHashes = await this.fetchInviteHashes(state, { force: true });
+      decision = evaluateEntitlement([this.inviteChecker], {
+        coordinate: state.coordinate,
+        attendeePubkey,
+        invite,
+        publishedInviteHashes: freshHashes,
+      }, this.now());
+      if (decision.grant) {
+        log(`[join] ${short(attendeePubkey)} invite hash missing from cache — bypass re-fetch found it`);
+      }
+    }
 
     this.deps.store.upsertAttendee({
       coordinate: state.coordinate,
@@ -1630,10 +1653,14 @@ export class Coordinator {
    * The event's published invite hashes, cached per event (audit COORD-29):
    * every join request used to re-fetch the 31601. The cache is invalidated when
    * a new 31601 arrives on the config subscription (see subscribeEventConfig).
+   * `force` bypasses a stale cache hit on the one path where staleness is
+   * actually costly — a join whose code doesn't validate against it
+   * (handleJoin's single bypass retry) — without paying a relay fetch on the
+   * common case of every other join.
    */
-  private async fetchInviteHashes(state: EventState): Promise<Set<string>> {
+  private async fetchInviteHashes(state: EventState, opts: { force?: boolean } = {}): Promise<Set<string>> {
     const cached = this.inviteHashCache.get(state.coordinate);
-    if (cached) return cached;
+    if (cached && !opts.force) return cached;
     const events = await this.deps.transport.fetch(
       { kinds: [KIND_INVITE_LIST], authors: [state.eidPubkey], "#d": [parseCoordinate(state.coordinate).identifier] },
       state.configRelays,

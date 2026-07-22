@@ -2037,4 +2037,99 @@ describe("audit COORD-29 — invite hashes are cached per event", () => {
     await join(h, generateSecretKey(), "code");
     expect(inviteFetches()).toBe(2); // refetched after invalidation
   });
+
+  it("a code that isn't in the cached hash set gets ONE bypass re-fetch before falling to the manual queue", async () => {
+    // Reproduces the reported gap: an organizer generates a fresh invite code
+    // and hands it out immediately. The coordinator's cache was already primed
+    // (by an earlier join) with the OLD hash set, and — unlike the test above —
+    // the new 31601's arrival is NOT delivered through the config subscription
+    // (relay propagation lag, or a relay the invalidating publish never
+    // reached). Without the fix this attendee is wrongly queued for manual
+    // approval despite holding a genuinely valid, freshly-generated code.
+    const h = await setup();
+    const inviteFetches = () => h.transport.fetches.filter((f) => f.kinds?.includes(31601)).length;
+
+    // Prime the cache with the original 6-invite set.
+    await join(h, generateSecretKey(), "crypto");
+    expect(inviteFetches()).toBe(1);
+
+    // A NEW invite code, published straight to the relay (as the app really
+    // does) but WITHOUT going through the config subscription the cache
+    // listens on — exactly the propagation/never-delivered gap.
+    const freshInviteSk = generateSecretKey();
+    h.transport.published.push({
+      kind: 31601,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "inv-fresh",
+      tags: [["d", "cypherpunk"]],
+      content: JSON.stringify({
+        v: 1,
+        invites: [...h.invites, freshInviteSk].map((sk) => ({ h: inviteHash(getPublicKey(sk)) })),
+      }),
+      sig: "",
+    } as any);
+
+    const attendeeSk = generateSecretKey();
+    const attendeePubkey = getPublicKey(attendeeSk);
+    const proof = makeInviteProof(freshInviteSk, h.coordinate, attendeePubkey);
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(attendeeSk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 1, name: "fresh-code-holder", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(freshInviteSk), proof.sig]],
+      }) as any,
+    );
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePubkey);
+    expect(attendee?.status).toBe("approved"); // NOT stuck in manual queue
+    expect(inviteFetches()).toBe(2); // exactly one bypass re-fetch, not a fetch storm
+  });
+
+  it("does NOT retry when there's simply no invite code, or the code was already used", async () => {
+    // The bypass exists to rescue a genuinely valid code the cache hasn't
+    // caught up to yet — it must not paper over "no code presented" or
+    // "single-use code already claimed", where a re-fetch changes nothing and
+    // would just be a wasted relay round-trip on every such join.
+    const h = await setup();
+    const inviteFetches = () => h.transport.fetches.filter((f) => f.kinds?.includes(31601)).length;
+
+    await join(h, generateSecretKey(), "crypto"); // primes the cache (valid code)
+    expect(inviteFetches()).toBe(1);
+
+    // A raw join with NO invite tag at all.
+    const attendeeSk = generateSecretKey();
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(attendeeSk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 1, name: "no code", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]], // no ["invite", ...] tag
+      }) as any,
+    );
+    expect(h.store.getAttendee(h.coordinate, getPublicKey(attendeeSk))?.status).toBe("pending");
+    expect(inviteFetches()).toBe(1); // still cache-only — no pointless retry
+
+    // A valid code, used twice.
+    const reuseSk = generateSecretKey();
+    await join(h, reuseSk, "design"); // consumes h.invites[1]
+    const beforeSecondAttempt = inviteFetches();
+    const secondAttendeeSk = generateSecretKey();
+    const secondPubkey = getPublicKey(secondAttendeeSk);
+    const dupeInviteSk = h.invites[1]!; // same code as `reuseSk` just claimed
+    const dupeProof = makeInviteProof(dupeInviteSk, h.coordinate, secondPubkey);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(secondAttendeeSk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 1, name: "reused code", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(dupeInviteSk), dupeProof.sig]],
+      }) as any,
+    );
+    expect(h.store.getAttendee(h.coordinate, secondPubkey)?.status).toBe("pending");
+    expect(inviteFetches()).toBe(beforeSecondAttempt); // still no pointless retry
+  });
 });
