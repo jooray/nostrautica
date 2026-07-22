@@ -209,23 +209,54 @@ describe("every §7 payload round-trips through JSON", () => {
       attendees: [{ pubkey: hex, d: "deadbeef", role: "attendee" }],
     }));
 
-  it("31604 roster carries an optional Marmot chat_pubkey (§4.4)", () =>
+  it("31604 roster carries per-device chat_keys per attendee (NIP §6.2)", () =>
     roundTrips(rosterContentSchema, {
       v: 2,
       eck_current: 2,
+      nostr_group_id: "d".repeat(64),
       attendees: [
-        { pubkey: hex, d: "deadbeef", role: "attendee", chat_pubkey: "b".repeat(64) },
-        { pubkey: "c".repeat(64), d: "cafe", role: "organizer" }, // no chat key
+        {
+          pubkey: hex,
+          d: "deadbeef",
+          role: "attendee",
+          chat_keys: [
+            { pubkey: "b".repeat(64), label: "Chrome on macOS", added_at: 1_700_000_000 },
+            { pubkey: "e".repeat(64), added_at: 1_700_000_100 }, // label optional
+          ],
+        },
+        { pubkey: "c".repeat(64), d: "cafe", role: "organizer" }, // no chat keys
       ],
     }));
 
-  it("21607 chat-key attestation round-trips (add + revoke)", () => {
+  it("31604 roster rejects more than MAX_CHAT_KEYS_PER_ACCOUNT chat_keys", () => {
+    expect(() =>
+      rosterContentSchema.parse({
+        v: 2,
+        eck_current: 1,
+        attendees: [
+          {
+            pubkey: hex,
+            d: "d",
+            role: "attendee",
+            chat_keys: Array.from({ length: 6 }, (_, i) => ({
+              pubkey: String(i).repeat(64).slice(0, 64),
+              added_at: 1,
+            })),
+          },
+        ],
+      }),
+    ).toThrow();
+  });
+
+  it("21607 chat device attestation round-trips (add with proof+label, revoke)", () => {
     roundTrips(chatKeyAttestationContentSchema, {
       v: 2,
       a: "31923:" + hex + ":ev",
       op: "add",
       chat_pubkey: "b".repeat(64),
+      label: "Chrome on macOS",
       client_id: "device-1",
+      proof: "a".repeat(128),
     });
     roundTrips(chatKeyAttestationContentSchema, {
       v: 2,
@@ -233,6 +264,40 @@ describe("every §7 payload round-trips through JSON", () => {
       op: "revoke",
       chat_pubkey: "b".repeat(64),
     });
+  });
+
+  it("21607 add REQUIRES a proof of possession and a label (NIP §10.2)", () => {
+    // add without proof → rejected
+    expect(() =>
+      chatKeyAttestationContentSchema.parse({
+        v: 2,
+        a: "31923:" + hex + ":ev",
+        op: "add",
+        chat_pubkey: "b".repeat(64),
+        label: "Chrome",
+      }),
+    ).toThrow();
+    // add without label → rejected
+    expect(() =>
+      chatKeyAttestationContentSchema.parse({
+        v: 2,
+        a: "31923:" + hex + ":ev",
+        op: "add",
+        chat_pubkey: "b".repeat(64),
+        proof: "a".repeat(128),
+      }),
+    ).toThrow();
+    // malformed proof (not 128-hex) → rejected
+    expect(() =>
+      chatKeyAttestationContentSchema.parse({
+        v: 2,
+        a: "31923:" + hex + ":ev",
+        op: "add",
+        chat_pubkey: "b".repeat(64),
+        label: "Chrome",
+        proof: "xyz",
+      }),
+    ).toThrow();
   });
 
   it("21607 rejects an unknown op and an unexpected field (strict)", () => {
@@ -250,6 +315,8 @@ describe("every §7 payload round-trips through JSON", () => {
         a: "31923:" + hex + ":ev",
         op: "add",
         chat_pubkey: "b".repeat(64),
+        label: "Chrome",
+        proof: "a".repeat(128),
         rogue: true, // strict → rejected
       }),
     ).toThrow();

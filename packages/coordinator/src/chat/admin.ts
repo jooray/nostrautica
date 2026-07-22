@@ -15,7 +15,11 @@
  */
 import type { Store } from "../store/db.js";
 import type { ChatMls } from "./mls.js";
-import type { ChatKeyAttestationContent } from "@nostrautica/protocol";
+import {
+  verifyChatDeviceProof,
+  MAX_CHAT_KEYS_PER_ACCOUNT,
+  type ChatKeyAttestationContent,
+} from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
 
@@ -240,12 +244,19 @@ export class MarmotAdmin {
    * evict another member's key. Rebinding a chat_pubkey already owned by another
    * account is likewise refused at the store layer (audit COORD-10).
    *
+   * Proof of possession (NIP §10.2): an `op:"add"` MUST carry a `proof` — a BIP-340
+   * signature by the chat DEVICE key over the §10.2 challenge (binding coordinate,
+   * account, chat pubkey, and the rumor's `created_at`). Without a valid proof the
+   * add is rejected, so an account can no longer bind a chat key it doesn't control.
+   * The rumor's `created_at` is passed in because it is part of the signed challenge.
+   *
    * @returns true if the attestation was accepted (recorded), false if rejected.
    */
   async handleAttestation(
     coordinate: string,
     accountPubkey: string,
     content: ChatKeyAttestationContent,
+    createdAt: number,
   ): Promise<boolean> {
     if (content.a !== coordinate) return false;
     const attendee = this.store.getAttendee(coordinate, accountPubkey);
@@ -254,11 +265,37 @@ export class MarmotAdmin {
       return false;
     }
     if (content.op === "add") {
+      // Proof of possession (NIP §10.2): the chat DEVICE key must sign the challenge
+      // that binds this (coordinate, account, chat pubkey, created_at). The schema
+      // already requires `proof` on add; re-verify the signature here before binding.
+      if (
+        !content.proof ||
+        !verifyChatDeviceProof(content.proof, coordinate, accountPubkey, content.chat_pubkey, createdAt)
+      ) {
+        this.log(
+          `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: invalid/missing proof of possession for ${content.chat_pubkey.slice(0, 8)}`,
+        );
+        return false;
+      }
+      // Per-account device cap (NIP §10.1): at most MAX_CHAT_KEYS_PER_ACCOUNT active
+      // keys per account per event. A refresh of an already-active key doesn't count
+      // against the cap; activating a NEW (or previously-revoked) key beyond it does.
+      const active = this.store
+        .chatKeysForAccount(coordinate, accountPubkey)
+        .filter((k) => k.status === "active");
+      const alreadyActive = active.some((k) => k.chat_pubkey === content.chat_pubkey);
+      if (!alreadyActive && active.length >= MAX_CHAT_KEYS_PER_ACCOUNT) {
+        this.log(
+          `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: account already at the ${MAX_CHAT_KEYS_PER_ACCOUNT}-device cap`,
+        );
+        return false;
+      }
       const recorded = this.store.upsertChatKey({
         coordinate,
         accountPubkey,
         chatPubkey: content.chat_pubkey,
         clientId: content.client_id ?? null,
+        label: content.label ?? null,
         status: "active",
         now: this.now(),
       });

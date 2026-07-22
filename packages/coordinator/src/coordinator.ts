@@ -45,6 +45,7 @@ import {
   profileCorrectionContentSchema,
   talkSubmissionContentSchema,
   chatKeyAttestationContentSchema,
+  MAX_CHAT_KEYS_PER_ACCOUNT,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
   AI_PROFILE_FIELDS,
@@ -845,7 +846,8 @@ export class Coordinator {
         if (!this.marmot) return;
         const content = chatKeyAttestationContentSchema.parse(JSON.parse(rumor.content));
         log(`[chat] 21607 ${content.op} from ${short(rumor.pubkey)} for ${content.a}`);
-        await this.marmot.handleAttestation(content.a, rumor.pubkey, content);
+        // The rumor's created_at is part of the §10.2 proof-of-possession challenge.
+        await this.marmot.handleAttestation(content.a, rumor.pubkey, content, rumor.created_at ?? 0);
       }
     });
   }
@@ -1252,11 +1254,27 @@ export class Coordinator {
       v: 2,
       eck_current: this.currentEck(state).id,
       ...(nostrGroupId ? { nostr_group_id: nostrGroupId } : {}),
-      attendees: approved.map((a) => ({
-        pubkey: a.pubkey,
-        d: blindedDFor(bytes, state.coordinate, a.pubkey),
-        role: a.role === "organizer" ? "organizer" : "attendee",
-      })),
+      attendees: approved.map((a) => {
+        // Per-device chat keys attested to this account (NIP §6.2 / §10.1): the
+        // active bindings, capped at MAX_CHAT_KEYS_PER_ACCOUNT, so clients dedupe
+        // the member list by account and render per-device labels. Only emitted
+        // when the attendee has attested at least one device.
+        const chatKeys = this.deps.store
+          .chatKeysForAccount(state.coordinate, a.pubkey)
+          .filter((k) => k.status === "active")
+          .slice(0, MAX_CHAT_KEYS_PER_ACCOUNT)
+          .map((k) => ({
+            pubkey: k.chat_pubkey,
+            ...(k.label ? { label: k.label } : {}),
+            added_at: k.updated_at,
+          }));
+        return {
+          pubkey: a.pubkey,
+          d: blindedDFor(bytes, state.coordinate, a.pubkey),
+          role: a.role === "organizer" ? "organizer" : ("attendee" as const),
+          ...(chatKeys.length > 0 ? { chat_keys: chatKeys } : {}),
+        };
+      }),
     };
     const event = buildRoster(this.publishKeys(state), state.coordinate, roster, this.nextCreatedAt);
     await this.deps.transport.publish(event, state.configRelays);

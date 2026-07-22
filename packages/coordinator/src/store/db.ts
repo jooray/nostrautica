@@ -135,6 +135,7 @@ export interface MarmotChatKeyRow {
   account_pubkey: string;
   chat_pubkey: string;
   client_id: string | null;
+  label: string | null;
   status: "active" | "revoked";
   updated_at: number;
 }
@@ -337,6 +338,7 @@ CREATE TABLE IF NOT EXISTS marmot_chat_keys (
   account_pubkey TEXT NOT NULL,
   chat_pubkey TEXT NOT NULL,
   client_id TEXT,
+  label TEXT,                             -- human device label from the 21607 add (NIP §10.2)
   status TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, chat_pubkey)
@@ -452,6 +454,12 @@ export class Store {
     // Migration (wire-v2 §3.5): the install generation on older event rows.
     try {
       this.db.exec("ALTER TABLE events ADD COLUMN gen INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (wire-v2 §10.2): per-device chat-key label on older binding rows.
+    try {
+      this.db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN label TEXT");
     } catch {
       /* column already exists */
     }
@@ -1498,6 +1506,7 @@ export class Store {
     accountPubkey: string;
     chatPubkey: string;
     clientId?: string | null;
+    label?: string | null;
     status?: "active" | "revoked";
     now: number;
   }): boolean {
@@ -1505,10 +1514,11 @@ export class Store {
     if (existing && existing.account_pubkey !== row.accountPubkey) return false;
     this.db
       .prepare(
-        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, status, updated_at)
-         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, COALESCE(:status, 'active'), :now)
+        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, label, status, updated_at)
+         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, :label, COALESCE(:status, 'active'), :now)
          ON CONFLICT(coordinate, chat_pubkey) DO UPDATE SET
            client_id = COALESCE(excluded.client_id, marmot_chat_keys.client_id),
+           label = COALESCE(excluded.label, marmot_chat_keys.label),
            status = COALESCE(:status, marmot_chat_keys.status),
            updated_at = excluded.updated_at`,
       )
@@ -1517,6 +1527,7 @@ export class Store {
         accountPubkey: row.accountPubkey,
         chatPubkey: row.chatPubkey,
         clientId: row.clientId ?? null,
+        label: row.label ?? null,
         status: row.status ?? null,
         now: row.now,
       });

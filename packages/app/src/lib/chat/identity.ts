@@ -345,6 +345,40 @@ export async function unlockChatIdentityForLogin(
   }
 }
 
+/**
+ * A best-effort human label for THIS device ("Chrome on macOS", "Firefox on
+ * Android", …), used as the default 21607 `label` (NIP §10.2) so the roster and
+ * other clients show a friendly device name. Cheap UA sniff — user-editable device
+ * management is Phase 3. Falls back to "Web device" off-browser or on a blank UA.
+ */
+export function defaultDeviceLabel(): string {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
+  if (!ua) return "Web device";
+  const browser = /Edg\//.test(ua)
+    ? "Edge"
+    : /OPR\/|Opera/.test(ua)
+      ? "Opera"
+      : /Firefox\//.test(ua)
+        ? "Firefox"
+        : /Chrome\//.test(ua)
+          ? "Chrome"
+          : /Safari\//.test(ua)
+            ? "Safari"
+            : "Browser";
+  const os = /Android/.test(ua)
+    ? "Android"
+    : /iPhone|iPad|iPod/.test(ua)
+      ? "iOS"
+      : /Mac OS X|Macintosh/.test(ua)
+        ? "macOS"
+        : /Windows/.test(ua)
+          ? "Windows"
+          : /Linux/.test(ua)
+            ? "Linux"
+            : "";
+  return os ? `${browser} on ${os}` : browser;
+}
+
 /** Build an applesauce-shaped `EventSigner` over a raw 32-byte key. */
 export function eventSignerFromKey(sk: Uint8Array): ChatEventSigner {
   const pk = getPublicKey(sk);

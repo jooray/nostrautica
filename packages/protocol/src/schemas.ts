@@ -510,16 +510,10 @@ export const myProfileContentSchema = z.object({
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 
 // ── 31602 chat device-key backup (self-encrypted, cross-device) ──────────────
-// A remote-signer (NIP-46/NIP-07) account's MLS chat *device* key, self-encrypted
-// (NIP-44 to the account's OWN pubkey) and published as a SIBLING per-user 31602
-// entry — its `d` blinded over the literal "chat-device-key", `a:null` (never an
-// event coordinate). Lets a genuinely different browser signing in as the same
-// account restore the SAME chat identity instead of minting a fork (docs/
-// MARMOT-GROUP-CHAT §9 Q1). `.strict()` + exactly these three fields is the schema
-// half of the no-leak guarantee: it carries ONLY the 32-byte key — no group/epoch
-// state (non-transferable per Marmot), no coordinate, no other event's data. Only
-// the account's own signer can decrypt it (NIP-44-to-self), so it can restore an
-// existing identity but can never let anyone add or impersonate a device.
+// NOTE (NIP §6.2 / §10, decision D3): this variant is RETIRED in wire v2 — the
+// per-device chat identity model has no shared key to back up. It is deleted
+// alongside its consumer (`app/lib/chat/device-key-backup.ts`) in the per-device
+// identity slice; retained here only until that consumer is removed.
 export const chatDeviceKeyBackupSchema = z
   .object({
     v: version,
@@ -567,49 +561,91 @@ export const directoryEntryContentSchema = z
   });
 export type DirectoryEntryContent = z.infer<typeof directoryEntryContentSchema>;
 
-// ── 21607 Chat-key Attestation rumor content (Marmot §3.3) ───────────────────
-// Binds an app-generated chat *device* key to an account, for NIP-46/NIP-07 users
-// who cannot raw-sign the mandatory MLS account-identity-proof with their account
-// key. Gift-wrapped attendee → coordinator, sealed (kind 13) by the *account* key,
-// so the coordinator authenticates the binding exactly as it authenticates a 21600
-// join (seal author = the enrolled account npub). `op:"revoke"` (lost device) tells
-// the coordinator to remove that chat key's leaves and stop re-adding it.
+// ── 21607 Chat Device Attestation rumor content (NIP §10.2, v2) ──────────────
+// Binds a per-device chat key to an account. Every device (all account types, per
+// decision D3) mints its own chat key and attests it: a 21607 rumor gift-wrapped
+// attendee → coordinator, sealed (kind 13) by the *account* key (so the coordinator
+// authenticates the binding as it authenticates a 21600 join) AND — for `op:"add"`
+// — carrying a `proof` of possession: a BIP-340 signature by the chat DEVICE key
+// over the §10.2 challenge (see `makeChatDeviceProof`). The coordinator MUST verify
+// the proof before binding, closing v1's mis-binding/griefing gap. `op:"revoke"`
+// (lost/retired device) needs no proof — the account is evicting a key it named,
+// possession is irrelevant.
+
+/** Human-readable per-device label ("Chrome on laptop"), user-editable (NIP §10.2). */
+export const MAX_CHAT_KEY_LABEL = 60;
+/** Stable per-device 30443 slot id carried in the attestation. */
+export const MAX_CHAT_KEY_CLIENT_ID = 120;
+/** Concurrent device keys one account may hold per event (NIP §10.1). */
+export const MAX_CHAT_KEYS_PER_ACCOUNT = 5;
+
 export const chatKeyAttestationContentSchema = z
   .object({
     v: version,
     a: z.string(), // coordinate this attestation applies to
     op: z.enum(["add", "revoke"]),
-    chat_pubkey: hex32, // the app-generated chat device key (MLS account identity)
-    client_id: z.string().optional(), // stable per-device 30443 slot id
+    chat_pubkey: hex32, // the per-device chat key (MLS account identity for this device)
+    label: z.string().max(MAX_CHAT_KEY_LABEL).optional(), // required on add (see refine)
+    client_id: z.string().max(MAX_CHAT_KEY_CLIENT_ID).optional(), // stable 30443 slot id
+    proof: z.string().regex(/^[0-9a-f]{128}$/, "expected 128-hex schnorr sig").optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.op !== "add") return;
+    // Proof of possession is REQUIRED on add — a device without one can't be bound
+    // (the coordinator additionally re-verifies the signature). Label is required so
+    // the roster/device UI always has a human name for the device.
+    if (val.proof === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proof"],
+        message: "proof of possession is required for op:'add'",
+      });
+    }
+    if (val.label === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["label"],
+        message: "label is required for op:'add'",
+      });
+    }
+  });
 export type ChatKeyAttestationContent = z.infer<typeof chatKeyAttestationContentSchema>;
 
 // ── 31604 Roster content (ECK) ───────────────────────────────────────────────
-// `chat_pubkey` (Marmot §4.4, additive — old clients ignore it): for NIP-46/NIP-07
-// attendees whose MLS identity is a separate chat device key, this maps the chat
-// npub back to the account so the chat UI can render members as people. Absent for
-// local-key attendees (their account key IS the chat identity).
+// `chat_keys` (NIP §6.2 / §10.1): the per-DEVICE chat keys attested to each account
+// (up to MAX_CHAT_KEYS_PER_ACCOUNT). Replaces v1's never-populated singular
+// `chat_pubkey`; Nostrautica clients dedupe the member list by account and render
+// per-device labels/revoke UI from it. Each entry carries the device pubkey, its
+// human label, and when it was bound. Absent for attendees with no attested device
+// (e.g. an account that hasn't opened chat).
 //
-// `nostr_group_id` (Marmot §4.4, additive — old clients ignore it): the routing id
-// (445 `#h` tag) of this event's MLS group, the authoritative event→group binding
-// the coordinator otherwise never publishes. An MLS Welcome carries no event
-// coordinate, so a member holding two same-coordinator events' groups cannot tell
-// which joined group is which from MLS state alone; advertising the id here on the
-// member-only, ECK-encrypted roster lets each event's client bind deterministically
-// to ITS OWN group instead of guessing (audit APPK-3). Absent for chat-off events
-// and for coordinators/organizers that predate this field.
+// `nostr_group_id` (NIP §10.4): the routing id (445 `#h` tag) of this event's MLS
+// group — the authoritative event→group binding an MLS Welcome cannot carry, so a
+// member holding two same-coordinator events' groups binds deterministically to ITS
+// OWN group instead of guessing (audit APPK-3). Absent for chat-off events and for
+// coordinators/organizers that predate this field.
+
+/** One attested per-device chat key on the roster (NIP §6.2). */
+export const rosterChatKeySchema = z.object({
+  pubkey: hex32, // the per-device chat key
+  label: z.string().max(MAX_CHAT_KEY_LABEL).optional(),
+  added_at: z.number().int(),
+});
+export type RosterChatKey = z.infer<typeof rosterChatKeySchema>;
+
 export const rosterContentSchema = z.object({
   v: version,
   eck_current: z.number().int().positive(),
-  nostr_group_id: hex32.optional(), // Marmot MLS routing id of this event's group (§4.4)
+  nostr_group_id: hex32.optional(), // Marmot MLS routing id of this event's group (§10.4)
   attendees: z
     .array(
       z.object({
         pubkey: hex32,
         d: z.string().max(MAX_D), // entry's blinded d
         role: z.enum(["attendee", "organizer"]),
-        chat_pubkey: hex32.optional(), // Marmot chat device key, when distinct (§4.4)
+        // Per-device chat keys attested to this account (NIP §6.2), ≤ 5 per attendee.
+        chat_keys: z.array(rosterChatKeySchema).max(MAX_CHAT_KEYS_PER_ACCOUNT).optional(),
       }),
     )
     .max(MAX_ROSTER),

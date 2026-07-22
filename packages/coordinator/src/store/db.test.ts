@@ -213,6 +213,24 @@ describe("chat-key binding ownership (audit COORD-10)", () => {
     expect(store.getChatKey(CO, KEY)!.client_id).toBe("dev-1");
     store.close();
   });
+
+  it("one account binds MULTIPLE distinct device keys (multi-device), each with its label", () => {
+    const store = new Store();
+    const KEY2 = "d".repeat(64);
+    // Device 1 and device 2 (fresh storage → different keys) both bind to account A.
+    expect(
+      store.upsertChatKey({ coordinate: CO, accountPubkey: A, chatPubkey: KEY, label: "Chrome on macOS", now: 1 }),
+    ).toBe(true);
+    expect(
+      store.upsertChatKey({ coordinate: CO, accountPubkey: A, chatPubkey: KEY2, label: "Firefox on Android", now: 2 }),
+    ).toBe(true);
+    const keys = store.chatKeysForAccount(CO, A);
+    expect(keys.map((k) => k.chat_pubkey).sort()).toEqual([KEY, KEY2].sort());
+    expect(store.getChatKey(CO, KEY)!.label).toBe("Chrome on macOS");
+    expect(store.getChatKey(CO, KEY2)!.label).toBe("Firefox on Android");
+    expect(keys.every((k) => k.status === "active")).toBe(true);
+    store.close();
+  });
 });
 
 describe("invite claim atomicity (audit COORD-25)", () => {

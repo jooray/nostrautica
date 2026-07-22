@@ -278,4 +278,83 @@ export function isInviteValid(
   );
 }
 
+// ── Chat device attestation proof of possession (NIP §10.2) ──────────────────
+// A 21607 v2 `op:"add"` attestation is sealed by the ACCOUNT key but must ALSO
+// prove the account controls the chat DEVICE key's secret — otherwise an account
+// could attest a chat pubkey it doesn't own (v1's griefing/mis-binding gap). The
+// device key signs a domain-separated, injective challenge that also binds the
+// rumor's `created_at`, so a captured proof can't be replayed under a different
+// timestamp/rumor:
+//
+//   sha256( utf8( JSON.stringify(
+//     ["nostrautica-chat-device-v2", <coordinate>, <account-pubkey>,
+//      <chat-pubkey>, <created_at>] ) ) )
+const CHAT_DEVICE_PROOF_TAG = "nostrautica-chat-device-v2";
+
+function chatDeviceChallenge(
+  coordinate: string,
+  accountPubkey: string,
+  chatPubkey: string,
+  createdAt: number,
+): Uint8Array {
+  return sha256(
+    utf8ToBytes(
+      JSON.stringify([
+        CHAT_DEVICE_PROOF_TAG,
+        coordinate,
+        accountPubkey,
+        chatPubkey,
+        createdAt,
+      ]),
+    ),
+  );
+}
+
+/**
+ * Build a chat-device proof of possession: BIP-340 schnorr signature by the chat
+ * DEVICE key over the §10.2 challenge. `createdAt` MUST be the 21607 rumor's own
+ * `created_at` (the verifier reconstructs the challenge from it). Returns hex.
+ */
+export function makeChatDeviceProof(
+  deviceSk: Uint8Array,
+  coordinate: string,
+  accountPubkey: string,
+  createdAt: number,
+): string {
+  const chatPubkey = getPublicKey(deviceSk);
+  const sig = schnorr.sign(
+    chatDeviceChallenge(coordinate, accountPubkey, chatPubkey, createdAt),
+    deviceSk,
+  );
+  return bytesToHex(sig);
+}
+
+/**
+ * Verify a chat-device proof of possession (NIP §10.2). A predicate over
+ * UNTRUSTED input (the coordinator receives it inside a gift-wrapped rumor from
+ * anyone) — malformed hex must return false, never throw. Returns true only when
+ * `proofSig` is a valid BIP-340 signature by `chatPubkey` over the challenge that
+ * binds this (coordinate, account, chat pubkey, created_at).
+ */
+export function verifyChatDeviceProof(
+  proofSig: string,
+  coordinate: string,
+  accountPubkey: string,
+  chatPubkey: string,
+  createdAt: number,
+): boolean {
+  if (!/^[0-9a-f]{128}$/.test(proofSig) || !/^[0-9a-f]{64}$/.test(chatPubkey)) {
+    return false;
+  }
+  try {
+    return schnorr.verify(
+      hexToBytes(proofSig),
+      chatDeviceChallenge(coordinate, accountPubkey, chatPubkey, createdAt),
+      chatPubkey,
+    );
+  } catch {
+    return false;
+  }
+}
+
 export { bytesToHex, hexToBytes, utf8ToBytes, concatBytes };

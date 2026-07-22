@@ -24,7 +24,12 @@ import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
 import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
-import { resolveChatIdentity, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
+import {
+  resolveChatIdentity,
+  buildChatKeyProfile,
+  defaultDeviceLabel,
+  type ChatIdentity,
+} from "./identity.js";
 import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
 import {
@@ -167,6 +172,8 @@ export class MarmotChat {
         op: "add",
         chatPubkey: this.identity.pubkey,
         clientId: this.identity.clientId,
+        label: defaultDeviceLabel(),
+        deviceSecretKey: this.identity.secretKey,
       });
     }
   }

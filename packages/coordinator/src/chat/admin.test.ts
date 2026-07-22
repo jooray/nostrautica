@@ -1,16 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { generateSecretKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { Store } from "../store/db.js";
 import { MarmotAdmin } from "./admin.js";
 import type { ChatMls } from "./mls.js";
-import type { ChatKeyAttestationContent } from "@nostrautica/protocol";
+import { makeChatDeviceProof, type ChatKeyAttestationContent } from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][] };
 
 const COORD = "31923:" + "e".repeat(64) + ":devcon";
 const ACCOUNT = "a".repeat(64);
-const CHATKEY = "c".repeat(64);
-const CHATKEY2 = "d".repeat(64);
+// Real device keys: CHATKEY/CHATKEY2 are the pubkeys of DEVICE_SK/DEVICE_SK2, so a
+// 21607-add proof of possession (NIP §10.2) can actually be signed and verified.
+const DEVICE_SK = generateSecretKey();
+const CHATKEY = getPublicKey(DEVICE_SK);
+const DEVICE_SK2 = generateSecretKey();
+const CHATKEY2 = getPublicKey(DEVICE_SK2);
+/** The rumor created_at bound into the proof challenge (also the admin's now()). */
+const CREATED_AT = 1000;
 
 /** An in-memory ChatMls: tracks membership per group in a Set, records all calls. */
 class FakeMls implements ChatMls {
@@ -79,8 +85,24 @@ function freshStore(): Store {
   return new Store(":memory:", generateSecretKey());
 }
 
-function attest(op: "add" | "revoke", chatPubkey = CHATKEY): ChatKeyAttestationContent {
-  return { v: 2, a: COORD, op, chat_pubkey: chatPubkey };
+/**
+ * Build a 21607 v2 attestation content. For op:"add" it attaches a real proof of
+ * possession signed by the device key (`deviceSk`, default DEVICE_SK) over the
+ * §10.2 challenge for `account` (default ACCOUNT) at CREATED_AT. `op:"revoke"`
+ * carries no proof. Pass `deviceSk: undefined` to omit the proof entirely (to test
+ * the missing-proof rejection).
+ */
+function attest(
+  op: "add" | "revoke",
+  chatPubkey = CHATKEY,
+  opts: { deviceSk?: Uint8Array | null; account?: string; label?: string } = {},
+): ChatKeyAttestationContent {
+  const base = { v: 2 as const, a: COORD, op, chat_pubkey: chatPubkey };
+  if (op !== "add") return base;
+  const account = opts.account ?? ACCOUNT;
+  const deviceSk = "deviceSk" in opts ? opts.deviceSk : DEVICE_SK;
+  const proof = deviceSk ? makeChatDeviceProof(deviceSk, COORD, account, CREATED_AT) : undefined;
+  return { ...base, label: opts.label ?? "Test device", ...(proof ? { proof } : {}) };
 }
 
 describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
@@ -219,7 +241,7 @@ describe("MarmotAdmin — attestation authentication (§3.3)", () => {
     const admin = makeAdmin(store, mls);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     // ACCOUNT is not an attendee row → rejected, nothing recorded.
-    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"));
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     expect(ok).toBe(false);
     expect(store.getChatKey(COORD, CHATKEY)).toBeUndefined();
     expect(mls.invited).toEqual([]);
@@ -232,7 +254,7 @@ describe("MarmotAdmin — attestation authentication (§3.3)", () => {
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
 
-    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"));
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     expect(ok).toBe(true);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active");
     expect(mls.invited).toEqual([CHATKEY]); // synced in on attest
@@ -245,7 +267,7 @@ describe("MarmotAdmin — attestation authentication (§3.3)", () => {
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 1 });
 
-    await admin.handleAttestation(COORD, ACCOUNT, attest("add"));
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active"); // recorded
     expect(mls.invited).toEqual([]); // but not added
   });
@@ -256,10 +278,10 @@ describe("MarmotAdmin — attestation authentication (§3.3)", () => {
     const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
-    await admin.handleAttestation(COORD, ACCOUNT, attest("add"));
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
 
-    await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"));
+    await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
     expect(mls.removed.at(-1)).toEqual([CHATKEY]);
     expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
@@ -297,16 +319,16 @@ describe("MarmotAdmin — attestation authorization (audit COORD-1/COORD-10)", (
     const stranger = "f".repeat(64);
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     store.upsertAttendee({ coordinate: COORD, pubkey: stranger, status: "approved", now: 1 });
-    await admin.handleAttestation(COORD, ACCOUNT, attest("add"));
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
 
     // The enrolled stranger tries to evict ACCOUNT's chat key — rejected, key intact.
-    const ok = await admin.handleAttestation(COORD, stranger, attest("revoke"));
+    const ok = await admin.handleAttestation(COORD, stranger, attest("revoke"), CREATED_AT);
     expect(ok).toBe(false);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active");
     expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
     // The owner CAN still revoke it.
-    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"))).toBe(true);
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT)).toBe(true);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
   });
 
@@ -319,7 +341,7 @@ describe("MarmotAdmin — attestation authorization (audit COORD-1/COORD-10)", (
     await admin.syncMember(COORD, ACCOUNT);
     expect(mls.members.get("mls-1")?.has(ACCOUNT)).toBe(true);
 
-    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("revoke", ACCOUNT));
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("revoke", ACCOUNT), CREATED_AT);
     expect(ok).toBe(true);
     expect(mls.removed.at(-1)).toEqual([ACCOUNT]);
     expect(mls.members.get("mls-1")?.has(ACCOUNT)).toBe(false);
@@ -331,9 +353,9 @@ describe("MarmotAdmin — attestation authorization (audit COORD-1/COORD-10)", (
     const admin = makeAdmin(store, mls);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 1 });
-    await admin.handleAttestation(COORD, ACCOUNT, attest("add"));
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
 
-    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"));
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
     expect(ok).toBe(false);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active"); // not revoked
     expect(mls.removed).toEqual([]); // no MLS removal happened
@@ -348,13 +370,113 @@ describe("MarmotAdmin — attestation authorization (audit COORD-1/COORD-10)", (
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     store.upsertAttendee({ coordinate: COORD, pubkey: b, status: "approved", now: 1 });
 
-    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"))).toBe(true);
-    // B attests the SAME chat key — rejected at the store layer (COORD-10).
-    expect(await admin.handleAttestation(COORD, b, attest("add"))).toBe(false);
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    // B attests the SAME chat key with a genuine proof of possession (B even holds
+    // the device secret) — still rejected at the store layer (COORD-10): a chat
+    // pubkey is never rebound to a different account.
+    const bProof = attest("add", CHATKEY, { account: b, deviceSk: DEVICE_SK });
+    expect(await admin.handleAttestation(COORD, b, bProof, CREATED_AT)).toBe(false);
     const row = store.getChatKey(COORD, CHATKEY)!;
     expect(row.account_pubkey).toBe(ACCOUNT); // binding unchanged
     // And B can't revoke what they never owned either.
-    expect(await admin.handleAttestation(COORD, b, attest("revoke"))).toBe(false);
+    expect(await admin.handleAttestation(COORD, b, attest("revoke"), CREATED_AT)).toBe(false);
+  });
+});
+
+describe("MarmotAdmin — 21607 v2 proof of possession & device cap (NIP §10)", () => {
+  it("rejects an add with no proof of possession", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    // deviceSk:null → no proof attached at all.
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { deviceSk: null }), CREATED_AT);
+    expect(ok).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)).toBeUndefined();
+    expect(mls.invited).toEqual([]);
+  });
+
+  it("rejects an add whose proof was signed by the WRONG key", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    // The attested chat_pubkey is CHATKEY, but the proof is signed by DEVICE_SK2
+    // (whose pubkey is CHATKEY2) — the coordinator can't verify possession.
+    const forged = attest("add", CHATKEY, { deviceSk: DEVICE_SK2 });
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, forged, CREATED_AT);
+    expect(ok).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)).toBeUndefined();
+  });
+
+  it("rejects an add whose proof was signed over a DIFFERENT created_at (replay guard)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    const content = attest("add"); // proof over CREATED_AT
+    // Coordinator uses a different rumor created_at → challenge differs → invalid.
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, content, CREATED_AT + 1);
+    expect(ok).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)).toBeUndefined();
+  });
+
+  it("enforces the per-account device cap: a 6th distinct key is rejected", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    // Five distinct device keys bind successfully…
+    const devices = Array.from({ length: 6 }, () => generateSecretKey());
+    for (let i = 0; i < 5; i++) {
+      const sk = devices[i]!;
+      const pk = getPublicKey(sk);
+      const ok = await admin.handleAttestation(
+        COORD,
+        ACCOUNT,
+        attest("add", pk, { deviceSk: sk }),
+        CREATED_AT,
+      );
+      expect(ok).toBe(true);
+    }
+    // …the sixth is over the cap.
+    const sixth = devices[5]!;
+    const sixthPk = getPublicKey(sixth);
+    const ok = await admin.handleAttestation(
+      COORD,
+      ACCOUNT,
+      attest("add", sixthPk, { deviceSk: sixth }),
+      CREATED_AT,
+    );
+    expect(ok).toBe(false);
+    expect(store.getChatKey(COORD, sixthPk)).toBeUndefined();
+    // A refresh of an already-active key is NOT counted against the cap.
+    const refresh = await admin.handleAttestation(
+      COORD,
+      ACCOUNT,
+      attest("add", getPublicKey(devices[0]!), { deviceSk: devices[0]! }),
+      CREATED_AT,
+    );
+    expect(refresh).toBe(true);
+  });
+
+  it("stores the device label from the attestation on the binding", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(
+      COORD,
+      ACCOUNT,
+      attest("add", CHATKEY, { label: "Firefox on Linux" }),
+      CREATED_AT,
+    );
+    expect(store.getChatKey(COORD, CHATKEY)?.label).toBe("Firefox on Linux");
   });
 });
 
