@@ -32,6 +32,7 @@
   import PostCard from "$lib/components/PostCard.svelte";
   import ReadinessJourney from "$lib/components/ReadinessJourney.svelte";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
+  import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -297,6 +298,36 @@
   const latestPost = $derived(
     [...eventPosts].sort((a, b) => b.publishedAt - a.publishedAt)[0],
   );
+
+  // Own coordinator-status notices (21606 sealed to this attendee, NIP §6.3):
+  // a poison in the attendee's own submission/talk pipeline surfaces as a modest
+  // banner, seeded from cache and kept live by the grant scan.
+  const ownPoison = $derived(ctx ? ownStatusStore.poison(ctx.coordinate) : []);
+
+  // Declared data retention (NIP §6.2): one localized line at the bottom of a
+  // member's event view. `retentionDays` is absent for indefinite retention.
+  const retentionDays = $derived(ctx?.config.retentionDays);
+
+  // "Leave event" (NIP §6.3 21610) — enrolled attendees only (organizers manage
+  // the event, not leave it). A confirm dialog guards the destructive action.
+  let leaving = $state(false);
+  let confirmingLeave = $state(false);
+  let leftMessage = $state<string | null>(null);
+  async function doLeave() {
+    if (!session.signer || !ctx) return;
+    leaving = true;
+    try {
+      const { withdrawFromEvent } = await import("$lib/events/withdraw.js");
+      await withdrawFromEvent(session.signer, ctx);
+      leftMessage = t("event.leave.done");
+      approved = false;
+      confirmingLeave = false;
+    } catch {
+      leftMessage = t("event.leave.failed");
+    } finally {
+      leaving = false;
+    }
+  }
 </script>
 
 {#if error}
@@ -309,6 +340,18 @@
 {:else}
   <EventHeader {ctx} status={overviewStatus} />
   {#if ctx.summary}<p class="summary">{ctx.summary}</p>{/if}
+
+  <!-- Own-pipeline failure notices (21606 → attendee, NIP §6.3): modest, per stage. -->
+  {#each ownPoison as st (st.stage)}
+    <div class="card warn" role="status">
+      <strong>{t("event.ownStatus.title")}</strong>
+      <span class="muted"
+        >{st.stage === "process_talk"
+          ? t("event.ownStatus.talk")
+          : t("event.ownStatus.submission")}</span
+      >
+    </div>
+  {/each}
 
   <!-- One unified event menu (user feedback 2026-07-16: admin was up top, other
        links stranded at the bottom): organizer admin + custom 31608 items +
@@ -420,6 +463,34 @@
         <PostCard {post} {naddr} full />
       {/each}
     {/if}
+  {/if}
+
+  <!-- Declared data retention (NIP §6.2): one line, best-effort wording. -->
+  {#if retentionDays !== undefined}
+    <p class="muted retention-line">{t("event.retention.line", { days: retentionDays })}</p>
+  {/if}
+
+  <!-- Leave event (NIP §6.3 21610): enrolled attendees only, confirm-guarded. -->
+  {#if approved && !organizer}
+    <div class="leave-zone">
+      {#if leftMessage}
+        <p class="muted" role="status">{leftMessage}</p>
+      {:else if confirmingLeave}
+        <p class="muted">{t("event.leave.confirm")}</p>
+        <div class="row" style="gap:0.5rem">
+          <button class="btn danger inline" disabled={leaving} onclick={doLeave}>
+            {leaving ? t("event.leave.leaving") : t("event.leave.confirmYes")}
+          </button>
+          <button class="btn inline" disabled={leaving} onclick={() => (confirmingLeave = false)}>
+            {t("event.leave.cancel")}
+          </button>
+        </div>
+      {:else}
+        <button class="btn inline subtle" onclick={() => (confirmingLeave = true)}>
+          {t("event.leave.action")}
+        </button>
+      {/if}
+    </div>
   {/if}
 {/if}
 

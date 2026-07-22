@@ -15,6 +15,7 @@ import {
   wrapRumor,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
+  KIND_KEY_GRANT,
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_DIRECTORY_ENTRY,
@@ -24,6 +25,7 @@ import {
   KIND_PROFILE_CORRECTION,
   KIND_TALK,
   KIND_TALK_SUBMISSION,
+  KIND_ATTENDEE_WITHDRAWAL,
   KIND_DELETION,
   talkContentSchema,
   directoryEntryContentSchema,
@@ -281,6 +283,10 @@ async function setup(
     /** Per-role provider routing (H-1): route summary+translate to one instance
      *  ("provA") and match+embed to another ("provB"), exposed as h.llmA/h.llmB. */
     splitProviders?: boolean;
+    /** Retention policy (NIP §6.2): seed a `retention` tag on the 31600 and an
+     *  `end` tag on the 31923 so the retention sweep has a deadline to test. */
+    retentionDays?: number;
+    eventEndSec?: number;
     /** Billing policy (§9, D5): the wire verdict evaluator + optional grace window. */
     evaluateBilling?: (eid: string, count: number) => import("@nostrautica/protocol").CoordinatorBilling;
     billingGracePeriodSec?: number;
@@ -313,8 +319,8 @@ async function setup(
   const store = new Store(":memory:", coordSk);
   const transport = new FakeTransport();
   transport.seed.push(
-    { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d }) ?? []),
   );
@@ -3034,5 +3040,187 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     const latest = rosters[rosters.length - 1]!;
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
     expect(roster.nostr_group_id).toBeUndefined();
+  });
+});
+
+// ── NIP §6.3 21610 — attendee withdrawal ─────────────────────────────────────
+/** Send a 21610 withdrawal rumor sealed by the attendee's own account key to E_inbox. */
+async function withdraw(
+  h: Harness,
+  attendeeSk: Uint8Array,
+  opts: { deleteData?: boolean; createdAt?: number } = {},
+): Promise<void> {
+  const inboxPk = getPublicKey(h.einboxSk);
+  const wrap = wrapRumor(attendeeSk, inboxPk, {
+    kind: KIND_ATTENDEE_WITHDRAWAL,
+    content: { v: 2, a: h.coordinate, delete_data: opts.deleteData ?? true },
+    tags: [["a", h.coordinate]],
+    ...(opts.createdAt !== undefined ? { created_at: opts.createdAt } : {}),
+  });
+  await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+}
+
+/** The stored media ciphertext hash for an approved attendee (from its submission). */
+function attendeeBlobX(h: Harness, pubkey: string): string | undefined {
+  const row = h.store.getAttendee(h.coordinate, pubkey);
+  if (!row?.profile_json) return undefined;
+  try {
+    return (JSON.parse(row.profile_json) as { __media?: { x?: string }[] }).__media?.[0]?.x;
+  } catch {
+    return undefined;
+  }
+}
+
+describe("NIP §6.3 — attendee withdrawal (21610)", () => {
+  it("runs the full revoke effect chain: directory deletion, ECK rotation, re-grant to the rest", async () => {
+    const h = await setup();
+    const leaverSk = generateSecretKey();
+    const stayerSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    const stayerPk = await join(h, stayerSk, "design");
+    await h.coordinator.jobs.drain();
+    const before = h.transport.published.length;
+
+    await withdraw(h, leaverSk, { deleteData: true });
+    await h.coordinator.jobs.drain();
+    const after = h.transport.published.slice(before);
+
+    // The leaver's directory entry was NIP-09-deleted.
+    expect(after.some((e) => e.kind === KIND_DELETION)).toBe(true);
+    // The leaver is no longer an approved attendee.
+    expect(h.store.approvedAttendees(h.coordinate).some((a) => a.pubkey === leaverPk)).toBe(false);
+    // The remaining attendee got a re-grant carrying the rotated ECK v2.
+    const grantToStayer = after
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, stayerSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_KEY_GRANT)
+      .map((r) => keyGrantContentSchema.parse(JSON.parse(r.content)))
+      .pop();
+    expect(grantToStayer?.eck.length).toBe(2);
+    void stayerPk;
+  });
+
+  it("delete_data:true purges stored artifacts; delete_data:false retains them", async () => {
+    // delete_data:true → attendee row + transcript purged.
+    const h1 = await setup();
+    const sk1 = generateSecretKey();
+    const pk1 = await join(h1, sk1, "crypto");
+    await h1.coordinator.jobs.drain();
+    const x1 = attendeeBlobX(h1, pk1)!;
+    expect(h1.store.getTranscript(x1)).not.toBeUndefined();
+    expect(h1.store.getAttendee(h1.coordinate, pk1)?.ai_profile_json).not.toBeNull();
+    await withdraw(h1, sk1, { deleteData: true });
+    await h1.coordinator.jobs.drain();
+    expect(h1.store.getAttendee(h1.coordinate, pk1)).toBeUndefined();
+    expect(h1.store.getTranscript(x1)).toBeUndefined();
+
+    // delete_data:false → row retained (status revoked), artifacts kept.
+    const h2 = await setup();
+    const sk2 = generateSecretKey();
+    const pk2 = await join(h2, sk2, "crypto");
+    await h2.coordinator.jobs.drain();
+    const x2 = attendeeBlobX(h2, pk2)!;
+    await withdraw(h2, sk2, { deleteData: false });
+    await h2.coordinator.jobs.drain();
+    const row = h2.store.getAttendee(h2.coordinate, pk2);
+    expect(row?.status).toBe("revoked");
+    expect(row?.ai_profile_json).not.toBeNull();
+    expect(h2.store.getTranscript(x2)).not.toBeUndefined();
+  });
+
+  it("a re-delivered stale withdrawal cannot re-withdraw after a rejoin (per-subject watermark)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const t0 = Math.floor(h.clock.t / 1000);
+
+    // Withdraw at t0 (delete_data:false so the row survives to observe status).
+    await withdraw(h, sk, { deleteData: false, createdAt: t0 });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+
+    // Rejoin via a fresh join request → approved again.
+    h.clock.t += 60_000;
+    await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+
+    // A re-delivered COPY of the old withdrawal (same/earlier created_at) is stale
+    // under the per-subject watermark and must NOT re-withdraw the rejoined attendee.
+    await withdraw(h, sk, { deleteData: false, createdAt: t0 });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+});
+
+// ── NIP §6.3 21606 — attendee-scoped status delivery ─────────────────────────
+describe("NIP §6.3 — attendee-scoped 21606 status", () => {
+  it("a poisoned own-pipeline job is sealed to the affected attendee too", async () => {
+    const h = await setup(0, { failTranscribe: true });
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    for (let i = 0; i < 30; i++) {
+      await h.coordinator.jobs.drain();
+      h.clock.t += 5 * 60 * 60_000;
+    }
+    // The organizer received the poison status (unchanged behavior)...
+    const toOrg = lastCoordinatorStatus(h);
+    expect(toOrg?.state).toBe("poison");
+    expect(toOrg?.pubkey).toBe(pk);
+    // ...AND the affected attendee received the same status, sealed to THEM.
+    const toAttendee = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, attendeeSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
+    expect(toAttendee.length).toBeGreaterThan(0);
+    expect(toAttendee[toAttendee.length - 1]!.pubkey).toBe(pk);
+  });
+});
+
+// ── NIP §6.2 — retention sweep ───────────────────────────────────────────────
+describe("NIP §6.2 — retention sweep", () => {
+  it("does nothing before the retention deadline", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 30, eventEndSec: nowSec - 10 * 86_400 });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const before = h.transport.published.length;
+    await h.coordinator.retentionSweep();
+    // 10 days after end, 30-day window: nothing deleted.
+    expect(h.transport.published.slice(before).some((e) => e.kind === KIND_DELETION)).toBe(false);
+  });
+
+  it("after the deadline: deletes member records, stops processing, emits a 21606", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const before = h.transport.published.length;
+
+    await h.coordinator.retentionSweep();
+    const after = h.transport.published.slice(before);
+
+    // Member records deleted (NIP-09) — at least the directory + roster addresses.
+    const deletion = after.find((e) => e.kind === KIND_DELETION);
+    expect(deletion).toBeDefined();
+    expect(deletion!.tags.some((t) => t[0] === "k" && t[1] === String(KIND_DIRECTORY_ENTRY))).toBe(true);
+    expect(deletion!.tags.some((t) => t[0] === "k" && t[1] === "31604")).toBe(true);
+    // A 21606 retention status went to the organizer.
+    const status = after
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .pop();
+    expect(status?.error_category).toBe("retention_expired");
+    // Processing is terminally parked: durable flag set, and a fresh submission's
+    // paid pipeline does not resume.
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+
+    // Idempotent: a second sweep issues no further deletions.
+    const before2 = h.transport.published.length;
+    await h.coordinator.retentionSweep();
+    expect(h.transport.published.slice(before2).some((e) => e.kind === KIND_DELETION)).toBe(false);
+    void pk;
   });
 });

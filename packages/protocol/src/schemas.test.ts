@@ -18,6 +18,7 @@ import {
   coordinatorStatusContentSchema,
   mediaTranscriptSchema,
   profileCorrectionContentSchema,
+  withdrawalContentSchema,
   chatKeyAttestationContentSchema,
   attendeeProfileSchema,
   aiProfileSchema,
@@ -706,6 +707,50 @@ describe("boundary length caps (PROTO-4)", () => {
         matches: Array(MAX_MATCHES + 1).fill(match),
       }),
     ).toThrow();
+  });
+
+  it("31605 icebreakers: ≤ 3 per match, ≤ 280 chars each (NIP §6.2)", () => {
+    const base = { pubkey: hex, score: 0.5, similarity: 0.5, complementarity: 0.5, reasoning: "r" };
+    // Present + within bounds round-trips.
+    roundTrips(matchListContentSchema, {
+      v: 2,
+      computed_at: 1,
+      matches: [{ ...base, icebreakers: ["a".repeat(280), "hi", "hey"] }],
+    });
+    // Absent is fine (additive field).
+    roundTrips(matchListContentSchema, { v: 2, computed_at: 1, matches: [base] });
+    // > 3 icebreakers rejected.
+    expect(() =>
+      matchListContentSchema.parse({
+        v: 2,
+        computed_at: 1,
+        matches: [{ ...base, icebreakers: ["1", "2", "3", "4"] }],
+      }),
+    ).toThrow();
+    // An oversized icebreaker rejected.
+    expect(() =>
+      matchListContentSchema.parse({
+        v: 2,
+        computed_at: 1,
+        matches: [{ ...base, icebreakers: ["x".repeat(281)] }],
+      }),
+    ).toThrow();
+  });
+
+  it("21610 withdrawal: strict, delete_data defaults true (NIP §6.3)", () => {
+    // Default fills in delete_data:true.
+    expect(withdrawalContentSchema.parse({ v: 2, a: "31923:pk:d" })).toEqual({
+      v: 2,
+      a: "31923:pk:d",
+      delete_data: true,
+    });
+    roundTrips(withdrawalContentSchema, { v: 2, a: "31923:pk:d", delete_data: false });
+    // Strict: an unknown field is rejected.
+    expect(() =>
+      withdrawalContentSchema.parse({ v: 2, a: "31923:pk:d", extra: 1 }),
+    ).toThrow();
+    // Wrong version rejected (strict wire v2).
+    expect(() => withdrawalContentSchema.parse({ v: 1, a: "x" })).toThrow();
   });
 
   it("31604 roster: attendees ≤ MAX_ROSTER", () => {

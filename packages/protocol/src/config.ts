@@ -70,6 +70,13 @@ export interface EventConfig {
   lang: string; // ISO 639-1 event language (attendee UI + AI output); default "en"
   talks: TalksMode; // prerecorded-talks journey (spec F2); default "off" (tag omitted)
   chat: ChatBackend[]; // group-chat backends (Marmot §1.3); default [] (tag omitted)
+  /**
+   * Data-retention window in days (NIP §6.2 `retention`): the coordinator deletes
+   * the event's member records and ceases processing this many days after the
+   * event's end time, and clients surface the declared value at join time. A
+   * positive integer; absent (undefined) = indefinite retention.
+   */
+  retentionDays?: number;
 }
 
 export interface EventConfigTags {
@@ -120,6 +127,15 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
   // round-trip never silently drops it (see event-page.ts warning).
   for (const backend of cfg.chat ?? []) {
     if (CHAT_BACKENDS.includes(backend)) tags.push(["chat", backend]);
+  }
+  // Retention (NIP §6.2): a positive integer of days, omitted for indefinite
+  // retention so an event without a policy stays byte-identical. A non-positive or
+  // non-integer value is a programming error at the build boundary.
+  if (cfg.retentionDays !== undefined) {
+    if (!Number.isInteger(cfg.retentionDays) || cfg.retentionDays < 1) {
+      throw new Error("31600 config: retentionDays must be a positive integer");
+    }
+    tags.push(["retention", String(cfg.retentionDays)]);
   }
   return { kind: KIND_EVENT_CONFIG, tags, content: "" };
 }
@@ -257,7 +273,22 @@ export function parseEventConfig(
     lang: normalizeLang(first(tags, "lang")),
     talks,
     chat,
+    // Retention (NIP §6.2): a positive-integer day count; absent/non-positive/
+    // non-integer means indefinite retention (undefined). Fail-soft like every
+    // other optional tag parsed from public relay data.
+    retentionDays: retentionTag(tags),
   };
+}
+
+/**
+ * Parse the optional `retention` tag (NIP §6.2) into a positive-integer day count.
+ * Absent, non-numeric, non-integer, or ≤ 0 → undefined (indefinite retention).
+ */
+function retentionTag(tags: string[][]): number | undefined {
+  const raw = first(tags, "retention");
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 ? n : undefined;
 }
 
 /** The event coordinate for a parsed config. */

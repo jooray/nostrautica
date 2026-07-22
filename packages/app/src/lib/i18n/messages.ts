@@ -215,6 +215,17 @@ export const messages = {
     "event.status.approved": "Approved",
     "event.status.pending": "Pending",
     "event.status.visitor": "Visitor",
+    "event.ownStatus.title": "Processing problem",
+    "event.ownStatus.submission": "Your profile couldn't be processed — try re-submitting.",
+    "event.ownStatus.talk": "Your talk couldn't be processed — try re-recording.",
+    "event.retention.line": "Your event data is deleted {days} days after the event.",
+    "event.leave.action": "Leave event",
+    "event.leave.confirm": "Leave this event? Your directory entry and matches are removed, and your intro media is deleted.",
+    "event.leave.confirmYes": "Leave event",
+    "event.leave.cancel": "Cancel",
+    "event.leave.leaving": "Leaving…",
+    "event.leave.done": "You've left this event.",
+    "event.leave.failed": "Couldn't leave — please try again.",
     "event.latest": "Latest",
 
     // Readiness journey (redesign §4.1)
@@ -326,6 +337,7 @@ export const messages = {
 
     // Join
     "join.title": "Join {title}",
+    "join.retention": "This event's data is deleted {days} days after it ends.",
     "join.wentWrong": "Something went wrong.",
     "join.loading": "Loading event…",
     "join.youreIn": "You're in",
@@ -1188,6 +1200,17 @@ export const messages = {
     "event.status.approved": "Schválené",
     "event.status.pending": "Čaká sa",
     "event.status.visitor": "Návštevník",
+    "event.ownStatus.title": "Problém so spracovaním",
+    "event.ownStatus.submission": "Tvoj profil sa nepodarilo spracovať — skús ho odoslať znova.",
+    "event.ownStatus.talk": "Tvoju prednášku sa nepodarilo spracovať — skús ju nahrať znova.",
+    "event.retention.line": "Tvoje údaje z podujatia sa vymažú {days} dní po podujatí.",
+    "event.leave.action": "Opustiť podujatie",
+    "event.leave.confirm": "Opustiť toto podujatie? Tvoj záznam v adresári a zhody sa odstránia a tvoje intro médiá sa vymažú.",
+    "event.leave.confirmYes": "Opustiť podujatie",
+    "event.leave.cancel": "Zrušiť",
+    "event.leave.leaving": "Opúšťam…",
+    "event.leave.done": "Opustil si toto podujatie.",
+    "event.leave.failed": "Nepodarilo sa odísť — skús to znova.",
     "event.latest": "Najnovšie",
 
     // Readiness journey (redesign §4.1)
@@ -1300,6 +1323,7 @@ export const messages = {
 
     // Join
     "join.title": "Pripojiť sa: {title}",
+    "join.retention": "Údaje z tohto podujatia sa vymažú {days} dní po jeho skončení.",
     "join.wentWrong": "Niečo sa pokazilo.",
     "join.loading": "Načítava sa podujatie…",
     "join.youreIn": "Ste vnútri",
@@ -2168,6 +2192,17 @@ export const messages = {
     "event.status.approved": "Schváleno",
     "event.status.pending": "Čeká se",
     "event.status.visitor": "Návštěvník",
+    "event.ownStatus.title": "Problém se zpracováním",
+    "event.ownStatus.submission": "Tvůj profil se nepodařilo zpracovat — zkus ho odeslat znovu.",
+    "event.ownStatus.talk": "Tvou přednášku se nepodařilo zpracovat — zkus ji nahrát znovu.",
+    "event.retention.line": "Tvá data z akce se smažou {days} dní po akci.",
+    "event.leave.action": "Opustit akci",
+    "event.leave.confirm": "Opustit tuto akci? Tvůj záznam v adresáři a shody budou odstraněny a tvá intro média smazána.",
+    "event.leave.confirmYes": "Opustit akci",
+    "event.leave.cancel": "Zrušit",
+    "event.leave.leaving": "Opouštím…",
+    "event.leave.done": "Opustil jsi tuto akci.",
+    "event.leave.failed": "Nepodařilo se odejít — zkus to znovu.",
     "event.latest": "Nejnovější",
 
     // Cesta k připravenosti (redesign §4.1)
@@ -2280,6 +2315,7 @@ export const messages = {
 
     // Připojení
     "join.title": "Připojit se: {title}",
+    "join.retention": "Data z této akce se smažou {days} dní po jejím skončení.",
     "join.wentWrong": "Něco se pokazilo.",
     "join.loading": "Načítání akce…",
     "join.youreIn": "Jste uvnitř",

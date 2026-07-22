@@ -19,8 +19,11 @@ import {
   KIND_ADMIN_COMMAND,
   KIND_PROFILE_CORRECTION,
   KIND_TALK_SUBMISSION,
+  KIND_ATTENDEE_WITHDRAWAL,
   KIND_TALK,
   KIND_DIRECTORY_ENTRY,
+  KIND_ROSTER,
+  KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
   KIND_DELETION,
@@ -44,6 +47,7 @@ import {
   adminCommandContentSchema,
   profileCorrectionContentSchema,
   talkSubmissionContentSchema,
+  withdrawalContentSchema,
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   KIND_CHAT_KEY_ATTESTATION,
@@ -134,6 +138,23 @@ const MAX_TALKS_PER_SPEAKER = 10;
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
 function effectiveMaxMediaSec(configured: number): number {
   return configured > 0 ? configured : MAX_INPUT_DURATION_SEC;
+}
+
+/**
+ * The event's end time in unix seconds from its NIP-52 31923 event, the anchor the
+ * retention window (NIP §6.2) counts from. Prefers the `end` tag; falls back to
+ * `start` (an instant event with no distinct end). 0 when neither is a valid int —
+ * the retention sweep then skips the event (it cannot know when the window opened).
+ */
+function parseEventEndSec(evt: NostrEvent | undefined): number {
+  if (!evt) return 0;
+  const read = (name: string): number => {
+    const raw = evt.tags.find((t) => t[0] === name)?.[1];
+    if (raw === undefined) return 0;
+    const n = Number(raw);
+    return Number.isInteger(n) && n > 0 ? n : 0;
+  };
+  return read("end") || read("start");
 }
 
 /**
@@ -296,6 +317,16 @@ interface EventState {
   /** The install generation this event was authorized at (NIP §3.5). A newest 31600
    *  that no longer names this coordinator with THIS gen triggers a durable detach. */
   gen: number;
+  /** Data-retention window in days (NIP §6.2 `retention`); undefined = indefinite.
+   *  The retention sweep deletes member records + parks processing once now is past
+   *  `eventEndSec + retentionDays·86400`. */
+  retentionDays?: number;
+  /** The event's end time (unix seconds) from its 31923 `end` tag (falls back to
+   *  `start`), the anchor the retention window counts from. 0 when unknown. */
+  eventEndSec: number;
+  /** True once the retention sweep has expired this event: paid processing is parked
+   *  and member records have been deleted. A terminal state distinct from billing park. */
+  retentionExpired?: boolean;
 }
 
 /** Build a uniform route from a single legacy llm + ModelRef (test/back-compat). */
@@ -669,6 +700,9 @@ export class Coordinator {
       configEventId: cfgEvent?.id,
       configCreatedAt: cfgEvent?.created_at ?? 0,
       gen,
+      retentionDays: config?.retentionDays,
+      eventEndSec: parseEventEndSec(evtEvent),
+      retentionExpired: this.deps.store.isRetentionExpired(grant.coordinate) || undefined,
     };
     this.events.set(grant.coordinate, state);
     // Persist the typed billing principal + evaluate the state machine at install
@@ -934,8 +968,65 @@ export class Coordinator {
         const content = talkSubmissionContentSchema.parse(JSON.parse(rumor.content));
         // The speaker is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor.
         await this.handleTalkSubmission(state, rumor.pubkey, content);
+      } else if (rumor.kind === KIND_ATTENDEE_WITHDRAWAL) {
+        const content = withdrawalContentSchema.parse(JSON.parse(rumor.content));
+        // The withdrawing attendee is the SEAL AUTHOR (rumor.pubkey), bound by
+        // unwrapRumor — an attendee can only withdraw THEMSELVES (NIP §6.3 21610).
+        await this.handleWithdrawal(state, rumor.pubkey, content, {
+          createdAt: rumor.created_at ?? 0,
+          rumorId: rumor.id,
+        });
       }
     });
+  }
+
+  /**
+   * Attendee-initiated withdrawal (NIP §6.3 21610). Same effect chain as an
+   * organizer `revoke` (roster/directory/match removal, NIP-09 deletions, ECK
+   * rotation, Marmot member removal) triggered by the attendee themselves — no
+   * organizer action required. Gated by the §3.4 per-subject watermark (subject =
+   * the withdrawing sender), reusing the durable command-watermark table so a
+   * re-delivered old withdrawal cannot replay after a later re-approval.
+   *
+   * `delete_data` (default true): full deletion — the coordinator additionally
+   * purges its stored per-attendee artifacts (profile/ai_profile row, transcripts,
+   * nostr summary, content-addressed pipeline artifacts) so nothing derived
+   * survives. `delete_data: false` retains those artifacts so a later re-approval
+   * avoids reprocessing spend; only the public records are removed.
+   */
+  private async handleWithdrawal(
+    state: EventState,
+    pubkey: string,
+    content: import("@nostrautica/protocol").WithdrawalContent,
+    order: { createdAt: number; rumorId: string },
+  ): Promise<void> {
+    if (content.a !== state.coordinate) return;
+    // Per-subject watermark (NIP §3.4): reject a withdrawal that does not supersede
+    // the last one applied for this sender, so a re-delivered stale rumor after a
+    // rejoin can never re-withdraw the freshly re-approved attendee.
+    const subject = `withdraw:${pubkey}`;
+    const wm = this.deps.store.getCommandWatermark(state.coordinate, subject);
+    if (wm && !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: wm.rumor_id, created_at: wm.created_at })) {
+      log(`[withdraw] skipped stale withdrawal from ${short(pubkey)}: does not supersede watermark`);
+      return;
+    }
+    this.deps.store.setCommandWatermark(state.coordinate, subject, order.createdAt, order.rumorId);
+
+    const existing = this.deps.store.getAttendee(state.coordinate, pubkey);
+    if (!existing) {
+      log(`[withdraw] ${short(pubkey)} not enrolled — nothing to withdraw`);
+      return;
+    }
+    log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
+    // The public effect chain is identical to an organizer revoke (idempotent).
+    await this.revokeAttendee(state, pubkey);
+    if (content.delete_data) {
+      // Full deletion: purge the coordinator's stored derived artifacts for this
+      // attendee. The public directory/roster/match records were already removed
+      // by revokeAttendee; this removes the private DB copies too.
+      this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
+      log(`[withdraw] purged stored artifacts for ${short(pubkey)}`);
+    }
   }
 
   /**
@@ -2115,6 +2206,97 @@ export class Coordinator {
     }
   }
 
+  // ── retention sweep (NIP §6.2) ────────────────────────────────────────────
+  /**
+   * The unix-second deadline after which an event's member records are deleted and
+   * processing ceases: `eventEndSec + retentionDays·86400`. `null` when the event
+   * has no retention policy or an unknown end time (the sweep skips it).
+   */
+  private retentionDeadline(state: EventState): number | null {
+    if (state.retentionDays === undefined || state.eventEndSec <= 0) return null;
+    return state.eventEndSec + state.retentionDays * 86_400;
+  }
+
+  /**
+   * Periodic retention sweep (NIP §6.2): for every installed event whose retention
+   * window has elapsed and which hasn't already been swept, delete the event's
+   * member records (31603/31604/31605/31606/published 31610), stop paid processing
+   * (a terminal park distinct from billing/budget), and emit a 21606 to organizers.
+   * Idempotent — an event already expired is skipped.
+   */
+  async retentionSweep(): Promise<void> {
+    const nowSec = Math.floor(this.now() / 1000);
+    for (const state of [...this.events.values()]) {
+      if (state.retentionExpired) continue;
+      const deadline = this.retentionDeadline(state);
+      if (deadline === null || nowSec <= deadline) continue;
+      await this.expireRetention(state).catch((e) =>
+        log(`[retention] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e}`),
+      );
+    }
+  }
+
+  /**
+   * Expire one event's retention (NIP §6.2): NIP-09-delete every member record,
+   * park paid processing terminally, and notify organizers via 21606. The public
+   * effect is best-effort (relays may not honor NIP-09) — the wording never
+   * overpromises — but the coordinator also stops authoring anything new for the
+   * event, so no fresh member content appears after expiry.
+   */
+  private async expireRetention(state: EventState): Promise<void> {
+    log(`[retention] ${state.coordinate}: window elapsed — deleting member records + parking processing`);
+    const prev = this.currentEck(state);
+    const nowSec = Math.floor(this.now() / 1000);
+    const deletions: string[][] = [];
+    // 31603 directory entry per (currently-approved) attendee, blinded under the
+    // current ECK; 31605 match list shares the same blinded d, different kind.
+    for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
+      const d = blindedD(prev.bytes, state.coordinate, a.pubkey);
+      deletions.push([`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY)]);
+      deletions.push([`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST)]);
+    }
+    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded).
+    deletions.push([`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER)]);
+    deletions.push([`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX)]);
+    // Published 31610 talks, at the ECK version each was published under.
+    for (const talk of this.deps.store.publishedTalksForEvent(state.coordinate)) {
+      const eckBytes = this.eckById(state, talk.published_eck_id ?? prev.id);
+      const d = talkBlindedD(eckBytes, state.coordinate, talk.pubkey, talk.talk_d);
+      deletions.push([`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK)]);
+    }
+    // One NIP-09 kind-5 carrying every address (a-tag + k-tag pairs).
+    const tags: string[][] = [];
+    for (const [a, k] of deletions) {
+      tags.push(["a", a!]);
+      tags.push(["k", k!]);
+    }
+    const deletion = finalizeEvent(
+      { kind: KIND_DELETION, created_at: nowSec, tags, content: "retention window elapsed" },
+      this.deps.coordSk,
+    );
+    await this.deps.transport.publish(deletion, state.configRelays);
+
+    // Stop paid processing: terminal park (durable) + cancel in-flight jobs.
+    this.deps.store.markRetentionExpired(state.coordinate);
+    state.retentionExpired = true;
+    const cancelled = this.deps.store.cancelJobsForEvent(state.coordinate);
+
+    // Notify organizers via 21606 (billing block untouched — this is a lifecycle
+    // stage). error_category is a sanitized class, never attendee text.
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: "retention",
+      state: "poison",
+      attempts: 0,
+      error_category: "retention_expired",
+      retryable: false,
+      at: nowSec,
+    });
+    await this.deps.transport.publish(status, state.configRelays);
+    log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), cancelled ${cancelled} job(s), notified organizer`);
+  }
+
   // ── context fetch ───────────────────────────────────────────────────────────
   /**
    * The event's published invite hashes, cached per event (audit COORD-29):
@@ -2293,6 +2475,13 @@ export class Coordinator {
       if (typeof (timer as any).unref === "function") (timer as any).unref();
       this.closers.push(() => clearInterval(timer));
     }
+    // Retention sweep (NIP §6.2): run once at boot (catches events whose window
+    // elapsed while the daemon was down) and then hourly. Cheap — it only touches
+    // events that carry a retention policy and are past their deadline.
+    await this.retentionSweep().catch((e) => log(`[retention] boot sweep failed: ${e instanceof Error ? e.message : e}`));
+    const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
+    if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
+    this.closers.push(() => clearInterval(retentionTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
   }
@@ -2312,7 +2501,7 @@ export class Coordinator {
    * only implicitly (a restart re-publishes with a fresh wall clock, which — being
    * a later second than anything it published before the restart — stays monotonic
    * in practice; the map closes the same-process, same-second gap that actually
-   * produced §3.1 ties). A durable column is a later refinement.
+   * produced §3.1 ties). A durable column is a later refinement (reliability tail).
    */
   private lastPublishedAt = new Map<string, number>();
 
@@ -2499,8 +2688,21 @@ export class Coordinator {
     state.maxMediaSec = effectiveMaxMediaSec(Math.max(config.maxVideoSec, config.maxTalkSec));
     state.configRelays = relays;
     state.chat = isMarmotChatEnabled(config);
+    state.retentionDays = config.retentionDays;
     state.configEventId = event.id;
     state.configCreatedAt = event.created_at;
+    // A config edit that extends or removes the retention policy lifts a prior
+    // retention expiry (NIP §6.2): if the event is no longer past its (new) deadline,
+    // clear the terminal flag and resume parked work so processing can continue.
+    if (state.retentionExpired) {
+      const deadline = this.retentionDeadline(state);
+      if (deadline === null || Math.floor(this.now() / 1000) <= deadline) {
+        state.retentionExpired = undefined;
+        this.deps.store.clearRetentionExpired(coordinate);
+        this.resumeParkedWork(coordinate);
+        log(`[retention] ${coordinate}: policy extended/removed — retention expiry lifted, parked work resumed`);
+      }
+    }
     log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
 
     // Relay handover (audit COORD-8): the E_inbox / config / chat subscriptions
@@ -2618,6 +2820,14 @@ export class Coordinator {
    * never call this. `pubkey` scopes per-attendee budgets + call accounting.
    */
   private async assertSpendAllowed(coordinate: string, pubkey?: string): Promise<void> {
+    // 0. Retention gate (NIP §6.2): once the retention window has expired, paid
+    // processing is terminally parked — a re-enqueued job re-parks here rather than
+    // spending. Distinct from billing/budget park (which resume on payment/raise);
+    // retention expiry is only lifted by the organizer extending/removing the policy
+    // (a config edit, which clears the flag) or detaching.
+    if (this.events.get(coordinate)?.retentionExpired || this.deps.store.isRetentionExpired(coordinate)) {
+      throw new ParkJobError(`retention expired for ${coordinate} — paid work parked (records deleted)`);
+    }
     // 1. Billing gate.
     if (this.deps.evaluateBilling) {
       const stateNow = await this.reevaluateBilling(coordinate);
@@ -2746,7 +2956,7 @@ export class Coordinator {
       retryable: 1,
       updated_at: this.now(),
     });
-    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+    const content: import("@nostrautica/protocol").CoordinatorStatusContent = {
       v: 2,
       a: coordinate,
       ...(pubkey ? { pubkey } : {}),
@@ -2756,9 +2966,19 @@ export class Coordinator {
       error_category: category,
       retryable: true,
       at: Math.floor(this.now() / 1000),
-    });
+    };
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, content);
     await this.deps.transport.publish(status, state.configRelays);
-    log(`[status] surfaced poisoned ${info.type} for ${pubkey ? short(pubkey) : coordinate} to organizer`);
+    // Attendee-scoped delivery (NIP §6.3 21606): a poison report tied to a single
+    // attendee's own submission/talk pipeline is ALSO sealed to that attendee, so
+    // they see "your talk failed processing — try re-recording" without waiting on
+    // the organizer. Billing/budget blocks stay organizer-only (emitted elsewhere,
+    // never via surfacePoison), so every poison surfaced here is safe to mirror.
+    if (pubkey) {
+      const attendeeStatus = buildCoordinatorStatus(this.deps.coordSk, pubkey, content);
+      await this.deps.transport.publish(attendeeStatus, state.configRelays);
+    }
+    log(`[status] surfaced poisoned ${info.type} for ${pubkey ? short(pubkey) : coordinate}${pubkey ? " to organizer + attendee" : " to organizer"}`);
   }
 
   stop(): void {

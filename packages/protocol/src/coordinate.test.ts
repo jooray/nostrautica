@@ -131,6 +131,39 @@ describe("event config (kind 31600)", () => {
     expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)], ["talks", "bogus"]]).talks).toBe("off");
   });
 
+  it("omits the retention tag by default but round-trips a positive day count (NIP §6.2)", () => {
+    const base = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: [],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "off" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+      talks: "off" as const,
+      chat: [] as ("marmot")[],
+    };
+    // Absent → no tag, parses back to undefined (indefinite retention).
+    const noRet = buildEventConfig(base);
+    expect(noRet.tags.find((t) => t[0] === "retention")).toBeUndefined();
+    expect(parseEventConfig(pubkey, noRet.tags).retentionDays).toBeUndefined();
+    // Present → emitted + parsed.
+    const built = buildEventConfig({ ...base, retentionDays: 90 });
+    expect(built.tags).toContainEqual(["retention", "90"]);
+    expect(parseEventConfig(pubkey, built.tags).retentionDays).toBe(90);
+    // A non-positive/non-integer retention tag from a relay degrades to undefined.
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)], ["retention", "0"]]).retentionDays).toBeUndefined();
+    expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)], ["retention", "1.5"]]).retentionDays).toBeUndefined();
+    // Build rejects an invalid value (programming error at the boundary).
+    expect(() => buildEventConfig({ ...base, retentionDays: 0 })).toThrow();
+  });
+
   it("omits the chat tag when off (default) but round-trips marmot", () => {
     const base = {
       d: "ev",

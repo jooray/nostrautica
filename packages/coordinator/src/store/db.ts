@@ -507,6 +507,15 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (wire-v2 §6.2): retention-expired terminal flag on the events row.
+    // Once the retention sweep has deleted an event's member records + parked paid
+    // processing, this stays set across restarts so a re-install of the same event
+    // row never resumes paid work before the next sweep tick re-detects expiry.
+    try {
+      this.db.exec("ALTER TABLE events ADD COLUMN retention_expired INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      /* column already exists */
+    }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
@@ -627,6 +636,26 @@ export class Store {
    *  custody per decision D6. The install_state tombstone survives to bar re-install. */
   deleteEvent(coordinate: string): void {
     this.db.prepare("DELETE FROM events WHERE coordinate = ?").run(coordinate);
+  }
+
+  // ── retention-expiry terminal flag (NIP §6.2) ─────────────────────────────
+  /** True once the retention sweep has expired this event (records deleted, paid
+   *  processing parked). Survives restarts so paid work never resumes pre-sweep. */
+  isRetentionExpired(coordinate: string): boolean {
+    const row = this.db.prepare("SELECT retention_expired FROM events WHERE coordinate = ?").get(coordinate) as
+      | { retention_expired: number }
+      | undefined;
+    return !!row && row.retention_expired === 1;
+  }
+
+  /** Mark an event retention-expired (idempotent). */
+  markRetentionExpired(coordinate: string): void {
+    this.db.prepare("UPDATE events SET retention_expired = 1 WHERE coordinate = ?").run(coordinate);
+  }
+
+  /** Lift an event's retention expiry (organizer extended/removed the policy). */
+  clearRetentionExpired(coordinate: string): void {
+    this.db.prepare("UPDATE events SET retention_expired = 0 WHERE coordinate = ?").run(coordinate);
   }
 
   // ── admin-command per-subject watermarks (NIP §3.4) ───────────────────────
@@ -1136,6 +1165,61 @@ export class Store {
     this.db
       .prepare("DELETE FROM pairs WHERE coordinate = ? AND (a = ? OR b = ?)")
       .run(coordinate, pubkey, pubkey);
+  }
+
+  /**
+   * Full purge of an attendee's stored derived artifacts (NIP §6.3 21610,
+   * `delete_data: true`). Removes the coordinator's private DB copies of everything
+   * derived from the attendee's submission — the attendee row (profile, ai_profile,
+   * transcripts_json, correction), their submissions, their per-account nostr
+   * summary, their talks, and the content-addressed STT transcripts for every media
+   * blob they submitted (intro + talk media). Cached pair scores are already dropped
+   * by `clearPairsInvolving` on the revoke path. Idempotent.
+   *
+   * `delete_data: false` withdrawals do NOT call this — those artifacts are retained
+   * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
+   */
+  purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
+    // Collect every media ciphertext hash (`x`) this attendee submitted, so the
+    // corresponding STT transcript rows can be deleted. Transcripts are keyed by
+    // `descriptor.x` (see transcribe.ts). Sources: the attendee's stored profile
+    // media (`profile_json.__media`) and their talk media (`talks.media_json`).
+    const blobHashes = new Set<string>();
+    const att = this.db
+      .prepare("SELECT profile_json FROM attendees WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { profile_json: string | null } | undefined;
+    if (att?.profile_json) {
+      try {
+        const media = (JSON.parse(att.profile_json) as { __media?: { x?: string }[] }).__media ?? [];
+        for (const m of media) if (typeof m.x === "string") blobHashes.add(m.x);
+      } catch {
+        /* malformed stored JSON — nothing to collect */
+      }
+    }
+    const talkRows = this.db
+      .prepare("SELECT media_json FROM talks WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { media_json: string }[];
+    for (const t of talkRows) {
+      try {
+        const x = (JSON.parse(t.media_json) as { x?: string }).x;
+        if (typeof x === "string") blobHashes.add(x);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const delTranscript = this.db.prepare("DELETE FROM transcripts WHERE blob_sha256 = ?");
+      for (const x of blobHashes) delTranscript.run(x);
+      this.db.prepare("DELETE FROM talks WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      this.db.prepare("DELETE FROM submissions WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      this.db.prepare("DELETE FROM nostr_summaries WHERE pubkey = ?").run(pubkey);
+      this.db.prepare("DELETE FROM attendees WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   pairsFor(coordinate: string, pubkey: string): {

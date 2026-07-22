@@ -7,6 +7,7 @@ import {
   KIND_GIFT_WRAP,
   KIND_KEY_GRANT,
   KIND_ORGANIZER_GRANT,
+  KIND_COORDINATOR_STATUS,
   KIND_EVENT_CONFIG,
   KIND_CALENDAR_EVENT,
   KIND_DIRECTORY_ENTRY,
@@ -51,6 +52,7 @@ import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
+import { recordOwnStatus } from "./attendee-status.js";
 
 /**
  * Authenticate a received 21605 Organizer Grant (spec §8, audit finding C2).
@@ -335,6 +337,22 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
         grant.role === "organizer" ? "organizer" : "attendee",
       );
       coordinates.add(grant.a);
+      memo[wrap.id] = true;
+      memoDirty = true;
+      continue;
+    }
+    // Own coordinator status (21606 sealed to this attendee, NIP §6.3): a failure
+    // in THIS attendee's own submission/talk pipeline. Authenticate against the
+    // event's configured coordinator and record it for the modest in-app banner.
+    if (rumor.kind === KIND_COORDINATOR_STATUS) {
+      let coord: string | undefined;
+      try {
+        coord = (JSON.parse(rumor.content) as { a?: string }).a;
+      } catch {
+        /* malformed — still memoize below */
+      }
+      const config = coord ? await configFor(coord, eventRelayHints(coord)) : undefined;
+      recordOwnStatus(rumor, pubkey, config?.coordinator);
       memo[wrap.id] = true;
       memoDirty = true;
       continue;

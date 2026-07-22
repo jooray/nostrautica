@@ -235,6 +235,11 @@ export const MAX_INVITE_LABEL = 100;
 export const MAX_INVITES = 10000; // 31601 invites array items
 export const MAX_REASONING = 2000; // per-match reasoning
 export const MAX_MATCHES = 100; // 31605 matches array items
+// Icebreakers (31605, NIP §6.2): ≤ 3 short conversation starters per match entry,
+// ≤ 280 chars each — concrete opening lines the coordinator derives alongside the
+// directional reasoning, not a restatement of it.
+export const MAX_ICEBREAKERS = 3;
+export const MAX_ICEBREAKER = 280;
 export const MAX_ROSTER = 2000; // 31604 attendees array items
 export const MAX_RELAYS = 30; // relay URL array items
 export const MAX_MEDIA = 20; // media descriptors per 31602 self-copy / reuse library
@@ -476,6 +481,27 @@ export const talkContentSchema = z
   .refine((v) => v.media.kind === "talk", "talk media must be kind:'talk'");
 export type TalkContent = z.infer<typeof talkContentSchema>;
 
+// ── 21610 Attendee Withdrawal rumor content (attendee → E_inbox) ─────────────
+// The attendee removing THEMSELVES from the event, without organizer action. Sealed
+// by the attendee's own account key; the coordinator binds the subject to the seal
+// author (an attendee can only withdraw themselves). Same effect chain as an organizer
+// `revoke` (roster/directory/match removal, NIP-09 deletions, ECK rotation). Ordering
+// uses the §3.4 per-subject watermark, subject = the sender.
+//
+// `delete_data` (default true): full deletion — the coordinator also purges its stored
+// processed artifacts (transcripts, ai_profile, pair-cache rows). `delete_data: false`
+// removes the attendee from FUTURE publications but retains those artifacts so a later
+// re-approval avoids reprocessing spend. `.strict()`: read off a relay and acted on, so
+// an unexpected field is a hard error.
+export const withdrawalContentSchema = z
+  .object({
+    v: version,
+    a: z.string(), // coordinate this withdrawal applies to
+    delete_data: z.boolean().default(true),
+  })
+  .strict();
+export type WithdrawalContent = z.infer<typeof withdrawalContentSchema>;
+
 // ── 21605 Organizer Grant rumor content (co-organizer, full key custody) ─────
 export const organizerGrantContentSchema = z.object({
   v: version,
@@ -652,6 +678,9 @@ export const matchSchema = z.object({
   similarity: z.number(),
   complementarity: z.number(),
   reasoning: z.string().max(MAX_REASONING),
+  // Additive (NIP §6.2): ≤ 3 short conversation starters. A client without support
+  // simply ignores the field; an oversized/overlong list is rejected at parse.
+  icebreakers: z.array(z.string().max(MAX_ICEBREAKER)).max(MAX_ICEBREAKERS).optional(),
 });
 export type Match = z.infer<typeof matchSchema>;
 

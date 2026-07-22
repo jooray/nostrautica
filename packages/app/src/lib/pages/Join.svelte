@@ -412,6 +412,14 @@
 {:else}
   <h1>{t("join.title", { title: ctx.title })}</h1>
 
+  <!-- Declared data retention (NIP §6.2): one line at join time. Best-effort
+       wording — deletion depends on relays honoring NIP-09. -->
+  {#if ctx.config.retentionDays !== undefined}
+    <p class="muted retention-line">
+      {t("join.retention", { days: ctx.config.retentionDays })}
+    </p>
+  {/if}
+
   {#if !session.loggedIn}
     <!-- The event's language may have just auto-adopted (event-context.ts,
          logged-out only) — this is the way back to a different one. -->
