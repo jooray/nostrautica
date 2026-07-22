@@ -82,6 +82,33 @@ describe("playback object-URL cache (APPR-4/UX-28)", () => {
     expect(await resolveMediaUrl(ninth)).toBe(url9);
   });
 
+  it("coalesces concurrent resolves of the same ciphertext into one download (App-3)", async () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    // Gate the download so BOTH resolves are genuinely in flight at once.
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    downloadBlob.mockImplementation(async (urls: string[]) => {
+      await gate;
+      return new TextEncoder().encode(urls[0]);
+    });
+
+    const d = descriptor("concurrent");
+    const pA = resolveMediaUrl(d);
+    const pB = resolveMediaUrl(d);
+    open();
+    const [urlA, urlB] = await Promise.all([pA, pB]);
+
+    expect(urlB).toBe(urlA);
+    expect(downloadBlob).toHaveBeenCalledTimes(1); // pre-fix this was 2 (leaked URL)
+
+    // Two callers acquired one ref each: A's release must NOT revoke while B holds it.
+    releaseMediaUrl(d);
+    expect(revoke).not.toHaveBeenCalled();
+    releaseMediaUrl(d); // both released — retained zero-ref within the bound
+    expect(await resolveMediaUrl(d)).toBe(urlA); // cache hit, still a single download
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
+  });
+
   it("never evicts an entry that is still referenced", async () => {
     const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
     // 9 LIVE players at once: the bound goes soft rather than revoking in-use URLs.

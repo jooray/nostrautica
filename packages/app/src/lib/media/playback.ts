@@ -31,6 +31,15 @@ interface ObjectUrlEntry {
 const MAX_CACHED_OBJECT_URLS = 8;
 const objectUrlCache = new Map<string, ObjectUrlEntry>();
 
+/**
+ * In-flight downloads keyed by ciphertext hash (audit App-3). Without this, two
+ * concurrent `resolveMediaUrl(sameX)` calls both miss the cache, both
+ * download/decrypt, both `createObjectURL`, and the second `set()` orphans the
+ * first URL (leak) and clobbers its ref count. Followers instead await the
+ * leader's single download and then acquire their own reference.
+ */
+const inflight = new Map<string, Promise<string>>();
+
 /** Evict + revoke least-recently-used zero-ref entries until within the bound. */
 function trimCache(): void {
   while (objectUrlCache.size > MAX_CACHED_OBJECT_URLS) {
@@ -48,31 +57,55 @@ function trimCache(): void {
   }
 }
 
+/** Acquire a reference to an already-cached entry, if present. */
+function acquireCached(x: string): string | undefined {
+  const cached = objectUrlCache.get(x);
+  if (!cached) return undefined;
+  cached.refs++;
+  cached.lastUsed = Date.now();
+  return cached.url;
+}
+
 /** Fetch + decrypt a media descriptor into a playable object URL. */
 export async function resolveMediaUrl(descriptor: MediaDescriptor): Promise<string> {
-  const cached = objectUrlCache.get(descriptor.x);
-  if (cached) {
-    cached.refs++;
-    cached.lastUsed = Date.now();
-    return cached.url;
+  const hit = acquireCached(descriptor.x);
+  if (hit) return hit;
+
+  // Coalesce concurrent resolves of the same ciphertext onto one download; each
+  // caller still acquires its own ref count (matched by its own releaseMediaUrl).
+  const pending = inflight.get(descriptor.x);
+  if (pending) {
+    await pending;
+    const acquired = acquireCached(descriptor.x);
+    if (acquired) return acquired;
+    // The entry was evicted between the leader finishing and us acquiring (its
+    // caller released immediately and a zero-ref trim ran) — download our own.
   }
 
-  // A descriptor already claiming more than the cap is rejected before any
-  // network traffic (the download itself is capped too — this just fails fast).
-  if (descriptor.size > MAX_MEDIA_DOWNLOAD_BYTES) {
-    throw new Error(
-      `This media claims to be ${Math.round(descriptor.size / 1024 / 1024)} MB — over the ${Math.round(MAX_MEDIA_DOWNLOAD_BYTES / 1024 / 1024)} MB limit, not downloading it.`,
-    );
+  const download = (async () => {
+    // A descriptor already claiming more than the cap is rejected before any
+    // network traffic (the download itself is capped too — this just fails fast).
+    if (descriptor.size > MAX_MEDIA_DOWNLOAD_BYTES) {
+      throw new Error(
+        `This media claims to be ${Math.round(descriptor.size / 1024 / 1024)} MB — over the ${Math.round(MAX_MEDIA_DOWNLOAD_BYTES / 1024 / 1024)} MB limit, not downloading it.`,
+      );
+    }
+    const ciphertext = await downloadBlob(descriptor.url, descriptor.x, {
+      expectedSize: descriptor.size,
+    });
+    const plaintext = await decryptMedia(descriptor, ciphertext);
+    const blob = new Blob([plaintext as unknown as BlobPart], { type: descriptor.m });
+    const url = URL.createObjectURL(blob);
+    objectUrlCache.set(descriptor.x, { url, refs: 1, lastUsed: Date.now() });
+    trimCache();
+    return url;
+  })();
+  inflight.set(descriptor.x, download);
+  try {
+    return await download;
+  } finally {
+    inflight.delete(descriptor.x);
   }
-  const ciphertext = await downloadBlob(descriptor.url, descriptor.x, {
-    expectedSize: descriptor.size,
-  });
-  const plaintext = await decryptMedia(descriptor, ciphertext);
-  const blob = new Blob([plaintext as unknown as BlobPart], { type: descriptor.m });
-  const url = URL.createObjectURL(blob);
-  objectUrlCache.set(descriptor.x, { url, refs: 1, lastUsed: Date.now() });
-  trimCache();
-  return url;
 }
 
 /** Release one reference to a cached object URL (call on component unmount). */
