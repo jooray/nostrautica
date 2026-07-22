@@ -81,11 +81,16 @@ export const mediaDescriptorDraftSchema = mediaDescriptorSchema
 // Because `x` is content-addressed, re-recording an intro changes `x` and orphans
 // the old transcript — the directory-entry schema below validates that every
 // transcript still references live media (stale transcripts are dropped).
+/** BCP-47 language tag chars (audit P2). */
+export const MAX_LANG = 35;
+/** STT/authored transcript body cap (audit P2). */
+export const MAX_TRANSCRIPT_TEXT = 100_000;
+
 export const mediaTranscriptSchema = z
   .object({
     x: hex32, // the media descriptor's `x` this transcript belongs to
-    text: z.string(),
-    lang: z.string(), // ISO-639-1 detected by STT, or the authored source language
+    text: z.string().max(MAX_TRANSCRIPT_TEXT),
+    lang: z.string().max(MAX_LANG), // ISO-639-1 detected by STT, or the authored source language
     source: z.enum(["stt", "authored"]),
     updated_at: z.number().int(),
   })
@@ -120,6 +125,12 @@ export const MAX_MATCHES = 100; // 31605 matches array items
 export const MAX_ROSTER = 2000; // 31604 attendees array items
 export const MAX_RELAYS = 30; // relay URL array items
 export const MAX_MEDIA = 20; // media descriptors per payload
+export const MAX_D = 200; // blinded `d` identifier chars (roster/directory)
+export const MAX_MATCH_PAIRS = 200_000; // 31606 match-matrix pairs array items
+export const MAX_TITLE = 300; // members-post title
+export const MAX_POST_BODY = 100_000; // members-post markdown body
+export const MAX_NOTES = 2000; // per-event private note map entries
+export const MAX_NOTE = 5000; // chars per per-event private note
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
@@ -134,19 +145,19 @@ export type AttendeeProfile = z.infer<typeof attendeeProfileSchema>;
 // event language, shown when the viewer reads the event language and the source
 // text was written in a different one. Never overwrites the user's originals.
 export const profileTranslationSchema = z.object({
-  lang: z.string(), // target (event) language, ISO 639-1
-  about: z.string().optional(),
-  looking_for: z.string().optional(),
-  skills: z.array(z.string()).optional(),
+  lang: z.string().max(MAX_LANG), // target (event) language, ISO 639-1
+  about: z.string().max(MAX_ABOUT).optional(),
+  looking_for: z.string().max(MAX_LOOKING_FOR).optional(),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
 });
 export type ProfileTranslation = z.infer<typeof profileTranslationSchema>;
 
 export const aiProfileSchema = z.object({
-  summary: z.string(),
-  skills: z.array(z.string()),
-  interests: z.array(z.string()),
-  offers: z.array(z.string()),
-  seeks: z.array(z.string()),
+  summary: z.string().max(MAX_ABOUT),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
+  interests: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
+  offers: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
+  seeks: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
   // Present when the attendee's own profile language differs from the event's.
   translations: profileTranslationSchema.optional(),
 });
@@ -449,7 +460,7 @@ export const rosterContentSchema = z.object({
     .array(
       z.object({
         pubkey: hex32,
-        d: z.string(), // entry's blinded d
+        d: z.string().max(MAX_D), // entry's blinded d
         role: z.enum(["attendee", "organizer"]),
         chat_pubkey: hex32.optional(), // Marmot chat device key, when distinct (§4.4)
       }),
@@ -479,9 +490,9 @@ export type MatchListContent = z.infer<typeof matchListContentSchema>;
 export const matchMatrixContentSchema = z.object({
   v: version,
   computed_at: z.number().int(),
-  pairs: z.array(
-    z.object({ a: hex32, b: hex32, score: z.number() }),
-  ),
+  pairs: z
+    .array(z.object({ a: hex32, b: hex32, score: z.number() }))
+    .max(MAX_MATCH_PAIRS),
 });
 export type MatchMatrixContent = z.infer<typeof matchMatrixContentSchema>;
 
@@ -491,12 +502,12 @@ export type MatchMatrixContent = z.infer<typeof matchMatrixContentSchema>;
 // organizer attribution.
 export const membersPostContentSchema = z.object({
   v: version,
-  title: z.string(),
-  summary: z.string().optional(),
-  image: z.string().optional(),
+  title: z.string().max(MAX_TITLE),
+  summary: z.string().max(MAX_MESSAGE).optional(),
+  image: z.string().max(MAX_URL).optional(),
   published_at: z.number().int(),
   author: hex32.optional(),
-  content: z.string(), // markdown
+  content: z.string().max(MAX_POST_BODY), // markdown
 });
 export type MembersPostContent = z.infer<typeof membersPostContentSchema>;
 
@@ -524,8 +535,8 @@ export const eventPageSectionSchema = z.discriminatedUnion("type", [
 export type EventPageSection = z.infer<typeof eventPageSectionSchema>;
 
 export const menuItemSchema = z.object({
-  label: z.string(),
-  target: z.string(), // https: URL or nostr:naddr…
+  label: z.string().max(MAX_NAME),
+  target: z.string().max(MAX_URL), // https: URL or nostr:naddr…
 });
 export type MenuItem = z.infer<typeof menuItemSchema>;
 
@@ -557,17 +568,25 @@ export type EventPageContent = z.infer<typeof eventPageContentSchema>;
 export const userSettingsSchema = z.object({
   v: version,
   theme: z.enum(["light", "dark", "system"]).default("system"),
-  language: z.string().default("en"),
-  relays: z.array(z.string()).max(MAX_RELAYS).default([]),
+  language: z.string().max(MAX_LANG).default("en"),
+  relays: z.array(z.string().max(MAX_URL)).max(MAX_RELAYS).default([]),
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
 export const perEventSettingsSchema = z.object({
   v: version,
-  favorites: z.array(hex32).default([]),
-  want_to_meet: z.array(hex32).default([]),
-  met: z.array(hex32).default([]),
-  notes: z.record(z.string()).default({}),
+  favorites: z.array(hex32).max(MAX_ROSTER).default([]),
+  want_to_meet: z.array(hex32).max(MAX_ROSTER).default([]),
+  met: z.array(hex32).max(MAX_ROSTER).default([]),
+  // Bound both the per-note length and the number of notes (audit P2): an
+  // unbounded record is a DoS vector and can push the payload past the NIP-44
+  // ceiling.
+  notes: z
+    .record(z.string().max(MAX_NOTE))
+    .refine((r) => Object.keys(r).length <= MAX_NOTES, {
+      message: `too many notes (max ${MAX_NOTES})`,
+    })
+    .default({}),
 });
 export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 

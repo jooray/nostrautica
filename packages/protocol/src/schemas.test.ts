@@ -20,6 +20,9 @@ import {
   profileCorrectionContentSchema,
   chatKeyAttestationContentSchema,
   attendeeProfileSchema,
+  aiProfileSchema,
+  membersPostContentSchema,
+  menuItemSchema,
   userSettingsSchema,
   coordinatorAnnounceSchema,
   coordinatorBillingSchema,
@@ -41,6 +44,14 @@ import {
   MAX_MEDIA,
   MAX_LIBRARY_TEXTS,
   MAX_INTRO_TEXT,
+  MAX_LANG,
+  MAX_D,
+  MAX_TRANSCRIPT_TEXT,
+  MAX_MATCH_PAIRS,
+  MAX_TITLE,
+  MAX_POST_BODY,
+  MAX_NOTES,
+  MAX_NOTE,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -586,6 +597,14 @@ describe("boundary length caps (PROTO-4)", () => {
         attendees: Array(MAX_ROSTER + 1).fill(attendee),
       }),
     ).toThrow();
+    // Inner blinded `d` is bounded too (P2).
+    expect(() =>
+      rosterContentSchema.parse({
+        v: 1,
+        eck_current: 1,
+        attendees: [{ ...attendee, d: "d".repeat(MAX_D + 1) }],
+      }),
+    ).toThrow();
   });
 
   it("21603/21605 grants: config_relays ≤ MAX_RELAYS", () => {
@@ -642,6 +661,85 @@ describe("boundary length caps (PROTO-4)", () => {
         name: "coord",
         features: { matching: true, talks: false, chat: Array(MAX_RELAYS + 1).fill("wss://r") },
       }),
+    ).toThrow();
+  });
+
+  it("media transcript: text ≤ MAX_TRANSCRIPT_TEXT, lang ≤ MAX_LANG (P2)", () => {
+    const base = { x: hex, source: "stt" as const, updated_at: 1 };
+    roundTrips(mediaTranscriptSchema, {
+      ...base,
+      text: "t".repeat(MAX_TRANSCRIPT_TEXT),
+      lang: "l".repeat(MAX_LANG),
+    });
+    expect(() =>
+      mediaTranscriptSchema.parse({ ...base, text: "t".repeat(MAX_TRANSCRIPT_TEXT + 1), lang: "en" }),
+    ).toThrow();
+    expect(() =>
+      mediaTranscriptSchema.parse({ ...base, text: "ok", lang: "l".repeat(MAX_LANG + 1) }),
+    ).toThrow();
+  });
+
+  it("ai_profile: summary/skills/interests/offers/seeks caps (P2)", () => {
+    const ok = {
+      summary: "s".repeat(MAX_ABOUT),
+      skills: Array(MAX_SKILLS).fill("s".repeat(MAX_SKILL)),
+      interests: Array(MAX_SKILLS).fill("i"),
+      offers: Array(MAX_SKILLS).fill("o"),
+      seeks: Array(MAX_SKILLS).fill("k"),
+    };
+    roundTrips(aiProfileSchema, ok);
+    expect(() => aiProfileSchema.parse({ ...ok, summary: "s".repeat(MAX_ABOUT + 1) })).toThrow();
+    expect(() => aiProfileSchema.parse({ ...ok, interests: Array(MAX_SKILLS + 1).fill("i") })).toThrow();
+    expect(() => aiProfileSchema.parse({ ...ok, skills: ["s".repeat(MAX_SKILL + 1)] })).toThrow();
+  });
+
+  it("31606 match matrix: pairs ≤ MAX_MATCH_PAIRS (P2)", () => {
+    const pair = { a: hex, b: hex, score: 0.5 };
+    roundTrips(matchMatrixContentSchema, { v: 1, computed_at: 1, pairs: [pair] });
+    expect(() =>
+      matchMatrixContentSchema.parse({
+        v: 1,
+        computed_at: 1,
+        pairs: Array(MAX_MATCH_PAIRS + 1).fill(pair),
+      }),
+    ).toThrow();
+  });
+
+  it("31607 members post: title/summary/image/content caps (P2)", () => {
+    const ok = {
+      v: 1,
+      title: "t".repeat(MAX_TITLE),
+      summary: "s".repeat(MAX_MESSAGE),
+      image: "https://example.com/" + "u".repeat(MAX_URL - "https://example.com/".length),
+      published_at: 1,
+      content: "c".repeat(MAX_POST_BODY),
+    };
+    roundTrips(membersPostContentSchema, ok);
+    expect(() => membersPostContentSchema.parse({ ...ok, title: "t".repeat(MAX_TITLE + 1) })).toThrow();
+    expect(() => membersPostContentSchema.parse({ ...ok, content: "c".repeat(MAX_POST_BODY + 1) })).toThrow();
+  });
+
+  it("31608 menu item: label ≤ MAX_NAME, target ≤ MAX_URL (P2)", () => {
+    const target = "https://example.com/" + "u".repeat(MAX_URL - "https://example.com/".length);
+    roundTrips(menuItemSchema, { label: "l".repeat(MAX_NAME), target });
+    expect(() => menuItemSchema.parse({ label: "l".repeat(MAX_NAME + 1), target: "x" })).toThrow();
+    expect(() => menuItemSchema.parse({ label: "ok", target: target + "x" })).toThrow();
+  });
+
+  it("per-event settings: note length ≤ MAX_NOTE, note count ≤ MAX_NOTES, id arrays ≤ MAX_ROSTER (P2)", () => {
+    roundTrips(perEventSettingsSchema, {
+      v: 1,
+      notes: { [hex]: "n".repeat(MAX_NOTE) },
+      favorites: Array(MAX_ROSTER).fill(hex),
+    });
+    expect(() =>
+      perEventSettingsSchema.parse({ v: 1, notes: { [hex]: "n".repeat(MAX_NOTE + 1) } }),
+    ).toThrow();
+    const tooMany: Record<string, string> = {};
+    for (let i = 0; i < MAX_NOTES + 1; i++) tooMany[i.toString(16).padStart(64, "0")] = "x";
+    expect(() => perEventSettingsSchema.parse({ v: 1, notes: tooMany })).toThrow();
+    expect(() =>
+      perEventSettingsSchema.parse({ v: 1, favorites: Array(MAX_ROSTER + 1).fill(hex) }),
     ).toThrow();
   });
 
