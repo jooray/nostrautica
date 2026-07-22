@@ -401,13 +401,21 @@ export type CoordinatorGrantContent = z.infer<
 >;
 
 // ── 21604 Admin Command rumor content ────────────────────────────────────────
+/** Default admin-command lifetime (NIP §3.4): a command is void 48h after it was
+ *  issued, so an old revoke/recompute can never re-execute from a backfill/restore. */
+export const ADMIN_COMMAND_TTL_SEC = 172_800; // 48 hours
+
 export const adminCommandContentSchema = z.object({
   v: version,
   a: z.string(),
   // talk_publish / talk_reject moderate a submitted talk (F2, audit U11); args
-  // carry { pubkey, talk_d }.
-  cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject"]),
+  // carry { pubkey, talk_d }. `detach` (NIP §3.5) uninstalls the coordinator from
+  // the event (no args) with the same effects as a config-based detach.
+  cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject", "detach"]),
   args: z.record(z.unknown()).default({}),
+  // Replay horizon (NIP §3.4, required): unix seconds after which the command is
+  // void. The coordinator skips an expired command on live delivery AND on backfill.
+  expires: z.number().int(),
 });
 export type AdminCommandContent = z.infer<typeof adminCommandContentSchema>;
 

@@ -133,6 +133,20 @@ describe("every §7 payload round-trips through JSON", () => {
       a: "31923:" + hex + ":ev",
       cmd: "revoke",
       args: { pubkey: hex },
+      expires: 1_800_000_000,
+    }));
+
+  it("21604 admin command requires expires (NIP §3.4)", () =>
+    expect(() =>
+      adminCommandContentSchema.parse({ v: 2, a: "31923:" + hex + ":ev", cmd: "recompute" }),
+    ).toThrow());
+
+  it("21604 accepts the detach command (NIP §3.5)", () =>
+    roundTrips(adminCommandContentSchema, {
+      v: 2,
+      a: "31923:" + hex + ":ev",
+      cmd: "detach",
+      expires: 1_800_000_000,
     }));
 
   it("31601 invite list", () =>

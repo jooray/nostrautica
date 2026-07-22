@@ -348,6 +348,27 @@ CREATE TABLE IF NOT EXISTS marmot_consumed_kps (
   created_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (coordinate, kp_event_id)
 );
+-- Per-subject admin-command watermark (NIP §3.4): the (created_at, rumor_id) of the
+-- last applied 21604 command per (coordinate, subject). A command strictly older
+-- than the watermark under the §3.1 comparator is rejected, so approve/revoke
+-- interleavings resolve deterministically per subject instead of by arrival order.
+CREATE TABLE IF NOT EXISTS command_watermarks (
+  coordinate TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  rumor_id TEXT NOT NULL,
+  PRIMARY KEY (coordinate, subject)
+);
+-- Coordinator install generation state (NIP §3.5): the highest generation ever
+-- installed OR detached for a coordinate, plus a durable detach tombstone. A fresh
+-- 21603 grant must carry a gen strictly greater than high_gen (so a replayed
+-- historical install can never re-install), and a detach tombstones the row.
+CREATE TABLE IF NOT EXISTS install_state (
+  coordinate TEXT PRIMARY KEY,
+  high_gen INTEGER NOT NULL DEFAULT 0,
+  tombstoned INTEGER NOT NULL DEFAULT 0,   -- 1 once detached (custody deleted)
+  detached_at INTEGER
+);
 `;
 
 export class Store {
@@ -537,6 +558,75 @@ export class Store {
       .prepare("SELECT coordinate, inbox_nsec, config_relays FROM events")
       .all() as any[];
     return rows.map((r) => ({ ...r, inbox_nsec: this.reveal(r.inbox_nsec) }));
+  }
+
+  /** Delete an event's stored custody (E_inbox/ECK) row — detach disposes of key
+   *  custody per decision D6. The install_state tombstone survives to bar re-install. */
+  deleteEvent(coordinate: string): void {
+    this.db.prepare("DELETE FROM events WHERE coordinate = ?").run(coordinate);
+  }
+
+  // ── admin-command per-subject watermarks (NIP §3.4) ───────────────────────
+  /** The last applied command's (created_at, rumor_id) for a (coordinate, subject). */
+  getCommandWatermark(coordinate: string, subject: string): { created_at: number; rumor_id: string } | undefined {
+    return this.db
+      .prepare("SELECT created_at, rumor_id FROM command_watermarks WHERE coordinate = ? AND subject = ?")
+      .get(coordinate, subject) as { created_at: number; rumor_id: string } | undefined;
+  }
+  /** Record the watermark of the just-applied command for a (coordinate, subject). */
+  setCommandWatermark(coordinate: string, subject: string, createdAt: number, rumorId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id) VALUES (?, ?, ?, ?)
+         ON CONFLICT(coordinate, subject) DO UPDATE SET created_at = excluded.created_at, rumor_id = excluded.rumor_id`,
+      )
+      .run(coordinate, subject, createdAt, rumorId);
+  }
+
+  // ── install generation / detach tombstone (NIP §3.5) ──────────────────────
+  /** The highest generation ever installed OR detached for a coordinate (0 if none). */
+  installHighGen(coordinate: string): number {
+    const row = this.db
+      .prepare("SELECT high_gen FROM install_state WHERE coordinate = ?")
+      .get(coordinate) as { high_gen: number } | undefined;
+    return row?.high_gen ?? 0;
+  }
+  /** Whether the coordinate is currently detach-tombstoned (custody deleted). */
+  isInstallTombstoned(coordinate: string): boolean {
+    const row = this.db
+      .prepare("SELECT tombstoned FROM install_state WHERE coordinate = ?")
+      .get(coordinate) as { tombstoned: number } | undefined;
+    return !!row && row.tombstoned === 1;
+  }
+  /** Record a (re)install at `gen`: bump the high-water mark and clear any tombstone. */
+  recordInstalledGen(coordinate: string, gen: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO install_state (coordinate, high_gen, tombstoned, detached_at) VALUES (?, ?, 0, NULL)
+         ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 0, detached_at = NULL`,
+      )
+      .run(coordinate, gen);
+  }
+  /** Durably tombstone a detached install: bump the high-water mark to `gen`. */
+  tombstoneInstall(coordinate: string, gen: number, detachedAt: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO install_state (coordinate, high_gen, tombstoned, detached_at) VALUES (?, ?, 1, ?)
+         ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 1, detached_at = excluded.detached_at`,
+      )
+      .run(coordinate, gen, detachedAt);
+  }
+
+  /** Cancel every pending/running job for an event (detach: stop pending paid work). */
+  cancelJobsForEvent(coordinate: string): number {
+    // Jobs carry the coordinate in their JSON payload; match on it and drop the
+    // non-terminal ones so a detached event's queued work never runs.
+    const info = this.db
+      .prepare(
+        "DELETE FROM jobs WHERE state IN ('pending','running') AND json_extract(payload, '$.coordinate') = ?",
+      )
+      .run(coordinate);
+    return Number(info.changes);
   }
 
   // ── attendees ─────────────────────────────────────────────────────────────

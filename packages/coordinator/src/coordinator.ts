@@ -732,7 +732,11 @@ export class Coordinator {
       } else if (rumor.kind === KIND_ADMIN_COMMAND) {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
         log(`[admin] "${cmd.cmd}" from organizer ${short(rumor.pubkey)}`);
-        await this.handleAdmin(rumor.pubkey, cmd.a, cmd.cmd, cmd.args);
+        await this.handleAdmin(rumor.pubkey, cmd.a, cmd.cmd, cmd.args, {
+          createdAt: rumor.created_at ?? 0,
+          rumorId: rumor.id,
+          expires: cmd.expires,
+        });
       } else if (rumor.kind === KIND_CHAT_KEY_ATTESTATION) {
         // Marmot chat-key attestation (§3.3). rumor.pubkey is the SEAL AUTHOR bound by
         // unwrapRumor — i.e. the attendee's own account key sealing the binding. The
@@ -1662,17 +1666,68 @@ export class Coordinator {
   }
 
   // ── admin commands (21604) ─────────────────────────────────────────────────
+  /** The per-subject watermark key for an admin command (NIP §3.4). */
+  private commandSubject(
+    coordinate: string,
+    cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject" | "detach",
+    args: Record<string, unknown>,
+  ): string {
+    switch (cmd) {
+      case "approve":
+      case "reprocess":
+      case "revoke":
+        return `pubkey:${String(args.pubkey ?? "")}`;
+      case "talk_publish":
+      case "talk_reject":
+        return `talk:${String(args.pubkey ?? "")}:${String(args.talk_d ?? "")}`;
+      case "recompute":
+      case "detach":
+        return `coordinate:${coordinate}`;
+    }
+  }
+
   private async handleAdmin(
     from: string,
     coordinate: string,
-    cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject",
+    cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject" | "detach",
     args: Record<string, unknown>,
+    order?: { createdAt: number; rumorId: string; expires: number },
   ): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state) return;
     // Only the organizer (E_id) may command the coordinator.
     if (from !== state.eidPubkey) return;
 
+    // Replay horizon (NIP §3.4): a command is void after its `expires`. Skip an
+    // expired command on live delivery AND on backfill/restore, so an old
+    // revoke/recompute can never re-execute after a DB loss.
+    if (order && Math.floor(this.now() / 1000) > order.expires) {
+      log(`[admin] skipped expired "${cmd}" (expires ${order.expires} < now)`);
+      return;
+    }
+
+    // Per-subject ordering (NIP §3.4): reject a command strictly older than the
+    // watermark of the last applied command for this (coordinate, subject). Approve
+    // vs revoke interleavings then resolve deterministically by (created_at, id)
+    // instead of relay arrival order. Different subjects have independent watermarks.
+    const subject = this.commandSubject(coordinate, cmd, args);
+    if (order) {
+      const wm = this.deps.store.getCommandWatermark(coordinate, subject);
+      if (wm && !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: wm.rumor_id, created_at: wm.created_at })) {
+        log(`[admin] skipped stale "${cmd}" for ${subject}: (${order.createdAt},${order.rumorId.slice(0, 8)}) does not supersede watermark (${wm.created_at},${wm.rumor_id.slice(0, 8)})`);
+        return;
+      }
+    }
+    // The command passed ordering — record the new watermark up front so a later
+    // out-of-order duplicate is rejected even if this handler throws mid-effect
+    // (the effects are idempotent; re-running an older command must not).
+    if (order) this.deps.store.setCommandWatermark(coordinate, subject, order.createdAt, order.rumorId);
+
+    if (cmd === "detach") {
+      // Signed immediate detach (NIP §3.5): same effects as a config-based detach.
+      await this.detachEvent(coordinate, { reason: "21604 detach command" });
+      return;
+    }
     if (cmd === "approve") {
       // Manual approval routed through the coordinator so IT grants the ECK and
       // publishes the directory/roster (attendees discover those under the
@@ -1804,6 +1859,44 @@ export class Coordinator {
         `chat-revoke:${state.coordinate}:${removedPubkey}:${this.now()}`,
         { coordinate: state.coordinate, pubkey: removedPubkey },
       );
+    }
+  }
+
+  /**
+   * Durably detach the coordinator from an event (NIP §3.5, decision D6). Triggered
+   * by a signed 21604 `detach`, by a newest 31600 that no longer names this
+   * coordinator+gen (config update / startup revalidation, commit 3), or by an
+   * explicit uninstall. Effects — all idempotent, so a re-trigger is safe:
+   *  - durably tombstone the installation (coordinate + last gen + detached_at),
+   *    which bars any replayed historical grant from re-installing;
+   *  - close the event's subscriptions (inbox / config / chat) so it stops serving;
+   *  - cancel pending/running jobs for the event (stop pending paid work);
+   *  - DELETE the stored E_inbox/ECK custody (decision D6 — re-attach requires a
+   *    fresh grant with a new gen); the tombstone row survives for dedupe/replay bar;
+   *  - freeze the event's Marmot group (the existing freeze path) — full Marmot
+   *    detach semantics (key rotation, member wipe) remain Phase 2/3.
+   */
+  async detachEvent(coordinate: string, opts: { reason: string; gen?: number } = { reason: "detach" }): Promise<void> {
+    const already = this.deps.store.isInstallTombstoned(coordinate) && !this.events.has(coordinate);
+    // Tombstone at the highest gen we know about (the passed gen, else the stored
+    // install high-water mark) so a replayed lower/equal-gen grant can never re-install.
+    const gen = Math.max(opts.gen ?? 0, this.deps.store.installHighGen(coordinate));
+    this.deps.store.tombstoneInstall(coordinate, gen, Math.floor(this.now() / 1000));
+    // Close subscriptions for this coordinate.
+    for (const map of [this.inboxSubs, this.configSubs, this.chatSubs]) {
+      map.get(coordinate)?.close();
+      map.delete(coordinate);
+    }
+    // Cancel pending/running paid work for the event.
+    const cancelled = this.deps.store.cancelJobsForEvent(coordinate);
+    // Freeze the Marmot group (existing freeze path) before dropping live state.
+    if (this.marmot) this.marmot.freeze(coordinate);
+    // Drop live state and DELETE key custody (D6).
+    this.events.delete(coordinate);
+    this.deps.store.deleteEvent(coordinate);
+    this.inviteHashCache.delete(coordinate);
+    if (!already) {
+      log(`[detach] ${coordinate} — ${opts.reason} (gen ${gen}); custody deleted, ${cancelled} job(s) cancelled, subscriptions closed`);
     }
   }
 

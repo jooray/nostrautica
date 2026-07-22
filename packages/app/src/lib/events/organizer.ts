@@ -49,6 +49,7 @@ import {
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
+  ADMIN_COMMAND_TTL_SEC,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -373,9 +374,12 @@ export async function sendAdminCommand(
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eidSk = hexToBytes(keys.eidNsecHex);
+  // Replay horizon (NIP §3.4): the command is void after created_at + 48h, so an
+  // old command can never re-execute from a coordinator backfill/restore.
+  const expires = Math.floor(Date.now() / 1000) + ADMIN_COMMAND_TTL_SEC;
   const wrap = wrapRumor(eidSk, ctx.config.coordinator, {
     kind: KIND_ADMIN_COMMAND,
-    content: { v: 2, a: ctx.coordinate, cmd, args },
+    content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
   await publishOrQueue(wrap as any, ctx.config.relays);
 }

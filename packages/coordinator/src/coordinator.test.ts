@@ -272,6 +272,7 @@ async function setup(
     prefilter?: PrefilterConfig;
   } = {},
 ): Promise<Harness> {
+  adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
   const coordSk = generateSecretKey();
   const eidSk = generateSecretKey();
   const eidPubkey = getPublicKey(eidSk);
@@ -624,7 +625,7 @@ describe("F3 — ai_profile correction / hide (U9)", () => {
     // so it is re-applied at publish time.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 2, a: h.coordinate, cmd: "reprocess", args: { pubkey: pk } },
+      content: { v: 2, a: h.coordinate, cmd: "reprocess", args: { pubkey: pk }, expires: Math.floor(h.clock.t / 1000) + 172800 },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -799,7 +800,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Organizer (E_id) sends a 21604 revoke admin command for the cryptographer.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk }, expires: Math.floor(h.clock.t / 1000) + 172800 },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -1039,7 +1040,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Revoke the cryptographer.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk } },
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: cryptoPk }, expires: Math.floor(h.clock.t / 1000) + 172800 },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -1158,7 +1159,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // Manual reprocess (fresh dedupe key → the job DOES run) must hit the caches.
     const adminWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
       kind: KIND_ADMIN_COMMAND,
-      content: { v: 2, a: h.coordinate, cmd: "reprocess", args: { pubkey: cryptoPk } },
+      content: { v: 2, a: h.coordinate, cmd: "reprocess", args: { pubkey: cryptoPk }, expires: Math.floor(h.clock.t / 1000) + 172800 },
     });
     await h.coordinator.handleCoordinatorWrap(adminWrap as any);
     await h.coordinator.jobs.drain();
@@ -1313,14 +1314,25 @@ async function submitTalk(
   await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
 }
 
-/** Send an organizer admin command (sealed by E_id). The `_n` nonce keeps two
- *  otherwise-identical commands from colliding on rumor id under the fixed test
- *  clock (production `created_at` varies); handleAdmin ignores unknown args. */
+/** Send an organizer admin command (sealed by E_id). Each call stamps a strictly
+ *  increasing `created_at` (via `adminNonce`, reset per test in setup) so the NIP
+ *  §3.4 per-subject watermark accepts sequential same-subject commands under the
+ *  fixed test clock — in production the wall clock supplies the ordering. The `_n`
+ *  nonce also keeps two otherwise-identical commands from colliding on rumor id;
+ *  handleAdmin ignores unknown args. Commands are stamped with a far-future
+ *  `expires` unless the caller overrides it (expiry tests do). */
 let adminNonce = 0;
-async function admin(h: Harness, cmd: string, args: Record<string, unknown>): Promise<void> {
+async function admin(
+  h: Harness,
+  cmd: string,
+  args: Record<string, unknown>,
+  opts: { expires?: number } = {},
+): Promise<void> {
+  const createdAt = Math.floor(h.clock.t / 1000) + adminNonce++;
   const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
     kind: KIND_ADMIN_COMMAND,
-    content: { v: 2, a: h.coordinate, cmd, args: { ...args, _n: adminNonce++ } },
+    content: { v: 2, a: h.coordinate, cmd, args, expires: opts.expires ?? createdAt + 172_800 },
+    created_at: createdAt,
   });
   await h.coordinator.handleCoordinatorWrap(wrap as any);
 }
@@ -1600,6 +1612,117 @@ describe("NIP §3.3 — 21601 profile submissions ordered by (rev, created_at, i
     // A strictly higher rev always wins.
     await h.coordinator.handleInboxWrap(h.coordinate, mkSub("REV3", 3, nowSec) as any);
     expect(about()).toBe("REV3");
+  });
+});
+
+describe("NIP §3.4 — admin command expiry + per-subject watermarks", () => {
+  /** Send a 21604 command with an explicit created_at + expires (ordering tests). */
+  async function sendAdminAt(
+    h: Harness,
+    cmd: string,
+    args: Record<string, unknown>,
+    createdAt: number,
+    expires: number,
+  ): Promise<void> {
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd, args, expires },
+      created_at: createdAt,
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+  }
+
+  it("skips an expired command on live delivery AND on a backfill rescan", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto"); // approved
+    const now = Math.floor(h.clock.t / 1000);
+    // A revoke that expired an hour ago must be skipped on live delivery — the
+    // attendee stays approved.
+    await sendAdminAt(h, "revoke", { pubkey: pk }, now - 7200, now - 3600);
+    expect(h.store.getAttendee(h.coordinate, pk)!.status).toBe("approved");
+    // A DIFFERENT (never-seen) expired command — as a fresh startup backfill would
+    // replay from full history after a DB loss — is also skipped by the expiry gate
+    // in handleAdmin (the same code path live and backfill use). An old revoke can
+    // never re-execute.
+    await sendAdminAt(h, "revoke", { pubkey: pk }, now - 7300, now - 3600);
+    expect(h.store.getAttendee(h.coordinate, pk)!.status).toBe("approved");
+  });
+
+  it("rejects a command older than the subject watermark, but a newer command for a DIFFERENT subject applies", async () => {
+    const h = await setup();
+    const aSk = generateSecretKey();
+    const bSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    const bPk = await join(h, bSk, "design");
+    const now = Math.floor(h.clock.t / 1000);
+    const exp = now + 172_800;
+    // Revoke A at T=now+50 → applied (A revoked), watermark(pubkey:A)=now+50.
+    await sendAdminAt(h, "revoke", { pubkey: aPk }, now + 50, exp);
+    expect(h.store.getAttendee(h.coordinate, aPk)!.status).toBe("revoked");
+    // Reprocess B at T=now+10 (older than A's watermark, but a DIFFERENT subject)
+    // → applies (independent watermark). Observable via an enqueued process job.
+    await sendAdminAt(h, "reprocess", { pubkey: bPk }, now + 10, exp);
+    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${bPk}`)).toMatchObject({ created_at: now + 10 });
+    // A reprocess for A older than A's watermark is rejected (watermark unchanged).
+    await sendAdminAt(h, "reprocess", { pubkey: aPk }, now + 20, exp);
+    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${aPk}`)!.created_at).toBe(now + 50);
+  });
+
+  it("approve/revoke interleavings converge per subject regardless of arrival order", async () => {
+    const now0 = Math.floor(Date.now() / 1000);
+    const exp = now0 + 172_800;
+    // Revoke is the NEWER command (T2). Both arrival orders converge to revoked.
+    for (const order of ["approve-first", "revoke-first"] as const) {
+      const h = await setup();
+      const sk = generateSecretKey();
+      const pk = await join(h, sk, "crypto"); // approved
+      const t1 = now0 - 100; // approve
+      const t2 = now0 - 50; // revoke (newer → wins)
+      if (order === "approve-first") {
+        await sendAdminAt(h, "approve", { pubkey: pk }, t1, exp);
+        await sendAdminAt(h, "revoke", { pubkey: pk }, t2, exp);
+      } else {
+        await sendAdminAt(h, "revoke", { pubkey: pk }, t2, exp);
+        await sendAdminAt(h, "approve", { pubkey: pk }, t1, exp); // older → rejected
+      }
+      expect(h.store.getAttendee(h.coordinate, pk)!.status).toBe("revoked");
+    }
+    // Approve is the NEWER command (T2). Both arrival orders converge to approved.
+    for (const order of ["approve-first", "revoke-first"] as const) {
+      const h = await setup();
+      const sk = generateSecretKey();
+      const pk = await join(h, sk, "crypto");
+      const t1 = now0 - 100; // revoke
+      const t2 = now0 - 50; // approve (newer → wins)
+      if (order === "revoke-first") {
+        await sendAdminAt(h, "revoke", { pubkey: pk }, t1, exp);
+        await sendAdminAt(h, "approve", { pubkey: pk }, t2, exp);
+      } else {
+        await sendAdminAt(h, "approve", { pubkey: pk }, t2, exp);
+        await sendAdminAt(h, "revoke", { pubkey: pk }, t1, exp); // older → rejected
+      }
+      expect(h.store.getAttendee(h.coordinate, pk)!.status).toBe("approved");
+    }
+  });
+
+  it("a signed detach command tombstones the install, deletes custody, and stops serving", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    const now = Math.floor(h.clock.t / 1000);
+    await sendAdminAt(h, "detach", {}, now, now + 172_800);
+    // Custody deleted (D6), install tombstoned, subscriptions closed.
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+    expect(h.transport.subs.some((s) => s.closed)).toBe(true);
+    // The event no longer serves: a further join is a no-op (no new grant).
+    const before = h.transport.published.length;
+    const sk2 = generateSecretKey();
+    await join(h, sk2, "design").catch(() => {});
+    expect(h.transport.published.length).toBe(before);
+    void pk;
   });
 });
 
