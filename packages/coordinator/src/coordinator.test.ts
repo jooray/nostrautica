@@ -38,6 +38,7 @@ import {
 import { Store } from "./store/db.js";
 import { Coordinator, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
+import type { RoleRoutes } from "./providers/types.js";
 import type { ChatMls } from "./chat/mls.js";
 import type { PrefilterConfig } from "./matching/prefilter.js";
 import { talkBlindedD } from "./nostr/publisher.js";
@@ -237,6 +238,9 @@ interface Harness {
   transport: FakeTransport;
   store: Store;
   llm: MockLlm;
+  /** Per-role split providers (H-1, splitProviders opt): summary+translate / match+embed. */
+  llmA?: MockLlm;
+  llmB?: MockLlm;
   stt: MockStt;
   counters: Counters;
   coordSk: Uint8Array;
@@ -274,6 +278,9 @@ async function setup(
     extraSeed?: (keys: { eidPubkey: string; d: string }) => NostrEvent[];
     /** Prefilter override (COORD-13). */
     prefilter?: PrefilterConfig;
+    /** Per-role provider routing (H-1): route summary+translate to one instance
+     *  ("provA") and match+embed to another ("provB"), exposed as h.llmA/h.llmB. */
+    splitProviders?: boolean;
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -301,6 +308,19 @@ async function setup(
 
   const counters: Counters = { nostrSummary: 0, batchCalls: [], reverseCalls: [], translateCalls: 0 };
   const llm = makeLlm(counters);
+  // Per-role split providers (H-1): two distinct instances sharing the same mock
+  // handler so the pipeline still produces sensible outputs, but each role's calls
+  // land on its own instance — the routing can then be asserted call-by-call.
+  const llmA = opts.splitProviders ? makeLlm(counters) : undefined;
+  const llmB = opts.splitProviders ? makeLlm(counters) : undefined;
+  const roles: RoleRoutes | undefined = opts.splitProviders
+    ? {
+        summary: { llm: llmA!, model: "mock-cheap", provider: "provA", requirePrivate: true, privacy: "private" },
+        translate: { llm: llmA!, model: "mock-cheap", provider: "provA", requirePrivate: true, privacy: "private" },
+        match: { llm: llmB!, model: "mock-strong", provider: "provB", requirePrivate: false, privacy: "non-private" },
+        embed: { llm: llmB!, model: "mock-embed", provider: "provB", requirePrivate: false, privacy: "non-private" },
+      }
+    : undefined;
   const stt = new MockStt({
     [String(blobSize("crypto"))]: FIXTURES.crypto.transcript,
     [String(blobSize("design"))]: FIXTURES.design.transcript,
@@ -314,12 +334,17 @@ async function setup(
   // past epoch would make every test rumor look future-dated.
   const clock = { t: Date.now() };
   const coordinator = new Coordinator({
-    store, transport, coordSk, llm, stt,
+    store, transport, coordSk, stt,
+    ...(roles
+      ? { roles }
+      : {
+          llm,
+          summaryModel: { provider: "mock", model: "mock-cheap" },
+          matchModel: { provider: "mock", model: "mock-strong" },
+          embedModel: { provider: "mock", model: "mock-embed" },
+          translateModel: { provider: "mock", model: "mock-cheap" },
+        }),
     sttModel: "mock",
-    summaryModel: { provider: "mock", model: "mock-cheap" },
-    matchModel: { provider: "mock", model: "mock-strong" },
-    embedModel: { provider: "mock", model: "mock-embed" },
-    translateModel: { provider: "mock", model: "mock-cheap" },
     defaultRelays: ["wss://test"],
     batchSize: opts.batchSize,
     prefilter: opts.prefilter,
@@ -349,7 +374,7 @@ async function setup(
     coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
   });
 
-  return { coordinator, transport, store, llm, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
+  return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
 }
 
 async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<string> {
@@ -2505,6 +2530,67 @@ describe("audit COORD-13 — roster embeddings are cached by profile hash + mode
     h.coordinator.jobs.enqueue("match_recompute", "re-embed-check", { coordinate: h.coordinate, pubkey: aPk });
     await h.coordinator.jobs.drain();
     expect(h.llm.embedCalls).toBe(callsAfterFirst); // all embeddings came from the cache
+  });
+});
+
+describe("H-1 — per-role provider routing (§12 item 7)", () => {
+  function schemasOf(llm: MockLlm): Set<string> {
+    return new Set(llm.requests.map((r) => r.schemaName));
+  }
+
+  it("each role's provider call lands on its OWN instance, none on the other", async () => {
+    // nostr_context>0 so the summary role runs; lang!=en so translate runs; a low
+    // prefilter threshold so the embed role runs; ai_profile + batch_score are match.
+    const h = await setup(3, { splitProviders: true, lang: "sk", prefilter: { threshold: 1, topM: 5, randomN: 1 } });
+    const aSk = generateSecretKey();
+    h.transport.seed.push({ kind: 1, pubkey: getPublicKey(aSk), created_at: 11, tags: [], content: "zk musings", id: "post-a", sig: "" } as any);
+    await join(h, aSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    // provA = summary + translate.
+    const a = schemasOf(h.llmA!);
+    expect(a.has("nostr_summary")).toBe(true);
+    expect(a.has("profile_translation")).toBe(true);
+    expect(a.has("ai_profile")).toBe(false);
+    expect(a.has("batch_score")).toBe(false);
+
+    // provB = match (ai_profile + batch scoring) + embed.
+    const b = schemasOf(h.llmB!);
+    expect(b.has("ai_profile")).toBe(true);
+    expect([...b].some((s) => s.includes("batch_score"))).toBe(true);
+    expect(b.has("nostr_summary")).toBe(false);
+    expect(b.has("profile_translation")).toBe(false);
+    expect(h.llmB!.embedCalls).toBeGreaterThan(0); // embed role ran on provB
+    expect(h.llmA!.embedCalls).toBe(0);
+  });
+
+  it("a one-provider outage on the match instance does not disable the summary/translate roles", async () => {
+    const h = await setup(3, { splitProviders: true, lang: "sk", prefilter: { threshold: 100, topM: 5, randomN: 1 } });
+    // Make the MATCH/EMBED provider (provB) fail every completion — ai_profile can't
+    // be built — but the summary+translate provider (provA) must still be reachable
+    // and its stages must still be exercised for the attendee.
+    (h.llmB as any).completeStructured = async () => {
+      throw new Error("provB provider outage");
+    };
+    const aSk = generateSecretKey();
+    h.transport.seed.push({ kind: 1, pubkey: getPublicKey(aSk), created_at: 11, tags: [], content: "zk musings", id: "post-b", sig: "" } as any);
+    await join(h, aSk, "crypto");
+    await h.coordinator.jobs.drain();
+    // provA still served its roles despite provB being down.
+    expect(h.llmA!.completeCalls).toBeGreaterThan(0);
+    expect(schemasOf(h.llmA!).has("nostr_summary")).toBe(true);
+  });
+});
+
+describe("H-1 — provider/model change invalidates affected cached artifacts (§12 item 7)", () => {
+  it("re-routing the summary role to a new model recomputes the summary (not cache-reused)", async () => {
+    // The nostr-summary cache keys on the summary provider/model; a role reroute
+    // must not silently reuse a summary produced by the previous model.
+    const { nostrInputsHash } = await import("./pipeline/profile.js");
+    const k1 = nostrInputsHash("pk", [{ kind: 1, content: "gm", created_at: 1 }], "en", "venice:sum-a");
+    const k2 = nostrInputsHash("pk", [{ kind: 1, content: "gm", created_at: 1 }], "en", "venice:sum-b");
+    expect(k1).not.toBe(k2);
   });
 });
 

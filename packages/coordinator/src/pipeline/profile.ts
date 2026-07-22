@@ -253,11 +253,12 @@ export interface NostrPost {
 /** Hash of the nostr-context inputs (pubkey + the posts fed in + output language).
  *  FULL post content is hashed (audit COORD-22) — two different posts that share a
  *  40-char prefix must not collide onto the same cached summary. */
-export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en"): string {
+export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en", modelKey = ""): string {
   const canonical = JSON.stringify({
     pubkey,
     lang: (lang || "en").toLowerCase(),
     ids: posts.map((p) => `${p.kind}:${p.created_at}:${p.content}`),
+    m: modelKey,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }

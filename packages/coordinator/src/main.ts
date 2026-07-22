@@ -17,11 +17,11 @@ import { NostrClient } from "./nostr/client.js";
 import { buildCoordinatorAnnounce } from "./nostr/publisher.js";
 import { Coordinator, type Transport } from "./coordinator.js";
 import { verifyFfmpeg, sweepStaleTempDirs } from "./pipeline/audio.js";
-import { verifyModelPrivacy } from "./providers/privacy.js";
 import { ApiKeyPayment } from "./providers/payment.js";
 import { VeniceLlm, VeniceStt } from "./providers/venice.js";
 import { RoutstrLlm } from "./providers/routstr.js";
 import { CashuPayment } from "./providers/cashu.js";
+import { resolveRoleRoutes, disclosureFromRoutes } from "./providers/routes.js";
 import type { LlmProvider, SttProvider } from "./providers/types.js";
 import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
@@ -67,10 +67,22 @@ async function main(): Promise<void> {
       }
     : undefined;
 
-  // LLM: Routstr (Cashu-paid) if configured (v2 flag), else Venice (v1).
-  let llm: LlmProvider;
-  const nodeUrl = config.providers.routstr?.node_url;
-  if (nodeUrl) {
+  // Per-role provider routing (audit H-1, §13.5 Option A): construct each provider
+  // instance that some role references, then resolve + validate a route per role.
+  // Roles may point at Venice or Routstr independently; startup fails closed on an
+  // unroutable role or a require_private role whose model isn't a private tier.
+  const referencedProviders = new Set(
+    (["summary", "match", "embed", "translate"] as const).map((r) => config.models[r].provider),
+  );
+  const providers: Partial<Record<string, LlmProvider>> = {};
+
+  if (referencedProviders.has("venice")) {
+    if (!veniceOpts) throw new Error("a role routes to Venice but no Venice API key is configured");
+    providers.venice = new VeniceLlm(veniceOpts);
+  }
+  if (referencedProviders.has("routstr")) {
+    const nodeUrl = config.providers.routstr?.node_url;
+    if (!nodeUrl) throw new Error("a role routes to Routstr but providers.routstr.node_url is not set");
     const r = config.providers.routstr!;
     const payment = new CashuPayment({
       mintUrl: r.mint ?? "",
@@ -84,15 +96,18 @@ async function main(): Promise<void> {
     if (quarantined > 0) {
       console.log(`[coordinator] cashu: quarantined ${quarantined} interrupted reservation(s) as ambiguous`);
     }
-    llm = new RoutstrLlm({ nodeUrl, payment });
-    console.log(`[coordinator] LLM: Routstr ${nodeUrl} (Cashu)`);
-  } else {
-    if (!veniceOpts) throw new Error("No Venice API key and no Routstr node configured");
-    llm = new VeniceLlm(veniceOpts);
-    console.log("[coordinator] LLM: Venice");
-    await verifyModelPrivacy(llm, config, console, {
-      allowUnverified: config.security.allow_unverified_model_privacy,
-    });
+    providers.routstr = new RoutstrLlm({ nodeUrl, payment });
+    console.log(`[coordinator] Routstr ${nodeUrl} (Cashu) available for routing`);
+  }
+
+  const roles = await resolveRoleRoutes(config, {
+    providers,
+    logger: console,
+    allowUnverified: config.security.allow_unverified_model_privacy,
+  });
+  for (const role of ["summary", "match", "embed", "translate"] as const) {
+    const rt = roles[role];
+    console.log(`[coordinator] route ${role} → ${rt.provider} ${rt.model} (${rt.privacy})`);
   }
 
   const stt: SttProvider =
@@ -121,13 +136,9 @@ async function main(): Promise<void> {
     store,
     transport: client as unknown as Transport,
     coordSk,
-    llm,
+    roles,
     stt,
     sttModel: config.stt.model,
-    summaryModel: config.models.summary,
-    matchModel: config.models.match,
-    embedModel: config.models.embed,
-    translateModel: config.models.translate,
     defaultRelays: config.relays.default,
     prefilter: {
       threshold: config.matching.prefilter_threshold,
@@ -151,7 +162,10 @@ async function main(): Promise<void> {
   // Replaceable — republished on every boot so config edits propagate.
   if (config.coordinator.announce) {
     try {
-      const announce = buildCoordinatorAnnounce(coordSk, buildAnnounceContent(config));
+      const announce = buildCoordinatorAnnounce(
+        coordSk,
+        buildAnnounceContent(config, disclosureFromRoutes(roles)),
+      );
       await client.publish(announce as any, config.relays.default);
       console.log(
         `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,

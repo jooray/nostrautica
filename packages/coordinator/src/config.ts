@@ -184,10 +184,19 @@ export function roleRequiresPrivate(config: CoordinatorConfig, role: ModelRole):
  * intent (relaxed → "non-private", so organizers see which roles leave the TEE).
  * `free_organizers` is deliberately NOT included — it's a private allowlist.
  */
-export function buildAnnounceContent(config: CoordinatorConfig): CoordinatorAnnounce {
-  const privacy: Record<string, string> = { stt: "private" };
-  for (const role of ["summary", "match", "embed", "translate"] as ModelRole[]) {
-    privacy[role] = roleRequiresPrivate(config, role) ? "private" : "non-private";
+export function buildAnnounceContent(
+  config: CoordinatorConfig,
+  privacyOverride?: Record<string, string>,
+): CoordinatorAnnounce {
+  // Privacy disclosure is generated from the RESOLVED runtime routes when provided
+  // (audit H-1, §13.5) — where data actually flows, with verified tiers — falling
+  // back to config intent only when routes haven't been resolved (e.g. announce
+  // disabled paths). `privacyOverride` is `disclosureFromRoutes(routes)`.
+  const privacy: Record<string, string> = privacyOverride ?? { stt: "private" };
+  if (!privacyOverride) {
+    for (const role of ["summary", "match", "embed", "translate"] as ModelRole[]) {
+      privacy[role] = roleRequiresPrivate(config, role) ? "private" : "non-private";
+    }
   }
   const p = config.pricing;
   const pricing = {

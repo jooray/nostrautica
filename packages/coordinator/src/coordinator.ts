@@ -103,7 +103,7 @@ import {
   type PublishKeys,
 } from "./nostr/publisher.js";
 import { transcribeMedia } from "./pipeline/transcribe.js";
-import type { LlmProvider, SttProvider, ModelRef } from "./providers/types.js";
+import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "./providers/types.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
@@ -184,13 +184,26 @@ export interface CoordinatorDeps {
   store: Store;
   transport: Transport;
   coordSk: Uint8Array;
-  llm: LlmProvider;
   stt: SttProvider;
   sttModel: string;
-  summaryModel: ModelRef;
-  matchModel: ModelRef;
-  embedModel: ModelRef;
-  translateModel: ModelRef;
+  /**
+   * Resolved per-role provider routes (audit H-1, §13.5 Option A). Production
+   * passes this from `resolveRoleRoutes`; each role carries its OWN provider
+   * instance, so summary/match/embed/translate can flow to different providers.
+   * When omitted, the legacy `llm` + `*Model` fields below build uniform routes
+   * pointing every role at one instance (kept for the existing test harness).
+   */
+  roles?: RoleRoutes;
+  /** @deprecated pass `roles`; kept so existing single-provider callers/tests work. */
+  llm?: LlmProvider;
+  /** @deprecated pass `roles`. */
+  summaryModel?: ModelRef;
+  /** @deprecated pass `roles`. */
+  matchModel?: ModelRef;
+  /** @deprecated pass `roles`. */
+  embedModel?: ModelRef;
+  /** @deprecated pass `roles`. */
+  translateModel?: ModelRef;
   defaultRelays: string[];
   prefilter?: PrefilterConfig;
   topK?: number;
@@ -262,8 +275,18 @@ interface EventState {
   gen: number;
 }
 
+/** Build a uniform route from a single legacy llm + ModelRef (test/back-compat). */
+function legacyRoute(llm: LlmProvider | undefined, ref: ModelRef | undefined): RoleRoute {
+  if (!llm || !ref) {
+    throw new Error("Coordinator: pass `roles`, or all of llm + summaryModel/matchModel/embedModel/translateModel");
+  }
+  return { llm, model: ref.model, provider: ref.provider, requirePrivate: true, privacy: "private" };
+}
+
 export class Coordinator {
   readonly jobs: JobRunner;
+  /** Resolved per-role provider routes (audit H-1). */
+  private readonly roles: RoleRoutes;
   private readonly coordPubkey: string;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -311,6 +334,12 @@ export class Coordinator {
     this.topK = deps.topK ?? 20;
     this.batchSize = deps.batchSize ?? 10;
     this.matchRng = deps.matchRng ?? Math.random;
+    this.roles = deps.roles ?? {
+      summary: legacyRoute(deps.llm, deps.summaryModel),
+      match: legacyRoute(deps.llm, deps.matchModel),
+      embed: legacyRoute(deps.llm, deps.embedModel),
+      translate: legacyRoute(deps.llm, deps.translateModel),
+    };
     this.inviteChecker = new InviteChecker(deps.store);
     if (deps.chatMls) {
       this.marmot = new MarmotAdmin({
@@ -1307,10 +1336,9 @@ export class Coordinator {
         store: this.deps.store,
         stt: this.deps.stt,
         sttModel: this.deps.sttModel,
-        llm: this.deps.llm,
-        summaryModel: this.deps.summaryModel,
-        matchModel: this.deps.matchModel,
-        translateModel: this.deps.translateModel,
+        summary: this.roles.summary,
+        match: this.roles.match,
+        translate: this.roles.translate,
         fetchBlob: this.deps.fetchBlob,
         transcribe: this.deps.transcribe,
         blossomOrigins: state.blossomOrigins,
@@ -1540,7 +1568,7 @@ export class Coordinator {
     const roster = this.buildMatchingRoster(coordinate);
     const target = roster.find((a) => a.pubkey === pubkey);
     if (!target) return [];
-    if (roster.length > this.prefilter.threshold && this.deps.llm.embed) {
+    if (roster.length > this.prefilter.threshold && this.roles.embed.llm.embed) {
       await this.attachEmbeddings(coordinate, roster);
     }
     return selectPairsToScore(this.deps.store, coordinate, target, roster, this.prefilter);
@@ -1553,8 +1581,9 @@ export class Coordinator {
    * only embeds attendees whose profile CHANGED — not the full roster every time.
    */
   private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[]): Promise<void> {
-    if (!this.deps.llm.embed) return;
-    const modelKey = `${this.deps.embedModel.provider}:${this.deps.embedModel.model}`;
+    const provider = this.roles.embed.llm;
+    if (!provider.embed) return;
+    const modelKey = `${this.roles.embed.provider}:${this.roles.embed.model}`;
     const textFor = (pubkey: string): string => {
       const attendee = this.deps.store.getAttendee(coordinate, pubkey);
       const ai = attendee?.ai_profile_json ? JSON.parse(attendee.ai_profile_json) : {};
@@ -1569,15 +1598,15 @@ export class Coordinator {
       else missing.push({ index, pubkey: a.pubkey, hash, text: textFor(a.pubkey) });
     });
     if (missing.length === 0) return;
-    const embeddings = await this.deps.llm.embed(missing.map((m) => m.text), this.deps.embedModel.model);
+    const embeddings = await provider.embed(missing.map((m) => m.text), this.roles.embed.model);
     missing.forEach((m, i) => {
       const embedding = embeddings[i]!;
       roster[m.index]!.embedding = embedding;
       this.deps.store.putArtifact({
         stage: "roster_embedding",
         inputsHash: m.hash,
-        provider: this.deps.embedModel.provider,
-        model: this.deps.embedModel.model,
+        provider: this.roles.embed.provider,
+        model: this.roles.embed.model,
         output: embedding,
         now: this.now(),
       });
@@ -1620,8 +1649,8 @@ export class Coordinator {
     if (candidates.length === 0) return { scored: [], missing: 0 };
 
     const { scores, missing } = await scoreBatch(
-      this.deps.llm,
-      this.deps.matchModel.model,
+      this.roles.match.llm,
+      this.roles.match.model,
       state.scoringCtx,
       targetProfile,
       candidates,
@@ -1680,8 +1709,8 @@ export class Coordinator {
     if (targets.length === 0) return { scored: [], missing: 0 };
 
     const { scores, missing } = await scoreReverseBatch(
-      this.deps.llm,
-      this.deps.matchModel.model,
+      this.roles.match.llm,
+      this.roles.match.model,
       state.scoringCtx,
       sharedProfile,
       targets,

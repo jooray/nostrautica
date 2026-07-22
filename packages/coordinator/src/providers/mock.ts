@@ -34,14 +34,31 @@ export class MockStt implements SttProvider {
 }
 
 export class MockLlm implements LlmProvider {
-  readonly id = "mock";
+  readonly id: string;
   completeCalls = 0;
   embedCalls = 0;
   /** Every completeStructured request seen, for prompt assertions in tests. */
   requests: { system: string; user: string; schemaName: string }[] = [];
+  private readonly catalogue: ModelInfo[];
+  private readonly modelsError?: () => never;
   constructor(
     private readonly handler: (req: { system: string; user: string; schemaName: string }) => unknown,
-  ) {}
+    /** Per-role routing tests (audit H-1): give a fake a distinct id, catalogue, or
+     *  a models() that throws (to simulate a one-provider outage). */
+    opts: { id?: string; models?: ModelInfo[]; modelsThrows?: boolean } = {},
+  ) {
+    this.id = opts.id ?? "mock";
+    this.catalogue = opts.models ?? [
+      { id: "mock-strong", supportsResponseSchema: true, private: true },
+      { id: "mock-cheap", supportsResponseSchema: true, private: true },
+      { id: "mock-embed", private: true },
+    ];
+    if (opts.modelsThrows) {
+      this.modelsError = () => {
+        throw new Error(`${this.id} catalogue unreachable`);
+      };
+    }
+  }
 
   /** The most recent request for a given schemaName (test helper). */
   lastBySchema(schemaName: string) {
@@ -49,11 +66,8 @@ export class MockLlm implements LlmProvider {
   }
 
   async models(): Promise<ModelInfo[]> {
-    return [
-      { id: "mock-strong", supportsResponseSchema: true, private: true },
-      { id: "mock-cheap", supportsResponseSchema: true, private: true },
-      { id: "mock-embed", private: true },
-    ];
+    if (this.modelsError) this.modelsError();
+    return this.catalogue;
   }
 
   async completeStructured<T>(req: {

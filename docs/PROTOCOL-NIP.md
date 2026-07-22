@@ -286,6 +286,11 @@ storage-amplification bug.
 
 **21609** — equal-revision/different-content rejection (§3.3).
 
+**31605** — each match entry gains optional `icebreakers?: string[]` (≤ 3 entries,
+≤ 280 chars each): concrete conversation starters the coordinator derives alongside the
+directional reasoning. Additive (the schema is non-strict); clients without support
+ignore it.
+
 **21610 Attendee Withdrawal (new).** Content (`.strict()`):
 `{ v: 2, a: <coordinate>, delete_data?: bool (default true) }`, sealed by the attendee's
 account key. Semantics: attendee-initiated removal — the same effect chain as an
@@ -532,3 +537,29 @@ roster `chat_keys` array; per-device chat identity, chat-backup variant retired;
 kind-0 on chat relays; bounded 21608 overrides; media `size ≥ 1` + required a/v duration +
 actual-length verification; billing principal renamed and enforced; announcements from
 resolved provider routes.
+
+## 15. Future work (non-normative)
+
+Recorded here so the ideas survive without implying commitment; none of these affect the
+v2 wire.
+
+- **Cashu ticketing + QR door check-in (one feature, two halves).** Ticketing per the
+  existing design: purchase yields a Cashu token P2PK-locked to the attendee npub; the
+  join request carries `["payment", <token>]`; the coordinator's pluggable entitlement
+  checker redeems and auto-grants — no wire change beyond the reserved tag. Check-in
+  completes it at the venue door: the attendee's app shows a QR of a BIP-340-signed
+  statement `{coordinate, attendee-pubkey, timestamp}` (domain-separated like the other
+  v2 challenges); door staff verify offline against the ECK roster — no connectivity or
+  server needed. Check-in without ticketing is possible (roster membership is the gate)
+  but only becomes essential alongside paid admission; implement them together.
+- **Match feedback loop.** Attendee ratings of match suggestions biasing future scoring
+  would require an opt-in feedback rumor to the coordinator (ratings live in user-private
+  30078, unreadable by the coordinator by design). Deferred: wire addition + privacy
+  trade-off for an unproven quality gain.
+- **Follow packs (following.space, kind 39089).** Considered for the post-event export;
+  rejected as default because follow packs are public events — publishing "everyone I
+  met at event X" would leak the attendee's participation and social graph. The
+  post-event report exports npubs locally instead; a deliberate, clearly-labeled
+  "publish as follow pack" could be offered later.
+- **Geohash event discovery; NIP-77 negentropy sync.** Not now; revisit with real
+  multi-event usage and relay support respectively.
