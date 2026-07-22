@@ -634,8 +634,13 @@ export class Store {
     /** New media sha256 (x); when it differs from the stored one the transcript is dropped. */
     mediaX: string;
     now: number;
-  }): void {
+  }): boolean {
     const existing = this.getTalk(row.coordinate, row.pubkey, row.talkD);
+    // Reject an out-of-order lower revision (audit P0-2 interim guard): relays can
+    // deliver history out of order, and without this a delayed revision 0 would
+    // overwrite a live revision 2 and reset its moderation status to 'pending'.
+    // Equal revisions still apply (idempotent re-processing of the same submission).
+    if (existing && row.revision < existing.revision) return false;
     let keepTranscript: string | null = existing?.transcript_json ?? null;
     if (existing) {
       try {
@@ -673,6 +678,7 @@ export class Store {
         revision: row.revision,
         now: row.now,
       });
+    return true;
   }
 
   getTalk(coordinate: string, pubkey: string, talkD: string): TalkRow | undefined {

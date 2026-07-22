@@ -284,4 +284,34 @@ describe("talk transcript compare-and-set (audit P0-7)", () => {
     expect(store.getTalk("c", "p", "d")!.transcript_json).toBeNull(); // not re-attached
     store.close();
   });
+
+  it("rejects an out-of-order lower talk revision (P0-2 interim guard)", () => {
+    const store = new Store();
+    const put = (revision: number, x: string) =>
+      store.upsertTalk({
+        coordinate: "c",
+        pubkey: "p",
+        talkD: "d",
+        title: `rev${revision}`,
+        description: "",
+        speakersJson: "[]",
+        mediaJson: JSON.stringify({ x }),
+        lang: "en",
+        revision,
+        mediaX: x,
+        now: revision,
+      });
+    expect(put(2, "X2")).toBe(true);
+    store.setTalkStatus("c", "p", "d", "published", 10, 10);
+    // A delayed revision 0 must NOT overwrite revision 2 or reset moderation.
+    expect(put(0, "X0")).toBe(false);
+    const talk = store.getTalk("c", "p", "d")!;
+    expect(talk.revision).toBe(2);
+    expect(talk.title).toBe("rev2");
+    expect(talk.status).toBe("published"); // moderation not reset by the stale write
+    // A genuine higher revision still applies (and resets to pending).
+    expect(put(3, "X3")).toBe(true);
+    expect(store.getTalk("c", "p", "d")!.status).toBe("pending");
+    store.close();
+  });
 });

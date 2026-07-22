@@ -799,7 +799,7 @@ export class Coordinator {
       );
       return;
     }
-    this.deps.store.upsertTalk({
+    const applied = this.deps.store.upsertTalk({
       coordinate: state.coordinate,
       pubkey,
       talkD: content.talk_d,
@@ -812,6 +812,11 @@ export class Coordinator {
       mediaX: content.media.x,
       now: this.now(),
     });
+    if (!applied) {
+      // Out-of-order lower revision (P0-2): don't reset moderation or run paid STT.
+      log(`[talk] ignored stale rev ${content.revision} from ${short(pubkey)} "${content.title}": a newer revision is already stored`);
+      return;
+    }
     log(`[talk] "${content.title}" from ${short(pubkey)} (rev ${content.revision}) → pending moderation`);
     // Transcribe in the background (keyed by media x so a re-delivery dedupes).
     this.jobs.enqueue(
