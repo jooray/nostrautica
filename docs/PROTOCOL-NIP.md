@@ -146,6 +146,30 @@ named (with current generation) in the newest fetchable `31600`. A grant whose s
 is a *formerly* assigned coordinator **MUST** be rejected once a newer config no longer
 names it. Missing config remains "retry later", never "accept".
 
+### 3.7 Detach hygiene, record authority, and handover
+
+Deleting custody on detach (§3.5) is the honest coordinator's obligation; a *malicious*
+coordinator may retain copies of `E_inbox` and the ECK. Detach therefore has protocol
+consequences beyond the coordinator itself:
+
+- **Key rotation on detach/replace.** The organizer's client **SHOULD** rotate the ECK
+  (same machinery as attendee revocation) and **SHOULD** rotate `E_inbox` (mint a new
+  inbox keypair, publish it in the new `31600` `inbox` tag, and include the new secret in
+  the replacement coordinator's `21603`). Senders always encrypt to the newest config's
+  inbox, so inbox rotation is transparent to attendees; organizers retain old inbox
+  secrets locally for reading history. As everywhere, rotation protects **future**
+  content only.
+- **Record authority is pinned to the current assignment.** Readers **MUST** accept
+  coordinator-authored kinds (31603, 31604, 31605, 31606, 31610) only when authored by
+  the coordinator currently named in the newest fetchable `31600`, or by `E_id`. Records
+  authored by a formerly assigned coordinator are ignored once a newer config no longer
+  names it.
+- **Handover republish.** A newly attached coordinator **MUST** republish the event's
+  member records (directory, roster, match lists, published talks) under its own key —
+  bootstrapping from the previous coordinator's still-decryptable records where custody
+  allows, and from reprocessing otherwise — so that record authority (above) never leaves
+  members without a readable directory.
+
 ## 4. Encryption model
 
 Unchanged from v1 in construction; restated normatively.
@@ -217,6 +241,7 @@ empty tags) → kind-1059 wrap (one-time key, single `p` tag, `created_at` rando
 | 21607 | Chat Device Attestation | account → coordinator |
 | 21608 | Profile Correction | account → `E_inbox` |
 | 21609 | Talk Submission | account → `E_inbox` |
+| 21610 | Attendee Withdrawal | account → `E_inbox` |
 
 Standard kinds used: 0, 1, 3, 5, 6, 13, 14, 1059, 10000, 10002, 10050, 10063, 24242,
 30023, 30078, 31923/31924/31925, and Marmot's 30443/443/444/445.
@@ -260,6 +285,30 @@ authority"; the code was already stricter). `granted_by` **MUST** equal the seal
 storage-amplification bug.
 
 **21609** — equal-revision/different-content rejection (§3.3).
+
+**21610 Attendee Withdrawal (new).** Content (`.strict()`):
+`{ v: 2, a: <coordinate>, delete_data?: bool (default true) }`, sealed by the attendee's
+account key. Semantics: attendee-initiated removal — the same effect chain as an
+organizer `revoke` (roster/directory/match removal, NIP-09 deletions, ECK rotation),
+without requiring organizer action. The withdrawing client **SHOULD** also delete its own
+Blossom blobs (uploader-authorized) and its 31602 self-copy. Ordering uses the §3.4
+per-subject watermark (subject = the sender). Rejoining afterwards is a fresh join
+request. Rationale: v1 had no way for an attendee to leave an event or retract their
+data — user agency over their own participation should not depend on the organizer.
+
+**21606** — recipient widened: in addition to the organizer, the coordinator **MAY** seal
+a status rumor to the *affected attendee*, restricted to status about that attendee's own
+items (their submission/talk pipeline failures); billing blocks go only to organizers.
+Rationale: v1 delivered "your talk failed transcription" only to organizers — the one
+party who can't fix it.
+
+**31600** — new optional tag `["retention", <days>]` (positive int): the coordinator
+**MUST** delete member records (31603/31604/31605/31606/31610 talks) via NIP-09 and cease
+processing `<days>` days after the event's end time, and clients **MUST** surface the
+declared retention at join time. Tag absent = indefinite retention (status quo). This
+makes data lifetime part of the joining contract rather than an operator afterthought.
+Deletion remains best-effort (relays may not honor NIP-09); the privacy model never
+depends on it, and the UI wording must not overpromise.
 
 ## 7. Invite codes
 
@@ -465,6 +514,15 @@ to the resolved choices. This spec is **frozen** as the implementation target.
 | D5 | Billing | **`free_eids` rename + persisted enforcement state machine** (`evaluating → ok | grace | blocked`) |
 | D6 | Detach key disposal | **Delete `E_inbox`/ECK custody** on detach; re-attach requires a fresh grant with a new `gen` |
 | D7 | `seen_rumors` pruning | **Prune beyond the §3.4 horizon** once command expiry ships |
+
+**Post-freeze review additions (2026-07-22, owner-mandated design pass):** §3.7 detach
+hygiene / record-authority pinning / handover republish; rumor 21610 Attendee Withdrawal
+(custom rumor range extends to 21600–21610); 31600 `retention` tag; 21606 widened to the
+affected attendee. All additive on top of the v2 flag day; no prior decision is changed.
+Considered and rejected in the same pass: `E_inbox` p-tag metadata mitigation (complexity
+disproportionate to an accepted, documented leak), scoped organizer roles (additive
+later, large), chunked-media descriptor reservation (speculative without implementation),
+PoW-gated join requests (additive later if spam materializes).
 
 Changelog v1 → v2 (summary): strict version parse; global latest-event tie-break; monotonic
 publisher timestamps; `rev` on 21601/21608; talk equal-revision rejection; `expires` +
