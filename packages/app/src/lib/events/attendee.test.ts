@@ -389,7 +389,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
           ["d", "cypherpunk-2026"],
           ["v", "2"],
           ["inbox", inbox],
-          ["coordinator", coordinator],
+          ["coordinator", coordinator, "1"],
         ],
         content: "",
       },

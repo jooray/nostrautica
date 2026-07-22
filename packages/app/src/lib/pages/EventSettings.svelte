@@ -13,6 +13,7 @@
   } from "$lib/events/organizer.js";
   import { updateEventMetadata } from "$lib/events/event-metadata.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
+  import { deriveBlindingKey } from "$lib/events/blinding.js";
   import {
     fetchCoordinators,
     cachedCoordinators,
@@ -328,7 +329,10 @@
     error = null;
     try {
       if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error(t("admin.error.enterNpub"));
-      await attachCoordinator(session.signer, ctx, pubkey);
+      // Blinding key lets attach persist the install generation into the durable
+      // 30078 backup too (NIP §3.5), not only the local keystore record.
+      const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
+      await attachCoordinator(session.signer, ctx, pubkey, blindingKey);
       attached = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

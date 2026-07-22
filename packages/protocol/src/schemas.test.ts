@@ -122,10 +122,24 @@ describe("every §7 payload round-trips through JSON", () => {
     roundTrips(coordinatorGrantContentSchema, {
       v: 2,
       a: "31923:" + hex + ":ev",
+      gen: 1,
       inbox_nsec: hex,
       eck: [{ id: 1, key: b64_32 }],
       config_relays: ["wss://relay.example"],
     }));
+
+  it("21603 coordinator grant requires a positive gen (NIP §3.5)", () => {
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "31923:" + hex + ":ev", inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "31923:" + hex + ":ev", gen: 0, inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
+      }),
+    ).toThrow();
+  });
 
   it("21604 admin command", () =>
     roundTrips(adminCommandContentSchema, {
@@ -655,6 +669,7 @@ describe("boundary length caps (PROTO-4)", () => {
     roundTrips(coordinatorGrantContentSchema, {
       v: 2,
       a: "31923:" + hex + ":ev",
+      gen: 1,
       inbox_nsec: hex,
       eck: [{ id: 1, key: b64_32 }],
       config_relays: Array(MAX_RELAYS).fill("wss://relay.example"),

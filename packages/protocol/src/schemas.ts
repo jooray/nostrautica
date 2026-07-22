@@ -392,6 +392,10 @@ export type KeyGrantContent = z.infer<typeof keyGrantContentSchema>;
 export const coordinatorGrantContentSchema = z.object({
   v: version,
   a: z.string(),
+  // Install generation (NIP §3.5, required): must match the newest 31600's gen for
+  // a fresh install, and be strictly greater than the highest gen ever installed or
+  // detached for the coordinate — a replayed historical grant can never re-install.
+  gen: z.number().int().positive(),
   inbox_nsec: secretKeyHex, // hex privkey of E_inbox
   eck: z.array(eckVersionSchema),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
@@ -742,6 +746,10 @@ export const eventKeysBackupSchema = z.object({
   eid_nsec: secretKeyHex,
   einbox_nsec: secretKeyHex,
   eck: z.array(eckVersionSchema),
+  // Last coordinator install generation the organizer used (NIP §3.5). Absent = 0
+  // (never attached, or a backup written before generations); a re-attach reads it
+  // back and uses lastGen + 1, so generations strictly increase across devices.
+  coordinator_gen: z.number().int().nonnegative().optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 

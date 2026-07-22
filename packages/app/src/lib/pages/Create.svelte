@@ -206,7 +206,7 @@
       // event exists regardless, and a failure is recoverable from Admin — never a
       // reason to leave the organizer on the form risking a duplicate create.
       if (coordinatorPubkey) {
-        attachFailed = await attachCoordinator(signer, eventCtx, coordinatorPubkey).then(
+        attachFailed = await attachCoordinator(signer, eventCtx, coordinatorPubkey, blindingKey).then(
           () => false,
           (e) => {
             console.warn("coordinator attach at creation failed:", e);
@@ -240,7 +240,7 @@
   async function retryAttach() {
     if (!session.signer || !retryCtx || !coordinatorPubkey) return;
     retrying = "attach";
-    attachFailed = await attachCoordinator(session.signer, retryCtx, coordinatorPubkey).then(
+    attachFailed = await attachCoordinator(session.signer, retryCtx, coordinatorPubkey, retryBlindingKey ?? undefined).then(
       () => false,
       () => true,
     );

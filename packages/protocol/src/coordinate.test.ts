@@ -54,6 +54,7 @@ describe("event config (kind 31600)", () => {
       eidPubkey: pubkey,
       inbox: "b".repeat(64),
       coordinator: "c".repeat(64),
+      coordinatorGen: 3,
       relays: ["wss://relay.a", "wss://relay.b"],
       blossom: ["https://blossom.a"],
       maxVideoSec: 90,
@@ -136,6 +137,7 @@ describe("event config (kind 31600)", () => {
       eidPubkey: pubkey,
       inbox: "b".repeat(64),
       coordinator: "c".repeat(64),
+      coordinatorGen: 1,
       relays: [],
       blossom: [],
       maxVideoSec: 90,
@@ -176,7 +178,7 @@ describe("event config (kind 31600)", () => {
     const withCoord = parseEventConfig(pubkey, [
       ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
-      ["coordinator", "c".repeat(64)],
+      ["coordinator", "c".repeat(64), "1"],
       ["chat", "marmot"],
     ]);
     expect(isMarmotChatEnabled(withCoord)).toBe(true);
@@ -192,7 +194,7 @@ describe("event config (kind 31600)", () => {
     const noChat = parseEventConfig(pubkey, [
       ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
-      ["coordinator", "c".repeat(64)],
+      ["coordinator", "c".repeat(64), "1"],
     ]);
     expect(isMarmotChatEnabled(noChat)).toBe(false);
   });
@@ -289,13 +291,52 @@ describe("event config (kind 31600)", () => {
       ["coordinator", "C".repeat(64)], // uppercase hex: dropped like any invalid value
     ]);
     expect(upper.coordinator).toBeUndefined();
-    // A valid coordinator still parses.
+    // A valid THREE-element coordinator tag (NIP §3.5) still parses, with its gen.
     const ok = parseEventConfig(pubkey, [
+      ["d", "ev"], ["v", "2"],
+      ["inbox", "b".repeat(64)],
+      ["coordinator", "c".repeat(64), "2"],
+    ]);
+    expect(ok.coordinator).toBe("c".repeat(64));
+    expect(ok.coordinatorGen).toBe(2);
+  });
+
+  // ── NIP §3.5: coordinator tag is three-element (pubkey + generation) ─────────
+  it("treats a malformed coordinator tag as no coordinator (2-element / bad gen)", () => {
+    // A 2-element tag (the v1 shape) has no generation → treated as no coordinator.
+    const twoEl = parseEventConfig(pubkey, [
       ["d", "ev"], ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["coordinator", "c".repeat(64)],
     ]);
-    expect(ok.coordinator).toBe("c".repeat(64));
+    expect(twoEl.coordinator).toBeUndefined();
+    expect(twoEl.coordinatorGen).toBeUndefined();
+    // A non-positive-integer gen is likewise dropped.
+    for (const gen of ["0", "-1", "x", "1.5"]) {
+      const p = parseEventConfig(pubkey, [
+        ["d", "ev"], ["v", "2"],
+        ["inbox", "b".repeat(64)],
+        ["coordinator", "c".repeat(64), gen],
+      ]);
+      expect(p.coordinator, `gen=${gen}`).toBeUndefined();
+    }
+  });
+
+  it("buildEventConfig requires a positive coordinatorGen when a coordinator is set", () => {
+    const base = {
+      d: "ev", eidPubkey: pubkey, inbox: "b".repeat(64),
+      relays: [], blossom: [], maxVideoSec: 90, maxTalkSec: 900,
+      matching: "off" as const, matchVisibility: "pair" as const,
+      approval: "manual" as const, eck: 1, nostrContext: 0, lang: "en",
+      talks: "off" as const, chat: [],
+    };
+    // Coordinator with a gen → three-element tag.
+    const built = buildEventConfig({ ...base, coordinator: "c".repeat(64), coordinatorGen: 4 });
+    expect(built.tags).toContainEqual(["coordinator", "c".repeat(64), "4"]);
+    // Coordinator without a gen → throws (a programming error in the organizer flow).
+    expect(() => buildEventConfig({ ...base, coordinator: "c".repeat(64) })).toThrow();
+    // No coordinator → no coordinator tag, no gen required.
+    expect(buildEventConfig(base).tags.find((t) => t[0] === "coordinator")).toBeUndefined();
   });
 
   it("keeps only wss:// relay tags and https:// blossom tags", () => {

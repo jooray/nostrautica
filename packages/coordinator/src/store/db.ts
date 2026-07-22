@@ -158,6 +158,7 @@ CREATE TABLE IF NOT EXISTS events (
   inbox_nsec TEXT NOT NULL,
   eck_json TEXT NOT NULL,
   config_relays TEXT NOT NULL,
+  gen INTEGER NOT NULL DEFAULT 0,   -- the install generation this event was granted at (NIP §3.5)
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS attendees (
@@ -448,6 +449,12 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (wire-v2 §3.5): the install generation on older event rows.
+    try {
+      this.db.exec("ALTER TABLE events ADD COLUMN gen INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      /* column already exists */
+    }
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
@@ -522,42 +529,46 @@ export class Store {
     inboxNsec: string;
     eckJson: string;
     configRelays: string;
+    /** Install generation this event was granted at (NIP §3.5); keeps its value when omitted. */
+    gen?: number;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO events (coordinate, config_json, inbox_nsec, eck_json, config_relays, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO events (coordinate, config_json, inbox_nsec, eck_json, config_relays, gen, updated_at)
+         VALUES (:coordinate, :configJson, :inboxNsec, :eckJson, :configRelays, COALESCE(:gen, 0), :now)
          ON CONFLICT(coordinate) DO UPDATE SET
            config_json = excluded.config_json,
            inbox_nsec = excluded.inbox_nsec,
            eck_json = excluded.eck_json,
            config_relays = excluded.config_relays,
+           gen = COALESCE(:gen, events.gen),
            updated_at = excluded.updated_at`,
       )
-      .run(
-        row.coordinate,
-        row.configJson,
-        this.protect(row.inboxNsec),
-        this.protect(row.eckJson),
-        row.configRelays,
-        row.now,
-      );
+      .run({
+        coordinate: row.coordinate,
+        configJson: row.configJson,
+        inboxNsec: this.protect(row.inboxNsec),
+        eckJson: this.protect(row.eckJson),
+        configRelays: row.configRelays,
+        gen: row.gen ?? null,
+        now: row.now,
+      });
   }
 
   getEvent(coordinate: string):
-    | { coordinate: string; config_json: string; inbox_nsec: string; eck_json: string; config_relays: string }
+    | { coordinate: string; config_json: string; inbox_nsec: string; eck_json: string; config_relays: string; gen: number }
     | undefined {
     const row = this.db.prepare("SELECT * FROM events WHERE coordinate = ?").get(coordinate) as any;
     if (!row) return undefined;
-    return { ...row, inbox_nsec: this.reveal(row.inbox_nsec), eck_json: this.reveal(row.eck_json) };
+    return { ...row, inbox_nsec: this.reveal(row.inbox_nsec), eck_json: this.reveal(row.eck_json), gen: row.gen ?? 0 };
   }
 
-  allEvents(): { coordinate: string; inbox_nsec: string; config_relays: string }[] {
+  allEvents(): { coordinate: string; inbox_nsec: string; config_relays: string; gen: number }[] {
     const rows = this.db
-      .prepare("SELECT coordinate, inbox_nsec, config_relays FROM events")
+      .prepare("SELECT coordinate, inbox_nsec, config_relays, gen FROM events")
       .all() as any[];
-    return rows.map((r) => ({ ...r, inbox_nsec: this.reveal(r.inbox_nsec) }));
+    return rows.map((r) => ({ ...r, inbox_nsec: this.reveal(r.inbox_nsec), gen: r.gen ?? 0 }));
   }
 
   /** Delete an event's stored custody (E_inbox/ECK) row — detach disposes of key

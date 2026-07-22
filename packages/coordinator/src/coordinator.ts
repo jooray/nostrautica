@@ -256,6 +256,9 @@ interface EventState {
   /** Newest applied 31600 config event id + timestamp (audit H5 replaceable ordering). */
   configEventId?: string;
   configCreatedAt: number;
+  /** The install generation this event was authorized at (NIP §3.5). A newest 31600
+   *  that no longer names this coordinator with THIS gen triggers a durable detach. */
+  gen: number;
 }
 
 export class Coordinator {
@@ -274,6 +277,14 @@ export class Coordinator {
   /** The Marmot admin bot (§4), present only when a chat MLS layer is configured. */
   private readonly marmot?: MarmotAdmin;
   private events = new Map<string, EventState>();
+  /**
+   * Events whose newest 31600 could not be fetched at restore/revalidation time
+   * (NIP §3.5, P0-5). They are NOT resumed — no subscriptions, no processing — and
+   * are retried with backoff until the config is fetchable and revalidates (resume)
+   * or names another coordinator/gen (detach). An unfetchable config is never
+   * treated as authorization to run NOR as a detach.
+   */
+  private suspended = new Map<string, { inboxSkHex: string; eck: EckVersion[]; configRelays: string[]; gen: number; retryAt: number; attempts: number }>();
   private closers: Array<() => void> = [];
   /**
    * Rumor ids whose handler is currently in flight (audit P0-3). Subscription
@@ -450,6 +461,10 @@ export class Coordinator {
     inboxSkHex: string;
     eck: EckVersion[];
     configRelays: string[];
+    /** Install generation (NIP §3.5). Required for a fresh grant (must match the
+     *  newest 31600 and exceed the stored high-water mark); on restore it is the
+     *  gen the event was previously installed at, revalidated against the config. */
+    gen?: number;
     /**
      * Backfill window for the E_inbox subscription (audit H2). "full" (a fresh
      * install of a never-before-seen event) scans the entire history so join
@@ -488,10 +503,15 @@ export class Coordinator {
     const evtEvent = cfgEvents.find((e) => e.kind === 31923);
     const config = cfgEvent ? parseEventConfig(eidPubkey, cfgEvent.tags) : undefined;
 
-    // Install authorization (audit COORD-3, P0-4).
-    if ((grant.source ?? "restore") === "grant") {
+    // Install authorization (audit COORD-3, P0-4, NIP §3.5).
+    const source = grant.source ?? "restore";
+    let gen = grant.gen ?? 0;
+    if (source === "grant") {
       // Fresh grant: fail CLOSED. Require a valid, newest 31600 that names THIS
-      // daemon, and a grant inbox key that derives the config's declared inbox.
+      // daemon with the SAME gen as the grant, a gen strictly greater than the
+      // highest ever installed OR detached for this coordinate (a replayed
+      // historical grant can never re-install), and a grant inbox key that derives
+      // the config's declared inbox.
       if (!config) {
         // Not an authorization decision — the authoritative 31600 isn't fetchable
         // right now (relay gap, or not yet propagated after a just-created event).
@@ -506,6 +526,19 @@ export class Coordinator {
         );
         return;
       }
+      if (config.coordinatorGen !== gen) {
+        log(
+          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} does not match the newest 31600's gen ${config.coordinatorGen}`,
+        );
+        return;
+      }
+      const highGen = this.deps.store.installHighGen(grant.coordinate);
+      if (gen <= highGen) {
+        log(
+          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} ≤ the highest generation ever installed/detached (${highGen}) — replayed or stale`,
+        );
+        return;
+      }
       const grantInboxPub = getPublicKey(hexToBytes(grant.inboxSkHex));
       if (grantInboxPub !== config.inbox) {
         log(
@@ -513,14 +546,27 @@ export class Coordinator {
         );
         return;
       }
-    } else if (config?.coordinator && config.coordinator !== this.coordPubkey) {
-      // Restore of an already-authorized event: keep the lenient check (reject
-      // only an explicit re-point to another coordinator). Durable startup
-      // revalidation of missing/absent assignment is P0-5 (deferred).
-      log(
-        `[install] REJECTED ${grant.coordinate}: 31600 coordinator tag names ${short(config.coordinator)}, not this daemon (${short(this.coordPubkey)})`,
-      );
-      return;
+    } else {
+      // Restore/startup revalidation (P0-5): the newest 31600 MUST still name this
+      // coordinator with the gen the event was installed at, BEFORE we resume it.
+      gen = grant.gen ?? this.deps.store.getEvent(grant.coordinate)?.gen ?? 0;
+      if (!config) {
+        // Unfetchable config is NOT authorization to run and NOT a detach — keep the
+        // event SUSPENDED (no subscriptions, no processing) and retry with backoff.
+        this.suspendEvent(grant, gen);
+        return;
+      }
+      if (config.coordinator !== this.coordPubkey || config.coordinatorGen !== gen) {
+        // The newest config no longer names this coordinator+gen → durable detach.
+        this.suspended.delete(grant.coordinate);
+        await this.detachEvent(grant.coordinate, {
+          gen,
+          reason: `startup revalidation: newest 31600 ${config.coordinator === this.coordPubkey ? `names gen ${config.coordinatorGen}, not ${gen}` : config.coordinator ? `names ${short(config.coordinator)}` : "names no coordinator"}`,
+        });
+        return;
+      }
+      // Revalidation passed — resume; drop any prior suspension.
+      this.suspended.delete(grant.coordinate);
     }
 
     // Billing policy signal (Part 3, COORD-3): not a gate yet — the verdict is
@@ -545,8 +591,12 @@ export class Coordinator {
       inboxNsec: grant.inboxSkHex,
       eckJson: JSON.stringify(grant.eck),
       configRelays: JSON.stringify(relays),
+      gen,
       now: this.now(),
     });
+    // Record the install generation (NIP §3.5): bump the high-water mark and clear
+    // any prior detach tombstone (a fresh grant with a higher gen re-installs).
+    this.deps.store.recordInstalledGen(grant.coordinate, gen);
 
     const state: EventState = {
       coordinate: grant.coordinate,
@@ -571,6 +621,7 @@ export class Coordinator {
       },
       configEventId: cfgEvent?.id,
       configCreatedAt: cfgEvent?.created_at ?? 0,
+      gen,
     };
     this.events.set(grant.coordinate, state);
     log(
@@ -589,6 +640,55 @@ export class Coordinator {
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
     // work here — a chat-off event stays completely inert (no group, no watcher).
     if (state.chat) await this.ensureChat(state);
+  }
+
+  /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
+   *  backoff retry and ensure it is NOT live. Idempotent. */
+  private suspendEvent(
+    grant: { coordinate: string; inboxSkHex: string; eck: EckVersion[]; configRelays: string[] },
+    gen: number,
+  ): void {
+    // Make sure a previously-live instance stops serving while suspended.
+    for (const map of [this.inboxSubs, this.configSubs, this.chatSubs]) {
+      map.get(grant.coordinate)?.close();
+      map.delete(grant.coordinate);
+    }
+    this.events.delete(grant.coordinate);
+    const prev = this.suspended.get(grant.coordinate);
+    const attempts = (prev?.attempts ?? 0) + 1;
+    const delaysMs = this.wrapRetryDelaysMs;
+    const backoff = delaysMs[Math.min(attempts - 1, delaysMs.length - 1)] ?? 30_000;
+    this.suspended.set(grant.coordinate, {
+      inboxSkHex: grant.inboxSkHex,
+      eck: grant.eck,
+      configRelays: grant.configRelays,
+      gen,
+      retryAt: this.now() + backoff,
+      attempts,
+    });
+    log(`[install] SUSPENDED ${grant.coordinate}: newest 31600 not fetchable — not resumed, retry in ${backoff}ms (attempt ${attempts})`);
+  }
+
+  /**
+   * Retry revalidation of every suspended event whose backoff has elapsed (NIP §3.5).
+   * A suspended event resumes when its config becomes fetchable and revalidates, or
+   * detaches when the config names another coordinator/gen. Exposed for tests; in
+   * production it is driven by a periodic timer started in {@link start}.
+   */
+  async retrySuspendedEvents(): Promise<void> {
+    const now = this.now();
+    for (const [coordinate, s] of [...this.suspended]) {
+      if (s.retryAt > now) continue;
+      await this.installEvent({
+        coordinate,
+        inboxSkHex: s.inboxSkHex,
+        eck: s.eck,
+        configRelays: s.configRelays,
+        gen: s.gen,
+        backfill: "recent",
+        source: "restore",
+      });
+    }
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -726,6 +826,7 @@ export class Coordinator {
           inboxSkHex: grant.inbox_nsec,
           eck: grant.eck,
           configRelays: grant.config_relays,
+          gen: grant.gen,
           backfill: known ? "recent" : "full",
           source: "grant",
         });
@@ -2036,14 +2137,18 @@ export class Coordinator {
     const reclaimed = this.jobs.recoverStrandedJobs();
     if (reclaimed > 0) log(`[jobs] recovered ${reclaimed} stranded job(s) from a previous run`);
 
-    // Restore installed events from the store. Already-known events use the 3-day
-    // live-overlap window (backfill "recent"); H2's full backfill is for fresh installs.
+    // Restore installed events from the store. Each is REVALIDATED against its newest
+    // 31600 before resuming (NIP §3.5, P0-5): a config that no longer names this
+    // coordinator+gen detaches it; an unfetchable config leaves it SUSPENDED (retried
+    // by retrySuspendedEvents) rather than resumed leniently. Already-known events use
+    // the 3-day live-overlap window (backfill "recent").
     for (const row of this.deps.store.allEvents()) {
       await this.installEvent({
         coordinate: row.coordinate,
         inboxSkHex: row.inbox_nsec,
         eck: this.eckFromStore(row.coordinate),
         configRelays: JSON.parse(row.config_relays),
+        gen: row.gen,
         backfill: "recent",
         source: "restore",
       });
@@ -2066,6 +2171,14 @@ export class Coordinator {
 
     const coordCloser = this.subscribeCoordInbox();
     this.closers.push(coordCloser);
+    // Periodically revalidate suspended events (NIP §3.5, P0-5): one whose config was
+    // unfetchable at startup resumes once it's fetchable, or detaches if it now names
+    // another coordinator/gen. Only scheduled when there's something to retry.
+    if (this.suspended.size > 0) {
+      const timer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
+      if (typeof (timer as any).unref === "function") (timer as any).unref();
+      this.closers.push(() => clearInterval(timer));
+    }
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
   }
@@ -2220,14 +2333,21 @@ export class Coordinator {
       return;
     }
 
-    // De-installation (audit COORD-3): a config that re-points the event at a
-    // DIFFERENT coordinator uninstalls it here — stop serving the event (its
-    // subscriptions become inert no-ops) and drop its live state.
-    if (config.coordinator && config.coordinator !== this.coordPubkey) {
-      log(
-        `[config] 31600 for ${coordinate} now names coordinator ${short(config.coordinator)} — uninstalling from this daemon`,
-      );
-      this.events.delete(coordinate);
+    // Durable detach (NIP §3.5, decision D6): the newest 31600 is a detach signal
+    // whenever it does not name this coordinator with the CURRENT generation —
+    // including a config with no coordinator tag, a config naming another
+    // coordinator, and a config naming this coordinator at a DIFFERENT gen (a
+    // re-attach, whose fresh 21603 grant re-installs). detachEvent tombstones the
+    // install, closes subscriptions, cancels pending work, and deletes custody.
+    if (config.coordinator !== this.coordPubkey || config.coordinatorGen !== state.gen) {
+      const why =
+        config.coordinator === this.coordPubkey
+          ? `gen changed to ${config.coordinatorGen} (installed at ${state.gen})`
+          : config.coordinator
+            ? `now names coordinator ${short(config.coordinator)}`
+            : "no longer names a coordinator";
+      log(`[config] 31600 for ${coordinate} ${why} — detaching from this daemon`);
+      await this.detachEvent(coordinate, { gen: state.gen, reason: `config update: ${why}` });
       return;
     }
 

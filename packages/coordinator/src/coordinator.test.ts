@@ -51,6 +51,9 @@ class FakeTransport implements Transport {
   fetches: any[] = [];
   /** Throw on the next N publishes (COORD-2 failure injection). */
   failPublishes = 0;
+  /** When true, a fetch touching kind 31600 returns [] — simulates an unfetchable
+   *  config for the NIP §3.5 startup-revalidation suspension path. */
+  blockConfig = false;
   async publish(event: NostrEvent): Promise<void> {
     if (this.failPublishes > 0) {
       this.failPublishes--;
@@ -60,6 +63,7 @@ class FakeTransport implements Transport {
   }
   async fetch(filter: any): Promise<NostrEvent[]> {
     this.fetches.push(filter);
+    if (this.blockConfig && filter.kinds?.includes(31600)) return [];
     return [...this.seed, ...this.published].filter((e) => {
       if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
       if (filter.authors && !filter.authors.includes(e.pubkey)) return false;
@@ -290,7 +294,7 @@ async function setup(
   const transport = new FakeTransport();
   transport.seed.push(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"]], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ...(opts.chat ? [["chat", "marmot"], ["coordinator", opts.foreignCoordinator ?? coordPubkey]] : opts.foreignCoordinator ? [["coordinator", opts.foreignCoordinator]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d }) ?? []),
   );
@@ -337,8 +341,12 @@ async function setup(
     },
   });
 
+  // Install as a fresh grant at gen 1 (exercises the NIP §3.5 grant-gen validation:
+  // the seeded 31600 names this coordinator at gen 1). A foreignCoordinator seed
+  // names a DIFFERENT coordinator, so the grant is rejected and the event never
+  // installs — the behavior those tests assert.
   await coordinator.installEvent({
-    coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"],
+    coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
   });
 
   return { coordinator, transport, store, llm, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
@@ -906,12 +914,14 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const grantContent = {
       v: 2,
       a: coordinate2,
+      gen: 1,
       inbox_nsec: bytesToHex(inbox2Sk),
       eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
       config_relays: ["wss://test"],
     };
-    // A fresh grant install now fails closed (P0-4) unless a 31600 exists that
-    // names THIS coordinator and whose inbox the grant key derives — seed it.
+    // A fresh grant install now fails closed (P0-4/§3.5) unless a 31600 exists that
+    // names THIS coordinator at the grant's gen and whose inbox the grant key
+    // derives — seed it.
     h.transport.seed.push({
       kind: 31600,
       pubkey: getPublicKey(eid2Sk),
@@ -923,7 +933,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
         ["d", "second-event"],
         ["v", "2"],
         ["inbox", getPublicKey(inbox2Sk)],
-        ["coordinator", getPublicKey(h.coordSk)],
+        ["coordinator", getPublicKey(h.coordSk), "1"],
       ],
     } as any);
 
@@ -1090,7 +1100,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     const eidPubkey = getPublicKey(h.eidSk);
     const newer = {
       kind: 31600, pubkey: eidPubkey, created_at: 100,
-      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["match_visibility", "event"]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"], ["match_visibility", "event"]],
       content: "", id: "cfg-2", sig: "",
     } as any;
     await h.coordinator.handleConfigUpdate(h.coordinate, newer);
@@ -1101,7 +1111,7 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
   it("on a created_at tie, the LOWEST-id 31600 wins (NIP §3.1 flip; converges either arrival order)", async () => {
     const mkCfg = (h: Awaited<ReturnType<typeof setup>>, id: string, matching: "on" | "off") => ({
       kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 500,
-      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", matching]],
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", matching]],
       content: "", id, sig: "",
     });
     const applied = (h: Awaited<ReturnType<typeof setup>>) =>
@@ -1795,6 +1805,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
       content: {
         v: 2,
         a: coord2,
+        gen: 1,
         inbox_nsec: bytesToHex(einbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
         config_relays: [],
@@ -1815,6 +1826,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
       content: {
         v: 2,
         a: coord2,
+        gen: 1,
         inbox_nsec: bytesToHex(einbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
         config_relays: [],
@@ -1842,7 +1854,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
         ["d", "relay-check"],
         ["v", "2"],
         ["inbox", getPublicKey(einbox2)],
-        ["coordinator", getPublicKey(h.coordSk)],
+        ["coordinator", getPublicKey(h.coordSk), "1"],
       ],
     } as any);
     const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
@@ -1850,6 +1862,7 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
       content: {
         v: 2,
         a: coord2,
+        gen: 1,
         inbox_nsec: bytesToHex(einbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
         config_relays: ["ws://insecure.example", "wss://ok.example/", "wss://ok.example"],
@@ -1874,6 +1887,7 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
       content: {
         v: 2,
         a: coord2,
+        gen: 1,
         inbox_nsec: bytesToHex(inbox2),
         eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
         config_relays: ["wss://test"],
@@ -1927,7 +1941,7 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
     // Config names this coordinator but declares a DIFFERENT inbox than the grant.
     seedConfig(h, eid2, "wrong-inbox", [
       ["inbox", getPublicKey(generateSecretKey())],
-      ["coordinator", getPublicKey(h.coordSk)],
+      ["coordinator", getPublicKey(h.coordSk), "1"],
     ]);
     await h.coordinator.handleCoordinatorWrap(grantWrap as any);
     expect(h.store.getEvent(coord2)).toBeUndefined();
@@ -1940,10 +1954,115 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
     const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "authorized");
     seedConfig(h, eid2, "authorized", [
       ["inbox", getPublicKey(inbox2)],
-      ["coordinator", getPublicKey(h.coordSk)],
+      ["coordinator", getPublicKey(h.coordSk), "1"],
     ]);
     await h.coordinator.handleCoordinatorWrap(grantWrap as any);
     expect(h.store.getEvent(coord2)).toBeDefined();
+  });
+});
+
+describe("NIP §3.5 — install generation + durable detach + startup revalidation", () => {
+  /** Build a genuine 21603 grant (sealed by E_id) + seed its authorizing 31600. */
+  function grantAndSeed(
+    h: Harness,
+    eid2: Uint8Array,
+    inbox2: Uint8Array,
+    d: string,
+    gen: number,
+    configGen = gen,
+  ): { coord2: string; grantWrap: any } {
+    const coord2 = makeCoordinate(getPublicKey(eid2), d);
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(eid2), created_at: 1, id: `cfg-${d}`, sig: "", content: "",
+      tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(inbox2)], ["coordinator", getPublicKey(h.coordSk), String(configGen)]],
+    } as any);
+    const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: coord2, gen, inbox_nsec: bytesToHex(inbox2), eck: [{ id: 1, key: bytesToBase64(generateEck()) }], config_relays: ["wss://test"] },
+    });
+    return { coord2, grantWrap };
+  }
+
+  it("rejects a grant whose gen does not match the newest 31600's gen", async () => {
+    const h = await setup();
+    // Config declares gen 2, grant carries gen 1 → mismatch → rejected.
+    const { coord2, grantWrap } = grantAndSeed(h, generateSecretKey(), generateSecretKey(), "genmismatch", 1, 2);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+  });
+
+  it("rejects a replayed old-gen 21603 after a detach (gen ≤ high-water mark)", async () => {
+    const h = await setup(); // installed at gen 1
+    expect(h.store.installHighGen(h.coordinate)).toBe(1);
+    // Detach (signed command) → tombstone at gen 1, custody deleted.
+    const now = Math.floor(h.clock.t / 1000);
+    const detachWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "detach", args: {}, expires: now + 172_800 },
+      created_at: now,
+    });
+    await h.coordinator.handleCoordinatorWrap(detachWrap as any);
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+
+    // Replay the ORIGINAL gen-1 grant (config still seeded at gen 1). gen 1 ≤ the
+    // high-water mark (1) → rejected, no re-install.
+    const replay = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"] },
+    });
+    await h.coordinator.handleCoordinatorWrap(replay as any);
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+  });
+
+  it("startup revalidation detaches an event whose newest 31600 names another coordinator", async () => {
+    const h = await setup(); // installed at gen 1, serving
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    const subsBefore = h.transport.subs.filter((s) => !s.closed).length;
+    // The newest config now names a DIFFERENT coordinator (a re-point).
+    const foreign = getPublicKey(generateSecretKey());
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100, id: "cfg-repoint", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", foreign, "2"]],
+    } as any);
+    // Restart revalidation for this event (what start() does before resuming).
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+    // Detached: custody deleted (D6), tombstoned, subscriptions closed.
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+    expect(h.transport.subs.filter((s) => s.closed).length).toBeGreaterThanOrEqual(subsBefore);
+    // No longer serving: a join is a no-op.
+    const { pubkey } = await joinOnly(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined();
+  });
+
+  it("startup with an unfetchable config SUSPENDS the event (not resumed, not detached), then resumes when fetchable", async () => {
+    const h = await setup();
+    // Make the config unfetchable and revalidate on "restart".
+    h.transport.blockConfig = true;
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+    // Suspended: custody RETAINED (not detached), NOT tombstoned, and NOT serving.
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(false);
+    const { pubkey } = await joinOnly(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined(); // not resumed
+
+    // Config becomes fetchable; advance past the backoff and retry → resumes.
+    h.transport.blockConfig = false;
+    h.clock.t += 60_000;
+    await h.coordinator.retrySuspendedEvents();
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    // Serving again: a fresh join is processed.
+    const p2 = await joinOnly(h, generateSecretKey(), "design");
+    expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
   });
 });
 
@@ -2140,6 +2259,7 @@ describe("audit COORD-8 — relay handover re-creates subscriptions", () => {
         ["d", "cypherpunk"],
         ["v", "2"],
         ["inbox", getPublicKey(h.einboxSk)],
+        ["coordinator", getPublicKey(h.coordSk), "1"],
         ["relay", "wss://new.relay"],
         ["matching", "on"],
       ],
@@ -2265,6 +2385,7 @@ describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () =
         content: {
           v: 2,
           a: coordinate,
+          gen: 1,
           inbox_nsec: bytesToHex(einboxSk),
           eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
           config_relays: [],
@@ -2283,7 +2404,7 @@ describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () =
         ["d", "backfilled-event"],
         ["v", "2"],
         ["inbox", getPublicKey(einboxSk)],
-        ["coordinator", coordPub],
+        ["coordinator", coordPub, "1"],
       ],
     } as any);
     const coordinator = new Coordinator({

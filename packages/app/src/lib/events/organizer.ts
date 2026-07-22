@@ -46,10 +46,12 @@ import {
   type TalksMode,
   type ChatBackend,
   KIND_INVITE_LIST,
+  KIND_APP_DATA,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
   ADMIN_COMMAND_TTL_SEC,
+  type EventKeysBackup,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -666,9 +668,10 @@ export async function updateEventConfig(
 }
 
 export async function attachCoordinator(
-  _organizer: AppSigner,
+  organizer: AppSigner,
   ctx: EventContext,
   coordinatorPubkey: string,
+  blindingKey?: Uint8Array,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
@@ -676,8 +679,27 @@ export async function attachCoordinator(
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
 
-  // 1. Republish 31600 with the coordinator tag (signed by E_id).
-  const cfg = { ...ctx.config, coordinator: coordinatorPubkey };
+  // Install generation (NIP §3.5): strictly increase across every attach/detach/
+  // re-attach so a replayed historical 21603 can never re-install. The last-used
+  // gen lives on the local record + the 30078 backup (durable across devices).
+  const gen = (keys.coordinatorGen ?? 0) + 1;
+
+  // 0. Coordinator replacement: if a different coordinator is currently attached,
+  //    detach it first (signed 21604) so it disposes of custody promptly rather than
+  //    only noticing via the config change. The new 31600 below also names the new
+  //    coordinator+gen, which detaches the old one on its next config revalidation.
+  const previous = ctx.config.coordinator;
+  if (previous && previous !== coordinatorPubkey) {
+    const expires = Math.floor(Date.now() / 1000) + ADMIN_COMMAND_TTL_SEC;
+    const detachWrap = wrapRumor(eidSk, previous, {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
+    });
+    await publishOrQueue(detachWrap as any, ctx.config.relays);
+  }
+
+  // 1. Republish 31600 with the three-element coordinator tag (signed by E_id).
+  const cfg = { ...ctx.config, coordinator: coordinatorPubkey, coordinatorGen: gen };
   const built = buildEventConfig(cfg);
   const configEvent = finalizeEvent(
     {
@@ -689,13 +711,14 @@ export async function attachCoordinator(
     eidSk,
   );
 
-  // 2. Gift-wrap the Coordinator Grant (21603), sealed by E_id so the
-  //    coordinator can authenticate the install against the coordinate (F2).
+  // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
+  //    E_id so the coordinator can authenticate the install against the coordinate.
   const grantWrap = wrapRumor(eidSk, coordinatorPubkey, {
     kind: KIND_COORDINATOR_GRANT,
     content: {
       v: 2,
       a: ctx.coordinate,
+      gen,
       inbox_nsec: keys.einboxNsecHex,
       eck: keys.eck,
       config_relays: ctx.config.relays,
@@ -705,5 +728,84 @@ export async function attachCoordinator(
   await Promise.all([
     publishOrQueue(configEvent, ctx.config.relays),
     publishOrQueue(grantWrap as any, ctx.config.relays),
+  ]);
+
+  // 3. Persist the new gen locally and (durably) in the 30078 backup so a re-attach
+  //    — on this or a fresh device — increments past it instead of colliding.
+  await saveEventKeys({ ...keys, coordinatorGen: gen });
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch(() => {});
+  }
+}
+
+/** Republish the organizer's self-encrypted 30078 event-keys backup with the given
+ *  coordinator generation (NIP §3.5), so the last-used gen survives a device wipe. */
+async function writeEventKeysBackup(
+  organizer: AppSigner,
+  coordinate: string,
+  keys: EventKeys,
+  blindingKey: Uint8Array,
+  coordinatorGen: number,
+): Promise<void> {
+  if (!keys.eidNsecHex || !keys.einboxNsecHex) return;
+  const backup: EventKeysBackup = {
+    v: 2,
+    a: coordinate,
+    eid_nsec: keys.eidNsecHex,
+    einbox_nsec: keys.einboxNsecHex,
+    eck: keys.eck,
+    coordinator_gen: coordinatorGen,
+  };
+  const ownPubkey = await organizer.getPublicKey();
+  const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
+  const d = `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
+  const event = await organizer.signEvent({
+    kind: KIND_APP_DATA,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["d", d]],
+    content,
+  });
+  await publishOrQueue(event);
+}
+
+/**
+ * Detach the currently-attached coordinator (NIP §3.5): republish the 31600 WITHOUT
+ * a coordinator tag (signed by E_id) and send a signed 21604 `detach` command so the
+ * coordinator durably tombstones the install and disposes of key custody (decision
+ * D6). The last-used generation is retained locally, so a later re-attach increments
+ * past it. No-op when no coordinator is attached.
+ */
+export async function detachCoordinator(
+  _organizer: AppSigner,
+  ctx: EventContext,
+): Promise<void> {
+  const previous = ctx.config.coordinator;
+  if (!previous) return;
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
+    throw new Error("organizer E_id key not available");
+  }
+  const eidSk = hexToBytes(keys.eidNsecHex);
+
+  // 1. Republish 31600 without the coordinator tag (and without its gen).
+  const { coordinator: _c, coordinatorGen: _g, ...rest } = ctx.config;
+  void _c;
+  void _g;
+  const built = buildEventConfig(rest);
+  const configEvent = finalizeEvent(
+    { kind: built.kind, created_at: Math.floor(Date.now() / 1000), tags: built.tags, content: built.content },
+    eidSk,
+  );
+
+  // 2. Signed 21604 detach to the current coordinator (immediate custody disposal).
+  const expires = Math.floor(Date.now() / 1000) + ADMIN_COMMAND_TTL_SEC;
+  const detachWrap = wrapRumor(eidSk, previous, {
+    kind: KIND_ADMIN_COMMAND,
+    content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
+  });
+
+  await Promise.all([
+    publishOrQueue(configEvent, ctx.config.relays),
+    publishOrQueue(detachWrap as any, ctx.config.relays),
   ]);
 }

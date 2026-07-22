@@ -27,6 +27,9 @@ export interface EventKeys {
   eck: EckVersion[]; // {id, key(base64)}
   eidNsecHex?: string; // organizer only
   einboxNsecHex?: string; // organizer + coordinator only
+  /** Last coordinator install generation this organizer used (NIP §3.5). A
+   *  re-attach uses lastGen + 1; absent = never attached (0). Organizer only. */
+  coordinatorGen?: number;
 }
 
 /** On-disk shape: an EventKeys record scoped to the identity that owns it. */
@@ -89,6 +92,7 @@ function toPublic(r: StoredEventKeys): EventKeys {
     eck: r.eck,
     eidNsecHex: r.eidNsecHex,
     einboxNsecHex: r.einboxNsecHex,
+    coordinatorGen: r.coordinatorGen,
   };
 }
 
@@ -424,6 +428,9 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
     eck: [...byId.values()].sort((a, b) => a.id - b.id),
     eidNsecHex: primary.eidNsecHex ?? fallback.eidNsecHex,
     einboxNsecHex: primary.einboxNsecHex ?? fallback.einboxNsecHex,
+    // The install generation only grows, so keep the higher of the two views —
+    // never let a stale snapshot regress a re-attach's newer generation.
+    coordinatorGen: Math.max(primary.coordinatorGen ?? 0, fallback.coordinatorGen ?? 0) || undefined,
   };
 }
 

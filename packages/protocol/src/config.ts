@@ -49,6 +49,13 @@ export interface EventConfig {
   eidPubkey: string; // author of the config (E_id)
   inbox: string; // E_inbox pubkey hex
   coordinator?: string; // coordinator pubkey hex (absent = no coordinator)
+  /**
+   * Coordinator installation generation (NIP §3.5): a positive integer strictly
+   * increasing across every attach/detach/re-attach. Present iff `coordinator` is
+   * present — the `coordinator` tag is three-element `["coordinator", <pk>, <gen>]`,
+   * and a malformed (2-element or non-positive-gen) tag is treated as no coordinator.
+   */
+  coordinatorGen?: number;
   relays: string[];
   blossom: string[];
   /** Seconds; 0 means unlimited (no hard cap). Defaults to 90 when the tag is absent. */
@@ -80,7 +87,16 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
     ["v", PROTOCOL_VERSION_TAG],
     ["inbox", cfg.inbox],
   ];
-  if (cfg.coordinator) tags.push(["coordinator", cfg.coordinator]);
+  // Coordinator tag is three-element (NIP §3.5): pubkey + a positive-int generation.
+  // A coordinator without a valid gen is a programming error — the organizer flows
+  // always supply one (attach uses lastGen+1) — so fail loudly rather than emit a
+  // malformed tag readers would drop.
+  if (cfg.coordinator) {
+    if (!Number.isInteger(cfg.coordinatorGen) || (cfg.coordinatorGen ?? 0) < 1) {
+      throw new Error("31600 config: coordinator requires a positive integer coordinatorGen");
+    }
+    tags.push(["coordinator", cfg.coordinator, String(cfg.coordinatorGen)]);
+  }
   for (const r of cfg.relays) tags.push(["relay", r]);
   for (const b of cfg.blossom) tags.push(["blossom", b]);
   tags.push(["max_video_sec", String(cfg.maxVideoSec)]);
@@ -207,12 +223,26 @@ export function parseEventConfig(
       chat.push(backend as ChatBackend);
     }
   }
-  const coordinatorRaw = first(tags, "coordinator");
+  // Coordinator tag (NIP §3.5): three-element `["coordinator", <pk-hex>, <gen>]`.
+  // The stricter option (per the task): a MALFORMED coordinator tag — a 2-element
+  // tag, a non-hex pubkey, or a non-positive-integer gen — is treated as NO
+  // coordinator (dropped), the same fail-soft style used for other bad values.
+  const coordinatorTag = tags.find((t) => t[0] === "coordinator");
+  let coordinator: string | undefined;
+  let coordinatorGen: number | undefined;
+  if (coordinatorTag && coordinatorTag[1] && HEX32.test(coordinatorTag[1]) && coordinatorTag[2] !== undefined) {
+    const gen = Number(coordinatorTag[2]);
+    if (Number.isInteger(gen) && gen >= 1) {
+      coordinator = coordinatorTag[1];
+      coordinatorGen = gen;
+    }
+  }
   return {
     d,
     eidPubkey,
     inbox,
-    coordinator: coordinatorRaw && HEX32.test(coordinatorRaw) ? coordinatorRaw : undefined,
+    coordinator,
+    coordinatorGen,
     relays: urlValues(tags, "relay", "wss:"),
     blossom: urlValues(tags, "blossom", "https:"),
     // 0 is a valid parsed value (UNLIMITED_SEC) — intTag only falls back to the
