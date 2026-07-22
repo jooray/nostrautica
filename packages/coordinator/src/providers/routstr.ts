@@ -10,6 +10,7 @@
  */
 import type { LlmProvider, ModelInfo, PaymentStrategy, TokenUsage } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
+import { PROVIDER_TIMEOUTS, withProviderTimeout } from "./http.js";
 
 export interface RoutstrOptions {
   nodeUrl: string; // e.g. https://api.routstr.com/v1
@@ -25,9 +26,15 @@ export class RoutstrLlm implements LlmProvider {
   }
 
   async models(): Promise<ModelInfo[]> {
-    const res = await fetch(`${this.base()}/models`);
-    if (!res.ok) throw new Error(`Routstr GET /models failed: ${res.status}`);
-    const body = (await res.json()) as { data?: any[] };
+    const body = await withProviderTimeout(
+      "Routstr GET /models",
+      PROVIDER_TIMEOUTS.metadata,
+      async (signal) => {
+        const res = await fetch(`${this.base()}/models`, { signal });
+        if (!res.ok) throw new Error(`Routstr GET /models failed: ${res.status}`);
+        return (await res.json()) as { data?: any[] };
+      },
+    );
     return (body.data ?? []).map((m) => ({
       id: m.id,
       contextLength: m.context_length,
@@ -38,8 +45,10 @@ export class RoutstrLlm implements LlmProvider {
 
   /** Accepted mints etc. from the node's /v1/info (spec §9.4). */
   async info(): Promise<any> {
-    const res = await fetch(`${this.base()}/info`);
-    return res.ok ? res.json() : {};
+    return withProviderTimeout("Routstr GET /info", PROVIDER_TIMEOUTS.metadata, async (signal) => {
+      const res = await fetch(`${this.base()}/info`, { signal });
+      return res.ok ? await res.json() : {};
+    });
   }
 
   async completeStructured<T>(req: {
@@ -56,38 +65,46 @@ export class RoutstrLlm implements LlmProvider {
       "Content-Type": "application/json",
       ...(await this.opts.payment.prepare({ estimateTokens: req.maxTokens })),
     };
-    let res: Response;
+    let body: any;
     try {
-      res = await fetch(`${this.base()}/chat/completions`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: req.model,
-          temperature: req.temperature ?? 0.2,
-          max_tokens: req.maxTokens,
-          messages: [
-            { role: "system", content: req.system },
-            { role: "user", content: req.user },
-          ],
-          response_format: {
-            type: "json_schema",
-            json_schema: { name: req.schemaName, strict: true, schema: req.schema },
-          },
-        }),
-      });
+      body = await withProviderTimeout(
+        "Routstr chat/completions",
+        PROVIDER_TIMEOUTS.completion,
+        async (signal) => {
+          const res = await fetch(`${this.base()}/chat/completions`, {
+            method: "POST",
+            headers,
+            signal,
+            body: JSON.stringify({
+              model: req.model,
+              temperature: req.temperature ?? 0.2,
+              max_tokens: req.maxTokens,
+              messages: [
+                { role: "system", content: req.system },
+                { role: "user", content: req.user },
+              ],
+              response_format: {
+                type: "json_schema",
+                json_schema: { name: req.schemaName, strict: true, schema: req.schema },
+              },
+            }),
+          });
+          if (!res.ok) {
+            throw new Error(`Routstr chat/completions failed: ${res.status} ${await res.text()}`);
+          }
+          const parsed = (await res.json()) as any;
+          // Change proofs (if any) come back in response headers — settle the wallet.
+          await this.opts.payment.settle(res.headers);
+          return parsed;
+        },
+      );
     } catch (e) {
-      // Network failure after prepare(): the reserved proofs never reach a
-      // settle() — account for them (audit COORD-5).
+      // Network failure / non-2xx / TIMEOUT after prepare(): the reserved proofs
+      // never reach a settle() — account for them, and after a post-reservation
+      // timeout the mint state is genuinely ambiguous (audit COORD-5, H-4).
       await this.opts.payment.fail?.().catch(() => {});
       throw e;
     }
-    if (!res.ok) {
-      await this.opts.payment.fail?.().catch(() => {}); // COORD-5, as above
-      throw new Error(`Routstr chat/completions failed: ${res.status} ${await res.text()}`);
-    }
-    const body = (await res.json()) as any;
-    // Change proofs (if any) come back in response headers — settle the wallet.
-    await this.opts.payment.settle(res.headers);
     const content = body.choices?.[0]?.message?.content;
     if (typeof content !== "string") {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");

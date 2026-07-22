@@ -13,6 +13,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
+import { PROVIDER_TIMEOUTS, withProviderTimeout } from "./http.js";
 
 const DEFAULT_BASE = "https://api.venice.ai/api/v1";
 /** Venice STT hard limit: 25 MB (spec §9.4, §3.7). */
@@ -53,9 +54,16 @@ export class VeniceLlm implements LlmProvider {
   }
 
   async models(): Promise<ModelInfo[]> {
-    const res = await fetch(`${this.base}/models`, { headers: await this.headers() });
-    if (!res.ok) throw await httpError(res, "Venice GET /models");
-    const body = (await res.json()) as { data?: any[] };
+    const headers = await this.headers();
+    const body = await withProviderTimeout(
+      "Venice GET /models",
+      PROVIDER_TIMEOUTS.metadata,
+      async (signal) => {
+        const res = await fetch(`${this.base}/models`, { headers, signal });
+        if (!res.ok) throw await httpError(res, "Venice GET /models");
+        return (await res.json()) as { data?: any[] };
+      },
+    );
     const models = (body.data ?? []).map((m) => {
       const spec = m.model_spec ?? m.spec ?? {};
       const caps = spec.capabilities ?? m.capabilities ?? {};
@@ -80,37 +88,46 @@ export class VeniceLlm implements LlmProvider {
     maxTokens?: number;
     validate?: (raw: unknown) => T;
   }): Promise<{ value: T; usage: TokenUsage }> {
-    const res = await fetch(`${this.base}/chat/completions`, {
-      method: "POST",
-      headers: await this.headers(req.maxTokens),
-      body: JSON.stringify({
-        model: req.model,
-        temperature: req.temperature ?? 0.2,
-        // Reasoning models otherwise burn the whole budget on chain-of-thought and
-        // return empty content; give structured output real headroom.
-        max_tokens: req.maxTokens ?? 4096,
-        messages: [
-          { role: "system", content: req.system },
-          { role: "user", content: req.user },
-        ],
-        response_format: {
-          type: "json_schema",
-          json_schema: { name: req.schemaName, strict: true, schema: req.schema },
-        },
-        // Our system prompt is authoritative (no Venice persona), and we don't want
-        // reasoning tokens between us and the JSON.
-        venice_parameters: {
-          include_venice_system_prompt: false,
-          disable_thinking: true,
-          strip_thinking_response: true,
-        },
-      }),
-    });
-    if (!res.ok) {
-      throw await httpError(res, "Venice chat/completions");
-    }
-    const body = (await res.json()) as any;
-    await this.opts.payment.settle(res.headers);
+    const headers = await this.headers(req.maxTokens);
+    const body = await withProviderTimeout(
+      "Venice chat/completions",
+      PROVIDER_TIMEOUTS.completion,
+      async (signal) => {
+        const res = await fetch(`${this.base}/chat/completions`, {
+          method: "POST",
+          headers,
+          signal,
+          body: JSON.stringify({
+            model: req.model,
+            temperature: req.temperature ?? 0.2,
+            // Reasoning models otherwise burn the whole budget on chain-of-thought and
+            // return empty content; give structured output real headroom.
+            max_tokens: req.maxTokens ?? 4096,
+            messages: [
+              { role: "system", content: req.system },
+              { role: "user", content: req.user },
+            ],
+            response_format: {
+              type: "json_schema",
+              json_schema: { name: req.schemaName, strict: true, schema: req.schema },
+            },
+            // Our system prompt is authoritative (no Venice persona), and we don't want
+            // reasoning tokens between us and the JSON.
+            venice_parameters: {
+              include_venice_system_prompt: false,
+              disable_thinking: true,
+              strip_thinking_response: true,
+            },
+          }),
+        });
+        if (!res.ok) {
+          throw await httpError(res, "Venice chat/completions");
+        }
+        const parsed = (await res.json()) as any;
+        await this.opts.payment.settle(res.headers);
+        return parsed;
+      },
+    );
     const content = body.choices?.[0]?.message?.content;
     if (typeof content !== "string") {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
@@ -136,13 +153,21 @@ export class VeniceLlm implements LlmProvider {
   }
 
   async embed(texts: string[], model?: string): Promise<number[][]> {
-    const res = await fetch(`${this.base}/embeddings`, {
-      method: "POST",
-      headers: await this.headers(),
-      body: JSON.stringify({ model: model ?? "text-embedding-bge-m3", input: texts }),
-    });
-    if (!res.ok) throw await httpError(res, "Venice embeddings");
-    const body = (await res.json()) as { data?: { embedding: number[] }[] };
+    const headers = await this.headers();
+    const body = await withProviderTimeout(
+      "Venice embeddings",
+      PROVIDER_TIMEOUTS.embedding,
+      async (signal) => {
+        const res = await fetch(`${this.base}/embeddings`, {
+          method: "POST",
+          headers,
+          signal,
+          body: JSON.stringify({ model: model ?? "text-embedding-bge-m3", input: texts }),
+        });
+        if (!res.ok) throw await httpError(res, "Venice embeddings");
+        return (await res.json()) as { data?: { embedding: number[] }[] };
+      },
+    );
     const embedModel = model ?? "text-embedding-bge-m3";
     return (body.data ?? []).map((d, i) => {
       const emb = d?.embedding;
@@ -193,13 +218,20 @@ export class VeniceStt implements SttProvider {
     if (audio.language) form.append("language", audio.language);
 
     const headers = await this.opts.payment.prepare({});
-    const res = await fetch(`${this.base}/audio/transcriptions`, {
-      method: "POST",
-      headers, // do NOT set Content-Type; fetch sets the multipart boundary
-      body: form,
-    });
-    if (!res.ok) throw await httpError(res, "Venice STT");
-    const body = (await res.json()) as { text?: unknown; language?: unknown };
+    const body = await withProviderTimeout(
+      "Venice STT",
+      PROVIDER_TIMEOUTS.stt,
+      async (signal) => {
+        const res = await fetch(`${this.base}/audio/transcriptions`, {
+          method: "POST",
+          headers, // do NOT set Content-Type; fetch sets the multipart boundary
+          body: form,
+          signal,
+        });
+        if (!res.ok) throw await httpError(res, "Venice STT");
+        return (await res.json()) as { text?: unknown; language?: unknown };
+      },
+    );
     if (body.text !== undefined && typeof body.text !== "string") {
       throw new ProviderContractError(this.id, "stt", opts?.model ?? "openai/whisper-large-v3", "text was not a string");
     }

@@ -2133,6 +2133,9 @@ function errorCategory(msg: string): string {
     return "provider_billing";
   }
   if (m.includes("contract")) return "provider_contract";
+  // A provider stall (audit H-4) is distinct from a media-fetch timeout: it may
+  // have left a Cashu reservation ambiguous and warrants provider-level attention.
+  if (m.includes("provider timeout")) return "provider_timeout";
   if (m.includes("hash mismatch")) return "media_integrity";
   if (m.includes("fetch") || m.includes("blossom") || m.includes("network") || m.includes("timeout")) return "media_fetch";
   if (m.includes("ffmpeg") || m.includes("audio")) return "media_processing";
