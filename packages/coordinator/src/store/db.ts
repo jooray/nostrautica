@@ -403,6 +403,19 @@ CREATE TABLE IF NOT EXISTS billing_state (
   grace_until INTEGER,
   updated_at INTEGER NOT NULL
 );
+-- Durable per-attendee / per-event usage accounting (spec §8 budgets, H-2):
+-- actual downloaded ciphertext BYTES, decoded media DURATION (probed via ffprobe,
+-- not the attendee-declared value), and provider spend attempts (CALLS). Budgets
+-- gate paid processing as an abuse ceiling. pubkey='' = event-scoped spend.
+CREATE TABLE IF NOT EXISTS usage (
+  coordinate TEXT NOT NULL,
+  pubkey TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (coordinate, pubkey)
+);
 `;
 
 export class Store {
@@ -1317,6 +1330,73 @@ export class Store {
         .prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND payload LIKE ?")
         .get(`%"coordinate":"${coordinate}"%`) as any
     ).c;
+  }
+
+  /**
+   * Supersede a superseded submission's still-pending/parked pipeline jobs (H-2):
+   * a new submission revision cancels the OLDER revision's `process_attendee` (and
+   * any parked variant) so the coordinator never pays to download+STT+profile a
+   * recording the attendee has already replaced. `prefix` matches the per-attendee
+   * dedupe-key namespace (`proc:<coordinate>:<pubkey>:`); `keepKey` is the new
+   * revision's key (never deleted). Running jobs are left alone — the lease/
+   * compare-and-set logic already discards their stale writes. Returns count deleted.
+   */
+  supersedePendingJobs(prefix: string, keepKey: string): number {
+    const info = this.db
+      .prepare(
+        "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? AND dedupe_key != ?",
+      )
+      .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
+    return Number(info.changes);
+  }
+
+  // ── durable usage accounting (spec §8 budgets, H-2) ───────────────────────
+  // Per-attendee and per-event cumulative actual usage: downloaded ciphertext
+  // BYTES, decoded media DURATION (probed, not declared), and provider spend
+  // attempts (CALLS). Budgets gate paid processing (abuse ceiling, not a product
+  // limit). pubkey = '' rows are event-scoped spend not tied to one attendee.
+  addUsage(
+    coordinate: string,
+    pubkey: string,
+    delta: { bytes?: number; durationSec?: number; calls?: number },
+    now: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO usage (coordinate, pubkey, bytes, duration_sec, calls, updated_at)
+         VALUES (:coordinate, :pubkey, :bytes, :duration_sec, :calls, :now)
+         ON CONFLICT(coordinate, pubkey) DO UPDATE SET
+           bytes = bytes + excluded.bytes,
+           duration_sec = duration_sec + excluded.duration_sec,
+           calls = calls + excluded.calls,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate,
+        pubkey,
+        bytes: delta.bytes ?? 0,
+        duration_sec: delta.durationSec ?? 0,
+        calls: delta.calls ?? 0,
+        now,
+      });
+  }
+
+  /** Cumulative usage for one attendee (defaults to zeros when none recorded). */
+  getUsage(coordinate: string, pubkey: string): { bytes: number; durationSec: number; calls: number } {
+    const row = this.db
+      .prepare("SELECT bytes, duration_sec, calls FROM usage WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { bytes: number; duration_sec: number; calls: number } | undefined;
+    return { bytes: row?.bytes ?? 0, durationSec: row?.duration_sec ?? 0, calls: row?.calls ?? 0 };
+  }
+
+  /** Cumulative usage summed across every attendee for one event. */
+  getEventUsage(coordinate: string): { bytes: number; durationSec: number; calls: number } {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(bytes),0) AS bytes, COALESCE(SUM(duration_sec),0) AS duration_sec, COALESCE(SUM(calls),0) AS calls FROM usage WHERE coordinate = ?",
+      )
+      .get(coordinate) as { bytes: number; duration_sec: number; calls: number };
+    return { bytes: row.bytes, durationSec: row.duration_sec, calls: row.calls };
   }
 
   // ── billing state machine (spec §9, D5, §13.4) ────────────────────────────

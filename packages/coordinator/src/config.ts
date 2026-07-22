@@ -114,6 +114,24 @@ export const configSchema = z.object({
       grace_period_sec: z.number().int().nonnegative().optional(),
     })
     .default({}),
+  // Per-attendee / per-event usage budgets (spec §8, audit H-2). Generous abuse
+  // ceilings, NOT product limits — exceeding one parks further paid processing for
+  // that attendee/event (same waiting-state as a billing block) and emits a 21606
+  // `budget_exceeded`. An organizer reprocess/recompute after a config raise (which
+  // reloads these) resumes. Any limit set to 0 means "unlimited".
+  budgets: z
+    .object({
+      /** Actual downloaded ciphertext bytes. Default 2 GiB / attendee, 50 GiB / event. */
+      per_attendee_bytes: z.number().int().nonnegative().default(2 * 1024 * 1024 * 1024),
+      per_event_bytes: z.number().int().nonnegative().default(50 * 1024 * 1024 * 1024),
+      /** Decoded media seconds (probed). Default 4 h / attendee, 200 h / event. */
+      per_attendee_duration_sec: z.number().int().nonnegative().default(4 * 3600),
+      per_event_duration_sec: z.number().int().nonnegative().default(200 * 3600),
+      /** Provider spend attempts (paid job executions). Default 500 / attendee, 20k / event. */
+      per_attendee_calls: z.number().int().nonnegative().default(500),
+      per_event_calls: z.number().int().nonnegative().default(20_000),
+    })
+    .default({}),
   // Daemon-side security policy (audit COORD-3/COORD-20). Install is
   // protocol-level, so unsolicited 21603 grants are bounded here.
   security: z

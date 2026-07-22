@@ -12,7 +12,7 @@
 import type { AiProfile, AttendeeProfile, MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
 import type { SttProvider, RoleRoute } from "../providers/types.js";
 import type { Store } from "../store/db.js";
-import { transcribeMedia, type TranscriptResult } from "./transcribe.js";
+import { transcribeMedia, MediaPolicyError, type TranscriptResult } from "./transcribe.js";
 import {
   buildAiProfile,
   summarizeNostr,
@@ -44,6 +44,12 @@ export interface ProcessDeps {
   blossomOrigins?: string[];
   /** Max media bytes per blob download (audit C3). */
   maxMediaBytes?: number;
+  /** Real decoded-duration limit for intro media (audit H-3); 0/undefined ⇒ none. */
+  maxDurationSec?: number;
+  /** Injectable duration probe (tests). */
+  probeDuration?: (media: Uint8Array, mime: string) => Promise<number>;
+  /** Account actual downloaded bytes + probed duration into the usage budgets (H-2/H-3). */
+  onMediaUsage?: (usage: { bytes: number; durationSec: number }) => void;
   /** Fetch the attendee's kind-0 + last N public posts (resolved reposts). */
   fetchNostrContext: (pubkey: string, n: number) => Promise<NostrPost[]>;
   nostrContextN: number;
@@ -101,6 +107,9 @@ export async function processAttendee(
           fetchBlob: deps.fetchBlob,
           blossomOrigins: deps.blossomOrigins,
           maxMediaBytes: deps.maxMediaBytes,
+          maxDurationSec: deps.maxDurationSec,
+          probeDuration: deps.probeDuration,
+          onUsage: deps.onMediaUsage,
           now,
         },
         descriptor,
@@ -108,7 +117,16 @@ export async function processAttendee(
   const transcripts: string[] = []; // text fed into buildAiProfile
   const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
-    const r = await transcribe(descriptor);
+    // A media-policy rejection (declared-size mismatch / over-duration, audit H-3)
+    // rejects THAT media only — an empty transcript is cached, no STT, and the
+    // other media/attendee continue — rather than poisoning the whole attendee.
+    let r: string | TranscriptResult;
+    try {
+      r = await transcribe(descriptor);
+    } catch (e) {
+      if (e instanceof MediaPolicyError) continue;
+      throw e;
+    }
     const text = typeof r === "string" ? r : r.text;
     const detected = typeof r === "string" ? undefined : r.lang;
     if (text) {

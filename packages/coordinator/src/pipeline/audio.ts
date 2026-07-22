@@ -195,3 +195,22 @@ async function probeDurationSec(path: string): Promise<number> {
     return 0;
   }
 }
+
+/**
+ * Probe the REAL decoded duration (seconds) of a media blob (audit H-3). The
+ * coordinator enforces the event's duration limit against this, not the
+ * attendee-declared `duration`, before spending on STT. Returns 0 if ffprobe
+ * can't parse the container (treated as "unknown" by the caller). Writes to a
+ * temp file (ffprobe needs a seekable input) and always cleans it up.
+ */
+export async function probeDurationFromBytes(media: Uint8Array, mime: string): Promise<number> {
+  const dir = await mkdtemp(join(tmpdir(), "nostrautica-probe-"));
+  try {
+    const ext = mime.includes("mp4") ? "mp4" : mime.includes("webm") ? "webm" : "bin";
+    const inPath = join(dir, `probe.${ext}`);
+    await writeFile(inPath, media);
+    return await probeDurationSec(inPath);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}

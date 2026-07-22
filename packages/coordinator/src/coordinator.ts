@@ -103,7 +103,7 @@ import {
   talkBlindedD,
   type PublishKeys,
 } from "./nostr/publisher.js";
-import { transcribeMedia } from "./pipeline/transcribe.js";
+import { transcribeMedia, MediaPolicyError } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "./providers/types.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
@@ -249,6 +249,19 @@ export interface CoordinatorDeps {
   evaluateBilling?: (eidPubkey: string, attendeeCount: number) => CoordinatorBilling;
   /** Grace window (seconds) before a paying-over-tier event blocks (spec §9). */
   billingGracePeriodSec?: number;
+  /**
+   * Per-attendee / per-event usage budgets (spec §8, H-2). Exceeding one parks
+   * further paid processing (same waiting-state as a billing block) and emits a
+   * 21606 `budget_exceeded`. Any limit 0 ⇒ unlimited. Omitted ⇒ no budget gate.
+   */
+  budgets?: {
+    perAttendeeBytes: number;
+    perEventBytes: number;
+    perAttendeeDurationSec: number;
+    perEventDurationSec: number;
+    perAttendeeCalls: number;
+    perEventCalls: number;
+  };
 }
 
 interface EventState {
@@ -270,6 +283,10 @@ interface EventState {
   /** Per-descriptor duration cap in seconds (audit COORD-4): the event's
    *  max(max_video_sec, max_talk_sec); 0/unset ⇒ the built-in DEFAULT cap. */
   maxMediaSec: number;
+  /** Real decoded-duration limits enforced distinctly by media kind (audit H-3):
+   *  intro media uses max_video_sec, talk media uses max_talk_sec (0/unset ⇒ DEFAULT). */
+  maxIntroSec: number;
+  maxTalkSec: number;
   /** Whether Marmot group chat is operative for this event (§1.3). */
   chat: boolean;
   scoringCtx: EventContextForScoring;
@@ -328,6 +345,9 @@ export class Coordinator {
    * (two daemons sharing one SQLite file) remains deferred.
    */
   private readonly inFlightRumors = new Set<string>();
+  /** Coordinates for which a 21606 budget_exceeded was already emitted (H-2): emit
+   *  once per block, cleared on resume so a later re-exceed re-notifies. */
+  private readonly budgetNotified = new Set<string>();
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -382,8 +402,9 @@ export class Coordinator {
       // Re-check config at execution (audit H4): matching may have been turned off
       // after this job was queued — exit before any embedding/scoring provider call.
       if (this.events.get(p.coordinate)?.matching === "off") return;
-      // Billing gate (spec §9): a blocked event parks this before any embed spend.
-      await this.assertBillingAllowsSpend(p.coordinate);
+      // Spend gate (spec §8/§9): billing block OR exceeded budget parks this before
+      // any embed spend.
+      await this.assertSpendAllowed(p.coordinate, p.pubkey);
       const pairs = await this.selectPairs(p.coordinate, p.pubkey);
       if (!pairs.length) return;
       // FORWARD direction (p.pubkey → others): one target + ≤K candidates per call.
@@ -423,7 +444,7 @@ export class Coordinator {
     });
 
     this.jobs.register("score_batch", async (p, { enqueue }) => {
-      await this.assertBillingAllowsSpend(p.coordinate);
+      await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.a);
       const pairs = p.pairs as CandidatePair[];
       const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs);
       // A directed write only changes the TARGET's list (the candidate's own view
@@ -448,7 +469,7 @@ export class Coordinator {
     });
 
     this.jobs.register("score_reverse_batch", async (p, { enqueue }) => {
-      await this.assertBillingAllowsSpend(p.coordinate);
+      await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.b);
       const pairs = p.pairs as CandidatePair[];
       const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs);
       // Each reverse pair {a: other, b: shared} writes the OTHER's directed row, so
@@ -636,6 +657,8 @@ export class Coordinator {
       blossomOrigins: config?.blossom ?? [],
       lang: config?.lang ?? "en",
       maxMediaSec: effectiveMaxMediaSec(Math.max(config?.maxVideoSec ?? 0, config?.maxTalkSec ?? 0)),
+      maxIntroSec: effectiveMaxMediaSec(config?.maxVideoSec ?? 0),
+      maxTalkSec: effectiveMaxMediaSec(config?.maxTalkSec ?? 0),
       chat: config ? isMarmotChatEnabled(config) : false,
       scoringCtx: {
         title: evtEvent?.tags.find((t) => t[0] === "title")?.[1] ?? "the event",
@@ -1161,10 +1184,15 @@ export class Coordinator {
     if (this.events.get(coordinate)?.matching === "off") return;
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     const version = sha256Hex(utf8ToBytes(attendee?.profile_json ?? "")).slice(0, 16);
-    this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:${version}`, {
-      coordinate,
-      pubkey,
-    });
+    const key = `proc:${coordinate}:${pubkey}:${version}`;
+    // Coalesce superseded revisions (audit H-2): a new submission cancels this
+    // attendee's still-pending/parked process_attendee jobs for OLDER revisions, so
+    // the coordinator never pays to download+STT+profile a recording the attendee
+    // already replaced. A running job is left alone (its stale writes are discarded
+    // by the compare-and-set on source_revision / media x).
+    const cancelled = this.deps.store.supersedePendingJobs(`proc:${coordinate}:${pubkey}:`, key);
+    if (cancelled > 0) log(`[pipeline] ${short(pubkey)}: superseded ${cancelled} stale pending process job(s)`);
+    this.jobs.enqueue("process_attendee", key, { coordinate, pubkey });
   }
 
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
@@ -1320,8 +1348,9 @@ export class Coordinator {
     // Re-check config at execution time (audit H4): a job queued while matching was
     // ON must not call any provider if matching has since been turned OFF.
     if (state.matching === "off") return;
-    // Billing gate (spec §9): a blocked event parks this before any STT/LLM spend.
-    await this.assertBillingAllowsSpend(coordinate);
+    // Spend gate (spec §8/§9): a blocked event OR exceeded budget parks this before
+    // any STT/LLM spend.
+    await this.assertSpendAllowed(coordinate, pubkey);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     if (!attendee) return;
     const { profile, media, introText } = this.parseStoredProfile(attendee);
@@ -1349,6 +1378,10 @@ export class Coordinator {
         transcribe: this.deps.transcribe,
         blossomOrigins: state.blossomOrigins,
         maxMediaBytes: this.deps.maxMediaBytes,
+        // H-3: enforce the REAL intro-media duration limit + account actual bytes.
+        maxDurationSec: state.maxIntroSec,
+        onMediaUsage: ({ bytes, durationSec }) =>
+          this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
         fetchNostrContext: (pk, n) => this.fetchNostrContext(state, pk, n),
         nostrContextN: state.nostrContextN,
         lang: state.lang,
@@ -1416,8 +1449,8 @@ export class Coordinator {
       log(`[talk] process_talk skipped for ${short(pubkey)}: talks are off for this event`);
       return;
     }
-    // Billing gate (spec §9): a blocked event parks talk STT before any spend.
-    await this.assertBillingAllowsSpend(coordinate);
+    // Spend gate (spec §8/§9): billing block OR exceeded budget parks talk STT.
+    await this.assertSpendAllowed(coordinate, pubkey);
     const talk = this.deps.store.getTalk(coordinate, pubkey, talkD);
     if (!talk) return;
     const media = JSON.parse(talk.media_json) as MediaDescriptor;
@@ -1437,12 +1470,27 @@ export class Coordinator {
             fetchBlob: this.deps.fetchBlob,
             blossomOrigins: state.blossomOrigins,
             maxMediaBytes: this.deps.maxMediaBytes,
+            // H-3: enforce the REAL TALK-media duration limit + account actual bytes.
+            maxDurationSec: state.maxTalkSec,
+            onUsage: ({ bytes, durationSec }) =>
+              this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
             now: this.now,
           },
           d,
         ));
     let transcript: MediaTranscript | undefined;
-    const r = await transcribe(media);
+    // A media-policy rejection (declared-size mismatch / over-duration) rejects this
+    // talk's media (no transcript) without poisoning the whole talk job (H-3).
+    let r: string | import("./pipeline/transcribe.js").TranscriptResult;
+    try {
+      r = await transcribe(media);
+    } catch (e) {
+      if (e instanceof MediaPolicyError) {
+        log(`[talk] media rejected for "${talk.title}" (${short(pubkey)}): ${e.message}`);
+        return;
+      }
+      throw e;
+    }
     const text = typeof r === "string" ? r : r.text;
     const detected = typeof r === "string" ? undefined : r.lang;
     if (text) {
@@ -1901,9 +1949,11 @@ export class Coordinator {
       }
     } else if (cmd === "recompute") {
       // A raise (config reload) + organizer recompute must resume parked work
-      // (spec §9 / H-2): re-evaluate billing/budget FIRST so a now-ok event unblocks
-      // and its parked jobs re-enqueue, then drop cached scores and re-run.
+      // (spec §8/§9 / H-2): re-evaluate billing so a now-ok event unblocks, and
+      // explicitly resume budget-parked work (a budget raise isn't a billing
+      // transition), then drop cached scores and re-run.
       await this.reevaluateBilling(coordinate);
+      this.resumeParkedWork(coordinate);
       this.deps.store.clearPairs(coordinate);
       const key = `${this.now()}`;
       for (const a of this.deps.store.approvedAttendees(coordinate)) {
@@ -1913,8 +1963,9 @@ export class Coordinator {
         });
       }
     } else if (cmd === "reprocess") {
-      // Same as recompute: re-evaluate so a raise resumes this attendee's parked work.
+      // Same as recompute: re-evaluate + resume so a raise resumes parked work.
       await this.reevaluateBilling(coordinate);
+      this.resumeParkedWork(coordinate);
       const pubkey = String(args.pubkey ?? "");
       if (pubkey) {
         this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
@@ -2557,17 +2608,85 @@ export class Coordinator {
   }
 
   /**
-   * The paid-work gate (spec §9): re-evaluate billing at job execution and, when
-   * `blocked`, throw {@link ParkJobError} so the runner parks the job in the
-   * `waiting` state (coalesced, no retry-spin) instead of spending. Resumed on
-   * unblock. Revoke/detach/roster/status paths never call this.
+   * The paid-work gate (spec §8/§9, H-2): re-evaluate billing AND check usage
+   * budgets at job execution and immediately before any provider spend. When
+   * `blocked` (billing) or over a byte/duration/call budget, throw
+   * {@link ParkJobError} so the runner parks the job in the `waiting` state
+   * (coalesced, no retry-spin) instead of spending — resumed on unblock / a raised
+   * budget (organizer recompute/reprocess). Otherwise accounts one provider spend
+   * attempt (per-attendee + per-event `calls`). Revoke/detach/roster/status paths
+   * never call this. `pubkey` scopes per-attendee budgets + call accounting.
    */
-  private async assertBillingAllowsSpend(coordinate: string): Promise<void> {
-    if (!this.deps.evaluateBilling) return;
-    const stateNow = await this.reevaluateBilling(coordinate);
-    if (stateNow === "blocked") {
-      throw new ParkJobError(`billing blocked for ${coordinate} — paid work parked until payment`);
+  private async assertSpendAllowed(coordinate: string, pubkey?: string): Promise<void> {
+    // 1. Billing gate.
+    if (this.deps.evaluateBilling) {
+      const stateNow = await this.reevaluateBilling(coordinate);
+      if (stateNow === "blocked") {
+        throw new ParkJobError(`billing blocked for ${coordinate} — paid work parked until payment`);
+      }
     }
+    // 2. Budget gate (already-exceeded → park + emit budget_exceeded once).
+    const over = this.checkBudget(coordinate, pubkey);
+    if (over) {
+      if (!this.budgetNotified.has(coordinate)) {
+        this.budgetNotified.add(coordinate);
+        const state = this.events.get(coordinate);
+        if (state) await this.emitBudgetStatus(state, over);
+        log(`[budget] ${coordinate}: parking paid work — ${over}`);
+      }
+      throw new ParkJobError(`budget exceeded for ${coordinate}: ${over}`);
+    }
+    // 3. Account one provider spend attempt (per-attendee + per-event `calls`).
+    if (this.deps.budgets) {
+      const now = this.now();
+      if (pubkey) this.deps.store.addUsage(coordinate, pubkey, { calls: 1 }, now);
+      else this.deps.store.addUsage(coordinate, "", { calls: 1 }, now);
+    }
+  }
+
+  /** Re-enqueue budget/billing-parked work for a coordinate and clear the budget
+   *  notification latch (H-2), so a raised budget or resolved payment resumes it. */
+  private resumeParkedWork(coordinate: string): void {
+    this.budgetNotified.delete(coordinate);
+    const resumed = this.deps.store.resumeWaitingJobs(coordinate);
+    if (resumed > 0) log(`[budget] ${coordinate}: resumed ${resumed} parked job(s)`);
+  }
+
+  /** Return a `budget_exceeded` reason string if any budget is already exceeded, else undefined. */
+  private checkBudget(coordinate: string, pubkey?: string): string | undefined {
+    const b = this.deps.budgets;
+    if (!b) return undefined;
+    const over = (limit: number, val: number) => limit > 0 && val >= limit;
+    const ev = this.deps.store.getEventUsage(coordinate);
+    if (over(b.perEventBytes, ev.bytes)) return `budget_exceeded: event bytes ${ev.bytes} ≥ ${b.perEventBytes}`;
+    if (over(b.perEventDurationSec, ev.durationSec))
+      return `budget_exceeded: event duration ${ev.durationSec}s ≥ ${b.perEventDurationSec}s`;
+    if (over(b.perEventCalls, ev.calls)) return `budget_exceeded: event calls ${ev.calls} ≥ ${b.perEventCalls}`;
+    if (pubkey) {
+      const at = this.deps.store.getUsage(coordinate, pubkey);
+      if (over(b.perAttendeeBytes, at.bytes)) return `budget_exceeded: attendee bytes ${at.bytes} ≥ ${b.perAttendeeBytes}`;
+      if (over(b.perAttendeeDurationSec, at.durationSec))
+        return `budget_exceeded: attendee duration ${at.durationSec}s ≥ ${b.perAttendeeDurationSec}s`;
+      if (over(b.perAttendeeCalls, at.calls)) return `budget_exceeded: attendee calls ${at.calls} ≥ ${b.perAttendeeCalls}`;
+    }
+    return undefined;
+  }
+
+  /** Gift-wrap a 21606 budget_exceeded status to the event identity (H-2). */
+  private async emitBudgetStatus(state: EventState, reason: string): Promise<void> {
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: "budget",
+      state: "poison",
+      attempts: 0,
+      error_category: "budget_exceeded",
+      retryable: true,
+      billing: { state: "payment_required", reason: reason.slice(0, 500) },
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, state.configRelays);
+    log(`[budget] published 21606 budget_exceeded for ${state.coordinate}`);
   }
 
   /** Gift-wrap a 21606 billing status to the event identity on a state transition. */

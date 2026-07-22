@@ -155,6 +155,15 @@ async function main(): Promise<void> {
     // the persisted evaluating→ok|grace|blocked machine and enforces it.
     evaluateBilling: (eid, attendeeCount) => evaluateBilling(config, eid, attendeeCount),
     billingGracePeriodSec: config.pricing.grace_period_sec,
+    // Usage budgets (spec §8, H-2): abuse ceilings gating paid processing.
+    budgets: {
+      perAttendeeBytes: config.budgets.per_attendee_bytes,
+      perEventBytes: config.budgets.per_event_bytes,
+      perAttendeeDurationSec: config.budgets.per_attendee_duration_sec,
+      perEventDurationSec: config.budgets.per_event_duration_sec,
+      perAttendeeCalls: config.budgets.per_attendee_calls,
+      perEventCalls: config.budgets.per_event_calls,
+    },
   });
 
   await coordinator.start();
