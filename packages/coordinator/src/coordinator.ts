@@ -64,14 +64,15 @@ import {
   type RosterContent,
   type MatchMatrixContent,
   type MatchListContent,
+  type CoordinatorBilling,
   pickLatest,
   supersedes,
   revisionSupersedes,
   MAX_SKILLS,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor } from "@nostrautica/protocol";
-import { Store } from "./store/db.js";
-import { JobRunner } from "./pipeline/jobs.js";
+import { Store, type BillingStateRow } from "./store/db.js";
+import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
 import type { NostrPost } from "./pipeline/profile.js";
@@ -239,10 +240,15 @@ export interface CoordinatorDeps {
    */
   allowedEidPubkeys?: string[];
   /**
-   * Billing policy evaluation (Part 3, COORD-3). Invoked at install time and its
-   * verdict logged — payment itself is not enforced by this daemon yet.
+   * Billing policy evaluation (spec §9, D5). Given the billing principal (event
+   * identity) and the current approved-attendee count, returns the wire billing
+   * verdict. The coordinator maps it onto a persisted `evaluating→ok|grace|blocked`
+   * state machine and enforces it: a `blocked` event's paid provider work is parked
+   * (never revoke/detach/roster/status). Omitted ⇒ billing is always `ok`.
    */
-  evaluateBilling?: (organizerPubkey: string, attendeeCount: number) => { state: string; reason?: string };
+  evaluateBilling?: (eidPubkey: string, attendeeCount: number) => CoordinatorBilling;
+  /** Grace window (seconds) before a paying-over-tier event blocks (spec §9). */
+  billingGracePeriodSec?: number;
 }
 
 interface EventState {
@@ -376,6 +382,8 @@ export class Coordinator {
       // Re-check config at execution (audit H4): matching may have been turned off
       // after this job was queued — exit before any embedding/scoring provider call.
       if (this.events.get(p.coordinate)?.matching === "off") return;
+      // Billing gate (spec §9): a blocked event parks this before any embed spend.
+      await this.assertBillingAllowsSpend(p.coordinate);
       const pairs = await this.selectPairs(p.coordinate, p.pubkey);
       if (!pairs.length) return;
       // FORWARD direction (p.pubkey → others): one target + ≤K candidates per call.
@@ -415,6 +423,7 @@ export class Coordinator {
     });
 
     this.jobs.register("score_batch", async (p, { enqueue }) => {
+      await this.assertBillingAllowsSpend(p.coordinate);
       const pairs = p.pairs as CandidatePair[];
       const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs);
       // A directed write only changes the TARGET's list (the candidate's own view
@@ -439,6 +448,7 @@ export class Coordinator {
     });
 
     this.jobs.register("score_reverse_batch", async (p, { enqueue }) => {
+      await this.assertBillingAllowsSpend(p.coordinate);
       const pairs = p.pairs as CandidatePair[];
       const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs);
       // Each reverse pair {a: other, b: shared} writes the OTHER's directed row, so
@@ -599,22 +609,6 @@ export class Coordinator {
       this.suspended.delete(grant.coordinate);
     }
 
-    // Billing policy signal (Part 3, COORD-3): not a gate yet — the verdict is
-    // logged so an operator sees when an event exceeds the configured free tier.
-    if (this.deps.evaluateBilling) {
-      try {
-        const verdict = this.deps.evaluateBilling(
-          eidPubkey,
-          this.deps.store.approvedAttendees(grant.coordinate).length,
-        );
-        if (verdict.state !== "ok") {
-          log(`[install] billing=${verdict.state} for ${grant.coordinate}${verdict.reason ? ` — ${verdict.reason}` : ""}`);
-        }
-      } catch (e) {
-        log(`[install] billing evaluation failed: ${e instanceof Error ? e.message : e}`);
-      }
-    }
-
     this.deps.store.upsertEvent({
       coordinate: grant.coordinate,
       configJson: JSON.stringify(config ?? {}),
@@ -654,6 +648,9 @@ export class Coordinator {
       gen,
     };
     this.events.set(grant.coordinate, state);
+    // Persist the typed billing principal + evaluate the state machine at install
+    // (spec §9, D5). Emits a 21606 if the event installs already over its tier.
+    await this.reevaluateBilling(grant.coordinate);
     log(
       `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}, talks=${state.talks}`,
     );
@@ -1141,6 +1138,9 @@ export class Coordinator {
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
     if (attendee?.status === "approved") {
       await this.publishDirectory(state, pubkey);
+      // Re-evaluate billing on a submission revision (spec §9): the enqueued paid
+      // pipeline is gated at execution, but this refreshes state + emits on change.
+      await this.reevaluateBilling(state.coordinate);
       this.enqueueProcess(state.coordinate, pubkey);
     }
   }
@@ -1174,6 +1174,10 @@ export class Coordinator {
     await this.publishDirectory(state, attendeePubkey);
     await this.publishRoster(state);
     log(`[grant] ECK granted to ${short(attendeePubkey)}; directory + roster published`);
+    // Attendee-count change (spec §9): re-evaluate billing — this new approval may
+    // push the event over its free tier. Roster/grant above always run first, so
+    // admission itself is never gated by billing (only paid AI work is).
+    await this.reevaluateBilling(state.coordinate);
     // Profile-first matching (user feedback 2026-07-16): a Nostr-native attendee
     // brings a kind-0 bio and posts — start the AI pipeline at approval time so
     // matching runs from profile + nostr-context immediately, no intro required.
@@ -1316,6 +1320,8 @@ export class Coordinator {
     // Re-check config at execution time (audit H4): a job queued while matching was
     // ON must not call any provider if matching has since been turned OFF.
     if (state.matching === "off") return;
+    // Billing gate (spec §9): a blocked event parks this before any STT/LLM spend.
+    await this.assertBillingAllowsSpend(coordinate);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     if (!attendee) return;
     const { profile, media, introText } = this.parseStoredProfile(attendee);
@@ -1410,6 +1416,8 @@ export class Coordinator {
       log(`[talk] process_talk skipped for ${short(pubkey)}: talks are off for this event`);
       return;
     }
+    // Billing gate (spec §9): a blocked event parks talk STT before any spend.
+    await this.assertBillingAllowsSpend(coordinate);
     const talk = this.deps.store.getTalk(coordinate, pubkey, talkD);
     if (!talk) return;
     const media = JSON.parse(talk.media_json) as MediaDescriptor;
@@ -1892,7 +1900,10 @@ export class Coordinator {
         await this.grantAndPublish(state, pubkey);
       }
     } else if (cmd === "recompute") {
-      // Full recompute: drop cached pair scores so every pair is re-scored.
+      // A raise (config reload) + organizer recompute must resume parked work
+      // (spec §9 / H-2): re-evaluate billing/budget FIRST so a now-ok event unblocks
+      // and its parked jobs re-enqueue, then drop cached scores and re-run.
+      await this.reevaluateBilling(coordinate);
       this.deps.store.clearPairs(coordinate);
       const key = `${this.now()}`;
       for (const a of this.deps.store.approvedAttendees(coordinate)) {
@@ -1902,6 +1913,8 @@ export class Coordinator {
         });
       }
     } else if (cmd === "reprocess") {
+      // Same as recompute: re-evaluate so a raise resumes this attendee's parked work.
+      await this.reevaluateBilling(coordinate);
       const pubkey = String(args.pubkey ?? "");
       if (pubkey) {
         this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
@@ -2008,6 +2021,9 @@ export class Coordinator {
         { coordinate: state.coordinate, pubkey: removedPubkey },
       );
     }
+    // Attendee-count change (spec §9): a revocation can bring the event back under
+    // its free tier — re-evaluate, which unblocks + resumes parked work if so.
+    await this.reevaluateBilling(state.coordinate);
   }
 
   /**
@@ -2468,6 +2484,125 @@ export class Coordinator {
       if (state.chat) await this.ensureChat(state);
       else this.marmot.freeze(coordinate);
     }
+  }
+
+  // ── billing state machine (spec §9, D5, §13.4) ─────────────────────────────
+  /**
+   * Re-evaluate the persisted billing state for an installation and enforce it.
+   * Called at install, attendee-count change, submission revision, job claim, and
+   * immediately before provider spend. Persists the typed principal (kind "eid" =
+   * the event identity) + the `evaluating→ok|grace|blocked` verdict, emits an
+   * authenticated 21606 on a state TRANSITION, and re-enqueues any parked paid work
+   * when the block clears. Returns the new state. No-op returning "ok" when no
+   * billing policy is configured (the free default). Never throws — enforcement is
+   * done by the paid-job gate reading the returned value.
+   */
+  private async reevaluateBilling(coordinate: string): Promise<BillingStateRow["state"]> {
+    const state = this.events.get(coordinate);
+    if (!state) return "ok";
+    if (!this.deps.evaluateBilling) return "ok";
+    const now = this.now();
+    const count = this.deps.store.approvedAttendees(coordinate).length;
+    let verdict: CoordinatorBilling;
+    try {
+      verdict = this.deps.evaluateBilling(state.eidPubkey, count);
+    } catch (e) {
+      log(`[billing] evaluation failed for ${coordinate}: ${e instanceof Error ? e.message : e}`);
+      return this.deps.store.getBillingState(coordinate)?.state ?? "ok";
+    }
+    const prev = this.deps.store.getBillingState(coordinate);
+    let next: BillingStateRow["state"] = "ok";
+    let graceUntil: number | null = null;
+    let reason: string | null = null;
+    if (verdict.state !== "ok") {
+      reason = verdict.reason ?? null;
+      const graceMs = (this.deps.billingGracePeriodSec ?? 0) * 1000;
+      if (graceMs > 0 && prev?.state !== "blocked") {
+        // Fresh over-tier → open a grace window; continue an existing one; block once
+        // it has elapsed. A previously-blocked event stays blocked (no grace reset).
+        if (prev?.state === "grace" && prev.grace_until != null) {
+          if (now >= prev.grace_until) next = "blocked";
+          else {
+            next = "grace";
+            graceUntil = prev.grace_until;
+          }
+        } else {
+          next = "grace";
+          graceUntil = now + graceMs;
+        }
+      } else {
+        next = "blocked";
+      }
+    }
+    this.deps.store.setBillingState({
+      coordinate,
+      principalKind: "eid",
+      principalId: state.eidPubkey,
+      state: next,
+      reason,
+      graceUntil,
+      now,
+    });
+    const changed = (prev?.state ?? "evaluating") !== next;
+    if (changed) {
+      log(`[billing] ${coordinate}: ${prev?.state ?? "evaluating"} → ${next}${reason ? ` — ${reason}` : ""}`);
+      await this.emitBillingStatus(state, next, verdict, graceUntil);
+      // Unblocked (→ ok/grace): re-enqueue paid work parked while blocked (H-2).
+      if (next !== "blocked" && prev?.state === "blocked") {
+        const resumed = this.deps.store.resumeWaitingJobs(coordinate);
+        if (resumed > 0) log(`[billing] ${coordinate}: resumed ${resumed} parked job(s)`);
+      }
+    }
+    return next;
+  }
+
+  /**
+   * The paid-work gate (spec §9): re-evaluate billing at job execution and, when
+   * `blocked`, throw {@link ParkJobError} so the runner parks the job in the
+   * `waiting` state (coalesced, no retry-spin) instead of spending. Resumed on
+   * unblock. Revoke/detach/roster/status paths never call this.
+   */
+  private async assertBillingAllowsSpend(coordinate: string): Promise<void> {
+    if (!this.deps.evaluateBilling) return;
+    const stateNow = await this.reevaluateBilling(coordinate);
+    if (stateNow === "blocked") {
+      throw new ParkJobError(`billing blocked for ${coordinate} — paid work parked until payment`);
+    }
+  }
+
+  /** Gift-wrap a 21606 billing status to the event identity on a state transition. */
+  private async emitBillingStatus(
+    state: EventState,
+    next: BillingStateRow["state"],
+    verdict: CoordinatorBilling,
+    graceUntil: number | null,
+  ): Promise<void> {
+    // Map the internal state onto the frozen wire `billing` block (spec §9): the
+    // wire has no "blocked" — a blocked event is `payment_required` on the wire.
+    const billing: CoordinatorBilling =
+      next === "blocked"
+        ? {
+            state: "payment_required",
+            ...(verdict.reason ? { reason: verdict.reason } : {}),
+            ...(verdict.checkout_url ? { checkout_url: verdict.checkout_url } : {}),
+            ...(verdict.currency ? { currency: verdict.currency } : {}),
+          }
+        : next === "grace"
+          ? {
+              state: "grace",
+              ...(verdict.reason ? { reason: verdict.reason } : {}),
+              ...(graceUntil != null ? { grace_until: Math.floor(graceUntil / 1000) } : {}),
+              ...(verdict.checkout_url ? { checkout_url: verdict.checkout_url } : {}),
+            }
+          : { state: "ok" };
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      billing,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, state.configRelays);
+    log(`[billing] published 21606 billing=${billing.state} for ${state.coordinate}`);
   }
 
   /**

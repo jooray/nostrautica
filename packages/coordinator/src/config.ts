@@ -102,9 +102,16 @@ export const configSchema = z.object({
       summary: z.string().optional(),
       checkout_url: z.string().optional(),
       currency: z.string().optional(),
-      // Organizer npubs/hex pubkeys that are ALWAYS free (community events).
-      // Private — evaluated at billing time, never put in the public announce.
-      free_organizers: z.array(z.string()).default([]),
+      // Event identities (E_id: npub or hex pubkey) that are ALWAYS free — the
+      // billing principal in v2 is the event identity (spec §9, D5: v1's
+      // `free_organizers` was a misnomer; nothing authenticated a personal
+      // organizer). Private — evaluated at billing time, never in the public announce.
+      free_eids: z.array(z.string()).default([]),
+      // Optional grace window (seconds) before a paying-over-tier event is BLOCKED:
+      // on first exceeding the free tier the event enters `grace` (paid work still
+      // runs) until now+grace_period_sec, then transitions to `blocked`. Absent ⇒ no
+      // grace (straight to blocked). Keeps the evaluating→grace→blocked path real.
+      grace_period_sec: z.number().int().nonnegative().optional(),
     })
     .default({}),
   // Daemon-side security policy (audit COORD-3/COORD-20). Install is
@@ -235,24 +242,25 @@ function toHexPubkey(id: string): string | undefined {
   return undefined;
 }
 
-/** True if this organizer is on the always-free allowlist (community events). */
-export function isFreeOrganizer(config: CoordinatorConfig, organizerPubkeyHex: string): boolean {
-  const target = organizerPubkeyHex.toLowerCase();
-  return config.pricing.free_organizers.some((id) => toHexPubkey(id) === target);
+/** True if this event identity (E_id) is on the always-free allowlist (spec §9 D5). */
+export function isFreeEid(config: CoordinatorConfig, eidPubkeyHex: string): boolean {
+  const target = eidPubkeyHex.toLowerCase();
+  return config.pricing.free_eids.some((id) => toHexPubkey(id) === target);
 }
 
 /**
- * Evaluate the billing state for an event (Part 3). Pure — the caller decides
- * whether/when to emit it in a 21606 status. Default-free config always returns
- * `ok`, so wiring this into the flow is a no-op until an operator sets pricing.
+ * Evaluate the billing state for an event (spec §9). Pure — the caller decides
+ * whether/when to emit it in a 21606 status and how to map it onto the persisted
+ * `evaluating→ok|grace|blocked` state machine. Default-free config always returns
+ * `ok`. `eidPubkeyHex` is the BILLING PRINCIPAL (the event identity, D5).
  */
 export function evaluateBilling(
   config: CoordinatorConfig,
-  organizerPubkeyHex: string | undefined,
+  eidPubkeyHex: string | undefined,
   attendeeCount: number,
 ): CoordinatorBilling {
   if (config.pricing.model === "free") return { state: "ok" };
-  if (organizerPubkeyHex && isFreeOrganizer(config, organizerPubkeyHex)) return { state: "ok" };
+  if (eidPubkeyHex && isFreeEid(config, eidPubkeyHex)) return { state: "ok" };
   const freeUpTo = config.pricing.free_up_to_users;
   if (freeUpTo === undefined || attendeeCount <= freeUpTo) return { state: "ok" };
   return {

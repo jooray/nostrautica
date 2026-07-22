@@ -151,8 +151,10 @@ async function main(): Promise<void> {
     // Install authorization + unsolicited-install caps (audit COORD-3).
     maxEvents: config.security.max_events,
     allowedEidPubkeys: config.security.allowed_eid_pubkeys,
-    // Billing policy signal (Part 3, COORD-3): evaluated + logged at install.
-    evaluateBilling: (organizer, attendeeCount) => evaluateBilling(config, organizer, attendeeCount),
+    // Billing state machine (spec §9, D5): the coordinator maps this verdict onto
+    // the persisted evaluating→ok|grace|blocked machine and enforces it.
+    evaluateBilling: (eid, attendeeCount) => evaluateBilling(config, eid, attendeeCount),
+    billingGracePeriodSec: config.pricing.grace_period_sec,
   });
 
   await coordinator.start();

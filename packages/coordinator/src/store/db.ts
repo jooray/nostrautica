@@ -152,6 +152,23 @@ export interface JobStatusRow {
   updated_at: number;
 }
 
+/**
+ * Persisted billing state machine per installation (spec §9, D5, §13.4). The
+ * principal is TYPED (kind "eid" today — the event identity — extensible to a
+ * personal/organization principal without a wire change). `state` is the durable
+ * enforcement verdict `evaluating → ok | grace | blocked` re-evaluated at install,
+ * attendee-count change, submission revision, job claim, and before provider spend.
+ */
+export interface BillingStateRow {
+  coordinate: string;
+  principal_kind: string;
+  principal_id: string;
+  state: "evaluating" | "ok" | "grace" | "blocked";
+  reason: string | null;
+  grace_until: number | null;
+  updated_at: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
   coordinate TEXT PRIMARY KEY,
@@ -371,6 +388,20 @@ CREATE TABLE IF NOT EXISTS install_state (
   high_gen INTEGER NOT NULL DEFAULT 0,
   tombstoned INTEGER NOT NULL DEFAULT 0,   -- 1 once detached (custody deleted)
   detached_at INTEGER
+);
+-- Persisted billing state machine per installation (NIP §9, D5, §13.4). The
+-- principal is typed (kind 'eid' = the event identity today; extensible to a
+-- personal/organization principal later WITHOUT a wire change). state is the
+-- durable enforcement verdict evaluating→ok|grace|blocked; a 'blocked' event stops
+-- paid provider work but never revoke/detach/roster repair/status publication.
+CREATE TABLE IF NOT EXISTS billing_state (
+  coordinate TEXT PRIMARY KEY,
+  principal_kind TEXT NOT NULL DEFAULT 'eid',
+  principal_id TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'evaluating',
+  reason TEXT,
+  grace_until INTEGER,
+  updated_at INTEGER NOT NULL
 );
 `;
 
@@ -1242,6 +1273,87 @@ export class Store {
   }
   poisonJobs(): JobRow[] {
     return this.db.prepare("SELECT * FROM jobs WHERE state = 'poison'").all() as any;
+  }
+
+  /**
+   * Park a claimed job in the distinct `waiting` state (spec §9 billing/budget
+   * gates, H-2). Unlike a failure this does NOT consume a retry, set a backoff, or
+   * ever poison — `claimNextJob` never claims a `waiting` row, so blocked paid work
+   * is COALESCED (parked once) instead of retry-spinning against a hard budget/
+   * billing block. `resumeWaitingJobs` re-enqueues it when the block clears. Only
+   * the lease owner may park. Returns true if this worker still owned the job.
+   */
+  parkJob(id: number, reason: string, workerToken?: string): boolean {
+    const sql =
+      "UPDATE jobs SET state = 'waiting', last_error = ?, worker_token = NULL, lease_until = NULL WHERE id = ?" +
+      (workerToken ? " AND worker_token = ?" : "");
+    const args: unknown[] = [reason, id];
+    if (workerToken) args.push(workerToken);
+    return this.db.prepare(sql).run(...(args as any)).changes > 0;
+  }
+
+  /**
+   * Re-enqueue parked (`waiting`) jobs for one coordinate back to `pending`
+   * (billing unblocked, or a budget raised via config reload + organizer
+   * reprocess/recompute). Matches on the coordinate embedded in the job payload.
+   * Returns the number of jobs resumed.
+   */
+  resumeWaitingJobs(coordinate: string): number {
+    const info = this.db
+      .prepare(
+        "UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL WHERE state = 'waiting' AND payload LIKE ?",
+      )
+      .run(`%"coordinate":"${coordinate}"%`);
+    return Number(info.changes);
+  }
+
+  /** Count parked jobs for a coordinate (test/observability helper). */
+  waitingJobCount(coordinate?: string): number {
+    if (coordinate === undefined) {
+      return (this.db.prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting'").get() as any).c;
+    }
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND payload LIKE ?")
+        .get(`%"coordinate":"${coordinate}"%`) as any
+    ).c;
+  }
+
+  // ── billing state machine (spec §9, D5, §13.4) ────────────────────────────
+  getBillingState(coordinate: string): BillingStateRow | undefined {
+    return this.db.prepare("SELECT * FROM billing_state WHERE coordinate = ?").get(coordinate) as
+      | BillingStateRow
+      | undefined;
+  }
+
+  /** Upsert the persisted billing state for an installation. */
+  setBillingState(row: {
+    coordinate: string;
+    principalKind: string;
+    principalId: string;
+    state: BillingStateRow["state"];
+    reason?: string | null;
+    graceUntil?: number | null;
+    now: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO billing_state (coordinate, principal_kind, principal_id, state, reason, grace_until, updated_at)
+         VALUES (:coordinate, :principal_kind, :principal_id, :state, :reason, :grace_until, :updated_at)
+         ON CONFLICT(coordinate) DO UPDATE SET
+           principal_kind = excluded.principal_kind, principal_id = excluded.principal_id,
+           state = excluded.state, reason = excluded.reason,
+           grace_until = excluded.grace_until, updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        principal_kind: row.principalKind,
+        principal_id: row.principalId,
+        state: row.state,
+        reason: row.reason ?? null,
+        grace_until: row.graceUntil ?? null,
+        updated_at: row.now,
+      });
   }
 
   // ── Cashu payment journal (audit finding H8) ──────────────────────────────

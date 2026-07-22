@@ -281,6 +281,9 @@ async function setup(
     /** Per-role provider routing (H-1): route summary+translate to one instance
      *  ("provA") and match+embed to another ("provB"), exposed as h.llmA/h.llmB. */
     splitProviders?: boolean;
+    /** Billing policy (§9, D5): the wire verdict evaluator + optional grace window. */
+    evaluateBilling?: (eid: string, count: number) => import("@nostrautica/protocol").CoordinatorBilling;
+    billingGracePeriodSec?: number;
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -345,6 +348,8 @@ async function setup(
           translateModel: { provider: "mock", model: "mock-cheap" },
         }),
     sttModel: "mock",
+    ...(opts.evaluateBilling ? { evaluateBilling: opts.evaluateBilling } : {}),
+    ...(opts.billingGracePeriodSec !== undefined ? { billingGracePeriodSec: opts.billingGracePeriodSec } : {}),
     defaultRelays: ["wss://test"],
     batchSize: opts.batchSize,
     prefilter: opts.prefilter,
@@ -2591,6 +2596,119 @@ describe("H-1 — provider/model change invalidates affected cached artifacts (�
     const k1 = nostrInputsHash("pk", [{ kind: 1, content: "gm", created_at: 1 }], "en", "venice:sum-a");
     const k2 = nostrInputsHash("pk", [{ kind: 1, content: "gm", created_at: 1 }], "en", "venice:sum-b");
     expect(k1).not.toBe(k2);
+  });
+});
+
+describe("D5 §9 — persisted billing state machine (§13.4)", () => {
+  const overTier = (reason = "over free tier"): (eid: string, count: number) => any =>
+    (_eid, count) => (count >= 1 ? { state: "payment_required", reason, checkout_url: "https://pay/x" } : { state: "ok" });
+
+  it("a blocked event parks paid work (no provider spend) but still admits + publishes status", async () => {
+    const h = await setup(0, { evaluateBilling: overTier() });
+    const aPk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+
+    // No STT / LLM spend happened — the paid pipeline is parked, not run.
+    expect(h.llm.completeCalls).toBe(0);
+    expect(h.stt.calls).toBe(0);
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+    // State persisted as blocked with the typed EID principal.
+    const bs = h.store.getBillingState(h.coordinate)!;
+    expect(bs.state).toBe("blocked");
+    expect(bs.principal_kind).toBe("eid");
+    expect(bs.principal_id).toBe(getPublicKey(h.eidSk));
+    // BUT admission still happened: the attendee's directory entry was published.
+    const d = blindedD(h.eck, h.coordinate, aPk);
+    expect(latestDirectory(h.transport, h.eck, d)).toBeDefined();
+    // And a 21606 billing status (payment_required on the wire) was gift-wrapped.
+    const s = lastCoordinatorStatus(h);
+    expect(s?.billing?.state).toBe("payment_required");
+    expect(s?.billing?.checkout_url).toBe("https://pay/x");
+  });
+
+  it("revoke, detach and roster/status paths are NOT blocked by billing", async () => {
+    const h = await setup(0, { evaluateBilling: overTier() });
+    const aSk = generateSecretKey();
+    const bSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    const bPk = await join(h, bSk, "design");
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
+    const rosterBefore = h.transport.published.filter((e) => e.kind === 31604).length;
+
+    // Revoke b — must succeed (roster republished) even while billing is blocked.
+    await admin(h, "revoke", { pubkey: bPk });
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, bPk)?.status).toBe("revoked");
+    expect(h.transport.published.filter((e) => e.kind === 31604).length).toBeGreaterThan(rosterBefore);
+    void aPk;
+  });
+
+  it("unblocking (payment resolved) via organizer recompute resumes parked work and it then spends", async () => {
+    let over = true;
+    const h = await setup(0, {
+      evaluateBilling: (_eid, count) => (over && count >= 1 ? { state: "payment_required", reason: "x" } : { state: "ok" }),
+    });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
+    expect(h.llm.completeCalls).toBe(0);
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+
+    // Payment resolved (operator lifts the block) → organizer recompute re-evaluates,
+    // transitions blocked→ok, re-enqueues the parked work, which now runs and spends.
+    over = false;
+    await admin(h, "recompute", {});
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("ok");
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+    expect(h.llm.completeCalls).toBeGreaterThan(0);
+  });
+
+  it("billing state persists across a coordinator restart", async () => {
+    const h = await setup(0, { evaluateBilling: overTier() });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
+
+    // A brand-new Coordinator over the SAME store reads the persisted blocked state.
+    const restarted = new Coordinator({
+      store: h.store,
+      transport: h.transport,
+      coordSk: h.coordSk,
+      llm: h.llm,
+      stt: h.stt,
+      sttModel: "mock",
+      summaryModel: { provider: "mock", model: "mock-cheap" },
+      matchModel: { provider: "mock", model: "mock-strong" },
+      embedModel: { provider: "mock", model: "mock-embed" },
+      translateModel: { provider: "mock", model: "mock-cheap" },
+      defaultRelays: ["wss://test"],
+      evaluateBilling: overTier(),
+      now: () => h.clock.t,
+      sleep: async () => {},
+    });
+    void restarted;
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
+  });
+
+  it("a grace window keeps paid work running until it elapses, then blocks", async () => {
+    const h = await setup(0, {
+      evaluateBilling: (_eid, count) => (count >= 1 ? { state: "payment_required", reason: "grace me" } : { state: "ok" }),
+      billingGracePeriodSec: 3600,
+    });
+    await join(h, generateSecretKey(), "crypto");
+    // During grace, the state is 'grace' and paid work is NOT parked.
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("grace");
+    await h.coordinator.jobs.drain();
+    expect(h.llm.completeCalls).toBeGreaterThan(0); // spent during grace
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+
+    // Advance past the grace window → next evaluation blocks.
+    h.clock.t += 3600_000 + 1000;
+    await admin(h, "recompute", {});
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
   });
 });
 

@@ -11,6 +11,20 @@ import type { Store, JobRow } from "../store/db.js";
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn }) => Promise<void>;
 export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => void;
 
+/**
+ * A handler throws this to PARK its job (spec §9 billing/budget gates, H-2) rather
+ * than fail it: the job moves to a distinct `waiting` state that `claimNextJob`
+ * never claims, so blocked paid work is coalesced (parked once) instead of
+ * retry-spinning against a hard billing/budget block. It consumes no retry and can
+ * never poison; `store.resumeWaitingJobs` re-enqueues it when the block clears.
+ */
+export class ParkJobError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "ParkJobError";
+  }
+}
+
 /** A poisoned job, surfaced so the coordinator can notify the organizer (Q12). */
 export interface PoisonInfo {
   type: string;
@@ -139,6 +153,16 @@ export class JobRunner {
       // rows — we discard our result rather than clobber the new owner's state.
       this.store.completeJob(job.id, token);
     } catch (err) {
+      // A billing/budget PARK is not a failure: move to `waiting` (coalesced, no
+      // retry consumed, never poisons) — resumed when the block clears (H-2).
+      if (err instanceof ParkJobError) {
+        const parked = this.store.parkJob(job.id, err.message, token);
+        if (parked) {
+          const t = new Date().toISOString().slice(11, 19);
+          console.log(`[${t}] [job] ${job.type} PARKED (waiting): ${err.message.slice(0, 120)}`);
+        }
+        return;
+      }
       const attempts = job.attempts + 1;
       const poison = attempts >= this.maxAttempts;
       const backoff = this.backoffForAttempt(attempts);
