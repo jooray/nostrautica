@@ -841,6 +841,9 @@ export const messages = {
       "Authorized. Open it in that client — it'll join once its key package is found. If it hasn't after a few minutes, authorize again here to re-check.",
     "chat.handoff.link.badNpub": "Enter an npub or 64-char hex pubkey",
     "chat.handoff.link.relaysHint": "This event's relays, in case it still doesn't join:",
+    "chat.devices.title": "This device is in the chat",
+    "chat.devices.body":
+      "Each device has its own chat key, added to the group on its own. To chat from your phone or another browser, just open this event there and sign in — it joins automatically. History starts from when each device joins.",
     "chat.display.label": "Chat style",
     "chat.display.bubbles": "Bubbles",
     "chat.display.irc": "IRC",
@@ -1817,6 +1820,9 @@ export const messages = {
       "Autorizované. Otvorte to v danom klientovi — pripojí sa, keď sa nájde jeho key package. Ak sa to po pár minútach nestane, autorizujte znova — tým sa vyhľadávanie zopakuje.",
     "chat.handoff.link.badNpub": "Zadajte npub alebo 64-znakový hex pubkey",
     "chat.handoff.link.relaysHint": "Relaye tejto akcie, pre prípad, že sa stále nepripojí:",
+    "chat.devices.title": "Toto zariadenie je v chate",
+    "chat.devices.body":
+      "Každé zariadenie má vlastný kľúč chatu, ktorý sa do skupiny pridá samostatne. Ak chcete chatovať z telefónu alebo iného prehliadača, stačí tam otvoriť túto akciu a prihlásiť sa — pripojí sa automaticky. História začína od pripojenia daného zariadenia.",
     "chat.display.label": "Štýl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",
@@ -2795,6 +2801,9 @@ export const messages = {
       "Autorizováno. Otevřete to v daném klientovi — připojí se, jakmile se najde jeho key package. Pokud se to po pár minutách nestane, autorizujte znovu — tím se vyhledávání zopakuje.",
     "chat.handoff.link.badNpub": "Zadejte npub nebo 64znakový hex pubkey",
     "chat.handoff.link.relaysHint": "Relaye této akce, pro případ, že se stále nepřipojí:",
+    "chat.devices.title": "Toto zařízení je v chatu",
+    "chat.devices.body":
+      "Každé zařízení má vlastní klíč chatu, který se do skupiny přidá samostatně. Chcete-li chatovat z telefonu nebo jiného prohlížeče, stačí tam otevřít tuto akci a přihlásit se — připojí se automaticky. Historie začíná od připojení daného zařízení.",
     "chat.display.label": "Styl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",

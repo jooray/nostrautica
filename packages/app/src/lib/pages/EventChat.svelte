@@ -417,8 +417,8 @@
     <p class="send-error" role="alert">{sendError}</p>
   {/if}
 
-  {#if chat && ctx && session.signer}
-    <ChatHandoffCard signer={session.signer} {ctx} />
+  {#if chat && ctx}
+    <ChatHandoffCard />
   {/if}
 {/if}
 

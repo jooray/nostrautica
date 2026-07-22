@@ -124,16 +124,14 @@ export class MarmotChat {
    * attestation binding the chat key to the account. Idempotent.
    */
   async ensurePublished(): Promise<void> {
-    // Device-key accounts: publish (or refresh) the chat key's own kind-0 so
-    // other Marmot clients — and our chat UI, which resolves sender names by
-    // fetching this exact pubkey's kind-0 — can show a name/picture instead of
-    // a bare pubkey. Unlike everything below, this is NOT gated on "already
-    // joined": a kind-0 is a plain profile note, not MLS state, so republishing
-    // it here every open also self-heals identities that joined before this
-    // existed (prod report 2026-07-20 — chat showed raw pubkeys for everyone).
-    if (!this.identity.isAccountKey) {
-      await this.ensureChatKeyProfile();
-    }
+    // Publish (or refresh) this device key's own kind-0 (NIP §10.3) so other
+    // Marmot clients — and our chat UI, which resolves sender names by fetching
+    // this exact pubkey's kind-0 — can show a name/picture instead of a bare
+    // pubkey. Every account type has a per-device chat key now (D3), so this is
+    // unconditional. Unlike everything below, it is NOT gated on "already joined":
+    // a kind-0 is a plain profile note, not MLS state, so republishing it here
+    // every open also self-heals identities that joined before this existed.
+    await this.ensureChatKeyProfile();
 
     // Already a joined member OF THIS EVENT's group (APPK-3)? Publish NOTHING
     // else. Re-advertising a fresh kind-30443 key package, or (for device-key
@@ -165,17 +163,15 @@ export class MarmotChat {
     // is retrievable; if not, force a fresh publish to the same `d` slot (the relay
     // replaces in place, so this can't spawn a duplicate).
     await this.ensureKeyPackageOnRelays();
-    // Device-key accounts must attest the chat key to the coordinator (sealed by
-    // the account key). Local-key accounts are their own chat identity — skip.
-    if (!this.identity.isAccountKey) {
-      await sendChatKeyAttestation(this.accountSigner, this.ctx, {
-        op: "add",
-        chatPubkey: this.identity.pubkey,
-        clientId: this.identity.clientId,
-        label: defaultDeviceLabel(),
-        deviceSecretKey: this.identity.secretKey,
-      });
-    }
+    // Every account type attests its per-device chat key to the coordinator (D3),
+    // sealed by the account key and carrying a proof of possession (NIP §10.2).
+    await sendChatKeyAttestation(this.accountSigner, this.ctx, {
+      op: "add",
+      chatPubkey: this.identity.pubkey,
+      clientId: this.identity.clientId,
+      label: defaultDeviceLabel(),
+      deviceSecretKey: this.identity.secretKey,
+    });
   }
 
   /** Publish the device chat key's own kind-0 (name/picture borrowed from the

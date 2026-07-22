@@ -162,13 +162,19 @@ vi.mock("./identity.js", () => ({
   resolveChatIdentity: async () => ({
     pubkey: "c".repeat(64),
     account: "c".repeat(64),
-    isAccountKey: true,
+    // Per-device keys (D3): the chat key is never the account key, so every account
+    // type attests and publishes a device kind-0 on bootstrap.
+    isAccountKey: false,
     eventSigner: { getPublicKey: () => "c".repeat(64), signEvent: () => ({}), nip44: {} },
     accountProofSigner: () => new Uint8Array(),
     clientId: "web-test",
     secretKey: new Uint8Array(32),
   }),
+  buildChatKeyProfile: () => ({ kind: 0, pubkey: "c".repeat(64), content: "{}", tags: [], sig: "" }),
+  defaultDeviceLabel: () => "Test device",
 }));
+// Device kind-0 publish reads the account profile; keep it out of the network.
+vi.mock("$lib/events/social.js", () => ({ fetchProfiles: vi.fn(async () => new Map()) }));
 // The REAL stores module (namespacing logic under test for APPK-3), but every
 // chat gets a fresh in-memory backend instead of the shared IndexedDB one.
 vi.mock("./stores.js", async (orig) => {

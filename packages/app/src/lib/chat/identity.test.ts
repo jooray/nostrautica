@@ -1,27 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { generateSecretKey, getPublicKey, verifyEvent, finalizeEvent } from "nostr-tools/pure";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
-import { nip44Encrypt, nip44Decrypt } from "@nostrautica/protocol";
-
-// The relay transport is mocked (real NIP-44 crypto throughout, mocked network —
-// same pattern as media/library.test.ts): publishOrQueue records events into a
-// shared `published` array and fetchEvents serves them straight back, so the
-// self-encrypt/decrypt + blinded-d + schema-validate paths run end to end.
-const published: {
-  kind: number;
-  tags: string[][];
-  content: string;
-  created_at: number;
-  pubkey?: string;
-}[] = [];
-const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
-vi.mock("$lib/nostr/publish-queue.js", () => ({
-  publishOrQueue: vi.fn(async (ev: (typeof published)[number]) => {
-    published.push(ev);
-    return true;
-  }),
-}));
 
 import {
   eventSignerFromKey,
@@ -38,7 +17,6 @@ import {
   InMemoryKvBackend,
   __setMarmotKvBackendForTests,
 } from "./stores.js";
-import { clearBlindingCache } from "$lib/events/blinding.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import {
   signAccountIdentityProof,
@@ -95,7 +73,7 @@ describe("account identity proof signer", () => {
 });
 
 describe("buildChatKeyProfile", () => {
-  it("publishes a kind-0 branded as a Nostrautica chat child key, signed by the chat key", () => {
+  it("publishes a device kind-0 whose name equals the account display name (NIP §10.3, D4)", () => {
     const sk = generateSecretKey();
     const identity = {
       pubkey: getPublicKey(sk),
@@ -110,7 +88,8 @@ describe("buildChatKeyProfile", () => {
     expect(ev.kind).toBe(0);
     expect(ev.pubkey).toBe(getPublicKey(sk));
     expect(verifyEvent(ev)).toBe(true);
-    expect(JSON.parse(ev.content).name).toBe("Nostrautica Alice (chat)");
+    // No "(chat)" suffix — the device name is the account's display name.
+    expect(JSON.parse(ev.content).name).toBe("Alice");
   });
 
   it("points `about` at the real account's npub, so the key doesn't read as its own person", () => {
@@ -140,7 +119,7 @@ describe("buildChatKeyProfile", () => {
       clientId: "web-1",
       secretKey: sk,
     } satisfies ChatIdentity;
-    expect(JSON.parse(buildChatKeyProfile(identity, "  ").content).name).toBe("Nostrautica user (chat)");
+    expect(JSON.parse(buildChatKeyProfile(identity, "  ").content).name).toBe("Nostrautica user");
   });
 
   it("carries the account's picture through when given", () => {
@@ -347,168 +326,67 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
   });
 });
 
-describe("chat device-key relay backup (Marmot §9 Q1: cross-device restore)", () => {
-  // A remote-signer-shaped AppSigner backed by a REAL key: real NIP-44 + real
-  // event signing, but NO getSecretKey — so resolveChatIdentity takes the chat
-  // *device key* path (local-key accounts reuse the account key and never need a
-  // backup). This is the crypto the relay backup actually rides on, unmocked.
-  function remoteSignerFromKey(sk: Uint8Array): AppSigner {
-    const pk = getPublicKey(sk);
-    return {
-      method: "nip46",
-      getPublicKey: async () => pk,
-      signEvent: async (t) =>
-        finalizeEvent(
-          {
-            kind: t.kind,
-            created_at: t.created_at ?? Math.floor(Date.now() / 1000),
-            tags: t.tags ?? [],
-            content: t.content ?? "",
-          },
-          sk,
-        ),
-      nip44Encrypt: async (to: string, ptext: string) => nip44Encrypt(sk, to, ptext),
-      nip44Decrypt: async (from: string, ct: string) => nip44Decrypt(sk, from, ct),
-    } as AppSigner;
-  }
-
-  // Serve the newest published event matching a filter's kinds + #d back through
-  // fetchEvents — so a "second device" reads what the first device published.
-  function serveRelay(): void {
-    fetchEvents.mockImplementation(async (filter: { kinds?: number[]; "#d"?: string[] }) => {
-      const d = filter["#d"]?.[0];
-      return published
-        .filter(
-          (e) =>
-            (!filter.kinds || filter.kinds.includes(e.kind)) &&
-            (!d || e.tags.some((t) => t[0] === "d" && t[1] === d)),
-        )
-        .slice(-1);
-    });
-  }
-
-  /** All published chat device-key backups (kind 31602 with a chat_device_key). */
-  async function backupEvents(accountSk: Uint8Array): Promise<
-    { chat_device_key?: string; a?: unknown }[]
-  > {
-    const account = getPublicKey(accountSk);
-    const out: { chat_device_key?: string; a?: unknown }[] = [];
-    for (const e of published) {
-      if (e.kind !== 31602) continue;
-      try {
-        const parsed = JSON.parse(nip44Decrypt(accountSk, account, e.content));
-        if (parsed && typeof parsed === "object" && "chat_device_key" in parsed) out.push(parsed);
-      } catch {
-        /* not decryptable by this account / not a self-copy */
-      }
-    }
-    return out;
-  }
-
+describe("per-device chat identity (NIP §10.1, decision D3)", () => {
   beforeEach(() => {
-    published.length = 0;
-    fetchEvents.mockReset();
-    fetchEvents.mockResolvedValue([]);
-    clearBlindingCache();
     __setMarmotKvBackendForTests(new InMemoryKvBackend());
   });
   afterEach(() => {
     __setMarmotKvBackendForTests(null);
-    clearBlindingCache();
   });
 
-  it("a fresh device with no local key and no relay backup mints one AND publishes a backup", async () => {
-    serveRelay();
+  /** A local-nsec-shaped signer: exposes getSecretKey (the raw account key). */
+  function localSigner(accountSk: Uint8Array): AppSigner {
+    return {
+      method: "local",
+      getPublicKey: async () => getPublicKey(accountSk),
+      getSecretKey: () => accountSk,
+    } as unknown as AppSigner;
+  }
+  /** A remote-signer-shaped signer: no getSecretKey. */
+  function remoteSigner(account: string): AppSigner {
+    return { method: "nip46", getPublicKey: async () => account } as unknown as AppSigner;
+  }
+
+  it("a local-nsec account mints a per-device chat key DISTINCT from the account key", async () => {
     const accountSk = generateSecretKey();
-    const signer = remoteSignerFromKey(accountSk);
-
-    const id = await resolveChatIdentity(signer);
-    expect(id.isAccountKey).toBe(false); // device-key path
-
-    const backups = await backupEvents(accountSk);
-    expect(backups).toHaveLength(1);
-    // The backup carries the freshly-minted device key (its chat pubkey matches).
-    const restoredKey = Buffer.from(backups[0]!.chat_device_key!, "base64");
-    expect(getPublicKey(new Uint8Array(restoredKey))).toBe(id.pubkey);
+    const account = getPublicKey(accountSk);
+    const id = await resolveChatIdentity(localSigner(accountSk));
+    // The chat identity is NOT the account key anymore (v1 reused it).
+    expect(id.pubkey).not.toBe(account);
+    expect(id.account).toBe(account);
+    expect(id.isAccountKey).toBe(false);
+    expect(Array.from(id.secretKey)).not.toEqual(Array.from(accountSk));
+    // It is persisted for this device and stable across resolves.
+    const again = await resolveChatIdentity(localSigner(accountSk));
+    expect(again.pubkey).toBe(id.pubkey);
+    // A local-nsec account must attest, so it exposes the device secret for the proof.
+    expect(getPublicKey(id.secretKey)).toBe(id.pubkey);
   });
 
-  it("does not republish the backup on a second resolve once confirmed (idempotent marker)", async () => {
-    serveRelay();
-    const accountSk = generateSecretKey();
-    const signer = remoteSignerFromKey(accountSk);
-
-    await resolveChatIdentity(signer);
-    await resolveChatIdentity(signer); // same device, key already known + backed up
-    expect((await backupEvents(accountSk)).length).toBe(1); // published exactly once
+  it("a remote-signer account also mints a per-device chat key distinct from the account", async () => {
+    const account = "b".repeat(64);
+    const id = await resolveChatIdentity(remoteSigner(account));
+    expect(id.pubkey).not.toBe(account);
+    expect(id.isAccountKey).toBe(false);
+    expect(getPublicKey(id.secretKey)).toBe(id.pubkey);
   });
 
-  it("a fresh device with NO local key but a genuine relay backup RESTORES it (no new mint)", async () => {
-    serveRelay();
+  it("a second device (fresh storage) of the SAME account mints a DIFFERENT key", async () => {
     const accountSk = generateSecretKey();
-    const signer = remoteSignerFromKey(accountSk);
-
-    // Device A mints + publishes the backup.
-    const deviceA = await resolveChatIdentity(signer);
-
-    // Device B: a genuinely different browser — fresh local storage, cold caches —
-    // signing in as the SAME account. Only the relay backup carries the identity.
+    // Device A.
+    const deviceA = await resolveChatIdentity(localSigner(accountSk));
+    // Device B: a genuinely different browser — fresh local storage, no relay
+    // restore exists any more (backup retired). It mints its OWN key.
     __setMarmotKvBackendForTests(new InMemoryKvBackend());
-    clearBlindingCache();
     expect(await loadChatDeviceKey(getPublicKey(accountSk))).toBeUndefined();
-
-    const deviceB = await resolveChatIdentity(signer);
-    // Restored the SAME chat identity — not a freshly minted, forked one.
-    expect(deviceB.pubkey).toBe(deviceA.pubkey);
-    // And it did NOT publish a second backup (restore recorded the marker).
-    expect((await backupEvents(accountSk)).length).toBe(1);
+    const deviceB = await resolveChatIdentity(localSigner(accountSk));
+    expect(deviceB.pubkey).not.toBe(deviceA.pubkey); // two devices = two members
+    expect(deviceB.account).toBe(deviceA.account); // same owning account
   });
 
-  it("the backup blob decrypts to ONLY the device key — no coordinate, no group state, no leakage", async () => {
-    serveRelay();
-    const accountSk = generateSecretKey();
-    const account = getPublicKey(accountSk);
-    const signer = remoteSignerFromKey(accountSk);
-    await resolveChatIdentity(signer);
-
-    const ev = published.find((e) => e.kind === 31602)!;
-    const parsed = JSON.parse(nip44Decrypt(accountSk, account, ev.content));
-    // Exactly three fields, nothing else rides along.
-    expect(Object.keys(parsed).sort()).toEqual(["a", "chat_device_key", "v"]);
-    expect(parsed.a).toBeNull(); // never tied to an event coordinate
-    const serialized = JSON.stringify(parsed);
-    expect(serialized).not.toContain("31923"); // no event coordinate anywhere
-    expect(serialized).not.toContain("epoch"); // no MLS group/epoch state
-    expect(serialized).not.toContain("groupState");
-  });
-
-  it("a failed LOCAL unlock still FAILS CLOSED even when a relay backup exists (local lock wins)", async () => {
-    serveRelay();
-    const accountSk = generateSecretKey();
-    const account = getPublicKey(accountSk);
-    const signer = remoteSignerFromKey(accountSk);
-
-    // Establish a device key (also publishes the relay backup) and lock it away.
-    const before = await resolveChatIdentity(signer);
-    const selfEncrypt = async (pt: string) => `enc:${pt}`;
-    await lockChatIdentityForLogout(account, selfEncrypt);
-    expect(await loadChatDeviceKey(account)).toBeUndefined(); // locked
-
-    // Unlock fails (signer "unreachable"): the snapshot correctly stays put.
-    await unlockChatIdentityForLogin(account, async () => {
-      throw new Error("signer offline");
-    });
-
-    // Even though a decryptable relay backup EXISTS, resolve must refuse to mint
-    // or silently restore-from-relay: a local locked snapshot means the real key
-    // is present and merely unreachable — fail closed and retry, don't fork.
-    await expect(resolveChatIdentity(signer)).rejects.toThrow(/locked/);
-
-    // Recover: a successful unlock restores the SAME identity (never a fork).
-    const selfDecrypt = async (ct: string) => {
-      if (!ct.startsWith("enc:")) throw new Error("bad ciphertext");
-      return ct.slice(4);
-    };
-    await unlockChatIdentityForLogin(account, selfDecrypt);
-    expect((await resolveChatIdentity(signer)).pubkey).toBe(before.pubkey);
+  it("no 31602 chat-device-key backup is published on resolve (backup retired)", async () => {
+    // resolveChatIdentity does no network I/O at all now; there is nothing to mock.
+    const id = await resolveChatIdentity(remoteSigner("c".repeat(64)));
+    expect(id.pubkey).toMatch(/^[0-9a-f]{64}$/);
   });
 });

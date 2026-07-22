@@ -1,22 +1,23 @@
 /**
- * Marmot chat identity resolution (MARMOT-GROUP-CHAT §3, Phase 2).
+ * Marmot chat identity resolution (NIP §10, wire v2 — per-device keys).
  *
  * The mandatory `marmot.account-identity-proof.v1` leaf requires **raw BIP-340**
  * signing over a 32-byte digest that is not a Nostr event — something NIP-46/Amber
- * and NIP-07 cannot do. Resolution (§3.2): the MLS account identity for chat is
- * always a key the app holds locally.
+ * and NIP-07 cannot do. So the MLS account identity for chat is always a key the
+ * app holds locally.
  *
- *  - **Local-key accounts** (`AppSigner.getSecretKey` present): the account key IS
- *    the chat identity. Full native interop — the member appears under the user's
- *    own npub in every Marmot client.
- *  - **NIP-46 / NIP-07 accounts**: a dedicated **chat device key** is generated
- *    once per install and persisted (IndexedDB, same secret class as `local-sk`,
- *    SPECIFICATION.md §14). It signs the 30443, the 10050/10002, the identity
- *    proof, and appears as the member. The real account is bound to it out of band
- *    via a kind-21607 attestation (see `attest.ts`).
+ * **Chat identity is per DEVICE, for every account type** (local key, NIP-07,
+ * NIP-46 — decision D3). On first chat use each browser/device mints its own chat
+ * keypair, persisted in this device's IndexedDB (same secret class as `local-sk`,
+ * SPECIFICATION.md §14). It signs the 30443, the 10050/10002, and the identity
+ * proof, and appears as the member. The owning account is bound to it via a
+ * kind-21607 attestation carrying a proof of possession (see `attest.ts`).
  *
- * Either way the chat identity holds a raw 32-byte key locally, so the
- * `accountProofSigner` hook is uniform: `signAccountIdentityProof(req, sk)`.
+ * There is **no shared chat key, no relay backup, and no cross-device restore** of
+ * chat identity (v1's 31602 chat-device-key backup is retired): a device is *added*
+ * by attestation and *removed* by revocation; a lost device is revoked, not
+ * recovered. The only "restore" is the same-device logout/login lock/unlock below,
+ * which keeps this device's own key from being re-minted (forked) across a session.
  */
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
@@ -35,11 +36,6 @@ import {
 } from "@internet-privacy/marmot-ts/core";
 import type { AppSigner } from "$lib/signer/types.js";
 import { marmotKvBackend, identityPrefix } from "./stores.js";
-import {
-  fetchChatDeviceKeyBackup,
-  publishChatDeviceKeyBackup,
-  chatPubkeyOf,
-} from "./device-key-backup.js";
 
 /**
  * The applesauce `EventSigner` shape marmot-ts expects. Declared structurally so
@@ -57,11 +53,16 @@ export interface ChatEventSigner {
 
 /** A resolved chat identity: everything the MarmotClient wrapper needs. */
 export interface ChatIdentity {
-  /** MLS account identity pubkey (hex) — the member npub other clients see. */
+  /** This device's MLS chat pubkey (hex) — the member other clients see. */
   pubkey: string;
-  /** The owning Nostr account pubkey (hex). Equals `pubkey` for local-key accounts. */
+  /** The owning Nostr account pubkey (hex). */
   account: string;
-  /** True when the account key itself is the chat identity (no attestation needed). */
+  /**
+   * Whether the chat pubkey equals the account pubkey. Under per-device keys (D3)
+   * this is always false — the chat key is a freshly-minted per-device key distinct
+   * from the account — but the field is retained so callers stay explicit. Every
+   * account type now attests its device key and publishes a device kind-0.
+   */
   isAccountKey: boolean;
   /** applesauce-shaped signer over the chat identity's raw key. */
   eventSigner: ChatEventSigner;
@@ -76,16 +77,9 @@ export interface ChatIdentity {
 // ── Persistence (IndexedDB via the shared marmot KV backend) ──────────────────
 const DEVICE_KEY_NS = "__chat_device_key__";
 const CLIENT_ID_NS = "__chat_client_id__";
-// Idempotency marker: the chat pubkey whose relay backup is confirmed current for
-// this account. When it matches the live device key we skip the fetch+publish, so
-// the relay backup is written/verified at most once per key (not every chat open).
-const BACKUP_MARK_NS = "__chat_devkey_backup__";
 
 function deviceKeyKey(account: string): string {
   return `${DEVICE_KEY_NS}\x1f${account}`;
-}
-function backupMarkKey(account: string): string {
-  return `${BACKUP_MARK_NS}\x1f${account}`;
 }
 function clientIdKey(chatPubkey: string): string {
   return `${CLIENT_ID_NS}\x1f${chatPubkey}`;
@@ -112,25 +106,24 @@ const unlockInFlight = new Map<string, Promise<void>>();
 /**
  * `ensureChatDeviceKey` in flight, per account. Two chats (two events, same
  * account) can init concurrently — each `MarmotChat.create` → `resolveChatIdentity`
- * → here — and the relay-restore step widens the async window before the mint.
- * Without dedup, both would see "no key yet" and BOTH mint, forking the credential
- * (last write wins locally, but each returned a different key). Sharing one promise
- * per account collapses that to a single resolve, and a fail-closed rejection
- * propagates to every concurrent caller.
+ * → here. Without dedup, both could see "no key yet" and BOTH mint, forking THIS
+ * device's key (last write wins locally, but each returned a different key).
+ * Sharing one promise per account collapses that to a single resolve, and a
+ * fail-closed rejection propagates to every concurrent caller.
  */
 const resolveInFlight = new Map<string, Promise<Uint8Array>>();
 
 /**
- * Resolve the account's chat device key: restore an existing one (local snapshot,
- * else a relay-published backup) before ever minting a fresh one, so a genuinely
- * different browser presents as the SAME chat identity. `signer` (present for every
- * real caller via `resolveChatIdentity`) enables the relay-backup restore/publish;
- * omit it to get the local-only mint path.
+ * Resolve THIS device's chat key: return the locally-persisted one, or mint a
+ * fresh per-device key (D3). There is no cross-device restore — every device holds
+ * only its own key. The only restore is the same-device logout snapshot
+ * (`unlockInFlight` / the locked-snapshot fail-closed check), which keeps a
+ * logout/login on this device from re-minting (and forking) its own key.
  */
-function ensureChatDeviceKey(account: string, signer?: AppSigner): Promise<Uint8Array> {
+function ensureChatDeviceKey(account: string): Promise<Uint8Array> {
   const inflight = resolveInFlight.get(account);
   if (inflight) return inflight;
-  const run = ensureChatDeviceKeyInner(account, signer);
+  const run = ensureChatDeviceKeyInner(account);
   resolveInFlight.set(account, run);
   // Clear on settle so a later resolve re-reads storage (e.g. after a logout wipe),
   // but only if we still own the slot (a newer overlapping call owns it otherwise).
@@ -141,86 +134,33 @@ function ensureChatDeviceKey(account: string, signer?: AppSigner): Promise<Uint8
   return run;
 }
 
-async function ensureChatDeviceKeyInner(
-  account: string,
-  signer?: AppSigner,
-): Promise<Uint8Array> {
-  // Let a real key restore first, if one's landing. Only WAIT for it to settle
-  // — an unlock failure (e.g. a storage error) is that caller's problem, not
-  // this unrelated one's; swallow it here rather than letting it propagate
-  // into a concurrent resolveChatIdentity that has nothing to do with it.
+async function ensureChatDeviceKeyInner(account: string): Promise<Uint8Array> {
+  // Let this device's key restore first, if a logout snapshot is being unlocked.
+  // Only WAIT for it to settle — an unlock failure (e.g. a storage error) is that
+  // caller's problem, not this unrelated one's; swallow it here rather than let it
+  // propagate into a concurrent resolveChatIdentity that has nothing to do with it.
   await unlockInFlight.get(account)?.catch(() => {});
   const existing = await loadChatDeviceKey(account);
-  if (existing) {
-    // Known locally — make sure a relay backup exists so a future device can
-    // restore it. Idempotent + cheap (marker-gated); best-effort.
-    if (signer) await ensureBackupPublished(account, signer, existing);
-    return existing;
-  }
-  // FAIL CLOSED. `unlockInFlight` covers the timing race, but not a FAILED
-  // unlock: with a NIP-46 signer unreachable (or the user dismissing the Amber
-  // prompt) the decrypt throws, the snapshot correctly stays locked, and we
-  // arrive here with no device key — the one state where minting is exactly
-  // wrong. Generating a key now forks the account's MLS credential, which is
-  // the very outcome the comment above says this guard prevents, and the next
-  // logout would then lock the fork over the real snapshot. A locked snapshot
-  // means the real key exists and is merely unreachable right now: refuse, and
-  // let the caller retry once the signer is back.
-  //
-  // This is checked BEFORE the relay-backup restore below, so a local locked
-  // snapshot always takes priority: a signer that can't decrypt the local
-  // snapshot can't decrypt the relay backup either (same signer), so trying the
-  // relay here would only fail too — refusing is the loud, recoverable outcome.
+  if (existing) return existing;
+  // FAIL CLOSED. `unlockInFlight` covers the timing race, but not a FAILED unlock:
+  // with a NIP-46 signer unreachable (or the user dismissing the Amber prompt) the
+  // decrypt throws, the snapshot correctly stays locked, and we arrive here with no
+  // device key — the one state where minting is exactly wrong. Minting now forks
+  // THIS device's identity: every other client sees a stranger and this device's
+  // old group membership is lost, and the next logout would lock the fork over the
+  // real snapshot. A locked snapshot means the real key exists and is merely
+  // unreachable right now: refuse, and let the caller retry once the signer is back.
   if (await marmotKvBackend().get(lockedKey(account))) {
     throw new Error(
       "chat identity is locked and could not be unlocked — signer unavailable; not minting a new device key",
     );
   }
-  // Genuinely fresh device (no local key, no locked snapshot): try a
-  // relay-published backup before minting, so a second browser signing in as the
-  // same account restores the SAME chat identity instead of forking it. A missing
-  // or undecryptable backup returns/throws → treated as "none", fall through to
-  // mint. Note this network fetch is off the app-open critical path entirely:
-  // `resolveChatIdentity` is only reached via the lazy `import("./client.js")` in
-  // `chat/session.svelte.ts`, i.e. when a user actually opens an event's chat —
-  // never on first paint or session restore (which +layout runs in the background
-  // per UX-19). So awaiting it delays only chat-panel readiness on a fresh device.
-  if (signer) {
-    const restored = await fetchChatDeviceKeyBackup(signer).catch(() => undefined);
-    if (restored) {
-      await marmotKvBackend().set(deviceKeyKey(account), new Uint8Array(restored));
-      // Already on a relay — record the marker so we don't republish it.
-      await marmotKvBackend().set(backupMarkKey(account), chatPubkeyOf(restored));
-      return restored;
-    }
-  }
+  // Genuinely fresh device (no local key, no locked snapshot): mint this device's
+  // own key and persist it. Nothing is published or restored — a peer device that
+  // wants in mints and attests its own key.
   const sk = generateSecretKey();
   await marmotKvBackend().set(deviceKeyKey(account), new Uint8Array(sk));
-  // Freshly minted → publish its backup so the next device can restore it.
-  if (signer) await ensureBackupPublished(account, signer, sk);
   return sk;
-}
-
-/**
- * Publish (or refresh) the relay backup for `deviceKey` unless the idempotency
- * marker already confirms it. Best-effort: a failure (e.g. the signer dismissed
- * the prompt, or `deriveBlindingKey` couldn't run) leaves the marker unset so the
- * next chat open retries — it must never break resolving the chat identity.
- */
-async function ensureBackupPublished(
-  account: string,
-  signer: AppSigner,
-  deviceKey: Uint8Array,
-): Promise<void> {
-  const backend = marmotKvBackend();
-  const chatPubkey = chatPubkeyOf(deviceKey);
-  if ((await backend.get(backupMarkKey(account))) === chatPubkey) return;
-  try {
-    await publishChatDeviceKeyBackup(signer, deviceKey);
-    await backend.set(backupMarkKey(account), chatPubkey);
-  } catch {
-    /* signer/relay unavailable — marker left unset, retried next chat open */
-  }
 }
 
 /** A stable per-install slot id for this chat identity's 30443 events. */
@@ -253,13 +193,11 @@ function reviver(_key: string, value: unknown): unknown {
 }
 
 /**
- * Every raw backend key this account's chat identity touches: the namespaced
- * state under the account pubkey itself (local-key accounts, whose chat
- * identity IS the account key) plus — when a dedicated device key was ever
- * persisted (remote-signer accounts) — that key's own storage slot, its
- * client-id slot, and its namespaced state too. Neither slot exists until
- * chat has actually been used, so an account that never opened chat yields
- * nothing to lock.
+ * Every raw backend key this device's chat identity touches: the namespaced state
+ * under the account pubkey itself, plus — once this device has minted its chat key
+ * — that key's own storage slot, its client-id slot, and its namespaced MLS state.
+ * The device slot doesn't exist until chat has been used, so an account that never
+ * opened chat on this device yields nothing to lock.
  */
 async function chatKeysFor(account: string): Promise<string[]> {
   const backend = marmotKvBackend();
@@ -270,9 +208,6 @@ async function chatKeysFor(account: string): Promise<string[]> {
     for (const k of await backend.keysWithPrefix(identityPrefix(chatPubkey))) keys.add(k);
     keys.add(deviceKeyKey(account));
     keys.add(clientIdKey(chatPubkey));
-    // The relay-backup idempotency marker rides along too, so a logout→login on
-    // this device restores it and doesn't needlessly republish the backup.
-    keys.add(backupMarkKey(account));
   }
   return [...keys];
 }
@@ -402,18 +337,17 @@ export function eventSignerFromKey(sk: Uint8Array): ChatEventSigner {
 }
 
 /**
- * Resolve the chat identity for the logged-in account. Local-key accounts reuse
- * the account key; remote-signer accounts get (and persist) a dedicated device key.
+ * Resolve THIS device's chat identity for the logged-in account. Every account type
+ * (local key, NIP-07, NIP-46) mints and persists a per-device chat key on first use
+ * (D3) — the account key is never reused as the chat identity, so multiple devices
+ * of one account are distinct MLS members. The account binds each device via a
+ * 21607 attestation with proof of possession (see `attest.ts`).
  */
 export async function resolveChatIdentity(accountSigner: AppSigner): Promise<ChatIdentity> {
   const account = await accountSigner.getPublicKey();
-  const rawAccountKey = accountSigner.getSecretKey?.();
-
-  const sk = rawAccountKey
-    ? new Uint8Array(rawAccountKey)
-    : await ensureChatDeviceKey(account, accountSigner);
+  const sk = await ensureChatDeviceKey(account);
   const pubkey = getPublicKey(sk);
-  const isAccountKey = pubkey === account;
+  const isAccountKey = pubkey === account; // always false under per-device keys
   const clientId = await ensureClientId(pubkey);
 
   return {
@@ -428,21 +362,21 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
 }
 
 /**
- * Build the locally-signed kind-0 profile a chat device key publishes so other
- * Marmot clients — and our own chat UI, which resolves sender names/avatars by
- * fetching the chat-identity pubkey's own kind-0 — render it sensibly (§3.2):
- * the account's display name/picture, a "Nostrautica" + "(chat)" marker so it
- * reads as an app-scoped child key rather than a person (user feedback
- * 2026-07-20), and the real account's npub in `about` so anyone who runs into
- * this key elsewhere can find who it actually belongs to. Local-key identities
- * don't need this (their kind-0 is the user's own).
+ * Build the locally-signed kind-0 profile each chat device key publishes so other
+ * Marmot clients (e.g. White Noise) — and our own chat UI, which resolves sender
+ * names/avatars by fetching the chat-identity pubkey's own kind-0 — render a human
+ * name for each device member (NIP §10.3). Per decision D4 the `name` equals the
+ * account's display name (no "(chat)" suffix — devices of one account share the
+ * name) and the `about` references the owning account's npub, so external clients
+ * can verify and group devices by account (the public device→account link is
+ * accepted for interop). Every account type publishes this now.
  */
 export function buildChatKeyProfile(
   identity: ChatIdentity,
   accountName: string | undefined,
   accountPicture?: string,
 ): ReturnType<typeof finalizeEvent> {
-  const name = `Nostrautica ${accountName?.trim() || "user"} (chat)`;
+  const name = accountName?.trim() || "Nostrautica user";
   const npub = npubEncode(identity.account);
   const content = JSON.stringify({
     name,

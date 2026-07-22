@@ -509,19 +509,12 @@ export const myProfileContentSchema = z.object({
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 
-// ── 31602 chat device-key backup (self-encrypted, cross-device) ──────────────
-// NOTE (NIP §6.2 / §10, decision D3): this variant is RETIRED in wire v2 — the
-// per-device chat identity model has no shared key to back up. It is deleted
-// alongside its consumer (`app/lib/chat/device-key-backup.ts`) in the per-device
-// identity slice; retained here only until that consumer is removed.
-export const chatDeviceKeyBackupSchema = z
-  .object({
-    v: version,
-    a: z.null(),
-    chat_device_key: base64Bytes(32, "chat-device-key"), // 32-byte MLS device key, b64
-  })
-  .strict();
-export type ChatDeviceKeyBackup = z.infer<typeof chatDeviceKeyBackupSchema>;
+// ── 31602 chat device-key backup RETIRED (NIP §6.2 / §10, decision D3) ───────
+// The v1 shared-chat-identity design self-encrypted a remote-signer account's MLS
+// device key as a per-user 31602 entry so a second browser could restore the SAME
+// key. Wire v2 mints a per-DEVICE chat key for every account type — there is no
+// shared key to back up or restore (a lost device is revoked, not recovered), so
+// this schema variant and its app module are gone. See `docs/MULTIDEVICE-CHAT.md` §5.
 
 // ── 31603 Directory Entry content (ECK) ──────────────────────────────────────
 export const directoryEntryContentSchema = z
