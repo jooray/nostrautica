@@ -134,6 +134,11 @@
   }
 
   function teardown() {
+    // Stop the recorder too, not just the tracks (audit App-4): if the component
+    // is destroyed mid-recording, stopStream() ends the hardware tracks but the
+    // MediaRecorder itself stays un-stopped, leaking the capture object.
+    capture?.stop();
+    recording = false;
     stopStream();
     if (recorded) URL.revokeObjectURL(recorded.url);
   }
@@ -238,6 +243,9 @@
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     stopStream();
+    // Replacing a prior selection/recording: revoke its object URL first so
+    // picking a different file doesn't orphan the previous one (audit App-4).
+    if (recorded) URL.revokeObjectURL(recorded.url);
     const url = URL.createObjectURL(file);
     let durationSec = 0;
     try {
