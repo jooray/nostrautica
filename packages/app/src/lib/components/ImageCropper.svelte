@@ -28,6 +28,7 @@
 
   let bitmap = $state<ImageBitmap | undefined>(undefined);
   let ready = $state(false);
+  let decodeError = $state(false);
   let zoom = $state(1); // 1 = image just covers the viewport
   let ox = $state(0); // image top-left x within the viewport (px)
   let oy = $state(0);
@@ -42,7 +43,10 @@
       center();
       ready = true;
     } catch {
-      onCancel();
+      // Don't silently close (audit App-9): HEIC / corrupt / unsupported images
+      // fail to decode here, and a disappearing dialog reads as a broken app.
+      // Surface a visible reason and let the user dismiss it themselves.
+      decodeError = true;
     }
   });
   onDestroy(() => {
@@ -115,6 +119,12 @@
 <div class="backdrop" role="dialog" aria-modal="true" aria-label={t("cropper.title")}>
   <div class="sheet">
     <h2>{t("cropper.title")}</h2>
+    {#if decodeError}
+      <p class="error" role="alert">{t("cropper.decodeError")}</p>
+      <div class="row actions">
+        <button class="btn inline primary" onclick={onCancel}>{t("cropper.cancel")}</button>
+      </div>
+    {:else}
     <p class="muted hint">{t("cropper.hint")}</p>
 
     <div
@@ -148,6 +158,7 @@
         {t("cropper.use")}
       </button>
     </div>
+    {/if}
   </div>
 </div>
 
@@ -180,6 +191,12 @@
     margin: 0;
     align-self: flex-start;
     font-size: 0.85rem;
+  }
+  .error {
+    margin: 0;
+    align-self: flex-start;
+    font-size: 0.9rem;
+    color: var(--danger);
   }
   .viewport {
     position: relative;
