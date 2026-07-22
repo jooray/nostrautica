@@ -4,6 +4,7 @@
   import type { Match, DirectoryEntryContent } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
+  import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchMatches, fetchDirectory, cachedMatches, cachedDirectory, isApproved } from "$lib/events/attendee.js";
@@ -98,6 +99,14 @@
   function message(pubkey: string) {
     router.go({ name: "dmPeer", npub: npubEncode(pubkey) });
   }
+  // "Introduce us" (§9.3): open the DM composer pre-filled with the coordinator's
+  // suggestion (a match icebreaker, falling back to the host-voice reasoning), so
+  // the introduction becomes an actual opening line. Prefill only — user edits/sends.
+  function introduce(m: (typeof matches)[number]) {
+    const suggestion = m.icebreakers?.[0] || m.reasoning;
+    if (suggestion) dmPrefill.set(m.pubkey, suggestion);
+    router.go({ name: "dmPeer", npub: npubEncode(m.pubkey) });
+  }
   function nameOf(pubkey: string): string {
     return (
       profiles.get(pubkey)?.name ||
@@ -161,10 +170,25 @@
         <!-- Reasoning is the product — full body size, no longer under a %. -->
         <p class="reason">{m.reasoning}</p>
 
+        <!-- Icebreakers (§7.3 kind 31605): concrete conversation starters, if any. -->
+        {#if m.icebreakers && m.icebreakers.length > 0}
+          <div class="icebreakers">
+            <div class="ib-label">{t("matches.icebreakers")}</div>
+            <ul class="ib-list">
+              {#each m.icebreakers as ib (ib)}
+                <li>{ib}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+
         <div class="actions">
           {#if session.loggedIn}
-            <button class="btn inline primary" onclick={() => message(m.pubkey)}>
-              <Icon name="send" size={16} />{t("matches.message")}
+            <button class="btn inline primary" onclick={() => introduce(m)}>
+              <Icon name="send" size={16} />{t("matches.introduce")}
+            </button>
+            <button class="btn inline" onclick={() => message(m.pubkey)}>
+              {t("matches.message")}
             </button>
           {/if}
           <button class="btn inline" onclick={() => open(m.pubkey)}>
@@ -231,6 +255,26 @@
     margin: 0;
     font-size: 0.95rem;
     line-height: 1.5;
+  }
+  .icebreakers {
+    margin: 0;
+  }
+  .ib-label {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.7rem;
+    font-weight: 650;
+    color: var(--text-dim);
+    margin-bottom: 0.2rem;
+  }
+  .ib-list {
+    margin: 0;
+    padding-left: 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.9rem;
+    line-height: 1.45;
   }
   .actions {
     display: flex;

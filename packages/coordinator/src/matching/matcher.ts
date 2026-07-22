@@ -120,6 +120,7 @@ export function recordDirectedScore(
     similarity: score.similarity,
     complementarity: score.complementarity,
     reasoning: score.reasoning,
+    ...(score.icebreakers ? { icebreakers: score.icebreakers } : {}),
     now,
   });
 }
@@ -164,6 +165,7 @@ export function buildMatchList(
       similarity: r.similarity,
       complementarity: r.complementarity,
       reasoning: r.reasoning,
+      ...(r.icebreakers && r.icebreakers.length > 0 ? { icebreakers: r.icebreakers } : {}),
     }));
   return { v: 2, computed_at: now, matches };
 }

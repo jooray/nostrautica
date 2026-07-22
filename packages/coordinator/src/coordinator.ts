@@ -3009,7 +3009,16 @@ function blindedDFor(eck: Uint8Array, coordinate: string, pubkey: string): strin
 function sanitizeMatchList(list: MatchListContent): MatchListContent {
   return {
     ...list,
-    matches: list.matches.map((m) => ({ ...m, reasoning: sanitizeLlmText(m.reasoning) })),
+    matches: list.matches.map((m) => ({
+      ...m,
+      reasoning: sanitizeLlmText(m.reasoning),
+      // Icebreakers are LLM-authored too (NIP §6.2): same publish-boundary hygiene
+      // as reasoning — length cap + URL neutralization so injected text can't
+      // smuggle clickable links. Capped to ≤ 3 defensively.
+      ...(m.icebreakers && m.icebreakers.length > 0
+        ? { icebreakers: m.icebreakers.slice(0, 3).map((s) => sanitizeLlmText(s)) }
+        : {}),
+    })),
   };
 }
 

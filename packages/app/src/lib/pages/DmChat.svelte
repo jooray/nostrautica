@@ -19,6 +19,7 @@
   import Avatar from "$lib/components/Avatar.svelte";
   import { fillHeight } from "$lib/components/fill-height.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
+  import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -126,6 +127,12 @@
   }
 
   onMount(async () => {
+    // "Introduce us" prefill (§9.3): consume a one-shot suggested opening line the
+    // Matches screen staged for this peer. Prefill only — the user edits before send.
+    if (peer) {
+      const staged = dmPrefill.take(peer);
+      if (staged && !draft) draft = staged;
+    }
     // Cache-first: paint the name/avatar the People list already fetched, so the
     // header isn't a bare npub while the network/signer is slow (user feedback
     // 2026-07-17). Refresh in the background.

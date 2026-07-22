@@ -136,6 +136,11 @@ function scoreEntry(index: number, aRole?: string, bRole?: string, updated = fal
     reasoning_for_target: complementary
       ? `You should meet them — complementary skills (${aRole} + ${bRole}) fit this event.${updated ? " (updated)" : ""}`
       : "Similar backgrounds.",
+    // Icebreakers (NIP §6.2): the model returns MORE than the ≤3 cap and an empty
+    // entry, so the parse's cap + non-empty filter is exercised end-to-end.
+    icebreakers: complementary
+      ? [`Ask them about ${bRole} work`, "", "What brings you here?", `Compare notes on ${aRole}`, "extra-over-cap"]
+      : [],
   };
 }
 
@@ -3040,6 +3045,37 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     const latest = rosters[rosters.length - 1]!;
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
     expect(roster.nostr_group_id).toBeUndefined();
+  });
+});
+
+// ── NIP §6.2 — match icebreakers (31605) ─────────────────────────────────────
+describe("NIP §6.2 — match icebreakers", () => {
+  it("published match lists carry ≤3 non-empty icebreakers per entry", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design"); // complementary → icebreakers emitted
+    await h.coordinator.jobs.drain();
+
+    const eck = h.eck;
+    const cryptoD = blindedD(eck, h.coordinate, cryptoPk);
+    const list = latestMatchList(h.transport, cryptoSk, getPublicKey(h.coordSk), cryptoD);
+    expect(list).toBeDefined();
+    const entry = list.matches.find((m) => m.icebreakers);
+    expect(entry).toBeDefined();
+    // The mock returned 4 non-empty + 1 empty; the parse caps at 3 and drops empties.
+    expect(entry!.icebreakers!.length).toBe(3);
+    expect(entry!.icebreakers!.every((s) => s.length > 0)).toBe(true);
+  });
+
+  it("a match with no icebreakers omits the field entirely", async () => {
+    const h = await setup();
+    const aSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    await join(h, generateSecretKey(), "crypto"); // NON-complementary → empty icebreakers
+    await h.coordinator.jobs.drain();
+    const list = latestMatchList(h.transport, aSk, getPublicKey(h.coordSk), blindedD(h.eck, h.coordinate, aPk));
+    if (list) for (const m of list.matches) expect(m.icebreakers).toBeUndefined();
   });
 });
 

@@ -507,6 +507,16 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (wire-v2 §6.2): per-direction icebreakers on cached pair rows.
+    // JSON arrays (≤ 3 strings), addressed to `a` and `b` respectively — parallel
+    // to reasoning/reasoning_b. NULL on legacy rows (no icebreakers surfaced).
+    for (const col of ["icebreakers_json TEXT", "icebreakers_b_json TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE pairs ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
     // Migration (wire-v2 §6.2): retention-expired terminal flag on the events row.
     // Once the retention sweep has deleted an event's member records + parked paid
     // processing, this stays set across restarts so a re-install of the same event
@@ -1111,10 +1121,13 @@ export class Store {
     similarity: number;
     complementarity: number;
     reasoning: string;
+    /** ≤ 3 conversation starters addressed to `from` (NIP §6.2). */
+    icebreakers?: string[];
     now: number;
   }): void {
     const [x, y] = row.from < row.to ? [row.from, row.to] : [row.to, row.from];
     const fromIsX = row.from === x;
+    const icebreakersJson = row.icebreakers && row.icebreakers.length > 0 ? JSON.stringify(row.icebreakers) : null;
     const existing = this.db
       .prepare("SELECT inputs_hash FROM pairs WHERE coordinate = ? AND a = ? AND b = ?")
       .get(row.coordinate, x, y) as { inputs_hash: string } | undefined;
@@ -1127,31 +1140,33 @@ export class Store {
     if (fromIsX) {
       this.db
         .prepare(
-          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, icebreakers_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(coordinate, a, b) DO UPDATE SET
              inputs_hash = excluded.inputs_hash, score = excluded.score,
              similarity = excluded.similarity, complementarity = excluded.complementarity,
-             reasoning = excluded.reasoning, created_at = excluded.created_at`,
+             reasoning = excluded.reasoning, icebreakers_json = excluded.icebreakers_json,
+             created_at = excluded.created_at`,
         )
-        .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, row.now);
+        .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, icebreakersJson, row.now);
     } else {
       // b→a direction: write the *_b columns. On INSERT the base (a→b) columns are
       // not yet known — seed them so the NOT NULL constraints hold; the a→b batch
       // overwrites them later.
       this.db
         .prepare(
-          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, score_b, similarity_b, complementarity_b, reasoning_b, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, score_b, similarity_b, complementarity_b, reasoning_b, icebreakers_b_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
            ON CONFLICT(coordinate, a, b) DO UPDATE SET
              inputs_hash = excluded.inputs_hash, score_b = excluded.score_b,
              similarity_b = excluded.similarity_b, complementarity_b = excluded.complementarity_b,
-             reasoning_b = excluded.reasoning_b, created_at = excluded.created_at`,
+             reasoning_b = excluded.reasoning_b, icebreakers_b_json = excluded.icebreakers_b_json,
+             created_at = excluded.created_at`,
         )
         .run(
           row.coordinate, x, y, row.inputsHash,
           row.score, row.similarity, row.complementarity, // seed base cols for NOT NULL
-          row.score, row.similarity, row.complementarity, row.reasoning, row.now,
+          row.score, row.similarity, row.complementarity, row.reasoning, icebreakersJson, row.now,
         );
     }
   }
@@ -1228,25 +1243,48 @@ export class Store {
     similarity: number;
     complementarity: number;
     reasoning: string;
+    icebreakers?: string[];
   }[] {
     // Return pubkey's OWN directional view: when pubkey is the stored `a`, the base
     // columns are its outbound (a→b) score/reasoning; when it is `b`, the *_b
     // columns. Scores COALESCE to the shared value for legacy pairwise rows (which
     // set reasoning_b but not score_b); reasoning must NOT fall back — a NULL
-    // reasoning_b means the b→a direction was never scored.
+    // reasoning_b means the b→a direction was never scored. Icebreakers follow the
+    // same directional selection as reasoning.
     const rows = this.db
       .prepare(
         `SELECT CASE WHEN a = ? THEN b ELSE a END AS other,
                 CASE WHEN a = ? THEN score ELSE COALESCE(score_b, score) END AS score,
                 CASE WHEN a = ? THEN similarity ELSE COALESCE(similarity_b, similarity) END AS similarity,
                 CASE WHEN a = ? THEN complementarity ELSE COALESCE(complementarity_b, complementarity) END AS complementarity,
-                CASE WHEN a = ? THEN reasoning ELSE reasoning_b END AS reasoning
+                CASE WHEN a = ? THEN reasoning ELSE reasoning_b END AS reasoning,
+                CASE WHEN a = ? THEN icebreakers_json ELSE icebreakers_b_json END AS icebreakers_json
          FROM pairs WHERE coordinate = ? AND (a = ? OR b = ?)`,
       )
-      .all(pubkey, pubkey, pubkey, pubkey, pubkey, coordinate, pubkey, pubkey) as any[];
+      .all(pubkey, pubkey, pubkey, pubkey, pubkey, pubkey, coordinate, pubkey, pubkey) as any[];
     // Only surface directions that have actually been scored (non-empty reasoning);
     // a row seeded by the reverse direction has an empty/NULL value here.
-    return rows.filter((r) => r.reasoning != null && r.reasoning !== "");
+    return rows
+      .filter((r) => r.reasoning != null && r.reasoning !== "")
+      .map((r) => {
+        let icebreakers: string[] | undefined;
+        if (r.icebreakers_json) {
+          try {
+            const parsed = JSON.parse(r.icebreakers_json);
+            if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string")) icebreakers = parsed;
+          } catch {
+            /* malformed stored JSON — drop icebreakers, keep the match */
+          }
+        }
+        return {
+          other: r.other,
+          score: r.score,
+          similarity: r.similarity,
+          complementarity: r.complementarity,
+          reasoning: r.reasoning,
+          ...(icebreakers ? { icebreakers } : {}),
+        };
+      });
   }
 
   // ── invite usage (first-come, single-use) ─────────────────────────────────
