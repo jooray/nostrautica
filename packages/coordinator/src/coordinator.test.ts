@@ -2133,3 +2133,59 @@ describe("audit COORD-29 — invite hashes are cached per event", () => {
     expect(inviteFetches()).toBe(beforeSecondAttempt); // still no pointless retry
   });
 });
+
+describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
+  it("publishes nostr_group_id on the roster once the event has an active MLS group", async () => {
+    const h = await setup(0, { chat: true });
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+    // The coordinator's authoritative event→group binding (marmot_groups): a member
+    // holding two same-coordinator events' groups cannot tell them apart from an MLS
+    // Welcome alone, so the routing id is surfaced on the member-only, ECK roster.
+    const gid = "a".repeat(64);
+    h.store.upsertMarmotGroup({
+      coordinate: h.coordinate,
+      mlsGroupId: "b".repeat(64),
+      nostrGroupId: gid,
+      status: "active",
+      now: h.clock.t,
+    });
+
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    expect(roster.nostr_group_id).toBe(gid);
+  });
+
+  it("omits nostr_group_id when the event has no MLS group (chat off / not yet created)", async () => {
+    const h = await setup();
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    expect(roster.nostr_group_id).toBeUndefined();
+  });
+
+  it("omits the id for a FROZEN group — members must no longer route there (§9 Q4)", async () => {
+    const h = await setup(0, { chat: true });
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+    h.store.upsertMarmotGroup({
+      coordinate: h.coordinate,
+      mlsGroupId: "b".repeat(64),
+      nostrGroupId: "a".repeat(64),
+      status: "frozen",
+      now: h.clock.t,
+    });
+
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    expect(roster.nostr_group_id).toBeUndefined();
+  });
+});

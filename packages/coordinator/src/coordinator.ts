@@ -1022,9 +1022,16 @@ export class Coordinator {
   private async publishRoster(state: EventState): Promise<void> {
     const approved = this.deps.store.approvedAttendees(state.coordinate);
     const { bytes } = this.currentEck(state);
+    // Advertise this event's MLS routing id (audit APPK-3) so members bind to the
+    // right group instead of guessing when one coordinator serves several events.
+    // Only an ACTIVE group's id is published — a frozen group is no longer the
+    // room members should route to. Absent when chat is off / no group exists.
+    const group = this.deps.store.getMarmotGroup(state.coordinate);
+    const nostrGroupId = group?.status === "active" ? group.nostr_group_id : undefined;
     const roster: RosterContent = {
       v: 1,
       eck_current: this.currentEck(state).id,
+      ...(nostrGroupId ? { nostr_group_id: nostrGroupId } : {}),
       attendees: approved.map((a) => ({
         pubkey: a.pubkey,
         d: blindedDFor(bytes, state.coordinate, a.pubkey),

@@ -23,6 +23,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
 import { resolveChatIdentity, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
 import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
@@ -331,16 +332,24 @@ export class MarmotChat {
         }
         // APPK-3: bind this event's coordinate to the joined group so every
         // later bind/send/membership check targets THIS event's room only.
-        // Never OVERWRITE an existing different binding: a welcome carries no
-        // event coordinate, so with two chat events on the SAME coordinator a
-        // late welcome for the other event is indistinguishable — clobbering
-        // would hijack a working room. (Protocol-level limitation; the first
-        // verified join wins. Both rooms are at least legitimate rooms of this
-        // user with this coordinator — never attacker groups, per the checks
-        // above.)
+        // A welcome carries no event coordinate, so with two chat events on the
+        // SAME coordinator a welcome for the OTHER event is indistinguishable at
+        // the MLS layer. Ground truth now exists: the coordinator advertises this
+        // event's MLS routing id on the (member-only, ECK) roster. Bind only when
+        // the joined group IS this event's roster group; when the roster names a
+        // different id, this welcome belongs to another same-coordinator event —
+        // leave the group joined for that event's session to claim, but never
+        // bind it here. When the roster carries no id yet (old coordinator), fall
+        // back to first-verified-wins, and let currentEventGroups() reconcile once
+        // the roster republishes.
         const joinedId = getNostrGroupIdHex(group.state);
+        const advertised = cachedRoster(this.ctx.coordinate)?.nostr_group_id;
         const existing = await this.recordedEventGroupId();
-        if (existing && existing !== joinedId) {
+        if (advertised && joinedId !== advertised) {
+          console.warn(
+            "marmot: joined group is not this event's roster group — not binding it to this event",
+          );
+        } else if (existing && existing !== joinedId) {
           console.warn(
             "marmot: joined a second coordinator-verified group — keeping this event's existing binding",
           );
@@ -365,27 +374,67 @@ export class MarmotChat {
    * membership goes through here instead of `groups.loadAll()` so attending
    * two chat-enabled events never mixes messages or misdelivers a send.
    *
-   * Migration: installs that joined before event scoping have no recorded
-   * binding. Exactly one joined group whose roster contains this event's
-   * coordinator is adopted (and the binding recorded); zero or ambiguous
-   * matches adopt nothing rather than guessing the wrong room.
+   * Ground truth is the coordinator-advertised `nostr_group_id` on this event's
+   * (member-only, ECK) roster: the authoritative event→group binding an MLS
+   * Welcome cannot carry. We resolve THIS event's group deterministically
+   * against that id instead of guessing "the single coordinator-verified group"
+   * — the old guess silently adopted another same-coordinator event's already-
+   * joined group, which could misdeliver an OUTGOING message (audit APPK-3).
    */
   private async currentEventGroups(): Promise<MarmotGroupLike[]> {
     const all = (await this.client.groups.loadAll().catch(() => [])) as MarmotGroupLike[];
     const recorded = await this.recordedEventGroupId();
-    if (recorded) return all.filter((g) => safeGroupIdHex(g) === recorded);
-    const coordinator = this.ctx.config.coordinator;
-    if (!coordinator) return [];
-    const verified = all.filter((g) => groupHasMember(g, coordinator));
-    if (verified.length === 1) {
-      const group = verified[0]!;
-      const id = safeGroupIdHex(group);
-      if (id) await this.eventGroups.setItem(this.ctx.coordinate, id).catch(() => {});
-      return [group];
+    // Cheap, hot-path-safe: the roster is fetched+cached by the People/event
+    // screens, so the send/bind path reads it without a network round-trip.
+    const advertised = cachedRoster(this.ctx.coordinate)?.nostr_group_id;
+
+    if (recorded) {
+      // A recorded binding that contradicts the authoritative roster is a stale
+      // or (pre-fix) mis-bound entry: nothing re-points it on its own, because the
+      // bind path only ran on a MISSING binding. Reconcile against the roster.
+      if (advertised && advertised !== recorded) {
+        const match = all.filter((g) => safeGroupIdHex(g) === advertised);
+        if (match.length > 0) {
+          // We hold this event's real group — re-point the binding to it.
+          await this.eventGroups.setItem(this.ctx.coordinate, advertised).catch(() => {});
+          return match;
+        }
+        // The roster names a group we have NOT joined. The recorded binding is
+        // provably wrong, so returning it would misdeliver; refuse to route until
+        // we're actually added to this event's group (a heal republish follows).
+        console.warn(
+          "marmot: recorded group binding disagrees with the roster and the correct group isn't joined — refusing to route",
+        );
+        return [];
+      }
+      return all.filter((g) => safeGroupIdHex(g) === recorded);
     }
-    if (verified.length > 1) {
+
+    // No recorded binding (a pre-scoping install, or not yet joined). Bind
+    // deterministically to the group the roster names — cache first, then one
+    // network read (this branch stops running as soon as a binding is recorded).
+    const groupId = advertised ?? (await fetchRoster(this.ctx).catch(() => undefined))?.nostr_group_id;
+    if (groupId) {
+      const match = all.filter((g) => safeGroupIdHex(g) === groupId);
+      if (match.length > 0) {
+        await this.eventGroups.setItem(this.ctx.coordinate, groupId).catch(() => {});
+        return match;
+      }
+      // The roster names this event's group but we haven't joined it yet — we're
+      // simply not a member of THIS event's room. Never adopt a different joined
+      // group (that is exactly the misdelivery this fix removes).
+      return [];
+    }
+
+    // The roster advertises no id (a coordinator that predates APPK-3, or no
+    // group exists yet). A correct mechanism now exists, so we deliberately do
+    // NOT fall back to the old "single coordinator-verified group" guess — that
+    // guess is what misrouted a send across two same-coordinator events. Treat
+    // the event as unbound (chat stays "setting up") until the roster republishes
+    // with the id; this degrades gracefully instead of risking the wrong room.
+    if (all.length > 0) {
       console.warn(
-        "marmot: multiple coordinator-verified groups and no recorded binding — refusing to guess",
+        "marmot: no roster-advertised group id and no recorded binding — refusing to guess the room",
       );
     }
     return [];

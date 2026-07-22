@@ -412,9 +412,19 @@ export type ChatKeyAttestationContent = z.infer<typeof chatKeyAttestationContent
 // attendees whose MLS identity is a separate chat device key, this maps the chat
 // npub back to the account so the chat UI can render members as people. Absent for
 // local-key attendees (their account key IS the chat identity).
+//
+// `nostr_group_id` (Marmot §4.4, additive — old clients ignore it): the routing id
+// (445 `#h` tag) of this event's MLS group, the authoritative event→group binding
+// the coordinator otherwise never publishes. An MLS Welcome carries no event
+// coordinate, so a member holding two same-coordinator events' groups cannot tell
+// which joined group is which from MLS state alone; advertising the id here on the
+// member-only, ECK-encrypted roster lets each event's client bind deterministically
+// to ITS OWN group instead of guessing (audit APPK-3). Absent for chat-off events
+// and for coordinators/organizers that predate this field.
 export const rosterContentSchema = z.object({
   v: version,
   eck_current: z.number().int().positive(),
+  nostr_group_id: hex32.optional(), // Marmot MLS routing id of this event's group (§4.4)
   attendees: z
     .array(
       z.object({

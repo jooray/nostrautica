@@ -33,6 +33,17 @@ class TinyEmitter {
 const COORD = "d".repeat(64);
 const ATTACKER = "e".repeat(64);
 
+// Shared test state, hoisted so the vi.mock factories below can read it. Lets two
+// MarmotChat instances (two events, ONE chat identity) share a single storage
+// backend and one joined-groups pool — the real "MLS state is namespaced per
+// identity, not per event" condition the APPK-3 misdelivery bug requires — and lets
+// tests drive what each event's roster advertises as its nostr_group_id.
+const shared = vi.hoisted(() => ({
+  backend: null as unknown, // shared InMemoryKvBackend, or null → a fresh one per client
+  groups: null as unknown[] | null, // shared joined-groups pool, or null → per client
+  rosters: new Map<string, { v: number; eck_current: number; nostr_group_id?: string; attendees: unknown[] }>(),
+}));
+
 interface FakeRumor {
   id: string;
   pubkey?: string;
@@ -75,7 +86,9 @@ class FakeInvites extends TinyEmitter {
 }
 
 class FakeGroups {
-  groups: FakeGroup[] = [];
+  // Share one joined-groups pool across clients when the test set one (two events,
+  // one identity → one MLS state pool), else an isolated per-client pool.
+  groups: FakeGroup[] = (shared.groups as FakeGroup[] | null) ?? [];
   connectAllCalls = 0;
   send = vi.fn(async (_groupId: Uint8Array, _intent: unknown) => {});
   destroy = vi.fn(async (_groupId: Uint8Array) => {});
@@ -157,7 +170,7 @@ vi.mock("./stores.js", async (orig) => {
   return {
     ...actual,
     marmotKvBackend: () =>
-      new (actual.InMemoryKvBackend as new () => unknown)(),
+      shared.backend ?? new (actual.InMemoryKvBackend as new () => unknown)(),
   };
 });
 vi.mock("./network.js", () => ({ createMarmotNetwork: () => ({}) }));
@@ -165,6 +178,13 @@ vi.mock("./attest.js", () => ({ sendChatKeyAttestation: vi.fn(async () => {}) })
 vi.mock("$lib/nostr/ndk.js", () => ({
   publishSigned: vi.fn(async () => {}),
   fetchEventsRelayOnly: vi.fn(async () => []),
+}));
+// The roster is the coordinator's authoritative event→group binding (APPK-3).
+// `cachedRoster` is the sync, hot-path read; `fetchRoster` the async one. Both
+// resolve from the per-test `shared.rosters` map keyed by event coordinate.
+vi.mock("$lib/events/attendee.js", () => ({
+  cachedRoster: (coordinate: string) => shared.rosters.get(coordinate),
+  fetchRoster: async (ctx: { coordinate: string }) => shared.rosters.get(ctx.coordinate),
 }));
 
 import { MarmotChat } from "./client.js";
@@ -174,6 +194,14 @@ const ctx = {
   coordinate: "31923:" + "f".repeat(64) + ":my-event",
 } as never;
 const accountSigner = { getPublicKey: async () => "c".repeat(64) } as never;
+
+// Reset the shared cross-instance fixtures before every test so a two-event test's
+// shared backend/pool/rosters never leak into a single-event one.
+beforeEach(() => {
+  shared.backend = null;
+  shared.groups = null;
+  shared.rosters.clear();
+});
 
 describe("MarmotChat.start() — late welcome (G-3)", () => {
   beforeEach(() => {
@@ -351,14 +379,38 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
     expect(lastClient.keyPackages.ensurePublished).toHaveBeenCalled();
   });
 
-  it("adopts a single pre-scoping group when its roster holds the coordinator", async () => {
+  it("binds a pre-scoping group deterministically to the id the roster advertises", async () => {
+    // Legacy install: joined group, no recorded coordinate→group binding. The
+    // roster now names THIS event's group id, so it binds by that — not by a guess.
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 1,
+      eck_current: 1,
+      nostr_group_id: "gid-legacy",
+      attendees: [],
+    });
     const chat = await MarmotChat.create({ accountSigner, ctx });
-    // Legacy install: joined group, no recorded coordinate→group binding.
     lastClient.groups.groups.push(foreignGroup("gid-legacy", [COORD]));
 
     await chat.start();
-    // Exactly one coordinator-verified group → adopted as this event's room.
     expect(await chat.nostrGroupId()).toBe("gid-legacy");
+  });
+
+  it("refuses to guess when the roster advertises no group id (old coordinator)", async () => {
+    // Roster present but WITHOUT nostr_group_id (a coordinator that predates the
+    // fix, or no group yet). A single coordinator-verified group used to be adopted
+    // by the old guess — that guess is exactly what could misroute a send, so with
+    // ground truth absent we now refuse rather than risk the wrong room.
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 1,
+      eck_current: 1,
+      attendees: [],
+    });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    lastClient.groups.groups.push(foreignGroup("gid-legacy", [COORD]));
+
+    await chat.start();
+    expect(await chat.nostrGroupId()).toBeUndefined();
+    await expect(chat.send("oops")).rejects.toThrow("no joined chat group yet");
   });
 
   it("refuses to guess when several coordinator-verified groups lack a binding", async () => {
@@ -371,8 +423,99 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
     });
 
     await chat.start();
-    // Ambiguous — operate on none rather than risk the wrong room.
+    // No roster ground truth → operate on none rather than risk the wrong room.
     expect(await chat.nostrGroupId()).toBeUndefined();
     await expect(chat.send("oops")).rejects.toThrow("no joined chat group yet");
+  });
+});
+
+// ── The core APPK-3 misdelivery scenario: two events, ONE coordinator, ONE chat
+// identity, ONE shared MLS-state pool — each event must resolve to ITS OWN group.
+describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coordA = "31923:" + "a".repeat(64) + ":event-a";
+  const coordB = "31923:" + "b".repeat(64) + ":event-b";
+  const ctxA = { config: { relays: ["wss://r"], coordinator: COORD }, coordinate: coordA } as never;
+  const ctxB = { config: { relays: ["wss://r"], coordinator: COORD }, coordinate: coordB } as never;
+
+  /** A joined group in the shared pool, both events' coordinator is a member. */
+  function joinedGroup(id: number, nostrGroupId: string): FakeGroup {
+    return {
+      idStr: "group-" + nostrGroupId,
+      id: new Uint8Array([id]),
+      state: { members: [COORD], nostrGroupId },
+      on: () => {},
+    };
+  }
+
+  it("each event resolves to its own roster-advertised group, never the other's", async () => {
+    // One identity, one storage backend, one joined-groups pool holding BOTH events'
+    // groups (both welcomes already joined; no bindings recorded — the migration case).
+    const { InMemoryKvBackend } = await import("./stores.js");
+    shared.backend = new (InMemoryKvBackend as new () => unknown)();
+    shared.groups = [joinedGroup(1, "gid-A"), joinedGroup(2, "gid-B")];
+    shared.rosters.set(coordA, { v: 1, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
+    shared.rosters.set(coordB, { v: 1, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
+
+    const chatA = await MarmotChat.create({ accountSigner, ctx: ctxA });
+    const clientA = lastClient;
+    const chatB = await MarmotChat.create({ accountSigner, ctx: ctxB });
+    const clientB = lastClient;
+
+    // The old guess saw TWO coordinator-verified groups and returned nothing (or, in
+    // the single-group case, the WRONG one). The roster id disambiguates precisely.
+    expect(await chatA.nostrGroupId()).toBe("gid-A");
+    expect(await chatB.nostrGroupId()).toBe("gid-B");
+
+    await chatA.send("hello event A");
+    await chatB.send("hello event B");
+    // Each send lands on its OWN group's id (gid-A → [1], gid-B → [2]) — no crossover.
+    expect(clientA.groups.send).toHaveBeenCalledOnce();
+    expect(clientA.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([1]));
+    expect(clientB.groups.send).toHaveBeenCalledOnce();
+    expect(clientB.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([2]));
+  });
+
+  it("corrects a pre-fix MIS-BINDING against the roster's authoritative id", async () => {
+    const { InMemoryKvBackend, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => { set(k: string, v: unknown): Promise<void> };
+      MARMOT_NAMESPACES: { eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    shared.groups = [joinedGroup(1, "gid-A"), joinedGroup(2, "gid-B")];
+    shared.rosters.set(coordA, { v: 1, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
+    // Seed a WRONG binding: event A points at event B's group (the exact pre-fix
+    // mis-bind — nothing re-points a present-but-wrong binding on its own). Identity
+    // pubkey is "c"*64 (identity mock); the store key is <identity>␟<ns>␟<coordinate>.
+    const identity = "c".repeat(64);
+    await backend.set(`${identity}\u001f${MARMOT_NAMESPACES.eventGroups}\u001f${coordA}`, "gid-B");
+
+    const chatA = await MarmotChat.create({ accountSigner, ctx: ctxA });
+    // The roster says A is gid-A and we hold gid-A → the wrong binding is corrected.
+    expect(await chatA.nostrGroupId()).toBe("gid-A");
+    await chatA.send("to A after correction");
+    expect(lastClient.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([1]));
+  });
+
+  it("refuses to route a mis-bound event whose real group we have NOT joined", async () => {
+    const { InMemoryKvBackend, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => { set(k: string, v: unknown): Promise<void> };
+      MARMOT_NAMESPACES: { eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    // We only hold event A's group; event B's real group (gid-B) is NOT joined.
+    shared.groups = [joinedGroup(1, "gid-A")];
+    shared.rosters.set(coordB, { v: 1, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
+    const identity = "c".repeat(64);
+    // Event B is mis-bound to A's group. The roster says B is gid-B, which we don't
+    // hold → refuse to route (never fall back to the recorded, wrong group A).
+    await backend.set(`${identity}\u001f${MARMOT_NAMESPACES.eventGroups}\u001f${coordB}`, "gid-A");
+
+    const chatB = await MarmotChat.create({ accountSigner, ctx: ctxB });
+    expect(await chatB.nostrGroupId()).toBeUndefined();
+    await expect(chatB.send("must not reach event A")).rejects.toThrow("no joined chat group yet");
   });
 });
