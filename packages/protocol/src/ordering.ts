@@ -42,3 +42,29 @@ export function pickLatest<T extends OrderableEvent>(events: readonly T[]): T | 
   for (const e of events) if (!best || supersedes(e, best)) best = e;
   return best;
 }
+
+/**
+ * Ordering key of a revisioned mutable submission (NIP §3.3): an explicit
+ * application `rev` is the primary key, then the sender-chosen `created_at`, then
+ * the rumor `id` — sender timestamps are never the primary ordering key.
+ */
+export interface RevisionKey {
+  rev: number;
+  created_at: number;
+  /** The rumor id (used only as the final, deterministic tie-break). */
+  id: string;
+}
+
+/**
+ * The §3.3 total order for revisioned mutable submissions (21601 profile, 21608
+ * correction): higher `rev` wins; equal `rev` → higher `created_at` wins; equal
+ * both → the lexicographically LOWEST rumor id wins. Returns true when
+ * `candidate` STRICTLY supersedes `current`; a loser OR an exactly-equal key
+ * returns false, so a stale (or identical re-delivered) submission is never
+ * applied over the stored one.
+ */
+export function revisionSupersedes(candidate: RevisionKey, current: RevisionKey): boolean {
+  if (candidate.rev !== current.rev) return candidate.rev > current.rev;
+  if (candidate.created_at !== current.created_at) return candidate.created_at > current.created_at;
+  return candidate.id < current.id;
+}

@@ -34,7 +34,7 @@ import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 // The self-copy (31602) and reuse library are decrypted private data, cached
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
 // readiness paint the last intro/library instantly instead of re-decrypting.
-type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string };
+type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string; rev?: number };
 
 /**
  * Whether a self-copy carries an intro (audit UX-O5). An intro is EITHER a
@@ -179,6 +179,13 @@ export async function submitProfileAndMedia(
   const attendeePubkey = await signer.getPublicKey();
   const introText = args.introText?.trim() || undefined;
 
+  // Monotonic per-(coordinate) revision (NIP §3.3): the last-sent rev lives on the
+  // per-event self-copy (the client's own durable per-event submission store), so we
+  // read it back and bump on every edit. A first submission is rev 0; nothing else
+  // in the app depends on the exact value — only that it strictly increases per edit.
+  const prevSelf = await loadSelfCopy(signer, ctx, args.blindingKey).catch(() => undefined);
+  const rev = (prevSelf?.rev ?? -1) + 1;
+
   // v2 (NIP §8): the 21601 submission carries at most MAX_SUBMISSION_MEDIA (4)
   // descriptors, or the coordinator rejects it wholesale at the schema boundary.
   // The 31602 self-copy/library keeps the full set (MAX_MEDIA=20).
@@ -187,6 +194,7 @@ export async function submitProfileAndMedia(
   // 21601 → E_inbox (gift-wrapped).
   const submission = {
     v: 2,
+    rev,
     profile: args.profile,
     media: submissionMedia,
     ...(introText ? { intro_text: introText } : {}),
@@ -198,10 +206,12 @@ export async function submitProfileAndMedia(
   });
 
   // 31602 self-copy (blinded d over the self-conversation key). Keeps the
-  // attendee's own device holding their authored text intro too.
+  // attendee's own device holding their authored text intro too, and the `rev`
+  // just sent so the next edit bumps from it.
   const selfContent = {
     v: 2,
     a: ctx.coordinate,
+    rev,
     profile: args.profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
@@ -318,9 +328,7 @@ export async function loadSelfCopy(
   signer: AppSigner,
   ctx: EventContext,
   blindingKey: Uint8Array,
-): Promise<
-  { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string } | undefined
-> {
+): Promise<SelfCopy | undefined> {
   const pubkey = await signer.getPublicKey();
   const d = blindedD(blindingKey, ctx.coordinate, pubkey);
   const events = await fetchEvents({
@@ -336,11 +344,13 @@ export async function loadSelfCopy(
       profile?: AttendeeProfile;
       media?: MediaDescriptor[];
       intro_text?: string;
+      rev?: number;
     };
     const self: SelfCopy = {
       profile: parsed.profile,
       media: parsed.media ?? [],
       introText: parsed.intro_text,
+      rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
     };
     cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
     return self;

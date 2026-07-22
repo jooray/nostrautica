@@ -316,4 +316,26 @@ describe("talk transcript compare-and-set (audit P0-7)", () => {
     expect(store.getTalk("c", "p", "d")!.status).toBe("pending");
     store.close();
   });
+
+  it("rejects an equal-revision talk with different content, no-ops on identical (NIP §3.3)", () => {
+    const store = new Store();
+    const put = (revision: number, title: string, x: string) =>
+      store.upsertTalk({
+        coordinate: "c", pubkey: "p", talkD: "d",
+        title, description: "", speakersJson: "[]",
+        mediaJson: JSON.stringify({ x }), lang: "en",
+        revision, mediaX: x, now: revision,
+      });
+    expect(put(1, "original", "X1")).toBe(true);
+    // Same revision, DIFFERENT content → rejected, stored talk untouched.
+    expect(put(1, "tampered", "X2")).toBe(false);
+    expect(store.getTalk("c", "p", "d")!.title).toBe("original");
+    // Same revision, IDENTICAL content → idempotent no-op (still rejected as a write).
+    expect(put(1, "original", "X1")).toBe(false);
+    expect(store.getTalk("c", "p", "d")!.title).toBe("original");
+    // Higher revision with the tampered content → accepted.
+    expect(put(2, "tampered", "X2")).toBe(true);
+    expect(store.getTalk("c", "p", "d")!.title).toBe("tampered");
+    store.close();
+  });
 });

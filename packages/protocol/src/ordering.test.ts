@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compareLatest, supersedes, pickLatest } from "./ordering.js";
+import { compareLatest, supersedes, pickLatest, revisionSupersedes } from "./ordering.js";
 
 describe("latest-event rule (NIP §3.1)", () => {
   it("higher created_at wins", () => {
@@ -67,5 +67,42 @@ describe("latest-event rule (NIP §3.1)", () => {
     expect(fold(evs)).toBe("e1");
     expect(fold([...evs].reverse())).toBe("e1");
     expect(fold([evs[1]!, evs[0]!, evs[2]!])).toBe("e1");
+  });
+});
+
+describe("revisioned submission order (NIP §3.3)", () => {
+  const cur = { rev: 5, created_at: 100, id: "m" };
+  // The six permutations of (rev, created_at, id) around the stored key.
+  it("higher rev supersedes (even with older created_at / higher id)", () => {
+    expect(revisionSupersedes({ rev: 6, created_at: 1, id: "z" }, cur)).toBe(true);
+  });
+  it("lower rev never supersedes (even with newer created_at / lower id)", () => {
+    expect(revisionSupersedes({ rev: 4, created_at: 999, id: "0" }, cur)).toBe(false);
+  });
+  it("equal rev, higher created_at supersedes", () => {
+    expect(revisionSupersedes({ rev: 5, created_at: 101, id: "z" }, cur)).toBe(true);
+  });
+  it("equal rev, lower created_at does not supersede", () => {
+    expect(revisionSupersedes({ rev: 5, created_at: 99, id: "0" }, cur)).toBe(false);
+  });
+  it("equal rev+created_at, lower id supersedes", () => {
+    expect(revisionSupersedes({ rev: 5, created_at: 100, id: "a" }, cur)).toBe(true);
+  });
+  it("equal rev+created_at, higher id does not supersede", () => {
+    expect(revisionSupersedes({ rev: 5, created_at: 100, id: "z" }, cur)).toBe(false);
+  });
+  it("an exactly-equal key does not supersede (idempotent re-delivery is a no-op)", () => {
+    expect(revisionSupersedes({ ...cur }, cur)).toBe(false);
+  });
+  it("both arrival orders of two competing keys converge on the same winner", () => {
+    const a = { rev: 5, created_at: 100, id: "a" };
+    const b = { rev: 5, created_at: 100, id: "b" };
+    const fold = (arrival: typeof a[]) => {
+      let best = arrival[0]!;
+      for (const k of arrival.slice(1)) if (revisionSupersedes(k, best)) best = k;
+      return best.id;
+    };
+    expect(fold([a, b])).toBe("a");
+    expect(fold([b, a])).toBe("a");
   });
 });

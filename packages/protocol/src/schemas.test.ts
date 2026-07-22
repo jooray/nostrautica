@@ -104,6 +104,7 @@ describe("every §7 payload round-trips through JSON", () => {
   it("21601 profile submission", () =>
     roundTrips(profileSubmissionContentSchema, {
       v: 2,
+      rev: 0,
       profile: { about: "dev", skills: ["rust"], looking_for: "cofounder", links: [] },
       media: [descriptor],
     }));
@@ -397,6 +398,7 @@ describe("F1 — intro_text + MediaTranscript on 21601 / 31603", () => {
   it("21601 submission round-trips with a text intro (no media)", () =>
     roundTrips(profileSubmissionContentSchema, {
       v: 2,
+      rev: 3,
       profile: { about: "dev", skills: ["rust"], looking_for: "cofounder", links: [] },
       media: [],
       intro_text: "I write Rust and care about privacy. Looking to meet designers.",
@@ -406,10 +408,25 @@ describe("F1 — intro_text + MediaTranscript on 21601 / 31603", () => {
     expect(() =>
       profileSubmissionContentSchema.parse({
         v: 2,
+        rev: 0,
         profile: { about: "", skills: [], looking_for: "", links: [] },
         media: [],
         intro_text: "x".repeat(2001),
       }),
+    ).toThrow());
+
+  it("21601 submission requires rev (NIP §3.3)", () =>
+    expect(() =>
+      profileSubmissionContentSchema.parse({
+        v: 2,
+        profile: { about: "", skills: [], looking_for: "", links: [] },
+        media: [],
+      }),
+    ).toThrow());
+
+  it("21608 correction requires rev (NIP §3.3)", () =>
+    expect(() =>
+      profileCorrectionContentSchema.parse({ v: 2, a: coordinate, hidden: true }),
     ).toThrow());
 
   it("MediaTranscript round-trips and is strict", () => {
@@ -464,16 +481,18 @@ describe("F3 — profile correction (21608) + ai_profile_edited on 31603", () =>
     roundTrips(profileCorrectionContentSchema, {
       v: 2,
       a: coordinate,
+      rev: 0,
       overrides: { summary: "I actually build hardware, not software.", skills: ["soldering"] },
     }));
 
   it("a hide-everything correction round-trips", () =>
-    roundTrips(profileCorrectionContentSchema, { v: 2, a: coordinate, hidden: true }));
+    roundTrips(profileCorrectionContentSchema, { v: 2, a: coordinate, rev: 1, hidden: true }));
 
   it("hidden_fields + report round-trip", () =>
     roundTrips(profileCorrectionContentSchema, {
       v: 2,
       a: coordinate,
+      rev: 0,
       hidden_fields: ["interests", "seeks"],
       report: "The AI invented interests I never mentioned.",
     }));
@@ -804,6 +823,7 @@ describe("boundary length caps (PROTO-4)", () => {
     // v2 (NIP §8): a 21601 submission is capped at 4; the 31602 library holds up to 20.
     roundTrips(profileSubmissionContentSchema, {
       v: 2,
+      rev: 0,
       profile: emptyProfile,
       media: Array(MAX_SUBMISSION_MEDIA).fill(descriptor),
     });
@@ -988,6 +1008,7 @@ describe("21608 correction overrides are bounded (NIP §8, v2)", () => {
     const ok = profileCorrectionContentSchema.parse({
       v: 2,
       a: coordinate,
+      rev: 0,
       overrides: {
         summary: "x".repeat(MAX_ABOUT),
         skills: Array(MAX_SKILLS).fill("s".repeat(MAX_SKILL)),

@@ -65,6 +65,7 @@ import {
   type MatchListContent,
   pickLatest,
   supersedes,
+  revisionSupersedes,
   MAX_SKILLS,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor } from "@nostrautica/protocol";
@@ -757,8 +758,9 @@ export class Coordinator {
         await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name);
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
-        log(`[submission] from ${short(rumor.pubkey)} — ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
+        log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
         await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
+          rev: content.rev,
           createdAt: rumor.created_at ?? 0,
           rumorId: rumor.id,
         });
@@ -767,7 +769,11 @@ export class Coordinator {
         // The subject is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor — an
         // attendee may only correct THEIR OWN profile (audit U9). There is no subject
         // field to spoof: a correction always applies to the sender's own entry.
-        await this.handleCorrection(state, rumor.pubkey, content);
+        await this.handleCorrection(state, rumor.pubkey, content, {
+          rev: content.rev,
+          createdAt: rumor.created_at ?? 0,
+          rumorId: rumor.id,
+        });
       } else if (rumor.kind === KIND_TALK_SUBMISSION) {
         const content = talkSubmissionContentSchema.parse(JSON.parse(rumor.content));
         // The speaker is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor.
@@ -843,6 +849,7 @@ export class Coordinator {
     state: EventState,
     pubkey: string,
     content: ProfileCorrectionContent,
+    order?: { rev: number; createdAt: number; rumorId: string },
   ): Promise<void> {
     if (content.a !== state.coordinate) return; // correction for a different event
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
@@ -850,10 +857,24 @@ export class Coordinator {
       log(`[correction] ignored from ${short(pubkey)}: not an approved attendee`);
       return;
     }
+    // Revisioned ordering (NIP §3.3): reject a correction whose (rev, created_at, id)
+    // key does not strictly supersede the applied one — an out-of-order older
+    // correction can never overwrite a newer one.
+    if (order && attendee.correction_rev != null) {
+      const current = { rev: attendee.correction_rev, created_at: attendee.correction_created_at ?? 0, id: attendee.correction_rumor_id ?? "" };
+      const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };
+      if (!revisionSupersedes(candidate, current)) {
+        log(`[correction] ignored stale correction from ${short(pubkey)}: rev ${order.rev} does not supersede stored ${current.rev}`);
+        return;
+      }
+    }
     this.deps.store.upsertAttendee({
       coordinate: state.coordinate,
       pubkey,
       correctionJson: JSON.stringify(content),
+      correctionRev: order?.rev ?? null,
+      correctionCreatedAt: order?.createdAt ?? null,
+      correctionRumorId: order?.rumorId ?? null,
       now: this.now(),
     });
     const kind = content.hidden
@@ -940,20 +961,23 @@ export class Coordinator {
     profile: AttendeeProfile,
     media: MediaDescriptor[],
     introText?: string,
-    order?: { createdAt: number; rumorId: string },
+    order?: { rev: number; createdAt: number; rumorId: string },
   ): Promise<void> {
-    // Latest-wins ordering (audit P0-2 interim guard): profile submissions carry
-    // no revision, so relays delivering history out of order could finish a
-    // backfill with an OLDER profile as current. Reject a submission whose
-    // authenticated created_at is STRICTLY older than the stored one. Equal
-    // timestamps still apply (a genuine same-second edit is last-writer-wins, as
-    // before) — the full monotonic model that would resolve same-second ties is
-    // deferred.
+    // Revisioned ordering (NIP §3.3): profile submissions carry a monotonic `rev`.
+    // Accept only a submission whose (rev, created_at, id) key STRICTLY supersedes
+    // the stored one — higher rev wins; equal rev → higher created_at; equal both →
+    // lexicographically lowest id. A loser (an out-of-order older edit, or a
+    // same-key re-delivery) is discarded, never applied. This replaces v1's
+    // created_at-only interim guard (P0-2), closing same-key nondeterminism.
     if (order) {
       const cur = this.deps.store.getAttendee(state.coordinate, pubkey);
-      if (cur?.profile_created_at != null && order.createdAt < cur.profile_created_at) {
-        log(`[submission] ignored stale profile from ${short(pubkey)}: created_at ${order.createdAt} < stored ${cur.profile_created_at}`);
-        return;
+      if (cur?.profile_rev != null) {
+        const current = { rev: cur.profile_rev, created_at: cur.profile_created_at ?? 0, id: cur.profile_rumor_id ?? "" };
+        const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };
+        if (!revisionSupersedes(candidate, current)) {
+          log(`[submission] ignored stale profile from ${short(pubkey)}: rev/created_at/id (${order.rev},${order.createdAt}) does not supersede stored (${current.rev},${current.created_at})`);
+          return;
+        }
       }
     }
     // Cap media descriptors per submission (audit COORD-4): extras are skipped
@@ -973,6 +997,7 @@ export class Coordinator {
       pubkey,
       profileJson,
       sourceRevision: this.sourceRevision(profileJson),
+      profileRev: order?.rev ?? null,
       profileCreatedAt: order?.createdAt ?? null,
       profileRumorId: order?.rumorId ?? null,
       now: this.now(),

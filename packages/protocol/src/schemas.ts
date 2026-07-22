@@ -306,6 +306,11 @@ export type JoinRequestContent = z.infer<typeof joinRequestContentSchema>;
 // ── 21601 Profile Submission rumor content ───────────────────────────────────
 export const profileSubmissionContentSchema = z.object({
   v: version,
+  // Application revision (NIP §3.3, required): the client maintains it monotonically
+  // per (coordinate) in its own storage and bumps it on every edit. The coordinator
+  // orders submissions by (rev, created_at, id) — sender timestamps are never the
+  // primary ordering key — so an out-of-order older edit can never regress the profile.
+  rev: z.number().int().nonnegative(),
   profile: attendeeProfileSchema,
   media: z.array(mediaDescriptorSchema).max(MAX_SUBMISSION_MEDIA).default([]),
   // A plain-text intro (spec F1): an alternative to an audio/video intro for
@@ -347,6 +352,10 @@ export type AiProfileOverride = z.infer<typeof aiProfileOverrideSchema>;
 export const profileCorrectionContentSchema = z.object({
   v: version,
   a: z.string(), // coordinate this correction applies to
+  // Application revision (NIP §3.3, required): same monotonic-per-(coordinate,kind)
+  // rule and same total order as the 21601 profile submission — an out-of-order
+  // older correction can never overwrite a newer one.
+  rev: z.number().int().nonnegative(),
   // Replace named ai_profile fields with the attendee's own text/lists.
   overrides: aiProfileOverrideSchema.optional(),
   // true = publish the directory entry with NO ai_profile (self-authored fallback).
@@ -479,6 +488,12 @@ export const myProfileContentSchema = z.object({
   profile: attendeeProfileSchema.optional(),
   media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
   intro_texts: z.array(z.string().max(MAX_INTRO_TEXT)).max(MAX_LIBRARY_TEXTS).optional(),
+  // The per-(coordinate) profile-submission revision counter (NIP §3.3). The
+  // per-event self-copy is the client's own durable store for per-event submission
+  // state, so the `rev` last sent in a 21601 lives here and is bumped on every edit
+  // (survives a device change, unlike a device-local counter). Absent on the
+  // reuse-library entry and on pre-rev self-copies (treated as "no submission yet").
+  rev: z.number().int().nonnegative().optional(),
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 

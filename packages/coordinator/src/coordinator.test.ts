@@ -104,6 +104,17 @@ interface Counters {
 const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
 const roleOf = (text: string) => ROLES.find((r) => text.includes(r));
 
+// Per-attendee monotonic 21601 rev (NIP §3.3): the app bumps a per-(coordinate)
+// counter on every edit, so a re-submission MUST carry a strictly higher rev or the
+// coordinator rejects it as stale. Tracked per attendee pubkey for the test helpers.
+const revByAttendee = new Map<string, number>();
+const correctionRevByAttendee = new Map<string, number>();
+function nextSubmissionRev(pubkey: string): number {
+  const rev = (revByAttendee.get(pubkey) ?? -1) + 1;
+  revByAttendee.set(pubkey, rev);
+  return rev;
+}
+
 /** Shared match-scoring: complementary (different roles) → high, else low. An
  *  "(updated)" profile in EITHER block nudges the score so a re-recorded intro
  *  produces a visibly different match list. */
@@ -348,6 +359,7 @@ async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Pr
     kind: KIND_PROFILE_SUBMISSION,
     content: {
       v: 2,
+      rev: nextSubmissionRev(attendeePubkey),
       profile: { about: f.about, skills: f.skills, looking_for: "", links: [] },
       media: [{
         kind: "intro", url: ["https://blob/x"],
@@ -378,6 +390,7 @@ async function resubmitIntro(h: Harness, attendeeSk: Uint8Array, fixture: Fixtur
     kind: KIND_PROFILE_SUBMISSION,
     content: {
       v: 2,
+      rev: nextSubmissionRev(getPublicKey(attendeeSk)),
       profile: { about: f.about, skills: f.skills, looking_for: "", links: [] },
       media: [{
         kind: "intro", url: ["https://blob/x2"],
@@ -415,6 +428,7 @@ async function joinCustom(
     kind: KIND_PROFILE_SUBMISSION,
     content: {
       v: 2,
+      rev: nextSubmissionRev(attendeePubkey),
       profile: { about, skills, looking_for: "", links: [] },
       media: opts.media ?? [],
       ...(opts.introText ? { intro_text: opts.introText } : {}),
@@ -522,9 +536,13 @@ describe("F3 — ai_profile correction / hide (U9)", () => {
     content: Record<string, unknown>,
   ): Promise<void> {
     const inboxPk = getPublicKey(h.einboxSk);
+    // Corrections carry a monotonic per-(coordinate) rev (NIP §3.3); auto-bump per
+    // attendee unless the caller pins one explicitly (stale-ordering tests do).
+    const pk = getPublicKey(attendeeSk);
+    const rev = "rev" in content ? content.rev : (correctionRevByAttendee.set(pk, (correctionRevByAttendee.get(pk) ?? -1) + 1), correctionRevByAttendee.get(pk));
     const wrap = wrapRumor(attendeeSk, inboxPk, {
       kind: KIND_PROFILE_CORRECTION,
-      content: { v: 2, a: h.coordinate, ...content },
+      content: { v: 2, a: h.coordinate, rev, ...content },
       tags: [["a", h.coordinate]],
     });
     await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
@@ -1397,6 +1415,34 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     expect(last.talk_d).toBe("t1"); // same address — replaced in place
   });
 
+  it("equal revision + different content is REJECTED (a content change requires a revision bump) — NIP §3.3", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "First", media: talkMedia(700, "ee".repeat(32)), revision: 0 });
+    await h.coordinator.jobs.drain();
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    expect(h.store.getTalk(h.coordinate, pk, "t1")!.status).toBe("published");
+
+    // Same revision, DIFFERENT content (new title + media) — a content change with
+    // no revision bump. Must be rejected: the stored talk is unchanged and stays
+    // published (never reset to pending), so a delayed duplicate can't silently
+    // replace moderated content.
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Sneaky edit", media: talkMedia(720, "ac".repeat(32)), revision: 0 });
+    await h.coordinator.jobs.drain();
+    const row = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row.title).toBe("First");
+    expect(row.status).toBe("published");
+
+    // A proper edit (revision bumped) IS accepted and re-enters moderation.
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Proper edit", media: talkMedia(720, "ac".repeat(32)), revision: 1 });
+    await h.coordinator.jobs.drain();
+    const row2 = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row2.title).toBe("Proper edit");
+    expect(row2.status).toBe("pending");
+  });
+
   it("a talk transcript feeds the speaker's ai_profile (§9.2)", async () => {
     const h = await setup(0, { talks: "on", matching: "on" });
     const speakerSk = generateSecretKey();
@@ -1517,29 +1563,43 @@ describe("audit P0-3 — duplicate rumors don't execute concurrently", () => {
   });
 });
 
-describe("audit P0-2 — profile submissions are latest-wins on out-of-order delivery", () => {
-  it("a stale (older created_at) profile does not overwrite a newer one", async () => {
+describe("NIP §3.3 — 21601 profile submissions ordered by (rev, created_at, id)", () => {
+  it("higher rev wins regardless of created_at; a lower/equal-loser rev is rejected", async () => {
     const h = await setup();
     const sk = generateSecretKey();
-    const pk = await join(h, sk, "crypto"); // approved; initial profile stored
+    const pk = await join(h, sk, "crypto"); // approved; join stored rev 0
     const inboxPk = getPublicKey(h.einboxSk);
     const nowSec = Math.floor(h.clock.t / 1000);
-    const mkSub = (about: string, createdAt: number) =>
+    const about = () => JSON.parse(h.store.getAttendee(h.coordinate, pk)!.profile_json!).about;
+    const mkSub = (label: string, rev: number, createdAt: number) =>
       wrapRumor(sk, inboxPk, {
         kind: KIND_PROFILE_SUBMISSION,
-        content: { v: 2, profile: { about, skills: [], looking_for: "", links: [] }, media: [] },
+        content: { v: 2, rev, profile: { about: label, skills: [], looking_for: "", links: [] }, media: [] },
         tags: [["a", h.coordinate]],
         created_at: createdAt,
       });
 
-    // Newer profile B (created_at +100s) lands first and is stored.
-    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("PROFILE-B", nowSec + 100) as any);
-    expect(JSON.parse(h.store.getAttendee(h.coordinate, pk)!.profile_json!).about).toBe("PROFILE-B");
+    // rev 2 lands (regardless of created_at) over the join's rev 0.
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("REV2", 2, nowSec + 10) as any);
+    expect(about()).toBe("REV2");
 
-    // Older profile A (created_at +50s) arrives after — an out-of-order backfill.
-    // It must be rejected rather than regressing the profile.
-    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("PROFILE-A", nowSec + 50) as any);
-    expect(JSON.parse(h.store.getAttendee(h.coordinate, pk)!.profile_json!).about).toBe("PROFILE-B");
+    // A LOWER rev with a much NEWER created_at is still rejected (rev is primary).
+    // (+800s stays under the +900s future-clamp so the rejection is the rev rule,
+    // not the freshness drop.)
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("REV1-LATER", 1, nowSec + 800) as any);
+    expect(about()).toBe("REV2");
+
+    // EQUAL rev, higher created_at supersedes.
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("REV2-NEWER", 2, nowSec + 20) as any);
+    expect(about()).toBe("REV2-NEWER");
+
+    // EQUAL rev, LOWER created_at is rejected.
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("REV2-OLDER", 2, nowSec + 5) as any);
+    expect(about()).toBe("REV2-NEWER");
+
+    // A strictly higher rev always wins.
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("REV3", 3, nowSec) as any);
+    expect(about()).toBe("REV3");
   });
 });
 
@@ -2178,7 +2238,7 @@ describe("audit COORD-12 — publish-boundary output hygiene", () => {
     });
     const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
       kind: KIND_PROFILE_CORRECTION,
-      content: { v: 2, a: h.coordinate },
+      content: { v: 2, a: h.coordinate, rev: 0 },
       tags: [["a", h.coordinate]],
     });
     await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);

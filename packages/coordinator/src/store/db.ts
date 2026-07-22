@@ -17,7 +17,7 @@
  * one-way, idempotent, logged.
  */
 import { DatabaseSync } from "node:sqlite";
-import { selfEncrypt, selfDecrypt } from "@nostrautica/protocol";
+import { selfEncrypt, selfDecrypt, sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 
 /** Prefix marking a column value as NIP-44-encrypted under the identity key. */
 const ENC_PREFIX = "nip44:";
@@ -75,12 +75,20 @@ export interface AttendeeRow {
   // Display name from the join request (B1): match reasoning must be able to
   // call people by their actual names — profiles alone carry no name.
   display_name: string | null;
-  // Ordering key of the currently-stored profile submission (audit P0-2): the
-  // authenticated rumor's created_at + id, so an out-of-order older submission
-  // is rejected instead of regressing the profile. Null on rows written before
-  // this migration (treated as "unknown", so the first ordered write wins).
+  // Ordering key of the currently-stored profile submission. NIP §3.3 makes the
+  // application `rev` the primary key; (rev, created_at, rumor_id) is the total
+  // order the coordinator accepts strictly-greater keys under (higher rev wins;
+  // equal rev → higher created_at; equal both → lexicographically lowest id).
+  // v1's created_at-only interim guard (P0-2) is replaced by this. Null on rows
+  // written before a first ordered submission.
+  profile_rev: number | null;
   profile_created_at: number | null;
   profile_rumor_id: string | null;
+  // Ordering key of the applied 21608 correction (NIP §3.3), same total order as
+  // the profile submission — a stale (out-of-order older) correction is rejected.
+  correction_rev: number | null;
+  correction_created_at: number | null;
+  correction_rumor_id: string | null;
   updated_at: number;
 }
 
@@ -96,6 +104,11 @@ export interface TalkRow {
   transcript_json: string | null;
   lang: string;
   revision: number;
+  // Canonical content hash of the applied talk (NIP §3.3): a submission with a
+  // revision EQUAL to the stored one but a DIFFERENT content hash is rejected
+  // (a content change requires a revision bump); equal revision + identical hash
+  // is an idempotent no-op. See `talkContentHash`.
+  content_hash: string | null;
   status: "pending" | "published" | "rejected";
   published_at: number;
   /**
@@ -164,8 +177,12 @@ CREATE TABLE IF NOT EXISTS attendees (
   transcripts_json TEXT,
   correction_json TEXT,
   display_name TEXT,
+  profile_rev INTEGER,
   profile_created_at INTEGER,
   profile_rumor_id TEXT,
+  correction_rev INTEGER,
+  correction_created_at INTEGER,
+  correction_rumor_id TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -265,6 +282,7 @@ CREATE TABLE IF NOT EXISTS talks (
   transcript_json TEXT,
   lang TEXT NOT NULL DEFAULT 'en',
   revision INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   published_at INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
@@ -373,7 +391,9 @@ export class Store {
     // Migration (F3): correction_json on attendees (ai_profile correction/hide).
     // Migration (B1 2026-07-16): display_name — match reasoning needs real names.
     // Migration (P0-2 2026-07-22): profile submission ordering key (latest-wins).
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT", "profile_created_at INTEGER", "profile_rumor_id TEXT"]) {
+    // Migration (wire-v2 §3.3): rev-primary ordering keys for 21601 submissions and
+    // 21608 corrections (profile_rev / correction_rev/created_at/rumor_id).
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT", "profile_created_at INTEGER", "profile_rumor_id TEXT", "profile_rev INTEGER", "correction_rev INTEGER", "correction_created_at INTEGER", "correction_rumor_id TEXT"]) {
       try {
         this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
       } catch {
@@ -390,6 +410,12 @@ export class Store {
     // move the entry to the new ECK).
     try {
       this.db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (wire-v2 §3.3): canonical content hash for equal-revision rejection.
+    try {
+      this.db.exec("ALTER TABLE talks ADD COLUMN content_hash TEXT");
     } catch {
       /* column already exists */
     }
@@ -533,16 +559,21 @@ export class Store {
     transcriptsJson?: string | null;
     correctionJson?: string | null;
     displayName?: string | null;
-    /** Ordering key of this profile submission (audit P0-2); written only with a profile. */
+    /** Ordering key of this profile submission (NIP §3.3); written only with a profile. */
+    profileRev?: number | null;
     profileCreatedAt?: number | null;
     profileRumorId?: string | null;
+    /** Ordering key of this correction (NIP §3.3); written only with a correction. */
+    correctionRev?: number | null;
+    correctionCreatedAt?: number | null;
+    correctionRumorId?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, profile_created_at, profile_rumor_id, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, profile_rev, profile_created_at, profile_rumor_id, correction_rev, correction_created_at, correction_rumor_id, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :profileCreatedAt, :profileRumorId, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :profileRev, :profileCreatedAt, :profileRumorId, :correctionRev, :correctionCreatedAt, :correctionRumorId, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
@@ -554,8 +585,12 @@ export class Store {
            transcripts_json = COALESCE(:transcriptsJson, attendees.transcripts_json),
            correction_json = COALESCE(:correctionJson, attendees.correction_json),
            display_name = COALESCE(:displayName, attendees.display_name),
+           profile_rev = COALESCE(:profileRev, attendees.profile_rev),
            profile_created_at = COALESCE(:profileCreatedAt, attendees.profile_created_at),
            profile_rumor_id = COALESCE(:profileRumorId, attendees.profile_rumor_id),
+           correction_rev = COALESCE(:correctionRev, attendees.correction_rev),
+           correction_created_at = COALESCE(:correctionCreatedAt, attendees.correction_created_at),
+           correction_rumor_id = COALESCE(:correctionRumorId, attendees.correction_rumor_id),
            updated_at = :now`,
       )
       .run({
@@ -571,8 +606,12 @@ export class Store {
         transcriptsJson: row.transcriptsJson ?? null,
         correctionJson: row.correctionJson ?? null,
         displayName: row.displayName ?? null,
+        profileRev: row.profileRev ?? null,
         profileCreatedAt: row.profileCreatedAt ?? null,
         profileRumorId: row.profileRumorId ?? null,
+        correctionRev: row.correctionRev ?? null,
+        correctionCreatedAt: row.correctionCreatedAt ?? null,
+        correctionRumorId: row.correctionRumorId ?? null,
         now: row.now,
       });
   }
@@ -652,11 +691,26 @@ export class Store {
     now: number;
   }): boolean {
     const existing = this.getTalk(row.coordinate, row.pubkey, row.talkD);
-    // Reject an out-of-order lower revision (audit P0-2 interim guard): relays can
-    // deliver history out of order, and without this a delayed revision 0 would
-    // overwrite a live revision 2 and reset its moderation status to 'pending'.
-    // Equal revisions still apply (idempotent re-processing of the same submission).
+    const contentHash = talkContentHash({
+      mediaX: row.mediaX,
+      title: row.title,
+      description: row.description,
+      speakersJson: row.speakersJson,
+      lang: row.lang,
+    });
+    // Reject an out-of-order lower revision (NIP §3.3): relays can deliver history
+    // out of order, and without this a delayed revision 0 would overwrite a live
+    // revision 2 and reset its moderation status to 'pending'.
     if (existing && row.revision < existing.revision) return false;
+    // Equal-revision rejection (NIP §3.3): a submission whose revision EQUALS the
+    // stored one but whose content DIFFERS is rejected — a content change requires
+    // a revision bump. Equal revision + identical content is an idempotent no-op
+    // (the identical rumor is already deduped upstream; this catches a distinct
+    // rumor carrying the same revision). Legacy rows with a null content_hash can't
+    // be compared, so they fall through and re-apply once (then carry a hash).
+    if (existing && row.revision === existing.revision && existing.content_hash != null) {
+      return false;
+    }
     let keepTranscript: string | null = existing?.transcript_json ?? null;
     if (existing) {
       try {
@@ -668,8 +722,8 @@ export class Store {
     }
     this.db
       .prepare(
-        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, status, published_at, updated_at)
-         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
+        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, content_hash, status, published_at, updated_at)
+         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, :contentHash, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
          ON CONFLICT(coordinate, pubkey, talk_d) DO UPDATE SET
            title = excluded.title,
            description = excluded.description,
@@ -678,6 +732,7 @@ export class Store {
            transcript_json = excluded.transcript_json,
            lang = excluded.lang,
            revision = excluded.revision,
+           content_hash = excluded.content_hash,
            status = 'pending',
            updated_at = excluded.updated_at`,
       )
@@ -692,6 +747,7 @@ export class Store {
         transcriptJson: keepTranscript,
         lang: row.lang,
         revision: row.revision,
+        contentHash,
         now: row.now,
       });
     return true;
@@ -1410,4 +1466,30 @@ export class Store {
       .prepare("SELECT 1 FROM marmot_consumed_kps WHERE coordinate = ? AND kp_event_id = ?")
       .get(coordinate, kpEventId);
   }
+}
+
+/**
+ * Canonical content hash of a talk submission for NIP §3.3 equal-revision
+ * rejection. The simplest canonicalization sufficient to detect a content change:
+ * the media ciphertext hash `x`, the title, the description, the co-speaker set
+ * (order-independent — sorted), and the language, space-joined and SHA-256'd. Two
+ * submissions with the same revision hash equal iff those fields are identical.
+ */
+export function talkContentHash(fields: {
+  mediaX: string;
+  title: string;
+  description: string;
+  /** JSON of the speakers array (parsed + sorted so co-speaker order is irrelevant). */
+  speakersJson: string;
+  lang: string;
+}): string {
+  let speakers: string[];
+  try {
+    const parsed = JSON.parse(fields.speakersJson);
+    speakers = Array.isArray(parsed) ? [...parsed].map(String).sort() : [];
+  } catch {
+    speakers = [];
+  }
+  const canonical = [fields.mediaX, fields.title, fields.description, speakers.join(","), fields.lang].join(" ");
+  return sha256Hex(utf8ToBytes(canonical));
 }
