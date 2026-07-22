@@ -1450,6 +1450,31 @@ describe("audit COORD-2 — rumor handling is failure-safe", () => {
   });
 });
 
+describe("audit P0-3 — duplicate rumors don't execute concurrently", () => {
+  it("a rumor delivered via two concurrent wraps runs its side effects once", async () => {
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const attendeePubkey = getPublicKey(attendeeSk);
+    const inboxPk = getPublicKey(h.einboxSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
+    // One rumor, wrapped once — delivered TWICE at the same instant. The durable
+    // "seen" mark lands only after the handler succeeds, so pre-fix both
+    // subscription callbacks pass the read-only seen check and grant in parallel.
+    const wrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 1, name: "crypto", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    await Promise.all([
+      h.coordinator.handleInboxWrap(h.coordinate, wrap as any),
+      h.coordinator.handleInboxWrap(h.coordinate, wrap as any),
+    ]);
+    expect(grantsTo(h, attendeeSk)).toHaveLength(1); // pre-fix: 2
+    expect(h.store.isRumorSeen(wrap.id)).toBe(true);
+  });
+});
+
 describe("audit COORD-3 — install authorization + unsolicited-install caps", () => {
   it("rejects an install whose 31600 names a DIFFERENT coordinator", async () => {
     const foreign = getPublicKey(generateSecretKey());

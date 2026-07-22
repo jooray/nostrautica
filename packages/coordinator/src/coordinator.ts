@@ -271,6 +271,18 @@ export class Coordinator {
   private readonly marmot?: MarmotAdmin;
   private events = new Map<string, EventState>();
   private closers: Array<() => void> = [];
+  /**
+   * Rumor ids whose handler is currently in flight (audit P0-3). Subscription
+   * callbacks are dispatched fire-and-forget and two gift wraps can legitimately
+   * carry the SAME rumor; the durable `seen_rumors` mark lands only after the
+   * handler succeeds, so without this both wraps would pass the read-only seen
+   * check in `unwrapFresh` and run side effects concurrently. This claims the
+   * rumor synchronously (no await between check and add, so no interleaving) and
+   * `processRumorWithRetry` releases it when the handler settles. NOTE: this
+   * closes the in-PROCESS race only; a durable cross-process processing lease
+   * (two daemons sharing one SQLite file) remains deferred.
+   */
+  private readonly inFlightRumors = new Set<string>();
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -581,6 +593,11 @@ export class Coordinator {
       this.deps.store.markRumorSeen(wrap.id, this.now()); // same rumor, new wrap
       return undefined;
     }
+    // Atomic in-process claim (P0-3): a concurrent duplicate wrap carrying this
+    // same rumor is already executing it — skip rather than run side effects
+    // twice. Synchronous check-and-add, so the two callbacks cannot interleave.
+    if (this.inFlightRumors.has(rumor.id)) return undefined;
+    this.inFlightRumors.add(rumor.id);
     return rumor;
   }
 
@@ -599,32 +616,39 @@ export class Coordinator {
   ): Promise<void> {
     const delays = this.wrapRetryDelaysMs;
     const maxAttempts = 1 + delays.length;
-    for (let attempt = 1; ; attempt++) {
-      try {
-        await dispatch();
-        this.deps.store.markRumorSeen(rumor.id, this.now());
-        this.deps.store.markRumorSeen(wrapId, this.now());
-        return;
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        // Permanent failures — the payload can never parse (schema) or is not
-        // JSON at all — are marked seen instead of looping on every rescan.
-        if (e instanceof ZodError || e instanceof SyntaxError) {
-          log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) is permanently unprocessable — dropped: ${msg.slice(0, 120)}`);
+    try {
+      for (let attempt = 1; ; attempt++) {
+        try {
+          await dispatch();
           this.deps.store.markRumorSeen(rumor.id, this.now());
           this.deps.store.markRumorSeen(wrapId, this.now());
           return;
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          // Permanent failures — the payload can never parse (schema) or is not
+          // JSON at all — are marked seen instead of looping on every rescan.
+          if (e instanceof ZodError || e instanceof SyntaxError) {
+            log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) is permanently unprocessable — dropped: ${msg.slice(0, 120)}`);
+            this.deps.store.markRumorSeen(rumor.id, this.now());
+            this.deps.store.markRumorSeen(wrapId, this.now());
+            return;
+          }
+          if (attempt >= maxAttempts) {
+            log(
+              `[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) FAILED after ${attempt} attempt(s) — left unseen for the startup rescan: ${msg.slice(0, 160)}`,
+            );
+            return;
+          }
+          const delay = delays[attempt - 1]!;
+          log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) attempt ${attempt}/${maxAttempts} failed: ${msg.slice(0, 120)} — retrying in ${delay}ms`);
+          await this.sleep(delay);
         }
-        if (attempt >= maxAttempts) {
-          log(
-            `[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) FAILED after ${attempt} attempt(s) — left unseen for the startup rescan: ${msg.slice(0, 160)}`,
-          );
-          return;
-        }
-        const delay = delays[attempt - 1]!;
-        log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) attempt ${attempt}/${maxAttempts} failed: ${msg.slice(0, 120)} — retrying in ${delay}ms`);
-        await this.sleep(delay);
       }
+    } finally {
+      // Release the P0-3 in-flight claim once the handler settles (success,
+      // permanent drop, or give-up-for-rescan) so a later legitimate redelivery
+      // — of a rumor left unseen — can be reprocessed.
+      this.inFlightRumors.delete(rumor.id);
     }
   }
 
