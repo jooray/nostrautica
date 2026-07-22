@@ -27,6 +27,7 @@
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
   import QrCode from "$lib/components/QrCode.svelte";
+  import SecretSurface from "$lib/components/SecretSurface.svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { publishEventUpdate } from "$lib/events/updates.js";
   import {
@@ -927,24 +928,31 @@
         {generating ? t("admin.invites.generating") : t("admin.invites.generate")}
       </button>
     </div>
-    {#if invites.length > 1}
-      <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
-        <button class="btn inline" onclick={copyAllLinks}>
-          {copiedAllLinks ? t("admin.invites.copiedAll") : t("admin.invites.copyAll")}
-        </button>
-        <button class="btn inline" onclick={downloadLinksFile}>{t("admin.invites.download")}</button>
-      </div>
+    {#if invites.length > 0}
+      <!-- §13.3: invite links embed single-use nsecs (and QR codes of them);
+           suppress the organizer's event CSS while they're on screen so no
+           31609 stylesheet can exfiltrate them. -->
+      <SecretSurface>
+        {#if invites.length > 1}
+          <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
+            <button class="btn inline" onclick={copyAllLinks}>
+              {copiedAllLinks ? t("admin.invites.copiedAll") : t("admin.invites.copyAll")}
+            </button>
+            <button class="btn inline" onclick={downloadLinksFile}>{t("admin.invites.download")}</button>
+          </div>
+        {/if}
+        {#each invites as inv (inv.nsec)}
+          <div class="card" style="background:var(--bg-elev2)">
+            <div class="row" style="justify-content:space-between">
+              <span class="badge">{inv.label}</span>
+              <button class="btn inline" onclick={() => copyLink(inv.link)}>{t("admin.invites.copyLink")}</button>
+            </div>
+            <QrCode data={inv.link} size={140} />
+            <p class="mono">{inv.link}</p>
+          </div>
+        {/each}
+      </SecretSurface>
     {/if}
-    {#each invites as inv (inv.nsec)}
-      <div class="card" style="background:var(--bg-elev2)">
-        <div class="row" style="justify-content:space-between">
-          <span class="badge">{inv.label}</span>
-          <button class="btn inline" onclick={() => copyLink(inv.link)}>{t("admin.invites.copyLink")}</button>
-        </div>
-        <QrCode data={inv.link} size={140} />
-        <p class="mono">{inv.link}</p>
-      </div>
-    {/each}
   </div>
 
   {#if ctx}

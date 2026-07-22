@@ -6,6 +6,7 @@
   import { eventNaddr, routeTitleKey } from "$lib/router/routes.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
   import { syncEventTheme } from "$lib/events/theme-injector.js";
+  import { secretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { theme } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
@@ -118,6 +119,10 @@
   // settings, key-backup or DM routes — and swaps when the event changes.
   $effect(() => {
     if (!booted) return;
+    // Re-run when a secret surface opens/closes (§13.3): while one is active the
+    // injector suppresses theming (already removed synchronously on enter); when
+    // the last closes, this re-syncs the current route's theme back in.
+    void secretSurface.active;
     void syncEventTheme(eventNaddr(router.route));
   });
 

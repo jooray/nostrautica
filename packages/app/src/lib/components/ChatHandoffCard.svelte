@@ -9,8 +9,10 @@
   // needed). Renaming another device is impossible by design: only the holder of a
   // device's secret can produce its proof of possession, so "rename" is offered for
   // this device alone.
+  import { onMount } from "svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
+  import { enterSecretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { chatSession } from "$lib/chat/session.svelte.js";
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { sendChatKeyAttestation } from "$lib/chat/attest.js";
@@ -19,6 +21,11 @@
   import Icon from "$lib/components/icons/Icon.svelte";
 
   let { ctx }: { ctx: EventContext } = $props();
+
+  // §13.3: chat device handoff/management is a sensitive per-device surface;
+  // suppress the event theme while it's shown (it renders on the themed Chat
+  // route) so no organizer CSS is live over device identity/management controls.
+  onMount(() => enterSecretSurface());
 
   const account = $derived(session.pubkey);
   const myChatPubkey = $derived(chatSession.chatPubkey);
