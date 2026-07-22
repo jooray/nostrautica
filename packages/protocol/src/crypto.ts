@@ -196,12 +196,23 @@ export function sha256Hex(bytes: Uint8Array): string {
   return bytesToHex(sha256(bytes));
 }
 
-// ── Invite proofs (spec §6.5) ────────────────────────────────────────────────
-// An invite code IS an nsec. Proof = schnorr signature by the invite key over
-// sha256("<coordinate>:<attendee-pubkey>"), binding the code to the attendee.
+// ── Invite proofs (NIP §7) ───────────────────────────────────────────────────
+// An invite code IS an nsec. Proof = BIP-340 schnorr signature by the invite key
+// over a domain-separated, injectively-encoded challenge (wire v2):
+//
+//   sha256( utf8( JSON.stringify(
+//     ["nostrautica-invite-v2", <coordinate>, <attendee-pubkey-hex>] ) ) )
+//
+// The literal first element is the domain-separation tag; JSON-array encoding is
+// injective, fixing v1's ambiguous `"<coordinate>:<attendee>"` colon-join (the
+// coordinate itself contains colons). A v1-format proof necessarily fails against
+// this challenge — the digest differs — so v1 proofs are rejected on the flag day.
+const INVITE_PROOF_TAG = "nostrautica-invite-v2";
 
 function inviteChallenge(coordinate: string, attendeePubkey: string): Uint8Array {
-  return sha256(utf8ToBytes(`${coordinate}:${attendeePubkey}`));
+  return sha256(
+    utf8ToBytes(JSON.stringify([INVITE_PROOF_TAG, coordinate, attendeePubkey])),
+  );
 }
 
 /** sha256(invite-pubkey) hex — what the organizer publishes in kind 31601. */
