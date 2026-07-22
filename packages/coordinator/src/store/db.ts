@@ -22,6 +22,59 @@ import { selfEncrypt, selfDecrypt, sha256Hex, utf8ToBytes } from "@nostrautica/p
 /** Prefix marking a column value as NIP-44-encrypted under the identity key. */
 const ENC_PREFIX = "nip44:";
 
+/** Handle to an acquired single-daemon lock; call `release` on shutdown. */
+export interface DaemonLock {
+  release(): void;
+}
+
+/**
+ * Acquire an exclusive single-daemon lock for a store path (reliability tail): two
+ * coordinator daemons sharing one SQLite database would both claim jobs and both
+ * publish, racing the monotonic-publish watermark and the seen-rumor ledger. A
+ * dedicated `${dbPath}.lock` SQLite file is opened in EXCLUSIVE locking mode and a
+ * marker row written, which takes and HOLDS a file-level exclusive lock for the
+ * connection's lifetime. A second daemon's acquire then fails fast (SQLITE_BUSY)
+ * with a clear error instead of silently double-running. Returns a handle whose
+ * `release` drops the lock (closes the connection). The `:memory:` store takes no
+ * lock (each connection is private — nothing to contend).
+ */
+export function acquireDaemonLock(dbPath: string): DaemonLock {
+  if (dbPath === ":memory:") return { release() {} };
+  const lockPath = `${dbPath}.lock`;
+  const db = new DatabaseSync(lockPath);
+  try {
+    db.exec("PRAGMA locking_mode = EXCLUSIVE");
+    db.exec("CREATE TABLE IF NOT EXISTS daemon_lock (id INTEGER PRIMARY KEY, pid INTEGER, acquired_at INTEGER)");
+    // The write forces SQLite to take the RESERVED→EXCLUSIVE lock; under
+    // locking_mode=EXCLUSIVE the connection keeps it until close, so a second
+    // daemon's write throws SQLITE_BUSY.
+    db.exec("BEGIN EXCLUSIVE");
+    db.prepare("INSERT OR REPLACE INTO daemon_lock (id, pid, acquired_at) VALUES (1, ?, ?)").run(
+      process.pid,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (e) {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    throw new Error(
+      `another coordinator daemon is already running on ${dbPath} (single-daemon lock held): ${e instanceof Error ? e.message : e}`,
+    );
+  }
+  return {
+    release() {
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    },
+  };
+}
+
 export type JobState = "pending" | "running" | "done" | "poison";
 
 /** A Cashu payment reservation in the durable journal (audit finding H8). */
@@ -526,6 +579,15 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (wire-v2 §3.2): durable monotonic-publish watermark per replaceable
+    // address, so restarts keep created_at monotonic instead of relying on the wall
+    // clock having advanced past everything published before the restart.
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS publish_watermarks (
+        address TEXT PRIMARY KEY,
+        last_created_at INTEGER NOT NULL
+      )`,
+    );
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
@@ -666,6 +728,29 @@ export class Store {
   /** Lift an event's retention expiry (organizer extended/removed the policy). */
   clearRetentionExpired(coordinate: string): void {
     this.db.prepare("UPDATE events SET retention_expired = 0 WHERE coordinate = ?").run(coordinate);
+  }
+
+  // ── durable monotonic-publish watermark (NIP §3.2) ────────────────────────
+  /**
+   * Bump and return the `created_at` for a replaceable publish at `address`
+   * (`${kind}:${d}`): `max(now, last_published_for_address + 1)`, persisted so a
+   * restart keeps §3.2 monotonicity even if the wall clock hasn't advanced past what
+   * was published before the restart (clock skew, a relay that clamps timestamps, or
+   * successive publishes within one second straddling the restart). Atomic under the
+   * single-daemon write lock.
+   */
+  nextPublishCreatedAt(address: string, now: number): number {
+    const row = this.db.prepare("SELECT last_created_at FROM publish_watermarks WHERE address = ?").get(address) as
+      | { last_created_at: number }
+      | undefined;
+    const next = row ? Math.max(now, row.last_created_at + 1) : now;
+    this.db
+      .prepare(
+        `INSERT INTO publish_watermarks (address, last_created_at) VALUES (?, ?)
+         ON CONFLICT(address) DO UPDATE SET last_created_at = excluded.last_created_at`,
+      )
+      .run(address, next);
+    return next;
   }
 
   // ── admin-command per-subject watermarks (NIP §3.4) ───────────────────────

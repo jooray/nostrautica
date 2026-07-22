@@ -175,9 +175,16 @@ const WHITENOISE_RELAYS = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whi
 const KIND_KEY_PACKAGE = 30443;
 const KIND_GROUP_MESSAGE = 445;
 
+/** Outcome of a publish (reliability tail): `replaced` is set when a relay answered
+ *  a replaceable publish with "replaced/have newer", so the coordinator can fetch the
+ *  competing event and reconcile via the global §3.1 comparator. */
+export interface PublishOutcome {
+  replaced?: boolean;
+}
+
 /** Minimal transport the coordinator needs (NostrClient satisfies it). */
 export interface Transport {
-  publish(event: NostrEvent, relays?: string[]): Promise<void>;
+  publish(event: NostrEvent, relays?: string[]): Promise<void | PublishOutcome>;
   fetch(filter: any, relays?: string[], timeoutMs?: number): Promise<NostrEvent[]>;
 }
 
@@ -1536,7 +1543,7 @@ export class Coordinator {
       ...(introText ? { intro_text: capAuthoredText(introText) } : {}),
       updated_at: Math.floor(this.now() / 1000),
     }, this.nextCreatedAt);
-    await this.deps.transport.publish(entry, state.configRelays);
+    await this.publish(entry, state.configRelays);
   }
 
   private async publishRoster(state: EventState): Promise<void> {
@@ -1575,7 +1582,7 @@ export class Coordinator {
       }),
     };
     const event = buildRoster(this.publishKeys(state), state.coordinate, roster, this.nextCreatedAt);
-    await this.deps.transport.publish(event, state.configRelays);
+    await this.publish(event, state.configRelays);
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
@@ -1806,7 +1813,7 @@ export class Coordinator {
       published_at: publishedAt,
     };
     const event = buildTalkEntry(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
-    await this.deps.transport.publish(event, state.configRelays);
+    await this.publish(event, state.configRelays);
     // Record the publish-time ECK id (audit COORD-7): post-rotation deletion must
     // address the entry under the ECK it was published with, not the current one.
     this.deps.store.setTalkStatus(state.coordinate, pubkey, talkD, "published", publishedAt, this.now(), this.currentEck(state).id);
@@ -2059,7 +2066,7 @@ export class Coordinator {
     const list = buildMatchList(this.deps.store, coordinate, pubkey, this.topK, Math.floor(this.now() / 1000));
     if (list.matches.length === 0) return;
     const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, sanitizeMatchList(list), this.nextCreatedAt);
-    await this.deps.transport.publish(event, state.configRelays);
+    await this.publish(event, state.configRelays);
     log(`[match] published list for ${short(pubkey)} — ${list.matches.length} match(es)`);
     // Publish the event-wide matrix (31606) only when visibility is "event" (H4).
     if (state.matchVisibility === "event") await this.publishMatrix(state);
@@ -2088,7 +2095,7 @@ export class Coordinator {
     }
     const content: MatchMatrixContent = { v: 2, computed_at: Math.floor(this.now() / 1000), pairs };
     const event = buildMatchMatrix(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
-    await this.deps.transport.publish(event, state.configRelays);
+    await this.publish(event, state.configRelays);
     log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
   }
 
@@ -2275,7 +2282,7 @@ export class Coordinator {
         const list = buildMatchList(this.deps.store, state.coordinate, a.pubkey, this.topK, Math.floor(this.now() / 1000));
         if (list.matches.length > 0) {
           const event = buildMatchListEvent(this.publishKeys(state), state.coordinate, a.pubkey, sanitizeMatchList(list), this.nextCreatedAt);
-          await this.deps.transport.publish(event, state.configRelays);
+          await this.publish(event, state.configRelays);
         }
       }
     }
@@ -2341,8 +2348,32 @@ export class Coordinator {
     }
     // Cancel pending/running paid work for the event.
     const cancelled = this.deps.store.cancelJobsForEvent(coordinate);
+    // Capture chat state + notify context BEFORE dropping live state, so the
+    // chat-orphaned notice below can still be sent.
+    const state = this.events.get(coordinate);
+    const hadChat = !!state?.chat && !!this.marmot;
     // Freeze the Marmot group (existing freeze path) before dropping live state.
+    // Detach leaves the MLS group FROZEN, not wiped (full Marmot detach — key
+    // rotation + member removal — is Phase 3): chat administration for the event is
+    // orphaned until a coordinator re-attaches and re-adopts the group.
     if (this.marmot) this.marmot.freeze(coordinate);
+    // Notify the organizer (21606) that chat administration is now orphaned. Sealed
+    // by this coordinator's own key to E_id — needs no ECK/inbox custody (which we
+    // delete below). Best-effort: a failure here never blocks the detach.
+    if (hadChat && state && !already) {
+      const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+        v: 2,
+        a: coordinate,
+        stage: "chat",
+        state: "poison",
+        attempts: 0,
+        error_category: "chat_orphaned_on_detach",
+        retryable: false,
+        at: Math.floor(this.now() / 1000),
+      });
+      await this.deps.transport.publish(status, state.configRelays).catch(() => {});
+      log(`[detach] ${coordinate}: Marmot group FROZEN — chat administration orphaned until a coordinator re-attaches`);
+    }
     // Drop live state and DELETE key custody (D6).
     this.events.delete(coordinate);
     this.deps.store.deleteEvent(coordinate);
@@ -2642,28 +2673,72 @@ export class Coordinator {
   private inviteHashCache = new Map<string, Set<string>>();
 
   /**
-   * Monotonic-publish watermark per replaceable address `${kind}:${d}` (NIP §3.2).
-   * In-memory: the coordinator re-derives it from published events after a restart
-   * only implicitly (a restart re-publishes with a fresh wall clock, which — being
-   * a later second than anything it published before the restart — stays monotonic
-   * in practice; the map closes the same-process, same-second gap that actually
-   * produced §3.1 ties). A durable column is a later refinement (reliability tail).
-   */
-  private lastPublishedAt = new Map<string, number>();
-
-  /**
    * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:
    * `max(now, previous_for_that_address + 1)`. Handed to every replaceable
    * publisher builder so two updates to the same address in the same wall-clock
    * second get strictly increasing timestamps instead of colliding.
+   *
+   * DURABLE (reliability tail): the per-address last-published `created_at` is
+   * persisted in `publish_watermarks`, so a restart keeps §3.2 monotonicity even if
+   * the wall clock hasn't advanced past what was published before the restart. The
+   * prior in-memory map relied on the wall clock alone across restarts; the store
+   * closes that gap process-wide.
    */
   private nextCreatedAt = (kind: number, d: string): number => {
-    const key = `${kind}:${d}`;
     const now = Math.floor(this.now() / 1000);
-    const ts = Math.max(now, (this.lastPublishedAt.get(key) ?? 0) + 1);
-    this.lastPublishedAt.set(key, ts);
-    return ts;
+    return this.deps.store.nextPublishCreatedAt(`${kind}:${d}`, now);
   };
+
+  /**
+   * Publish through the transport, reconciling a "replaced/have newer" relay answer
+   * (reliability tail). All coordinator publishes route here so a replaceable event
+   * a relay rejected as superseded is reconciled via the global §3.1 comparator
+   * ({@link reconcileReplaceable}) instead of being silently dropped. Non-replaceable
+   * publishes (gift wraps, NIP-09 deletions — no `d` tag) never trigger a reconcile.
+   */
+  private async publish(event: NostrEvent, relays?: string[]): Promise<void> {
+    const outcome = await this.deps.transport.publish(event, relays);
+    if (outcome && (outcome as PublishOutcome).replaced) {
+      await this.reconcileReplaceable(event, relays ?? this.deps.defaultRelays).catch((e) =>
+        log(`[reconcile] ${event.kind}:${event.id.slice(0, 8)} failed: ${e instanceof Error ? e.message : e}`),
+      );
+    }
+  }
+
+  /**
+   * Reconcile a replaceable event a relay reported as "replaced/have newer" (NIP
+   * §3.1/§3.2). Fetch the competing event at (kind, our author, `d`) and apply the
+   * global comparator: if it SUPERSEDES ours, ADOPT it — advance our durable publish
+   * watermark past it so the next intended update wins, and don't clobber it. If OURS
+   * supersedes the relay's, REPUBLISH ours so the relay converges to our version.
+   * Bounded: a single fetch + at most one republish, never a loop.
+   */
+  private async reconcileReplaceable(event: NostrEvent, relays: string[]): Promise<void> {
+    const d = event.tags.find((t) => t[0] === "d")?.[1];
+    if (d === undefined) return; // not a replaceable-with-d event (gift wrap / deletion)
+    const address = `${event.kind}:${d}`;
+    let competing: NostrEvent[];
+    try {
+      competing = await this.deps.transport.fetch(
+        { kinds: [event.kind], authors: [event.pubkey], "#d": [d] },
+        relays,
+      );
+    } catch {
+      return;
+    }
+    const newest = pickLatest(competing.filter((e) => e.pubkey === event.pubkey));
+    if (!newest || newest.id === event.id) return; // our publish is already current
+    if (supersedes({ id: newest.id, created_at: newest.created_at }, { id: event.id, created_at: event.created_at })) {
+      // A competing replaceable event supersedes ours — adopt it (advance the
+      // watermark so a future update exceeds it; leave the relay's version in place).
+      this.deps.store.nextPublishCreatedAt(address, newest.created_at);
+      log(`[reconcile] ${address}: competing ${newest.id.slice(0, 8)} supersedes ours — adopted (watermark advanced)`);
+    } else {
+      // Ours supersedes the relay's — republish so the relay converges to our version.
+      await this.deps.transport.publish(event, relays).catch(() => {});
+      log(`[reconcile] ${address}: our event supersedes the relay's ${newest.id.slice(0, 8)} — republished ours`);
+    }
+  }
 
   /**
    * Open a subscription for `coordinate`, closing the previous one when its key

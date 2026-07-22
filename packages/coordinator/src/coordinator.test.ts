@@ -58,12 +58,24 @@ class FakeTransport implements Transport {
   /** When true, a fetch touching kind 31600 returns [] — simulates an unfetchable
    *  config for the NIP §3.5 startup-revalidation suspension path. */
   blockConfig = false;
-  async publish(event: NostrEvent): Promise<void> {
+  /** Replaceable addresses (`${kind}:${d}`) for which the next publish reports
+   *  "replaced/have newer" — drives the reliability-tail reconciliation path. */
+  replacedAddresses = new Set<string>();
+  async publish(event: NostrEvent): Promise<void | { replaced?: boolean }> {
     if (this.failPublishes > 0) {
       this.failPublishes--;
       throw new Error("simulated relay outage");
     }
+    const d = event.tags.find((t) => t[0] === "d")?.[1];
+    const addr = d !== undefined ? `${event.kind}:${d}` : undefined;
+    if (addr && this.replacedAddresses.has(addr)) {
+      // The relay REJECTED our event as superseded — don't store it. One-shot, so a
+      // reconciliation republish (address cleared) is then accepted normally.
+      this.replacedAddresses.delete(addr);
+      return { replaced: true };
+    }
     this.published.push(event);
+    return undefined;
   }
   async fetch(filter: any): Promise<NostrEvent[]> {
     this.fetches.push(filter);
@@ -2428,6 +2440,26 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     await h.coordinator.jobs.drain();
     expect(mls.removed).toEqual([[pk]]);
   });
+
+  it("detach freezes the group and emits a chat-orphaned 21606 (reliability tail 6e)", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+
+    await admin(h, "detach", {});
+
+    const status = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .find((s) => s.error_category === "chat_orphaned_on_detach");
+    expect(status).toBeDefined();
+    expect(status!.retryable).toBe(false);
+    // The event is fully detached (custody deleted).
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+  });
 });
 
 describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () => {
@@ -3067,6 +3099,52 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     const latest = rosters[rosters.length - 1]!;
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
     expect(roster.nostr_group_id).toBeUndefined();
+  });
+});
+
+// ── reliability tail — replaced-publish reconciliation (NIP §3.1/§3.2) ───────
+describe("reliability tail — replaced-publish reconciliation", () => {
+  it("republishes ours when the relay's competing event is OLDER (ours supersedes)", async () => {
+    const h = await setup();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const rosterAddr = `31604:${identifier}`;
+    // The relay holds an OLDER competing roster and answers the next publish "replaced".
+    h.transport.seed.push({
+      kind: 31604, pubkey: getPublicKey(h.coordSk), created_at: 1, id: "old-roster", sig: "", content: "x",
+      tags: [["d", identifier]],
+    } as any);
+    h.transport.replacedAddresses.add(rosterAddr);
+
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+
+    // The first roster publish was rejected as "replaced", but reconcile found the
+    // relay's version older and REPUBLISHED ours — so our roster is stored after all.
+    const ours = h.transport.published.filter((e) => e.kind === 31604 && e.pubkey === getPublicKey(h.coordSk));
+    expect(ours.length).toBeGreaterThan(0);
+  });
+
+  it("adopts the relay's competing event when it SUPERSEDES ours (no clobber)", async () => {
+    const h = await setup();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const rosterAddr = `31604:${identifier}`;
+    const future = Math.floor(h.clock.t / 1000) + 1_000_000;
+    // The relay holds a FAR-NEWER competing roster and answers the next publish "replaced".
+    h.transport.seed.push({
+      kind: 31604, pubkey: getPublicKey(h.coordSk), created_at: future, id: "future-roster", sig: "", content: "x",
+      tags: [["d", identifier]],
+    } as any);
+    h.transport.replacedAddresses.add(rosterAddr);
+
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+
+    // Reconcile ADOPTED the newer roster — the coordinator never republished a roster
+    // that would clobber it (nothing at/after the competitor's timestamp was stored).
+    const clobbering = h.transport.published.filter(
+      (e) => e.kind === 31604 && e.pubkey === getPublicKey(h.coordSk) && (e.created_at ?? 0) >= future,
+    );
+    expect(clobbering.length).toBe(0);
   });
 });
 

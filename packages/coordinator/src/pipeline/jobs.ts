@@ -110,6 +110,17 @@ export class JobRunner {
     return this.store.reclaimExpiredLeases(this.now());
   }
 
+  /** Set once shutdown begins: `drain` stops claiming NEW jobs (the in-flight job
+   *  still finishes) so a graceful stop can await active work and then close. */
+  private stopping = false;
+
+  /** Stop claiming new jobs (reliability tail: graceful shutdown drain). The job
+   *  currently executing inside `runOne` is awaited by the caller; no new job is
+   *  claimed after this. Idempotent. */
+  stopClaiming(): void {
+    this.stopping = true;
+  }
+
   /** Run one claimable job under a fresh lease. Returns true if a job was processed. */
   async runOne(): Promise<boolean> {
     const token = randomUUID();
@@ -119,9 +130,11 @@ export class JobRunner {
     return true;
   }
 
-  /** Drain the queue until no runnable jobs remain (bounded to avoid loops). */
+  /** Drain the queue until no runnable jobs remain (bounded to avoid loops). Stops
+   *  claiming new jobs once {@link stopClaiming} has been called (graceful shutdown). */
   async drain(maxIterations = 10_000): Promise<void> {
     for (let i = 0; i < maxIterations; i++) {
+      if (this.stopping) return;
       if (!(await this.runOne())) return;
     }
   }

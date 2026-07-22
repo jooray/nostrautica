@@ -26,6 +26,22 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.pendingJobCount()).toBe(0);
   });
 
+  it("stopClaiming halts new claims but the drain returns cleanly (graceful shutdown)", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now });
+    let runs = 0;
+    runner.register("noop", async () => {
+      runs++;
+    });
+    runner.enqueue("noop", "a", {});
+    runner.enqueue("noop", "b", {});
+    runner.stopClaiming();
+    await runner.drain();
+    // No new jobs were claimed after stopClaiming; both remain pending.
+    expect(runs).toBe(0);
+    expect(store.pendingJobCount()).toBe(2);
+  });
+
   it("retries with exponential backoff, then poisons after max attempts", async () => {
     const store = new Store();
     const clock = fixedClock();

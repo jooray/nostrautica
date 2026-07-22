@@ -12,7 +12,7 @@ import {
   buildAnnounceContent,
   evaluateBilling,
 } from "./config.js";
-import { Store } from "./store/db.js";
+import { Store, acquireDaemonLock } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
 import { buildCoordinatorAnnounce } from "./nostr/publisher.js";
 import { Coordinator, type Transport } from "./coordinator.js";
@@ -42,6 +42,10 @@ async function main(): Promise<void> {
   const coordSk = resolveIdentity(config);
   const coordPubkey = getPublicKey(coordSk);
   console.log(`[coordinator] identity ${npubEncode(coordPubkey)}`);
+
+  // Single-daemon lock (reliability tail): fail fast if another daemon already runs
+  // on this store — two daemons would race the publish watermark + seen-rumor ledger.
+  const daemonLock = acquireDaemonLock(dbPath);
 
   // Event keys (E_inbox nsec, ECKs) are encrypted at rest under the coordinator
   // identity key; legacy plaintext rows are migrated in place on first start.
@@ -190,19 +194,41 @@ async function main(): Promise<void> {
 
   // Job loop: drain runnable jobs, then idle briefly.
   let stopped = false;
-  const shutdown = () => {
+  let shuttingDown = false;
+  let drainPromise: Promise<void> = Promise.resolve();
+  /** Max time to await the in-flight job on shutdown before closing anyway. */
+  const DRAIN_TIMEOUT_MS = 30_000;
+
+  // Graceful shutdown (reliability tail): stop claiming new jobs, await the active
+  // job (bounded), abort subscriptions, then close the transport + store + lock. A
+  // SECOND signal forces an immediate exit (a hung job never blocks stop forever).
+  const shutdown = async () => {
+    if (shuttingDown) {
+      console.log("[coordinator] second signal — forcing exit");
+      process.exit(1);
+    }
+    shuttingDown = true;
     stopped = true;
+    console.log("[coordinator] draining in-flight work…");
+    coordinator.jobs.stopClaiming(); // no new claims; the active job still finishes
+    await Promise.race([
+      drainPromise.catch(() => {}),
+      new Promise((r) => setTimeout(r, DRAIN_TIMEOUT_MS)),
+    ]);
     coordinator.stop();
     client.close();
     store.close();
+    daemonLock.release();
     console.log("[coordinator] stopped");
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown());
 
   while (!stopped) {
-    await coordinator.jobs.drain();
+    drainPromise = coordinator.jobs.drain();
+    await drainPromise;
+    if (stopped) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
 }

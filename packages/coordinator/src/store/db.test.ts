@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
 import { bytesToHex } from "@nostrautica/protocol";
-import { Store } from "./db.js";
+import { Store, acquireDaemonLock } from "./db.js";
 
 const ENC_PREFIX = "nip44:";
 
@@ -355,5 +355,65 @@ describe("talk transcript compare-and-set (audit P0-7)", () => {
     expect(put(2, "tampered", "X2")).toBe(true);
     expect(store.getTalk("c", "p", "d")!.title).toBe("tampered");
     store.close();
+  });
+});
+
+describe("durable monotonic-publish watermark (NIP §3.2, reliability tail)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDbPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-wm-"));
+    tmpDirs.push(dir);
+    return join(dir, "test.sqlite");
+  }
+
+  it("is strictly increasing per address and survives a restart", () => {
+    const path = tmpDbPath();
+    const store = new Store(path);
+    const addr = "31605:blinded-d";
+    // Same wall-clock second → strictly increasing.
+    expect(store.nextPublishCreatedAt(addr, 1000)).toBe(1000);
+    expect(store.nextPublishCreatedAt(addr, 1000)).toBe(1001);
+    expect(store.nextPublishCreatedAt(addr, 1000)).toBe(1002);
+    // A different address is independent.
+    expect(store.nextPublishCreatedAt("31604:other", 1000)).toBe(1000);
+    store.close();
+
+    // Restart: a fresh Store on the same file keeps monotonicity even when the
+    // wall clock has NOT advanced past the last-published second.
+    const store2 = new Store(path);
+    expect(store2.nextPublishCreatedAt(addr, 1000)).toBe(1003);
+    store2.close();
+  });
+});
+
+describe("single-daemon lock (reliability tail)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDbPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-lock-"));
+    tmpDirs.push(dir);
+    return join(dir, "test.sqlite");
+  }
+
+  it("a second daemon on the same store fails fast with a clear error", () => {
+    const path = tmpDbPath();
+    const lock = acquireDaemonLock(path);
+    expect(() => acquireDaemonLock(path)).toThrow(/already running/i);
+    // Released → a new daemon can acquire it.
+    lock.release();
+    const lock2 = acquireDaemonLock(path);
+    lock2.release();
+  });
+
+  it(":memory: takes no lock (private connection)", () => {
+    const a = acquireDaemonLock(":memory:");
+    const b = acquireDaemonLock(":memory:");
+    a.release();
+    b.release();
   });
 });
