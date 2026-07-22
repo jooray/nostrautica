@@ -882,13 +882,29 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     // A second event the coordinator has never seen.
     const eid2Sk = generateSecretKey();
     const coordinate2 = makeCoordinate(getPublicKey(eid2Sk), "second-event");
+    const inbox2Sk = generateSecretKey();
     const grantContent = {
       v: 1,
       a: coordinate2,
-      inbox_nsec: bytesToHex(generateSecretKey()),
+      inbox_nsec: bytesToHex(inbox2Sk),
       eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
       config_relays: ["wss://test"],
     };
+    // A fresh grant install now fails closed (P0-4) unless a 31600 exists that
+    // names THIS coordinator and whose inbox the grant key derives — seed it.
+    h.transport.seed.push({
+      kind: 31600,
+      pubkey: getPublicKey(eid2Sk),
+      created_at: 1,
+      id: "cfg-second-event",
+      sig: "",
+      content: "",
+      tags: [
+        ["d", "second-event"],
+        ["inbox", getPublicKey(inbox2Sk)],
+        ["coordinator", getPublicKey(h.coordSk)],
+      ],
+    } as any);
 
     // Forged install: a well-formed grant sealed by an arbitrary key. The seal
     // author (rumor.pubkey) is not the coordinate's E_id → must be dropped.
@@ -1547,6 +1563,21 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
     const eid2 = generateSecretKey();
     const coord2 = makeCoordinate(getPublicKey(eid2), "relay-check");
     const einbox2 = generateSecretKey();
+    // Authorizing 31600 for the grant install (P0-4): names this coordinator,
+    // inbox derives from the grant's inbox key.
+    h.transport.seed.push({
+      kind: 31600,
+      pubkey: getPublicKey(eid2),
+      created_at: 1,
+      id: "cfg-relay-check",
+      sig: "",
+      content: "",
+      tags: [
+        ["d", "relay-check"],
+        ["inbox", getPublicKey(einbox2)],
+        ["coordinator", getPublicKey(h.coordSk)],
+      ],
+    } as any);
     const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
       kind: KIND_COORDINATOR_GRANT,
       content: {
@@ -1559,6 +1590,93 @@ describe("audit COORD-3 — install authorization + unsolicited-install caps", (
     });
     await h.coordinator.handleCoordinatorWrap(grantWrap as any);
     expect(JSON.parse(h.store.getEvent(coord2)!.config_relays)).toEqual(["wss://ok.example"]);
+  });
+});
+
+describe("audit P0-4 — install requires current authenticated assignment", () => {
+  // A genuine grant (sealed by the event's E_id), varying only the authorizing 31600.
+  async function grantFor(
+    h: Harness,
+    eid2: Uint8Array,
+    inbox2: Uint8Array,
+    d: string,
+  ) {
+    const coord2 = makeCoordinate(getPublicKey(eid2), d);
+    const grantWrap = wrapRumor(eid2, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 1,
+        a: coord2,
+        inbox_nsec: bytesToHex(inbox2),
+        eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        config_relays: ["wss://test"],
+      },
+    });
+    return { coord2, grantWrap };
+  }
+
+  function seedConfig(
+    h: Harness,
+    eid2: Uint8Array,
+    d: string,
+    tags: string[][],
+  ) {
+    h.transport.seed.push({
+      kind: 31600,
+      pubkey: getPublicKey(eid2),
+      created_at: 1,
+      id: `cfg-${d}`,
+      sig: "",
+      content: "",
+      tags: [["d", d], ...tags],
+    } as any);
+  }
+
+  it("rejects a grant install with NO fetchable 31600 (retryable, never installs blind)", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "no-config");
+    // No 31600 seeded → the grant can't be authorized → left unseen, not installed.
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+  });
+
+  it("rejects a grant whose 31600 names NO coordinator", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "unassigned");
+    seedConfig(h, eid2, "unassigned", [["inbox", getPublicKey(inbox2)]]); // no coordinator tag
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+  });
+
+  it("rejects a grant whose inbox key does not derive the config's declared inbox", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "wrong-inbox");
+    // Config names this coordinator but declares a DIFFERENT inbox than the grant.
+    seedConfig(h, eid2, "wrong-inbox", [
+      ["inbox", getPublicKey(generateSecretKey())],
+      ["coordinator", getPublicKey(h.coordSk)],
+    ]);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+  });
+
+  it("installs when a newest 31600 names this coordinator and the inbox matches", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "authorized");
+    seedConfig(h, eid2, "authorized", [
+      ["inbox", getPublicKey(inbox2)],
+      ["coordinator", getPublicKey(h.coordSk)],
+    ]);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeDefined();
   });
 });
 
@@ -1870,6 +1988,20 @@ describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () =
         },
       }) as any,
     );
+    // Authorizing 31600 for the backfilled grant install (P0-4).
+    transport.seed.push({
+      kind: 31600,
+      pubkey: eidPub,
+      created_at: 1,
+      id: "cfg-backfilled",
+      sig: "",
+      content: "",
+      tags: [
+        ["d", "backfilled-event"],
+        ["inbox", getPublicKey(einboxSk)],
+        ["coordinator", coordPub],
+      ],
+    } as any);
     const coordinator = new Coordinator({
       store,
       transport,

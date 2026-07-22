@@ -454,6 +454,16 @@ export class Coordinator {
      * live-overlap window. Default "recent".
      */
     backfill?: "full" | "recent";
+    /**
+     * Where this install came from (audit P0-4). "grant" is a fresh 21603 grant
+     * and must fail CLOSED: a valid newest 31600 must exist AND name this daemon,
+     * and the grant's inbox key must derive the config's declared inbox — a
+     * config that isn't fetchable yet is retryable (throw), not authorization.
+     * "restore" is a startup reload of an already-authorized event and keeps the
+     * lenient check (durable startup revalidation is P0-5, deferred). Default
+     * "restore".
+     */
+    source?: "grant" | "restore";
   }): Promise<void> {
     const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
@@ -474,10 +484,35 @@ export class Coordinator {
     const evtEvent = cfgEvents.find((e) => e.kind === 31923);
     const config = cfgEvent ? parseEventConfig(eidPubkey, cfgEvent.tags) : undefined;
 
-    // Install authorization (audit COORD-3): a 31600 that names a coordinator
-    // must name THIS one — otherwise the grant is for someone else's daemon and
-    // the event is rejected (also enforced on live config updates).
-    if (config?.coordinator && config.coordinator !== this.coordPubkey) {
+    // Install authorization (audit COORD-3, P0-4).
+    if ((grant.source ?? "restore") === "grant") {
+      // Fresh grant: fail CLOSED. Require a valid, newest 31600 that names THIS
+      // daemon, and a grant inbox key that derives the config's declared inbox.
+      if (!config) {
+        // Not an authorization decision — the authoritative 31600 isn't fetchable
+        // right now (relay gap, or not yet propagated after a just-created event).
+        // Throw so processRumorWithRetry retries instead of installing blind.
+        throw new Error(
+          `install ${grant.coordinate}: no fetchable 31600 to authorize the grant yet — retryable`,
+        );
+      }
+      if (config.coordinator !== this.coordPubkey) {
+        log(
+          `[install] REJECTED ${grant.coordinate}: 31600 ${config.coordinator ? `names ${short(config.coordinator)}` : "names no coordinator"}, not this daemon (${short(this.coordPubkey)})`,
+        );
+        return;
+      }
+      const grantInboxPub = getPublicKey(hexToBytes(grant.inboxSkHex));
+      if (grantInboxPub !== config.inbox) {
+        log(
+          `[install] REJECTED ${grant.coordinate}: grant inbox key ${short(grantInboxPub)} does not derive the config's declared inbox ${short(config.inbox)}`,
+        );
+        return;
+      }
+    } else if (config?.coordinator && config.coordinator !== this.coordPubkey) {
+      // Restore of an already-authorized event: keep the lenient check (reject
+      // only an explicit re-point to another coordinator). Durable startup
+      // revalidation of missing/absent assignment is P0-5 (deferred).
       log(
         `[install] REJECTED ${grant.coordinate}: 31600 coordinator tag names ${short(config.coordinator)}, not this daemon (${short(this.coordPubkey)})`,
       );
@@ -688,6 +723,7 @@ export class Coordinator {
           eck: grant.eck,
           configRelays: grant.config_relays,
           backfill: known ? "recent" : "full",
+          source: "grant",
         });
       } else if (rumor.kind === KIND_ADMIN_COMMAND) {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
@@ -1824,6 +1860,7 @@ export class Coordinator {
         eck: this.eckFromStore(row.coordinate),
         configRelays: JSON.parse(row.config_relays),
         backfill: "recent",
+        source: "restore",
       });
     }
 
