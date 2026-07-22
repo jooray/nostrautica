@@ -64,6 +64,14 @@
       if (dict[key] !== undefined) el.setAttribute("aria-label", dict[key]);
     });
 
+    // Locale-specific link targets (e.g. the sk/cs guide pages) — falls back to
+    // the href already in the markup (the English page) when a locale doesn't
+    // have a translated key, so this never produces a broken link.
+    document.querySelectorAll("[data-i18n-href]").forEach(function (el) {
+      var key = el.getAttribute("data-i18n-href");
+      if (dict[key] !== undefined) el.setAttribute("href", dict[key]);
+    });
+
     if (dict["meta.title"]) document.title = dict["meta.title"];
     var metaDesc = document.querySelector('meta[name="description"]');
     if (metaDesc && dict["meta.description"]) metaDesc.setAttribute("content", dict["meta.description"]);

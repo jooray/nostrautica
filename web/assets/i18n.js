@@ -69,6 +69,7 @@
       "organizers.f5": "Live talks or prerecorded — including the no-stage format",
       "organizers.f6": "Encrypted group chat that survives into mobile Nostr apps",
       "organizers.cta": "Read the organizer guide",
+      "organizers.cta_href": "/docs/ORGANIZER-GUIDE.html",
 
       "attendees.eyebrow": "For attendees",
       "attendees.title": "Show up already knowing who to find.",
@@ -79,6 +80,7 @@
       "attendees.f4": "Message anyone directly, end-to-end encrypted",
       "attendees.f6": "You leave with a real Nostr identity you carry to the next event — or into everyday life. It holds the people you met, and you can follow what they post.",
       "attendees.cta": "Read the participant guide",
+      "attendees.cta_href": "/docs/PARTICIPANT-GUIDE.html",
       "attendees.caption": "The People tab: search, filter, everyone's skills at a glance.",
 
       "sovereignty.eyebrow": "Own the aftermath",
@@ -120,7 +122,9 @@
       "footer.col_product": "Product",
       "footer.col_resources": "Guides",
       "footer.organizer_guide": "Organizer guide",
+      "footer.organizer_guide_href": "/docs/ORGANIZER-GUIDE.html",
       "footer.participant_guide": "Participant guide",
+      "footer.participant_guide_href": "/docs/PARTICIPANT-GUIDE.html",
       "footer.spec": "Technical specification",
       "footer.rights": "Free and open source, MIT licensed.",
       "footer.source": "Source on GitHub",
@@ -198,6 +202,7 @@
       "organizers.f5": "Živé prednášky aj vopred nahraté — vrátane formátu úplne bez pódia",
       "organizers.f6": "Šifrovaný skupinový chat, ktorý funguje aj v mobilných Nostr appkách",
       "organizers.cta": "Príručka pre organizátorov",
+      "organizers.cta_href": "/docs/ORGANIZER-GUIDE-sk.html",
 
       "attendees.eyebrow": "Pre účastníkov",
       "attendees.title": "Prídete a už viete, koho hľadať.",
@@ -208,6 +213,7 @@
       "attendees.f4": "Napíšte komukoľvek priamo, end-to-end šifrované",
       "attendees.f6": "Odchádzate s naozajstnou Nostr identitou, ktorú si vezmete na ďalšie podujatie alebo do života. Máte v nej kontakty na ľudí, ktorých ste stretli, a môžete sledovať ich príspevky.",
       "attendees.cta": "Príručka pre účastníkov",
+      "attendees.cta_href": "/docs/PARTICIPANT-GUIDE-sk.html",
       "attendees.caption": "Karta Ľudia: hľadanie, filtre, zručnosti každého na prvý pohľad.",
 
       "sovereignty.eyebrow": "Čo vám ostane",
@@ -249,7 +255,9 @@
       "footer.col_product": "Produkt",
       "footer.col_resources": "Príručky",
       "footer.organizer_guide": "Príručka pre organizátorov",
+      "footer.organizer_guide_href": "/docs/ORGANIZER-GUIDE-sk.html",
       "footer.participant_guide": "Príručka pre účastníkov",
+      "footer.participant_guide_href": "/docs/PARTICIPANT-GUIDE-sk.html",
       "footer.spec": "Technická špecifikácia",
       "footer.rights": "Slobodný a otvorený softvér, licencia MIT.",
       "footer.source": "Zdrojový kód na GitHube",
@@ -327,6 +335,7 @@
       "organizers.f5": "Živé přednášky i nahrané předem — včetně formátu úplně bez pódia",
       "organizers.f6": "Šifrovaný skupinový chat, který funguje i v mobilních Nostr appkách",
       "organizers.cta": "Příručka pro organizátory",
+      "organizers.cta_href": "/docs/ORGANIZER-GUIDE-cs.html",
 
       "attendees.eyebrow": "Pro účastníky",
       "attendees.title": "Přijdete a už víte, koho hledat.",
@@ -337,6 +346,7 @@
       "attendees.f4": "Napište komukoli přímo, end-to-end šifrované",
       "attendees.f6": "Odcházíte se skutečnou Nostr identitou, kterou si vezmete na další akci nebo do života. Máte v ní kontakty na lidi, které jste potkali, a můžete sledovat jejich příspěvky.",
       "attendees.cta": "Příručka pro účastníky",
+      "attendees.cta_href": "/docs/PARTICIPANT-GUIDE-cs.html",
       "attendees.caption": "Záložka Lidé: hledání, filtry, dovednosti každého na první pohled.",
 
       "sovereignty.eyebrow": "Co vám zůstane",
@@ -378,7 +388,9 @@
       "footer.col_product": "Produkt",
       "footer.col_resources": "Příručky",
       "footer.organizer_guide": "Příručka pro organizátory",
+      "footer.organizer_guide_href": "/docs/ORGANIZER-GUIDE-cs.html",
       "footer.participant_guide": "Příručka pro účastníky",
+      "footer.participant_guide_href": "/docs/PARTICIPANT-GUIDE-cs.html",
       "footer.spec": "Technická specifikace",
       "footer.rights": "Svobodný a otevřený software, licence MIT.",
       "footer.source": "Zdrojový kód na GitHubu",
