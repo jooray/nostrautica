@@ -29,6 +29,8 @@
   import Avatar from "$lib/components/Avatar.svelte";
   import ChatHandoffCard from "$lib/components/ChatHandoffCard.svelte";
   import type { ChatMessage } from "$lib/chat/messages.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -51,6 +53,14 @@
   let sendError = $state<string | null>(null);
   let draft = $state("");
   let sending = $state(false);
+
+  // Draft-safe auto-refresh (App-2): persist the compose text (owner-scoped) and
+  // hold the pending reload while it's non-empty; it applies once the box clears.
+  $effect(() => {
+    const text = draft;
+    saveDraft(`chat:${naddr}`, text);
+    if (text.trim().length > 0) return refreshGuard.hold("chat");
+  });
   // Set once our own membership-resolve pass (grant fetch + shell re-sync) has run.
   let membershipKnown = $state(false);
   // The session itself lives in the shell (chat/session.svelte.ts), started as
@@ -93,6 +103,11 @@
   }
 
   onMount(async () => {
+    // Restore a compose draft left by a previous session/refresh (App-2).
+    if (!draft && session.pubkey) {
+      const saved = loadDraft(`chat:${naddr}`);
+      if (saved) draft = saved;
+    }
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);

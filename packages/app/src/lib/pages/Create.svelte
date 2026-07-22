@@ -25,6 +25,9 @@
   import { attachCoordinator } from "$lib/events/organizer.js";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { onMount } from "svelte";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
 
   let title = $state("");
   let summary = $state("");
@@ -59,6 +62,22 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let created = $state<CreatedEvent | null>(null);
+
+  // Draft-safe auto-refresh (App-2): the title/summary an organizer is composing
+  // must not be lost to a mid-typing deploy. Persist them (owner-scoped once the
+  // key exists) and hold the pending reload while either is non-empty — it
+  // applies automatically once the form is empty or the event is created.
+  onMount(() => {
+    if (!session.pubkey) return;
+    if (!title) title = loadDraft("create:title") ?? "";
+    if (!summary) summary = loadDraft("create:summary") ?? "";
+  });
+  $effect(() => {
+    if (created) return; // event published — drafts already cleared below
+    saveDraft("create:title", title);
+    saveDraft("create:summary", summary);
+    if (title.trim().length > 0 || summary.trim().length > 0) return refreshGuard.hold("create");
+  });
   // Truthful outcomes for the two best-effort secondary steps (audit UX-A3):
   // the event is created regardless, but the success screen must not claim
   // enrollment/attach succeeded when they didn't — it must offer a retry.
@@ -215,6 +234,9 @@
         );
       }
       created = result;
+      // Event published — the compose drafts are spent (App-2).
+      clearDraft("create:title");
+      clearDraft("create:summary");
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

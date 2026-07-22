@@ -20,6 +20,8 @@
   import { fillHeight } from "$lib/components/fill-height.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -44,6 +46,17 @@
   let composerEl = $state<HTMLElement | null>(null);
   let muteBusy = $state(false);
   const muted = $derived(!!peer && mutes.isMuted(peer));
+
+  // Draft-safe auto-refresh (App-2): persist the compose text (owner-scoped) so a
+  // deploy that reloads the tab doesn't lose it, and hold off that reload while
+  // the box has unsent text — it applies automatically once the box is empty.
+  const draftId = $derived(`dm:${npub}`);
+  $effect(() => {
+    const id = draftId;
+    const text = draft;
+    saveDraft(id, text);
+    if (text.trim().length > 0) return refreshGuard.hold("dm");
+  });
   // "Also attending: …" (user feedback 2026-07-20) — every event the CURRENT
   // user holds a working key for (listEventKeys: local, network-free, and the
   // authoritative "can I actually decrypt this event's data" answer — unlike
@@ -132,6 +145,12 @@
     if (peer) {
       const staged = dmPrefill.take(peer);
       if (staged && !draft) draft = staged;
+    }
+    // Restore a compose draft left by a previous session/refresh (App-2), unless
+    // a prefill already populated the box. Owner-scoped, so nothing cross-leaks.
+    if (!draft && session.pubkey) {
+      const saved = loadDraft(`dm:${npub}`);
+      if (saved) draft = saved;
     }
     // Cache-first: paint the name/avatar the People list already fetched, so the
     // header isn't a bare npub while the network/signer is slow (user feedback

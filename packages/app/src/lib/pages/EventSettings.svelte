@@ -48,6 +48,7 @@
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -471,6 +472,19 @@
   let themePreviewing = $state(false);
   const themeBytes = $derived(utf8ByteLength(themeCss));
   const themeOver = $derived(themeBytes > MAX_THEME_CSS_BYTES);
+
+  // Draft-safe auto-refresh (App-2): hold the pending reload while the organizer
+  // has unsaved metadata edits (title/summary differ from the loaded event) or a
+  // half-filled add-coordinator / add-co-organizer input; it applies once saved
+  // or cleared. Theme CSS is loaded from the network so it's excluded (a reload
+  // just refetches it).
+  $effect(() => {
+    const dirty =
+      (!!ctx && (metadataTitle !== ctx.title || metadataSummary !== ctx.summary)) ||
+      coordinatorInput.trim().length > 0 ||
+      coOrgInput.trim().length > 0;
+    if (dirty) return refreshGuard.hold("settings");
+  });
 
   async function loadTheme() {
     if (!ctx) return;

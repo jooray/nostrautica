@@ -13,6 +13,7 @@
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
   import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { registerPwa } from "$lib/pwa.js";
@@ -202,6 +203,11 @@
   {#if !online.isOnline}
     <div class="card warn" style="margin:0.5rem 0" role="status" aria-live="polite">
       {t("app.offline")}
+    </div>
+  {/if}
+  {#if refreshGuard.updateWaiting}
+    <div class="card" style="margin:0.5rem 0" role="status" aria-live="polite">
+      {t("update.deferred")}
     </div>
   {/if}
   {#if session.logoutError}

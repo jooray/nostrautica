@@ -22,6 +22,8 @@ export const messages = {
     "update.available":
       "A newer version of the app is required to read this event. Please update.",
     "update.action": "Update now",
+    "update.deferred":
+      "An update is ready and will apply automatically as soon as you finish what you're typing.",
     "logout.encryptFailed":
       "Logout couldn't lock some of your keys on this device (your signer was unreachable), so they were left in place rather than risked. Log in again to finish securing them.",
     "logout.dismiss": "Dismiss",
@@ -1031,6 +1033,8 @@ export const messages = {
     "update.available":
       "Na zobrazenie tejto udalosti je potrebná novšia verzia aplikácie. Aktualizujte ju, prosím.",
     "update.action": "Aktualizovať",
+    "update.deferred":
+      "Aktualizácia je pripravená a použije sa automaticky hneď, ako dokončíte to, čo píšete.",
     "logout.encryptFailed":
       "Pri odhlásení sa na tomto zariadení nepodarilo uzamknúť niektoré vaše kľúče (podpisovač bol nedostupný), takže zostali na mieste, aby sa neriskovalo ich poškodenie. Prihláste sa znova a dokončite ich zabezpečenie.",
     "logout.dismiss": "Zavrieť",
@@ -2049,6 +2053,8 @@ export const messages = {
     "update.available":
       "K zobrazení této události je potřeba novější verze aplikace. Aktualizujte ji, prosím.",
     "update.action": "Aktualizovat",
+    "update.deferred":
+      "Aktualizace je připravena a použije se automaticky hned, jakmile dokončíte to, co píšete.",
     "logout.encryptFailed":
       "Při odhlášení se na tomto zařízení nepodařilo uzamknout některé vaše klíče (podepisovač byl nedostupný), takže zůstaly na místě, aby se neriskovalo jejich poškození. Přihlaste se znovu a dokončete jejich zabezpečení.",
     "logout.dismiss": "Zavřít",

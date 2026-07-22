@@ -22,6 +22,7 @@
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
@@ -84,6 +85,21 @@
   const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
 
   if (cachedCtx && (library.length || textLibrary.length || textIntro)) perfMark("Record", "cache-paint");
+
+  // Draft-safe auto-refresh (App-2): an automatic deploy reload must never
+  // interrupt a live recording or discard an unsaved intro/talk the user is
+  // typing. Hold the pending reload while any of that is in flight; it applies
+  // automatically once recording stops and the fields are clear/submitted. (The
+  // intro text itself is already round-tripped through `cachedSelfCopy`, so no
+  // extra draft store is needed here — this only gates the reload.)
+  $effect(() => {
+    const dirty =
+      recording ||
+      textIntro.trim().length > 0 ||
+      talkTitle.trim().length > 0 ||
+      talkDescription.trim().length > 0;
+    if (dirty) return refreshGuard.hold("record");
+  });
 
   onMount(async () => {
     try {

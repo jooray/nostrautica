@@ -17,6 +17,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -40,6 +41,16 @@
   });
   let hideAll = $state(false);
   let report = $state("");
+
+  // Draft-safe auto-refresh (App-2): hold the pending reload while the organizer
+  // has an unsaved correction/report in progress; it applies once submitted or
+  // cleared. (Values load from the network, so a reload restores them anyway —
+  // this only prevents a reload landing mid-edit.)
+  $effect(() => {
+    const edited =
+      report.trim().length > 0 || AI_PROFILE_FIELDS.some((f) => values[f] !== initial[f]);
+    if (edited) return refreshGuard.hold("profile");
+  });
 
   const isList = (f: AiProfileField) => f !== "summary";
 

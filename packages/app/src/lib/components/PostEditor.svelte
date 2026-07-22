@@ -17,6 +17,7 @@
   import Icon from "$lib/components/icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import type { PostVisibility } from "$lib/events/posts.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
   let {
     title = $bindable(""),
@@ -47,6 +48,13 @@
   let tab = $state<"write" | "preview">("write");
   let uploading = $state(false);
   let uploadError = $state("");
+
+  // Draft-safe auto-refresh (App-2): hold the pending reload while a post is
+  // being composed, so an automatic deploy doesn't wipe an unsaved draft; it
+  // applies once the editor is submitted, cancelled, or emptied.
+  $effect(() => {
+    if (title.trim().length > 0 || content.trim().length > 0) return refreshGuard.hold("post");
+  });
 
   async function onImageFile(e: Event) {
     const file = (e.target as HTMLInputElement).files?.[0];
