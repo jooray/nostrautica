@@ -65,6 +65,7 @@ import {
   type MatchListContent,
   pickLatest,
   supersedes,
+  MAX_SKILLS,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
@@ -1087,7 +1088,9 @@ export class Coordinator {
     // whole entry inside eckEncrypt (schema caps are the primary control).
     const cappedProfile: AttendeeProfile = {
       about: capAuthoredText(profile.about),
-      skills: profile.skills.slice(0, 64).map((s) => capAuthoredText(s, 200)),
+      // v2 (NIP §8): the publish-time re-cap must not be LOOSER than the schema —
+      // aligned from 64 to MAX_SKILLS (50), the intake cap on the submission.
+      skills: profile.skills.slice(0, MAX_SKILLS).map((s) => capAuthoredText(s, 200)),
       looking_for: capAuthoredText(profile.looking_for),
       links: profile.links.slice(0, 32).map((l) => capAuthoredText(l, 500)),
     };

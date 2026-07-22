@@ -20,6 +20,7 @@ import {
   type MediaDescriptor,
   type AttendeeProfile,
   pickLatest,
+  MAX_SUBMISSION_MEDIA,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
@@ -178,11 +179,16 @@ export async function submitProfileAndMedia(
   const attendeePubkey = await signer.getPublicKey();
   const introText = args.introText?.trim() || undefined;
 
+  // v2 (NIP §8): the 21601 submission carries at most MAX_SUBMISSION_MEDIA (4)
+  // descriptors, or the coordinator rejects it wholesale at the schema boundary.
+  // The 31602 self-copy/library keeps the full set (MAX_MEDIA=20).
+  const submissionMedia = args.media.slice(0, MAX_SUBMISSION_MEDIA);
+
   // 21601 → E_inbox (gift-wrapped).
   const submission = {
     v: 2,
     profile: args.profile,
-    media: args.media,
+    media: submissionMedia,
     ...(introText ? { intro_text: introText } : {}),
   };
   const wrap = await signerWrap(signer, ctx.config.inbox, {

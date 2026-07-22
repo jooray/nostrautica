@@ -39,6 +39,7 @@ describe("media descriptor + AES-GCM (spec §6.2)", () => {
       kind: "intro",
       data,
       mime: "video/webm",
+      duration: 5,
       urls: [],
     });
     expect(descriptor.url).toEqual([]);
@@ -56,6 +57,7 @@ describe("media descriptor + AES-GCM (spec §6.2)", () => {
       kind: "intro",
       data: new Uint8Array([1, 2, 3]),
       mime: "video/webm",
+      duration: 3,
       urls: [sampleUrl],
     });
     ciphertext[0]! ^= 0xff;
@@ -68,6 +70,7 @@ describe("media descriptor + AES-GCM (spec §6.2)", () => {
       kind: "intro",
       data,
       mime: "video/webm",
+      duration: 7,
       urls: [sampleUrl],
     });
     const fresh = await freshCopy(orig.descriptor, orig.ciphertext, [

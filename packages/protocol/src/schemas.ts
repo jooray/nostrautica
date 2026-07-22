@@ -134,13 +134,15 @@ function httpsUrl(maxLen?: number) {
 // `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an
 // unexpected field is rejected rather than silently ignored. Key/nonce lengths are
 // validated (C3) so a malformed descriptor can't reach the crypto layer.
-export const mediaDescriptorSchema = z
+const mediaDescriptorBase = z
   .object({
     kind: z.enum(["intro", "talk"]),
     url: z.array(httpsUrl()).min(1),
     x: hex32, // sha256 of ciphertext
     ox: hex32, // sha256 of plaintext
-    size: z.number().int().nonnegative(),
+    // v2 (NIP §8): a real blob is at least 1 byte — AES-GCM always emits ≥ the
+    // 16-byte tag — so `size: 0` is no longer a valid descriptor.
+    size: z.number().int().min(1),
     m: z.string(), // mime type
     duration: z.number().nonnegative().optional(),
     "encryption-algorithm": z.literal("aes-gcm"),
@@ -148,6 +150,28 @@ export const mediaDescriptorSchema = z
     "decryption-nonce": base64Bytes(12, "decryption-nonce"), // 12 bytes b64
   })
   .strict();
+
+/**
+ * v2 (NIP §8): `duration` is REQUIRED for audio/* and video/* media. The
+ * coordinator gates STT and pipeline segmentation on it and enforces per-event
+ * duration limits against the declared value, so an a/v descriptor without a
+ * duration is incomplete. Text/image descriptors leave it optional.
+ */
+function requireAvDuration(
+  val: { m: string; duration?: number },
+  ctx: z.RefinementCtx,
+): void {
+  const isAv = val.m.startsWith("audio/") || val.m.startsWith("video/");
+  if (isAv && val.duration === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["duration"],
+      message: "duration is required for audio/video media",
+    });
+  }
+}
+
+export const mediaDescriptorSchema = mediaDescriptorBase.superRefine(requireAvDuration);
 export type MediaDescriptor = z.infer<typeof mediaDescriptorSchema>;
 
 // Pre-upload draft: identical to mediaDescriptorSchema but `url` may be empty,
@@ -155,10 +179,12 @@ export type MediaDescriptor = z.infer<typeof mediaDescriptorSchema>;
 // `encryptMedia` validates this draft at encrypt time; the finalized descriptor
 // (real https URLs filled in) is validated against the strict schema at upload
 // time. Without this, encrypting an intro throws on the placeholder URL before a
-// single byte is uploaded.
-export const mediaDescriptorDraftSchema = mediaDescriptorSchema
+// single byte is uploaded. The a/v-duration rule applies here too, so the
+// recorder can't produce a durationless a/v blob even before upload.
+export const mediaDescriptorDraftSchema = mediaDescriptorBase
   .extend({ url: z.array(z.string()) })
-  .strict();
+  .strict()
+  .superRefine(requireAvDuration);
 
 // ── Media transcript (spec §9.2, audit A1) ───────────────────────────────────
 // A transcript tied to a specific media blob by its ciphertext hash `x`. The
@@ -211,7 +237,11 @@ export const MAX_REASONING = 2000; // per-match reasoning
 export const MAX_MATCHES = 100; // 31605 matches array items
 export const MAX_ROSTER = 2000; // 31604 attendees array items
 export const MAX_RELAYS = 30; // relay URL array items
-export const MAX_MEDIA = 20; // media descriptors per payload
+export const MAX_MEDIA = 20; // media descriptors per 31602 self-copy / reuse library
+// v2 (NIP §8): a 21601 profile submission carries at most 4 processed media
+// descriptors — aligned with the coordinator's long-standing MAX_MEDIA_PER_SUBMISSION
+// enforcement. The 31602 self-copy/library keeps MAX_MEDIA (it legitimately holds more).
+export const MAX_SUBMISSION_MEDIA = 4;
 export const MAX_D = 200; // blinded `d` identifier chars (roster/directory)
 export const MAX_MATCH_PAIRS = 200_000; // 31606 match-matrix pairs array items
 export const MAX_TITLE = 300; // members-post title
@@ -277,7 +307,7 @@ export type JoinRequestContent = z.infer<typeof joinRequestContentSchema>;
 export const profileSubmissionContentSchema = z.object({
   v: version,
   profile: attendeeProfileSchema,
-  media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
+  media: z.array(mediaDescriptorSchema).max(MAX_SUBMISSION_MEDIA).default([]),
   // A plain-text intro (spec F1): an alternative to an audio/video intro for
   // attendees who can't/won't record. Feeds the ai_profile like a transcript,
   // but has NO media blob. Bounded so it can't bloat the encrypted submission.
@@ -301,13 +331,16 @@ export type ProfileSubmissionContent = z.infer<
 export const AI_PROFILE_FIELDS = ["summary", "skills", "interests", "offers", "seeks"] as const;
 export type AiProfileField = (typeof AI_PROFILE_FIELDS)[number];
 
-/** Per-field overrides of the generated ai_profile. */
+/** Per-field overrides of the generated ai_profile. v2 (NIP §8): bounded exactly
+ *  like `ai_profile` (summary ≤ 5000, ≤ 50 list items of ≤ 200 chars) — v1's
+ *  unbounded overrides were a storage-amplification bug (an approved attendee could
+ *  push arbitrarily large text the coordinator stored and merged into every 31603). */
 export const aiProfileOverrideSchema = z.object({
-  summary: z.string().optional(),
-  skills: z.array(z.string()).optional(),
-  interests: z.array(z.string()).optional(),
-  offers: z.array(z.string()).optional(),
-  seeks: z.array(z.string()).optional(),
+  summary: z.string().max(MAX_ABOUT).optional(),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
+  interests: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
+  offers: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
+  seeks: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
 });
 export type AiProfileOverride = z.infer<typeof aiProfileOverrideSchema>;
 

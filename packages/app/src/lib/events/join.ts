@@ -15,6 +15,7 @@ import {
   KIND_CALENDAR_RSVP,
   makeInviteProof,
   blindedD,
+  MAX_SUBMISSION_MEDIA,
   type AttendeeProfile,
   type MediaDescriptor,
 } from "@nostrautica/protocol";
@@ -83,7 +84,9 @@ export async function sendJoinRequest(
     const submission = {
       v: 2,
       profile: input.profile,
-      media: input.media ?? [],
+      // v2 (NIP §8): the 21601 submission caps media at MAX_SUBMISSION_MEDIA (4);
+      // the 31602 self-copy below keeps the full set (MAX_MEDIA).
+      media: (input.media ?? []).slice(0, MAX_SUBMISSION_MEDIA),
     };
     wraps.push(
       signerWrap(signer, inboxPubkey, {

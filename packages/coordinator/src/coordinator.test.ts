@@ -353,7 +353,7 @@ async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Pr
         kind: "intro", url: ["https://blob/x"],
         x: String(ORDER.indexOf(fixture)).repeat(64).slice(0, 64),
         ox: "b".repeat(64),
-        size: blobSize(fixture), m: "video/webm",
+        size: blobSize(fixture), m: "video/webm", duration: 30,
         "encryption-algorithm": "aes-gcm",
         "decryption-key": bytesToBase64(new Uint8Array(32)),
         "decryption-nonce": bytesToBase64(new Uint8Array(12)),
@@ -383,7 +383,7 @@ async function resubmitIntro(h: Harness, attendeeSk: Uint8Array, fixture: Fixtur
         kind: "intro", url: ["https://blob/x2"],
         x: String(9).repeat(64).slice(0, 63) + String(ORDER.indexOf(fixture)),
         ox: "c".repeat(64),
-        size: newSize, m: "video/webm",
+        size: newSize, m: "video/webm", duration: 30,
         "encryption-algorithm": "aes-gcm",
         "decryption-key": bytesToBase64(new Uint8Array(32)),
         "decryption-nonce": bytesToBase64(new Uint8Array(12)),
@@ -435,6 +435,7 @@ function mediaDesc(sizeKey: number, x: string, mime: string) {
     ox: "b".repeat(64),
     size: sizeKey,
     m: mime,
+    duration: 30,
     "encryption-algorithm": "aes-gcm" as const,
     "decryption-key": bytesToBase64(new Uint8Array(32)),
     "decryption-nonce": bytesToBase64(new Uint8Array(12)),
@@ -1263,6 +1264,7 @@ function talkMedia(size: number, x: string) {
     ox: "b".repeat(64),
     size,
     m: "video/webm",
+    duration: 30,
     "encryption-algorithm": "aes-gcm" as const,
     "decryption-key": bytesToBase64(new Uint8Array(32)),
     "decryption-nonce": bytesToBase64(new Uint8Array(12)),
@@ -1763,14 +1765,29 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
 });
 
 describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
-  it("caps media descriptors per submission at 4 (extras skipped)", async () => {
+  it("processes a submission at the 4-media cap", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const media = [0, 1, 2, 3].map((i) => mediaDesc(100 + i, String(i).repeat(64), "video/webm"));
+    const pk = await joinCustom(h, sk, "tester", ["zk"], { media });
+    const d = blindedD(h.eck, h.coordinate, pk);
+    const entry = latestDirectory(h.transport, h.eck, d);
+    expect(entry.media).toHaveLength(4);
+  });
+
+  it("rejects a submission carrying MORE than 4 media descriptors (schema cap, v2 NIP §8)", async () => {
+    // v1 sliced extras off a >4 submission; v2 caps the 21601 media array at
+    // MAX_SUBMISSION_MEDIA=4 in the schema, so a 5-media submission fails to parse
+    // and is dropped wholesale — no directory entry is ever published for it.
     const h = await setup();
     const sk = generateSecretKey();
     const media = [0, 1, 2, 3, 4].map((i) => mediaDesc(100 + i, String(i).repeat(64), "video/webm"));
     const pk = await joinCustom(h, sk, "tester", ["zk"], { media });
     const d = blindedD(h.eck, h.coordinate, pk);
+    // The approval still publishes a directory entry, but the over-cap submission
+    // never parsed, so none of its media landed on it.
     const entry = latestDirectory(h.transport, h.eck, d);
-    expect(entry.media).toHaveLength(4);
+    expect(entry.media).toHaveLength(0);
   });
 
   it("skips transcription of media over the event's duration cap", async () => {

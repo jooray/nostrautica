@@ -42,6 +42,7 @@ import {
   MAX_ROSTER,
   MAX_RELAYS,
   MAX_MEDIA,
+  MAX_SUBMISSION_MEDIA,
   MAX_LIBRARY_TEXTS,
   MAX_INTRO_TEXT,
   MAX_LANG,
@@ -799,16 +800,23 @@ describe("boundary length caps (PROTO-4)", () => {
     ).toThrow();
   });
 
-  it("media arrays are capped at MAX_MEDIA (21601 / 31602 / 31603)", () => {
+  it("media arrays are capped (21601 at MAX_SUBMISSION_MEDIA, 31602 / 31603 at MAX_MEDIA)", () => {
+    // v2 (NIP §8): a 21601 submission is capped at 4; the 31602 library holds up to 20.
     roundTrips(profileSubmissionContentSchema, {
       v: 2,
       profile: emptyProfile,
-      media: Array(MAX_MEDIA).fill(descriptor),
+      media: Array(MAX_SUBMISSION_MEDIA).fill(descriptor),
     });
-    const tooMany = Array(MAX_MEDIA + 1).fill(descriptor);
-    expect(() =>
-      profileSubmissionContentSchema.parse({ v: 2, profile: emptyProfile, media: tooMany }),
+    expect(
+      () =>
+        profileSubmissionContentSchema.parse({
+          v: 2,
+          profile: emptyProfile,
+          media: Array(MAX_SUBMISSION_MEDIA + 1).fill(descriptor),
+        }),
     ).toThrow();
+    roundTrips(myProfileContentSchema, { v: 2, a: null, media: Array(MAX_MEDIA).fill(descriptor) });
+    const tooMany = Array(MAX_MEDIA + 1).fill(descriptor);
     expect(() => myProfileContentSchema.parse({ v: 2, a: null, media: tooMany })).toThrow();
     // The reuse text library is likewise bounded (count + per-item length).
     expect(() =>
@@ -915,5 +923,76 @@ describe("wire version 2 is strict (NIP §2, D1/D2)", () => {
     expect(isNewerVersionTag([["v", "1"]])).toBe(false);
     expect(readEventVersionTag([["v", "7"]])).toBe(7);
     expect(readEventVersionTag([["v", "x"]])).toBeUndefined();
+  });
+});
+
+describe("media descriptor tightening (NIP §8, v2)", () => {
+  it("rejects size 0 (a real encrypted blob is ≥ 1 byte)", () => {
+    expect(() => mediaDescriptorSchema.parse({ ...descriptor, size: 0 })).toThrow();
+    // size 1 is the new floor and parses.
+    expect(mediaDescriptorSchema.parse({ ...descriptor, size: 1 }).size).toBe(1);
+  });
+
+  it("requires duration for audio/* and video/* media", () => {
+    const { duration: _drop, ...noDuration } = descriptor;
+    // video/* without duration → rejected.
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...noDuration, m: "video/webm" }),
+    ).toThrow(/duration/);
+    // audio/* without duration → rejected.
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...noDuration, m: "audio/webm" }),
+    ).toThrow(/duration/);
+    // a non-a/v mime may still omit duration.
+    expect(
+      mediaDescriptorSchema.parse({ ...noDuration, m: "image/png" }).m,
+    ).toBe("image/png");
+    // a/v WITH duration parses.
+    expect(
+      mediaDescriptorSchema.parse({ ...noDuration, m: "video/webm", duration: 12 }).duration,
+    ).toBe(12);
+  });
+});
+
+describe("21608 correction overrides are bounded (NIP §8, v2)", () => {
+  const coordinate = "31923:" + hex + ":ev";
+
+  it("rejects an oversized override summary (> MAX_ABOUT)", () => {
+    expect(() =>
+      profileCorrectionContentSchema.parse({
+        v: 2,
+        a: coordinate,
+        overrides: { summary: "x".repeat(MAX_ABOUT + 1) },
+      }),
+    ).toThrow();
+  });
+
+  it("rejects too many override list entries and over-long items", () => {
+    expect(() =>
+      profileCorrectionContentSchema.parse({
+        v: 2,
+        a: coordinate,
+        overrides: { skills: Array(MAX_SKILLS + 1).fill("s") },
+      }),
+    ).toThrow();
+    expect(() =>
+      profileCorrectionContentSchema.parse({
+        v: 2,
+        a: coordinate,
+        overrides: { interests: ["x".repeat(MAX_SKILL + 1)] },
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a correction within the ai_profile bounds", () => {
+    const ok = profileCorrectionContentSchema.parse({
+      v: 2,
+      a: coordinate,
+      overrides: {
+        summary: "x".repeat(MAX_ABOUT),
+        skills: Array(MAX_SKILLS).fill("s".repeat(MAX_SKILL)),
+      },
+    });
+    expect(ok.overrides?.skills).toHaveLength(MAX_SKILLS);
   });
 });
