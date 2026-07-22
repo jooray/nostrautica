@@ -33,6 +33,20 @@ import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
 // readiness paint the last intro/library instantly instead of re-decrypting.
 type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string };
+
+/**
+ * Whether a self-copy carries an intro (audit UX-O5). An intro is EITHER a
+ * recording (media of kind "intro") OR an authored text intro (F1). Both the
+ * readiness store and Join's post-approval routing must agree, so this is the
+ * single source of truth — checking only media wrongly told text-intro users to
+ * "record your intro."
+ */
+export function hasIntro(
+  self: { media?: MediaDescriptor[]; introText?: string } | undefined,
+): boolean {
+  return (self?.media ?? []).some((m) => m.kind === "intro") || !!self?.introText?.trim();
+}
+
 function selfCopyKey(coordinate: string): string {
   return `selfcopy:${coordinate}`;
 }

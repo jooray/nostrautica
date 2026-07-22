@@ -15,7 +15,7 @@
   import { parseCoordinate } from "@nostrautica/protocol";
   import { fetchProfiles } from "$lib/events/social.js";
   import { uploadPublicImage, prepareAvatarImage } from "$lib/media/image.js";
-  import { loadLibrary, prepareReuse, loadSelfCopy } from "$lib/media/submit.js";
+  import { loadLibrary, prepareReuse, loadSelfCopy, hasIntro } from "$lib/media/submit.js";
   import type { MediaDescriptor } from "@nostrautica/protocol";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
@@ -186,7 +186,9 @@
     try {
       const bk = await deriveBlindingKey(session.signer);
       const self = await loadSelfCopy(session.signer, ctx, bk);
-      introDone = (self?.media ?? []).some((m) => m.kind === "intro");
+      // An intro is a recording OR an authored text intro — one shared check
+      // (audit UX-O5), so text-intro users aren't told to "record your intro."
+      introDone = hasIntro(self);
     } catch {
       /* can't tell — default to offering Record (introDone stays false) */
     }

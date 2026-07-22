@@ -1,11 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { resolveBlossomServers } from "./submit.js";
+import { resolveBlossomServers, hasIntro } from "./submit.js";
+import type { MediaDescriptor } from "@nostrautica/protocol";
 import { DEFAULT_BLOSSOM_SERVERS } from "$lib/nostr/relays.js";
 import type { EventContext } from "$lib/events/event-context.js";
 
 function ctxWith(blossom: string[]): EventContext {
   return { config: { blossom } } as unknown as EventContext;
 }
+
+describe("hasIntro (UX-O5: recording OR text intro)", () => {
+  const intro = { kind: "intro" } as unknown as MediaDescriptor;
+  const talk = { kind: "talk" } as unknown as MediaDescriptor;
+
+  it("recognizes a media intro", () => {
+    expect(hasIntro({ media: [intro] })).toBe(true);
+  });
+  it("recognizes a text-only intro (the UX-O5 gap)", () => {
+    expect(hasIntro({ media: [], introText: "hello, I build things" })).toBe(true);
+  });
+  it("ignores whitespace-only text and non-intro media", () => {
+    expect(hasIntro({ media: [talk], introText: "   " })).toBe(false);
+  });
+  it("handles a missing/undefined self-copy", () => {
+    expect(hasIntro(undefined)).toBe(false);
+    expect(hasIntro({})).toBe(false);
+  });
+});
 
 describe("resolveBlossomServers (encrypted media)", () => {
   it("unions event-configured servers with app defaults, event servers first", () => {

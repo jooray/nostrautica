@@ -23,7 +23,7 @@ import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
 import { backupNag } from "$lib/stores/backup-nag.svelte.js";
 import { hasDurableKeyBackup } from "./key-backup.js";
 import { deriveBlindingKey } from "./blinding.js";
-import { loadSelfCopy } from "$lib/media/submit.js";
+import { loadSelfCopy, hasIntro as hasIntroFrom } from "$lib/media/submit.js";
 import { online } from "$lib/stores/online.svelte.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
@@ -106,8 +106,7 @@ class ReadinessStore {
           const bk = await deriveBlindingKey(signer);
           const self = await loadSelfCopy(signer, ctx, bk);
           // An intro can be a recording (media kind "intro") OR a text intro (F1).
-          hasIntro =
-            (self?.media ?? []).some((m) => m.kind === "intro") || !!self?.introText?.trim();
+          hasIntro = hasIntroFrom(self);
         } catch {
           hasIntro = undefined; // couldn't tell — model shows "Checking status"
         }
