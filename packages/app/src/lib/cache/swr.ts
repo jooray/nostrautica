@@ -6,7 +6,7 @@
  * per key (like prefetch.ts's `warm()`), and a short TTL keeps a remount from
  * re-hitting relays. Background refreshes never throw to the caller.
  */
-import { cacheGet, cacheSet, activeCacheOwner } from "./persist.js";
+import { cacheGet, cacheSet, activeCacheOwner, cacheGeneration } from "./persist.js";
 
 export interface SwrOptions<T> {
   /** Cache scope: "anon" for public data, an owner pubkey, or omit for the
@@ -66,10 +66,14 @@ export async function swr<T>(
   const running = inflight.get(dk) as Promise<T | undefined> | undefined;
   if (running) return running.then((v) => v ?? cached?.data);
 
+  // Capture the owner-cache generation before the async fetch so a logout that
+  // lands while the fetcher is in flight fences this write out (H-5): the fresh
+  // value is never written back to the logged-out identity's cache.
+  const gen = cacheGeneration();
   const job = (async (): Promise<T | undefined> => {
     try {
       const fresh = await fetcher();
-      cacheSet(key, fresh, atOf ? atOf(fresh) : undefined, scope);
+      cacheSet(key, fresh, atOf ? atOf(fresh) : undefined, scope, gen);
       apply(fresh, "network");
       lastRefreshAt.set(dk, Date.now());
       return fresh;

@@ -8,6 +8,8 @@ import {
   __resetPersistForTests,
   setActiveCacheOwner,
   cacheSet,
+  cacheGet,
+  clearOwnerCache,
   ANON,
   type PersistBackend,
 } from "./persist.js";
@@ -91,6 +93,22 @@ describe("swr", () => {
     expect(b).toBe("owner-value");
     expect(anonFetch).toHaveBeenCalledTimes(1);
     expect(ownerFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a fetch that resolves AFTER a logout does not repopulate owner cache (H-5)", async () => {
+    const owner = "a".repeat(64); // set as active in beforeEach
+    let release!: (v: string) => void;
+    const fetcher = vi.fn(() => new Promise<string>((r) => (release = r)));
+    // Fire an owner-scoped refresh; it captures the current generation up front.
+    const p = swr("dir", fetcher, () => {}, { scope: owner, ttlMs: 0, atOf: () => 200 });
+    // The user logs out mid-flight — clearOwnerCache advances the generation.
+    clearOwnerCache(owner);
+    // The slow relay finally answers with the logged-out identity's decrypted view.
+    release("owner-plaintext");
+    await p;
+    setActiveCacheOwner(owner);
+    // The write was fenced by the stale generation — no plaintext left behind.
+    expect(cacheGet("dir", owner)).toBeUndefined();
   });
 
   it("never throws on a background failure; returns the cached value", async () => {

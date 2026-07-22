@@ -9,6 +9,7 @@
   import { theme } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
+  import { initSessionBroadcast } from "$lib/signer/session-broadcast.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
   import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
@@ -37,6 +38,8 @@
 
   onMount(async () => {
     installRelayErrorGuard();
+    // H-5: drop this identity's owner state here if another tab logs it out.
+    initSessionBroadcast((owner) => session.applyRemoteLogout(owner));
     theme.init();
     i18n.init();
     online.init();
@@ -199,6 +202,19 @@
   {#if !online.isOnline}
     <div class="card warn" style="margin:0.5rem 0" role="status" aria-live="polite">
       {t("app.offline")}
+    </div>
+  {/if}
+  {#if session.logoutError}
+    <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
+      {t("logout.encryptFailed")}
+      <button
+        type="button"
+        class="btn"
+        style="margin-left:0.5rem"
+        onclick={() => (session.logoutError = false)}
+      >
+        {t("logout.dismiss")}
+      </button>
     </div>
   {/if}
   {#if showCompactHeader}
