@@ -4,7 +4,16 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
-  import { fetchRoster, cachedRoster, receiveGrants } from "$lib/events/attendee.js";
+  import { fetchRoster, cachedRoster, fetchDirectory, cachedDirectory, receiveGrants } from "$lib/events/attendee.js";
+  import {
+    mergePending,
+    visiblePending,
+    buildApprovedPeople,
+    summarizeBulk,
+    type AdminPerson,
+    type BulkItem,
+  } from "$lib/events/admin-people.js";
+  import type { DirectoryEntryContent, RosterContent } from "@nostrautica/protocol";
   import {
     fetchPending,
     cachedPending,
@@ -45,9 +54,18 @@
 
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let keys = $state<EventKeys | null>(null);
+  // `pending` is the DURABLE known join queue (UX-A2): a bounded relay refresh is
+  // merged into it, never allowed to replace it, so a transient partial fetch
+  // can't drop a request the organizer already saw.
   let pending = $state<PendingRequest[]>([]);
   let approvedSet = $state<Set<string>>(new Set()); // approved this session
   let rosterApproved = $state<Set<string>>(new Set()); // approved per the roster
+  // The full decrypted roster (UX-A1 source of truth) + directory entries, so the
+  // approved People section can be enumerated from durable state and enriched.
+  let roster = $state<RosterContent | undefined>(undefined);
+  let directory = $state<DirectoryEntryContent[] | undefined>(undefined);
+  // Data-freshness stamp, shown distinctly from item state (UX-A2).
+  let lastRefreshed = $state<number | undefined>(undefined);
   let loading = $state(true);
   // A subtle "refreshing…" affordance while background refreshes run on top of a
   // cached paint (CACHING-PLAN §2.11, §3.4) — spinners only on a true cold open.
@@ -82,12 +100,13 @@
   // transient "Revoked ✓" because the refresh moved the card first). Excluded
   // from pendingRequests for the same reason.
   let revokedSet = $state<Set<string>>(new Set());
-  const pendingRequests = $derived(
-    pending.filter((p) => !isApprovedNow(p.attendeePubkey) && !revokedSet.has(p.attendeePubkey)),
-  );
-  const approvedRequests = $derived(
-    pending.filter((p) => isApprovedNow(p.attendeePubkey) || revokedSet.has(p.attendeePubkey)),
-  );
+  // The pending QUEUE view: known requests minus confirmed transitions (approved
+  // in the roster / approved just now / revoked). Removal lives here — the merge
+  // never drops a known request (UX-A2).
+  const pendingRequests = $derived(visiblePending(pending, isApprovedNow, revokedSet));
+  // The approved People section is enumerated from the durable roster (UX-A1),
+  // enriched with recent intake + directory + statuses (statuses are folded in
+  // via `approvedPeople`, declared after coordStatuses is available).
 
   // The organizer is a participant of their own event only if they've enrolled
   // (the create-form checkbox, or the button below). Being the organizer is NOT
@@ -144,13 +163,28 @@
     // re-publishing the roster without the new attendee (bug found in caching
     // verification 2026-07-17: the parallel Promise.allSettled refresh made this
     // window wide enough to hit reliably in the e2e suite).
-    const [freshPending, roster] = await Promise.all([
+    const [freshPending, freshRoster] = await Promise.all([
       fetchPending(ctx, keys),
       fetchRoster(ctx).catch(() => undefined),
     ]);
-    pending = freshPending;
-    // Cross-reference the roster so already-approved attendees don't show as pending.
-    rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? []);
+    // Merge, don't replace (UX-A2): a bounded/partial relay scan folds INTO the
+    // known queue; a request already seen is never dropped by its absence here.
+    pending = mergePending(pending, freshPending);
+    // The roster is the durable approved source (UX-A1). A failed fetch keeps the
+    // last-known roster rather than blanking the approved section.
+    if (freshRoster) {
+      roster = freshRoster;
+      rosterApproved = new Set(freshRoster.attendees.map((a) => a.pubkey));
+    }
+    lastRefreshed = Math.floor(Date.now() / 1000);
+    // Enrich approved people with their directory entries (best-effort; the
+    // organizer holds the ECK). Runs in the background so it never blocks the
+    // queue paint.
+    void fetchDirectory(ctx)
+      .then((d) => {
+        if (!destroyed) directory = d;
+      })
+      .catch(() => {});
     // Pending talk submissions (spec F2.3) — moderation needs a coordinator to
     // publish the 31610, so only fetch the queue when one is attached.
     pendingTalks =
@@ -251,8 +285,12 @@
   function paintFromCache() {
     if (!ctx) return;
     const coord = ctx.coordinate;
-    pending = cachedPending(coord) ?? pending;
-    rosterApproved = new Set(cachedRoster(coord)?.attendees.map((a) => a.pubkey) ?? [...rosterApproved]);
+    // Seed the durable queue from cache, then merge so a stale cached entry never
+    // clobbers a fresher in-memory one (UX-A2).
+    pending = mergePending(pending, cachedPending(coord) ?? []);
+    roster = cachedRoster(coord) ?? roster;
+    directory = cachedDirectory(coord) ?? directory;
+    rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? [...rosterApproved]);
     pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
     coordStatuses = cachedCoordinatorStatuses(coord) ?? coordStatuses;
     coordLastSeen = cachedCoordinatorLastSeen(coord) ?? coordLastSeen;
@@ -305,6 +343,19 @@
   // the coordinator, gift-wrapped to E_id and authenticated against the configured
   // coordinator key. Dismiss is local-only (never a protocol action).
   let coordStatuses = $state<CoordinatorStatusContent[]>([]);
+  // Enumerated from the durable roster (UX-A1), enriched with intake + directory +
+  // statuses. A roster member with no fetchable intake still appears
+  // (intakeAvailable=false) with working revoke/reprocess controls.
+  const approvedPeople = $derived<AdminPerson[]>(
+    buildApprovedPeople({
+      roster,
+      sessionApproved: approvedSet,
+      revoked: revokedSet,
+      known: pending,
+      directory,
+      statuses: coordStatuses,
+    }),
+  );
   let dismissedStatuses = $state<Set<string>>(new Set(loadDismissed()));
   let retryingStatus = $state<string | null>(null);
 
@@ -447,23 +498,29 @@
     }
   }
 
-  async function reprocess(req: PendingRequest) {
+  async function reprocess(pubkey: string) {
     if (!ctx || !session.signer || !keys) return;
     try {
       if (ctx.config.coordinator) {
-        await sendAdminCommand(ctx, "reprocess", { pubkey: req.attendeePubkey });
+        await sendAdminCommand(ctx, "reprocess", { pubkey });
       } else {
         // Re-process exists to pull in a submission that landed AFTER approval —
         // typically a text intro the attendee typed once they were in. approveAttendee
         // threads req.introText into the 31603 entry, so it must act on a FRESH
-        // fetchPending: the in-memory `req` predates that submission (this admin
+        // fetchPending: any in-memory copy predates that submission (this admin
         // page hasn't re-read the E_inbox since it loaded), and republishing the
         // stale req drops the new intro entirely (caching verification 2026-07-17:
         // this is why the e2e directory-loop marker never reached the attendee).
         // Fetch-fresh-before-publish, same as the other read-modify-write paths.
         const fresh = await fetchPending(ctx, keys);
-        const latest = fresh.find((r) => r.attendeePubkey === req.attendeePubkey) ?? req;
-        pending = fresh; // keep the rendered queue in sync with what we just re-read
+        pending = mergePending(pending, fresh); // keep the queue in sync
+        const latest = fresh.find((r) => r.attendeePubkey === pubkey);
+        if (!latest) {
+          // No fetchable intake for this roster member (UX-A1): nothing to
+          // re-publish without a coordinator to recompute from stored state.
+          error = t("admin.reprocess.noIntake");
+          return;
+        }
         await approveAttendee(session.signer, ctx, latest); // re-publishes the entry
       }
     } catch (e) {
@@ -471,32 +528,30 @@
     }
   }
 
-  let approvingAll = $state(false);
+  /** Approve one attendee by pubkey (coordinator command or local approve).
+   *  Throws on failure so the bulk runner can record a per-item outcome. */
+  async function approveOne(pubkey: string): Promise<void> {
+    if (!ctx || !session.signer) throw new Error("not ready");
+    if (ctx.config.coordinator) {
+      // Route through the coordinator so IT grants + publishes the directory
+      // (attendees discover directory/roster/matches under the coordinator key).
+      await sendAdminCommand(ctx, "approve", { pubkey });
+    } else {
+      const req = pending.find((r) => r.attendeePubkey === pubkey);
+      if (!req) throw new Error(t("admin.reprocess.noIntake"));
+      await approveAttendee(session.signer, ctx, req);
+    }
+    approvedSet = new Set([...approvedSet, pubkey]);
+  }
+
   // Per-request busy guard (audit UX-27): a double-tap must not fire two
   // approvals (two roster republishes racing latest-wins).
   let approving = $state<Set<string>>(new Set());
-  async function approveAll() {
-    approvingAll = true;
-    try {
-      for (const req of pendingRequests) await approve(req);
-    } finally {
-      approvingAll = false;
-    }
-  }
-
   async function approve(req: PendingRequest) {
-    if (!ctx || !session.signer) return;
     if (approving.has(req.attendeePubkey)) return;
     approving = new Set([...approving, req.attendeePubkey]);
     try {
-      if (ctx.config.coordinator) {
-        // Route through the coordinator so IT grants + publishes the directory
-        // (attendees discover directory/roster/matches under the coordinator key).
-        await sendAdminCommand(ctx, "approve", { pubkey: req.attendeePubkey });
-      } else {
-        await approveAttendee(session.signer, ctx, req);
-      }
-      approvedSet = new Set([...approvedSet, req.attendeePubkey]);
+      await approveOne(req.attendeePubkey);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -504,20 +559,63 @@
     }
   }
 
+  // Bulk approval with per-item status (UX-A4): queued → publishing → confirmed /
+  // failed, with a final "N approved, M need retry" summary and individually
+  // retryable failures.
+  let approvingAll = $state(false);
+  let bulkItems = $state<BulkItem[]>([]);
+  let bulkRan = $state(false);
+  const bulkSummary = $derived(summarizeBulk(bulkItems));
+
+  function setBulk(pubkey: string, state: BulkItem["state"], errMsg?: string) {
+    bulkItems = bulkItems.map((it) =>
+      it.pubkey === pubkey ? { pubkey, state, error: errMsg } : it,
+    );
+  }
+
+  async function approveAll() {
+    approvingAll = true;
+    bulkRan = true;
+    bulkItems = pendingRequests.map((r) => ({ pubkey: r.attendeePubkey, state: "queued" as const }));
+    try {
+      for (const it of bulkItems) await runBulkItem(it.pubkey);
+    } finally {
+      approvingAll = false;
+    }
+  }
+
+  async function runBulkItem(pubkey: string) {
+    setBulk(pubkey, "publishing");
+    try {
+      await approveOne(pubkey);
+      setBulk(pubkey, "confirmed");
+    } catch (e) {
+      setBulk(pubkey, "failed", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function retryBulkItem(pubkey: string) {
+    await runBulkItem(pubkey);
+  }
+
+  function bulkItemState(pubkey: string): BulkItem["state"] | undefined {
+    return bulkItems.find((it) => it.pubkey === pubkey)?.state;
+  }
+
   // Inline, screenshotable revoke confirmation (no window.confirm) — the attendee
   // card swaps to the consequence copy + Revoke/Keep while this holds a pubkey.
   let confirmingRevoke = $state<string | null>(null);
-  async function revoke(req: PendingRequest) {
+  async function revoke(pubkey: string) {
     if (!ctx || !session.signer) return;
     confirmingRevoke = null;
     try {
       if (ctx.config.coordinator) {
-        await sendAdminCommand(ctx, "revoke", { pubkey: req.attendeePubkey });
+        await sendAdminCommand(ctx, "revoke", { pubkey });
       } else {
-        await revokeAttendeeClient(session.signer, ctx, req.attendeePubkey);
+        await revokeAttendeeClient(session.signer, ctx, pubkey);
       }
-      revokedSet = new Set([...revokedSet, req.attendeePubkey]);
-      approvedSet = new Set([...approvedSet].filter((p) => p !== req.attendeePubkey));
+      revokedSet = new Set([...revokedSet, pubkey]);
+      approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
@@ -646,6 +744,13 @@
     </button>
     <button class="btn inline" onclick={() => void refreshGuarded()}>{t("admin.refresh")}</button>
   </div>
+  {#if lastRefreshed !== undefined}
+    <!-- Data freshness shown distinctly from item state (UX-A2): "as of" is about
+         when we last heard from relays, not about any one request's status. -->
+    <p class="muted" style="font-size:0.75rem;margin:0 0 0.35rem">
+      {t("admin.freshness", { ago: sinceLabel(lastRefreshed) })}
+    </p>
+  {/if}
 
   <!-- Operations first (§9): urgent join requests render above everything else,
        so a pending approval is visible without scrolling past setup/invite QR. -->
@@ -769,7 +874,14 @@
         {approvingAll ? t("admin.requests.approving") : t("admin.requests.approveAll", { n: pendingRequests.length })}
       </button>
     {/if}
+    {#if bulkRan && bulkSummary.done && (bulkSummary.approved > 0 || bulkSummary.needRetry > 0)}
+      <!-- UX-A4 final tally after a bulk run: N approved, M need retry. -->
+      <p class="muted" role="status" aria-live="polite" style="margin:0.25rem 0">
+        {t("admin.requests.bulkSummary", { approved: bulkSummary.approved, retry: bulkSummary.needRetry })}
+      </p>
+    {/if}
     {#each pendingRequests as req (req.attendeePubkey)}
+      {@const bulk = bulkItemState(req.attendeePubkey)}
       <div class="card">
         <strong>{req.name}</strong>
         <span class="badge">{short(req.attendeePubkey)}</span>
@@ -781,41 +893,59 @@
           </div>
         {/if}
         {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
-        <button
-          class="btn primary"
-          onclick={() => approve(req)}
-          disabled={approving.has(req.attendeePubkey)}
-        >{t("admin.requests.approve")}</button>
+        {#if bulk === "queued" || bulk === "publishing"}
+          <p class="muted" role="status" style="margin:0.25rem 0 0">
+            {bulk === "publishing" ? t("admin.requests.bulk.publishing") : t("admin.requests.bulk.queued")}
+          </p>
+        {:else if bulk === "failed"}
+          <p class="muted" style="color:var(--danger);margin:0.25rem 0 0">{t("admin.requests.bulk.failed")}</p>
+          <button class="btn inline" onclick={() => void retryBulkItem(req.attendeePubkey)}>
+            {t("admin.requests.bulk.retry")}
+          </button>
+        {:else}
+          <button
+            class="btn primary"
+            onclick={() => approve(req)}
+            disabled={approving.has(req.attendeePubkey)}
+          >{t("admin.requests.approve")}</button>
+        {/if}
       </div>
     {/each}
   </div>
 
-  {#if approvedRequests.length}
+  {#if approvedPeople.length}
     <h2 class="section-head">{t("admin.section.people")}</h2>
-    <h2>{t("admin.approved.title", { n: approvedRequests.length })}</h2>
+    <h2>{t("admin.approved.title", { n: approvedPeople.length })}</h2>
     <div class="stack">
-      {#each approvedRequests as req (req.attendeePubkey)}
+      {#each approvedPeople as person (person.pubkey)}
         <div class="card">
-          <strong>{req.name}</strong>
-          <span class="badge">{short(req.attendeePubkey)}</span>
-          {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
-          {#if revokedSet.has(req.attendeePubkey)}
+          <strong>{person.name ?? short(person.pubkey)}</strong>
+          <span class="badge">{short(person.pubkey)}</span>
+          {#if person.role === "organizer"}<span class="badge">{t("admin.people.organizer")}</span>{/if}
+          {#if person.media?.length}<span class="badge">{tp("admin.requests.video", person.media.length)}</span>{/if}
+          {#if person.op === "failed"}<span class="badge warn">{t("admin.people.failed")}</span>{/if}
+          {#if !person.intakeAvailable && !person.revoked}
+            <!-- UX-A1: a roster member whose intake aged out of the backfill window
+                 still gets a card + working controls, never silently omitted. -->
+            <p class="muted" style="margin:0.25rem 0">{t("admin.people.intakeUnavailable")}</p>
+          {/if}
+          {#if person.revoked}
             <p class="muted">{t("admin.revoked")}</p>
-          {:else if confirmingRevoke === req.attendeePubkey}
+          {:else if confirmingRevoke === person.pubkey}
             <p class="muted" style="margin:0.25rem 0">
               {t("admin.revoke.confirm")}
             </p>
             <div class="row">
-              <button class="btn inline danger" onclick={() => revoke(req)}>{t("admin.revoke.revoke")}</button>
+              <button class="btn inline danger" onclick={() => revoke(person.pubkey)}>{t("admin.revoke.revoke")}</button>
               <button class="btn inline" onclick={() => (confirmingRevoke = null)}>{t("admin.revoke.keep")}</button>
             </div>
           {:else}
             <p class="muted">{t("admin.approvedTag")}</p>
             <div class="row">
-              <button class="btn inline" onclick={() => reprocess(req)}>{t("admin.reprocess")}</button>
+              <button class="btn inline" onclick={() => reprocess(person.pubkey)}>{t("admin.reprocess")}</button>
               <button
                 class="btn inline danger"
-                onclick={() => (confirmingRevoke = req.attendeePubkey)}
+                onclick={() => (confirmingRevoke = person.pubkey)}
               >
                 {t("admin.revoke.revoke")}
               </button>
