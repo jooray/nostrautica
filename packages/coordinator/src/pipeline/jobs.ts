@@ -118,6 +118,19 @@ export class JobRunner {
       this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true, token);
       return;
     }
+    // Heartbeat the lease while the handler runs (audit P0-6). A pipeline handler
+    // can download + transcode media, call several models, or score a batch — far
+    // longer than the 5-minute lease. Without a heartbeat the lease expires under
+    // an alive-but-slow worker and a second worker reclaims the job, duplicating
+    // paid work. We extend the lease at a third of its length; a handler that
+    // stops heartbeating (a truly dead/hung worker) correctly lets the lease
+    // lapse so recovery can reclaim it. The interval is unref'd so it never keeps
+    // the process alive on its own.
+    const heartbeatMs = Math.max(1, Math.floor(this.leaseMs / 3));
+    const heartbeat = setInterval(() => {
+      this.store.heartbeatJob(job.id, token, this.now() + this.leaseMs);
+    }, heartbeatMs);
+    (heartbeat as { unref?: () => void }).unref?.();
     try {
       await handler(JSON.parse(job.payload), {
         enqueue: (t, k, p) => this.enqueue(t, k, p),
@@ -140,6 +153,8 @@ export class JobRunner {
       if (poison && owned && this.onPoison) {
         this.onPoison({ type: job.type, payload: safeParse(job.payload), attempts, error: msg });
       }
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 }
