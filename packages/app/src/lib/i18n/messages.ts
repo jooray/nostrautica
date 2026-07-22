@@ -858,6 +858,9 @@ export const messages = {
     "chat.devices.title": "This device is in the chat",
     "chat.devices.body":
       "Each device has its own chat key, added to the group on its own. To chat from your phone or another browser, just open this event there and sign in — it joins automatically. History starts from when each device joins.",
+    "chat.otherTab.title": "Chat is open in another tab",
+    "chat.otherTab.body":
+      "This event's chat is active in another tab or window. Use it there to send messages — the newest messages still show here.",
     "chat.display.label": "Chat style",
     "chat.display.bubbles": "Bubbles",
     "chat.display.irc": "IRC",
@@ -1851,6 +1854,9 @@ export const messages = {
     "chat.devices.title": "Toto zariadenie je v chate",
     "chat.devices.body":
       "Každé zariadenie má vlastný kľúč chatu, ktorý sa do skupiny pridá samostatne. Ak chcete chatovať z telefónu alebo iného prehliadača, stačí tam otvoriť túto akciu a prihlásiť sa — pripojí sa automaticky. História začína od pripojenia daného zariadenia.",
+    "chat.otherTab.title": "Chat je otvorený v inej karte",
+    "chat.otherTab.body":
+      "Chat tohto podujatia je aktívny v inej karte alebo okne. Ak chcete posielať správy, použite ho tam — najnovšie správy sa zobrazujú aj tu.",
     "chat.display.label": "Štýl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",
@@ -2846,6 +2852,9 @@ export const messages = {
     "chat.devices.title": "Toto zařízení je v chatu",
     "chat.devices.body":
       "Každé zařízení má vlastní klíč chatu, který se do skupiny přidá samostatně. Chcete-li chatovat z telefonu nebo jiného prohlížeče, stačí tam otevřít tuto akci a přihlásit se — připojí se automaticky. Historie začíná od připojení daného zařízení.",
+    "chat.otherTab.title": "Chat je otevřený v jiné kartě",
+    "chat.otherTab.body":
+      "Chat této akce je aktivní v jiné kartě nebo okně. Chcete-li posílat zprávy, použijte jej tam — nejnovější zprávy se zobrazují i zde.",
     "chat.display.label": "Styl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",

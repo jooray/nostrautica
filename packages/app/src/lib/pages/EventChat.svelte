@@ -59,6 +59,10 @@
   const chat = $derived(chatSession.chat);
   const messages = $derived(chatSession.messages);
   const chatPubkey = $derived(chatSession.chatPubkey);
+  // Multi-tab (H-7): a read-only follower can't send from this tab — chat is
+  // active in another tab, or Web Locks is unavailable. Show a notice + disable
+  // the composer; the newest messages still render from the leader's broadcast.
+  const readOnly = $derived(chatSession.readOnly);
   // Setup usually completes within seconds (member publishes key package →
   // coordinator adds them → welcome lands). If it's still spinning after a grace
   // period the coordinator may be slow/asleep or a socket dropped — surface a
@@ -395,23 +399,33 @@
     </div>
   {/if}
 
-  <form class="compose" bind:this={composerEl} onsubmit={(e) => { e.preventDefault(); void send(); }}>
-    <textarea
-      bind:value={draft}
-      rows="1"
-      placeholder={t("chat.compose.placeholder")}
-      disabled={phase === "setup"}
-      onkeydown={(e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          void send();
-        }
-      }}
-    ></textarea>
-    <button class="send" type="submit" disabled={!draft.trim() || sending || phase === "setup"} aria-label={t("chat.send")}>
-      <Icon name="send" size={20} />
-    </button>
-  </form>
+  {#if readOnly}
+    <div class="disclosure" role="note">
+      <Icon name="info" size={18} />
+      <div>
+        <p style="font-weight:650">{t("chat.otherTab.title")}</p>
+        <p>{t("chat.otherTab.body")}</p>
+      </div>
+    </div>
+  {:else}
+    <form class="compose" bind:this={composerEl} onsubmit={(e) => { e.preventDefault(); void send(); }}>
+      <textarea
+        bind:value={draft}
+        rows="1"
+        placeholder={t("chat.compose.placeholder")}
+        disabled={phase === "setup"}
+        onkeydown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void send();
+          }
+        }}
+      ></textarea>
+      <button class="send" type="submit" disabled={!draft.trim() || sending || phase === "setup"} aria-label={t("chat.send")}>
+        <Icon name="send" size={20} />
+      </button>
+    </form>
+  {/if}
 
   {#if sendError}
     <p class="send-error" role="alert">{sendError}</p>
