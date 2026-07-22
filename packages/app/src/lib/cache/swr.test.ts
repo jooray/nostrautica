@@ -71,6 +71,28 @@ describe("swr", () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
 
+  it("TTL suppression is scope-qualified: a different scope still refreshes (App-5)", async () => {
+    const fetcher = vi.fn(async () => "v");
+    await swr("k", fetcher, () => {}, { scope: ANON, ttlMs: 10_000, atOf: () => 1 });
+    // Same key, DIFFERENT scope, within the anon TTL — must still hit the network.
+    await swr("k", fetcher, () => {}, { scope: "b".repeat(64), ttlMs: 10_000 });
+    expect(fetcher).toHaveBeenCalledTimes(2); // pre-fix: 1 (bare-key TTL collision)
+  });
+
+  it("in-flight results do not bleed across scopes (App-5)", async () => {
+    const anonFetch = vi.fn(async () => "anon-value");
+    const ownerFetch = vi.fn(async () => "owner-value");
+    const [a, b] = await Promise.all([
+      swr("k", anonFetch, () => {}, { scope: ANON, ttlMs: 0 }),
+      swr("k", ownerFetch, () => {}, { scope: "b".repeat(64), ttlMs: 0 }),
+    ]);
+    // Pre-fix the owner call reused the anon in-flight job and returned "anon-value".
+    expect(a).toBe("anon-value");
+    expect(b).toBe("owner-value");
+    expect(anonFetch).toHaveBeenCalledTimes(1);
+    expect(ownerFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("never throws on a background failure; returns the cached value", async () => {
     cacheSet("k", "cached", 100, ANON);
     const fresh = await swr(
