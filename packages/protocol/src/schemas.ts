@@ -351,6 +351,26 @@ export const myProfileContentSchema = z.object({
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 
+// ── 31602 chat device-key backup (self-encrypted, cross-device) ──────────────
+// A remote-signer (NIP-46/NIP-07) account's MLS chat *device* key, self-encrypted
+// (NIP-44 to the account's OWN pubkey) and published as a SIBLING per-user 31602
+// entry — its `d` blinded over the literal "chat-device-key", `a:null` (never an
+// event coordinate). Lets a genuinely different browser signing in as the same
+// account restore the SAME chat identity instead of minting a fork (docs/
+// MARMOT-GROUP-CHAT §9 Q1). `.strict()` + exactly these three fields is the schema
+// half of the no-leak guarantee: it carries ONLY the 32-byte key — no group/epoch
+// state (non-transferable per Marmot), no coordinate, no other event's data. Only
+// the account's own signer can decrypt it (NIP-44-to-self), so it can restore an
+// existing identity but can never let anyone add or impersonate a device.
+export const chatDeviceKeyBackupSchema = z
+  .object({
+    v: version,
+    a: z.null(),
+    chat_device_key: base64Bytes(32, "chat-device-key"), // 32-byte MLS device key, b64
+  })
+  .strict();
+export type ChatDeviceKeyBackup = z.infer<typeof chatDeviceKeyBackupSchema>;
+
 // ── 31603 Directory Entry content (ECK) ──────────────────────────────────────
 export const directoryEntryContentSchema = z
   .object({

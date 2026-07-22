@@ -35,6 +35,11 @@ import {
 } from "@internet-privacy/marmot-ts/core";
 import type { AppSigner } from "$lib/signer/types.js";
 import { marmotKvBackend, identityPrefix } from "./stores.js";
+import {
+  fetchChatDeviceKeyBackup,
+  publishChatDeviceKeyBackup,
+  chatPubkeyOf,
+} from "./device-key-backup.js";
 
 /**
  * The applesauce `EventSigner` shape marmot-ts expects. Declared structurally so
@@ -71,9 +76,16 @@ export interface ChatIdentity {
 // ── Persistence (IndexedDB via the shared marmot KV backend) ──────────────────
 const DEVICE_KEY_NS = "__chat_device_key__";
 const CLIENT_ID_NS = "__chat_client_id__";
+// Idempotency marker: the chat pubkey whose relay backup is confirmed current for
+// this account. When it matches the live device key we skip the fetch+publish, so
+// the relay backup is written/verified at most once per key (not every chat open).
+const BACKUP_MARK_NS = "__chat_devkey_backup__";
 
 function deviceKeyKey(account: string): string {
   return `${DEVICE_KEY_NS}\x1f${account}`;
+}
+function backupMarkKey(account: string): string {
+  return `${BACKUP_MARK_NS}\x1f${account}`;
 }
 function clientIdKey(chatPubkey: string): string {
   return `${CLIENT_ID_NS}\x1f${chatPubkey}`;
@@ -97,15 +109,54 @@ export async function loadChatDeviceKey(account: string): Promise<Uint8Array | u
  */
 const unlockInFlight = new Map<string, Promise<void>>();
 
-/** Generate + persist a fresh chat device key for an account (once per install). */
-async function ensureChatDeviceKey(account: string): Promise<Uint8Array> {
+/**
+ * `ensureChatDeviceKey` in flight, per account. Two chats (two events, same
+ * account) can init concurrently — each `MarmotChat.create` → `resolveChatIdentity`
+ * → here — and the relay-restore step widens the async window before the mint.
+ * Without dedup, both would see "no key yet" and BOTH mint, forking the credential
+ * (last write wins locally, but each returned a different key). Sharing one promise
+ * per account collapses that to a single resolve, and a fail-closed rejection
+ * propagates to every concurrent caller.
+ */
+const resolveInFlight = new Map<string, Promise<Uint8Array>>();
+
+/**
+ * Resolve the account's chat device key: restore an existing one (local snapshot,
+ * else a relay-published backup) before ever minting a fresh one, so a genuinely
+ * different browser presents as the SAME chat identity. `signer` (present for every
+ * real caller via `resolveChatIdentity`) enables the relay-backup restore/publish;
+ * omit it to get the local-only mint path.
+ */
+function ensureChatDeviceKey(account: string, signer?: AppSigner): Promise<Uint8Array> {
+  const inflight = resolveInFlight.get(account);
+  if (inflight) return inflight;
+  const run = ensureChatDeviceKeyInner(account, signer);
+  resolveInFlight.set(account, run);
+  // Clear on settle so a later resolve re-reads storage (e.g. after a logout wipe),
+  // but only if we still own the slot (a newer overlapping call owns it otherwise).
+  const clear = () => {
+    if (resolveInFlight.get(account) === run) resolveInFlight.delete(account);
+  };
+  run.then(clear, clear);
+  return run;
+}
+
+async function ensureChatDeviceKeyInner(
+  account: string,
+  signer?: AppSigner,
+): Promise<Uint8Array> {
   // Let a real key restore first, if one's landing. Only WAIT for it to settle
   // — an unlock failure (e.g. a storage error) is that caller's problem, not
   // this unrelated one's; swallow it here rather than letting it propagate
   // into a concurrent resolveChatIdentity that has nothing to do with it.
   await unlockInFlight.get(account)?.catch(() => {});
   const existing = await loadChatDeviceKey(account);
-  if (existing) return existing;
+  if (existing) {
+    // Known locally — make sure a relay backup exists so a future device can
+    // restore it. Idempotent + cheap (marker-gated); best-effort.
+    if (signer) await ensureBackupPublished(account, signer, existing);
+    return existing;
+  }
   // FAIL CLOSED. `unlockInFlight` covers the timing race, but not a FAILED
   // unlock: with a NIP-46 signer unreachable (or the user dismissing the Amber
   // prompt) the decrypt throws, the snapshot correctly stays locked, and we
@@ -115,14 +166,61 @@ async function ensureChatDeviceKey(account: string): Promise<Uint8Array> {
   // logout would then lock the fork over the real snapshot. A locked snapshot
   // means the real key exists and is merely unreachable right now: refuse, and
   // let the caller retry once the signer is back.
+  //
+  // This is checked BEFORE the relay-backup restore below, so a local locked
+  // snapshot always takes priority: a signer that can't decrypt the local
+  // snapshot can't decrypt the relay backup either (same signer), so trying the
+  // relay here would only fail too — refusing is the loud, recoverable outcome.
   if (await marmotKvBackend().get(lockedKey(account))) {
     throw new Error(
       "chat identity is locked and could not be unlocked — signer unavailable; not minting a new device key",
     );
   }
+  // Genuinely fresh device (no local key, no locked snapshot): try a
+  // relay-published backup before minting, so a second browser signing in as the
+  // same account restores the SAME chat identity instead of forking it. A missing
+  // or undecryptable backup returns/throws → treated as "none", fall through to
+  // mint. Note this network fetch is off the app-open critical path entirely:
+  // `resolveChatIdentity` is only reached via the lazy `import("./client.js")` in
+  // `chat/session.svelte.ts`, i.e. when a user actually opens an event's chat —
+  // never on first paint or session restore (which +layout runs in the background
+  // per UX-19). So awaiting it delays only chat-panel readiness on a fresh device.
+  if (signer) {
+    const restored = await fetchChatDeviceKeyBackup(signer).catch(() => undefined);
+    if (restored) {
+      await marmotKvBackend().set(deviceKeyKey(account), new Uint8Array(restored));
+      // Already on a relay — record the marker so we don't republish it.
+      await marmotKvBackend().set(backupMarkKey(account), chatPubkeyOf(restored));
+      return restored;
+    }
+  }
   const sk = generateSecretKey();
   await marmotKvBackend().set(deviceKeyKey(account), new Uint8Array(sk));
+  // Freshly minted → publish its backup so the next device can restore it.
+  if (signer) await ensureBackupPublished(account, signer, sk);
   return sk;
+}
+
+/**
+ * Publish (or refresh) the relay backup for `deviceKey` unless the idempotency
+ * marker already confirms it. Best-effort: a failure (e.g. the signer dismissed
+ * the prompt, or `deriveBlindingKey` couldn't run) leaves the marker unset so the
+ * next chat open retries — it must never break resolving the chat identity.
+ */
+async function ensureBackupPublished(
+  account: string,
+  signer: AppSigner,
+  deviceKey: Uint8Array,
+): Promise<void> {
+  const backend = marmotKvBackend();
+  const chatPubkey = chatPubkeyOf(deviceKey);
+  if ((await backend.get(backupMarkKey(account))) === chatPubkey) return;
+  try {
+    await publishChatDeviceKeyBackup(signer, deviceKey);
+    await backend.set(backupMarkKey(account), chatPubkey);
+  } catch {
+    /* signer/relay unavailable — marker left unset, retried next chat open */
+  }
 }
 
 /** A stable per-install slot id for this chat identity's 30443 events. */
@@ -172,6 +270,9 @@ async function chatKeysFor(account: string): Promise<string[]> {
     for (const k of await backend.keysWithPrefix(identityPrefix(chatPubkey))) keys.add(k);
     keys.add(deviceKeyKey(account));
     keys.add(clientIdKey(chatPubkey));
+    // The relay-backup idempotency marker rides along too, so a logout→login on
+    // this device restores it and doesn't needlessly republish the backup.
+    keys.add(backupMarkKey(account));
   }
   return [...keys];
 }
@@ -274,7 +375,9 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
   const account = await accountSigner.getPublicKey();
   const rawAccountKey = accountSigner.getSecretKey?.();
 
-  const sk = rawAccountKey ? new Uint8Array(rawAccountKey) : await ensureChatDeviceKey(account);
+  const sk = rawAccountKey
+    ? new Uint8Array(rawAccountKey)
+    : await ensureChatDeviceKey(account, accountSigner);
   const pubkey = getPublicKey(sk);
   const isAccountKey = pubkey === account;
   const clientId = await ensureClientId(pubkey);
