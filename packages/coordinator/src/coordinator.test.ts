@@ -19,6 +19,7 @@ import {
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_DIRECTORY_ENTRY,
+  KIND_ROSTER,
   KIND_ADMIN_COMMAND,
   KIND_COORDINATOR_GRANT,
   KIND_COORDINATOR_STATUS,
@@ -2035,12 +2036,33 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     return { coord2, grantWrap };
   }
 
-  it("rejects a grant whose gen does not match the newest 31600's gen", async () => {
+  it("rejects a grant whose gen is BELOW the newest 31600's gen (superseded/stale)", async () => {
     const h = await setup();
-    // Config declares gen 2, grant carries gen 1 → mismatch → rejected.
+    // Config declares gen 2, grant carries gen 1 → grant behind config → hard reject.
     const { coord2, grantWrap } = grantAndSeed(h, generateSecretKey(), generateSecretKey(), "genmismatch", 1, 2);
     await h.coordinator.handleCoordinatorWrap(grantWrap as any);
     expect(h.store.getEvent(coord2)).toBeUndefined();
+  });
+
+  it("a grant AHEAD of the config's gen is retryable (config lag), installs once it propagates (NIP §3.7)", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    // Grant carries gen 2; the config we can fetch still names gen 1 (propagation lag).
+    const { coord2, grantWrap } = grantAndSeed(h, eid2, inbox2, "genlag", 2, 1);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    // Not installed yet — retryable, NOT a hard reject; the wrap was left unseen.
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+
+    // The organizer's newer 31600 (gen 2) now propagates.
+    h.transport.seed = h.transport.seed.filter((e) => e.id !== "cfg-genlag");
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(eid2), created_at: 2, id: "cfg-genlag2", sig: "", content: "",
+      tags: [["d", "genlag"], ["v", "2"], ["inbox", getPublicKey(inbox2)], ["coordinator", getPublicKey(h.coordSk), "2"]],
+    } as any);
+    // Re-delivering the SAME grant now installs (a retryable failure never marks it seen).
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeDefined();
   });
 
   it("rejects a replayed old-gen 21603 after a detach (gen ≤ high-water mark)", async () => {
@@ -3045,6 +3067,89 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     const latest = rosters[rosters.length - 1]!;
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
     expect(roster.nostr_group_id).toBeUndefined();
+  });
+});
+
+// ── NIP §3.7 — coordinator handover (A → B) ──────────────────────────────────
+/** Build a SECOND coordinator (fresh key + store) sharing coordinator A's transport,
+ *  so a detach/replace handover can be exercised end-to-end. */
+function secondCoordinator(h: Harness, coordSkB: Uint8Array): { coordinator: Coordinator; store: Store } {
+  const storeB = new Store(":memory:", coordSkB);
+  const coordinator = new Coordinator({
+    store: storeB,
+    transport: h.transport,
+    coordSk: coordSkB,
+    stt: h.stt,
+    llm: h.llm,
+    summaryModel: { provider: "mock", model: "mock-cheap" },
+    matchModel: { provider: "mock", model: "mock-strong" },
+    embedModel: { provider: "mock", model: "mock-embed" },
+    translateModel: { provider: "mock", model: "mock-cheap" },
+    sttModel: "mock",
+    defaultRelays: ["wss://test"],
+    now: () => h.clock.t,
+    sleep: async () => {},
+    transcribe: async (descriptor) => {
+      const cached = storeB.getTranscript(descriptor.x);
+      if (cached !== undefined) return cached;
+      const { text } = await h.stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" });
+      storeB.putTranscript(descriptor.x, text, 1);
+      return text;
+    },
+  });
+  return { coordinator, store: storeB };
+}
+
+describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
+  it("a replacement coordinator republishes a complete directory/roster under its own key", async () => {
+    // Coordinator A installs + processes two invite-approved attendees.
+    const h = await setup();
+    const aliceSk = generateSecretKey();
+    const bobSk = generateSecretKey();
+    const alicePk = await join(h, aliceSk, "crypto");
+    const bobPk = await join(h, bobSk, "design");
+    await h.coordinator.jobs.drain();
+    // A published a roster + directory entries under A's key.
+    expect(h.transport.published.some((e) => e.kind === KIND_ROSTER && e.pubkey === getPublicKey(h.coordSk))).toBe(true);
+
+    // The organizer replaces A with B: a NEWER 31600 names B at gen 2 (same E_inbox
+    // + same ECK granted to B, so B can decrypt A's still-published records).
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const coordSkB = generateSecretKey();
+    const coordPkB = getPublicKey(coordSkB);
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b", sig: "", content: "",
+      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+    } as any);
+
+    // Install B as a fresh grant at gen 2 → runs the handover bootstrap.
+    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
+    await coordB.installEvent({
+      coordinate: h.coordinate,
+      inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"],
+      gen: 2,
+      source: "grant",
+      backfill: "full",
+    });
+    await coordB.jobs.drain();
+
+    // B reconstructed the approved set from A's roster.
+    const approvedB = storeB.approvedAttendees(h.coordinate).map((a) => a.pubkey).sort();
+    expect(approvedB).toEqual([alicePk, bobPk].sort());
+
+    // B published a roster + directory entries under B's OWN key.
+    const rosterB = h.transport.published.filter((e) => e.kind === KIND_ROSTER && e.pubkey === coordPkB);
+    expect(rosterB.length).toBeGreaterThan(0);
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, rosterB[rosterB.length - 1]!.content)));
+    expect(roster.attendees.map((a) => a.pubkey).sort()).toEqual([alicePk, bobPk].sort());
+    const dirB = h.transport.published.filter((e) => e.kind === KIND_DIRECTORY_ENTRY && e.pubkey === coordPkB);
+    expect(dirB.length).toBeGreaterThanOrEqual(2);
+
+    // A client applying the reader rule (accept only B's records now) sees B's roster.
+    const authoredByB = dirB.every((e) => e.pubkey === coordPkB);
+    expect(authoredByB).toBe(true);
   });
 });
 

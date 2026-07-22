@@ -27,6 +27,10 @@ export interface EventKeys {
   eck: EckVersion[]; // {id, key(base64)}
   eidNsecHex?: string; // organizer only
   einboxNsecHex?: string; // organizer + coordinator only
+  /** Superseded E_inbox secrets retained after an inbox rotation on detach/replace
+   *  (NIP §3.7): the current `einboxNsecHex` reads NEW submissions, these read the
+   *  history published to a prior inbox. Organizer only; absent = never rotated. */
+  priorEinboxNsecs?: string[];
   /** Last coordinator install generation this organizer used (NIP §3.5). A
    *  re-attach uses lastGen + 1; absent = never attached (0). Organizer only. */
   coordinatorGen?: number;
@@ -92,6 +96,7 @@ function toPublic(r: StoredEventKeys): EventKeys {
     eck: r.eck,
     eidNsecHex: r.eidNsecHex,
     einboxNsecHex: r.einboxNsecHex,
+    ...(r.priorEinboxNsecs ? { priorEinboxNsecs: r.priorEinboxNsecs } : {}),
     coordinatorGen: r.coordinatorGen,
   };
 }

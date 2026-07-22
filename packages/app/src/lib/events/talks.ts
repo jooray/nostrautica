@@ -31,7 +31,8 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
-import { directoryPublisher } from "./organizer.js";
+import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
+import { onlyByAuthors } from "$lib/nostr/verify.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
@@ -72,9 +73,15 @@ export async function fetchTalks(ctx: EventContext): Promise<TalkItem[]> {
   const eck = await eckBytes(ctx.coordinate);
   if (!eck) return [];
   const publisher = directoryPublisher(ctx);
-  const events = await fetchEvents(
-    { kinds: [KIND_TALK], authors: [publisher], "#a": [ctx.coordinate] },
-    ctx.config.relays,
+  // Record-authority pinning (NIP §3.7): only talks authored by the CURRENTLY
+  // assigned coordinator (or E_id) are trusted — a formerly assigned coordinator's
+  // 31610s are ignored once a newer 31600 no longer names it.
+  const events = onlyByAuthors(
+    await fetchEvents(
+      { kinds: [KIND_TALK], authors: [publisher], "#a": [ctx.coordinate] },
+      ctx.config.relays,
+    ),
+    acceptedRecordAuthors(ctx),
   );
   // Keep the latest event per blinded d (a revision replaces the same address).
   const latestByD = new Map<string, (typeof events)[number]>();

@@ -33,6 +33,7 @@ import {
   KIND_PROFILE,
   giftwrapSince,
   unwrapRumor,
+  eckDecrypt,
   base64ToBytes,
   hexToBytes,
   bytesToBase64,
@@ -48,6 +49,8 @@ import {
   profileCorrectionContentSchema,
   talkSubmissionContentSchema,
   withdrawalContentSchema,
+  rosterContentSchema,
+  directoryEntryContentSchema,
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   KIND_CHAT_KEY_ATTESTATION,
@@ -618,16 +621,33 @@ export class Coordinator {
         );
         return;
       }
-      if (config.coordinatorGen !== gen) {
-        log(
-          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} does not match the newest 31600's gen ${config.coordinatorGen}`,
-        );
-        return;
-      }
+      // A gen at or below the highest ever installed/detached is a hard reject — a
+      // replayed historical grant can never re-install (checked BEFORE the config-gen
+      // match so a stale grant is rejected outright, not endlessly retried).
       const highGen = this.deps.store.installHighGen(grant.coordinate);
       if (gen <= highGen) {
         log(
           `[install] REJECTED ${grant.coordinate}: grant gen ${gen} ≤ the highest generation ever installed/detached (${highGen}) — replayed or stale`,
+        );
+        return;
+      }
+      // Gen mismatch with the newest fetchable config (NIP §3.7). Two cases:
+      //  • grant gen > config gen — the 31600 we fetched is OLDER than the grant (the
+      //    organizer's new config and 21603 don't land atomically). This is config
+      //    propagation lag, NOT authorization failure: throw so the wrap retries
+      //    (bounded, like the unfetchable-config path) until the config catches up.
+      //  • grant gen < config gen — the config has already moved AHEAD to a newer
+      //    generation this grant is not for (a stale grant for a superseded attach).
+      //    Retrying can never resolve it; reject outright. (A replay at or below the
+      //    high-water mark was already rejected above.)
+      if (config.coordinatorGen !== gen) {
+        if (gen > (config.coordinatorGen ?? 0)) {
+          throw new Error(
+            `install ${grant.coordinate}: grant gen ${gen} ahead of the newest 31600's gen ${config.coordinatorGen} — config propagation lag, retryable`,
+          );
+        }
+        log(
+          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} < the newest 31600's gen ${config.coordinatorGen} — superseded/stale grant`,
         );
         return;
       }
@@ -724,6 +744,16 @@ export class Coordinator {
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
     // work here — a chat-off event stays completely inert (no group, no watcher).
     if (state.chat) await this.ensureChat(state);
+    // Handover bootstrap (NIP §3.7): a FRESH grant install may be a replacement
+    // coordinator taking over an event that already has a published record set under
+    // the previous coordinator's key. Reconstruct the approved set from the prior
+    // roster (decryptable with the granted ECK) and republish under our own key, so
+    // record-authority pinning never leaves members without a readable directory.
+    if (source === "grant" && grant.backfill === "full") {
+      await this.bootstrapHandover(state).catch((e) =>
+        log(`[handover] ${state.coordinate}: bootstrap failed (non-fatal): ${e instanceof Error ? e.message : e}`),
+      );
+    }
   }
 
   /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
@@ -1320,6 +1350,122 @@ export class Coordinator {
         { coordinate: state.coordinate, pubkey: attendeePubkey },
       );
     }
+  }
+
+  /** Try to ECK-decrypt `ciphertext` with any ECK version this coordinator holds
+   *  (a handover coordinator may hold both the pre- and post-rotation ECK). */
+  private tryEckDecrypt(state: EventState, ciphertext: string): string | undefined {
+    for (const v of state.eck) {
+      try {
+        return eckDecrypt(base64ToBytes(v.key), ciphertext);
+      } catch {
+        /* wrong version — try the next */
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Coordinator handover bootstrap (NIP §3.7). A newly attached coordinator MUST
+   * republish the event's member records under its own key so record-authority
+   * pinning never leaves members without a readable directory. The previous
+   * coordinator's manual-approval decisions arrived as 21604 commands addressed to
+   * ITS key, so a fresh E_inbox re-scan alone cannot reconstruct who was approved.
+   * This reads the previous coordinator's still-decryptable 31604 roster (ECK
+   * custody was granted to us) to learn the approved set, seeds each attendee's
+   * profile/ai_profile from their 31603 where available, marks them approved, and
+   * republishes directory + roster + grants under THIS coordinator's key. Matches
+   * are rebuilt by re-enqueuing the pipeline (the previous 31605s are per-recipient
+   * and undecryptable to us — the "from reprocessing otherwise" path). Best-effort:
+   * a fetch failure leaves the E_inbox backfill (invite auto-approvals) as the
+   * floor, and a later organizer recompute converges the rest.
+   */
+  private async bootstrapHandover(state: EventState): Promise<void> {
+    const { identifier } = parseCoordinate(state.coordinate);
+    let rosterEvents: NostrEvent[];
+    try {
+      rosterEvents = await this.deps.transport.fetch(
+        { kinds: [KIND_ROSTER], "#d": [identifier] },
+        state.configRelays,
+      );
+    } catch {
+      return;
+    }
+    // Newest roster from ANY prior author (previous coordinator or E_id) we can decrypt.
+    let roster: RosterContent | undefined;
+    for (const ev of [...rosterEvents].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))) {
+      if (ev.pubkey === this.coordPubkey) continue; // our own record — nothing to bootstrap from
+      const json = this.tryEckDecrypt(state, ev.content);
+      if (!json) continue;
+      try {
+        roster = rosterContentSchema.parse(JSON.parse(json));
+        break;
+      } catch {
+        /* malformed — try an older roster */
+      }
+    }
+    if (!roster || roster.attendees.length === 0) return;
+    log(`[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from the prior roster`);
+
+    let seeded = 0;
+    for (const a of roster.attendees) {
+      const existing = this.deps.store.getAttendee(state.coordinate, a.pubkey);
+      if (existing?.status === "approved") continue; // already reconstructed from E_inbox backfill
+      // Recover profile + ai_profile from the prior 31603 (decryptable with our ECK).
+      let profileJson: string | undefined;
+      let aiProfileJson: string | undefined;
+      let transcriptsJson: string | undefined;
+      let displayName: string | undefined;
+      try {
+        const dirEvents = await this.deps.transport.fetch(
+          { kinds: [KIND_DIRECTORY_ENTRY], "#d": [a.d] },
+          state.configRelays,
+        );
+        for (const de of [...dirEvents].sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))) {
+          const json = this.tryEckDecrypt(state, de.content);
+          if (!json) continue;
+          const entry = directoryEntryContentSchema.parse(JSON.parse(json));
+          if (entry.pubkey !== a.pubkey) continue;
+          profileJson = JSON.stringify({
+            ...entry.profile,
+            __media: entry.media,
+            ...(entry.intro_text ? { __intro_text: entry.intro_text } : {}),
+          });
+          if (entry.ai_profile) aiProfileJson = JSON.stringify(entry.ai_profile);
+          if (entry.transcripts) transcriptsJson = JSON.stringify(entry.transcripts);
+          if (entry.name) displayName = entry.name;
+          break;
+        }
+      } catch {
+        /* no readable directory entry — seed approval alone; the pipeline refills it */
+      }
+      const srcRev = profileJson ? this.sourceRevision(profileJson) : undefined;
+      this.deps.store.upsertAttendee({
+        coordinate: state.coordinate,
+        pubkey: a.pubkey,
+        status: "approved",
+        role: a.role,
+        ...(displayName ? { displayName } : {}),
+        ...(profileJson ? { profileJson, sourceRevision: srcRev } : {}),
+        // ai_source_revision === source_revision so publishDirectory surfaces the
+        // recovered ai_profile immediately (not paired with stale source text).
+        ...(aiProfileJson ? { aiProfileJson, aiSourceRevision: srcRev } : {}),
+        ...(transcriptsJson ? { transcriptsJson } : {}),
+        now: this.now(),
+      });
+      seeded++;
+    }
+
+    // Republish the full record set under THIS coordinator's key.
+    for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
+      const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
+      await this.deps.transport.publish(grant, state.configRelays);
+      await this.publishDirectory(state, a.pubkey);
+      // Rebuild matches under our authorship (the prior 31605s are undecryptable to us).
+      if (state.matching === "on") this.enqueueProcess(state.coordinate, a.pubkey);
+    }
+    await this.publishRoster(state);
+    log(`[handover] ${state.coordinate}: seeded ${seeded}, republished directory/roster/grants under this coordinator`);
   }
 
   private parseStoredProfile(

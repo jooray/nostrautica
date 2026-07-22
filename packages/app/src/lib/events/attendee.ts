@@ -44,9 +44,9 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, applyOrganizerGrant, loadEventKeys, currentEck } from "./keystore.js";
-import { directoryPublisher } from "./organizer.js";
+import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
@@ -424,8 +424,10 @@ export async function fetchRoster(ctx: EventContext): Promise<RosterContent | un
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
     { relays: ctx.config.relays },
   ).ready;
-  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = pickLatest(onlyVerified(events));
+  // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7): only a
+  // record authored by the CURRENTLY assigned coordinator (or E_id) is trusted, so
+  // a hostile relay or cached event from a formerly assigned coordinator is dropped.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)));
   if (!latest) return { v: 2, eck_current: 1, attendees: [] };
   // The roster is authored by the coordinator (or E_id) — a trusted authority
   // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
@@ -522,7 +524,7 @@ export async function fetchDirectory(
   const ds = roster.attendees.map((a) => a.d);
   // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
   // relay filter-size limits and silently return fewer people.
-  const events = await streamDirectoryEvents(publisher, ds, ctx.config.relays).ready;
+  const events = onlyByAuthors(await streamDirectoryEvents(publisher, ds, ctx.config.relays).ready, acceptedRecordAuthors(ctx));
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
@@ -567,6 +569,7 @@ export async function streamDirectory(
   const eck = await eckBytesFor(ctx.coordinate);
   if (!eck) return undefined; // not approved — nothing decryptable
   const publisher = directoryPublisher(ctx);
+  const acceptedAuthors = new Set(acceptedRecordAuthors(ctx));
   const coord = ctx.coordinate;
 
   // Accumulate by PUBKEY (one entry per attendee), latest-wins by created_at, so
@@ -593,8 +596,11 @@ export async function streamDirectory(
     if (!flushTimer) flushTimer = setTimeout(flush, 60);
   };
 
-  const onDirEvent = (e: { id: string; tags: string[][]; content: string; created_at?: number }) => {
+  const onDirEvent = (e: { id: string; pubkey?: string; tags: string[][]; content: string; created_at?: number }) => {
     if (!e.tags.some((tg) => tg[0] === "d")) return;
+    // Record-authority pinning (NIP §3.7): ignore a directory entry not authored by
+    // the currently assigned coordinator (or E_id) — a stale-coordinator event.
+    if (e.pubkey !== undefined && !acceptedAuthors.has(e.pubkey)) return;
     const at = e.created_at ?? 0;
     try {
       const entry = directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content)));
@@ -712,7 +718,11 @@ export async function fetchMatches(
     { kinds: [KIND_MATCH_LIST], authors: [coordinator], "#d": [d] },
     { relays: ctx.config.relays },
   ).ready;
-  const latest = pickLatest(events);
+  // Record-authority pinning (NIP §3.7): a 31605 is authored by the CURRENTLY
+  // assigned coordinator only. Guard the author so a hostile relay's injected event
+  // (higher created_at, wrong author) can't win the latest-pick and shadow the real
+  // list — it would fail to decrypt and drop the attendee's matches.
+  const latest = pickLatest(onlyByAuthors(events, [coordinator]));
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(coordinator, latest.content);

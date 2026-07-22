@@ -354,7 +354,8 @@ describe("fetchMatches cache write-through (§2.3)", () => {
 
   it("persists the decrypted match list owner-scoped for instant repaint", async () => {
     streamEvents.mockReturnValue({
-      ready: Promise.resolve([{ content: "ct", created_at: 500, tags: [] }]),
+      // Authored by the configured coordinator (record-authority pinning, NIP §3.7).
+      ready: Promise.resolve([{ pubkey: COORDINATOR, content: "ct", created_at: 500, tags: [] }]),
       stop: () => {},
     });
     expect(cachedMatches(coordinate)).toBeUndefined();
