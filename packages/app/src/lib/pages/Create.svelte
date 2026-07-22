@@ -59,6 +59,14 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let created = $state<CreatedEvent | null>(null);
+  // Truthful outcomes for the two best-effort secondary steps (audit UX-A3):
+  // the event is created regardless, but the success screen must not claim
+  // enrollment/attach succeeded when they didn't — it must offer a retry.
+  let enrollFailed = $state(false);
+  let attachFailed = $state(false);
+  let retrying = $state<"enroll" | "attach" | null>(null);
+  let retryCtx = $state<ReturnType<typeof createdEventContext> | null>(null);
+  let retryBlindingKey: Awaited<ReturnType<typeof deriveBlindingKey>> | null = null;
   // Logged-out organizers get an inline identity step instead of a login
   // detour (UI-SUGGESTIONS #18) — the key is created on submit, like Join.
   let organizerName = $state("");
@@ -170,13 +178,24 @@
       // E_inbox backfill. Best-effort (the event exists either way), but it must
       // complete BEFORE the share link is shown: once the link is out, an
       // attendee's approval could race an enrollment still in flight.
+      const eventCtx = createdEventContext(result, createInput);
+      // Keep what a later retry needs (the event context + blinding key), so a
+      // failed secondary step can be re-run from the success screen.
+      retryCtx = eventCtx;
+      retryBlindingKey = blindingKey;
       if (enrollSelf) {
-        await enrollOrganizerAsParticipant(
+        enrollFailed = await enrollOrganizerAsParticipant(
           signer,
-          createdEventContext(result, createInput),
+          eventCtx,
           blindingKey,
           appBase(),
-        ).catch((e) => console.warn("organizer self-enrollment failed:", e));
+        ).then(
+          () => false,
+          (e) => {
+            console.warn("organizer self-enrollment failed:", e);
+            return true;
+          },
+        );
       }
       // Coordinator picked during creation: attach it now, AFTER self-enrollment,
       // exactly mirroring "create, then go to Admin and attach" — attachCoordinator
@@ -187,11 +206,13 @@
       // event exists regardless, and a failure is recoverable from Admin — never a
       // reason to leave the organizer on the form risking a duplicate create.
       if (coordinatorPubkey) {
-        await attachCoordinator(
-          signer,
-          createdEventContext(result, createInput),
-          coordinatorPubkey,
-        ).catch((e) => console.warn("coordinator attach at creation failed:", e));
+        attachFailed = await attachCoordinator(signer, eventCtx, coordinatorPubkey).then(
+          () => false,
+          (e) => {
+            console.warn("coordinator attach at creation failed:", e);
+            return true;
+          },
+        );
       }
       created = result;
     } catch (e) {
@@ -199,6 +220,31 @@
     } finally {
       busy = false;
     }
+  }
+
+  async function retryEnroll() {
+    if (!session.signer || !retryCtx || !retryBlindingKey) return;
+    retrying = "enroll";
+    enrollFailed = await enrollOrganizerAsParticipant(
+      session.signer,
+      retryCtx,
+      retryBlindingKey,
+      appBase(),
+    ).then(
+      () => false,
+      () => true,
+    );
+    retrying = null;
+  }
+
+  async function retryAttach() {
+    if (!session.signer || !retryCtx || !coordinatorPubkey) return;
+    retrying = "attach";
+    attachFailed = await attachCoordinator(session.signer, retryCtx, coordinatorPubkey).then(
+      () => false,
+      () => true,
+    );
+    retrying = null;
   }
 
   function appBase() {
@@ -243,8 +289,25 @@
           {/if}
         </div>
       </li>
+      {#if enrollFailed}
+        <li style="margin-top:0.75rem">
+          <strong style="color:var(--danger)">{t("create.step.enroll.failed")}</strong>
+          <p class="muted" style="margin:0.25rem 0">{t("create.step.enroll.failed.body")}</p>
+          <button class="btn inline" disabled={retrying !== null} onclick={retryEnroll}>
+            {retrying === "enroll" ? t("create.retrying") : t("create.retry")}
+          </button>
+        </li>
+      {/if}
       <li style="margin-top:0.75rem">
-        {#if coordinatorPubkey}
+        {#if coordinatorPubkey && attachFailed}
+          <strong style="color:var(--danger)">{t("create.step.coordinator.failed")}</strong>
+          <p class="muted" style="margin:0.25rem 0">
+            {t("create.step.coordinator.failed.body")}
+          </p>
+          <button class="btn inline" disabled={retrying !== null} onclick={retryAttach}>
+            {retrying === "attach" ? t("create.retrying") : t("create.retry")}
+          </button>
+        {:else if coordinatorPubkey}
           <strong>{t("create.step.coordinator.attached")}</strong>
           <p class="muted" style="margin:0.25rem 0">
             {t("create.step.coordinator.attached.body")}

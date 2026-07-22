@@ -122,6 +122,12 @@ export const messages = {
     "create.step.coordinator.attached": "AI coordinator attached ✓",
     "create.step.coordinator.attached.body":
       "It starts building matches and processing intros within a few minutes. You can change or remove it later from the admin screen.",
+    "create.step.coordinator.failed": "AI coordinator attach didn't complete",
+    "create.step.coordinator.failed.body": "Your event was created, but publishing the coordinator grant failed. Retry here, or attach it later from the admin screen.",
+    "create.step.enroll.failed": "Adding you to the roster didn't complete",
+    "create.step.enroll.failed.body": "Your event was created, but enrolling you as a participant failed. Retry so People isn't empty for the first attendee.",
+    "create.retry": "Retry",
+    "create.retrying": "Retrying…",
     "create.step.approve": "Approve people as they ask to join",
     "create.step.approve.body":
       "Requests appear on the admin screen (invite links can skip this).",
@@ -1081,6 +1087,12 @@ export const messages = {
     "create.step.coordinator.attached": "AI koordinátor pripojený ✓",
     "create.step.coordinator.attached.body":
       "Do niekoľkých minút začne vytvárať spojenia a spracúvať predstavenia. Neskôr ho môžete zmeniť alebo odstrániť v administrácii.",
+    "create.step.coordinator.failed": "Pripojenie AI koordinátora sa nedokončilo",
+    "create.step.coordinator.failed.body": "Vaše podujatie bolo vytvorené, ale zverejnenie grantu koordinátora zlyhalo. Skúste znova tu alebo ho pripojte neskôr v správcovskej obrazovke.",
+    "create.step.enroll.failed": "Pridanie vás do zoznamu sa nedokončilo",
+    "create.step.enroll.failed.body": "Vaše podujatie bolo vytvorené, ale vaše prihlásenie ako účastníka zlyhalo. Skúste znova, aby Ľudia neboli pre prvého účastníka prázdni.",
+    "create.retry": "Skúsiť znova",
+    "create.retrying": "Skúšam znova…",
     "create.step.approve": "Schvaľujte ľudí, keď žiadajú o pripojenie",
     "create.step.approve.body":
       "Žiadosti sa zobrazia v administrácii (pozývacie odkazy to môžu preskočiť).",
@@ -2047,6 +2059,12 @@ export const messages = {
     "create.step.coordinator.attached": "AI koordinátor připojen ✓",
     "create.step.coordinator.attached.body":
       "Během několika minut začne vytvářet spojení a zpracovávat představení. Později ho můžete změnit nebo odebrat v administraci.",
+    "create.step.coordinator.failed": "Připojení AI koordinátora se nedokončilo",
+    "create.step.coordinator.failed.body": "Vaše událost byla vytvořena, ale zveřejnění grantu koordinátora selhalo. Zkuste to znovu zde nebo jej připojte později ve správcovské obrazovce.",
+    "create.step.enroll.failed": "Přidání vás do seznamu se nedokončilo",
+    "create.step.enroll.failed.body": "Vaše událost byla vytvořena, ale vaše přihlášení jako účastníka selhalo. Zkuste to znovu, aby Lidé nebyli pro prvního účastníka prázdní.",
+    "create.retry": "Zkusit znovu",
+    "create.retrying": "Zkouším znovu…",
     "create.step.approve": "Schvalujte lidi, jakmile žádají o připojení",
     "create.step.approve.body":
       "Žádosti se zobrazí v administraci (pozvánkové odkazy to mohou přeskočit).",
