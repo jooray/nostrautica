@@ -1491,6 +1491,32 @@ describe("audit P0-3 — duplicate rumors don't execute concurrently", () => {
   });
 });
 
+describe("audit P0-2 — profile submissions are latest-wins on out-of-order delivery", () => {
+  it("a stale (older created_at) profile does not overwrite a newer one", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto"); // approved; initial profile stored
+    const inboxPk = getPublicKey(h.einboxSk);
+    const nowSec = Math.floor(h.clock.t / 1000);
+    const mkSub = (about: string, createdAt: number) =>
+      wrapRumor(sk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 1, profile: { about, skills: [], looking_for: "", links: [] }, media: [] },
+        tags: [["a", h.coordinate]],
+        created_at: createdAt,
+      });
+
+    // Newer profile B (created_at +100s) lands first and is stored.
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("PROFILE-B", nowSec + 100) as any);
+    expect(JSON.parse(h.store.getAttendee(h.coordinate, pk)!.profile_json!).about).toBe("PROFILE-B");
+
+    // Older profile A (created_at +50s) arrives after — an out-of-order backfill.
+    // It must be rejected rather than regressing the profile.
+    await h.coordinator.handleInboxWrap(h.coordinate, mkSub("PROFILE-A", nowSec + 50) as any);
+    expect(JSON.parse(h.store.getAttendee(h.coordinate, pk)!.profile_json!).about).toBe("PROFILE-B");
+  });
+});
+
 describe("audit P0-7 — stale scoring output can't undo a revocation", () => {
   it("a score returned after an attendee is revoked does not recreate their deleted pair", async () => {
     const h = await setup();

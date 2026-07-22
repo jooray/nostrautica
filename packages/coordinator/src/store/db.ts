@@ -75,6 +75,12 @@ export interface AttendeeRow {
   // Display name from the join request (B1): match reasoning must be able to
   // call people by their actual names — profiles alone carry no name.
   display_name: string | null;
+  // Ordering key of the currently-stored profile submission (audit P0-2): the
+  // authenticated rumor's created_at + id, so an out-of-order older submission
+  // is rejected instead of regressing the profile. Null on rows written before
+  // this migration (treated as "unknown", so the first ordered write wins).
+  profile_created_at: number | null;
+  profile_rumor_id: string | null;
   updated_at: number;
 }
 
@@ -158,6 +164,8 @@ CREATE TABLE IF NOT EXISTS attendees (
   transcripts_json TEXT,
   correction_json TEXT,
   display_name TEXT,
+  profile_created_at INTEGER,
+  profile_rumor_id TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -364,7 +372,8 @@ export class Store {
     // Migration (F1): transcripts_json on attendees; lang on transcripts.
     // Migration (F3): correction_json on attendees (ai_profile correction/hide).
     // Migration (B1 2026-07-16): display_name — match reasoning needs real names.
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT"]) {
+    // Migration (P0-2 2026-07-22): profile submission ordering key (latest-wins).
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT", "profile_created_at INTEGER", "profile_rumor_id TEXT"]) {
       try {
         this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
       } catch {
@@ -524,13 +533,16 @@ export class Store {
     transcriptsJson?: string | null;
     correctionJson?: string | null;
     displayName?: string | null;
+    /** Ordering key of this profile submission (audit P0-2); written only with a profile. */
+    profileCreatedAt?: number | null;
+    profileRumorId?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, profile_created_at, profile_rumor_id, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :profileCreatedAt, :profileRumorId, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
@@ -542,6 +554,8 @@ export class Store {
            transcripts_json = COALESCE(:transcriptsJson, attendees.transcripts_json),
            correction_json = COALESCE(:correctionJson, attendees.correction_json),
            display_name = COALESCE(:displayName, attendees.display_name),
+           profile_created_at = COALESCE(:profileCreatedAt, attendees.profile_created_at),
+           profile_rumor_id = COALESCE(:profileRumorId, attendees.profile_rumor_id),
            updated_at = :now`,
       )
       .run({
@@ -557,6 +571,8 @@ export class Store {
         transcriptsJson: row.transcriptsJson ?? null,
         correctionJson: row.correctionJson ?? null,
         displayName: row.displayName ?? null,
+        profileCreatedAt: row.profileCreatedAt ?? null,
+        profileRumorId: row.profileRumorId ?? null,
         now: row.now,
       });
   }

@@ -755,7 +755,10 @@ export class Coordinator {
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         log(`[submission] from ${short(rumor.pubkey)} — ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
-        await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text);
+        await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
+          createdAt: rumor.created_at ?? 0,
+          rumorId: rumor.id,
+        });
       } else if (rumor.kind === KIND_PROFILE_CORRECTION) {
         const content = profileCorrectionContentSchema.parse(JSON.parse(rumor.content));
         // The subject is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor — an
@@ -934,7 +937,22 @@ export class Coordinator {
     profile: AttendeeProfile,
     media: MediaDescriptor[],
     introText?: string,
+    order?: { createdAt: number; rumorId: string },
   ): Promise<void> {
+    // Latest-wins ordering (audit P0-2 interim guard): profile submissions carry
+    // no revision, so relays delivering history out of order could finish a
+    // backfill with an OLDER profile as current. Reject a submission whose
+    // authenticated created_at is STRICTLY older than the stored one. Equal
+    // timestamps still apply (a genuine same-second edit is last-writer-wins, as
+    // before) — the full monotonic model that would resolve same-second ties is
+    // deferred.
+    if (order) {
+      const cur = this.deps.store.getAttendee(state.coordinate, pubkey);
+      if (cur?.profile_created_at != null && order.createdAt < cur.profile_created_at) {
+        log(`[submission] ignored stale profile from ${short(pubkey)}: created_at ${order.createdAt} < stored ${cur.profile_created_at}`);
+        return;
+      }
+    }
     // Cap media descriptors per submission (audit COORD-4): extras are skipped
     // (and logged) so a hostile submission can't fan out downloads/STT billing.
     let cappedMedia = media;
@@ -952,6 +970,8 @@ export class Coordinator {
       pubkey,
       profileJson,
       sourceRevision: this.sourceRevision(profileJson),
+      profileCreatedAt: order?.createdAt ?? null,
+      profileRumorId: order?.rumorId ?? null,
       now: this.now(),
     });
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
