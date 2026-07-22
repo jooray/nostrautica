@@ -68,6 +68,12 @@ export class MarmotChat {
   private readonly boundGroups = new Set<string>();
   /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
   private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
+  /** Memoized at most one live roster fetch per client, to reconcile a recorded
+   *  binding against a cold/stale cache (see currentEventGroups). Memoizing the
+   *  RESULT (not just "did we try") matters: if the cache stays stale, every call
+   *  after the first must keep using what the live fetch actually found instead
+   *  of falling back to trusting the (possibly proven-wrong) recorded value. */
+  private liveRosterFetch?: Promise<string | undefined>;
   onMessage?: ChatMessageHandler;
   onStateChange?: () => void;
 
@@ -391,12 +397,31 @@ export class MarmotChat {
     if (recorded) {
       // A recorded binding that contradicts the authoritative roster is a stale
       // or (pre-fix) mis-bound entry: nothing re-points it on its own, because the
-      // bind path only ran on a MISSING binding. Reconcile against the roster.
-      if (advertised && advertised !== recorded) {
-        const match = all.filter((g) => safeGroupIdHex(g) === advertised);
+      // bind path only ran on a MISSING binding. Reconcile against the roster —
+      // but the CACHE itself can be stale (decrypted+cached before the coordinator
+      // started advertising nostr_group_id, or before this event's group existed),
+      // in which case it silently omits the field and looks identical to "no id
+      // yet". Nothing else on the chat-open path is guaranteed to have refreshed
+      // it (only the People/Admin screens warm this cache), so a wrong recorded
+      // binding could otherwise never self-heal. Try one live read before giving
+      // up — same "cache first, then one network read" shape as the no-binding
+      // branch below. Memoized per client: if the cache never warms, every later
+      // call reuses what that one live fetch found instead of re-fetching (which
+      // would hammer the relay on every send) OR silently reverting to trusting
+      // `recorded` again (which would UN-DO the refusal below on the very next
+      // call, since the cache still can't prove it wrong the second time).
+      let liveAdvertised = advertised;
+      if (!liveAdvertised) {
+        this.liveRosterFetch ??= fetchRoster(this.ctx)
+          .then((r) => r?.nostr_group_id)
+          .catch(() => undefined);
+        liveAdvertised = await this.liveRosterFetch;
+      }
+      if (liveAdvertised && liveAdvertised !== recorded) {
+        const match = all.filter((g) => safeGroupIdHex(g) === liveAdvertised);
         if (match.length > 0) {
           // We hold this event's real group — re-point the binding to it.
-          await this.eventGroups.setItem(this.ctx.coordinate, advertised).catch(() => {});
+          await this.eventGroups.setItem(this.ctx.coordinate, liveAdvertised).catch(() => {});
           return match;
         }
         // The roster names a group we have NOT joined. The recorded binding is

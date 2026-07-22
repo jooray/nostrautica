@@ -42,6 +42,12 @@ const shared = vi.hoisted(() => ({
   backend: null as unknown, // shared InMemoryKvBackend, or null → a fresh one per client
   groups: null as unknown[] | null, // shared joined-groups pool, or null → per client
   rosters: new Map<string, { v: number; eck_current: number; nostr_group_id?: string; attendees: unknown[] }>(),
+  // Coordinates where cachedRoster() should report a cold/stale cache miss even
+  // though `rosters` (the live, relay-authoritative view fetchRoster reads) has
+  // an entry — models a persisted roster cache decrypted before the coordinator
+  // started advertising nostr_group_id (or before this event's group existed).
+  staleCache: new Set<string>(),
+  liveFetchCount: new Map<string, number>(),
 }));
 
 interface FakeRumor {
@@ -183,8 +189,12 @@ vi.mock("$lib/nostr/ndk.js", () => ({
 // `cachedRoster` is the sync, hot-path read; `fetchRoster` the async one. Both
 // resolve from the per-test `shared.rosters` map keyed by event coordinate.
 vi.mock("$lib/events/attendee.js", () => ({
-  cachedRoster: (coordinate: string) => shared.rosters.get(coordinate),
-  fetchRoster: async (ctx: { coordinate: string }) => shared.rosters.get(ctx.coordinate),
+  cachedRoster: (coordinate: string) =>
+    shared.staleCache.has(coordinate) ? undefined : shared.rosters.get(coordinate),
+  fetchRoster: async (ctx: { coordinate: string }) => {
+    shared.liveFetchCount.set(ctx.coordinate, (shared.liveFetchCount.get(ctx.coordinate) ?? 0) + 1);
+    return shared.rosters.get(ctx.coordinate);
+  },
 }));
 
 import { MarmotChat } from "./client.js";
@@ -201,6 +211,8 @@ beforeEach(() => {
   shared.backend = null;
   shared.groups = null;
   shared.rosters.clear();
+  shared.staleCache.clear();
+  shared.liveFetchCount.clear();
 });
 
 describe("MarmotChat.start() — late welcome (G-3)", () => {
@@ -497,6 +509,61 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     expect(await chatA.nostrGroupId()).toBe("gid-A");
     await chatA.send("to A after correction");
     expect(lastClient.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([1]));
+  });
+
+  it("self-heals a mis-binding via a live roster fetch when the cache is cold/stale", async () => {
+    // Reproduces a real prod report: an existing member's recorded binding was
+    // wrong (pre-fix), the coordinator has since started advertising the correct
+    // nostr_group_id, but THIS BROWSER's persisted roster cache was decrypted
+    // before that — cachedRoster() alone can't see the field and would leave the
+    // wrong recorded binding in place forever, since nothing else on the
+    // chat-open path is guaranteed to have refreshed the cache.
+    const { InMemoryKvBackend, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => { set(k: string, v: unknown): Promise<void> };
+      MARMOT_NAMESPACES: { eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    shared.groups = [joinedGroup(1, "gid-A"), joinedGroup(2, "gid-B")];
+    shared.rosters.set(coordA, { v: 1, eck_current: 1, nostr_group_id: "gid-A", attendees: [] });
+    shared.staleCache.add(coordA);
+    const identity = "c".repeat(64);
+    await backend.set(`${identity}${MARMOT_NAMESPACES.eventGroups}${coordA}`, "gid-B");
+
+    const chatA = await MarmotChat.create({ accountSigner, ctx: ctxA });
+    // Falls back to one live fetchRoster() call, discovers the mismatch against
+    // the AUTHORITATIVE (relay) roster, and re-points the binding.
+    expect(await chatA.nostrGroupId()).toBe("gid-A");
+    expect(shared.liveFetchCount.get(coordA)).toBe(1);
+    await chatA.send("to A after live-fetch self-heal");
+    expect(lastClient.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([1]));
+
+    // Healed — a second read must not re-fetch the roster again.
+    await chatA.nostrGroupId();
+    expect(shared.liveFetchCount.get(coordA)).toBe(1);
+  });
+
+  it("tries the live roster fetch at most once per client even if still unresolved", async () => {
+    const { InMemoryKvBackend, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => { set(k: string, v: unknown): Promise<void> };
+      MARMOT_NAMESPACES: { eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    // We only hold event A's group; event B's real group (gid-B) is NOT joined,
+    // and B's roster cache is also cold.
+    shared.groups = [joinedGroup(1, "gid-A")];
+    shared.rosters.set(coordB, { v: 1, eck_current: 1, nostr_group_id: "gid-B", attendees: [] });
+    shared.staleCache.add(coordB);
+    const identity = "c".repeat(64);
+    await backend.set(`${identity}${MARMOT_NAMESPACES.eventGroups}${coordB}`, "gid-A");
+
+    const chatB = await MarmotChat.create({ accountSigner, ctx: ctxB });
+    expect(await chatB.nostrGroupId()).toBeUndefined();
+    expect(shared.liveFetchCount.get(coordB)).toBe(1);
+    // Still refuses on a second read, and does not hammer the relay again.
+    expect(await chatB.nostrGroupId()).toBeUndefined();
+    expect(shared.liveFetchCount.get(coordB)).toBe(1);
   });
 
   it("refuses to route a mis-bound event whose real group we have NOT joined", async () => {
