@@ -173,6 +173,14 @@ class ChatSessionStore {
       chat.onStateChange = () => {
         if (tok === this.token) void this.syncPhase(tok);
       };
+      // First v2 chat session: best-effort retire the account's legacy 31602
+      // chat-device-key backup (NIP §7.5). Leader-only + once-per-account gated, so
+      // followers don't duplicate it. Fire-and-forget — never blocks the handshake.
+      void import("./legacy-cleanup.js")
+        .then(({ deleteLegacyChatDeviceKeyBackup }) =>
+          deleteLegacyChatDeviceKeyBackup(signer, ctx.config.relays),
+        )
+        .catch(() => {});
       // Publish the key package (+ attestation for device-key accounts) so the
       // coordinator can add us, then listen for the welcome and 445 traffic.
       await chat.ensurePublished();

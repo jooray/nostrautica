@@ -152,6 +152,59 @@ describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     expect(store.getMarmotGroup(COORD)!.status).toBe("active");
   });
+
+  // Re-attach-with-chat after a detach (NIP §3.5 detach + §3.7 handover + §10.4
+  // routing). When a DIFFERENT coordinator re-attaches — the handover case — its
+  // marmot_groups is empty, so it mints a FRESH group with a new routing id, and
+  // clients re-route to it via the roster's new nostr_group_id and rejoin. (The
+  // same-coordinator reuse/re-activate path is the "freeze re-activates" test above.)
+  it("a re-attaching coordinator creates a fresh group, invites the eligible set, and advertises a new routing id", async () => {
+    const ACCOUNT2 = "b".repeat(64);
+    const kps = [kpEvent(ACCOUNT, "kpA"), kpEvent(CHATKEY, "kpChat"), kpEvent(ACCOUNT2, "kpB")];
+    const eligible = [ACCOUNT, ACCOUNT2, CHATKEY].sort();
+
+    // ── Coordinator A: chat live, the full eligible set (both account keys + an
+    //    attested device key) added to group ng-1. ──
+    const storeA = freshStore();
+    const mlsA = new FakeMls();
+    const adminA = makeAdmin(storeA, mlsA, kps);
+    await adminA.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    storeA.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    storeA.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 1 });
+    storeA.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await adminA.backfillApproved(COORD);
+    expect(mlsA.invited.sort()).toEqual(eligible);
+    const idA = storeA.getMarmotGroup(COORD)!.nostr_group_id;
+
+    // ── Detach: coordinator A freezes its group (chat administration orphaned). ──
+    adminA.freeze(COORD);
+    expect(storeA.getMarmotGroup(COORD)!.status).toBe("frozen");
+
+    // ── Coordinator B re-attaches with a fresh store; its §3.7 roster bootstrap
+    //    re-seeds the same eligible attendee set. Empty marmot_groups ⇒ a brand-new
+    //    group with a new routing id (offset so it's visibly ≠ A's ng-1). ──
+    const storeB = freshStore();
+    const mlsB = new FakeMls();
+    mlsB.created = 10;
+    const adminB = makeAdmin(storeB, mlsB, kps);
+    storeB.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 2 });
+    storeB.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 2 });
+    storeB.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 2 });
+
+    const idsB = await adminB.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await adminB.backfillApproved(COORD);
+
+    // A fresh group was minted (not a reuse of A's), active, with a NEW routing id —
+    // the roster's §10.4 nostr_group_id clients route to and rejoin under.
+    expect(mlsB.created).toBe(11);
+    const rowB = storeB.getMarmotGroup(COORD)!;
+    expect(rowB.status).toBe("active");
+    expect(rowB.nostr_group_id).toBe("ng-11");
+    expect(rowB.nostr_group_id).not.toBe(idA);
+    expect(idsB.nostrGroupIdHex).toBe("ng-11");
+    // The full eligible set (account keys + attested chat key) is invited into it.
+    expect(mlsB.invited.sort()).toEqual(eligible);
+  });
 });
 
 describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
