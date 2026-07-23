@@ -28,7 +28,13 @@ Klepnite na **Pripojiť sa k podujatiu** a vyplňte, ako by vás mali ľudia poz
 
 > **Už niečo z toho používate?** Ak klepnete na **Už ste na Nostri? Prihláste sa**, môžete sa namiesto toho prihlásiť svojím existujúcim kľúčom, rozšírením prehliadača alebo podpisovacou appkou v telefóne (napríklad Amber alebo Clave). Váš existujúci profil sa prenesie a zobrazí sa ako needitovateľný — aplikácia ho nikdy nemení — a vyplniť si môžete len polia špecifické pre podujatie (zručnosti, čo hľadáte).
 >
-> ![Možnosti prihlásenia](images/participant-sk/07-signin-options-light.png)
+> ![Uvítacia obrazovka — prihlásenie alebo vytvorenie identity](images/participant-sk/07-signin-options-light.png)
+
+Ak organizátor nastavil limit na to, ako dlho si podujatie ponecháva vaše
+údaje, uvidíte to priamo na prihlasovacom formulári — niečo v štýle *„Údaje z
+tohto podujatia sa vymažú 90 dní po jeho skončení."* Je to organizátorovo
+vlastné nastavenie čistenia dát, nie niečo, čo nastavujete vy; je to len
+oznámené vopred, aby ste vedeli, s čím súhlasíte.
 
 Po odoslaní sa stane jedna z dvoch vecí, podľa toho, aký odkaz ste použili:
 
@@ -41,6 +47,16 @@ Po odoslaní sa stane jedna z dvoch vecí, podľa toho, aký odkaz ste použili:
   ![Žiadosť odoslaná](images/participant-sk/05-request-sent-light.png)
 
 Späť na **Prehľade** vás krátky kontrolný zoznam **„Pripravujeme vás"** sleduje presne tam, kde ste — Pripojené → Záloha zabezpečená → Predstavenie odoslané → Spracúva sa → Spojenia pripravené — a ukazuje vám na prvom mieste *jednu* najbližšiu vec, ktorú treba urobiť. Netreba hádať, prečo sa spojenia ešte neukázali — zoznam vám to povie.
+
+### Funguje aj so zlým Wi-Fi na mieste konania
+
+Nižšie na tej istej stránke Prehľad, keď ste už schválení, nájdete kartu
+**Stiahnuť na offline použitie**. Klepnutím na ňu si aplikácia vopred stiahne
+ľudí, spojenia a prednášky, takže sa dajú prezerať aj bez signálu — hodí sa
+to v preplnenej miestnosti, kde si všetky telefóny súperia o rovnaké slabé
+pripojenie. Samotné video a zvuk sa vopred nesťahujú (len všetko ostatné, čo
+potrebujete), a kedykoľvek môžete klepnúť na **Aktualizovať offline kópiu**,
+aby ste si ju obnovili.
 
 ### Uložte si kľúč (30 sekúnd — naozaj to urobte)
 
@@ -61,6 +77,12 @@ Práve toto robí párovanie dobrým. Je **nepovinné** — aj bez predstavenia 
 Skôr než sa čokoľvek nahrá, aplikácia vám jasne povie, kto to spracúva — účastníci podujatia, organizátorova párovacia služba, ak existuje, a ktorí poskytovatelia AI vidia zvuk/prepis (alebo len text, pri textových predstaveniach) — a musíte zaškrtnúť políčko, že ste si to prečítali. Samotné predstavenie nikdy neuvidí nikto mimo účastníkov tohto podujatia.
 
 ![Nahrávanie predstavenia — video, zvuk a textový režim](images/participant-sk/09-record-light.png)
+
+Aplikácia si na pozadí kontroluje nové verzie a automaticky sa aktualizuje —
+nikdy však uprostred nahrávania alebo keď máte rozpísané a neodoslané
+predstavenie. Počká, kým neskončíte a pole nie je prázdne alebo odoslané, až
+potom sa prípadne znova načíta, takže aktualizácia v nesprávnej chvíli vás
+nemôže pripraviť o záber.
 
 **Už ste niečo nahrali na inom podujatí?** Ak áno, na tejto obrazovke sa nad
 nahrávaním zobrazí **galéria na opätovné použitie** — každé video, zvuk alebo
@@ -83,7 +105,19 @@ Video a zvukové predstavenia dostanú automatický prepis, keď ich spracuje or
 
 ### Váš vlastný profil na podujatí
 
-Keď párovacia služba spracuje vaše predstavenie, otvorte **Viac → Môj profil na podujatí** a pozrite si presne to, čo o vás vidia ostatní: časti, ktoré ste napísali sami, a — samostatne — AI-generované zhrnutie, zručnosti, záujmy a „čo hľadáte", vytvorené z vášho predstavenia. Niečo je zle? Ktorékoľvek vygenerované pole môžete upraviť, skryť, alebo skryť celé AI zhrnutie a ukázať len to, čo ste napísali sami. Je tam aj rýchla poznámka „Nahlásiť problém", ak je niečo mimo a radšej to nahlásite, než by ste to opravovali sami. Uložte, a ostatní účastníci vašu opravu uvidia okamžite — ich pohľad na vás dostane malú značku **„Upravené účastníkom"**, aby vedeli, že to nie je čisto automatické.
+Keď párovacia služba spracuje vaše predstavenie, otvorte **Viac → Môj profil
+na podujatí** a pozrite si presne to, čo o vás vidia ostatní, rozdelené na
+dve úprimné polovice: **„Napísali ste"** — váš text o vás, zručnosti, čo
+hľadáte, odkazy a textové predstavenie, ak ste ho poslali, priamo upraviteľné
+(alebo poriadne opravené opätovným nahratím predstavenia) — a **„Vygenerované
+z vášho predstavenia"** — AI-generované zhrnutie, zručnosti, záujmy, v čom
+viete pomôcť a čo hľadáte, to všetko odvodené z toho, čo ste nahrali. Niečo
+je zle vo vygenerovanej polovici? Ktorékoľvek pole upravte, skryte, alebo
+skryte celú AI časť a ukážte len to, čo ste napísali sami. Je tam aj rýchla
+poznámka „Nahlásiť problém", ak je niečo mimo a radšej to nahlásite, než by
+ste to opravovali sami. Uložte, a ostatní účastníci vašu opravu uvidia
+okamžite — ich pohľad na vás dostane malú značku **„Upravené účastníkom"**,
+aby vedeli, že to nie je čisto automatické.
 
 ![Môj profil na podujatí — úprava, skrytie alebo nahlásenie vygenerovaného poľa](images/participant-sk/23-my-profile-edited-light.png)
 
@@ -116,6 +150,10 @@ Krátko po nahratí predstavenia klepnite na **Spojenia**: rebríček ľudí, kt
 
 ![Spojenia](images/participant-sk/11-matches-light.png)
 
+Na záložke **Spojenia** sa objaví malý odznak vždy, keď pribudnú nové
+spojenia od vašej poslednej návštevy, takže nemusíte stále kontrolovať
+zoznam, ktorý sa nezmenil.
+
 Na podujatí ten zoznam využite: nájdite si svoje top spojenia, spomeňte, že vám to povedala aplikácia. Lepší icebreaker neexistuje.
 
 > Spojenia sa objavia až vtedy, keď organizátorov koordinátor spracuje predstavenia pár ľudí — takže ak zoznam hovorí „zatiaľ žiadne spojenia", jednoducho to znamená, že sa miestnosť ešte len zapĺňa. Najprv nahrajte vlastné predstavenie (§3); práve to vás dostane do spojení ostatných.
@@ -134,15 +172,57 @@ Keďže ide o štandardné súkromné Nostr správy, **fungujú aj s inými Nost
 
 ## 6.5 Skupinový chat (experimentálne)
 
-Ak organizátor zapol **Skupinový chat**, hneď po schválení sa vám objaví záložka **Chat** — jedna zašifrovaná miestnosť pre celé podujatie, oddelená od súkromných správ. Funguje ako ktorýkoľvek chat: správy sa v miestnosti objavujú, ako ich ľudia posielajú, oddeľovače dní označujú plynutie času a medzi zobrazením v bublinách a kompaktným IRC-štýlovým logom môžete prepínať prepínačom nad správami. Je naozaj end-to-end šifrovaný (protokol s názvom Marmot/MLS), hoci ho prevádzkuje organizátorova párovacia služba (pridáva a odoberá ľudí, ako sú schválení alebo odobratí) a dokáže ho čítať — aplikácia vám to hovorí vopred, zakaždým, keď otvoríte záložku. Každé zariadenie vidí len správy odoslané po tom, čo sa pripojilo, takže na novom telefóne staršiu históriu neuvidíte.
+Ak organizátor zapol **Skupinový chat**, hneď po schválení sa vám objaví záložka **Chat** — jedna zašifrovaná miestnosť pre celé podujatie, oddelená od súkromných správ. Funguje ako ktorýkoľvek chat: správy sa v miestnosti objavujú, ako ich ľudia posielajú, oddeľovače dní označujú plynutie času a medzi zobrazením v bublinách a kompaktným IRC-štýlovým logom môžete prepínať prepínačom nad správami. Je naozaj end-to-end šifrovaný (protokol s názvom Marmot/MLS), hoci ho prevádzkuje organizátorova párovacia služba (pridáva a odoberá ľudí, ako sú schválení alebo odobratí) a dokáže ho čítať — aplikácia vám to hovorí vopred, zakaždým, keď otvoríte záložku.
 
-![Skupinový chat, uprostred konverzácie](images/participant-sk/chat-conversation-light.png)
+**Funguje naprieč všetkými vašimi zariadeniami, automaticky.** Otvorte
+záložku Chat na druhom telefóne alebo v inom prehliadači a pripojí sa do
+skupiny sám — žiadny kód na naskenovanie, žiadne párovanie. Cez **Chat →
+Zariadenia chatu** vidíte každé zariadenie napojené na váš účet pre toto
+podujatie, môžete premenovať to, na ktorom práve ste, a odstrániť tie, ktoré
+už nepoužívate (starý telefón, prehliadač, ktorý ste vymazali). Jedna vec
+vyplýva priamo z toho, ako protokol funguje, nie je to chyba: zariadenie
+vidí len správy odoslané *po* tom, čo sa pripojilo — históriu na novo
+pridané zariadenie nie je možné synchronizovať.
+
+![Skupinový chat so správou](images/participant/marmot-chat-roundtrip-light.png)
 
 Marmot je otvorený protokol a rovnaká konverzácia by mala byť časom dostupná aj z iných Marmot-kompatibilných chatovacích aplikácií, nielen z tejto — takáto vzájomná spolupráca je v pláne, ale zatiaľ sa na ňu nespoliehajte.
 
 Táto funkcia je zámerne označená ako **Experimentálne**: je nová a pripojenie do skupiny môže chvíľu trvať (alebo občas potrebuje nový pokus), kým sa začnú objavovať správy. Ak záložka zostane zaseknutá na „nastavuje sa", dajte tomu pár minút a otvorte ju znova.
 
-## 7. Potom: váš profil si necháte
+## 7. Váš report z podujatia
+
+Kedykoľvek — pred, počas alebo po podujatí — otvorte **Report podujatia** z
+menu podujatia a pozrite si prehľadné zhrnutie svojho podujatia, postavené
+výhradne na vašich vlastných značkách **chcem stretnúť** / **stretnuté** a
+poznámkach (§4). Zostáva živý a upraviteľný ešte aj po skončení podujatia,
+takže odráža to, čo sa na mieste skutočne stalo, nielen to, koho ste si
+vopred naplánovali.
+
+![Report z podujatia](images/participant-sk/34-report-light.png)
+
+Je rozdelený na **Ľudí, ktorých ste stretli**, **Chceli ste stretnúť** (ľudia,
+ktorých ste si označili, no nestretli ste sa), vaše **obľúbené prednášky** a
+súkromné poznámky. Tri spôsoby, ako si spojenia udržať, keď ste doma:
+
+- **Sledovať všetkých** — jedno klepnutie, s možnosťou najprv odškrtnúť
+  kohokoľvek, koho by ste radšej nesledovali. Je to jediné pridanie do vášho
+  vlastného Nostr zoznamu sledovaných, urobené lokálne — aplikácia nikdy
+  nezverejní verejný zoznam „týchto ľudí som stretol na tomto podujatí",
+  takže to, koho ste naozaj stretli, zostáva vašou vecou.
+- **Kopírovať npub-y** / **Stiahnuť .txt** — obyčajný zoznam mien a npub-ov na
+  vloženie do vlastných poznámok. Aj toto je len lokálne; nič sa
+  nezverejňuje.
+- **Tlačiť / uložiť ako PDF** — čistý výtlačok samotného reportu bez
+  ovládacích prvkov, pre tých, čo radšej majú papierovú stopu.
+
+Ak ste sa pripojili s identitou vytvorenou v aplikácii, report končí kartou
+**Vezmite si svoju identitu kamkoľvek**: ešte jedno pripomenutie a priamy
+odkaz na zálohovanie kľúča a jeho vyskúšanie v iných Nostr aplikáciách —
+rovnaký moment „prechodu na Nostr", opísaný nižšie, práve vo chvíli, keď je
+najrelevantnejší.
+
+## 8. Potom: váš profil si necháte
 
 Prekvapenie: účet, ktorý ste práve použili, je **identita na Nostri** — prihlásenie, ktoré vlastníte vy, nie táto aplikácia ani žiadna firma. Záložka **Viac** začína identifikačnou kartou s vašou fotkou, menom a verejnou adresou (vaším *npub*) — klepnutím na npub ho skopírujete:
 
@@ -157,6 +237,16 @@ Ešte jedna vec: **Viac → Nastavenia** má tmavý režim a prepínač jazyka (
 ![Nastavenia](images/app-sk/settings-light.png)
 
 > **Príspevky organizátora a poznámky len pre členov.** Pod **Novinkami** nájdete organizátorove oznámenia. Niektoré môžu byť **len pre členov** — zašifrované tak, aby si ich mohli prečítať len schválení účastníci (adresa afterparty, kód od dverí). Ak niekedy uvidíte príspevok so zámkom a nápisom „pripojte sa k podujatiu a prečítajte si toto", je to príspevok len pre členov, ku ktorému ešte nemáte prístup.
+
+## Ak potrebujete odísť
+
+Pripojili ste sa k nesprávnemu podujatiu, alebo ste si to jednoducho
+rozmysleli? Otvorte podujatie, prejdite na koniec stránky a klepnite na
+**Opustiť podujatie**. Potvrďte, a váš záznam v zozname účastníkov, vaše
+spojenia aj predstavovacie médiá sa odstránia — rovnako čisto, ako keby vás
+odobral organizátor, len ste to urobili sami a nikto to nemusí schvaľovať.
+Neskôr sa môžete znova pripojiť; berie sa to ako úplne nová žiadosť o
+pripojenie, nie obnovenie tej starej.
 
 ## Súkromie v jednom odseku
 

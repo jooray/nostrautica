@@ -47,7 +47,13 @@ it's a nice bonus).
 > shown read-only — the app never changes it — and only the event-specific
 > fields (skills, looking-for) are yours to fill in.
 >
-> ![Sign-in options](images/participant/07-signin-options-light.png)
+> ![Welcome screen — sign in or create your identity](images/participant/07-signin-options-light.png)
+
+If the organizer set a limit on how long the event keeps your data, you'll see
+a line saying so right on the join form — something like *"This event's data
+is deleted 90 days after it ends."* That's the organizer's own cleanup
+setting, not something you configure; it's just disclosed up front so you
+know what you're agreeing to.
 
 After you submit, one of two things happens depending on your link:
 
@@ -66,6 +72,15 @@ Back on **Overview**, a short **"Getting you ready"** checklist tracks exactly
 where you are — Joined → Backup secured → Intro submitted → Processing →
 Matches ready — and shows you the *one* next thing to do, front and center. No
 guessing why matches haven't appeared yet: the list tells you.
+
+### Works with bad venue Wi-Fi too
+
+Further down the same Overview page, once you're approved, there's a
+**Download for offline** card. Tap it and the app pre-fetches people, matches,
+and talks so they're browsable even with no signal — handy in a packed room
+where everyone's phone is fighting over the same weak connection. It doesn't
+pre-download the videos and audio themselves (just everything else), and you
+can tap **Update offline copy** any time to refresh it.
 
 ### Save your key (30 seconds — actually do it)
 
@@ -111,6 +126,12 @@ outside this event's attendees can ever see the intro itself.
 
 ![Recording your intro — video, audio, and text modes](images/participant/09-record-light.png)
 
+The app checks for new versions of itself in the background and updates
+automatically — but never mid-recording or while you've got a draft intro
+typed and unsent. It waits until you're done and the field is empty or
+submitted before it ever reloads, so an update landing at the wrong moment
+can't cost you a take.
+
 **Already recorded one for a different event?** If you have, this screen
 shows a **reuse gallery** above the recorder — every video, audio, or text
 intro you've made at any past event, each with a quick preview so you can
@@ -139,14 +160,18 @@ original one tap away ("show original"). So just be yourself in your own words.
 ### Your own event profile
 
 Once the matchmaking service has processed your intro, open **More → My event
-profile** to see exactly what everyone else sees about you: the bits you wrote
-yourself, and — separately — the AI-written summary, skills, interests, and
-"looking for" generated from your intro. Got something wrong? You can edit any
-generated field, hide just that field, or hide the whole AI summary and show
-only what you wrote. There's also a quick "report a problem" note if something
-is off and you'd rather flag it than fix it yourself. Save, and other attendees
-see your correction immediately — their view of you shows a small **"Edited by
-attendee"** badge so they know it's not purely automated.
+profile** to see exactly what everyone else sees about you, split into two
+honest halves: **"You wrote"** — your about text, skills, looking-for, links,
+and text intro if you sent one, editable directly (or fixed properly by
+re-recording your intro) — and **"Generated from your intro"** — the
+AI-written summary, skills, interests, what you can help with, and what
+you're looking for, all inferred from what you recorded. Got something wrong
+in the generated half? Edit any field, hide just that field, or hide the
+whole AI section and show only what you wrote. There's also a quick "report a
+problem" note if something is off and you'd rather flag it than fix it
+yourself. Save, and other attendees see your correction immediately — their
+view of you shows a small **"Edited by attendee"** badge so they know it's not
+purely automated.
 
 ![My event profile — edit, hide, or report a generated field](images/participant/23-my-profile-edited-light.png)
 
@@ -208,6 +233,10 @@ their full page.
 
 ![Matches](images/participant/11-matches-light.png)
 
+A small badge appears on the **Matches** tab whenever there are new matches
+since you last looked, so you don't have to keep re-checking a list that
+hasn't changed.
+
 At the event, work the list: find your top matches, mention the app told you to.
 Best icebreaker there is.
 
@@ -242,10 +271,18 @@ between a bubble view and a compact IRC-style log from a toggle above the
 messages. It's genuinely end-to-end encrypted (a protocol called Marmot/MLS),
 though the organizer's matchmaking service operates the group (adds and
 removes people as they're approved or revoked) and can read it — the app
-tells you this up front, every time you open the tab. Each device only sees
-messages sent after it joined, so a new phone won't see old history.
+tells you this up front, every time you open the tab.
 
-![Group chat, mid-conversation](images/participant/chat-conversation-light.png)
+**It works across all your devices, automatically.** Open the Chat tab on a
+second phone or another browser and it joins the group on its own — no code
+to scan, no pairing step. From **Chat → Chat devices** you can see every
+device attached to your account for this event, rename the one you're on, and
+remove any you no longer use (an old phone, a browser you cleared). One catch
+is inherent to how the underlying protocol works, not a bug: a device only
+ever sees messages sent *after* it joined — there's no syncing history onto a
+freshly added device.
+
+![The group chat, with a message sent](images/participant/marmot-chat-roundtrip-light.png)
 
 Marmot is an open protocol, and the same conversation is meant to eventually
 be reachable from other Marmot-compatible chat apps, not just this one — that
@@ -256,7 +293,35 @@ the group can take a little while (or occasionally need a retry) before
 messages start flowing. If the tab is stuck on "setting up," give it a few
 minutes and reopen it.
 
-## 7. Afterwards: your profile is yours to keep
+## 7. Your event report
+
+Any time — before, during, or after the event — open **Event report** from
+the event menu to see a tidy summary of your event, built entirely from your
+own **want to meet** / **met** marks and notes (§4). It stays live and
+editable right up to and past the end of the event, so it reflects what
+actually happened at the venue, not just who you planned to see beforehand.
+
+![Post-event report](images/participant/34-report-light.png)
+
+It's organized into **People you met**, **Wanted to meet** (people you
+flagged but didn't connect with), your **favorite talks**, and your private
+notes. Three ways to keep the connections once you're home:
+
+- **Follow everyone** — one tap, with a checklist to uncheck anyone you'd
+  rather not follow first. It's a single append to your own Nostr follow
+  list, done locally — the app never publishes a public "I met these people
+  at this event" list, so who you actually met stays your business.
+- **Copy npubs** / **Download .txt** — a plain list of names and npubs, for
+  pasting into your own notes app. Also local-only; nothing is published.
+- **Print / save PDF** — a clean, chrome-free printout of the report itself,
+  for people who'd rather keep a paper trail.
+
+If you joined with an app-created identity, the report ends with **Take your
+identity anywhere**: one more nudge, and a direct link, to back up your key
+and see it working in Primal, Damus, Amethyst, or Yakihonne — the same
+"switch to Nostr" moment described below, right when it's most relevant.
+
+## 8. Afterwards: your profile is yours to keep
 
 Surprise: the account you just used is a **Nostr identity** — a login you own,
 not tied to this app or any company. The **More** tab leads with an identity
@@ -283,6 +348,15 @@ One more thing: **More → Settings** has a dark mode and a language switch
 > approved attendees can read them (the after-party address, a door code). If you
 > ever see a post with a lock and "join the event to read this", that's a
 > members-only post you don't yet have access to.
+
+## If you need to leave
+
+Joined the wrong event, or just changed your mind? Open the event, scroll to
+the bottom, and tap **Leave event**. Confirm, and your directory entry,
+matches, and intro media are all removed — the same clean break as an
+organizer revoking you, except you did it yourself and nobody has to approve
+it. You can rejoin later; it's treated as a brand-new join request, not a
+resurrection of the old one.
 
 ## Privacy, in one paragraph
 
