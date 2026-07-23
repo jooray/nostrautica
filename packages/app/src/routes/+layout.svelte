@@ -212,9 +212,13 @@
   const evNaddr = $derived(eventNaddr(router.route));
   const routeName = $derived(router.route.name);
   // The layout owns one compact event header on subpages. EventHome renders its
-  // own full hero; Record is chrome-light (focused recording flow).
+  // own full hero; Record is chrome-light (focused recording flow); the Report
+  // renders its own print-friendly event hero (so the PDF carries the graphics).
   const showCompactHeader = $derived(
-    evNaddr !== undefined && routeName !== "event" && routeName !== "record",
+    evNaddr !== undefined &&
+      routeName !== "event" &&
+      routeName !== "record" &&
+      routeName !== "report",
   );
   const compactStatus = $derived.by(() => {
     switch (eventShell.role) {

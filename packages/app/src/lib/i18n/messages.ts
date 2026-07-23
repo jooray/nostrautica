@@ -1221,6 +1221,8 @@ export const messages = {
     "title.report": "Event report",
     "report.kicker": "Post-event report",
     "report.title": "Event report",
+    "report.about": "About this event",
+    "report.generatedOn": "Report generated {date}",
     "report.print": "Print / save PDF",
     "report.loading": "Assembling your report…",
     "report.empty":
@@ -2489,6 +2491,8 @@ export const messages = {
     "title.report": "Správa z podujatia",
     "report.kicker": "Správa po podujatí",
     "report.title": "Správa z podujatia",
+    "report.about": "O podujatí",
+    "report.generatedOn": "Správa vytvorená {date}",
     "report.print": "Tlačiť / uložiť PDF",
     "report.loading": "Zostavujeme vašu správu…",
     "report.empty":
@@ -3764,6 +3768,8 @@ export const messages = {
     "title.report": "Zpráva z akce",
     "report.kicker": "Zpráva po akci",
     "report.title": "Zpráva z akce",
+    "report.about": "O akci",
+    "report.generatedOn": "Zpráva vytvořena {date}",
     "report.print": "Tisk / uložit PDF",
     "report.loading": "Sestavujeme vaši zprávu…",
     "report.empty":
