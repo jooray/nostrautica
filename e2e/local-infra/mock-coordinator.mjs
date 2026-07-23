@@ -106,6 +106,7 @@ const coordinator = new Coordinator({
   summaryModel: { provider: "mock", model: "mock-cheap" },
   matchModel: modelRef,
   embedModel: { provider: "mock", model: "mock-embed" },
+  translateModel: { provider: "mock", model: "mock-translate" },
   defaultRelays: [RELAY],
   // Skip Blossom download + ffmpeg entirely — feed a canned transcript per media.
   transcribe: async () =>
