@@ -29,6 +29,14 @@
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
+  import {
+    buildOfflinePack,
+    cachedOfflinePack,
+    packComplete,
+    formatBytes,
+    type OfflinePack,
+    type PackStep,
+  } from "$lib/events/offline-pack.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
@@ -325,6 +333,37 @@
   // becomes prominent, though it's reachable anytime).
   const eventEnded = $derived(!!ctx?.end && ctx.end * 1000 < Date.now());
 
+  // Offline event pack (spec §13): one-tap pre-download of roster/directory/
+  // matches/talks/profiles + a persistent-storage request, so the app works at a
+  // venue with no signal. Everything rides the existing cache layer.
+  let offlinePack = $state<OfflinePack | undefined>(
+    cachedCtx ? cachedOfflinePack(cachedCtx.coordinate) : undefined,
+  );
+  let packing = $state(false);
+  let packSteps = $state<PackStep[]>([]);
+  let packPersisted = $state<boolean | null>(null);
+  let packEstimate = $state<StorageEstimate | undefined>(undefined);
+  const packDone = $derived(offlinePack ? packComplete(offlinePack) : false);
+  const packUsage = $derived(
+    packEstimate?.usage !== undefined ? formatBytes(packEstimate.usage) : null,
+  );
+
+  async function downloadPack() {
+    if (!ctx || packing) return;
+    packing = true;
+    packSteps = [];
+    try {
+      const res = await buildOfflinePack(ctx, session.signer, (steps) => (packSteps = steps));
+      offlinePack = res.pack;
+      packPersisted = res.persisted;
+      packEstimate = res.estimate;
+    } catch {
+      /* partial packs are recorded per-step; nothing more to surface here */
+    } finally {
+      packing = false;
+    }
+  }
+
   // Own coordinator-status notices (21606 sealed to this attendee, NIP §6.3):
   // a poison in the attendee's own submission/talk pipeline surfaces as a modest
   // banner, seeded from cache and kept live by the grant scan.
@@ -418,6 +457,38 @@
        Visitors see the Join CTA as step 1; approved members see intro/matches. -->
   {#if readinessStore.readiness}
     <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
+  {/if}
+
+  {#if approved}
+    <!-- Offline event pack (spec §13): pre-download + persistent storage. -->
+    <div class="card offline">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:0.5rem;flex-wrap:wrap">
+        <div style="min-width:0">
+          <strong>{t("event.offline.title")}</strong>
+          <p class="muted" style="margin:0.2rem 0 0;font-size:0.85rem">
+            {#if packing}
+              {t("event.offline.downloading", { n: packSteps.length })}
+            {:else if packDone}
+              {t("event.offline.ready")}
+            {:else if offlinePack}
+              {t("event.offline.partial")}
+            {:else}
+              {t("event.offline.body")}
+            {/if}
+          </p>
+        </div>
+        <button class="btn inline" disabled={packing} onclick={downloadPack}>
+          {#if packing}{t("event.offline.downloadingShort")}
+          {:else if offlinePack}{t("event.offline.refresh")}
+          {:else}{t("event.offline.download")}{/if}
+        </button>
+      </div>
+      <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
+        {#if packUsage}{t("event.offline.stored", { size: packUsage })}{/if}
+        {#if packPersisted}· {t("event.offline.persisted")}{/if}
+        {#if packDone}· {t("event.offline.mediaNote")}{/if}
+      </p>
+    </div>
   {/if}
 
   {#if latestPost}

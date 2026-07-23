@@ -13,7 +13,7 @@
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
-  import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
+  import { directoryEntryFields, searchRank } from "$lib/events/search.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -213,17 +213,15 @@
     return list;
   });
 
+  // Filter by the active chips first, then run the full-text search (all decrypted
+  // fields, transcripts included) with name matches ranked first (spec §13). The
+  // chip filter is applied before ranking so counts stay honest.
   const visible = $derived(
-    sorted.filter((e) => {
-      if (!passesFilter(e.pubkey)) return false;
-      const hay = buildSearchText([
-        nameOf(e.pubkey, e.profile.about),
-        cardAbout(e),
-        cardSkills(e),
-        e.ai_profile?.summary,
-      ]);
-      return matchesQuery(hay, query);
-    }),
+    searchRank(
+      sorted.filter((e) => passesFilter(e.pubkey)),
+      query,
+      (e) => directoryEntryFields(e, nameOf(e.pubkey, e.profile.about), i18n.locale),
+    ),
   );
 
   const hasFilters = $derived(query.trim().length > 0 || activeFilters.size > 0);
