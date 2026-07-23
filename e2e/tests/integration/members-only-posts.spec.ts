@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { newUser } from "../helpers.js";
 
 /**
  * Event customization (P9) — members-only encrypted posts (kind 31607).
@@ -14,15 +15,6 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 
 test.describe(RELAY_UP ? "members-only posts" : "members-only posts (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay");
-
-  async function newUser(context: BrowserContext, name: string) {
-    const page = await context.newPage();
-    await page.goto("/#/login");
-    await page.getByLabel(/your name/i).fill(name);
-    await page.getByRole("button", { name: /create my identity/i }).click();
-    await expect(page.getByText(/you're in/i)).toBeVisible();
-    return page;
-  }
 
   test("a members-only post is locked for an outsider and readable for an attendee", async ({ browser }) => {
     const organizerCtx = await browser.newContext();

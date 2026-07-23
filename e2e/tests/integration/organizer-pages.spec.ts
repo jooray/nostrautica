@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext, type Page } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
+import { newUser } from "../helpers.js";
 
 /**
  * Organizer-page render regression (BUG-3, validation pass 2026-07-23).
@@ -22,15 +23,6 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 
 test.describe(RELAY_UP ? "organizer pages render (BUG-3)" : "organizer pages render (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay");
-
-  async function newUser(context: BrowserContext, name: string) {
-    const page = await context.newPage();
-    await page.goto("/#/login");
-    await page.getByLabel(/your name/i).fill(name);
-    await page.getByRole("button", { name: /create my identity/i }).click();
-    await expect(page.getByText(/you're in/i)).toBeVisible();
-    return page;
-  }
 
   /** Fail the test if the RefreshGuard effect loop ever surfaces. */
   function trackEffectLoop(page: Page): { seen: () => boolean } {

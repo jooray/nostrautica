@@ -1,4 +1,10 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { newUser, eidPubkeyFromNaddr, pollRelayForEvent } from "../helpers.js";
+
+// packages/protocol/src/kinds.ts: KIND_DIRECTORY_ENTRY = 31603 (ECK-encrypted
+// directory entry). Hardcoded here rather than importing the protocol package
+// into the e2e workspace for one constant.
+const KIND_DIRECTORY_ENTRY = 31603;
 
 /**
  * The join → approve → directory loop, focused on the DIRECTORY ENTRY content
@@ -16,16 +22,12 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay");
 
-  async function newUser(context: BrowserContext, name: string) {
-    const page = await context.newPage();
-    await page.goto("/#/login");
-    await page.getByLabel(/your name/i).fill(name);
-    await page.getByRole("button", { name: /create my identity/i }).click();
-    await expect(page.getByText(/you're in/i)).toBeVisible();
-    return page;
-  }
-
   test("an approved attendee's directory entry is readable by another approved attendee", async ({ browser }) => {
+    // The retry block below now has a 60s outer budget (up from 30s, to give
+    // the ack-tied relay poll room for a couple of genuine attempts) — bump
+    // this test's own budget past the suite default (120s) so that alone
+    // doesn't become the new binding constraint.
+    test.setTimeout(150_000);
     const organizerCtx = await browser.newContext();
     const aCtx = await browser.newContext();
     const bCtx = await browser.newContext();
@@ -42,6 +44,9 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
     const shareLink = await organizer.locator(".mono").first().innerText();
     const naddr = shareLink.match(/#\/e\/([^/\s]+)/)?.[1];
     expect(naddr).toBeTruthy();
+    // Directory entries (31603) are signed by E_id, a per-event identity
+    // distinct from the organizer's personal pubkey — the naddr embeds it.
+    const eidPubkey = eidPubkeyFromNaddr(naddr!);
 
     for (const p of [alice, bob]) {
       await p.goto(`/#/e/${naddr}/join`);
@@ -105,20 +110,45 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
     await bob.goto(`/#/e/${naddr}`);
     await expect(bob.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
     await expect(async () => {
+      // Admin.reprocess() is a fire-and-forget click (no busy/disabled state
+      // exposed while its fetch + republish are in flight), so rather than
+      // guessing a fixed delay, wait for the relay to actually durable-store
+      // organizer's republished directory entry before checking Bob's side —
+      // an ack-tied wait, not a blind sleep (stabilization pass, 2026-07-23:
+      // this was the sole remaining flake once shared-relay worker contention
+      // was removed via playwright.config.ts `workers: 1`).
+      const since = Math.floor(Date.now() / 1000) - 1; // 1s clock-skew cushion
       await aliceAdminCard.getByRole("button", { name: /^re-process$/i }).click();
-      await organizer.waitForTimeout(1_000); // let the fetch + three relay publishes land
+      await pollRelayForEvent(
+        { kinds: [KIND_DIRECTORY_ENTRY], authors: [eidPubkey], since },
+        { timeoutMs: 15_000 },
+      );
       await bob.goto(`/#/e/${naddr}/attendees`);
       const openButtons = bob.locator(".roster button.open");
       await expect(openButtons).toHaveCount(3, { timeout: 5_000 });
       const n = await openButtons.count();
       for (let i = 0; i < n; i++) {
         await openButtons.nth(i).click();
-        if (await bob.getByText(marker, { exact: false }).count()) return; // found it
+        // Attendee.svelte's own fetchDirectoryEntry is async (onMount) — an
+        // immediate `.count()` right after the click checks the DOM before that
+        // resolves and always reads 0, even on the RIGHT card (root-caused via
+        // a debug capture during stabilization, 2026-07-23: the marker was
+        // confirmed present in the page's HTML a few awaits later on the very
+        // card `.count()` had just called "not found" on). `waitFor` polls
+        // until the text actually renders (or this card's bounded window
+        // elapses), which is the real signal, not a guessed delay.
+        const found = await bob
+          .getByText(marker, { exact: false })
+          .first()
+          .waitFor({ timeout: 4_000 })
+          .then(() => true)
+          .catch(() => false);
+        if (found) return; // found it
         await bob.goBack();
         await expect(openButtons).toHaveCount(3, { timeout: 5_000 });
       }
       throw new Error("marker not found on any roster card yet");
-    }).toPass({ timeout: 30_000, intervals: [2_000] });
+    }).toPass({ timeout: 60_000, intervals: [2_000] });
 
     // Revoke: organizer removes Alice specifically. Scope both the trigger and
     // the inline confirm click to HER card by NAME, not by an "approved ✓" text

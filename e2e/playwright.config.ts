@@ -28,6 +28,33 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   reporter: process.env.CI ? "github" : "list",
+  // Serialize spec FILES for the relay-bound tiers (integration/chat/full — the
+  // orchestrator sets NOSTRAUTICA_E2E_RELAY only once that infra is up). Without
+  // this, Playwright's default worker count (half the logical CPUs — 6 on a
+  // 12-core box) runs several spec files concurrently against the SAME shared
+  // nak relay/Blossom/coordinator double the orchestrator started, all fighting
+  // over one process's event loop and one SQLite-backed store.
+  //
+  // Stabilization pass (2026-07-23): 2 baseline `pnpm e2e:integration` runs with
+  // the default worker count each failed 3/11, but a DIFFERENT 3 each time
+  // (run1: join-approve-directory, members-only-posts, organizer-pages; run2:
+  // intro-composer, join-approve-directory, organizer-pages) — not a
+  // deterministic bug in one spec. 4 of the 6 failures were the identical
+  // shape: "Send join request" stuck `disabled` for the full 120s test budget.
+  // That button is gated on Join.svelte's own-profile fetch (profile-load.ts
+  // canSubmitLoggedIn) settling out of "loading"; the fetch itself is bounded
+  // to 8s (stream.ts `streamEvents` timeoutMs), but once it lands on "failed"/
+  // "empty" under relay contention, canSubmitLoggedIn stays false forever with
+  // no further retry — so a single missed 8s window strands the button for the
+  // rest of the test, not just 8 extra seconds. The other 2 failures were a
+  // `toPass` roster-propagation poll expiring in join-approve-directory.spec.ts
+  // — same shape (a relay round trip that normally lands well inside its
+  // window taking too long once six spec files are hammering the relay at
+  // once). `workers: 1` (relay-bound tiers only — smoke never starts a relay,
+  // so it keeps Playwright's default parallelism) removes the contention this
+  // was tracing back to; see e2e/tests/helpers.ts for the accompanying
+  // relay-ack-based fix to the specific own-profile race.
+  workers: process.env.NOSTRAUTICA_E2E_RELAY ? 1 : undefined,
   use: {
     baseURL: process.env.NOSTRAUTICA_URL ?? "http://127.0.0.1:4173",
     trace: "on-first-retry",

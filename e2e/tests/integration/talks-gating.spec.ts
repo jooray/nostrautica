@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { newUser } from "../helpers.js";
 
 /**
  * F2 — the prerecorded-talks journey's per-event gate (spec F2, audit U11).
@@ -17,15 +18,6 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 
 test.describe(RELAY_UP ? "talks gating" : "talks gating (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay");
-
-  async function newUser(context: BrowserContext, name: string) {
-    const page = await context.newPage();
-    await page.goto("/#/login");
-    await page.getByLabel(/your name/i).fill(name);
-    await page.getByRole("button", { name: /create my identity/i }).click();
-    await expect(page.getByText(/you're in/i)).toBeVisible();
-    return page;
-  }
 
   async function createEvent(organizer: import("@playwright/test").Page, title: string, talks: "off" | "on") {
     await organizer.goto("/#/create");

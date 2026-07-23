@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { newUser } from "../helpers.js";
 
 /**
  * P2 walking skeleton (IMPLEMENTATION_PLAN §2 acceptance): two browsers run the
@@ -12,16 +13,6 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 
 test.describe(RELAY_UP ? "walking skeleton" : "walking skeleton (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay");
-
-  async function newUser(context: BrowserContext, name: string) {
-    const page = await context.newPage();
-    await page.goto("/#/login");
-    // The login screen renders the create-identity form directly (name + button).
-    await page.getByLabel(/your name/i).fill(name);
-    await page.getByRole("button", { name: /create my identity/i }).click();
-    await expect(page.getByText(/you're in/i)).toBeVisible();
-    return page;
-  }
 
   test("create → join → approve → both see roster; outsider cannot", async ({ browser }) => {
     const organizerCtx = await browser.newContext();

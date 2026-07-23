@@ -1,4 +1,5 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { test, expect } from "@playwright/test";
+import { newUser } from "../helpers.js";
 
 /**
  * F1 — the record→submit path (feature-verification 2026-07-16, deliverable C,
@@ -19,15 +20,6 @@ const RELAY_UP = !!process.env.NOSTRAUTICA_E2E_RELAY;
 
 test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — skipped)", () => {
   test.skip(!RELAY_UP, "set NOSTRAUTICA_E2E_RELAY to run against a live relay + https Blossom");
-
-  async function newUser(context: BrowserContext, name: string) {
-    const page = await context.newPage();
-    await page.goto("/#/login");
-    await page.getByLabel(/your name/i).fill(name);
-    await page.getByRole("button", { name: /create my identity/i }).click();
-    await expect(page.getByText(/you're in/i)).toBeVisible();
-    return page;
-  }
 
   async function createAndApprove(organizer: import("@playwright/test").Page, attendee: import("@playwright/test").Page) {
     await organizer.goto("/#/create");
