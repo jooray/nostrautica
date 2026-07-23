@@ -4,6 +4,7 @@
   // dead-ends at "join first". Replicates BottomNav's shipped a11y pattern
   // verbatim: aria-current="page", aria-hidden icons, a non-colour ::before
   // marker (forced-colors safe), 48px targets, safe-area padding.
+  import { untrack } from "svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -18,11 +19,14 @@
   // New-matches-since-last-visit badge (spec §13). The refresh is a WRITE to
   // whatsNew.counts — it must run in an effect, never inside a $derived
   // (mutating $state from a derived throws Svelte's state_unsafe_mutation and
-  // breaks the render). The derived below only reads the resulting badge.
+  // breaks the render). untrack around the write: refreshMatches reads
+  // this.counts to spread it, and without untrack that read would re-schedule
+  // this effect forever → effect_update_depth_exceeded. The derived below only
+  // reads the resulting badge.
   const coord = $derived(eventShell.ctx?.coordinate ?? "");
   $effect(() => {
-    void coord;
-    if (coord) whatsNew.refreshMatches(coord);
+    const c = coord;
+    if (c) untrack(() => whatsNew.refreshMatches(c));
   });
   const newMatches = $derived(coord ? whatsNew.matchBadge(coord) : 0);
   function active(...names: string[]): boolean {
