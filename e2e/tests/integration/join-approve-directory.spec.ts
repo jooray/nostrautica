@@ -74,7 +74,7 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
     await alice.goto(`/#/e/${naddr}`);
     await expect(alice.getByText(/see who's here/i)).toBeVisible({ timeout: 20_000 });
     await alice.goto(`/#/e/${naddr}/record`);
-    await alice.getByRole("tab", { name: /^text$/i }).click();
+    await alice.getByRole("button", { name: /^text$/i }).click();
     await alice.locator('input[type=checkbox]').first().check();
     const marker = `directory-loop-marker-${Date.now()}`;
     await alice.locator("textarea").last().fill(`Hi, I'm Alice. ${marker}`);

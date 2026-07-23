@@ -63,7 +63,7 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
     const naddr = await createAndApprove(organizer, attendee);
 
     await attendee.goto(`/#/e/${naddr}/record`);
-    await expect(attendee.getByRole("tab", { name: /^video$/i })).toBeVisible();
+    await expect(attendee.getByRole("button", { name: /^video$/i })).toBeVisible();
 
     // Pre-submit disclosure (H10) gates every submit path.
     await attendee.locator('input[type=checkbox]').first().check();
@@ -87,7 +87,7 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
     const naddr = await createAndApprove(organizer, attendee);
 
     await attendee.goto(`/#/e/${naddr}/record`);
-    await attendee.getByRole("tab", { name: /^audio$/i }).click();
+    await attendee.getByRole("button", { name: /^audio$/i }).click();
     await attendee.locator('input[type=checkbox]').first().check();
     await attendee.getByRole("button", { name: /enable mic/i }).click();
     await attendee.getByRole("button", { name: /record/i }).click();
@@ -105,7 +105,7 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
     const naddr = await createAndApprove(organizer, attendee);
 
     await attendee.goto(`/#/e/${naddr}/record`);
-    await attendee.getByRole("tab", { name: /^text$/i }).click();
+    await attendee.getByRole("button", { name: /^text$/i }).click();
     // Text mode swaps in the "Write your intro" composer (no capture UI at all).
     await expect(attendee.getByRole("heading", { name: /write your intro/i })).toBeVisible();
     await attendee.locator('input[type=checkbox]').first().check();
