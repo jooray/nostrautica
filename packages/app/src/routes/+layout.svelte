@@ -41,7 +41,21 @@
   // deep-linked page's own load; subsequent navigations manage focus + announce.
   let firstRoute = true;
 
+  /**
+   * Dismiss the cold-boot splash (item 3). onMount fires after this component's
+   * DOM is inserted, i.e. the real app has painted behind the splash — so fading
+   * it out here reveals a ready shell, never a blank frame. Fade, then remove.
+   */
+  function dismissSplash(): void {
+    if (typeof document === "undefined") return;
+    const splash = document.getElementById("app-splash");
+    if (!splash) return;
+    splash.classList.add("splash-hide");
+    setTimeout(() => splash.remove(), 320);
+  }
+
   onMount(async () => {
+    dismissSplash();
     // Release provenance (§13.9): log the embedded manifest once so a deployed
     // bundle can be identified from the console without server access.
     console.info(releaseSummary());
