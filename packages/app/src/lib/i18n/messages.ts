@@ -984,6 +984,8 @@ export const messages = {
     "settings.theme.system": "System",
     "settings.theme.light": "Light",
     "settings.theme.dark": "Dark",
+    "settings.about": "About",
+    "settings.about.hint": "Build diagnostics — include this when reporting an issue.",
 
     // Accessibility (A2)
     "a11y.skipToContent": "Skip to content",
@@ -2239,6 +2241,8 @@ export const messages = {
     "settings.theme.system": "Systémový",
     "settings.theme.light": "Svetlý",
     "settings.theme.dark": "Tmavý",
+    "settings.about": "O aplikácii",
+    "settings.about.hint": "Diagnostika zostavenia — priložte ju pri hlásení problému.",
 
     // Accessibility (A2)
     "a11y.skipToContent": "Preskočiť na obsah",
@@ -3495,6 +3499,8 @@ export const messages = {
     "settings.theme.system": "Systémový",
     "settings.theme.light": "Světlý",
     "settings.theme.dark": "Tmavý",
+    "settings.about": "O aplikaci",
+    "settings.about.hint": "Diagnostika sestavení — přiložte ji při hlášení problému.",
 
     // Přístupnost (A2)
     "a11y.skipToContent": "Přeskočit na obsah",

@@ -8,9 +8,6 @@
  * refused (so shell/systemd/`ExecStartPre` can gate on it).
  */
 import { existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import { dirname } from "node:path";
 import { createRequire } from "node:module";
 import { WebSocket } from "ws";
 import { getPublicKey } from "nostr-tools/pure";
@@ -21,6 +18,7 @@ import { createBackup, verifyBackup, restoreBackup, metaPathFor, verifyPassed } 
 import { verifyFfmpeg } from "./pipeline/audio.js";
 import { VeniceLlm } from "./providers/venice.js";
 import { ApiKeyPayment } from "./providers/payment.js";
+import { releaseId } from "./release.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version: string };
@@ -42,23 +40,6 @@ function configPathFromArgs(args: string[]): string {
   const val = i >= 0 ? args[i + 1] : undefined;
   if (val) return val;
   return process.env.NOSTRAUTICA_COORDINATOR_CONFIG ?? "coordinator.toml";
-}
-
-/** Best-effort product release identity: `git describe`, else the package version. */
-export function releaseId(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  try {
-    const out = execFileSync("git", ["describe", "--tags", "--always", "--dirty"], {
-      cwd: here,
-      stdio: ["ignore", "pipe", "ignore"],
-    })
-      .toString()
-      .trim();
-    if (out) return out;
-  } catch {
-    /* not a git checkout (e.g. rsync'd source) — fall through */
-  }
-  return `v${pkg.version}`;
 }
 
 interface Identity {

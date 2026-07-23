@@ -31,6 +31,7 @@
   import BottomNav from "$lib/components/BottomNav.svelte";
   import EventNav from "$lib/components/EventNav.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import { releaseSummary } from "$lib/release.js";
 
   let { children } = $props();
   let booted = $state(false);
@@ -41,6 +42,9 @@
   let firstRoute = true;
 
   onMount(async () => {
+    // Release provenance (§13.9): log the embedded manifest once so a deployed
+    // bundle can be identified from the console without server access.
+    console.info(releaseSummary());
     installRelayErrorGuard();
     // H-5: drop this identity's owner state here if another tab logs it out.
     initSessionBroadcast((owner) => session.applyRemoteLogout(owner));

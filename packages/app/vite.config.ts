@@ -1,11 +1,20 @@
 import { sveltekit } from "@sveltejs/kit/vite";
 import { SvelteKitPWA } from "@vite-pwa/sveltekit";
 import { defineConfig } from "vitest/config";
-import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { computeReleaseManifest } from "../../scripts/release-manifest.mjs";
 
-const pkg = createRequire(import.meta.url)("./package.json") as { version: string };
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+// The release manifest (§13.9): git identity + package/wire versions + BASE_PATH,
+// computed once at build. `releaseId` is deterministic per commit, so it drives a
+// reproducible service-worker revision (below) instead of the old Date.now().
+const releaseManifest = computeReleaseManifest({ repoRoot, basePath: process.env.BASE_PATH || "" });
 
 export default defineConfig({
+  define: {
+    __RELEASE_MANIFEST__: JSON.stringify(releaseManifest),
+  },
   plugins: [
     sveltekit(),
     // Never stuck on an old version (spec §10.2): autoUpdate sets skipWaiting +
@@ -60,7 +69,10 @@ export default defineConfig({
         additionalManifestEntries: [
           {
             url: (process.env.BASE_PATH || "") + "/index.html",
-            revision: `${pkg.version}-${Date.now()}`,
+            // Reproducible per commit (§13.9): the same commit + BASE_PATH builds
+            // the same revision, and every release changes it. Replaces the old
+            // `${pkg.version}-${Date.now()}`, which changed on every rebuild.
+            revision: releaseManifest.releaseId,
           },
         ],
       },

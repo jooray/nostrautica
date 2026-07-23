@@ -26,8 +26,11 @@ import type { LlmProvider, SttProvider } from "./providers/types.js";
 import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
 import { isCliSubcommand, runCli } from "./cli.js";
+import { releaseSummary, coordinatorRelease } from "./release.js";
 
 async function runDaemon(): Promise<void> {
+  // Release provenance (§13.9): tie the running daemon to a specific build.
+  console.log(`[coordinator] ${releaseSummary()}`);
   const configPath = process.argv[2] ?? "coordinator.toml";
   const config = loadConfig(configPath);
   const dbPath = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "coordinator.sqlite";
@@ -178,10 +181,12 @@ async function runDaemon(): Promise<void> {
   // Replaceable — republished on every boot so config edits propagate.
   if (config.coordinator.announce) {
     try {
-      const announce = buildCoordinatorAnnounce(
-        coordSk,
-        buildAnnounceContent(config, disclosureFromRoutes(roles)),
-      );
+      const content = buildAnnounceContent(config, disclosureFromRoutes(roles));
+      // Release provenance (§13.9): the announce wire schema has no version field,
+      // so surface the release id in the existing `about` text (bounded at 2000).
+      const relTag = `nostrautica ${coordinatorRelease().releaseId}`;
+      content.about = (content.about ? `${content.about}\n\n${relTag}` : relTag).slice(0, 2000);
+      const announce = buildCoordinatorAnnounce(coordSk, content);
       await client.publish(announce as any, config.relays.default);
       console.log(
         `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
