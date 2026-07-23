@@ -672,6 +672,7 @@ export const messages = {
     "media.transcript.machine": "Machine-generated transcript",
     "media.captionsUnavailable": "Captions unavailable",
     "media.captionsLabel": "Transcript captions",
+    "media.speed": "Speed",
 
     // QR code
     "qr.alt": "QR code",
@@ -1938,6 +1939,7 @@ export const messages = {
     "media.transcript.machine": "Strojovo vygenerovaný prepis",
     "media.captionsUnavailable": "Titulky nie sú k dispozícii",
     "media.captionsLabel": "Titulky z prepisu",
+    "media.speed": "Rýchlosť",
 
     // QR code
     "qr.alt": "QR kód",
@@ -3208,6 +3210,7 @@ export const messages = {
     "media.transcript.machine": "Strojově vygenerovaný přepis",
     "media.captionsUnavailable": "Titulky nejsou k dispozici",
     "media.captionsLabel": "Titulky z přepisu",
+    "media.speed": "Rychlost",
 
     // QR kód
     "qr.alt": "QR kód",
