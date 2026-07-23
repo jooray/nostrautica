@@ -23,6 +23,7 @@ import {
   KIND_GIFT_WRAP,
   KIND_SEAL,
   RUMOR_MAX_CLOCK_SKEW_SEC,
+  nip44Encrypt,
   type RumorKind,
 } from "@nostrautica/protocol";
 import type { Rumor, GiftWrap } from "@nostrautica/protocol";
@@ -75,8 +76,9 @@ export async function signerWrap(
   });
 
   // 3. Wrap (kind 1059): a fresh one-time key encrypts the seal to the recipient.
+  // Static import (not dynamic): join/DM submit must not hit a post-deploy stale
+  // chunk 404 mid-flight ("Failed to fetch dynamically imported module").
   const otKey = generateSecretKey();
-  const { nip44Encrypt } = await import("@nostrautica/protocol");
   const wrapContent = nip44Encrypt(otKey, recipientPubkey, JSON.stringify(seal));
   const wrap = finalizeEvent(
     {
