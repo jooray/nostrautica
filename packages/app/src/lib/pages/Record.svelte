@@ -20,6 +20,7 @@
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
@@ -426,14 +427,18 @@
     </div>
   {/if}
 
-  <!-- Mode tabs: video · audio · text (spec F1.4). Talks are media-only (no text). -->
+  <!-- Mode switcher: video · audio · text (spec F1.4). Talks are media-only (no
+       text). Plain pressed buttons (audit §7.3.3), NOT an ARIA tabs widget: the
+       three panels below are ordinary page content (not focus-managed tabpanels),
+       so `aria-pressed` toggle buttons in a labelled group is the honest, fully
+       implemented pattern — no half-built roving-focus tablist. -->
   <div class="card">
     <div class="field-label" id="mode-label">{t("record.mode.label")}</div>
-    <div class="row" role="tablist" aria-labelledby="mode-label" style="flex-wrap:wrap">
-      <button class="btn inline" role="tab" aria-selected={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
-      <button class="btn inline" role="tab" aria-selected={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
+    <div class="row" role="group" aria-labelledby="mode-label" style="flex-wrap:wrap">
+      <button type="button" class="btn inline" aria-pressed={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
+      <button type="button" class="btn inline" aria-pressed={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
       {#if !talk}
-        <button class="btn inline" role="tab" aria-selected={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
+        <button type="button" class="btn inline" aria-pressed={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
       {/if}
     </div>
   </div>
@@ -580,15 +585,14 @@
             {:else}
               <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
             {/if}
-            <label class="btn" style="cursor:pointer">
+            <FileButton
+              class="btn"
+              accept={mode === "audio" ? "audio/*" : "video/*"}
+              onchange={chooseFile}
+              label={mode === "audio" ? t("record.chooseAudioFile") : t("record.chooseVideoFile")}
+            >
               {t("record.chooseFile")}
-              <input
-                type="file"
-                accept={mode === "audio" ? "audio/*" : "video/*"}
-                onchange={chooseFile}
-                style="display:none"
-              />
-            </label>
+            </FileButton>
           </div>
         {/if}
       {/if}

@@ -181,6 +181,8 @@ export const messages = {
     "create.bannerAlt": "event banner preview",
     "create.icon": "Icon",
     "create.banner": "Banner",
+    "create.iconPick": "Choose an event icon image",
+    "create.bannerPick": "Choose an event banner image",
     "create.reset": "Reset",
     "create.images.body":
       "Generated from the title if you don't upload your own. Uploads go to a public Blossom server (Primal).",
@@ -328,6 +330,7 @@ export const messages = {
     "post.editor.imagePreview": "header image preview",
     "cropper.title": "Position your image",
     "cropper.hint": "Drag to move, use the slider to zoom. What you see is what gets saved.",
+    "cropper.viewportLabel": "Crop preview — drag or use arrow keys to reposition",
     "cropper.zoom": "Zoom",
     "cropper.use": "Use this",
     "cropper.cancel": "Cancel",
@@ -468,6 +471,9 @@ export const messages = {
     "attendees.sort.name": "name",
     "attendees.following": "following",
     "attendees.matchTag": "Match",
+    "attendees.rosterLabel": "Attendees",
+    "attendees.wantToMeetName": "Want to meet {name}",
+    "attendees.messageName": "Message {name}",
     "attendees.name": "Attendee",
 
     // Attendee
@@ -623,6 +629,7 @@ export const messages = {
     "media.hideTranscript": "Hide transcript",
     "media.transcript.machine": "Machine-generated transcript",
     "media.captionsUnavailable": "Captions unavailable",
+    "media.captionsLabel": "Transcript captions",
 
     // QR code
     "qr.alt": "QR code",
@@ -1116,6 +1123,8 @@ export const messages = {
     "record.micLevel": "Microphone level",
     "record.error.mic": "Microphone access is required to record audio. {reason}",
     "record.chooseFile": "Choose a file",
+    "record.chooseAudioFile": "Choose an audio file",
+    "record.chooseVideoFile": "Choose a video file",
     "record.text.title": "Write your intro",
     "record.text.hint": "Type your intro instead of recording — it feeds your matches just like a spoken one.",
     "record.text.placeholder": "Tell other attendees who you are, what you do, and who you'd like to meet…",
@@ -1286,6 +1295,8 @@ export const messages = {
     "create.field.location": "Miesto",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Jazyk podujatia",
+    "create.iconPick": "Vyberte obrázok ikony podujatia",
+    "create.bannerPick": "Vyberte obrázok bannera podujatia",
     "create.field.language.body":
       "Nastaví rozhranie pre účastníkov a jazyk odôvodnení AI párovania aj profilových zhrnutí. Účastníci môžu naďalej písať v ľubovoľnom jazyku.",
     "create.advanced": "Rozšírené — obrázky, dĺžka videa",
@@ -1443,6 +1454,7 @@ export const messages = {
     "post.editor.imagePreview": "náhľad úvodného obrázka",
     "cropper.title": "Umiestnite obrázok",
     "cropper.hint": "Ťahaním posúvajte, posuvníkom priblížte. Uloží sa presne to, čo vidíte.",
+    "cropper.viewportLabel": "Náhľad orezu — presúvajte ťahaním alebo šípkami",
     "cropper.zoom": "Priblíženie",
     "cropper.use": "Použiť",
     "cropper.cancel": "Zrušiť",
@@ -1586,6 +1598,9 @@ export const messages = {
     "attendees.sort.name": "meno",
     "attendees.following": "sledované",
     "attendees.matchTag": "Zhoda",
+    "attendees.rosterLabel": "Účastníci",
+    "attendees.wantToMeetName": "Chcem stretnúť {name}",
+    "attendees.messageName": "Napísať {name}",
     "attendees.name": "Účastník",
 
     // Attendee
@@ -1743,6 +1758,7 @@ export const messages = {
     "media.hideTranscript": "Skryť prepis",
     "media.transcript.machine": "Strojovo vygenerovaný prepis",
     "media.captionsUnavailable": "Titulky nie sú k dispozícii",
+    "media.captionsLabel": "Titulky z prepisu",
 
     // QR code
     "qr.alt": "QR kód",
@@ -2240,6 +2256,8 @@ export const messages = {
     "record.micLevel": "Úroveň mikrofónu",
     "record.error.mic": "Na nahrávanie zvuku je potrebný prístup k mikrofónu. {reason}",
     "record.chooseFile": "Vybrať súbor",
+    "record.chooseAudioFile": "Vybrať zvukový súbor",
+    "record.chooseVideoFile": "Vybrať video súbor",
     "record.text.title": "Napíšte svoje predstavenie",
     "record.text.hint": "Namiesto nahrávania napíšte predstavenie — do spojení vstupuje rovnako ako hovorené.",
     "record.text.placeholder": "Povedzte ostatným účastníkom, kto ste, čo robíte a koho by ste chceli stretnúť…",
@@ -2410,6 +2428,8 @@ export const messages = {
     "create.field.location": "Místo",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Jazyk akce",
+    "create.iconPick": "Vyberte obrázek ikony akce",
+    "create.bannerPick": "Vyberte obrázek banneru akce",
     "create.field.language.body":
       "Nastaví rozhraní pro účastníky a jazyk odůvodnění AI spojení i profilových shrnutí. Účastníci mohou nadále psát v libovolném jazyce.",
     "create.advanced": "Pokročilé — obrázky, délka videa",
@@ -2567,6 +2587,7 @@ export const messages = {
     "post.editor.imagePreview": "náhled úvodního obrázku",
     "cropper.title": "Umístěte obrázek",
     "cropper.hint": "Přetažením posunete, posuvníkem přiblížíte. Uloží se přesně to, co vidíte.",
+    "cropper.viewportLabel": "Náhled oříznutí — posouvejte tažením nebo šipkami",
     "cropper.zoom": "Přiblížení",
     "cropper.use": "Použít",
     "cropper.cancel": "Zrušit",
@@ -2709,6 +2730,9 @@ export const messages = {
     "attendees.sort.name": "jméno",
     "attendees.following": "sledovaní",
     "attendees.matchTag": "Shoda",
+    "attendees.rosterLabel": "Účastníci",
+    "attendees.wantToMeetName": "Chci potkat {name}",
+    "attendees.messageName": "Napsat {name}",
     "attendees.name": "Účastník",
 
     // Účastník
@@ -2864,6 +2888,7 @@ export const messages = {
     "media.hideTranscript": "Skrýt přepis",
     "media.transcript.machine": "Strojově vygenerovaný přepis",
     "media.captionsUnavailable": "Titulky nejsou k dispozici",
+    "media.captionsLabel": "Titulky z přepisu",
 
     // QR kód
     "qr.alt": "QR kód",
@@ -3366,6 +3391,8 @@ export const messages = {
     "record.micLevel": "Úroveň mikrofonu",
     "record.error.mic": "Pro nahrávání zvuku je potřeba přístup k mikrofonu. {reason}",
     "record.chooseFile": "Vybrat soubor",
+    "record.chooseAudioFile": "Vybrat zvukový soubor",
+    "record.chooseVideoFile": "Vybrat video soubor",
     "record.text.title": "Napište své představení",
     "record.text.hint":
       "Místo nahrávání napište své představení — do spojení vstupuje stejně jako mluvené.",

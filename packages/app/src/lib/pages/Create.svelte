@@ -21,6 +21,7 @@
   import LanguagePicker from "$lib/components/LanguagePicker.svelte";
   import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
   import ImageCropper from "$lib/components/ImageCropper.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import CoordinatorPicker from "$lib/components/CoordinatorPicker.svelte";
   import { attachCoordinator } from "$lib/events/organizer.js";
   import { buildReceipt, type CreationReceipt } from "$lib/events/creation-outcomes.js";
@@ -465,19 +466,29 @@
         <div style="flex:none;text-align:center">
           <img src={previewIcon} alt={t("create.iconAlt")} style="width:64px;height:64px;border-radius:14px;object-fit:cover" />
           <div style="margin-top:0.35rem">
-            <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
+            <FileButton
+              class="btn inline"
+              style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
+              accept="image/*"
+              onchange={(e) => onImageFile(e, "icon")}
+              label={t("create.iconPick")}
+            >
               {uploading === "icon" ? "…" : t("create.icon")}
-              <input type="file" accept="image/*" onchange={(e) => onImageFile(e, "icon")} style="display:none" />
-            </label>
+            </FileButton>
           </div>
         </div>
         <div style="flex:1">
           <img src={previewBanner} alt={t("create.bannerAlt")} style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover" />
           <div class="row" style="margin-top:0.35rem">
-            <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
+            <FileButton
+              class="btn inline"
+              style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
+              accept="image/*"
+              onchange={(e) => onImageFile(e, "banner")}
+              label={t("create.bannerPick")}
+            >
               {uploading === "banner" ? "…" : t("create.banner")}
-              <input type="file" accept="image/*" onchange={(e) => onImageFile(e, "banner")} style="display:none" />
-            </label>
+            </FileButton>
             {#if iconUrl || bannerUrl}
               <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; }}>{t("create.reset")}</button>
             {/if}

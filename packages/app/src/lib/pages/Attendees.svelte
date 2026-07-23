@@ -15,7 +15,6 @@
   import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
-  import VirtualList from "$lib/components/VirtualList.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
@@ -278,46 +277,54 @@
       <button class="btn inline" onclick={clearFilters}>{t("attendees.filter.clear")}</button>
     </div>
   {:else}
+    <!-- Full roster in the DOM (audit §7.3.5): virtualization mounted only the
+         visible window, so browser Find and screen readers missed offscreen
+         attendees and zoom could clip fixed-height rows. At the spec scale
+         (≤2000, typically ~200) rendering every row is fine, and it's the
+         simplest correct fix. Real list semantics so AT announces "list, N
+         items"; a 2000-row render-perf check is an e2e-phase task. -->
     <div class="card roster">
-      <VirtualList items={visible} itemHeight={60} getKey={(e) => e.pubkey}>
-        {#snippet row(e)}
-          <PersonCard
-            pubkey={e.pubkey}
-            name={nameOf(e.pubkey, e.profile.about)}
-            line={cardAbout(e) || e.ai_profile?.summary}
-            picture={profiles.get(e.pubkey)?.picture}
-            onOpen={() => open(e.pubkey)}
-            last={e.pubkey === visible[visible.length - 1]?.pubkey}
-          >
-            {#snippet trailing()}
-              {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
-              {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
-            {/snippet}
-            {#snippet actions()}
-              {#if session.loggedIn && e.pubkey !== session.pubkey}
-                <button
-                  class="btn inline icon-btn"
-                  aria-pressed={wantToMeet(e.pubkey)}
-                  class:primary={wantToMeet(e.pubkey)}
-                  title={t("attendees.filter.wantToMeet")}
-                  aria-label={t("attendees.filter.wantToMeet")}
-                  onclick={() => toggleWantToMeet(e.pubkey)}
-                >
-                  <Icon name="star" size={16} />
-                </button>
-                <button
-                  class="btn inline icon-btn"
-                  title={t("matches.message")}
-                  aria-label={t("matches.message")}
-                  onclick={() => message(e.pubkey)}
-                >
-                  <Icon name="send" size={16} />
-                </button>
-              {/if}
-            {/snippet}
-          </PersonCard>
-        {/snippet}
-      </VirtualList>
+      <ul class="roster-list" aria-label={t("attendees.rosterLabel")}>
+        {#each visible as e (e.pubkey)}
+          <li>
+            <PersonCard
+              pubkey={e.pubkey}
+              name={nameOf(e.pubkey, e.profile.about)}
+              line={cardAbout(e) || e.ai_profile?.summary}
+              picture={profiles.get(e.pubkey)?.picture}
+              onOpen={() => open(e.pubkey)}
+              last={e.pubkey === visible[visible.length - 1]?.pubkey}
+            >
+              {#snippet trailing()}
+                {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
+                {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
+              {/snippet}
+              {#snippet actions()}
+                {#if session.loggedIn && e.pubkey !== session.pubkey}
+                  <button
+                    class="btn inline icon-btn"
+                    aria-pressed={wantToMeet(e.pubkey)}
+                    class:primary={wantToMeet(e.pubkey)}
+                    title={t("attendees.wantToMeetName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    aria-label={t("attendees.wantToMeetName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    onclick={() => toggleWantToMeet(e.pubkey)}
+                  >
+                    <Icon name="star" size={16} />
+                  </button>
+                  <button
+                    class="btn inline icon-btn"
+                    title={t("attendees.messageName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    aria-label={t("attendees.messageName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    onclick={() => message(e.pubkey)}
+                  >
+                    <Icon name="send" size={16} />
+                  </button>
+                {/if}
+              {/snippet}
+            </PersonCard>
+          </li>
+        {/each}
+      </ul>
     </div>
   {/if}
 {/if}
@@ -330,6 +337,11 @@
   }
   .roster {
     padding: 0.25rem 0.9rem;
+  }
+  .roster-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
   .icon-btn {
     padding: 0.4rem 0.5rem;

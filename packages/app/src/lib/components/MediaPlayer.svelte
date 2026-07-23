@@ -2,6 +2,7 @@
   import { onDestroy } from "svelte";
   import type { MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
   import { resolveMediaUrl, releaseMediaUrl } from "$lib/media/playback.js";
+  import { vttObjectUrl } from "$lib/media/vtt.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -40,10 +41,26 @@
     }
   }
 
-  // Audio intros (spec F1) play through <audio>; video through <video>. There are
-  // no timed caption tracks yet (VTT is a phase-2 follow-up), so the published
-  // transcript below is the nonvisual consumption path (audit A1).
+  // Audio intros (spec F1) play through <audio>; video through <video>.
   const isAudio = $derived(descriptor.m.startsWith("audio/"));
+
+  // Captions track (audit §7.3.6). The transcript wire format carries plain text
+  // only (no per-segment timing), so we synthesize a single whole-duration cue —
+  // a real, browser-native `<track kind="captions">` the caption UI + screen
+  // readers surface, not merely the offscreen transcript block below. A properly
+  // time-aligned track needs segment timing the schema does not yet carry.
+  let captionsUrl = $state<string | null>(null);
+  $effect(() => {
+    // Rebuild whenever the transcript text changes; revoke the prior blob URL.
+    const text = transcript?.text?.trim();
+    if (!text) {
+      captionsUrl = null;
+      return;
+    }
+    const u = vttObjectUrl(text);
+    captionsUrl = u;
+    return () => URL.revokeObjectURL(u);
+  });
 
   async function load() {
     loading = true;
@@ -73,7 +90,7 @@
       ontimeupdate={onTimeUpdate}
     ></audio>
   {:else}
-    <!-- svelte-ignore a11y_media_has_caption -->
+    {#if !captionsUrl}<!-- svelte-ignore a11y_media_has_caption -->{/if}
     <video
       bind:this={mediaEl}
       src={url}
@@ -82,7 +99,17 @@
       style="max-width:100%;border-radius:12px"
       onloadedmetadata={onLoadedMeta}
       ontimeupdate={onTimeUpdate}
-    ></video>
+    >
+      {#if captionsUrl}
+        <track
+          kind="captions"
+          src={captionsUrl}
+          srclang={transcript?.lang}
+          label={t("media.captionsLabel")}
+          default
+        />
+      {/if}
+    </video>
   {/if}
 {:else if error}
   <div class="card warn">{t("media.playError", { reason: error })}</div>

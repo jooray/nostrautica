@@ -19,6 +19,7 @@
   import type { MediaDescriptor } from "@nostrautica/protocol";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import SignInOptions from "$lib/components/SignInOptions.svelte";
   import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
@@ -528,14 +529,19 @@
         {t("join.publicNote")}
       </p>
       <div class="row" style="gap:0.75rem;align-items:center">
-        <label style="cursor:pointer;flex:none;margin:0">
+        <FileButton
+          class="avatar-pick"
+          style="background:none;border:none;padding:0;cursor:pointer;flex:none;margin:0"
+          accept="image/*"
+          onchange={onPicFile}
+          label={t("join.photoAdd")}
+        >
           {#if newPicPreview}
             <img src={newPicPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
           {:else}
             <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;color:var(--text-dim)"><Icon name="plus" size={22} /></span>
           {/if}
-          <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
-        </label>
+        </FileButton>
         <div class="muted" style="font-size:0.85rem">{t("join.photoAdd")} <span class="badge">{t("join.photoPublic")}</span><br />{t("join.photoTap")}</div>
       </div>
       <div>

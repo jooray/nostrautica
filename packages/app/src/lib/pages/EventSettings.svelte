@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
@@ -713,10 +714,15 @@
             style="width:64px;height:64px;border-radius:14px;object-fit:cover"
           />
           <div style="margin-top:0.35rem">
-            <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
+            <FileButton
+              class="btn inline"
+              style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
+              accept="image/*"
+              onchange={(e) => pickMetadataImage(e, "icon")}
+              label={t("create.iconPick")}
+            >
               {metadataUploading === "icon" ? "…" : t("create.icon")}
-              <input type="file" accept="image/*" onchange={(e) => pickMetadataImage(e, "icon")} style="display:none" />
-            </label>
+            </FileButton>
           </div>
         </div>
         <div style="flex:1">
@@ -726,10 +732,15 @@
             style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover"
           />
           <div class="row" style="margin-top:0.35rem">
-            <label class="btn inline" style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem">
+            <FileButton
+              class="btn inline"
+              style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
+              accept="image/*"
+              onchange={(e) => pickMetadataImage(e, "banner")}
+              label={t("create.bannerPick")}
+            >
               {metadataUploading === "banner" ? "…" : t("create.banner")}
-              <input type="file" accept="image/*" onchange={(e) => pickMetadataImage(e, "banner")} style="display:none" />
-            </label>
+            </FileButton>
             {#if metadataIcon || metadataBanner}
               <button
                 class="btn inline"

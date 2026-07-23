@@ -194,6 +194,7 @@
       role="combobox"
       aria-expanded="true"
       aria-controls="{id}-listbox"
+      aria-activedescendant={filtered[active] ? `${id}-opt-${filtered[active].code}` : undefined}
       aria-autocomplete="list"
       autocomplete="off"
       spellcheck="false"
@@ -217,6 +218,7 @@
         {/if}
         <li
           data-i={i}
+          id="{id}-opt-{o.code}"
           role="option"
           aria-selected={o.code === value}
           class="lang-option"
