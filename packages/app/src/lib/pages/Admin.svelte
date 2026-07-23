@@ -44,7 +44,6 @@
   import { checkoutUrlForEvent } from "$lib/events/coordinators.js";
   import { fetchPendingTalks, cachedPendingTalks, type PendingTalk } from "$lib/events/talks.js";
   import { perfMark } from "$lib/perf.js";
-  import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
   import QrCode from "$lib/components/QrCode.svelte";
   import SecretSurface from "$lib/components/SecretSurface.svelte";
@@ -59,6 +58,8 @@
   } from "$lib/events/posts.js";
   import PostEditor from "$lib/components/PostEditor.svelte";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
+  import AdminPersonDrawer from "$lib/components/AdminPersonDrawer.svelte";
+  import AdminTalks from "$lib/components/AdminTalks.svelte";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -218,29 +219,15 @@
   }
 
   // ── pending talk moderation (spec F2.3) ────────────────────────────────────
+  // The moderation UI + its per-talk interaction state (preview / in-flight) live
+  // in AdminTalks (domain split). The page keeps the source list + the acted-on
+  // set because the ops-overview count (`talksAwaiting`) reads `visibleTalks`.
   let pendingTalks = $state<PendingTalk[]>([]);
   let moderatedTalks = $state<Set<string>>(new Set()); // acted-on this session
-  let talkBusy = $state<string | null>(null);
-  let previewingTalk = $state<string | null>(null);
   function tkKey(tk: PendingTalk): string {
     return `${tk.pubkey}:${tk.talkD}`;
   }
   const visibleTalks = $derived(pendingTalks.filter((tk) => !moderatedTalks.has(tkKey(tk))));
-
-  async function moderateTalk(tk: PendingTalk, cmd: "talk_publish" | "talk_reject") {
-    if (!ctx?.config.coordinator) return;
-    const key = tkKey(tk);
-    talkBusy = key;
-    error = null;
-    try {
-      await sendAdminCommand(ctx, cmd, { pubkey: tk.pubkey, talk_d: tk.talkD });
-      moderatedTalks = new Set([...moderatedTalks, key]);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      talkBusy = null;
-    }
-  }
 
   function scrollToRequests() {
     document.getElementById("join-requests")?.scrollIntoView({ behavior: "smooth" });
@@ -477,6 +464,36 @@
   // rendered pending + approved sections (empty query/all → show everything).
   const peopleFilterActive = $derived(peopleFilter !== "all" || peopleQuery.trim().length > 0);
   const matchedPubkeys = $derived(new Set(filteredPeople.map((p) => p.pubkey)));
+
+  // Per-person operational drawer (Phase 5A carry-over a): submitted profile +
+  // provenance + operational history (coordinator statuses / talks) for one
+  // attendee, all from data already loaded here. `detailPubkey` selects them.
+  let detailPubkey = $state<string | null>(null);
+  const detailProps = $derived.by(() => {
+    const pk = detailPubkey;
+    if (!pk) return null;
+    const approved = approvedPeople.find((p) => p.pubkey === pk);
+    const req = pendingRequests.find((r) => r.attendeePubkey === pk);
+    if (!approved && !req) return null;
+    const talksFor = pendingTalks
+      .filter((tk) => tk.pubkey === pk)
+      .map((tk) => ({ title: tk.title, status: "pending" as const }));
+    return {
+      pubkey: pk,
+      name: approved?.name ?? req?.name ?? short(pk),
+      role: approved?.role ?? "attendee",
+      revoked: approved?.revoked ?? false,
+      inRoster: approved?.inRoster ?? false,
+      intakeAvailable: approved?.intakeAvailable ?? !!req,
+      pending: !!req,
+      reviewState: reviewMap[pk],
+      profile: approved?.profile ?? req?.profile,
+      media: approved?.media ?? req?.media,
+      introText: approved?.introText ?? req?.message,
+      statuses: coordStatuses.filter((s) => s.pubkey === pk),
+      talks: talksFor,
+    };
+  });
 
   async function refreshCoordStatus() {
     if (!ctx?.config.coordinator || !keys?.eidNsecHex) return;
@@ -1029,6 +1046,9 @@
             <button class="btn inline danger" onclick={() => (confirmingReject = req.attendeePubkey)}>
               {t("admin.requests.reject")}
             </button>
+            <button class="btn inline" onclick={() => (detailPubkey = req.attendeePubkey)}>
+              {t("admin.person.details")}
+            </button>
           </div>
         {/if}
       </div>
@@ -1083,6 +1103,9 @@
               >
                 {t("admin.revoke.revoke")}
               </button>
+              <button class="btn inline" onclick={() => (detailPubkey = person.pubkey)}>
+                {t("admin.person.details")}
+              </button>
             </div>
           {/if}
         </div>
@@ -1091,54 +1114,12 @@
   {/if}
 
   {#if ctx && ctx.config.talks !== "off"}
-    <h2 class="section-head">{t("admin.talks.mod.section")}</h2>
-    <div class="card">
-      <div class="field-label">{t("admin.talks.mod.title")}</div>
-      {#if !ctx.config.coordinator}
-        <!-- Publishing a talk's 31610 is a coordinator action (spec F2). Without one
-             there's no publish path, so surface that instead of dead buttons. -->
-        <p class="muted">{t("admin.talks.mod.needsCoordinator")}</p>
-      {:else if visibleTalks.length === 0}
-        <p class="muted">{t("admin.talks.mod.none")}</p>
-      {:else}
-        <p class="muted">{t("admin.talks.mod.body")}</p>
-        <div class="stack">
-          {#each visibleTalks as tk (tkKey(tk))}
-            <div class="card" style="background:var(--bg-elev2)">
-              <strong>{tk.title}</strong>
-              <span class="badge">{short(tk.pubkey)}</span>
-              {#if tk.revision > 0}
-                <span class="badge">{t("admin.talks.mod.revision", { n: tk.revision })}</span>
-              {/if}
-              {#if tk.description}<p class="muted">{tk.description}</p>{/if}
-              {#if previewingTalk === tkKey(tk)}
-                <MediaPlayer descriptor={tk.media} />
-              {:else}
-                <button class="btn inline" onclick={() => (previewingTalk = tkKey(tk))}>
-                  {t("admin.talks.mod.preview")}
-                </button>
-              {/if}
-              <div class="row">
-                <button
-                  class="btn primary"
-                  onclick={() => moderateTalk(tk, "talk_publish")}
-                  disabled={talkBusy === tkKey(tk)}
-                >
-                  {t("admin.talks.mod.publish")}
-                </button>
-                <button
-                  class="btn inline danger"
-                  onclick={() => moderateTalk(tk, "talk_reject")}
-                  disabled={talkBusy === tkKey(tk)}
-                >
-                  {t("admin.talks.mod.reject")}
-                </button>
-              </div>
-            </div>
-          {/each}
-        </div>
-      {/if}
-    </div>
+    <AdminTalks
+      {ctx}
+      talks={visibleTalks}
+      onModerated={(key) => (moderatedTalks = new Set([...moderatedTalks, key]))}
+      onError={(msg) => (error = msg)}
+    />
   {/if}
 
   <h2 class="section-head">{t("admin.section.communicate")}</h2>
@@ -1244,6 +1225,10 @@
       {/if}
     </div>
   {/if}
+{/if}
+
+{#if detailProps}
+  <AdminPersonDrawer {...detailProps} onClose={() => (detailPubkey = null)} />
 {/if}
 
 <style>
