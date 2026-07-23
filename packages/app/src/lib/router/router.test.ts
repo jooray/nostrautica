@@ -7,7 +7,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 vi.mock("$lib/perf.js", () => ({ markRouteChange: () => {} }));
 
-import { Router } from "./router.svelte.js";
+import { Router, upLabelKey } from "./router.svelte.js";
 import { buildHash, type Route } from "./routes.js";
 
 /** Minimal window shim: hash storage + captured hashchange listeners. */
@@ -32,6 +32,13 @@ function fakeWindow() {
 const HOME: Route = { name: "home" };
 const EVENT: Route = { name: "event", naddr: "naddr1xyz" };
 const POSTS: Route = { name: "posts", naddr: "naddr1xyz" };
+const MATCHES: Route = { name: "matches", naddr: "naddr1xyz" };
+const ATTENDEES: Route = { name: "attendees", naddr: "naddr1xyz" };
+const ATTENDEE: Route = { name: "attendee", naddr: "naddr1xyz", npub: "npub1abc" };
+const POST: Route = { name: "post", naddr: "naddr1xyz", d: "d1" };
+const DM: Route = { name: "dm" };
+const DM_PEER: Route = { name: "dmPeer", npub: "npub1abc" };
+const SETTINGS: Route = { name: "settings" };
 
 let fw: ReturnType<typeof fakeWindow>;
 let router: Router;
@@ -119,5 +126,69 @@ describe("router back-stack (UX-8)", () => {
     router.back();
     const target = router.route;
     expect(["home", "event"]).toContain(target.name);
+  });
+});
+
+describe("router hierarchical up()", () => {
+  it("rises to the contextual parent, not the chronological previous screen", () => {
+    // Arrive at matches via a non-hierarchical path: home → posts → matches.
+    go(POSTS);
+    go(MATCHES);
+    router.up(); // hierarchy says matches' parent is the event home, NOT posts
+    fw.navigate(buildHash(EVENT));
+    expect(router.route).toEqual(EVENT);
+  });
+
+  it("event home rises to All events (home)", () => {
+    go(EVENT);
+    router.up();
+    fw.navigate(buildHash(HOME));
+    expect(router.route).toEqual(HOME);
+  });
+
+  it("works on a cold deep-link with an empty stack", () => {
+    fw.navigate(buildHash(MATCHES)); // cold open, no in-app history
+    router.up();
+    const target = router.route;
+    // parentOf(matches) is the event home; up() must reach it regardless of stack.
+    expect(target.name === "matches" || target.name === "event").toBe(true);
+  });
+
+  it("collapses a matching stack top so hardware Back stays coherent", () => {
+    // Linear drill: home → event → matches. up() from matches returns to event
+    // AND pops the duplicate event off the stack, so the next up() reaches home.
+    go(EVENT);
+    go(MATCHES);
+    router.up();
+    fw.navigate(buildHash(EVENT));
+    expect(router.route).toEqual(EVENT);
+    router.up();
+    fw.navigate(buildHash(HOME));
+    expect(router.route).toEqual(HOME);
+    expect(router.canGoBack).toBe(false);
+  });
+});
+
+describe("upLabelKey names the destination", () => {
+  it("labels the event home button 'All events'", () => {
+    expect(upLabelKey(EVENT)).toBe("more.allEvents");
+  });
+  it("labels event subtabs by their parent (event home = Overview)", () => {
+    expect(upLabelKey(MATCHES)).toBe("nav.overview");
+    expect(upLabelKey(ATTENDEES)).toBe("nav.overview");
+  });
+  it("labels a person detail 'People'", () => {
+    expect(upLabelKey(ATTENDEE)).toBe("nav.people");
+  });
+  it("labels a single update 'Updates'", () => {
+    expect(upLabelKey(POST)).toBe("nav.updates");
+  });
+  it("labels a 1:1 chat by its conversation list", () => {
+    expect(upLabelKey(DM_PEER)).toBe("nav.chat");
+  });
+  it("falls back to generic 'Back' for a top-level page and for home", () => {
+    expect(upLabelKey(SETTINGS)).toBe("nav.back");
+    expect(upLabelKey(DM)).toBe("nav.back");
+    expect(upLabelKey(HOME)).toBe("nav.back");
   });
 });

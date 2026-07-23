@@ -8,16 +8,22 @@
  * deep invite link), falls back to the route's contextual parent instead of
  * leaving the app.
  */
-import { parseHash, buildHash, type Route } from "./routes.js";
+import { parseHash, buildHash, eventNaddr, type Route } from "./routes.js";
+import type { MessageKey } from "$lib/i18n/messages.js";
 import { markRouteChange } from "$lib/perf.js";
 
-/** The sensible parent screen for a route when there's no back-history. */
+/** The sensible parent screen for a route in the app's screen hierarchy. */
 function parentOf(route: Route): Route | null {
   switch (route.name) {
+    // Every event subpage rises to the event home — a group chat, the matches
+    // tab, the post-event report all go "up" to Overview, never off to Home.
     case "join":
     case "record":
     case "attendees":
     case "matches":
+    case "report":
+    case "chat":
+    case "talks":
     case "admin":
     case "eventSettings":
     case "posts":
@@ -25,8 +31,12 @@ function parentOf(route: Route): Route | null {
       return { name: "event", naddr: route.naddr };
     case "attendee":
       return { name: "attendees", naddr: route.naddr };
+    case "talk":
+      return { name: "talks", naddr: route.naddr };
     case "post":
       return { name: "posts", naddr: route.naddr };
+    case "myProfile":
+      return { name: "eventMore", naddr: route.naddr };
     case "dmPeer":
       return { name: "dm" };
     case "event":
@@ -38,6 +48,32 @@ function parentOf(route: Route): Route | null {
       return { name: "home" };
     default:
       return null;
+  }
+}
+
+/**
+ * i18n key for the top-bar "up" button's label, named after where it goes
+ * (Android Up-button convention). The one case the product pins explicitly:
+ * the event home page's button reads "All events". Everything else is labelled
+ * by its parent screen so the destination is predictable before you tap.
+ */
+export function upLabelKey(route: Route): MessageKey {
+  const parent = parentOf(route);
+  if (!parent) return "nav.back";
+  switch (parent.name) {
+    case "home":
+      // Leaving an event → "All events"; a plain top-level page → generic "Back".
+      return eventNaddr(route) !== undefined ? "more.allEvents" : "nav.back";
+    case "event":
+      return "nav.overview";
+    case "attendees":
+      return "nav.people";
+    case "posts":
+      return "nav.updates";
+    case "dm":
+      return "nav.chat";
+    default:
+      return "nav.back";
   }
 }
 
@@ -89,8 +125,27 @@ export class Router {
   }
 
   /**
-   * Smart back: return to the previous in-app screen if there is one; otherwise
-   * to this screen's contextual parent (never off the app).
+   * Hierarchical "up": always go to this screen's contextual PARENT, ignoring
+   * the chronological back-stack. This is the top-bar button's action, so it's
+   * predictable regardless of how the user arrived (deep link, tab switch,
+   * notification) — a subtab always rises to the event home, the event home to
+   * "All events", a 1:1 chat to the conversation list. When the stack top is
+   * already that parent (the common linear drill-down), pop it too so the
+   * chronological history stays coherent for Android's hardware Back.
+   */
+  up(): void {
+    const target = parentOf(this.route) ?? { name: "home" as const };
+    const top = this.stack[this.stack.length - 1];
+    if (top !== undefined && buildHash(top) === buildHash(target)) this.stack.pop();
+    this.goingBack = true;
+    this.go(target);
+  }
+
+  /**
+   * Chronological back — used by Android's hardware Back button (via hashchange)
+   * and any caller that wants "the previous screen." Returns to the previous
+   * in-app screen if there is one, else to the contextual parent (never off the
+   * app). The visible top-bar button uses `up()` instead (see above).
    */
   back(): void {
     const prev = this.stack.pop();
