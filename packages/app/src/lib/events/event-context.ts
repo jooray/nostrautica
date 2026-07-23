@@ -92,6 +92,9 @@ export async function loadEventContext(
   naddr: string,
   opts: { adoptLang?: boolean } = {},
 ): Promise<EventContext> {
+  if (!naddr || naddr === "undefined" || naddr === "null") {
+    throw new Error(t("error.badEventLink"));
+  }
   let decoded: { coordinate: string; relays: string[] };
   try {
     decoded = naddrToCoordinate(naddr);

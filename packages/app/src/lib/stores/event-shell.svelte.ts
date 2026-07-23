@@ -91,7 +91,10 @@ class EventShell {
    */
   async sync(naddr: string | undefined): Promise<void> {
     const tok = ++this.token;
-    if (!naddr) {
+    // Guard the string "undefined" / "null" too — a bad hash or a coerced
+    // missing prop becomes truthy and would otherwise hit naddrToCoordinate
+    // ("Bad event address: \"undefined\"" / bech32 Letter-"1" error).
+    if (!naddr || naddr === "undefined" || naddr === "null") {
       this.naddr = undefined;
       this.ctx = undefined;
       this.role = "visitor";
