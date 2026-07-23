@@ -10,9 +10,13 @@
     visiblePending,
     buildApprovedPeople,
     summarizeBulk,
+    filterPeople,
     type AdminPerson,
     type BulkItem,
+    type PeopleFilter,
   } from "$lib/events/admin-people.js";
+  import { buildOverview } from "$lib/events/admin-overview.js";
+  import AdminOverview from "$lib/components/AdminOverview.svelte";
   import type { DirectoryEntryContent, RosterContent } from "@nostrautica/protocol";
   import {
     loadReview,
@@ -426,6 +430,54 @@
     billing?.checkout_url ? checkoutUrlForEvent(billing.checkout_url, naddr) : undefined,
   );
 
+  // Operational overview (UX-A5): headline metrics + exceptions, all derived from
+  // state the page already holds. `matchesAvailable` uses the matching-enabled
+  // config as an honest proxy (a true per-event match aggregate isn't fetched
+  // here — see report).
+  const overview = $derived(
+    buildOverview({
+      pendingCount: pendingRequests.length,
+      approvedCount: approvedPeople.filter((p) => !p.revoked).length,
+      missingIntros: approvedPeople.filter((p) => !p.revoked && !p.hasIntro).length,
+      failedJobs: poisonStatuses.length,
+      talksAwaiting: visibleTalks.length,
+      matchesAvailable: ctx?.config.matching === "on",
+      hasCoordinator: !!ctx?.config.coordinator,
+      coordinatorStale: coordStale,
+      coordinatorUnknown: coordLastSeen === undefined,
+      billingBlocked: !!billing,
+    }),
+  );
+
+  // People search + filter (UX-A6): reuse the roster matching shape for the admin
+  // People list. `all` includes pending + approved; filters narrow it.
+  let peopleFilter = $state<PeopleFilter>("all");
+  let peopleQuery = $state("");
+  const talkPubkeys = $derived(new Set(pendingTalks.map((tk) => tk.pubkey)));
+  const filterablePeople = $derived([
+    ...pendingRequests.map((r) => ({
+      pubkey: r.attendeePubkey,
+      name: r.name,
+      approved: false,
+      hasIntro: !!(r.media?.length || r.introText?.trim()),
+      op: "ok" as const,
+      hasTalk: talkPubkeys.has(r.attendeePubkey),
+    })),
+    ...approvedPeople.map((p) => ({
+      pubkey: p.pubkey,
+      name: p.name,
+      approved: true,
+      hasIntro: p.hasIntro,
+      op: p.op,
+      hasTalk: talkPubkeys.has(p.pubkey),
+    })),
+  ]);
+  const filteredPeople = $derived(filterPeople(filterablePeople, peopleFilter, peopleQuery));
+  // The set of pubkeys that pass the current search/filter, used to narrow the
+  // rendered pending + approved sections (empty query/all → show everything).
+  const peopleFilterActive = $derived(peopleFilter !== "all" || peopleQuery.trim().length > 0);
+  const matchedPubkeys = $derived(new Set(filteredPeople.map((p) => p.pubkey)));
+
   async function refreshCoordStatus() {
     if (!ctx?.config.coordinator || !keys?.eidNsecHex) return;
     coordStatuses = await fetchCoordinatorStatuses(ctx, keys.eidNsecHex).catch(() => []);
@@ -773,6 +825,10 @@
     </p>
   {/if}
 
+  <!-- Operational overview (UX-A5): a control room, not just a control list —
+       exceptions above the healthy detail. -->
+  <AdminOverview exceptions={overview.exceptions} metrics={overview.metrics} />
+
   <!-- Operations first (§9): urgent join requests render above everything else,
        so a pending approval is visible without scrolling past setup/invite QR. -->
   <h2 class="section-head">{t("admin.section.operations")}</h2>
@@ -886,6 +942,31 @@
     </div>
   {/if}
 
+  <!-- People search + filter (UX-A6): narrows both the pending queue and the
+       approved People list below by name/pubkey and by status. -->
+  <div class="row" style="flex-wrap:wrap;gap:0.5rem;margin:0.75rem 0 0.25rem">
+    <input
+      type="search"
+      bind:value={peopleQuery}
+      placeholder={t("admin.people.search")}
+      aria-label={t("admin.people.search")}
+      style="flex:1;min-width:160px"
+    />
+    <select bind:value={peopleFilter} aria-label={t("admin.people.filter")}>
+      <option value="all">{t("admin.people.filter.all")}</option>
+      <option value="pending">{t("admin.people.filter.pending")}</option>
+      <option value="approved">{t("admin.people.filter.approved")}</option>
+      <option value="no-intro">{t("admin.people.filter.noIntro")}</option>
+      <option value="failed">{t("admin.people.filter.failed")}</option>
+      <option value="talk">{t("admin.people.filter.talk")}</option>
+    </select>
+  </div>
+  {#if peopleFilterActive}
+    <p class="muted" style="font-size:0.78rem;margin:0 0 0.35rem">
+      {tp("admin.people.matchCount", filteredPeople.length)}
+    </p>
+  {/if}
+
   <h2 id="join-requests">{t("admin.requests.title")}</h2>
   <div class="stack">
     {#if pendingRequests.length === 0}
@@ -901,7 +982,7 @@
         {t("admin.requests.bulkSummary", { approved: bulkSummary.approved, retry: bulkSummary.needRetry })}
       </p>
     {/if}
-    {#each pendingRequests as req (req.attendeePubkey)}
+    {#each pendingRequests.filter((r) => !peopleFilterActive || matchedPubkeys.has(r.attendeePubkey)) as req (req.attendeePubkey)}
       {@const bulk = bulkItemState(req.attendeePubkey)}
       {@const deferred = deferredSet.has(req.attendeePubkey)}
       <div class="card">
@@ -970,7 +1051,7 @@
     <h2 class="section-head">{t("admin.section.people")}</h2>
     <h2>{t("admin.approved.title", { n: approvedPeople.length })}</h2>
     <div class="stack">
-      {#each approvedPeople as person (person.pubkey)}
+      {#each approvedPeople.filter((p) => !peopleFilterActive || matchedPubkeys.has(p.pubkey)) as person (person.pubkey)}
         <div class="card">
           <strong>{person.name ?? short(person.pubkey)}</strong>
           <span class="badge">{short(person.pubkey)}</span>
