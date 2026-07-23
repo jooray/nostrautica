@@ -754,7 +754,7 @@ async function rotateEckAndInbox(
  */
 export async function updateEventConfig(
   ctx: EventContext,
-  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[] }>,
+  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[]; retentionDays: number | undefined }>,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {

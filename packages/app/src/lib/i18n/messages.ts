@@ -1113,6 +1113,15 @@ export const messages = {
     "admin.talks.save": "Save talks setting",
     "admin.talks.saving": "Saving…",
     "admin.talks.saved": "Saved",
+    "admin.retention.title": "Delete member data after the event",
+    "admin.retention.body":
+      "Set how long member data is kept after the event ends. Leave blank to keep it indefinitely.",
+    "admin.retention.placeholder": "e.g. 30",
+    "admin.retention.unit": "days after the event ends",
+    "admin.retention.consequence":
+      "The directory, matches and talks are deleted from relays {n} days after the event ends. Deletion is best-effort.",
+    "admin.retention.consequenceOff": "No automatic deletion — member data is kept indefinitely.",
+    "admin.retention.invalid": "Enter a whole number of days (1 or more), or leave it blank for no deletion.",
     "admin.talks.mod.section": "Talks moderation",
     "admin.talks.mod.title": "Pending talks",
     "admin.talks.mod.body":
@@ -2369,6 +2378,15 @@ export const messages = {
     "admin.talks.save": "Uložiť nastavenie prednášok",
     "admin.talks.saving": "Ukladá sa…",
     "admin.talks.saved": "Uložené",
+    "admin.retention.title": "Zmazať údaje účastníkov po podujatí",
+    "admin.retention.body":
+      "Nastavte, ako dlho sa údaje účastníkov uchovávajú po skončení podujatia. Prázdne pole = uchovávať natrvalo.",
+    "admin.retention.placeholder": "napr. 30",
+    "admin.retention.unit": "dní po skončení podujatia",
+    "admin.retention.consequence":
+      "Adresár, spárovania a prednášky sa z relé zmažú {n} dní po skončení podujatia. Mazanie je podľa najlepšej snahy.",
+    "admin.retention.consequenceOff": "Žiadne automatické mazanie — údaje účastníkov sa uchovávajú natrvalo.",
+    "admin.retention.invalid": "Zadajte celý počet dní (1 alebo viac), alebo pole nechajte prázdne pre žiadne mazanie.",
     "admin.talks.mod.section": "Moderovanie prednášok",
     "admin.talks.mod.title": "Čakajúce prednášky",
     "admin.talks.mod.body":
@@ -3630,6 +3648,15 @@ export const messages = {
     "admin.talks.save": "Uložit nastavení přednášek",
     "admin.talks.saving": "Ukládání…",
     "admin.talks.saved": "Uloženo",
+    "admin.retention.title": "Smazat data účastníků po akci",
+    "admin.retention.body":
+      "Nastavte, jak dlouho se data účastníků uchovávají po skončení akce. Prázdné pole = uchovávat trvale.",
+    "admin.retention.placeholder": "např. 30",
+    "admin.retention.unit": "dní po skončení akce",
+    "admin.retention.consequence":
+      "Adresář, spárování a přednášky se z relayů smažou {n} dní po skončení akce. Mazání je podle nejlepší snahy.",
+    "admin.retention.consequenceOff": "Žádné automatické mazání — data účastníků se uchovávají trvale.",
+    "admin.retention.invalid": "Zadejte celý počet dní (1 nebo více), nebo pole nechte prázdné pro žádné mazání.",
     "admin.talks.mod.section": "Moderování přednášek",
     "admin.talks.mod.title": "Čekající přednášky",
     "admin.talks.mod.body":

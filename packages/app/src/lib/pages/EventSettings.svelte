@@ -412,6 +412,45 @@
     }
   }
 
+  // Data-retention window (NIP §6.2 `retention`). Empty = no retention tag
+  // (indefinite). A positive integer N tells the coordinator to delete member
+  // data N days after the event ends. Editing republishes the 31600 config
+  // through the same path as talks/chat; the coordinator enforces the sweep.
+  // `bind:value` on a number input yields a number (or null when empty), so this
+  // is number|null, not a string — null is the "no retention" (indefinite) state.
+  let retentionInput = $state<number | null>(null);
+  let savingRetention = $state(false);
+  let retentionSaved = $state(false);
+  $effect(() => {
+    if (ctx) retentionInput = ctx.config.retentionDays ?? null;
+  });
+  const retentionDirty = $derived(!!ctx && (retentionInput ?? undefined) !== ctx.config.retentionDays);
+  async function saveRetention() {
+    if (!ctx) return;
+    // Empty (null) clears the tag (indefinite retention); otherwise require a positive integer.
+    let retentionDays: number | undefined;
+    if (retentionInput !== null) {
+      if (!Number.isInteger(retentionInput) || retentionInput < 1) {
+        error = t("admin.retention.invalid");
+        return;
+      }
+      retentionDays = retentionInput;
+    }
+    savingRetention = true;
+    retentionSaved = false;
+    error = null;
+    try {
+      await updateEventConfig(ctx, { retentionDays });
+      ctx = { ...ctx, config: { ...ctx.config, retentionDays } };
+      retentionSaved = true;
+      setTimeout(() => (retentionSaved = false), 1500);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      savingRetention = false;
+    }
+  }
+
   // Discovered coordinators (kind 31611) — pick one instead of pasting an npub.
   let coordinators = $state<DiscoveredCoordinator[]>([]);
   let loadingCoordinators = $state(false);
@@ -1106,6 +1145,35 @@
         {savingTalks ? t("admin.talks.saving") : t("admin.talks.save")}
       </button>
       {#if talksSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="field-label">{t("admin.retention.title")}</div>
+    <p class="muted">{t("admin.retention.body")}</p>
+    <div class="row" style="align-items:center;gap:0.5rem">
+      <input
+        type="number"
+        min="1"
+        step="1"
+        inputmode="numeric"
+        style="max-width:6rem"
+        placeholder={t("admin.retention.placeholder")}
+        aria-label={t("admin.retention.title")}
+        bind:value={retentionInput}
+      />
+      <span class="muted">{t("admin.retention.unit")}</span>
+    </div>
+    <p class="muted" style="margin:0.4rem 0 0;font-size:0.8rem">
+      {retentionInput === null || retentionInput === undefined
+        ? t("admin.retention.consequenceOff")
+        : t("admin.retention.consequence", { n: String(retentionInput) })}
+    </p>
+    <div class="row" style="margin-top:0.5rem">
+      <button class="btn inline" onclick={saveRetention} disabled={savingRetention || !retentionDirty}>
+        {savingRetention ? t("admin.talks.saving") : t("admin.talks.save")}
+      </button>
+      {#if retentionSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
     </div>
   </div>
 

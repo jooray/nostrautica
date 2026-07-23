@@ -162,6 +162,15 @@ describe("event config (kind 31600)", () => {
     expect(parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)], ["retention", "1.5"]]).retentionDays).toBeUndefined();
     // Build rejects an invalid value (programming error at the boundary).
     expect(() => buildEventConfig({ ...base, retentionDays: 0 })).toThrow();
+    // Set → clear → tag absent (item 6): the organizer settings UI clears the
+    // window by republishing the config with retentionDays === undefined
+    // (updateEventConfig spreads `{ ...cfg, retentionDays: undefined }`). The
+    // built config must then carry NO retention tag and parse back to undefined,
+    // exactly as if it had never been set.
+    const withRet = parseEventConfig(pubkey, built.tags);
+    const cleared = buildEventConfig({ ...withRet, retentionDays: undefined });
+    expect(cleared.tags.find((t) => t[0] === "retention")).toBeUndefined();
+    expect(parseEventConfig(pubkey, cleared.tags).retentionDays).toBeUndefined();
   });
 
   it("omits the chat tag when off (default) but round-trips marmot", () => {
