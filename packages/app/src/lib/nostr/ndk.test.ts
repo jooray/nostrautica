@@ -176,21 +176,21 @@ describe("fetchEvents / fetchEventsRelayOnly (UX-1: time-bounded)", () => {
 // (in flight) / connected / failed; only "failed" earns "relay-blocked".
 describe("relayHealth (item 5: no false 'blocked' before an attempt)", () => {
   let connected: unknown[] = [];
-  let releaseConnect: (() => void) | undefined;
+  let pendingConnects: Array<() => void> = [];
 
   function fakeNdkWithConnect() {
     return {
       pool: { connectedRelays: () => connected },
       // connect() stays pending until the test releases it, so the in-flight
       // "connecting" window is observable.
-      connect: () => new Promise<void>((res) => (releaseConnect = res)),
+      connect: () => new Promise<void>((res) => pendingConnects.push(res)),
     } as unknown as NDK;
   }
 
   beforeEach(() => {
     __resetRelayHealthForTests();
     connected = [];
-    releaseConnect = undefined;
+    pendingConnects = [];
     __setNdkForTests(fakeNdkWithConnect());
   });
   afterEach(() => {
@@ -205,7 +205,7 @@ describe("relayHealth (item 5: no false 'blocked' before an attempt)", () => {
   it("is connecting while an attempt is in flight, then failed once it returns empty", async () => {
     const p = connectNdk();
     expect(relayHealth()).toBe("connecting"); // attempt started, not settled, 0 connected
-    releaseConnect?.();
+    pendingConnects.shift()?.();
     await p;
     expect(relayHealth()).toBe("failed"); // bounded connect returned with 0 relays → the WiFi lie
   });
@@ -213,18 +213,45 @@ describe("relayHealth (item 5: no false 'blocked' before an attempt)", () => {
   it("is connected the moment a relay socket is open, regardless of prior state", async () => {
     const p = connectNdk();
     connected = [{ url: "wss://relay.example" }];
-    releaseConnect?.();
+    pendingConnects.shift()?.();
     await p;
     expect(relayHealth()).toBe("connected");
   });
 
   it("clears back to connected when a relay (re)connects after a failed attempt", async () => {
     const p = connectNdk();
-    releaseConnect?.();
+    pendingConnects.shift()?.();
     await p;
     expect(relayHealth()).toBe("failed");
     connected = [{ url: "wss://relay.example" }]; // background reconnect succeeds
     expect(relayHealth()).toBe("connected");
+  });
+
+  it("returns to connecting while retrying after a failed attempt", async () => {
+    const first = connectNdk();
+    pendingConnects.shift()?.();
+    await first;
+    expect(relayHealth()).toBe("failed");
+
+    const retry = connectNdk();
+    expect(relayHealth()).toBe("connecting");
+    pendingConnects.shift()?.();
+    await retry;
+    expect(relayHealth()).toBe("failed");
+  });
+
+  it("stays connecting until every overlapping attempt has settled", async () => {
+    const first = connectNdk();
+    const second = connectNdk();
+    expect(relayHealth()).toBe("connecting");
+
+    pendingConnects.shift()?.();
+    await first;
+    expect(relayHealth()).toBe("connecting");
+
+    pendingConnects.shift()?.();
+    await second;
+    expect(relayHealth()).toBe("failed");
   });
 });
 

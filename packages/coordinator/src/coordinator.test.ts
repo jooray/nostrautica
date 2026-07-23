@@ -576,7 +576,8 @@ describe("F1 — text/audio intro branch + transcript publish (A1)", () => {
 
   it("a video intro publishes a machine transcript on the directory entry (A1)", async () => {
     const h = await setup();
-    const pk = await join(h, generateSecretKey(), "crypto");
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
     await h.coordinator.jobs.drain();
     const d = blindedD(h.eck, h.coordinate, pk);
     const entry = latestDirectory(h.transport, h.eck, d);
@@ -735,7 +736,8 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
 
   it("directory entry (31603) folds in ai_profile after processing", async () => {
     const h = await setup();
-    const pk = await join(h, generateSecretKey(), "crypto");
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
     await h.coordinator.jobs.drain();
     const d = blindedD(h.eck, h.coordinate, pk);
     const entry = latestDirectoryWithAi(h.transport, h.eck, d);
@@ -1061,7 +1063,8 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
   // ── H4: matching=off is honored; 31606 matrix published for visibility=event ─
   it("matching=off runs no AI pipeline and publishes no match lists/matrix (H4)", async () => {
     const h = await setup(100, { matching: "off" });
-    const pk = await join(h, generateSecretKey(), "crypto");
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
     await join(h, generateSecretKey(), "design");
     await h.coordinator.jobs.drain();
 
@@ -3493,7 +3496,8 @@ describe("NIP §6.2 — retention sweep", () => {
   it("after the deadline: deletes member records, stops processing, emits a 21606", async () => {
     const nowSec = Math.floor(Date.now() / 1000);
     const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
-    const pk = await join(h, generateSecretKey(), "crypto");
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
     await h.coordinator.jobs.drain();
     const before = h.transport.published.length;
 
@@ -3517,10 +3521,24 @@ describe("NIP §6.2 — retention sweep", () => {
     // paid pipeline does not resume.
     expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
 
+    // Expiry is terminal at the inbox boundary: a late join cannot recreate a
+    // roster/grant, and a fresh profile revision cannot recreate a directory
+    // entry or enqueue provider work after the deletion sweep.
+    const lateSk = generateSecretKey();
+    const profileBefore = h.store.getAttendee(h.coordinate, pk)?.profile_json;
+    const beforeLate = h.transport.published.length;
+    await join(h, lateSk, "crypto");
+    await resubmitIntro(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, getPublicKey(lateSk))).toBeUndefined();
+    expect(h.transport.published.slice(beforeLate).some((e) =>
+      [KIND_KEY_GRANT, KIND_DIRECTORY_ENTRY, KIND_ROSTER].includes(e.kind)
+    )).toBe(false);
+
     // Idempotent: a second sweep issues no further deletions.
     const before2 = h.transport.published.length;
     await h.coordinator.retentionSweep();
     expect(h.transport.published.slice(before2).some((e) => e.kind === KIND_DELETION)).toBe(false);
-    void pk;
+    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBe(profileBefore);
   });
 });

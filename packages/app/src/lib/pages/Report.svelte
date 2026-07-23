@@ -35,7 +35,7 @@
   let favTalks = $state<{ d: string; title: string }[]>(
     cachedCtx ? favoriteTalkItems(cachedCtx.coordinate) : [],
   );
-  let loading = $state(settings === null);
+  let loading = $state(ctx === null);
   let error = $state<unknown>(null);
   let blindingKey: Uint8Array | null = null;
 
@@ -66,29 +66,33 @@
   const isLocalKey = $derived(session.signer?.method === "local");
 
   async function load() {
-    loading = settings === null;
+    loading = ctx === null;
     error = null;
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
+      // Event context is the only prerequisite for a truthful report shell. A
+      // slow private-settings relay must not leave the route on an indefinite
+      // spinner; render the empty state and fill it when 30078 arrives.
+      loading = false;
       if (!session.signer) return;
       const signer = session.signer;
       blindingKey = await deriveBlindingKey(signer);
-      const [s, dir] = await Promise.all([
-        loadPerEventSettings(signer, ctx, blindingKey),
-        fetchDirectory(ctx).catch(() => entries),
-      ]);
-      settings = s;
-      if (dir.length) entries = dir;
+      settings = await loadPerEventSettings(signer, ctx, blindingKey);
       favTalks = favoriteTalkItems(ctx.coordinate);
-      const need = entries.map((e) => e.pubkey);
-      if (need.length) {
-        fetchProfiles(need)
-          .then((m) => {
+      // Directory/profile names improve the report but are not report data: a
+      // coordinator outage must not hold the page on its loading state. Paint the
+      // private settings immediately and enrich names in the background.
+      void fetchDirectory(ctx)
+        .then((dir) => {
+          if (dir.length) entries = dir;
+          const need = entries.map((e) => e.pubkey);
+          if (!need.length) return;
+          return fetchProfiles(need).then((m) => {
             if (m.size) profiles = new Map([...profiles, ...m]);
-          })
-          .catch(() => {});
-      }
+          });
+        })
+        .catch(() => {});
     } catch (e) {
       error = e;
     } finally {

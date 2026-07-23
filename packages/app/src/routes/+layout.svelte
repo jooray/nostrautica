@@ -40,6 +40,7 @@
   // Skip focusing/announcing the very first render so we don't steal focus from a
   // deep-linked page's own load; subsequent navigations manage focus + announce.
   let firstRoute = true;
+  let prefetchedIdentity: string | null = null;
 
   /**
    * Dismiss the cold-boot splash (item 3). onMount fires after this component's
@@ -108,9 +109,16 @@
     // mutes, DM relay list, blind seed (local only), one DM inbox scan. Silent
     // (fire-and-forget) and silent-signer-guarded inside the warmer. Fires once
     // the (possibly background) restore has settled.
-    void restored.then(() => {
-      if (session.signer) prefetchIdentity(session.signer);
-    });
+    void restored;
+  });
+
+  // Run identity warmers after both restoration and an explicit later login.
+  $effect(() => {
+    const pubkey = session.pubkey;
+    const signer = session.signer;
+    if (!booted || !pubkey || !signer || prefetchedIdentity === pubkey) return;
+    prefetchedIdentity = pubkey;
+    untrack(() => prefetchIdentity(signer));
   });
 
   // Per-route document title, focus management, and a polite announcement (A2).

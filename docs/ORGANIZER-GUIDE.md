@@ -102,11 +102,10 @@ Note the copy under the form: **key rotation is forward-only** — anyone who
 ever held a decryption key can decrypt content that was published while that
 key was current. Revoking someone (§4) protects *future* content, not past.
 
-(Some organizers also configure a **retention window** — how many days after
-the event a coordinator should keep this event's records before deleting
-them. Where it's set, attendees see it disclosed plainly at join and on the
-event page, and deletion is best-effort, not a guarantee if a relay ignores
-the request.)
+Configure a **retention window** in **Admin → Settings → Delete member data
+after the event**. Enter a positive number of days, or leave it blank for
+indefinite retention. Attendees see the declared period at join and on the
+event page. Deletion is best-effort, not a guarantee if a relay ignores it.
 
 After creating, you get a **shareable link**, a next-steps checklist, and a
 **receipt** — each publishing step reported independently, so a partial

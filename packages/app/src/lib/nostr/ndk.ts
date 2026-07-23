@@ -134,7 +134,7 @@ export function getNdk(): NDK {
  *   failed     — a bounded connect() has returned with zero relays open;    relay-blocked.
  */
 let relayConnectAttempted = false;
-let relayConnectSettled = false;
+let relayConnectInFlight = 0;
 
 export type RelayHealth = "idle" | "connecting" | "connected" | "failed";
 
@@ -144,26 +144,25 @@ export function relayHealth(): RelayHealth {
   // prior history, so the banner clears promptly the moment a relay (re)connects.
   if (connectedRelayCount() > 0) return "connected";
   if (!relayConnectAttempted) return "idle";
-  return relayConnectSettled ? "failed" : "connecting";
+  return relayConnectInFlight > 0 ? "connecting" : "failed";
 }
 
 /** Test-only: reset the relay-connection lifecycle flags. */
 export function __resetRelayHealthForTests(): void {
   relayConnectAttempted = false;
-  relayConnectSettled = false;
+  relayConnectInFlight = 0;
 }
 
 /** Connect to relays (idempotent enough for app boot). */
 export async function connectNdk(): Promise<NDK> {
   const instance = getNdk();
   relayConnectAttempted = true;
+  relayConnectInFlight += 1;
   try {
     await instance.connect(2000);
     return instance;
   } finally {
-    // The connect call is bounded (2s); once it has returned at least once, a
-    // still-empty pool is a genuine failure, not a not-yet-attempted idle state.
-    relayConnectSettled = true;
+    relayConnectInFlight -= 1;
   }
 }
 

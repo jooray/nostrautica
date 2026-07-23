@@ -21,6 +21,7 @@
       (function () {
         try {
           var saved = localStorage.getItem("nostrautica:theme");
+          if (saved !== "dark" && saved !== "light" && saved !== "system") saved = "system";
           var dark =
             saved === "dark" ||
             ((saved === "system" || !saved) &&
@@ -30,7 +31,8 @@
           var m = document.querySelector('meta[name="theme-color"]');
           if (m) m.content = dark ? "#0e0e15" : "#fafafc";
         } catch (e) {
-          /* localStorage/matchMedia unavailable — keep the static dark fallback */
+          var systemDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.setAttribute("data-theme", systemDark ? "dark" : "light");
         }
       })();
     </script>
@@ -57,6 +59,7 @@
         color: #ededf4;
         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         transition: opacity 0.28s ease;
+        animation: splash-failsafe 0s 15s forwards;
       }
       [data-theme="light"] #app-splash {
         background: #fafafc;
@@ -99,6 +102,13 @@
         }
         100% {
           transform: translateX(340%);
+        }
+      }
+      @keyframes splash-failsafe {
+        to {
+          opacity: 0;
+          visibility: hidden;
+          pointer-events: none;
         }
       }
       @media (prefers-reduced-motion: reduce) {

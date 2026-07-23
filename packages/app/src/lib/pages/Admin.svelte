@@ -84,6 +84,7 @@
   let copiedLink = $state(false);
   let copiedNpub = $state(false);
   let coordLastSeen = $state<number | undefined>(undefined);
+  let coordLivenessChecked = $state(false);
   let destroyed = false;
 
   // Join-queue auto-refresh (audit UX-9): a request that arrives while Admin is
@@ -326,8 +327,13 @@
 
   async function refreshLiveness() {
     if (!ctx?.config.coordinator) return;
-    coordLastSeen = await fetchCoordinatorLastSeen(ctx).catch(() => undefined);
-    await refreshCoordStatus();
+    coordLivenessChecked = false;
+    try {
+      coordLastSeen = await fetchCoordinatorLastSeen(ctx).catch(() => undefined);
+      await refreshCoordStatus();
+    } finally {
+      coordLivenessChecked = true;
+    }
   }
 
   // Human "active 2 min ago" from a unix seconds timestamp.
@@ -811,8 +817,10 @@
       <p class="muted">{t("admin.coordinator.attached")} <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
       <p class="muted" style="margin:0 0 0.5rem">
         <!-- Stale/unknown liveness is never green (§9). -->
-        {#if coordLastSeen === undefined}
+        {#if !coordLivenessChecked && coordLastSeen === undefined}
           <span class="badge warn">{t("admin.checkingStatus")}</span>
+        {:else if coordLastSeen === undefined}
+          <span class="badge warn">{t("admin.coordinator.notSeen")}</span>
         {:else if coordStale}
           <span class="badge warn">{sinceLabel(coordLastSeen)}</span>
         {:else}

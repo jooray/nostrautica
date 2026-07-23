@@ -171,6 +171,18 @@ function parseEventEndSec(evt: NostrEvent | undefined): number {
  */
 const WHITENOISE_RELAYS = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
 
+function chatInteropRelays(eventRelays: string[]): string[] {
+  const localOnly = eventRelays.length > 0 && eventRelays.every((relay) => {
+    try {
+      const host = new URL(relay).hostname;
+      return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    } catch {
+      return false;
+    }
+  });
+  return localOnly ? [] : WHITENOISE_RELAYS;
+}
+
 /** Marmot v2 wire kinds (MARMOT-GROUP-CHAT §1.2): addressable key package + group msg. */
 const KIND_KEY_PACKAGE = 30443;
 const KIND_GROUP_MESSAGE = 445;
@@ -1017,6 +1029,13 @@ export class Coordinator {
     const rumor = this.unwrapFresh(wrap, state.inboxSk);
     if (!rumor) return;
     await this.processRumorWithRetry(wrap.id, rumor, async () => {
+      // Retention expiry is terminal for attendee-authored event data. Consume
+      // late/replayed inbox rumors without mutating private state or recreating
+      // relay records that the sweep just deleted.
+      if (state.retentionExpired || this.deps.store.isRetentionExpired(coordinate)) {
+        log(`[retention] ignored inbox kind ${rumor.kind} for expired event ${coordinate}`);
+        return;
+      }
       if (rumor.kind === KIND_JOIN_REQUEST) {
         const content = joinRequestContentSchema.parse(JSON.parse(rumor.content));
         log(`[join] request from ${short(rumor.pubkey)} ("${content.name}")`);
@@ -2600,7 +2619,7 @@ export class Coordinator {
     // Self-heal: additively fold the Whitenoise relays into the group's own
     // routing state, even for a group that already existed before this was
     // added — a no-op once they're present, so safe to run on every install.
-    await this.marmot.ensureRelays(state.coordinate, WHITENOISE_RELAYS);
+    await this.marmot.ensureRelays(state.coordinate, chatInteropRelays(state.configRelays));
     await this.marmot.backfillApproved(state.coordinate);
     this.subscribeChat(state);
   }

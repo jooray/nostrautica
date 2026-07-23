@@ -29,3 +29,12 @@ test("deep link to an unknown event route renders (hash routing, nsite-safe)", a
   // The app shell renders (no server 404 breakage); an error/loading state shows.
   await expect(page.locator(".app-shell")).toBeVisible();
 });
+
+test("logged-out idle home does not claim relays are blocked", async ({ page }) => {
+  const sockets: string[] = [];
+  page.on("websocket", (socket) => sockets.push(socket.url()));
+  await page.goto("/#/");
+  await expect(page.getByText("Meet the right people")).toBeVisible();
+  await expect(page.getByText(/no relay is reachable|network may be blocking/i)).toHaveCount(0);
+  expect(sockets).toEqual([]);
+});

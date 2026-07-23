@@ -44,7 +44,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, applyOrganizerGrant, loadEventKeys, currentEck } from "./keystore.js";
-import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
+import { acceptedRecordAuthors } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
@@ -416,12 +416,12 @@ export function cachedRoster(coordinate: string): RosterContent | undefined {
 export async function fetchRoster(ctx: EventContext): Promise<RosterContent | undefined> {
   const eck = await eckBytesFor(ctx.coordinate);
   if (!eck) return undefined;
-  const publisher = directoryPublisher(ctx);
+  const authors = acceptedRecordAuthors(ctx);
   const { identifier } = parseCoordinate(ctx.coordinate);
   // Streamed one-shot: first EOSE + grace instead of the slowest relay — this
   // read gates the whole People screen ("Decrypting the roster…").
   const events = await streamEvents(
-    { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors, "#d": [identifier] },
     { relays: ctx.config.relays },
   ).ready;
   // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7): only a
@@ -490,14 +490,14 @@ function chunkDs(ds: string[]): string[][] {
  * applied by the callers, exactly as with a single stream.
  */
 function streamDirectoryEvents(
-  publisher: string,
+  authors: string[],
   ds: string[],
   relays: string[] | undefined,
   onEvent?: StreamOptions["onEvent"],
 ): StreamHandle {
   const parts = chunkDs(ds).map((chunk) =>
     streamEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": chunk },
+      { kinds: [KIND_DIRECTORY_ENTRY], authors, "#d": chunk },
       { relays, ...(onEvent ? { onEvent } : {}) },
     ),
   );
@@ -520,11 +520,11 @@ export async function fetchDirectory(
   const roster = await fetchRoster(ctx);
   if (!roster || roster.attendees.length === 0) return [];
 
-  const publisher = directoryPublisher(ctx);
+  const authors = acceptedRecordAuthors(ctx);
   const ds = roster.attendees.map((a) => a.d);
   // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
   // relay filter-size limits and silently return fewer people.
-  const events = onlyByAuthors(await streamDirectoryEvents(publisher, ds, ctx.config.relays).ready, acceptedRecordAuthors(ctx));
+  const events = onlyByAuthors(await streamDirectoryEvents(authors, ds, ctx.config.relays).ready, authors);
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
@@ -568,7 +568,7 @@ export async function streamDirectory(
 ): Promise<DirectoryStream | undefined> {
   const eck = await eckBytesFor(ctx.coordinate);
   if (!eck) return undefined; // not approved — nothing decryptable
-  const publisher = directoryPublisher(ctx);
+  const authors = acceptedRecordAuthors(ctx);
   const acceptedAuthors = new Set(acceptedRecordAuthors(ctx));
   const coord = ctx.coordinate;
 
@@ -626,7 +626,7 @@ export async function streamDirectory(
     inner?.stop();
     currentDs = ds;
     // Chunked #d filters (UX-22); the composite handle stops/settles them all.
-    inner = streamDirectoryEvents(publisher, ds, ctx.config.relays, onDirEvent);
+    inner = streamDirectoryEvents(authors, ds, ctx.config.relays, onDirEvent);
     return inner;
   };
   const dsChanged = (ds: string[]): boolean =>

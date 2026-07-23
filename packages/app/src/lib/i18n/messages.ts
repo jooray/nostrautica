@@ -746,6 +746,7 @@ export const messages = {
     "admin.coordinator.attachedManage":
       "Attaching or swapping the coordinator is done here; running-event actions like recompute and billing live on the Administration tab.",
     "admin.checkingStatus": "Checking status",
+    "admin.coordinator.notSeen": "Coordinator not seen",
     "admin.posts.title": "Event posts",
     "admin.posts.body":
       "Announcements and posts shown on the event page. Markdown works. Public posts are standard Nostr long-form under the event's identity; members-only posts are encrypted to approved attendees.",
@@ -2009,6 +2010,7 @@ export const messages = {
     "admin.coordinator.attachedManage":
       "Pripojenie alebo výmena koordinátora sa robí tu; akcie počas podujatia ako prepočet a platby nájdete na karte Administrácia.",
     "admin.checkingStatus": "Overuje sa stav",
+    "admin.coordinator.notSeen": "Koordinátor zatiaľ nebol dostupný",
     "admin.posts.title": "Príspevky podujatia",
     "admin.posts.body":
       "Oznámenia a príspevky zobrazené na stránke podujatia. Markdown funguje. Verejné príspevky sú štandardné dlhé Nostr príspevky pod identitou podujatia; príspevky len pre členov sú zašifrované pre schválených účastníkov.",
@@ -3276,6 +3278,7 @@ export const messages = {
     "admin.coordinator.attachedManage":
       "Připojení nebo výměna koordinátora se provádí zde; akce během akce jako přepočet a platby najdete na kartě Administrace.",
     "admin.checkingStatus": "Kontrola stavu",
+    "admin.coordinator.notSeen": "Koordinátor zatím nebyl dostupný",
     "admin.posts.title": "Příspěvky akce",
     "admin.posts.body":
       "Oznámení a příspěvky zobrazené na stránce akce. Markdown funguje. Veřejné příspěvky jsou standardní dlouhé Nostr příspěvky pod identitou akce; příspěvky jen pro členy jsou zašifrovány pro schválené účastníky.",

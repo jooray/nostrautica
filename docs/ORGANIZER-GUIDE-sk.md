@@ -55,11 +55,10 @@ Jazyk robí tri veci. Nastavuje **predvolený jazyk rozhrania** pre účastníko
 
 Všimnite si poznámku pod formulárom: **rotácia kľúčov funguje len dopredu** — ktokoľvek niekedy držal dešifrovací kľúč, dokáže dešifrovať obsah zverejnený, kým bol tento kľúč platný. Odobratie niekoho (§4) chráni *budúci* obsah, nie minulý.
 
-(Niektorí organizátori nastavujú aj **retenčné obdobie** — koľko dní po
-podujatí by si koordinátor mal ponechať záznamy tohto podujatia, kým ich
-zmaže. Kde je nastavené, účastníci ho vidia jasne zverejnené pri pripojení
-aj na stránke podujatia; zmazanie je urobené s najlepším úmyslom, nie
-zaručené, ak relay žiadosť ignoruje.)
+**Retenčné obdobie** nastavíte v **Administrácia → Nastavenia → Zmazať údaje
+účastníkov po podujatí**. Zadajte kladný počet dní alebo nechajte pole
+prázdne pre neobmedzené uchovávanie. Účastníci obdobie vidia pri pripojení
+aj na stránke podujatia; zmazanie nie je zaručené, ak relay žiadosť ignoruje.
 
 Po vytvorení dostanete **odkaz na zdieľanie**, kontrolný zoznam ďalších
 krokov a **potvrdenku** — každý zverejňovací krok sa hlási samostatne, takže

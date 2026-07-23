@@ -83,5 +83,77 @@ test.describe(RELAY_UP ? "organizer pages render (BUG-3)" : "organizer pages ren
     await expect(organizer.getByText(/assembling your report/i)).toHaveCount(0, { timeout: 20_000 });
 
     expect(loop.seen(), "effect_update_depth_exceeded must never fire").toBe(false);
+    await Promise.all([organizerCtx.close(), attendeeCtx.close()]);
+  });
+
+  test("Admin and Report leave their loading state with a COORDINATOR attached", async ({ browser }) => {
+    // Validation-pass follow-up: seeding a coordinator-attached event reportedly
+    // reproduced a stuck loading state on Admin/Report distinct from the BUG-1
+    // RefreshGuard loop. Both pages take extra, coordinator-only code paths once a
+    // coordinator is attached — Admin fetches liveness + 21606 statuses + pending
+    // talks; the config republish carries the coordinator tag. The attach itself is
+    // entirely client-side (republish 31600 with the 3-element coordinator tag +
+    // gift-wrap the grant), so this reproduces the coordinator-attached RENDER
+    // conditions WITHOUT needing a live coordinator process: the coordinator-only
+    // fetches simply find nothing and must degrade (bounded by streamEvents' 8s cap
+    // + their own catches), never wedge the page at its spinner.
+    //
+    // COORD_NPUB is a throwaway, deterministic key (secp256k1 sk=1). No process
+    // backs it; the point is that the pages stay alive when the config names one.
+    const COORD_NPUB = "npub10xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpkge6d";
+
+    const organizerCtx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const attendeeCtx = await browser.newContext();
+    const organizer = await newUser(organizerCtx, "Coord Organizer");
+    const attendee = await newUser(attendeeCtx, "Coord Attendee");
+    const loop = trackEffectLoop(organizer);
+
+    await organizer.goto("/#/create");
+    await organizer.getByLabel("Title").fill("Coordinator Pages E2E");
+    await organizer.getByLabel("Start").fill("2026-09-01T10:00");
+    await organizer.getByRole("button", { name: /create event/i }).click();
+    await expect(organizer.getByText(/event created/i)).toBeVisible();
+    const naddr = (await organizer.locator(".mono").first().innerText()).match(/#\/e\/([^/\s]+)/)?.[1];
+    expect(naddr).toBeTruthy();
+
+    // Attach the coordinator via the Event settings "paste npub" fallback.
+    await organizer.goto(`/#/e/${naddr}/settings`);
+    const pasteCoordinator = organizer.locator("details").filter({ hasText: /paste.*npub/i });
+    await pasteCoordinator.locator("summary").click();
+    await pasteCoordinator.locator('input[placeholder*="coordinator" i]').fill(COORD_NPUB);
+    await organizer.getByRole("button", { name: /attach coordinator/i }).first().click();
+    await expect(organizer.getByText(/coordinator attached/i)).toBeVisible({ timeout: 20_000 });
+
+    // Admin must reflect the attached coordinator (the "Recompute" control only
+    // renders on the coordinator path) AND leave its loading state.
+    await organizer.goto(`/#/e/${naddr}/admin`);
+    await expect(organizer.getByRole("button", { name: /recompute/i })).toBeVisible({ timeout: 20_000 });
+    await expect(organizer.getByText(/loading pending requests/i)).toHaveCount(0, { timeout: 20_000 });
+    // Interactive proof: the pending queue painted (attendee joined below is not
+    // required — the Refresh control proves Admin is live, not wedged).
+    await expect(organizer.getByRole("button", { name: /refresh/i }).first()).toBeVisible({ timeout: 20_000 });
+    await expect(organizer.getByText(/coordinator not seen/i)).toBeVisible({ timeout: 20_000 });
+
+    // Attendee joins so Admin's coordinator-path pending fetch has real data to
+    // fold in — the page must stay interactive through it.
+    await attendee.goto(`/#/e/${naddr}/join`);
+    await attendee.getByRole("button", { name: /send join request/i }).click();
+    await expect(attendee.getByText(/request sent/i)).toBeVisible();
+    await organizer.goto(`/#/e/${naddr}/admin`);
+    const approve = organizer.getByRole("button", { name: /^approve$/i }).first();
+    await expect.poll(async () => {
+      if (await approve.count()) return true;
+      await organizer.getByRole("button", { name: /refresh/i }).first().click();
+      return false;
+    }, { timeout: 20_000, intervals: [500, 1_000, 2_000] }).toBe(true);
+
+    // Report must leave its "Assembling your report…" loading state on the
+    // coordinator-attached event (its bounded load settles regardless).
+    await organizer.goto(`/#/e/${naddr}/report`);
+    await expect(organizer.getByText(/post-event report/i)).toBeVisible({ timeout: 20_000 });
+    await expect(organizer.getByText(/assembling your report/i)).toHaveCount(0, { timeout: 20_000 });
+
+    expect(loop.seen(), "effect_update_depth_exceeded must never fire").toBe(false);
+    await Promise.all([organizerCtx.close(), attendeeCtx.close()]);
   });
 });
