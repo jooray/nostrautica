@@ -23,7 +23,10 @@ class WhatsNew {
   /** Recompute the badge from the cached match list + stored watermark. */
   refreshMatches(coordinate: string): void {
     const wm = loadWatermark(coordinate);
-    this.counts = { ...this.counts, [coordinate]: newMatchCount(cachedMatches(coordinate), wm) };
+    const next = newMatchCount(cachedMatches(coordinate), wm);
+    // Skip no-op writes so a caller that tracked `counts` can't loop.
+    if (this.counts[coordinate] === next) return;
+    this.counts = { ...this.counts, [coordinate]: next };
   }
 
   /** Mark the current matches as seen (call when the Matches view is opened). */
@@ -35,6 +38,7 @@ class WhatsNew {
       seenMatches: (list?.matches ?? []).map((m) => m.pubkey),
       at: Math.floor(Date.now() / 1000),
     });
+    if (this.counts[coordinate] === 0) return;
     this.counts = { ...this.counts, [coordinate]: 0 };
   }
 
