@@ -49,18 +49,13 @@
   import SecretSurface from "$lib/components/SecretSurface.svelte";
   import InviteSheet from "$lib/components/InviteSheet.svelte";
   import { router } from "$lib/router/router.svelte.js";
-  import { publishEventUpdate } from "$lib/events/updates.js";
-  import {
-    fetchEventPosts,
-    cachedEventPosts,
-    publishMembersPost,
-    type EventPost,
-    type PostVisibility,
-  } from "$lib/events/posts.js";
-  import PostEditor from "$lib/components/PostEditor.svelte";
+  import { cachedEventPosts } from "$lib/events/posts.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import AdminPersonDrawer from "$lib/components/AdminPersonDrawer.svelte";
   import AdminTalks from "$lib/components/AdminTalks.svelte";
+  import AdminCommunicate from "$lib/components/AdminCommunicate.svelte";
+  import AdminPeople from "$lib/components/AdminPeople.svelte";
+  import AdminQueue from "$lib/components/AdminQueue.svelte";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -126,10 +121,8 @@
   function review(pubkey: string, state: ReviewState | undefined) {
     if (!ctx) return;
     reviewMap = setReview(ctx.coordinate, reviewMap, pubkey, state);
-    if (confirmingReject === pubkey) confirmingReject = null;
   }
-  // Inline reject confirmation (no window.confirm), mirroring revoke.
-  let confirmingReject = $state<string | null>(null);
+  // Inline reject confirmation lives in AdminQueue (which owns the confirm state).
   // The approved People section is enumerated from the durable roster (UX-A1),
   // enriched with recent intake + directory + statuses (statuses are folded in
   // via `approvedPeople`, declared after coordStatuses is available).
@@ -279,7 +272,7 @@
       // the slowest background member. network-settled (finally) still waits for
       // everything, so perf marks stay meaningful.
       const background = Promise.allSettled([refreshLiveness()]);
-      await Promise.allSettled([refresh(), loadUpdates()]);
+      await Promise.allSettled([refresh()]);
       refreshing = false;
       await background;
       // Keep the join queue fresh while the page stays open (UX-9).
@@ -307,7 +300,6 @@
     pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
     coordStatuses = cachedCoordinatorStatuses(coord) ?? coordStatuses;
     coordLastSeen = cachedCoordinatorLastSeen(coord) ?? coordLastSeen;
-    posts = cachedEventPosts(coord) ?? posts;
   }
 
   async function pollForOrganizerGrant() {
@@ -323,7 +315,6 @@
         loading = true;
         try {
           await refresh();
-          await loadUpdates();
           void refreshLiveness();
         } finally {
           loading = false;
@@ -694,12 +685,10 @@
     return bulkItems.find((it) => it.pubkey === pubkey)?.state;
   }
 
-  // Inline, screenshotable revoke confirmation (no window.confirm) — the attendee
-  // card swaps to the consequence copy + Revoke/Keep while this holds a pubkey.
-  let confirmingRevoke = $state<string | null>(null);
+  // Inline, screenshotable revoke confirmation lives in AdminPeople (which owns the
+  // confirm state); the parent performs the revoke and updates its data model.
   async function revoke(pubkey: string) {
     if (!ctx || !session.signer) return;
-    confirmingRevoke = null;
     try {
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "revoke", { pubkey });
@@ -719,69 +708,8 @@
 
   // Event posts (spec §7.4): the PostEditor composer publishes public 30023
   // (exactly as updates, §7.1) or members-only 31607, chosen at creation.
-  let posts = $state<EventPost[]>([]);
-  let postTitle = $state("");
-  let postSummary = $state("");
-  let postImage = $state("");
-  let postContent = $state("");
-  let postVisibility = $state<PostVisibility>("public");
-  let postEditing = $state<EventPost | null>(null); // null = new post
-  let postBusy = $state(false);
-
-  async function loadUpdates() {
-    if (!ctx) return;
-    posts = await fetchEventPosts(ctx).catch(() => []);
-  }
-
-  function startEdit(p: EventPost) {
-    postEditing = p;
-    postTitle = p.title;
-    postSummary = p.summary ?? "";
-    postImage = p.image ?? "";
-    postContent = p.content;
-    // Visibility is fixed at creation (spec §7.4) — reflected + locked in the editor.
-    postVisibility = p.membersOnly ? "members" : "public";
-  }
-
-  function resetEditor() {
-    postEditing = null;
-    postTitle = "";
-    postSummary = "";
-    postImage = "";
-    postContent = "";
-    postVisibility = "public";
-  }
-
-  async function publishPost() {
-    if (!ctx || !postTitle.trim() || !postContent.trim()) return;
-    postBusy = true;
-    error = null;
-    try {
-      const base = {
-        d: postEditing?.d,
-        publishedAt: postEditing?.publishedAt,
-        title: postTitle.trim(),
-        summary: postSummary.trim() || undefined,
-        image: postImage.trim() || undefined,
-        content: postContent,
-      };
-      if (postVisibility === "members") {
-        await publishMembersPost(ctx, {
-          ...base,
-          // Optional attribution: which organizer wrote it (inside the ciphertext).
-          author: postEditing ? postEditing.author : (session.pubkey ?? undefined),
-        });
-      } else {
-        await publishEventUpdate(ctx, base);
-      }
-      resetEditor();
-      posts = await fetchEventPosts(ctx).catch(() => []);
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      postBusy = false;
-    }
-  }
+  // Event posts (spec §7.4) now live in the AdminCommunicate domain component,
+  // which owns the composer state, the post list, and the publish/edit actions.
 </script>
 
 <div class="row" style="justify-content:space-between;align-items:center">
@@ -986,134 +914,32 @@
     </p>
   {/if}
 
-  <h2 id="join-requests">{t("admin.requests.title")}</h2>
-  <div class="stack">
-    {#if pendingRequests.length === 0}
-      <p class="muted">{t("admin.requests.none")}</p>
-    {:else if pendingRequests.length > 1}
-      <button class="btn" onclick={approveAll} disabled={approvingAll}>
-        {approvingAll ? t("admin.requests.approving") : t("admin.requests.approveAll", { n: pendingRequests.length })}
-      </button>
-    {/if}
-    {#if bulkRan && bulkSummary.done && (bulkSummary.approved > 0 || bulkSummary.needRetry > 0)}
-      <!-- UX-A4 final tally after a bulk run: N approved, M need retry. -->
-      <p class="muted" role="status" aria-live="polite" style="margin:0.25rem 0">
-        {t("admin.requests.bulkSummary", { approved: bulkSummary.approved, retry: bulkSummary.needRetry })}
-      </p>
-    {/if}
-    {#each pendingRequests.filter((r) => !peopleFilterActive || matchedPubkeys.has(r.attendeePubkey)) as req (req.attendeePubkey)}
-      {@const bulk = bulkItemState(req.attendeePubkey)}
-      {@const deferred = deferredSet.has(req.attendeePubkey)}
-      <div class="card">
-        <strong>{req.name}</strong>
-        <span class="badge">{short(req.attendeePubkey)}</span>
-        {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
-        {#if deferred}<span class="badge">{t("admin.requests.reviewed")}</span>{/if}
-        {#if req.message}<p class="muted">{req.message}</p>{/if}
-        {#if req.profile?.skills?.length}
-          <div class="row" style="flex-wrap:wrap">
-            {#each req.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
-          </div>
-        {/if}
-        {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}
-        {#if bulk === "queued" || bulk === "publishing"}
-          <p class="muted" role="status" style="margin:0.25rem 0 0">
-            {bulk === "publishing" ? t("admin.requests.bulk.publishing") : t("admin.requests.bulk.queued")}
-          </p>
-        {:else if bulk === "failed"}
-          <p class="muted" style="color:var(--danger);margin:0.25rem 0 0">{t("admin.requests.bulk.failed")}</p>
-          <button class="btn inline" onclick={() => void retryBulkItem(req.attendeePubkey)}>
-            {t("admin.requests.bulk.retry")}
-          </button>
-        {:else if confirmingReject === req.attendeePubkey}
-          <p class="muted" style="margin:0.25rem 0">{t("admin.requests.reject.confirm")}</p>
-          <div class="row">
-            <button class="btn inline danger" onclick={() => review(req.attendeePubkey, "rejected")}>
-              {t("admin.requests.reject")}
-            </button>
-            <button class="btn inline" onclick={() => (confirmingReject = null)}>{t("admin.revoke.keep")}</button>
-          </div>
-        {:else}
-          <div class="row" style="flex-wrap:wrap">
-            <button
-              class="btn primary"
-              onclick={() => approve(req)}
-              disabled={approving.has(req.attendeePubkey)}
-            >{t("admin.requests.approve")}</button>
-            {#if !deferred}
-              <button class="btn inline" onclick={() => review(req.attendeePubkey, "deferred")}>
-                {t("admin.requests.leavePending")}
-              </button>
-            {/if}
-            <button class="btn inline danger" onclick={() => (confirmingReject = req.attendeePubkey)}>
-              {t("admin.requests.reject")}
-            </button>
-            <button class="btn inline" onclick={() => (detailPubkey = req.attendeePubkey)}>
-              {t("admin.person.details")}
-            </button>
-          </div>
-        {/if}
-      </div>
-    {/each}
-    {#if rejectedSet.size}
-      <p class="muted" style="font-size:0.8rem">
-        {tp("admin.requests.rejectedCount", rejectedSet.size)}
-        <button
-          class="btn inline"
-          style="display:inline;padding:0;background:none;border:none;color:var(--accent);text-decoration:underline"
-          onclick={() => { for (const pk of rejectedSet) review(pk, undefined); }}
-        >
-          {t("admin.requests.undoRejects")}
-        </button>
-      </p>
-    {/if}
-  </div>
+  <AdminQueue
+    requests={pendingRequests}
+    filterActive={peopleFilterActive}
+    {matchedPubkeys}
+    {deferredSet}
+    {rejectedSet}
+    {approving}
+    {approvingAll}
+    {bulkRan}
+    {bulkSummary}
+    {bulkItemState}
+    onApprove={approve}
+    onApproveAll={approveAll}
+    onReview={review}
+    onRetryBulk={(pk) => void retryBulkItem(pk)}
+    onDetails={(pk) => (detailPubkey = pk)}
+  />
 
-  {#if approvedPeople.length}
-    <h2 class="section-head">{t("admin.section.people")}</h2>
-    <h2>{t("admin.approved.title", { n: approvedPeople.length })}</h2>
-    <div class="stack">
-      {#each approvedPeople.filter((p) => !peopleFilterActive || matchedPubkeys.has(p.pubkey)) as person (person.pubkey)}
-        <div class="card">
-          <strong>{person.name ?? short(person.pubkey)}</strong>
-          <span class="badge">{short(person.pubkey)}</span>
-          {#if person.role === "organizer"}<span class="badge">{t("admin.people.organizer")}</span>{/if}
-          {#if person.media?.length}<span class="badge">{tp("admin.requests.video", person.media.length)}</span>{/if}
-          {#if person.op === "failed"}<span class="badge warn">{t("admin.people.failed")}</span>{/if}
-          {#if !person.intakeAvailable && !person.revoked}
-            <!-- UX-A1: a roster member whose intake aged out of the backfill window
-                 still gets a card + working controls, never silently omitted. -->
-            <p class="muted" style="margin:0.25rem 0">{t("admin.people.intakeUnavailable")}</p>
-          {/if}
-          {#if person.revoked}
-            <p class="muted">{t("admin.revoked")}</p>
-          {:else if confirmingRevoke === person.pubkey}
-            <p class="muted" style="margin:0.25rem 0">
-              {t("admin.revoke.confirm")}
-            </p>
-            <div class="row">
-              <button class="btn inline danger" onclick={() => revoke(person.pubkey)}>{t("admin.revoke.revoke")}</button>
-              <button class="btn inline" onclick={() => (confirmingRevoke = null)}>{t("admin.revoke.keep")}</button>
-            </div>
-          {:else}
-            <p class="muted">{t("admin.approvedTag")}</p>
-            <div class="row">
-              <button class="btn inline" onclick={() => reprocess(person.pubkey)}>{t("admin.reprocess")}</button>
-              <button
-                class="btn inline danger"
-                onclick={() => (confirmingRevoke = person.pubkey)}
-              >
-                {t("admin.revoke.revoke")}
-              </button>
-              <button class="btn inline" onclick={() => (detailPubkey = person.pubkey)}>
-                {t("admin.person.details")}
-              </button>
-            </div>
-          {/if}
-        </div>
-      {/each}
-    </div>
-  {/if}
+  <AdminPeople
+    people={approvedPeople}
+    filterActive={peopleFilterActive}
+    {matchedPubkeys}
+    onRevoke={revoke}
+    onReprocess={reprocess}
+    onDetails={(pk) => (detailPubkey = pk)}
+  />
 
   {#if ctx && ctx.config.talks !== "off"}
     <AdminTalks
@@ -1124,45 +950,13 @@
     />
   {/if}
 
-  <h2 class="section-head">{t("admin.section.communicate")}</h2>
-
-  <div class="card">
-    <div class="field-label">{t("admin.posts.title")}</div>
-    <p class="muted">
-      {t("admin.posts.body")}
-    </p>
-    <PostEditor
-      bind:title={postTitle}
-      bind:summary={postSummary}
-      bind:image={postImage}
-      bind:content={postContent}
-      bind:visibility={postVisibility}
-      editing={postEditing !== null}
-      busy={postBusy}
-      onsubmit={publishPost}
-      oncancel={resetEditor}
+  {#if ctx}
+    <AdminCommunicate
+      {ctx}
+      initialPosts={cachedEventPosts(ctx.coordinate) ?? []}
+      onError={(msg) => (error = msg)}
     />
-    {#if posts.length}
-      <div class="stack" style="margin-top:0.75rem">
-        {#each posts as p (p.d)}
-          <div class="row" style="justify-content:space-between">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-              {p.locked ? t("post.locked.title") : p.title}
-              {#if p.membersOnly}<span class="badge">{t("post.membersBadge")}</span>{/if}
-              <span class="muted" style="font-size:0.75rem">
-                · {new Date(p.publishedAt * 1000).toLocaleDateString()}
-              </span>
-            </span>
-            {#if !p.locked}
-              <button class="btn inline" style="flex:none" onclick={() => startEdit(p)}>
-                {t("admin.posts.edit")}
-              </button>
-            {/if}
-          </div>
-        {/each}
-      </div>
-    {/if}
-  </div>
+  {/if}
 
   <div class="card">
     <div class="field-label">{t("admin.invites.title")}</div>

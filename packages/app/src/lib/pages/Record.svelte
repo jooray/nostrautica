@@ -19,6 +19,8 @@
   } from "$lib/media/submit.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import ErrorSummary from "$lib/components/ErrorSummary.svelte";
+  import { validate, hasError, describedBy, type FieldError } from "$lib/stores/form-validation.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { perfMark } from "$lib/perf.js";
@@ -301,6 +303,7 @@
 
   async function submitRecorded() {
     if (!ctx || !session.signer || !recorded) return;
+    if (!checkSubmit(false)) return;
     busy = true;
     error = null;
     try {
@@ -320,7 +323,8 @@
   }
 
   async function submitText() {
-    if (!ctx || !session.signer || !textIntro.trim()) return;
+    if (!ctx || !session.signer) return;
+    if (!checkSubmit(true)) return;
     busy = true;
     error = null;
     try {
@@ -356,6 +360,7 @@
 
   async function reuse(descriptor: MediaDescriptor, fresh: boolean) {
     if (!ctx || !session.signer) return;
+    if (!checkSubmit(false)) return;
     busy = true;
     error = null;
     try {
@@ -407,9 +412,32 @@
     else opStatus.published(t("op.introPublished"));
   }
 
-  // Talks require a title (and always media — the text mode is intro-only).
-  const canSubmit = $derived(disclosureAck && !busy && (!talk || talkTitle.trim().length > 0));
   const talksOff = $derived(talk && !!ctx && ctx.config.talks === "off");
+
+  // Submit gating via the shared error-summary validation pattern (§7.3.7),
+  // replacing the old disabled-button gate: on a submit attempt the offending
+  // fields are listed in a focusable summary and linked to their inputs, instead
+  // of silently disabling the button with no explanation of what's missing.
+  // Checks are in DOM order (talk title, disclosure ack, then the text intro).
+  let showErrors = $state(false);
+  let fieldErrors = $state<FieldError[]>([]);
+  function checkSubmit(needText: boolean): boolean {
+    const result = validate([
+      { id: "talk-title", message: talk && !talkTitle.trim() ? t("record.error.talkTitle") : null },
+      { id: "disclosure-ack", message: !disclosureAck ? t("record.error.disclosure") : null },
+      {
+        id: "record-text",
+        message: needText && !textIntro.trim() ? t("record.error.textRequired") : null,
+      },
+    ]);
+    fieldErrors = result.errors;
+    showErrors = !result.ok;
+    if (!result.ok && result.firstErrorId) document.getElementById(result.firstErrorId)?.focus();
+    return result.ok;
+  }
+  const errTalkTitle = $derived(showErrors && hasError(fieldErrors, "talk-title"));
+  const errDisclosure = $derived(showErrors && hasError(fieldErrors, "disclosure-ack"));
+  const errText = $derived(showErrors && hasError(fieldErrors, "record-text"));
 </script>
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
@@ -434,13 +462,23 @@
     <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>{t("record.backToEvent")}</button>
   </div>
 {:else}
+  {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
+
   {#if talk}
     <!-- Talk metadata (spec F2): title + description ride in the 21609 submission. -->
     <div class="card stack">
       {#if editingTalk}<p class="muted" style="margin:0">{t("talks.editing")}</p>{/if}
       <div>
         <label for="talk-title">{t("talks.field.title")}</label>
-        <input id="talk-title" bind:value={talkTitle} maxlength="200" placeholder={t("talks.field.title.placeholder")} />
+        <input
+          id="talk-title"
+          bind:value={talkTitle}
+          maxlength="200"
+          placeholder={t("talks.field.title.placeholder")}
+          aria-invalid={errTalkTitle}
+          aria-describedby={describedBy("talk-title", errTalkTitle)}
+        />
+        {#if errTalkTitle}<p id="talk-title-error" class="field-error">{t("record.error.talkTitle")}</p>{/if}
       </div>
       <div>
         <label for="talk-desc">{t("talks.field.description")}</label>
@@ -478,9 +516,12 @@
     </ul>
     <label class="row" style="align-items:flex-start;gap:0.5rem;font-weight:400">
       <input
+        id="disclosure-ack"
         type="checkbox"
         bind:checked={disclosureAck}
         style="width:auto;min-height:0;flex:none;margin-top:0.2rem"
+        aria-invalid={errDisclosure}
+        aria-describedby={describedBy("disclosure-ack", errDisclosure)}
       />
       <span>
         {#if !hasCoordinator}
@@ -492,6 +533,7 @@
         {/if}
       </span>
     </label>
+    {#if errDisclosure}<p id="disclosure-ack-error" class="field-error">{t("record.error.disclosure")}</p>{/if}
   </div>
 
   <!-- Cross-event reuse gallery (F1 reuse): every intro the user recorded or wrote
@@ -510,8 +552,8 @@
             <!-- On-demand: MediaPlayer decrypts + plays only when clicked. -->
             <MediaPlayer descriptor={m} />
             <div class="row" style="flex-wrap:wrap">
-              <button class="btn inline" onclick={() => reuse(m, false)} disabled={!canSubmit}>{t("record.reuse.reuse")}</button>
-              <button class="btn inline" onclick={() => reuse(m, true)} disabled={!canSubmit}>{t("record.reuse.fresh")}</button>
+              <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy}>{t("record.reuse.reuse")}</button>
+              <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy}>{t("record.reuse.fresh")}</button>
             </div>
           </div>
         {/each}
@@ -533,20 +575,20 @@
       <h2>{t("record.text.title")}</h2>
       <p class="muted">{t("record.text.hint")}</p>
       <textarea
+        id="record-text"
         rows="6"
         maxlength={MAX_INTRO_TEXT}
         placeholder={t("record.text.placeholder")}
         bind:value={textIntro}
         aria-label={t("record.text.title")}
+        aria-invalid={errText}
+        aria-describedby={describedBy("record-text", errText)}
       ></textarea>
+      {#if errText}<p id="record-text-error" class="field-error">{t("record.error.textRequired")}</p>{/if}
       <p class="muted" style="text-align:right;font-size:0.8rem" aria-live="polite">
         {t("record.text.count", { n: textIntro.length, max: MAX_INTRO_TEXT })}
       </p>
-      <button
-        class="btn primary"
-        onclick={submitText}
-        disabled={!canSubmit || !textIntro.trim() || textLeft < 0}
-      >
+      <button class="btn primary" onclick={submitText} disabled={busy || textLeft < 0}>
         {busy ? t("record.uploading") : t("record.text.submit")}
       </button>
     </div>
@@ -562,7 +604,7 @@
         <p class="muted">{t("record.recorded", { sec: recorded.durationSec })}</p>
         <div class="row">
           <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
-          <button class="btn primary" onclick={submitRecorded} disabled={!canSubmit}>
+          <button class="btn primary" onclick={submitRecorded} disabled={busy}>
             {busy ? t("record.uploading") : t("record.useThis")}
           </button>
         </div>

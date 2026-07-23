@@ -1200,6 +1200,9 @@ export const messages = {
     "record.text.placeholder": "Tell other attendees who you are, what you do, and who you'd like to meet…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Use this intro",
+    "record.error.talkTitle": "Give your talk a title.",
+    "record.error.disclosure": "Please confirm you understand what’s shared before submitting.",
+    "record.error.textRequired": "Write your intro before submitting.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Event report",
@@ -2452,6 +2455,9 @@ export const messages = {
     "record.text.placeholder": "Povedzte ostatným účastníkom, kto ste, čo robíte a koho by ste chceli stretnúť…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Použiť toto predstavenie",
+    "record.error.talkTitle": "Pomenujte svoju prednášku.",
+    "record.error.disclosure": "Pred odoslaním potvrďte, že rozumiete, čo sa zdieľa.",
+    "record.error.textRequired": "Pred odoslaním napíšte svoje predstavenie.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Správa z podujatia",
@@ -3711,6 +3717,9 @@ export const messages = {
       "Řekněte ostatním účastníkům, kdo jste, co děláte a koho byste chtěli potkat…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Použít toto představení",
+    "record.error.talkTitle": "Pojmenujte svou přednášku.",
+    "record.error.disclosure": "Před odesláním potvrďte, že rozumíte, co se sdílí.",
+    "record.error.textRequired": "Před odesláním napište své představení.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Zpráva z akce",
