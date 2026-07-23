@@ -68,6 +68,13 @@ describe("visiblePending (confirmed-transition removal)", () => {
     const visible = visiblePending(known, (p) => approved.has(p), revoked);
     expect(visible.map((r) => r.attendeePubkey)).toEqual([pk("c")]);
   });
+
+  it("UX-A7: drops locally rejected requests too", () => {
+    const known = [req(pk("a"), 1), req(pk("b"), 2)];
+    const rejected = new Set([pk("a")]);
+    const visible = visiblePending(known, () => false, new Set(), rejected);
+    expect(visible.map((r) => r.attendeePubkey)).toEqual([pk("b")]);
+  });
 });
 
 describe("buildApprovedPeople (UX-A1: roster is the source of truth)", () => {

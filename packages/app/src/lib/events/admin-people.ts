@@ -56,16 +56,21 @@ export function mergePending(
 
 /**
  * The pending QUEUE view: known requests minus anyone who has made a confirmed
- * transition out of pending (approved — in the roster or just now — or revoked).
- * Removal happens HERE, never in `mergePending`.
+ * transition out of pending (approved — in the roster or just now — or revoked)
+ * or been locally rejected (UX-A7, no protocol action). Removal happens HERE,
+ * never in `mergePending`.
  */
 export function visiblePending(
   known: PendingRequest[],
   isApproved: (pubkey: string) => boolean,
   revoked: Set<string>,
+  rejected: Set<string> = new Set(),
 ): PendingRequest[] {
   return known.filter(
-    (r) => !isApproved(r.attendeePubkey) && !revoked.has(r.attendeePubkey),
+    (r) =>
+      !isApproved(r.attendeePubkey) &&
+      !revoked.has(r.attendeePubkey) &&
+      !rejected.has(r.attendeePubkey),
   );
 }
 

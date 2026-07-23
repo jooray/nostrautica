@@ -23,6 +23,7 @@
   import ImageCropper from "$lib/components/ImageCropper.svelte";
   import CoordinatorPicker from "$lib/components/CoordinatorPicker.svelte";
   import { attachCoordinator } from "$lib/events/organizer.js";
+  import { buildReceipt, type CreationReceipt } from "$lib/events/creation-outcomes.js";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { onMount } from "svelte";
@@ -276,6 +277,21 @@
   }
   const shareLink = $derived(created ? `${appBase()}#/e/${created.naddr}` : "");
 
+  // Independent-outcome receipt (UX-A3 tail): each publication tracked separately
+  // so the success screen reports the real state, not an implied all-success. The
+  // enroll/attach retries mutate enrollFailed/attachFailed, so the receipt updates
+  // reactively; backup stays "pending" until the BackupCard below confirms it.
+  const receipt = $derived<CreationReceipt>(
+    buildReceipt({
+      enrollAttempted: enrollSelf,
+      enrollFailed,
+      coordinatorPicked: !!coordinatorPubkey,
+      attachFailed,
+      freshLocalKey: session.freshLocalKey,
+      backupConfirmed: false,
+    }),
+  );
+
   async function copyShare() {
     await navigator.clipboard.writeText(shareLink);
     copiedShare = true;
@@ -297,8 +313,51 @@
 {#if created}
   <div class="card">
     <h2>{t("create.created")}</h2>
+    <!-- Independent-outcome receipt (UX-A3): each publication reports its own
+         state; failed secondary steps stay retryable and never masquerade as done. -->
+    <ul class="stack receipt" style="margin:0.75rem 0 0;padding:0;list-style:none">
+      <li><span class="badge ok">{t("create.receipt.ok")}</span> {t("create.receipt.event")}</li>
+      {#if receipt.organizerEnrolled !== "skipped"}
+        <li>
+          {#if receipt.organizerEnrolled === "ok"}
+            <span class="badge ok">{t("create.receipt.ok")}</span> {t("create.receipt.enrolled")}
+          {:else}
+            <span class="badge warn">{t("create.receipt.failed")}</span> {t("create.receipt.enrolled")}
+            <p class="muted" style="margin:0.25rem 0">{t("create.step.enroll.failed.body")}</p>
+            <button class="btn inline" disabled={retrying !== null} onclick={retryEnroll}>
+              {retrying === "enroll" ? t("create.retrying") : t("create.retry")}
+            </button>
+          {/if}
+        </li>
+      {/if}
+      {#if receipt.coordinatorGrant !== "skipped"}
+        <li>
+          {#if receipt.coordinatorGrant === "ok"}
+            <span class="badge ok">{t("create.receipt.ok")}</span> {t("create.receipt.grant")}
+            <p class="muted" style="margin:0.25rem 0">{t("create.step.coordinator.attached.body")}</p>
+          {:else}
+            <span class="badge warn">{t("create.receipt.failed")}</span> {t("create.receipt.grant")}
+            <p class="muted" style="margin:0.25rem 0">{t("create.step.coordinator.failed.body")}</p>
+            <button class="btn inline" disabled={retrying !== null} onclick={retryAttach}>
+              {retrying === "attach" ? t("create.retrying") : t("create.retry")}
+            </button>
+          {/if}
+        </li>
+      {/if}
+      {#if session.freshLocalKey}
+        <li>
+          {#if receipt.keysBackedUp === "ok"}
+            <span class="badge ok">{t("create.receipt.ok")}</span> {t("create.receipt.backup")}
+          {:else}
+            <span class="badge">{t("create.receipt.pending")}</span> {t("create.receipt.backup")}
+            <p class="muted" style="margin:0.25rem 0">{t("create.receipt.backup.pending.body")}</p>
+          {/if}
+        </li>
+      {/if}
+    </ul>
+
     <!-- Next steps as a checklist, not a pile of equal buttons (UI-SUGGESTIONS #14). -->
-    <ol class="stack" style="margin:0.75rem 0 0;padding-left:1.25rem">
+    <ol class="stack" style="margin:1rem 0 0;padding-left:1.25rem">
       <li>
         <strong>{t("create.step.share")}</strong>
         <p class="mono" style="margin:0.25rem 0">{shareLink}</p>
@@ -311,36 +370,14 @@
           {/if}
         </div>
       </li>
-      {#if enrollFailed}
+      {#if !coordinatorPubkey}
         <li style="margin-top:0.75rem">
-          <strong style="color:var(--danger)">{t("create.step.enroll.failed")}</strong>
-          <p class="muted" style="margin:0.25rem 0">{t("create.step.enroll.failed.body")}</p>
-          <button class="btn inline" disabled={retrying !== null} onclick={retryEnroll}>
-            {retrying === "enroll" ? t("create.retrying") : t("create.retry")}
-          </button>
-        </li>
-      {/if}
-      <li style="margin-top:0.75rem">
-        {#if coordinatorPubkey && attachFailed}
-          <strong style="color:var(--danger)">{t("create.step.coordinator.failed")}</strong>
-          <p class="muted" style="margin:0.25rem 0">
-            {t("create.step.coordinator.failed.body")}
-          </p>
-          <button class="btn inline" disabled={retrying !== null} onclick={retryAttach}>
-            {retrying === "attach" ? t("create.retrying") : t("create.retry")}
-          </button>
-        {:else if coordinatorPubkey}
-          <strong>{t("create.step.coordinator.attached")}</strong>
-          <p class="muted" style="margin:0.25rem 0">
-            {t("create.step.coordinator.attached.body")}
-          </p>
-        {:else}
           <strong>{t("create.step.coordinator")}</strong>
           <p class="muted" style="margin:0.25rem 0">
             {t("create.step.coordinator.body")}
           </p>
-        {/if}
-      </li>
+        </li>
+      {/if}
       <li style="margin-top:0.75rem">
         <strong>{t("create.step.approve")}</strong>
         <p class="muted" style="margin:0.25rem 0">
@@ -559,5 +596,8 @@
   }
   .datetime-input::-webkit-calendar-picker-indicator:hover {
     background-color: var(--accent-soft);
+  }
+  .receipt > li + li {
+    margin-top: 0.5rem;
   }
 </style>

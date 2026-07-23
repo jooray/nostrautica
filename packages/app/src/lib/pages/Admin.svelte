@@ -15,6 +15,13 @@
   } from "$lib/events/admin-people.js";
   import type { DirectoryEntryContent, RosterContent } from "@nostrautica/protocol";
   import {
+    loadReview,
+    setReview,
+    pubkeysInState,
+    type ReviewMap,
+    type ReviewState,
+  } from "$lib/stores/review-state.js";
+  import {
     fetchPending,
     cachedPending,
     approveAttendee,
@@ -100,10 +107,23 @@
   // transient "Revoked ✓" because the refresh moved the card first). Excluded
   // from pendingRequests for the same reason.
   let revokedSet = $state<Set<string>>(new Set());
+  // Local admission review state (UX-A7): rejected requests drop from the queue
+  // (local-only, no protocol action); deferred ones stay but stop looking new.
+  let reviewMap = $state<ReviewMap>({});
+  const rejectedSet = $derived(pubkeysInState(reviewMap, "rejected"));
+  const deferredSet = $derived(pubkeysInState(reviewMap, "deferred"));
   // The pending QUEUE view: known requests minus confirmed transitions (approved
-  // in the roster / approved just now / revoked). Removal lives here — the merge
-  // never drops a known request (UX-A2).
-  const pendingRequests = $derived(visiblePending(pending, isApprovedNow, revokedSet));
+  // in the roster / approved just now / revoked) and local rejections (UX-A7).
+  // The merge never drops a known request (UX-A2).
+  const pendingRequests = $derived(visiblePending(pending, isApprovedNow, revokedSet, rejectedSet));
+
+  function review(pubkey: string, state: ReviewState | undefined) {
+    if (!ctx) return;
+    reviewMap = setReview(ctx.coordinate, reviewMap, pubkey, state);
+    if (confirmingReject === pubkey) confirmingReject = null;
+  }
+  // Inline reject confirmation (no window.confirm), mirroring revoke.
+  let confirmingReject = $state<string | null>(null);
   // The approved People section is enumerated from the durable roster (UX-A1),
   // enriched with recent intake + directory + statuses (statuses are folded in
   // via `approvedPeople`, declared after coordStatuses is available).
@@ -290,6 +310,7 @@
     pending = mergePending(pending, cachedPending(coord) ?? []);
     roster = cachedRoster(coord) ?? roster;
     directory = cachedDirectory(coord) ?? directory;
+    reviewMap = loadReview(coord); // UX-A7: persisted reject/defer state
     rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? [...rosterApproved]);
     pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
     coordStatuses = cachedCoordinatorStatuses(coord) ?? coordStatuses;
@@ -882,10 +903,12 @@
     {/if}
     {#each pendingRequests as req (req.attendeePubkey)}
       {@const bulk = bulkItemState(req.attendeePubkey)}
+      {@const deferred = deferredSet.has(req.attendeePubkey)}
       <div class="card">
         <strong>{req.name}</strong>
         <span class="badge">{short(req.attendeePubkey)}</span>
         {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
+        {#if deferred}<span class="badge">{t("admin.requests.reviewed")}</span>{/if}
         {#if req.message}<p class="muted">{req.message}</p>{/if}
         {#if req.profile?.skills?.length}
           <div class="row" style="flex-wrap:wrap">
@@ -902,15 +925,45 @@
           <button class="btn inline" onclick={() => void retryBulkItem(req.attendeePubkey)}>
             {t("admin.requests.bulk.retry")}
           </button>
+        {:else if confirmingReject === req.attendeePubkey}
+          <p class="muted" style="margin:0.25rem 0">{t("admin.requests.reject.confirm")}</p>
+          <div class="row">
+            <button class="btn inline danger" onclick={() => review(req.attendeePubkey, "rejected")}>
+              {t("admin.requests.reject")}
+            </button>
+            <button class="btn inline" onclick={() => (confirmingReject = null)}>{t("admin.revoke.keep")}</button>
+          </div>
         {:else}
-          <button
-            class="btn primary"
-            onclick={() => approve(req)}
-            disabled={approving.has(req.attendeePubkey)}
-          >{t("admin.requests.approve")}</button>
+          <div class="row" style="flex-wrap:wrap">
+            <button
+              class="btn primary"
+              onclick={() => approve(req)}
+              disabled={approving.has(req.attendeePubkey)}
+            >{t("admin.requests.approve")}</button>
+            {#if !deferred}
+              <button class="btn inline" onclick={() => review(req.attendeePubkey, "deferred")}>
+                {t("admin.requests.leavePending")}
+              </button>
+            {/if}
+            <button class="btn inline danger" onclick={() => (confirmingReject = req.attendeePubkey)}>
+              {t("admin.requests.reject")}
+            </button>
+          </div>
         {/if}
       </div>
     {/each}
+    {#if rejectedSet.size}
+      <p class="muted" style="font-size:0.8rem">
+        {tp("admin.requests.rejectedCount", rejectedSet.size)}
+        <button
+          class="btn inline"
+          style="display:inline;padding:0;background:none;border:none;color:var(--accent);text-decoration:underline"
+          onclick={() => { for (const pk of rejectedSet) review(pk, undefined); }}
+        >
+          {t("admin.requests.undoRejects")}
+        </button>
+      </p>
+    {/if}
   </div>
 
   {#if approvedPeople.length}
