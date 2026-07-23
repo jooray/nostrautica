@@ -30,6 +30,9 @@
   import { onMount } from "svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
+  import ErrorSummary from "$lib/components/ErrorSummary.svelte";
+  import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
 
   let title = $state("");
   let summary = $state("");
@@ -134,16 +137,18 @@
 
   async function submit() {
     error = null;
-    if (!title.trim() || !startLocal) {
-      error = t("create.error.titleRequired");
-      return;
-    }
-    if (endLocal && startLocal && new Date(endLocal).getTime() <= new Date(startLocal).getTime()) {
-      error = t("create.error.endBeforeStart");
-      return;
-    }
-    if (!session.loggedIn && !organizerName.trim()) {
-      error = t("create.error.nameRequired");
+    const result = validate([
+      {
+        id: "on",
+        message: !session.loggedIn && !organizerName.trim() ? t("create.error.nameRequired") : null,
+      },
+      { id: "t", message: !title.trim() ? t("create.error.titleRequired") : null },
+      { id: "st", message: !startLocal ? t("create.error.startRequired") : null },
+      { id: "en", message: endBeforeStart ? t("create.error.endBeforeStart") : null },
+    ]);
+    if (!result.ok) {
+      showErrors = true;
+      if (result.firstErrorId) document.getElementById(result.firstErrorId)?.focus();
       return;
     }
     busy = true;
@@ -236,6 +241,7 @@
         );
       }
       created = result;
+      opStatus.published(t("op.eventCreated"));
       // Event published — the compose drafts are spent (App-2).
       clearDraft("create:title");
       clearDraft("create:summary");
@@ -307,6 +313,25 @@
   const endBeforeStart = $derived(
     !!endLocal && !!startLocal && new Date(endLocal).getTime() <= new Date(startLocal).getTime(),
   );
+
+  // Field-level validation (audit §7.3.7). Errors surface only after a submit
+  // attempt (`showErrors`), stay linked to their field via aria-describedby, and
+  // are summarized + first-error-focused by submit().
+  let showErrors = $state(false);
+  const fieldErrors = $derived(
+    validate([
+      {
+        id: "on",
+        message: !session.loggedIn && !organizerName.trim() ? t("create.error.nameRequired") : null,
+      },
+      { id: "t", message: !title.trim() ? t("create.error.titleRequired") : null },
+      { id: "st", message: !startLocal ? t("create.error.startRequired") : null },
+      { id: "en", message: endBeforeStart ? t("create.error.endBeforeStart") : null },
+    ]).errors,
+  );
+  const errName = $derived(showErrors && hasError(fieldErrors, "on"));
+  const errTitle = $derived(showErrors && hasError(fieldErrors, "t"));
+  const errStart = $derived(showErrors && hasError(fieldErrors, "st"));
 </script>
 
 <h1>{t("create.title")}</h1>
@@ -410,11 +435,19 @@
   {/if}
 {:else}
   {#if error}<div class="card warn">{error}</div>{/if}
+  {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
   <div class="card stack">
     {#if !session.loggedIn}
       <div>
         <label for="on">{t("create.organizerName")}</label>
-        <input id="on" bind:value={organizerName} placeholder={t("create.organizerName.placeholder")} />
+        <input
+          id="on"
+          bind:value={organizerName}
+          placeholder={t("create.organizerName.placeholder")}
+          aria-invalid={errName}
+          aria-describedby={describedBy("on", errName)}
+        />
+        {#if errName}<p id="on-error" class="field-error">{t("create.error.nameRequired")}</p>{/if}
         <p class="muted" style="margin:0.25rem 0 0">
           {t("create.organizerName.body")}
         </p>
@@ -422,7 +455,14 @@
     {/if}
     <div>
       <label for="t">{t("create.field.title")}</label>
-      <input id="t" bind:value={title} placeholder={t("create.field.title.placeholder")} />
+      <input
+        id="t"
+        bind:value={title}
+        placeholder={t("create.field.title.placeholder")}
+        aria-invalid={errTitle}
+        aria-describedby={describedBy("t", errTitle)}
+      />
+      {#if errTitle}<p id="t-error" class="field-error">{t("create.error.titleRequired")}</p>{/if}
     </div>
     <div>
       <label for="s">{t("create.field.summary")}</label>
@@ -431,7 +471,15 @@
     <div class="row" style="gap:0.75rem;align-items:flex-start;flex-wrap:wrap">
       <div style="flex:1;min-width:180px">
         <label for="st">{t("create.field.start")}</label>
-        <input id="st" type="datetime-local" class="datetime-input" bind:value={startLocal} />
+        <input
+          id="st"
+          type="datetime-local"
+          class="datetime-input"
+          bind:value={startLocal}
+          aria-invalid={errStart}
+          aria-describedby={describedBy("st", errStart)}
+        />
+        {#if errStart}<p id="st-error" class="field-error">{t("create.error.startRequired")}</p>{/if}
       </div>
       <div style="flex:1;min-width:180px">
         <label for="en">{t("create.field.end")}</label>
@@ -442,9 +490,10 @@
           bind:value={endLocal}
           min={startLocal}
           aria-invalid={endBeforeStart}
+          aria-describedby={describedBy("en", endBeforeStart)}
         />
         {#if endBeforeStart}
-          <p class="muted" style="margin:0.25rem 0 0;color:var(--danger)">{t("create.error.endBeforeStart")}</p>
+          <p id="en-error" class="field-error">{t("create.error.endBeforeStart")}</p>
         {/if}
       </div>
     </div>

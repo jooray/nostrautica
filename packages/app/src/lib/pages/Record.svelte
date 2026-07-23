@@ -24,6 +24,8 @@
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
+  import { online } from "$lib/stores/online.svelte.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
@@ -100,6 +102,15 @@
       talkTitle.trim().length > 0 ||
       talkDescription.trim().length > 0;
     if (dirty) return refreshGuard.hold("record");
+  });
+
+  // Clear any prior operation status once the user edits again (audit §7.3.9:
+  // next-edit lifetime). No-ops until a status has actually been set.
+  $effect(() => {
+    void textIntro;
+    void talkTitle;
+    void talkDescription;
+    opStatus.clearOnEdit();
   });
 
   onMount(async () => {
@@ -383,6 +394,12 @@
   function finish() {
     stopStream();
     done = true;
+    // Announce the outcome in the shared live region (audit §7.3.9). Offline →
+    // the durable outbox holds it; a talk is coordinator-moderated; an intro is
+    // published to relays. Truthful about what actually happened.
+    if (!online.isOnline) opStatus.queued(t("op.queued", { what: kindLabel }));
+    else if (talk) opStatus.acknowledged(t("op.talkSubmitted"));
+    else opStatus.published(t("op.introPublished"));
   }
 
   // Talks require a title (and always media — the text mode is intro-only).

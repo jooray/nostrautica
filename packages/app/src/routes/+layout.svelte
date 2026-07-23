@@ -26,6 +26,7 @@
   import { chatSession } from "$lib/chat/session.svelte.js";
   import { shouldPrewarmChat } from "$lib/chat/gate.js";
   import TopBar from "$lib/components/TopBar.svelte";
+  import OperationStatus from "$lib/components/OperationStatus.svelte";
   import BottomNav from "$lib/components/BottomNav.svelte";
   import EventNav from "$lib/components/EventNav.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
@@ -238,6 +239,9 @@
       ></div>
     {/if}
   {/if}
+  <!-- Shared, persistent operation-status announcer (audit §7.3.9): Queued /
+       Published / Coordinator-acknowledged, kept until the user's next edit. -->
+  <OperationStatus />
   <main id="main-content" bind:this={main} tabindex="-1">
     {#if booted}
       {@render children()}

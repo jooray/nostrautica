@@ -301,6 +301,21 @@ select:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
+/* Invalid fields carry a non-color cue (border weight) as well as the danger
+   colour, so the error is perceivable without colour (audit §7.3.7). */
+input[aria-invalid="true"],
+textarea[aria-invalid="true"],
+select[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+/* Shared field-level error message (audit §7.3.7): rendered as
+   <p id="{field}-error" class="field-error"> and linked via aria-describedby. */
+.field-error {
+  margin: 0.25rem 0 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
 
 label,
 .field-label {

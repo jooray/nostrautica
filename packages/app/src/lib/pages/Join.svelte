@@ -39,6 +39,8 @@
   } from "$lib/nostr/prefetch.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
+  import ErrorSummary from "$lib/components/ErrorSummary.svelte";
+  import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
 
@@ -101,6 +103,22 @@
   // Event-local display name (UX-O1): editable for logged-in users, prefilled from
   // the loaded kind-0 name. Sent with the join request; NEVER republishes kind 0.
   let eventDisplayName = $state("");
+
+  // Field-level name validation (audit §7.3.7). The required name field differs
+  // by mode: a brand-new user edits `n` (newName); a logged-in user whose public
+  // profile is missing/blank must supply an event-local `edn` (eventDisplayName).
+  let showErrors = $state(false);
+  const nameFieldId = $derived(session.loggedIn ? "edn" : "n");
+  const nameInvalid = $derived(
+    session.loggedIn
+      ? !canSubmitLoggedIn(profileState, eventDisplayName)
+      : !newName.trim(),
+  );
+  const fieldErrors = $derived(
+    validate([{ id: nameFieldId, message: nameInvalid ? t("join.error.nameRequired") : null }])
+      .errors,
+  );
+  const errName = $derived(showErrors && hasError(fieldErrors, nameFieldId));
 
   function onPicFile(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
@@ -272,7 +290,8 @@
       if (!session.loggedIn) {
         // Brand-new user we're creating a key for — these fields ARE the profile.
         if (!newName.trim()) {
-          error = t("join.error.nameRequired");
+          showErrors = true;
+          document.getElementById("n")?.focus();
           return;
         }
         await session.createLocalKey();
@@ -305,7 +324,8 @@
         // must not produce an anonymous-looking request — require an event-local
         // display name (which never modifies kind 0).
         if (!canSubmitLoggedIn(profileState, eventDisplayName)) {
-          error = t("join.error.nameRequired");
+          showErrors = true;
+          document.getElementById("edn")?.focus();
           return;
         }
         displayName = eventDisplayName.trim() || existingName;
@@ -482,6 +502,7 @@
     </p>
   {/if}
 
+  {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
   <div class="card stack">
     {#if session.loggedIn}
       <!-- Existing Nostr user: kind-0 shown read-only; a load-state machine (UX-O1)
@@ -520,7 +541,14 @@
       {#if profileState !== "loading" && profileState !== "idle"}
         <div>
           <label for="edn">{t("join.displayName")} <span class="muted" style="font-weight:400">{t("join.displayNameEvent")}</span></label>
-          <input id="edn" bind:value={eventDisplayName} placeholder={t("join.namePlaceholder")} />
+          <input
+            id="edn"
+            bind:value={eventDisplayName}
+            placeholder={t("join.namePlaceholder")}
+            aria-invalid={errName}
+            aria-describedby={describedBy("edn", errName)}
+          />
+          {#if errName}<p id="edn-error" class="field-error">{t("join.error.nameRequired")}</p>{/if}
         </div>
       {/if}
     {:else}
@@ -546,7 +574,14 @@
       </div>
       <div>
         <label for="n">{t("join.displayName")} <span class="muted" style="font-weight:400">{t("join.displayNamePublic")}</span></label>
-        <input id="n" bind:value={newName} placeholder={t("join.namePlaceholder")} />
+        <input
+          id="n"
+          bind:value={newName}
+          placeholder={t("join.namePlaceholder")}
+          aria-invalid={errName}
+          aria-describedby={describedBy("n", errName)}
+        />
+        {#if errName}<p id="n-error" class="field-error">{t("join.error.nameRequired")}</p>{/if}
       </div>
       <div>
         <label for="a">{t("join.aboutYou")} <span class="muted" style="font-weight:400">{t("join.aboutOptional")}</span></label>
