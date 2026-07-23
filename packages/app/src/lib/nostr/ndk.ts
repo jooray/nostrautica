@@ -120,11 +120,51 @@ export function getNdk(): NDK {
   return ndk;
 }
 
+/**
+ * Relay-connection lifecycle for the connectivity banner (§7.4.6, item 5).
+ * `relayHealth()` must distinguish "we haven't even tried to reach a relay yet"
+ * (the logged-out home page never calls connectNdk — nothing is deferred-lazy
+ * about it, it simply hasn't happened) from "we tried and every relay failed"
+ * (the conference-WiFi lie). Claiming "relay-blocked" before a single socket has
+ * been attempted is a false positive that scared logged-out visitors on prod.
+ *
+ *   idle       — connectNdk has never been called (no attempt); NO banner.
+ *   connecting — an attempt is in flight, none connected yet;               NO banner.
+ *   connected  — at least one relay socket is open right now;               OK.
+ *   failed     — a bounded connect() has returned with zero relays open;    relay-blocked.
+ */
+let relayConnectAttempted = false;
+let relayConnectSettled = false;
+
+export type RelayHealth = "idle" | "connecting" | "connected" | "failed";
+
+/** Current relay-connection health (see the state machine above). Never throws. */
+export function relayHealth(): RelayHealth {
+  // Live + authoritative: an open socket right now is "connected" regardless of
+  // prior history, so the banner clears promptly the moment a relay (re)connects.
+  if (connectedRelayCount() > 0) return "connected";
+  if (!relayConnectAttempted) return "idle";
+  return relayConnectSettled ? "failed" : "connecting";
+}
+
+/** Test-only: reset the relay-connection lifecycle flags. */
+export function __resetRelayHealthForTests(): void {
+  relayConnectAttempted = false;
+  relayConnectSettled = false;
+}
+
 /** Connect to relays (idempotent enough for app boot). */
 export async function connectNdk(): Promise<NDK> {
   const instance = getNdk();
-  await instance.connect(2000);
-  return instance;
+  relayConnectAttempted = true;
+  try {
+    await instance.connect(2000);
+    return instance;
+  } finally {
+    // The connect call is bounded (2s); once it has returned at least once, a
+    // still-empty pool is a genuine failure, not a not-yet-attempted idle state.
+    relayConnectSettled = true;
+  }
 }
 
 /**
