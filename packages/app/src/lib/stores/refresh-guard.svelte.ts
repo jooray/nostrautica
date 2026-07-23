@@ -17,17 +17,27 @@
  */
 
 class RefreshGuard {
-  /** Refcount per reason so overlapping holders (e.g. two compose boxes) nest. */
+  /**
+   * Refcount per reason so overlapping holders (e.g. two compose boxes) nest.
+   *
+   * This is a PLAIN, non-reactive Map on purpose (App-2 incident 2026-07-23):
+   * every `hold()` call site runs INSIDE a component `$effect` reacting to form
+   * state (Create title, Record dirty, compose text…). If `hold()`/`release()`
+   * mutated `$state` that the guard also reads back on the same tick, Svelte 5
+   * flags the effect as reading-and-writing its own dependency and throws
+   * `effect_update_depth_exceeded` — which wedged the page the instant a tracked
+   * field became non-empty (Create's success screen never rendered even though
+   * the event published). The dirty registry therefore carries NO reactive
+   * state; the only value that needs reactivity is `pending`, read by the shell
+   * banner, and nothing reads `dirty` reactively.
+   */
   private refs = new Map<string, number>();
-  /** Reactive bump: any change to `refs` or the pending flag notifies readers. */
-  private version = $state(0);
   /** The deferred reload, captured when a worker took control while dirty. */
   private refresh: (() => void) | null = null;
   private pending = $state(false);
 
   /** True while any unsaved work is held — the reload waits on this going false. */
   get dirty(): boolean {
-    void this.version;
     for (const n of this.refs.values()) if (n > 0) return true;
     return false;
   }
@@ -46,7 +56,6 @@ class RefreshGuard {
    */
   hold(reason: string): () => void {
     this.refs.set(reason, (this.refs.get(reason) ?? 0) + 1);
-    this.version++;
     let released = false;
     return () => {
       if (released) return;
@@ -54,7 +63,6 @@ class RefreshGuard {
       const n = (this.refs.get(reason) ?? 1) - 1;
       if (n <= 0) this.refs.delete(reason);
       else this.refs.set(reason, n);
-      this.version++;
       this.maybeRefresh();
     };
   }
@@ -83,7 +91,6 @@ class RefreshGuard {
     this.refs.clear();
     this.refresh = null;
     this.pending = false;
-    this.version++;
   }
 }
 
