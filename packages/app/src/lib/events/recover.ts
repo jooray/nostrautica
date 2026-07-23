@@ -79,6 +79,10 @@ async function restore(coordinate: string, backup: EventKeysBackup): Promise<voi
     eck: [...byId.values()].sort((a, b) => a.id - b.id),
     eidNsecHex: existing?.eidNsecHex ?? backup.eid_nsec,
     einboxNsecHex: existing?.einboxNsecHex ?? backup.einbox_nsec,
+    // The install generation (NIP §3.5) only grows — keep the higher of the local
+    // record and the backup so a re-attach on a fresh device still increments past
+    // the last-used gen instead of colliding at gen 1.
+    coordinatorGen: Math.max(existing?.coordinatorGen ?? 0, backup.coordinator_gen ?? 0) || undefined,
   });
 }
 

@@ -29,7 +29,7 @@ export function cachedPerEventSettings(coordinate: string): PerEventSettings | u
 }
 
 const EMPTY: PerEventSettings = {
-  v: 1,
+  v: 2,
   favorites: [],
   want_to_meet: [],
   met: [],

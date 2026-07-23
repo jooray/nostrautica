@@ -26,6 +26,22 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.pendingJobCount()).toBe(0);
   });
 
+  it("stopClaiming halts new claims but the drain returns cleanly (graceful shutdown)", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now });
+    let runs = 0;
+    runner.register("noop", async () => {
+      runs++;
+    });
+    runner.enqueue("noop", "a", {});
+    runner.enqueue("noop", "b", {});
+    runner.stopClaiming();
+    await runner.drain();
+    // No new jobs were claimed after stopClaiming; both remain pending.
+    expect(runs).toBe(0);
+    expect(store.pendingJobCount()).toBe(2);
+  });
+
   it("retries with exponential backoff, then poisons after max attempts", async () => {
     const store = new Store();
     const clock = fixedClock();
@@ -194,5 +210,29 @@ describe("job leases and crash recovery (audit H1)", () => {
     store.reclaimExpiredLeases(3000); // A crashed
     const c2 = store.claimNextJob(3000, "B", 1000)!;
     expect(c2.attempts).toBe(0); // still zero — no retry burned by the crash
+  });
+
+  it("heartbeats a long-running job so a second worker can't reclaim its lease (P0-6)", async () => {
+    const store = new Store();
+    // Real wall-clock `now` (default) so the heartbeat timer and the lease math
+    // agree. Short lease so the test is fast; the handler runs well past it.
+    const runner = new JobRunner(store, { leaseMs: 90, maxAttempts: 1 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    runner.register("slow", async () => {
+      await gate;
+    });
+    store.enqueueJob("slow", "k", {});
+    const running = runner.runOne(); // claims the job and parks on the gate
+
+    // Park well past 2× the lease. With the heartbeat the lease is continuously
+    // extended; pre-fix (no heartbeat) it would have lapsed at ~90ms.
+    await new Promise((r) => setTimeout(r, 250));
+    const stolen = store.claimNextJob(Date.now(), "worker-2", 90);
+    expect(stolen).toBeUndefined(); // still owned by the original worker
+
+    release();
+    await running;
+    expect(store.pendingJobCount()).toBe(0); // completed by the original owner
   });
 });

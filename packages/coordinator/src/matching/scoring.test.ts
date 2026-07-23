@@ -85,6 +85,46 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
     for (const i of [1, 2, 3]) expect(seen!.user).toContain(`--- CANDIDATE ${i} ---`);
   });
 
+  it("icebreakers: capped at 3, empties dropped, absent stays undefined (NIP §6.2)", async () => {
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          index: 1,
+          similarity: 0.5,
+          complementarity: 0.5,
+          score: 0.7,
+          reasoning_for_target: "You should meet.",
+          icebreakers: ["a", "", "b".repeat(400), "c", "d"], // 4 non-empty + 1 empty
+        },
+        {
+          index: 2,
+          similarity: 0.5,
+          complementarity: 0.5,
+          score: 0.7,
+          reasoning_for_target: "You too.",
+          // no icebreakers field at all
+        },
+      ],
+    }));
+    const cands = candidates(2);
+    const { scores } = await scoreBatch(llm, "m", EVENT, profile("t"), cands, () => 0);
+    // One candidate (the entry WITH icebreakers) is capped at 3 with empties dropped;
+    // the other (no icebreakers field) stays undefined — order is shuffled, so assert
+    // across both rather than by position.
+    const results = [...scores.values()];
+    const withIb = results.find((r) => r.icebreakers);
+    const withoutIb = results.find((r) => !r.icebreakers);
+    expect(withIb!.icebreakers).toHaveLength(3);
+    expect(withIb!.icebreakers!.every((s) => s.length > 0 && s.length <= 280)).toBe(true);
+    expect(withoutIb!.icebreakers).toBeUndefined();
+  });
+
+  it("the scoring schema + prompt include icebreakers (NIP §6.2)", () => {
+    expect("icebreakers" in BATCH_SCORE_SCHEMA.properties.matches.items.properties).toBe(true);
+    expect(BATCH_SYSTEM_PROMPT).toContain("icebreakers");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("icebreakers");
+  });
+
   it("maps indices back through the shuffled candidate order", async () => {
     const cands = candidates(5);
     // Reversing rng: shuffle becomes a deterministic permutation ≠ identity.

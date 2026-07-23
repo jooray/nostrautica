@@ -26,6 +26,41 @@ const WASH_ATTR = "data-event-wash";
 let activeNaddr: string | undefined;
 let requestToken = 0; // invalidates in-flight fetches on navigation
 
+/**
+ * Secret-surface suppression (§13.3, Option A). While a secret-bearing surface
+ * is on screen — an admin invite nsec/QR, a key backup/reveal, chat device
+ * handoff/management — NO organizer-controlled event CSS may be live, because
+ * CSS can exfiltrate DOM text (attribute selectors + background/font requests).
+ * `suppressEventTheme()` removes the stylesheet SYNCHRONOUSLY (before the secret
+ * paints) and latches this flag so nothing re-injects until the surface is gone.
+ */
+let suppressed = false;
+
+/** True while event theming is suppressed for a secret surface (§13.3). */
+export function isEventThemeSuppressed(): boolean {
+  return suppressed;
+}
+
+/**
+ * Synchronously strip any live event stylesheet + wash and block re-injection
+ * until {@link releaseEventTheme}. Called (via the secret-surface guard) the
+ * instant a secret surface mounts, so no frame ever shows organizer CSS while a
+ * secret is in the DOM.
+ */
+export function suppressEventTheme(): void {
+  if (typeof document === "undefined") return;
+  suppressed = true;
+  requestToken++; // drop any in-flight theme fetch that would re-inject
+  styleEl()?.remove();
+  washEl()?.remove();
+  activeNaddr = undefined; // force a fresh inject once the surface closes
+}
+
+/** Lift the suppression once the last secret surface unmounts (§13.3). */
+export function releaseEventTheme(): void {
+  suppressed = false;
+}
+
 function styleEl(): HTMLStyleElement | null {
   return document.querySelector(`style[${ATTR}]`);
 }
@@ -35,6 +70,7 @@ function washEl(): HTMLStyleElement | null {
 }
 
 function inject(naddr: string, css: string): void {
+  if (suppressed) return; // a secret surface is open — never inject event CSS
   let el = styleEl();
   if (!el) {
     el = document.createElement("style");
@@ -57,7 +93,7 @@ function inject(naddr: string, css: string): void {
 export function syncEventWash(coordinate: string | undefined): void {
   if (typeof document === "undefined") return;
   let el = washEl();
-  if (!coordinate) {
+  if (!coordinate || suppressed) {
     el?.remove();
     return;
   }
@@ -106,6 +142,7 @@ export async function syncEventTheme(naddr: string | undefined): Promise<void> {
     clearEventTheme();
     return;
   }
+  if (suppressed) return; // secret surface open — no event CSS until it closes
   if (naddr === activeNaddr) return; // same event — keep the current style
   clearEventTheme();
   const token = requestToken;

@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
 import { bytesToHex } from "@nostrautica/protocol";
-import { Store } from "./db.js";
+import { Store, acquireDaemonLock } from "./db.js";
 
 const ENC_PREFIX = "nip44:";
 
@@ -213,6 +213,24 @@ describe("chat-key binding ownership (audit COORD-10)", () => {
     expect(store.getChatKey(CO, KEY)!.client_id).toBe("dev-1");
     store.close();
   });
+
+  it("one account binds MULTIPLE distinct device keys (multi-device), each with its label", () => {
+    const store = new Store();
+    const KEY2 = "d".repeat(64);
+    // Device 1 and device 2 (fresh storage → different keys) both bind to account A.
+    expect(
+      store.upsertChatKey({ coordinate: CO, accountPubkey: A, chatPubkey: KEY, label: "Chrome on macOS", now: 1 }),
+    ).toBe(true);
+    expect(
+      store.upsertChatKey({ coordinate: CO, accountPubkey: A, chatPubkey: KEY2, label: "Firefox on Android", now: 2 }),
+    ).toBe(true);
+    const keys = store.chatKeysForAccount(CO, A);
+    expect(keys.map((k) => k.chat_pubkey).sort()).toEqual([KEY, KEY2].sort());
+    expect(store.getChatKey(CO, KEY)!.label).toBe("Chrome on macOS");
+    expect(store.getChatKey(CO, KEY2)!.label).toBe("Firefox on Android");
+    expect(keys.every((k) => k.status === "active")).toBe(true);
+    store.close();
+  });
 });
 
 describe("invite claim atomicity (audit COORD-25)", () => {
@@ -228,8 +246,8 @@ describe("invite claim atomicity (audit COORD-25)", () => {
   });
 });
 
-describe("TTL pruning (audit COORD-24)", () => {
-  it("prunes seen_rumors and consumed key packages older than 30 days, keeps fresh rows", () => {
+describe("TTL pruning (audit COORD-24 / P0-1)", () => {
+  it("prunes old consumed key packages but RETAINS seen_rumors (replay guard)", () => {
     const store = new Store();
     const DAY = 24 * 60 * 60 * 1000;
     const now = 100 * DAY;
@@ -238,11 +256,164 @@ describe("TTL pruning (audit COORD-24)", () => {
     store.markKpConsumed("31923:aaaa:ev", "old-kp", now - 90 * DAY);
     store.markKpConsumed("31923:aaaa:ev", "fresh-kp", now - 1 * DAY);
 
-    expect(store.pruneOldData(now)).toBe(2);
-    expect(store.isRumorSeen("old-rumor")).toBe(false);
+    // Only the stale key package is pruned; seen_rumors are kept so a since:0
+    // inbox rescan can't resurrect an old command past the old 30-day TTL (P0-1).
+    expect(store.pruneOldData(now)).toBe(1);
+    expect(store.isRumorSeen("old-rumor")).toBe(true); // retained (was pruned pre-fix)
     expect(store.isRumorSeen("fresh-rumor")).toBe(true);
     expect(store.isKpConsumed("31923:aaaa:ev", "old-kp")).toBe(false);
     expect(store.isKpConsumed("31923:aaaa:ev", "fresh-kp")).toBe(true);
     store.close();
+  });
+});
+
+describe("talk transcript compare-and-set (audit P0-7)", () => {
+  function seedTalk(store: Store, x: string, revision: number, now: number) {
+    store.upsertTalk({
+      coordinate: "c",
+      pubkey: "p",
+      talkD: "d",
+      title: "t",
+      description: "",
+      speakersJson: "[]",
+      mediaJson: JSON.stringify({ x }),
+      lang: "en",
+      revision,
+      mediaX: x,
+      now,
+    });
+  }
+
+  it("discards a stale transcript when the talk's media changed since STT started", () => {
+    const store = new Store();
+    seedTalk(store, "X1", 1, 1);
+    // STT for the current media (X1) writes successfully.
+    expect(
+      store.setTalkTranscript("c", "p", "d", JSON.stringify({ x: "X1", text: "one" }), 2, "X1"),
+    ).toBe(true);
+    expect(JSON.parse(store.getTalk("c", "p", "d")!.transcript_json!).text).toBe("one");
+
+    // Re-record: a new revision with new media X2 (upsertTalk drops the transcript).
+    seedTalk(store, "X2", 2, 3);
+    expect(store.getTalk("c", "p", "d")!.transcript_json).toBeNull();
+
+    // A slow STT result for the OLD media X1 finishing now must be discarded.
+    expect(
+      store.setTalkTranscript("c", "p", "d", JSON.stringify({ x: "X1", text: "stale" }), 4, "X1"),
+    ).toBe(false);
+    expect(store.getTalk("c", "p", "d")!.transcript_json).toBeNull(); // not re-attached
+    store.close();
+  });
+
+  it("rejects an out-of-order lower talk revision (P0-2 interim guard)", () => {
+    const store = new Store();
+    const put = (revision: number, x: string) =>
+      store.upsertTalk({
+        coordinate: "c",
+        pubkey: "p",
+        talkD: "d",
+        title: `rev${revision}`,
+        description: "",
+        speakersJson: "[]",
+        mediaJson: JSON.stringify({ x }),
+        lang: "en",
+        revision,
+        mediaX: x,
+        now: revision,
+      });
+    expect(put(2, "X2")).toBe(true);
+    store.setTalkStatus("c", "p", "d", "published", 10, 10);
+    // A delayed revision 0 must NOT overwrite revision 2 or reset moderation.
+    expect(put(0, "X0")).toBe(false);
+    const talk = store.getTalk("c", "p", "d")!;
+    expect(talk.revision).toBe(2);
+    expect(talk.title).toBe("rev2");
+    expect(talk.status).toBe("published"); // moderation not reset by the stale write
+    // A genuine higher revision still applies (and resets to pending).
+    expect(put(3, "X3")).toBe(true);
+    expect(store.getTalk("c", "p", "d")!.status).toBe("pending");
+    store.close();
+  });
+
+  it("rejects an equal-revision talk with different content, no-ops on identical (NIP §3.3)", () => {
+    const store = new Store();
+    const put = (revision: number, title: string, x: string) =>
+      store.upsertTalk({
+        coordinate: "c", pubkey: "p", talkD: "d",
+        title, description: "", speakersJson: "[]",
+        mediaJson: JSON.stringify({ x }), lang: "en",
+        revision, mediaX: x, now: revision,
+      });
+    expect(put(1, "original", "X1")).toBe(true);
+    // Same revision, DIFFERENT content → rejected, stored talk untouched.
+    expect(put(1, "tampered", "X2")).toBe(false);
+    expect(store.getTalk("c", "p", "d")!.title).toBe("original");
+    // Same revision, IDENTICAL content → idempotent no-op (still rejected as a write).
+    expect(put(1, "original", "X1")).toBe(false);
+    expect(store.getTalk("c", "p", "d")!.title).toBe("original");
+    // Higher revision with the tampered content → accepted.
+    expect(put(2, "tampered", "X2")).toBe(true);
+    expect(store.getTalk("c", "p", "d")!.title).toBe("tampered");
+    store.close();
+  });
+});
+
+describe("durable monotonic-publish watermark (NIP §3.2, reliability tail)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDbPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-wm-"));
+    tmpDirs.push(dir);
+    return join(dir, "test.sqlite");
+  }
+
+  it("is strictly increasing per address and survives a restart", () => {
+    const path = tmpDbPath();
+    const store = new Store(path);
+    const addr = "31605:blinded-d";
+    // Same wall-clock second → strictly increasing.
+    expect(store.nextPublishCreatedAt(addr, 1000)).toBe(1000);
+    expect(store.nextPublishCreatedAt(addr, 1000)).toBe(1001);
+    expect(store.nextPublishCreatedAt(addr, 1000)).toBe(1002);
+    // A different address is independent.
+    expect(store.nextPublishCreatedAt("31604:other", 1000)).toBe(1000);
+    store.close();
+
+    // Restart: a fresh Store on the same file keeps monotonicity even when the
+    // wall clock has NOT advanced past the last-published second.
+    const store2 = new Store(path);
+    expect(store2.nextPublishCreatedAt(addr, 1000)).toBe(1003);
+    store2.close();
+  });
+});
+
+describe("single-daemon lock (reliability tail)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDbPath(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-lock-"));
+    tmpDirs.push(dir);
+    return join(dir, "test.sqlite");
+  }
+
+  it("a second daemon on the same store fails fast with a clear error", () => {
+    const path = tmpDbPath();
+    const lock = acquireDaemonLock(path);
+    expect(() => acquireDaemonLock(path)).toThrow(/already running/i);
+    // Released → a new daemon can acquire it.
+    lock.release();
+    const lock2 = acquireDaemonLock(path);
+    lock2.release();
+  });
+
+  it(":memory: takes no lock (private connection)", () => {
+    const a = acquireDaemonLock(":memory:");
+    const b = acquireDaemonLock(":memory:");
+    a.release();
+    b.release();
   });
 });

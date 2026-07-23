@@ -27,11 +27,24 @@
   import Icon from "$lib/components/icons/Icon.svelte";
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { perfMark } from "$lib/perf.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
+  import {
+    buildOfflinePack,
+    cachedOfflinePack,
+    packComplete,
+    formatBytes,
+    type OfflinePack,
+    type PackStep,
+  } from "$lib/events/offline-pack.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
   import ReadinessJourney from "$lib/components/ReadinessJourney.svelte";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
+  import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
+  import { whatsNew } from "$lib/stores/whats-new.svelte.js";
+  import { visitorPreview } from "$lib/stores/visitor-preview.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -63,7 +76,39 @@
     cachedCtx ? cachedRoster(cachedCtx.coordinate)?.attendees.length : undefined,
   );
   let installHint = $state(false);
+  // "You were approved" banner (spec §13): shown once when approval landed since
+  // the last visit (watermark in whats-new), then acknowledged.
+  let showApprovedBanner = $state(false);
+  function checkApprovalBanner(coordinate: string) {
+    if (whatsNew.approvalIsNew(coordinate, true)) {
+      showApprovedBanner = true;
+      whatsNew.markApprovedSeen(coordinate);
+    }
+  }
+  function dismissApproved() {
+    showApprovedBanner = false;
+  }
   if (cachedCtx && (page || eventPosts.length)) perfMark("EventHome", "cache-paint");
+
+  // Cache-paint after background hydration (§7.4.5). Boot no longer blocks on the
+  // mirror, so on a cold open the cached snapshots above may be empty; re-read
+  // them the moment hydration lands. Guarded to act only while still cold — once
+  // ctx is set (here or by the network path) this no-ops.
+  $effect(() => {
+    void cacheHydration.version;
+    if (ctx) return;
+    const c = cachedEventContext(naddr);
+    if (!c) return;
+    ctx = c;
+    page ??= cachedEventPage(c.coordinate);
+    if (eventPosts.length === 0) eventPosts = cachedEventPosts(c.coordinate) ?? [];
+    if (attendeePosts.length === 0) attendeePosts = cachedAttendeePosts(c.coordinate) ?? [];
+    rosterCount ??= cachedRoster(c.coordinate)?.attendees.length;
+    if (page || eventPosts.length) {
+      bodyLoading = false;
+      perfMark("EventHome", "cache-paint");
+    }
+  });
 
   const installHintId = "event-page";
 
@@ -87,6 +132,7 @@
         approved = true;
         requestPending = false;
         clearJoinSent(ctx.coordinate);
+        checkApprovalBanner(ctx.coordinate);
         // The ECK just landed: the public pass ran keyless — re-fetch so
         // members-only page sections and posts decrypt, and warm the tabs.
         const [pageRes, postsRes] = await Promise.allSettled([
@@ -139,7 +185,10 @@
       await grantsScan;
       approved = await isApproved(ctx.coordinate);
       // The join-sent marker outlives a reload; approval supersedes it (P2).
-      if (approved) clearJoinSent(ctx.coordinate);
+      if (approved) {
+        clearJoinSent(ctx.coordinate);
+        checkApprovalBanner(ctx.coordinate);
+      }
       else {
         requestPending = joinSentAt(ctx.coordinate) !== undefined;
         // Keep watching for the approval while the page stays open (UX-9).
@@ -297,6 +346,97 @@
   const latestPost = $derived(
     [...eventPosts].sort((a, b) => b.publishedAt - a.publishedAt)[0],
   );
+
+  // The event has ended: its end time is in the past (spec §13 — the report
+  // becomes prominent, though it's reachable anytime).
+  const eventEnded = $derived(!!ctx?.end && ctx.end * 1000 < Date.now());
+
+  // "View as visitor" (spec §13): an organizer previewing the public view. While
+  // active, every member/organizer surface below is suppressed to the effective
+  // (visitor) role, so they see exactly what a non-member sees.
+  const previewing = $derived(!!ctx && visitorPreview.isActive(ctx.coordinate));
+  const effApproved = $derived(approved && !previewing);
+  const effOrganizer = $derived(organizer && !previewing);
+  function toggleVisitorPreview() {
+    if (ctx) visitorPreview.toggle(ctx.coordinate);
+  }
+
+  async function duplicateEvent() {
+    if (!ctx) return;
+    const { buildDuplicatePrefill } = await import("$lib/events/duplicate.js");
+    const { setDuplicateDraft } = await import("$lib/stores/duplicate-draft.js");
+    setDuplicateDraft(
+      buildDuplicatePrefill({
+        title: ctx.title,
+        summary: ctx.summary,
+        icon: ctx.icon,
+        config: ctx.config,
+        copyPrefix: (title) => t("event.duplicate.copyOf", { title }),
+      }),
+    );
+    router.go({ name: "create" });
+  }
+
+  // Offline event pack (spec §13): one-tap pre-download of roster/directory/
+  // matches/talks/profiles + a persistent-storage request, so the app works at a
+  // venue with no signal. Everything rides the existing cache layer.
+  let offlinePack = $state<OfflinePack | undefined>(
+    cachedCtx ? cachedOfflinePack(cachedCtx.coordinate) : undefined,
+  );
+  let packing = $state(false);
+  let packSteps = $state<PackStep[]>([]);
+  let packPersisted = $state<boolean | null>(null);
+  let packEstimate = $state<StorageEstimate | undefined>(undefined);
+  const packDone = $derived(offlinePack ? packComplete(offlinePack) : false);
+  const packUsage = $derived(
+    packEstimate?.usage !== undefined ? formatBytes(packEstimate.usage) : null,
+  );
+
+  async function downloadPack() {
+    if (!ctx || packing) return;
+    packing = true;
+    packSteps = [];
+    try {
+      const res = await buildOfflinePack(ctx, session.signer, (steps) => (packSteps = steps));
+      offlinePack = res.pack;
+      packPersisted = res.persisted;
+      packEstimate = res.estimate;
+    } catch {
+      /* partial packs are recorded per-step; nothing more to surface here */
+    } finally {
+      packing = false;
+    }
+  }
+
+  // Own coordinator-status notices (21606 sealed to this attendee, NIP §6.3):
+  // a poison in the attendee's own submission/talk pipeline surfaces as a modest
+  // banner, seeded from cache and kept live by the grant scan.
+  const ownPoison = $derived(ctx ? ownStatusStore.poison(ctx.coordinate) : []);
+
+  // Declared data retention (NIP §6.2): one localized line at the bottom of a
+  // member's event view. `retentionDays` is absent for indefinite retention.
+  const retentionDays = $derived(ctx?.config.retentionDays);
+
+  // "Leave event" (NIP §6.3 21610) — enrolled attendees only (organizers manage
+  // the event, not leave it). A confirm dialog guards the destructive action.
+  let leaving = $state(false);
+  let confirmingLeave = $state(false);
+  let leftMessage = $state<string | null>(null);
+  async function doLeave() {
+    if (!session.signer || !ctx) return;
+    leaving = true;
+    try {
+      const { withdrawFromEvent } = await import("$lib/events/withdraw.js");
+      await withdrawFromEvent(session.signer, ctx);
+      leftMessage = t("event.leave.done");
+      approved = false;
+      confirmingLeave = false;
+    } catch {
+      leftMessage = t("event.leave.failed");
+    } finally {
+      leaving = false;
+    }
+  }
 </script>
 
 {#if error}
@@ -308,33 +448,120 @@
   <p class="muted">{t("event.loading")}</p>
 {:else}
   <EventHeader {ctx} status={overviewStatus} />
+
+  {#if showApprovedBanner}
+    <!-- "You were approved" (spec §13): one line, shown once, dismissible. -->
+    <div class="card ok approved-banner" role="status">
+      <span><Icon name="check" size={16} /> {t("event.approvedBanner")}</span>
+      <button class="btn inline ghost" onclick={dismissApproved} aria-label={t("event.approvedBanner.dismiss")}>✕</button>
+    </div>
+  {/if}
+
   {#if ctx.summary}<p class="summary">{ctx.summary}</p>{/if}
+
+  <!-- Full logistics (§7.4.9): start/end + time zone, happening-now state,
+       add-to-calendar (.ics), directions. -->
+  <LogisticsBlock {ctx} />
+
+  <!-- Own-pipeline failure notices (21606 → attendee, NIP §6.3): modest, per stage. -->
+  {#each ownPoison as st (st.stage)}
+    <div class="card warn" role="status">
+      <strong>{t("event.ownStatus.title")}</strong>
+      <span class="muted"
+        >{st.stage === "process_talk"
+          ? t("event.ownStatus.talk")
+          : t("event.ownStatus.submission")}</span
+      >
+    </div>
+  {/each}
 
   <!-- One unified event menu (user feedback 2026-07-16: admin was up top, other
        links stranded at the bottom): organizer admin + custom 31608 items +
        the posts archive, as one prominent grid. -->
+  {#if previewing}
+    <!-- Exit bar for the visitor preview (spec §13). -->
+    <div class="card visitor-preview-bar" role="status">
+      <span>{t("event.viewAsVisitor.active")}</span>
+      <button class="btn inline primary" onclick={toggleVisitorPreview}>{t("event.viewAsVisitor.exit")}</button>
+    </div>
+  {/if}
+
   <nav class="menu-grid" data-event-menu>
-    {#if organizer}
+    {#if effOrganizer}
       <button class="btn menu-btn" onclick={() => router.go({ name: "admin", naddr })}>
         <Icon name="sliders" size={17} />{t("event.organizerAdmin")}
       </button>
     {/if}
     {#if page}
       {#each page.menu as item (item.label + item.target)}
-        <button class="btn menu-btn" onclick={() => openMenuTarget(item.target)}>
-          {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
-        </button>
+        {#if !(previewing && item.membersOnly)}
+          <button class="btn menu-btn" onclick={() => openMenuTarget(item.target)}>
+            {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
+          </button>
+        {/if}
       {/each}
     {/if}
     <button class="btn menu-btn" onclick={() => router.go({ name: "posts", naddr })}>
       <Icon name="horn" size={17} />{t("event.allPosts")}
     </button>
+    {#if organizer && !previewing}
+      <!-- Enter the visitor preview (organizers only). -->
+      <button class="btn menu-btn" onclick={toggleVisitorPreview}>
+        <Icon name="person" size={17} />{t("event.viewAsVisitor")}
+      </button>
+      <!-- Duplicate this event's config into a fresh event (organizers only). -->
+      <button class="btn menu-btn" onclick={duplicateEvent}>
+        <Icon name="copy" size={17} />{t("event.duplicate")}
+      </button>
+    {/if}
+    {#if effApproved}
+      <!-- Post-event report (spec §13): available anytime, emphasized once ended. -->
+      <button
+        class="btn menu-btn"
+        class:primary={eventEnded}
+        onclick={() => router.go({ name: "report", naddr })}
+      >
+        <Icon name="pennant" size={17} />{t("event.report")}
+      </button>
+    {/if}
   </nav>
 
   <!-- Readiness journey (§4.1): one honest next action, derived from real state.
        Visitors see the Join CTA as step 1; approved members see intro/matches. -->
-  {#if readinessStore.readiness}
+  {#if readinessStore.readiness && !previewing}
     <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
+  {/if}
+
+  {#if effApproved}
+    <!-- Offline event pack (spec §13): pre-download + persistent storage. -->
+    <div class="card offline">
+      <div class="row" style="justify-content:space-between;align-items:flex-start;gap:0.5rem;flex-wrap:wrap">
+        <div style="min-width:0">
+          <strong>{t("event.offline.title")}</strong>
+          <p class="muted" style="margin:0.2rem 0 0;font-size:0.85rem">
+            {#if packing}
+              {t("event.offline.downloading", { n: packSteps.length })}
+            {:else if packDone}
+              {t("event.offline.ready")}
+            {:else if offlinePack}
+              {t("event.offline.partial")}
+            {:else}
+              {t("event.offline.body")}
+            {/if}
+          </p>
+        </div>
+        <button class="btn inline" disabled={packing} onclick={downloadPack}>
+          {#if packing}{t("event.offline.downloadingShort")}
+          {:else if offlinePack}{t("event.offline.refresh")}
+          {:else}{t("event.offline.download")}{/if}
+        </button>
+      </div>
+      <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
+        {#if packUsage}{t("event.offline.stored", { size: packUsage })}{/if}
+        {#if packPersisted}· {t("event.offline.persisted")}{/if}
+        {#if packDone}· {t("event.offline.mediaNote")}{/if}
+      </p>
+    </div>
   {/if}
 
   {#if latestPost}
@@ -343,7 +570,7 @@
     <PostCard post={latestPost} {naddr} full />
   {/if}
 
-  {#if approved && installHint}
+  {#if effApproved && installHint}
     <!-- One-time, dismissable install hint (UI-SUGGESTIONS #24). Never shown in
          standalone mode; Chrome/Android gets the real prompt, iOS instructions. -->
     <div class="card">
@@ -396,7 +623,7 @@
             <PostCard {post} {naddr} full />
           {/each}
         {/if}
-      {:else if section.type === "attendees" && approved}
+      {:else if section.type === "attendees" && effApproved}
         <!-- Roster preview — renders only for members (spec §7.4). -->
         <div class="card">
           <strong>{t("event.attendeesSection")}</strong>
@@ -420,6 +647,34 @@
         <PostCard {post} {naddr} full />
       {/each}
     {/if}
+  {/if}
+
+  <!-- Declared data retention (NIP §6.2): one line, best-effort wording. -->
+  {#if retentionDays !== undefined}
+    <p class="muted retention-line">{t("event.retention.line", { days: retentionDays })}</p>
+  {/if}
+
+  <!-- Leave event (NIP §6.3 21610): enrolled attendees only, confirm-guarded. -->
+  {#if effApproved && !effOrganizer}
+    <div class="leave-zone">
+      {#if leftMessage}
+        <p class="muted" role="status">{leftMessage}</p>
+      {:else if confirmingLeave}
+        <p class="muted">{t("event.leave.confirm")}</p>
+        <div class="row" style="gap:0.5rem">
+          <button class="btn danger inline" disabled={leaving} onclick={doLeave}>
+            {leaving ? t("event.leave.leaving") : t("event.leave.confirmYes")}
+          </button>
+          <button class="btn inline" disabled={leaving} onclick={() => (confirmingLeave = false)}>
+            {t("event.leave.cancel")}
+          </button>
+        </div>
+      {:else}
+        <button class="btn inline subtle" onclick={() => (confirmingLeave = true)}>
+          {t("event.leave.action")}
+        </button>
+      {/if}
+    </div>
   {/if}
 {/if}
 
@@ -464,6 +719,24 @@
   }
   .summary {
     margin: 0.25rem 0 0.75rem;
+  }
+  .approved-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .approved-banner span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .visitor-preview-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
   .kicker {
     text-transform: uppercase;

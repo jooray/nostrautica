@@ -1,16 +1,17 @@
 # Coordinator discovery + billing-aware attach — plan (2026-07-17)
 
-Status: **steps 1–4 implemented** (announce + discovery picker + billing signal
-surface). Step 5 (native payment) is still deferred; the current coordinator
-stays free and organizers keep the paste-an-npub fallback. What shipped:
+Status: **partially implemented design.** Announcement and discovery are shipped.
+Billing is advisory only: the current coordinator evaluates it at install time and
+logs the result, but does not enforce payment or reliably emit a billing state.
+Native payment remains deferred; organizers keep the paste-an-npub fallback.
 
 - **Protocol**: `KIND_COORDINATOR_ANNOUNCE = 31611` + `coordinatorAnnounceSchema`
   / `coordinatorPricingSchema` / `coordinatorBillingSchema`; the 21606 status
   gained an optional `billing` block (poison fields relaxed to optional).
 - **Coordinator**: publishes its 31611 on boot (`[coordinator]` config, default
   `announce=true`); `[pricing]` + `free_organizers` config; pure
-  `buildAnnounceContent` / `evaluateBilling` / `isFreeOrganizer` (tested). Free
-  by default → always emits `billing: ok` (no behaviour change).
+   `buildAnnounceContent` / `evaluateBilling` / `isFreeOrganizer` (tested). Free
+   by default; current evaluation is logging only.
 - **App**: `fetchCoordinators()` + an Admin picker (cards with features, privacy
   disclosure, pricing label, Attach) with the paste-npub box kept as a fallback;
   a billing banner in the coordinator-status area that appends the event `naddr`
@@ -74,7 +75,7 @@ Notes:
   `pricing.model = "free"` (or omits `pricing` entirely).
 - The **community free-for-this-npub** case is deliberately *not* in the public
   announce (it would leak an allowlist). It's a private coordinator config knob
-  (`free_organizers = ["npub1…"]`) evaluated at attach time — see Part 3.
+   (`free_organizers = ["<E_id hex pubkey>"]`) evaluated at attach time — see Part 3.
 
 ## Part 2 — Discovery UI
 
@@ -107,8 +108,11 @@ Coordinator Status channel — not a blocking gate at attach.
 Flow:
 
 1. Organizer attaches (as today: 31600 + 21603 grant). The 21603 seal author is
-   the **organizer's personal pubkey**, so the coordinator learns who to bill /
-   allowlist.
+   the event identity **`E_id`**, not the organizer's personal pubkey. The current
+   implementation therefore evaluates `free_organizers` as an `E_id` allowlist;
+   the name is legacy. A personal-organizer billing principal is future protocol
+   work and needs an authenticated event-to-principal binding without weakening
+   21603 authentication.
 2. The coordinator evaluates eligibility and replies via **21606 Coordinator
    Status** (gift-wrapped → E_id, already fetched by the Admin status widget)
    with an added optional `billing` block:
@@ -127,7 +131,8 @@ Flow:
    - `ok` → nothing special (attached & active).
    - `payment_required` → a banner: *"Payment required — [Open checkout]"* plus
      the reason. Matching for **new** attendees pauses (existing matches stay);
-     the coordinator resumes on payment.
+      the coordinator resumes on payment. **Design target only:** current runtime
+      does not enforce this pause.
    - `grace` → "active, payment due by <date>" — soft nudge, no interruption.
 
 4. **Payment itself is out of scope now** — it's just a link. Later options:

@@ -8,8 +8,9 @@ import {
   KIND_COORDINATOR_ANNOUNCE,
   coordinatorAnnounceSchema,
   type CoordinatorAnnounce,
+  supersedes,
 } from "@nostrautica/protocol";
-import { npubEncode } from "nostr-tools/nip19";
+import { npubEncode, decode } from "nostr-tools/nip19";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
@@ -60,7 +61,7 @@ export async function fetchCoordinators(
   const latest = new Map<string, (typeof events)[number]>();
   for (const e of verified) {
     const prev = latest.get(e.pubkey);
-    if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latest.set(e.pubkey, e);
+    if (!prev || supersedes(e, prev)) latest.set(e.pubkey, e);
   }
   const out: DiscoveredCoordinator[] = [];
   for (const e of latest.values()) {
@@ -79,6 +80,29 @@ export async function fetchCoordinators(
   const sorted = out.sort((a, b) => b.createdAt - a.createdAt);
   cacheSet(COORDINATORS_KEY, sorted, Math.floor(Date.now() / 1000), ANON);
   return sorted;
+}
+
+/**
+ * Normalise a coordinator identity the organizer pasted (the "advanced" npub
+ * fallback in the picker) to a lowercase 64-char hex pubkey, or null if it isn't
+ * a valid npub / hex key. Accepts either an `npub1…` (decoded) or raw hex; this
+ * is the same validation the Admin attach path does inline (decode → hex regex),
+ * lifted out so the picker and its tests share one parser. Returns null rather
+ * than throwing so the caller can show a single "invalid key" hint.
+ */
+export function parseCoordinatorKey(input: string): string | null {
+  let pk = input.trim();
+  if (!pk) return null;
+  if (pk.startsWith("npub1")) {
+    try {
+      const decoded = decode(pk);
+      if (decoded.type !== "npub") return null;
+      pk = decoded.data;
+    } catch {
+      return null;
+    }
+  }
+  return /^[0-9a-f]{64}$/i.test(pk) ? pk.toLowerCase() : null;
 }
 
 /** A one-line human pricing summary for a coordinator card. */

@@ -102,9 +102,34 @@ export const configSchema = z.object({
       summary: z.string().optional(),
       checkout_url: z.string().optional(),
       currency: z.string().optional(),
-      // Organizer npubs/hex pubkeys that are ALWAYS free (community events).
-      // Private — evaluated at billing time, never put in the public announce.
-      free_organizers: z.array(z.string()).default([]),
+      // Event identities (E_id: npub or hex pubkey) that are ALWAYS free — the
+      // billing principal in v2 is the event identity (spec §9, D5: v1's
+      // `free_organizers` was a misnomer; nothing authenticated a personal
+      // organizer). Private — evaluated at billing time, never in the public announce.
+      free_eids: z.array(z.string()).default([]),
+      // Optional grace window (seconds) before a paying-over-tier event is BLOCKED:
+      // on first exceeding the free tier the event enters `grace` (paid work still
+      // runs) until now+grace_period_sec, then transitions to `blocked`. Absent ⇒ no
+      // grace (straight to blocked). Keeps the evaluating→grace→blocked path real.
+      grace_period_sec: z.number().int().nonnegative().optional(),
+    })
+    .default({}),
+  // Per-attendee / per-event usage budgets (spec §8, audit H-2). Generous abuse
+  // ceilings, NOT product limits — exceeding one parks further paid processing for
+  // that attendee/event (same waiting-state as a billing block) and emits a 21606
+  // `budget_exceeded`. An organizer reprocess/recompute after a config raise (which
+  // reloads these) resumes. Any limit set to 0 means "unlimited".
+  budgets: z
+    .object({
+      /** Actual downloaded ciphertext bytes. Default 2 GiB / attendee, 50 GiB / event. */
+      per_attendee_bytes: z.number().int().nonnegative().default(2 * 1024 * 1024 * 1024),
+      per_event_bytes: z.number().int().nonnegative().default(50 * 1024 * 1024 * 1024),
+      /** Decoded media seconds (probed). Default 4 h / attendee, 200 h / event. */
+      per_attendee_duration_sec: z.number().int().nonnegative().default(4 * 3600),
+      per_event_duration_sec: z.number().int().nonnegative().default(200 * 3600),
+      /** Provider spend attempts (paid job executions). Default 500 / attendee, 20k / event. */
+      per_attendee_calls: z.number().int().nonnegative().default(500),
+      per_event_calls: z.number().int().nonnegative().default(20_000),
     })
     .default({}),
   // Daemon-side security policy (audit COORD-3/COORD-20). Install is
@@ -184,10 +209,19 @@ export function roleRequiresPrivate(config: CoordinatorConfig, role: ModelRole):
  * intent (relaxed → "non-private", so organizers see which roles leave the TEE).
  * `free_organizers` is deliberately NOT included — it's a private allowlist.
  */
-export function buildAnnounceContent(config: CoordinatorConfig): CoordinatorAnnounce {
-  const privacy: Record<string, string> = { stt: "private" };
-  for (const role of ["summary", "match", "embed", "translate"] as ModelRole[]) {
-    privacy[role] = roleRequiresPrivate(config, role) ? "private" : "non-private";
+export function buildAnnounceContent(
+  config: CoordinatorConfig,
+  privacyOverride?: Record<string, string>,
+): CoordinatorAnnounce {
+  // Privacy disclosure is generated from the RESOLVED runtime routes when provided
+  // (audit H-1, §13.5) — where data actually flows, with verified tiers — falling
+  // back to config intent only when routes haven't been resolved (e.g. announce
+  // disabled paths). `privacyOverride` is `disclosureFromRoutes(routes)`.
+  const privacy: Record<string, string> = privacyOverride ?? { stt: "private" };
+  if (!privacyOverride) {
+    for (const role of ["summary", "match", "embed", "translate"] as ModelRole[]) {
+      privacy[role] = roleRequiresPrivate(config, role) ? "private" : "non-private";
+    }
   }
   const p = config.pricing;
   const pricing = {
@@ -198,7 +232,7 @@ export function buildAnnounceContent(config: CoordinatorConfig): CoordinatorAnno
     ...(p.currency ? { currency: p.currency } : {}),
   };
   return {
-    v: 1,
+    v: 2,
     name: config.coordinator.name,
     ...(config.coordinator.about ? { about: config.coordinator.about } : {}),
     ...(config.coordinator.picture ? { picture: config.coordinator.picture } : {}),
@@ -226,24 +260,25 @@ function toHexPubkey(id: string): string | undefined {
   return undefined;
 }
 
-/** True if this organizer is on the always-free allowlist (community events). */
-export function isFreeOrganizer(config: CoordinatorConfig, organizerPubkeyHex: string): boolean {
-  const target = organizerPubkeyHex.toLowerCase();
-  return config.pricing.free_organizers.some((id) => toHexPubkey(id) === target);
+/** True if this event identity (E_id) is on the always-free allowlist (spec §9 D5). */
+export function isFreeEid(config: CoordinatorConfig, eidPubkeyHex: string): boolean {
+  const target = eidPubkeyHex.toLowerCase();
+  return config.pricing.free_eids.some((id) => toHexPubkey(id) === target);
 }
 
 /**
- * Evaluate the billing state for an event (Part 3). Pure — the caller decides
- * whether/when to emit it in a 21606 status. Default-free config always returns
- * `ok`, so wiring this into the flow is a no-op until an operator sets pricing.
+ * Evaluate the billing state for an event (spec §9). Pure — the caller decides
+ * whether/when to emit it in a 21606 status and how to map it onto the persisted
+ * `evaluating→ok|grace|blocked` state machine. Default-free config always returns
+ * `ok`. `eidPubkeyHex` is the BILLING PRINCIPAL (the event identity, D5).
  */
 export function evaluateBilling(
   config: CoordinatorConfig,
-  organizerPubkeyHex: string | undefined,
+  eidPubkeyHex: string | undefined,
   attendeeCount: number,
 ): CoordinatorBilling {
   if (config.pricing.model === "free") return { state: "ok" };
-  if (organizerPubkeyHex && isFreeOrganizer(config, organizerPubkeyHex)) return { state: "ok" };
+  if (eidPubkeyHex && isFreeEid(config, eidPubkeyHex)) return { state: "ok" };
   const freeUpTo = config.pricing.free_up_to_users;
   if (freeUpTo === undefined || attendeeCount <= freeUpTo) return { state: "ok" };
   return {

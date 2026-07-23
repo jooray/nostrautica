@@ -11,15 +11,25 @@
     uploadMedia,
     submitProfileAndMedia,
     loadSelfCopy,
-    loadLibrary,
+    loadLibraryFull,
     cachedLibrary,
+    cachedTextLibrary,
     cachedSelfCopy,
     prepareReuse,
   } from "$lib/media/submit.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import ErrorSummary from "$lib/components/ErrorSummary.svelte";
+  import { validate, hasError, describedBy, type FieldError } from "$lib/stores/form-validation.js";
+  import MediaPlayer from "$lib/components/MediaPlayer.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
+  import { online } from "$lib/stores/online.svelte.js";
+  import { classifyDeviceError, deviceErrorMessageKey } from "$lib/media/device-error.js";
+  import type { MessageKey } from "$lib/i18n/messages.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
@@ -56,7 +66,12 @@
   let recorded = $state<{ blob: Blob; url: string; durationSec: number } | null>(null);
   let busy = $state(false);
   let done = $state(false);
+  // Cross-event reuse library (spec §6.2): recorded intros + authored text intros
+  // the user made at ANY previous event, offered here so they needn't redo one.
   let library = $state<MediaDescriptor[]>(cachedLibrary() ?? []);
+  let textLibrary = $state<string[]>(cachedTextLibrary() ?? []);
+  // Only intros are reusable AS an intro (a stored talk clip isn't an intro).
+  const introLibrary = $derived(library.filter((m) => m.kind === "intro"));
   let textIntro = $state(
     cachedCtx ? (cachedSelfCopy(cachedCtx.coordinate)?.introText ?? "") : "",
   );
@@ -76,7 +91,31 @@
   const unlimited = $derived(maxSec === UNLIMITED_SEC);
   const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
 
-  if (cachedCtx && (library.length || textIntro)) perfMark("Record", "cache-paint");
+  if (cachedCtx && (library.length || textLibrary.length || textIntro)) perfMark("Record", "cache-paint");
+
+  // Draft-safe auto-refresh (App-2): an automatic deploy reload must never
+  // interrupt a live recording or discard an unsaved intro/talk the user is
+  // typing. Hold the pending reload while any of that is in flight; it applies
+  // automatically once recording stops and the fields are clear/submitted. (The
+  // intro text itself is already round-tripped through `cachedSelfCopy`, so no
+  // extra draft store is needed here — this only gates the reload.)
+  $effect(() => {
+    const dirty =
+      recording ||
+      textIntro.trim().length > 0 ||
+      talkTitle.trim().length > 0 ||
+      talkDescription.trim().length > 0;
+    if (dirty) return refreshGuard.hold("record");
+  });
+
+  // Clear any prior operation status once the user edits again (audit §7.3.9:
+  // next-edit lifetime). No-ops until a status has actually been set.
+  $effect(() => {
+    void textIntro;
+    void talkTitle;
+    void talkDescription;
+    opStatus.clearOnEdit();
+  });
 
   onMount(async () => {
     try {
@@ -97,7 +136,9 @@
       }
       if (session.signer) {
         const bk = await deriveBlindingKey(session.signer);
-        library = await loadLibrary(session.signer, bk);
+        const lib = await loadLibraryFull(session.signer, bk);
+        library = lib.media;
+        textLibrary = lib.texts;
         const self = await loadSelfCopy(session.signer, ctx, bk);
         if (self?.introText) textIntro = self.introText;
       }
@@ -125,6 +166,11 @@
   }
 
   function teardown() {
+    // Stop the recorder too, not just the tracks (audit App-4): if the component
+    // is destroyed mid-recording, stopStream() ends the hardware tracks but the
+    // MediaRecorder itself stays un-stopped, leaking the capture object.
+    capture?.stop();
+    recording = false;
     stopStream();
     if (recorded) URL.revokeObjectURL(recorded.url);
   }
@@ -167,6 +213,7 @@
   async function enableCamera() {
     error = null;
     try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new TypeError("no mediaDevices");
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user" },
         audio: true,
@@ -178,17 +225,19 @@
       }
       startMeter(stream);
     } catch (e) {
-      error = new Error(t("record.error.camera", { reason: (e as Error).message }));
+      // Distinct recovery per cause (§7.4.10): denied / absent / busy / unsupported.
+      error = new Error(t(deviceErrorMessageKey(classifyDeviceError(e), false) as MessageKey));
     }
   }
 
   async function enableMic() {
     error = null;
     try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new TypeError("no mediaDevices");
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       startMeter(stream);
     } catch (e) {
-      error = new Error(t("record.error.mic", { reason: (e as Error).message }));
+      error = new Error(t(deviceErrorMessageKey(classifyDeviceError(e), true) as MessageKey));
     }
   }
 
@@ -229,6 +278,9 @@
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file) return;
     stopStream();
+    // Replacing a prior selection/recording: revoke its object URL first so
+    // picking a different file doesn't orphan the previous one (audit App-4).
+    if (recorded) URL.revokeObjectURL(recorded.url);
     const url = URL.createObjectURL(file);
     let durationSec = 0;
     try {
@@ -251,6 +303,7 @@
 
   async function submitRecorded() {
     if (!ctx || !session.signer || !recorded) return;
+    if (!checkSubmit(false)) return;
     busy = true;
     error = null;
     try {
@@ -270,7 +323,8 @@
   }
 
   async function submitText() {
-    if (!ctx || !session.signer || !textIntro.trim()) return;
+    if (!ctx || !session.signer) return;
+    if (!checkSubmit(true)) return;
     busy = true;
     error = null;
     try {
@@ -293,8 +347,20 @@
     }
   }
 
+  /**
+   * Reuse a previous TEXT intro. There's no blob to re-key (the "fresh copy"
+   * distinction is media-only), so we load the chosen text into the composer and
+   * switch to text mode: the user can submit it as-is or tweak it first, then the
+   * normal text-submit path runs.
+   */
+  function useTextFromLibrary(text: string) {
+    textIntro = text;
+    switchMode("text");
+  }
+
   async function reuse(descriptor: MediaDescriptor, fresh: boolean) {
     if (!ctx || !session.signer) return;
+    if (!checkSubmit(false)) return;
     busy = true;
     error = null;
     try {
@@ -338,11 +404,40 @@
   function finish() {
     stopStream();
     done = true;
+    // Announce the outcome in the shared live region (audit §7.3.9). Offline →
+    // the durable outbox holds it; a talk is coordinator-moderated; an intro is
+    // published to relays. Truthful about what actually happened.
+    if (!online.isOnline) opStatus.queued(t("op.queued", { what: kindLabel }));
+    else if (talk) opStatus.acknowledged(t("op.talkSubmitted"));
+    else opStatus.published(t("op.introPublished"));
   }
 
-  // Talks require a title (and always media — the text mode is intro-only).
-  const canSubmit = $derived(disclosureAck && !busy && (!talk || talkTitle.trim().length > 0));
   const talksOff = $derived(talk && !!ctx && ctx.config.talks === "off");
+
+  // Submit gating via the shared error-summary validation pattern (§7.3.7),
+  // replacing the old disabled-button gate: on a submit attempt the offending
+  // fields are listed in a focusable summary and linked to their inputs, instead
+  // of silently disabling the button with no explanation of what's missing.
+  // Checks are in DOM order (talk title, disclosure ack, then the text intro).
+  let showErrors = $state(false);
+  let fieldErrors = $state<FieldError[]>([]);
+  function checkSubmit(needText: boolean): boolean {
+    const result = validate([
+      { id: "talk-title", message: talk && !talkTitle.trim() ? t("record.error.talkTitle") : null },
+      { id: "disclosure-ack", message: !disclosureAck ? t("record.error.disclosure") : null },
+      {
+        id: "record-text",
+        message: needText && !textIntro.trim() ? t("record.error.textRequired") : null,
+      },
+    ]);
+    fieldErrors = result.errors;
+    showErrors = !result.ok;
+    if (!result.ok && result.firstErrorId) document.getElementById(result.firstErrorId)?.focus();
+    return result.ok;
+  }
+  const errTalkTitle = $derived(showErrors && hasError(fieldErrors, "talk-title"));
+  const errDisclosure = $derived(showErrors && hasError(fieldErrors, "disclosure-ack"));
+  const errText = $derived(showErrors && hasError(fieldErrors, "record-text"));
 </script>
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
@@ -367,13 +462,23 @@
     <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>{t("record.backToEvent")}</button>
   </div>
 {:else}
+  {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
+
   {#if talk}
     <!-- Talk metadata (spec F2): title + description ride in the 21609 submission. -->
     <div class="card stack">
       {#if editingTalk}<p class="muted" style="margin:0">{t("talks.editing")}</p>{/if}
       <div>
         <label for="talk-title">{t("talks.field.title")}</label>
-        <input id="talk-title" bind:value={talkTitle} maxlength="200" placeholder={t("talks.field.title.placeholder")} />
+        <input
+          id="talk-title"
+          bind:value={talkTitle}
+          maxlength="200"
+          placeholder={t("talks.field.title.placeholder")}
+          aria-invalid={errTalkTitle}
+          aria-describedby={describedBy("talk-title", errTalkTitle)}
+        />
+        {#if errTalkTitle}<p id="talk-title-error" class="field-error">{t("record.error.talkTitle")}</p>{/if}
       </div>
       <div>
         <label for="talk-desc">{t("talks.field.description")}</label>
@@ -382,14 +487,18 @@
     </div>
   {/if}
 
-  <!-- Mode tabs: video · audio · text (spec F1.4). Talks are media-only (no text). -->
+  <!-- Mode switcher: video · audio · text (spec F1.4). Talks are media-only (no
+       text). Plain pressed buttons (audit §7.3.3), NOT an ARIA tabs widget: the
+       three panels below are ordinary page content (not focus-managed tabpanels),
+       so `aria-pressed` toggle buttons in a labelled group is the honest, fully
+       implemented pattern — no half-built roving-focus tablist. -->
   <div class="card">
     <div class="field-label" id="mode-label">{t("record.mode.label")}</div>
-    <div class="row" role="tablist" aria-labelledby="mode-label" style="flex-wrap:wrap">
-      <button class="btn inline" role="tab" aria-selected={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
-      <button class="btn inline" role="tab" aria-selected={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
+    <div class="row" role="group" aria-labelledby="mode-label" style="flex-wrap:wrap">
+      <button type="button" class="btn inline" aria-pressed={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
+      <button type="button" class="btn inline" aria-pressed={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
       {#if !talk}
-        <button class="btn inline" role="tab" aria-selected={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
+        <button type="button" class="btn inline" aria-pressed={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
       {/if}
     </div>
   </div>
@@ -407,9 +516,12 @@
     </ul>
     <label class="row" style="align-items:flex-start;gap:0.5rem;font-weight:400">
       <input
+        id="disclosure-ack"
         type="checkbox"
         bind:checked={disclosureAck}
         style="width:auto;min-height:0;flex:none;margin-top:0.2rem"
+        aria-invalid={errDisclosure}
+        aria-describedby={describedBy("disclosure-ack", errDisclosure)}
       />
       <span>
         {#if !hasCoordinator}
@@ -421,21 +533,40 @@
         {/if}
       </span>
     </label>
+    {#if errDisclosure}<p id="disclosure-ack-error" class="field-error">{t("record.error.disclosure")}</p>{/if}
   </div>
 
-  {#if !talk && mode !== "text" && library.length > 0 && !recorded}
+  <!-- Cross-event reuse gallery (F1 reuse): every intro the user recorded or wrote
+       for ANY previous event, with an inline preview so they can tell them apart.
+       Independent of the current mode tab — reuse bypasses the live composer. -->
+  {#if !talk && !recorded && (introLibrary.length > 0 || textLibrary.length > 0)}
     <div class="card">
       <h2>{t("record.reuse.title")}</h2>
       <p class="muted">{t("record.reuse.body")}</p>
-      {#each library as m (m.x)}
-        <div class="row" style="justify-content:space-between;margin-top:0.5rem">
-          <span class="badge">{m.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")} · {m.duration ?? "?"}s</span>
-          <div class="row">
-            <button class="btn inline" onclick={() => reuse(m, false)} disabled={!canSubmit}>{t("record.reuse.reuse")}</button>
-            <button class="btn inline" onclick={() => reuse(m, true)} disabled={!canSubmit}>{t("record.reuse.fresh")}</button>
+      <div class="gallery">
+        {#each introLibrary as m (m.x)}
+          <div class="reuse-item">
+            <span class="badge">
+              {m.m.startsWith("audio/") ? t("record.reuse.audioLabel") : t("record.reuse.videoLabel")}{#if m.duration} · {m.duration}s{/if}
+            </span>
+            <!-- On-demand: MediaPlayer decrypts + plays only when clicked. -->
+            <MediaPlayer descriptor={m} />
+            <div class="row" style="flex-wrap:wrap">
+              <button class="btn inline" onclick={() => reuse(m, false)} disabled={busy}>{t("record.reuse.reuse")}</button>
+              <button class="btn inline" onclick={() => reuse(m, true)} disabled={busy}>{t("record.reuse.fresh")}</button>
+            </div>
           </div>
-        </div>
-      {/each}
+        {/each}
+        {#each textLibrary as txt, i (i)}
+          <div class="reuse-item">
+            <span class="badge">{t("record.reuse.textLabel")}</span>
+            <p class="excerpt">{txt}</p>
+            <div class="row">
+              <button class="btn inline" onclick={() => useTextFromLibrary(txt)}>{t("record.reuse.useText")}</button>
+            </div>
+          </div>
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -444,20 +575,20 @@
       <h2>{t("record.text.title")}</h2>
       <p class="muted">{t("record.text.hint")}</p>
       <textarea
+        id="record-text"
         rows="6"
         maxlength={MAX_INTRO_TEXT}
         placeholder={t("record.text.placeholder")}
         bind:value={textIntro}
         aria-label={t("record.text.title")}
+        aria-invalid={errText}
+        aria-describedby={describedBy("record-text", errText)}
       ></textarea>
+      {#if errText}<p id="record-text-error" class="field-error">{t("record.error.textRequired")}</p>{/if}
       <p class="muted" style="text-align:right;font-size:0.8rem" aria-live="polite">
         {t("record.text.count", { n: textIntro.length, max: MAX_INTRO_TEXT })}
       </p>
-      <button
-        class="btn primary"
-        onclick={submitText}
-        disabled={!canSubmit || !textIntro.trim() || textLeft < 0}
-      >
+      <button class="btn primary" onclick={submitText} disabled={busy || textLeft < 0}>
         {busy ? t("record.uploading") : t("record.text.submit")}
       </button>
     </div>
@@ -473,7 +604,7 @@
         <p class="muted">{t("record.recorded", { sec: recorded.durationSec })}</p>
         <div class="row">
           <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
-          <button class="btn primary" onclick={submitRecorded} disabled={!canSubmit}>
+          <button class="btn primary" onclick={submitRecorded} disabled={busy}>
             {busy ? t("record.uploading") : t("record.useThis")}
           </button>
         </div>
@@ -518,15 +649,14 @@
             {:else}
               <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
             {/if}
-            <label class="btn" style="cursor:pointer">
+            <FileButton
+              class="btn"
+              accept={mode === "audio" ? "audio/*" : "video/*"}
+              onchange={chooseFile}
+              label={mode === "audio" ? t("record.chooseAudioFile") : t("record.chooseVideoFile")}
+            >
               {t("record.chooseFile")}
-              <input
-                type="file"
-                accept={mode === "audio" ? "audio/*" : "video/*"}
-                onchange={chooseFile}
-                style="display:none"
-              />
-            </label>
+            </FileButton>
           </div>
         {/if}
       {/if}
@@ -546,5 +676,35 @@
     height: 100%;
     background: var(--accent);
     transition: width 80ms linear;
+  }
+  .gallery {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+  .reuse-item {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.75rem;
+    border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+    border-radius: 12px;
+    background: var(--bg-elev2);
+  }
+  .reuse-item .badge {
+    align-self: flex-start;
+  }
+  .excerpt {
+    margin: 0;
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+    /* Show enough of the text to recognize it without letting a long intro
+       dominate the gallery card. */
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
   }
 </style>

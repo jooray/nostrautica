@@ -4,14 +4,17 @@
   import type { Match, DirectoryEntryContent } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
+  import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchMatches, fetchDirectory, cachedMatches, cachedDirectory, isApproved } from "$lib/events/attendee.js";
   import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
+  import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { perfMark } from "$lib/perf.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -44,6 +47,25 @@
 
   if (matches.length) perfMark("Matches", "cache-paint");
 
+  // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
+  // mirror, so re-read matches/directory snapshots once hydration lands while the
+  // list is still empty.
+  $effect(() => {
+    void cacheHydration.version;
+    if (matches.length > 0) return;
+    const c = cachedEventContext(naddr);
+    if (!c) return;
+    ctx ??= c;
+    const list = cachedMatches(c.coordinate);
+    if (!list || list.matches.length === 0) return;
+    matches = list.matches;
+    names = new Map((cachedDirectory(c.coordinate) ?? []).map((e) => [e.pubkey, e]));
+    profiles = cachedProfiles(list.matches.map((m) => m.pubkey));
+    loading = false;
+    whatsNew.markMatchesSeen(c.coordinate);
+    perfMark("Matches", "cache-paint");
+  });
+
   onMount(async () => {
     try {
       await connectNdk();
@@ -68,6 +90,8 @@
       const list = await fetchMatches(session.signer, ctx);
       matches = list?.matches ?? [];
       loading = false;
+      // Viewing the Matches page clears the new-matches watermark (spec §13).
+      whatsNew.markMatchesSeen(ctx.coordinate);
       // Powers the cause-aware empty state ("record your intro" when that's why).
       void readinessStore.load(ctx, session.signer);
       await Promise.allSettled([
@@ -97,6 +121,14 @@
   }
   function message(pubkey: string) {
     router.go({ name: "dmPeer", npub: npubEncode(pubkey) });
+  }
+  // "Introduce us" (§9.3): open the DM composer pre-filled with the coordinator's
+  // suggestion (a match icebreaker, falling back to the host-voice reasoning), so
+  // the introduction becomes an actual opening line. Prefill only — user edits/sends.
+  function introduce(m: (typeof matches)[number]) {
+    const suggestion = m.icebreakers?.[0] || m.reasoning;
+    if (suggestion) dmPrefill.set(m.pubkey, suggestion);
+    router.go({ name: "dmPeer", npub: npubEncode(m.pubkey) });
   }
   function nameOf(pubkey: string): string {
     return (
@@ -161,10 +193,25 @@
         <!-- Reasoning is the product — full body size, no longer under a %. -->
         <p class="reason">{m.reasoning}</p>
 
+        <!-- Icebreakers (§7.3 kind 31605): concrete conversation starters, if any. -->
+        {#if m.icebreakers && m.icebreakers.length > 0}
+          <div class="icebreakers">
+            <div class="ib-label">{t("matches.icebreakers")}</div>
+            <ul class="ib-list">
+              {#each m.icebreakers as ib (ib)}
+                <li>{ib}</li>
+              {/each}
+            </ul>
+          </div>
+        {/if}
+
         <div class="actions">
           {#if session.loggedIn}
-            <button class="btn inline primary" onclick={() => message(m.pubkey)}>
-              <Icon name="send" size={16} />{t("matches.message")}
+            <button class="btn inline primary" onclick={() => introduce(m)}>
+              <Icon name="send" size={16} />{t("matches.introduce")}
+            </button>
+            <button class="btn inline" onclick={() => message(m.pubkey)}>
+              {t("matches.message")}
             </button>
           {/if}
           <button class="btn inline" onclick={() => open(m.pubkey)}>
@@ -231,6 +278,26 @@
     margin: 0;
     font-size: 0.95rem;
     line-height: 1.5;
+  }
+  .icebreakers {
+    margin: 0;
+  }
+  .ib-label {
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-size: 0.7rem;
+    font-weight: 650;
+    color: var(--text-dim);
+    margin-bottom: 0.2rem;
+  }
+  .ib-list {
+    margin: 0;
+    padding-left: 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    font-size: 0.9rem;
+    line-height: 1.45;
   }
   .actions {
     display: flex;

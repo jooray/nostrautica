@@ -196,12 +196,23 @@ export function sha256Hex(bytes: Uint8Array): string {
   return bytesToHex(sha256(bytes));
 }
 
-// ── Invite proofs (spec §6.5) ────────────────────────────────────────────────
-// An invite code IS an nsec. Proof = schnorr signature by the invite key over
-// sha256("<coordinate>:<attendee-pubkey>"), binding the code to the attendee.
+// ── Invite proofs (NIP §7) ───────────────────────────────────────────────────
+// An invite code IS an nsec. Proof = BIP-340 schnorr signature by the invite key
+// over a domain-separated, injectively-encoded challenge (wire v2):
+//
+//   sha256( utf8( JSON.stringify(
+//     ["nostrautica-invite-v2", <coordinate>, <attendee-pubkey-hex>] ) ) )
+//
+// The literal first element is the domain-separation tag; JSON-array encoding is
+// injective, fixing v1's ambiguous `"<coordinate>:<attendee>"` colon-join (the
+// coordinate itself contains colons). A v1-format proof necessarily fails against
+// this challenge — the digest differs — so v1 proofs are rejected on the flag day.
+const INVITE_PROOF_TAG = "nostrautica-invite-v2";
 
 function inviteChallenge(coordinate: string, attendeePubkey: string): Uint8Array {
-  return sha256(utf8ToBytes(`${coordinate}:${attendeePubkey}`));
+  return sha256(
+    utf8ToBytes(JSON.stringify([INVITE_PROOF_TAG, coordinate, attendeePubkey])),
+  );
 }
 
 /** sha256(invite-pubkey) hex — what the organizer publishes in kind 31601. */
@@ -265,6 +276,85 @@ export function isInviteValid(
     publishedHashes.has(inviteHash(proof.invitePubkey)) &&
     verifyInviteProof(proof, coordinate, attendeePubkey)
   );
+}
+
+// ── Chat device attestation proof of possession (NIP §10.2) ──────────────────
+// A 21607 v2 `op:"add"` attestation is sealed by the ACCOUNT key but must ALSO
+// prove the account controls the chat DEVICE key's secret — otherwise an account
+// could attest a chat pubkey it doesn't own (v1's griefing/mis-binding gap). The
+// device key signs a domain-separated, injective challenge that also binds the
+// rumor's `created_at`, so a captured proof can't be replayed under a different
+// timestamp/rumor:
+//
+//   sha256( utf8( JSON.stringify(
+//     ["nostrautica-chat-device-v2", <coordinate>, <account-pubkey>,
+//      <chat-pubkey>, <created_at>] ) ) )
+const CHAT_DEVICE_PROOF_TAG = "nostrautica-chat-device-v2";
+
+function chatDeviceChallenge(
+  coordinate: string,
+  accountPubkey: string,
+  chatPubkey: string,
+  createdAt: number,
+): Uint8Array {
+  return sha256(
+    utf8ToBytes(
+      JSON.stringify([
+        CHAT_DEVICE_PROOF_TAG,
+        coordinate,
+        accountPubkey,
+        chatPubkey,
+        createdAt,
+      ]),
+    ),
+  );
+}
+
+/**
+ * Build a chat-device proof of possession: BIP-340 schnorr signature by the chat
+ * DEVICE key over the §10.2 challenge. `createdAt` MUST be the 21607 rumor's own
+ * `created_at` (the verifier reconstructs the challenge from it). Returns hex.
+ */
+export function makeChatDeviceProof(
+  deviceSk: Uint8Array,
+  coordinate: string,
+  accountPubkey: string,
+  createdAt: number,
+): string {
+  const chatPubkey = getPublicKey(deviceSk);
+  const sig = schnorr.sign(
+    chatDeviceChallenge(coordinate, accountPubkey, chatPubkey, createdAt),
+    deviceSk,
+  );
+  return bytesToHex(sig);
+}
+
+/**
+ * Verify a chat-device proof of possession (NIP §10.2). A predicate over
+ * UNTRUSTED input (the coordinator receives it inside a gift-wrapped rumor from
+ * anyone) — malformed hex must return false, never throw. Returns true only when
+ * `proofSig` is a valid BIP-340 signature by `chatPubkey` over the challenge that
+ * binds this (coordinate, account, chat pubkey, created_at).
+ */
+export function verifyChatDeviceProof(
+  proofSig: string,
+  coordinate: string,
+  accountPubkey: string,
+  chatPubkey: string,
+  createdAt: number,
+): boolean {
+  if (!/^[0-9a-f]{128}$/.test(proofSig) || !/^[0-9a-f]{64}$/.test(chatPubkey)) {
+    return false;
+  }
+  try {
+    return schnorr.verify(
+      hexToBytes(proofSig),
+      chatDeviceChallenge(coordinate, accountPubkey, chatPubkey, createdAt),
+      chatPubkey,
+    );
+  } catch {
+    return false;
+  }
 }
 
 export { bytesToHex, hexToBytes, utf8ToBytes, concatBytes };

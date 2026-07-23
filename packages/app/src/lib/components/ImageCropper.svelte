@@ -8,6 +8,8 @@
    */
   import { onMount, onDestroy } from "svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { focusTrap } from "./focus-trap.js";
+  import { coverScale, centerOffset, clampOffset, panBy, cropRect } from "./crop-geometry.js";
 
   let {
     file,
@@ -28,6 +30,7 @@
 
   let bitmap = $state<ImageBitmap | undefined>(undefined);
   let ready = $state(false);
+  let decodeError = $state(false);
   let zoom = $state(1); // 1 = image just covers the viewport
   let ox = $state(0); // image top-left x within the viewport (px)
   let oy = $state(0);
@@ -38,11 +41,14 @@
     objectUrl = URL.createObjectURL(file);
     try {
       bitmap = await createImageBitmap(file);
-      baseScale = Math.max(VIEW_W / bitmap.width, viewH / bitmap.height);
+      baseScale = coverScale(bitmap.width, bitmap.height, VIEW_W, viewH);
       center();
       ready = true;
     } catch {
-      onCancel();
+      // Don't silently close (audit App-9): HEIC / corrupt / unsupported images
+      // fail to decode here, and a disappearing dialog reads as a broken app.
+      // Surface a visible reason and let the user dismiss it themselves.
+      decodeError = true;
     }
   });
   onDestroy(() => {
@@ -54,13 +60,24 @@
   const dispH = $derived(bitmap ? bitmap.height * baseScale * zoom : 0);
 
   function center() {
-    ox = (VIEW_W - dispW) / 2;
-    oy = (viewH - dispH) / 2;
+    ({ ox, oy } = centerOffset(dispW, dispH, VIEW_W, viewH));
   }
   function clamp() {
     // The image must always cover the viewport (no empty edges).
-    ox = Math.min(0, Math.max(VIEW_W - dispW, ox));
-    oy = Math.min(0, Math.max(viewH - dispH, oy));
+    ({ ox, oy } = clampOffset(ox, oy, dispW, dispH, VIEW_W, viewH));
+  }
+  // Keyboard panning (audit §7.3.2): arrows nudge the crop for pointer-free use.
+  function onViewportKey(e: KeyboardEvent) {
+    const map: Record<string, "left" | "right" | "up" | "down"> = {
+      ArrowLeft: "left",
+      ArrowRight: "right",
+      ArrowUp: "up",
+      ArrowDown: "down",
+    };
+    const dir = map[e.key];
+    if (!dir || !ready) return;
+    e.preventDefault();
+    ({ ox, oy } = panBy(dir, ox, oy, dispW, dispH, VIEW_W, viewH));
   }
   $effect(() => {
     void zoom; // re-clamp when zoom changes
@@ -101,31 +118,48 @@
     const c2d = canvas.getContext("2d");
     if (!c2d) return onCancel();
     // Map the viewport region back into image space.
-    const s = baseScale * zoom;
-    const sx = -ox / s;
-    const sy = -oy / s;
-    const sw = VIEW_W / s;
-    const sh = viewH / s;
+    const { sx, sy, sw, sh } = cropRect(ox, oy, baseScale * zoom, VIEW_W, viewH);
     c2d.drawImage(bitmap, sx, sy, sw, sh, 0, 0, outWidth, outH);
     const type = file.type === "image/png" ? "image/png" : "image/jpeg";
     canvas.toBlob((b) => (b ? onConfirm(b) : onCancel()), type, 0.9);
   }
 </script>
 
-<div class="backdrop" role="dialog" aria-modal="true" aria-label={t("cropper.title")}>
+<div
+  class="backdrop"
+  role="dialog"
+  aria-modal="true"
+  aria-label={t("cropper.title")}
+  tabindex="-1"
+  use:focusTrap
+  onkeydown={(e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onCancel();
+    }
+  }}
+>
   <div class="sheet">
     <h2>{t("cropper.title")}</h2>
+    {#if decodeError}
+      <p class="error" role="alert">{t("cropper.decodeError")}</p>
+      <div class="row actions">
+        <button class="btn inline primary" onclick={onCancel}>{t("cropper.cancel")}</button>
+      </div>
+    {:else}
     <p class="muted hint">{t("cropper.hint")}</p>
 
     <div
       class="viewport"
       role="group"
-      aria-label={t("cropper.title")}
+      aria-label={t("cropper.viewportLabel")}
+      tabindex="0"
       style="width:{VIEW_W}px;height:{viewH}px"
       onpointerdown={onPointerDown}
       onpointermove={onPointerMove}
       onpointerup={onPointerUp}
       onpointercancel={onPointerUp}
+      onkeydown={onViewportKey}
     >
       {#if objectUrl}
         <img
@@ -148,6 +182,7 @@
         {t("cropper.use")}
       </button>
     </div>
+    {/if}
   </div>
 </div>
 
@@ -180,6 +215,12 @@
     margin: 0;
     align-self: flex-start;
     font-size: 0.85rem;
+  }
+  .error {
+    margin: 0;
+    align-self: flex-start;
+    font-size: 0.9rem;
+    color: var(--danger);
   }
   .viewport {
     position: relative;

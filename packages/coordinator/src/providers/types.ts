@@ -129,3 +129,28 @@ export interface ModelRef {
   provider: string;
   model: string;
 }
+
+/** The matching-pipeline roles that route to an LLM provider (spec §13.5 / H-1). */
+export type MatchRole = "summary" | "match" | "embed" | "translate";
+
+/**
+ * A fully-RESOLVED provider route for one role (H-1, §13.5 Option A): the concrete
+ * provider INSTANCE that will serve this role, its model, the provider's id, the
+ * effective private-tier requirement, and the privacy tier VERIFIED at startup from
+ * the provider's own model catalogue. The public 31611 announcement's privacy map is
+ * generated from `privacy` here — where data actually flows — not from config intent.
+ * Cache keys that must invalidate on a provider/model change use `provider:model`.
+ */
+export interface RoleRoute {
+  llm: LlmProvider;
+  model: string;
+  /** Provider instance id, e.g. "venice" | "routstr". */
+  provider: string;
+  requirePrivate: boolean;
+  /** Verified at startup from the provider catalogue; falls back to intent when a
+   *  model can't be found in the catalogue (e.g. embeddings on a separate endpoint). */
+  privacy: "private" | "non-private";
+}
+
+/** Per-role resolved routes threaded through the whole matching pipeline (H-1). */
+export type RoleRoutes = Record<MatchRole, RoleRoute>;

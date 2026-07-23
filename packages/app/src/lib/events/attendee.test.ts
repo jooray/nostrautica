@@ -22,7 +22,7 @@ import {
 } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants } from "./attendee.js";
+import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants, MAX_GRANT_WRAPS } from "./attendee.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 
 // Cache-path setup (CACHING-PLAN §2.3): mock the relay stream so fetchMatches
@@ -150,7 +150,7 @@ describe("C2 — authenticateKeyGrant (21602)", () => {
   const config = makeConfig(eid, inbox, coordinator);
 
   const grant: KeyGrantContent = {
-    v: 1,
+    v: 2,
     a: coordinate,
     role: "attendee",
     eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -218,7 +218,7 @@ describe("C2 — authenticateOrganizerGrant (21605)", () => {
   const config = makeConfig(eid, inbox);
 
   const grant: OrganizerGrantContent = {
-    v: 1,
+    v: 2,
     a: coordinate,
     eid_nsec: bytesToHex(eidSk),
     einbox_nsec: bytesToHex(einboxSk),
@@ -285,7 +285,7 @@ describe("C2 — end-to-end unwrap + authenticate (no relays)", () => {
     // E_id (the authority) seals a real organizer grant to the recipient.
     const eidSigner = new LocalSigner(eidSk);
     const goodGrant: OrganizerGrantContent = {
-      v: 1,
+      v: 2,
       a: coordinate,
       eid_nsec: bytesToHex(eidSk),
       einbox_nsec: bytesToHex(einboxSk),
@@ -334,7 +334,7 @@ describe("fetchMatches cache write-through (§2.3)", () => {
     getPublicKey: async () => OWNER,
     nip44Decrypt: async () =>
       JSON.stringify({
-        v: 1,
+        v: 2,
         computed_at: 500,
         matches: [
           { pubkey: PEER, score: 0.9, similarity: 0.8, complementarity: 0.7, reasoning: "good" },
@@ -354,7 +354,8 @@ describe("fetchMatches cache write-through (§2.3)", () => {
 
   it("persists the decrypted match list owner-scoped for instant repaint", async () => {
     streamEvents.mockReturnValue({
-      ready: Promise.resolve([{ content: "ct", created_at: 500, tags: [] }]),
+      // Authored by the configured coordinator (record-authority pinning, NIP §3.7).
+      ready: Promise.resolve([{ pubkey: COORDINATOR, content: "ct", created_at: 500, tags: [] }]),
       stop: () => {},
     });
     expect(cachedMatches(coordinate)).toBeUndefined();
@@ -387,8 +388,9 @@ describe("APPK-5 — grant memoization + config relay set", () => {
         created_at: at,
         tags: [
           ["d", "cypherpunk-2026"],
+          ["v", "2"],
           ["inbox", inbox],
-          ["coordinator", coordinator],
+          ["coordinator", coordinator, "1"],
         ],
         content: "",
       },
@@ -399,7 +401,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
   /** A genuine 21602 key grant gift-wrapped to the attendee by the coordinator. */
   async function keyGrantWrap(eckId = 1) {
     const grant: KeyGrantContent = {
-      v: 1,
+      v: 2,
       a: coordinate,
       role: "attendee",
       eck: [{ id: eckId, key: bytesToBase64(generateEck()) }],
@@ -447,7 +449,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     // Sealed by an arbitrary attacker key but claiming granted_by = coordinator.
     const attacker = LocalSigner.generate();
     const forged: KeyGrantContent = {
-      v: 1,
+      v: 2,
       a: coordinate,
       role: "attendee",
       eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
@@ -465,6 +467,31 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     // Definitively rejected WITH a config in hand: never retried, never prompts
     // the signer for this wrap again.
     expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  it("bounds the persisted grant memo, evicting oldest-inserted entries (App-7)", async () => {
+    // Seed the memo above the cap with synthetic, insertion-ordered old entries.
+    const seeded: Record<string, true> = {};
+    for (let i = 0; i < MAX_GRANT_WRAPS + 50; i++) seeded[`old${i}`] = true;
+    cacheSet("grantwraps", seeded, 1); // owner-scoped to the active owner (attendeePk)
+
+    // A fresh non-grant wrap that unwraps successfully gets memoized (line ~323),
+    // making the write dirty and triggering the cap.
+    const other = await signerWrap(new LocalSigner(coordSk), attendeePk, {
+      kind: 14,
+      content: { hello: "world" },
+    });
+    fetchEventsRelayOnly.mockResolvedValue([other]);
+    fetchEvents.mockResolvedValue([]);
+
+    await receiveGrants(attendee);
+
+    const memo = cacheGet<Record<string, true>>("grantwraps")!.data;
+    const keys = Object.keys(memo);
+    expect(keys.length).toBe(MAX_GRANT_WRAPS); // pre-fix: MAX_GRANT_WRAPS + 51 (unbounded)
+    expect(memo[other.id]).toBe(true); // newest entry retained
+    expect(memo["old0"]).toBeUndefined(); // oldest-inserted evicted
+    expect(memo[`old${MAX_GRANT_WRAPS + 49}`]).toBe(true); // recent-old retained
   });
 
   it("fetches the config from the event's recorded relay hints ∪ defaults (custom-relay event)", async () => {

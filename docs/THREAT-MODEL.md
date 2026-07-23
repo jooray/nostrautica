@@ -38,6 +38,10 @@ system protects, what it deliberately leaks, and who must be trusted.
 - **Email backup of nsec** traverses email infrastructure — a user-chosen
   convenience trade-off (spec §5.2), stated plainly in the UI; the key rides the
   URL fragment (never sent to a server) but email itself is not confidential.
+- **Event CSS is trusted-organizer UI control, not a secret-safe boundary.** It can
+  spoof in-event UI and emit allowed image/network beacons. Some themed event
+  routes currently reveal sensitive values; `font-src 'self'` limits one remote
+  font exfiltration technique but does not make those surfaces safe.
 
 ## Trusted parties
 
@@ -49,6 +53,29 @@ system protects, what it deliberately leaks, and who must be trusted.
   v1 prefers Venice private/TEE-tier models (`require_private`); v2 uses
   operator-chosen Routstr nodes.
 - **Relays / Blossom** — see ciphertext + metadata only.
+
+## Marmot MLS chat
+
+- **Coordinator authority.** The coordinator is an MLS group member/admin and can
+  read group chat. It adds/removes members and therefore needs durable MLS state.
+- **Chat identity.** Local-key accounts use their account key as their chat
+  identity. NIP-07/NIP-46 accounts use an app-held chat device key, authorized to
+  the coordinator by an account-sealed `21607`. That attestation proves account
+  authorization, not possession of the attested chat private key.
+- **Relay backup.** A remote-signer device key is self-encrypted to the account and
+  published in a blinded replaceable `31602` entry. It contains only the raw
+  32-byte identity key, not MLS group/epoch state, membership state, or history.
+  Relays still observe the author and timing. Compromise of the account signer can
+  recover this stable chat identity key.
+- **Devices and history.** A restored identity may be used on another device, but
+  each device has its own MLS leaf and sees only from its own join epoch. Browser
+  eviction requires a fresh key package, coordinator re-add, and Welcome; history
+  during the gap is lost to that client.
+- **Recovery limits.** Backup fetch failure is not equivalent to confirmed absence;
+  competing replaceable backups and multi-tab state can fork identity/state. Normal
+  logout encrypts chat state, but best-effort encryption failure can leave local
+  plaintext. Coordinator database loss can orphan MLS administration; verified
+  backups and a second administrator are operational requirements.
 
 ## Revocation honesty
 
@@ -69,3 +96,6 @@ stated in the UI where organizers configure events and where they revoke.
   `wss:`/`https:` (relays + Blossom).
 - NIP-04 is lint-banned project-wide; NIP-44 is always requested with the scheme
   explicit.
+- NIP-46 persisted client key and bunker capability are plaintext IndexedDB bearer
+  capabilities while remembered on this origin; same-origin script compromise can
+  use them within the remote signer's granted permissions.

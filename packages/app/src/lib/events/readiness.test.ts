@@ -56,6 +56,22 @@ describe("deriveReadiness", () => {
     expect(r.primary?.route).toEqual({ name: "join", naddr: "naddr1xyz" });
   });
 
+  it("UX-O4: viewerIsMember is true only for approved members, gating 'See who's here'", () => {
+    expect(deriveReadiness(base({ role: "visitor" })).viewerIsMember).toBe(false);
+    expect(deriveReadiness(base({ role: "pending" })).viewerIsMember).toBe(false);
+    expect(deriveReadiness(base({ role: "attendee" })).viewerIsMember).toBe(true);
+    expect(deriveReadiness(base({ role: "organizer" })).viewerIsMember).toBe(true);
+  });
+
+  it("UX-O4: a pending viewer is never pushed to backup/intro — approval is the blocker", () => {
+    // Pending + not backed up + no intro: the ONLY primary CTA is the joined step
+    // (waiting on approval), never backup or record.
+    const r = deriveReadiness(base({ role: "pending", backupAcked: false, hasIntro: false }));
+    expect(stateOf(r, "joined")).toBe("in-progress");
+    // No action-required primary is offered while approval is pending.
+    expect(r.primary).toBeUndefined();
+  });
+
   it("pending → joined in-progress with waiting hint", () => {
     const r = deriveReadiness(base({ role: "pending", hasIntro: false }));
     expect(stateOf(r, "joined")).toBe("in-progress");
@@ -112,14 +128,22 @@ describe("deriveReadiness", () => {
     expect(r.matchesReady).toBe(false);
   });
 
-  it("exactly one primary CTA in every combination", () => {
+  it("at most one primary CTA, and it is role-appropriate in every combination", () => {
     for (const role of ["visitor", "pending", "attendee", "organizer"] as const) {
       for (const backupAcked of [true, false]) {
         for (const hasIntro of [true, false, undefined]) {
           const r = deriveReadiness(base({ role, backupAcked, hasIntro }));
-          const actionCount = r.steps.filter((s) => s.state === "action-required").length;
-          // primary is defined iff there is at least one action-required step
-          expect(!!r.primary).toBe(actionCount > 0);
+          const isMember = role === "attendee" || role === "organizer";
+          const joinedAction = r.steps.find((s) => s.id === "joined")?.state === "action-required";
+          const anyAction = r.steps.some((s) => s.state === "action-required");
+          // Members get the first action-required step; non-members only ever get
+          // the "joined" step (UX-O4) — never backup/intro while joining is the
+          // blocker.
+          const expected = isMember ? anyAction : joinedAction;
+          expect(!!r.primary).toBe(expected);
+          if (r.primary && !isMember) {
+            expect(r.primary.labelKey).toBe("readiness.cta.join");
+          }
         }
       }
     }

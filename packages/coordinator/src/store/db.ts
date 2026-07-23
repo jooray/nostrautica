@@ -17,10 +17,77 @@
  * one-way, idempotent, logged.
  */
 import { DatabaseSync } from "node:sqlite";
-import { selfEncrypt, selfDecrypt } from "@nostrautica/protocol";
+import { selfEncrypt, selfDecrypt, sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 
 /** Prefix marking a column value as NIP-44-encrypted under the identity key. */
 const ENC_PREFIX = "nip44:";
+
+/**
+ * The store's logical schema version, written to SQLite's `PRAGMA user_version`
+ * on every open. It exists so the backup/restore tooling (store/backup.ts) can
+ * refuse to restore a snapshot taken by a NEWER binary onto an older one: the
+ * on-disk shape would carry columns/semantics this build can't honor. Bump this
+ * whenever a migration changes the durable shape in a way a downgrade can't
+ * tolerate. Historic databases open at `user_version = 0` and are transparently
+ * brought up to the current value by the in-constructor migrations.
+ */
+export const SCHEMA_VERSION = 1;
+
+/** The at-rest encryption prefix, exported for the backup tool's decryption proof. */
+export const AT_REST_ENC_PREFIX = ENC_PREFIX;
+
+/** Handle to an acquired single-daemon lock; call `release` on shutdown. */
+export interface DaemonLock {
+  release(): void;
+}
+
+/**
+ * Acquire an exclusive single-daemon lock for a store path (reliability tail): two
+ * coordinator daemons sharing one SQLite database would both claim jobs and both
+ * publish, racing the monotonic-publish watermark and the seen-rumor ledger. A
+ * dedicated `${dbPath}.lock` SQLite file is opened in EXCLUSIVE locking mode and a
+ * marker row written, which takes and HOLDS a file-level exclusive lock for the
+ * connection's lifetime. A second daemon's acquire then fails fast (SQLITE_BUSY)
+ * with a clear error instead of silently double-running. Returns a handle whose
+ * `release` drops the lock (closes the connection). The `:memory:` store takes no
+ * lock (each connection is private — nothing to contend).
+ */
+export function acquireDaemonLock(dbPath: string): DaemonLock {
+  if (dbPath === ":memory:") return { release() {} };
+  const lockPath = `${dbPath}.lock`;
+  const db = new DatabaseSync(lockPath);
+  try {
+    db.exec("PRAGMA locking_mode = EXCLUSIVE");
+    db.exec("CREATE TABLE IF NOT EXISTS daemon_lock (id INTEGER PRIMARY KEY, pid INTEGER, acquired_at INTEGER)");
+    // The write forces SQLite to take the RESERVED→EXCLUSIVE lock; under
+    // locking_mode=EXCLUSIVE the connection keeps it until close, so a second
+    // daemon's write throws SQLITE_BUSY.
+    db.exec("BEGIN EXCLUSIVE");
+    db.prepare("INSERT OR REPLACE INTO daemon_lock (id, pid, acquired_at) VALUES (1, ?, ?)").run(
+      process.pid,
+      Date.now(),
+    );
+    db.exec("COMMIT");
+  } catch (e) {
+    try {
+      db.close();
+    } catch {
+      /* already closed */
+    }
+    throw new Error(
+      `another coordinator daemon is already running on ${dbPath} (single-daemon lock held): ${e instanceof Error ? e.message : e}`,
+    );
+  }
+  return {
+    release() {
+      try {
+        db.close();
+      } catch {
+        /* already closed */
+      }
+    },
+  };
+}
 
 export type JobState = "pending" | "running" | "done" | "poison";
 
@@ -75,6 +142,20 @@ export interface AttendeeRow {
   // Display name from the join request (B1): match reasoning must be able to
   // call people by their actual names — profiles alone carry no name.
   display_name: string | null;
+  // Ordering key of the currently-stored profile submission. NIP §3.3 makes the
+  // application `rev` the primary key; (rev, created_at, rumor_id) is the total
+  // order the coordinator accepts strictly-greater keys under (higher rev wins;
+  // equal rev → higher created_at; equal both → lexicographically lowest id).
+  // v1's created_at-only interim guard (P0-2) is replaced by this. Null on rows
+  // written before a first ordered submission.
+  profile_rev: number | null;
+  profile_created_at: number | null;
+  profile_rumor_id: string | null;
+  // Ordering key of the applied 21608 correction (NIP §3.3), same total order as
+  // the profile submission — a stale (out-of-order older) correction is rejected.
+  correction_rev: number | null;
+  correction_created_at: number | null;
+  correction_rumor_id: string | null;
   updated_at: number;
 }
 
@@ -90,6 +171,11 @@ export interface TalkRow {
   transcript_json: string | null;
   lang: string;
   revision: number;
+  // Canonical content hash of the applied talk (NIP §3.3): a submission with a
+  // revision EQUAL to the stored one but a DIFFERENT content hash is rejected
+  // (a content change requires a revision bump); equal revision + identical hash
+  // is an idempotent no-op. See `talkContentHash`.
+  content_hash: string | null;
   status: "pending" | "published" | "rejected";
   published_at: number;
   /**
@@ -116,6 +202,7 @@ export interface MarmotChatKeyRow {
   account_pubkey: string;
   chat_pubkey: string;
   client_id: string | null;
+  label: string | null;
   status: "active" | "revoked";
   updated_at: number;
 }
@@ -132,6 +219,23 @@ export interface JobStatusRow {
   updated_at: number;
 }
 
+/**
+ * Persisted billing state machine per installation (spec §9, D5, §13.4). The
+ * principal is TYPED (kind "eid" today — the event identity — extensible to a
+ * personal/organization principal without a wire change). `state` is the durable
+ * enforcement verdict `evaluating → ok | grace | blocked` re-evaluated at install,
+ * attendee-count change, submission revision, job claim, and before provider spend.
+ */
+export interface BillingStateRow {
+  coordinate: string;
+  principal_kind: string;
+  principal_id: string;
+  state: "evaluating" | "ok" | "grace" | "blocked";
+  reason: string | null;
+  grace_until: number | null;
+  updated_at: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (
   coordinate TEXT PRIMARY KEY,
@@ -139,6 +243,7 @@ CREATE TABLE IF NOT EXISTS events (
   inbox_nsec TEXT NOT NULL,
   eck_json TEXT NOT NULL,
   config_relays TEXT NOT NULL,
+  gen INTEGER NOT NULL DEFAULT 0,   -- the install generation this event was granted at (NIP §3.5)
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS attendees (
@@ -158,6 +263,12 @@ CREATE TABLE IF NOT EXISTS attendees (
   transcripts_json TEXT,
   correction_json TEXT,
   display_name TEXT,
+  profile_rev INTEGER,
+  profile_created_at INTEGER,
+  profile_rumor_id TEXT,
+  correction_rev INTEGER,
+  correction_created_at INTEGER,
+  correction_rumor_id TEXT,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
@@ -257,6 +368,7 @@ CREATE TABLE IF NOT EXISTS talks (
   transcript_json TEXT,
   lang TEXT NOT NULL DEFAULT 'en',
   revision INTEGER NOT NULL DEFAULT 0,
+  content_hash TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   published_at INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
@@ -310,6 +422,7 @@ CREATE TABLE IF NOT EXISTS marmot_chat_keys (
   account_pubkey TEXT NOT NULL,
   chat_pubkey TEXT NOT NULL,
   client_id TEXT,
+  label TEXT,                             -- human device label from the 21607 add (NIP §10.2)
   status TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, chat_pubkey)
@@ -321,6 +434,54 @@ CREATE TABLE IF NOT EXISTS marmot_consumed_kps (
   kp_event_id TEXT NOT NULL,
   created_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (coordinate, kp_event_id)
+);
+-- Per-subject admin-command watermark (NIP §3.4): the (created_at, rumor_id) of the
+-- last applied 21604 command per (coordinate, subject). A command strictly older
+-- than the watermark under the §3.1 comparator is rejected, so approve/revoke
+-- interleavings resolve deterministically per subject instead of by arrival order.
+CREATE TABLE IF NOT EXISTS command_watermarks (
+  coordinate TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  rumor_id TEXT NOT NULL,
+  PRIMARY KEY (coordinate, subject)
+);
+-- Coordinator install generation state (NIP §3.5): the highest generation ever
+-- installed OR detached for a coordinate, plus a durable detach tombstone. A fresh
+-- 21603 grant must carry a gen strictly greater than high_gen (so a replayed
+-- historical install can never re-install), and a detach tombstones the row.
+CREATE TABLE IF NOT EXISTS install_state (
+  coordinate TEXT PRIMARY KEY,
+  high_gen INTEGER NOT NULL DEFAULT 0,
+  tombstoned INTEGER NOT NULL DEFAULT 0,   -- 1 once detached (custody deleted)
+  detached_at INTEGER
+);
+-- Persisted billing state machine per installation (NIP §9, D5, §13.4). The
+-- principal is typed (kind 'eid' = the event identity today; extensible to a
+-- personal/organization principal later WITHOUT a wire change). state is the
+-- durable enforcement verdict evaluating→ok|grace|blocked; a 'blocked' event stops
+-- paid provider work but never revoke/detach/roster repair/status publication.
+CREATE TABLE IF NOT EXISTS billing_state (
+  coordinate TEXT PRIMARY KEY,
+  principal_kind TEXT NOT NULL DEFAULT 'eid',
+  principal_id TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'evaluating',
+  reason TEXT,
+  grace_until INTEGER,
+  updated_at INTEGER NOT NULL
+);
+-- Durable per-attendee / per-event usage accounting (spec §8 budgets, H-2):
+-- actual downloaded ciphertext BYTES, decoded media DURATION (probed via ffprobe,
+-- not the attendee-declared value), and provider spend attempts (CALLS). Budgets
+-- gate paid processing as an abuse ceiling. pubkey='' = event-scoped spend.
+CREATE TABLE IF NOT EXISTS usage (
+  coordinate TEXT NOT NULL,
+  pubkey TEXT NOT NULL,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (coordinate, pubkey)
 );
 `;
 
@@ -364,7 +525,10 @@ export class Store {
     // Migration (F1): transcripts_json on attendees; lang on transcripts.
     // Migration (F3): correction_json on attendees (ai_profile correction/hide).
     // Migration (B1 2026-07-16): display_name — match reasoning needs real names.
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT"]) {
+    // Migration (P0-2 2026-07-22): profile submission ordering key (latest-wins).
+    // Migration (wire-v2 §3.3): rev-primary ordering keys for 21601 submissions and
+    // 21608 corrections (profile_rev / correction_rev/created_at/rumor_id).
+    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT", "profile_created_at INTEGER", "profile_rumor_id TEXT", "profile_rev INTEGER", "correction_rev INTEGER", "correction_created_at INTEGER", "correction_rumor_id TEXT"]) {
       try {
         this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
       } catch {
@@ -384,6 +548,12 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (wire-v2 §3.3): canonical content hash for equal-revision rejection.
+    try {
+      this.db.exec("ALTER TABLE talks ADD COLUMN content_hash TEXT");
+    } catch {
+      /* column already exists */
+    }
     // Migration (COORD-24): consumption timestamps for TTL pruning. Existing rows
     // backfill to 0, so the first prune after upgrade sweeps them (they're all
     // older than any 30-day window by definition of being legacy).
@@ -392,13 +562,118 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (wire-v2 §3.5): the install generation on older event rows.
+    try {
+      this.db.exec("ALTER TABLE events ADD COLUMN gen INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (wire-v2 §10.2): per-device chat-key label on older binding rows.
+    try {
+      this.db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN label TEXT");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (wire-v2 §6.2): per-direction icebreakers on cached pair rows.
+    // JSON arrays (≤ 3 strings), addressed to `a` and `b` respectively — parallel
+    // to reasoning/reasoning_b. NULL on legacy rows (no icebreakers surfaced).
+    for (const col of ["icebreakers_json TEXT", "icebreakers_b_json TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE pairs ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
+    // Migration (wire-v2 §6.2): retention-expired terminal flag on the events row.
+    // Once the retention sweep has deleted an event's member records + parked paid
+    // processing, this stays set across restarts so a re-install of the same event
+    // row never resumes paid work before the next sweep tick re-detects expiry.
+    try {
+      this.db.exec("ALTER TABLE events ADD COLUMN retention_expired INTEGER NOT NULL DEFAULT 0");
+    } catch {
+      /* column already exists */
+    }
+    // Migration (wire-v2 §3.2): durable monotonic-publish watermark per replaceable
+    // address, so restarts keep created_at monotonic instead of relying on the wall
+    // clock having advanced past everything published before the restart.
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS publish_watermarks (
+        address TEXT PRIMARY KEY,
+        last_created_at INTEGER NOT NULL
+      )`,
+    );
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
+    // Record the logical schema version so the backup/restore tooling can reason
+    // about downgrade safety. The in-place migrations above have already brought
+    // the durable shape up to SCHEMA_VERSION, so stamping it here is correct.
+    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
   }
 
   close(): void {
     this.db.close();
+  }
+
+  // ── backup / integrity primitives (store/backup.ts, §13.2) ─────────────────
+  /** The schema version recorded in this database (SQLite `user_version`). */
+  schemaVersion(): number {
+    const row = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    return row.user_version;
+  }
+
+  /**
+   * Run `PRAGMA integrity_check` and return "ok" or a joined description of the
+   * problems SQLite reports. A healthy database returns the single row "ok".
+   */
+  integrityCheck(): string {
+    const rows = this.db.prepare("PRAGMA integrity_check").all() as { integrity_check: string }[];
+    const msgs = rows.map((r) => r.integrity_check);
+    return msgs.length === 1 && msgs[0] === "ok" ? "ok" : msgs.join("; ");
+  }
+
+  /**
+   * Write a consistent snapshot of this database to `destPath` via `VACUUM INTO`.
+   * Under WAL, the vacuum reads a single committed snapshot even while the daemon
+   * keeps writing, so the copy is crash-consistent without stopping the process.
+   * `destPath` must not already exist (SQLite refuses to overwrite). The path is
+   * a SQL string literal (no bind slot for VACUUM INTO), so single quotes are
+   * doubled to keep it safe.
+   */
+  backupTo(destPath: string): void {
+    const literal = destPath.replace(/'/g, "''");
+    this.db.exec(`VACUUM INTO '${literal}'`);
+  }
+
+  /** Count of installed events (rows carrying custodied E_inbox/ECK material). */
+  installedEventCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Prove every protected event-key row decrypts under the loaded identity: read
+   * each `inbox_nsec`/`eck_json`, decrypt it, and confirm the plaintext is the
+   * expected shape (nsec → 32-byte hex, eck_json → parseable JSON). Throws on the
+   * first row that fails. Returns the number of rows verified. A store opened
+   * without an identity key throws immediately (it cannot prove anything).
+   */
+  verifyProtectedRowsDecrypt(): number {
+    if (!this.identitySk) throw new Error("no identity key: cannot verify protected rows decrypt");
+    const rows = this.db.prepare("SELECT coordinate, inbox_nsec, eck_json FROM events").all() as {
+      coordinate: string;
+      inbox_nsec: string;
+      eck_json: string;
+    }[];
+    for (const row of rows) {
+      const nsec = this.reveal(row.inbox_nsec);
+      if (!/^[0-9a-f]{64}$/i.test(nsec)) {
+        throw new Error(`event ${row.coordinate}: decrypted inbox_nsec is not 32-byte hex`);
+      }
+      const eck = this.reveal(row.eck_json);
+      JSON.parse(eck); // throws if the decrypted ECK custody isn't valid JSON
+    }
+    return rows.length;
   }
 
   // ── at-rest protection of event-key columns (F1) ──────────────────────────
@@ -466,42 +741,158 @@ export class Store {
     inboxNsec: string;
     eckJson: string;
     configRelays: string;
+    /** Install generation this event was granted at (NIP §3.5); keeps its value when omitted. */
+    gen?: number;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO events (coordinate, config_json, inbox_nsec, eck_json, config_relays, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO events (coordinate, config_json, inbox_nsec, eck_json, config_relays, gen, updated_at)
+         VALUES (:coordinate, :configJson, :inboxNsec, :eckJson, :configRelays, COALESCE(:gen, 0), :now)
          ON CONFLICT(coordinate) DO UPDATE SET
            config_json = excluded.config_json,
            inbox_nsec = excluded.inbox_nsec,
            eck_json = excluded.eck_json,
            config_relays = excluded.config_relays,
+           gen = COALESCE(:gen, events.gen),
            updated_at = excluded.updated_at`,
       )
-      .run(
-        row.coordinate,
-        row.configJson,
-        this.protect(row.inboxNsec),
-        this.protect(row.eckJson),
-        row.configRelays,
-        row.now,
-      );
+      .run({
+        coordinate: row.coordinate,
+        configJson: row.configJson,
+        inboxNsec: this.protect(row.inboxNsec),
+        eckJson: this.protect(row.eckJson),
+        configRelays: row.configRelays,
+        gen: row.gen ?? null,
+        now: row.now,
+      });
   }
 
   getEvent(coordinate: string):
-    | { coordinate: string; config_json: string; inbox_nsec: string; eck_json: string; config_relays: string }
+    | { coordinate: string; config_json: string; inbox_nsec: string; eck_json: string; config_relays: string; gen: number }
     | undefined {
     const row = this.db.prepare("SELECT * FROM events WHERE coordinate = ?").get(coordinate) as any;
     if (!row) return undefined;
-    return { ...row, inbox_nsec: this.reveal(row.inbox_nsec), eck_json: this.reveal(row.eck_json) };
+    return { ...row, inbox_nsec: this.reveal(row.inbox_nsec), eck_json: this.reveal(row.eck_json), gen: row.gen ?? 0 };
   }
 
-  allEvents(): { coordinate: string; inbox_nsec: string; config_relays: string }[] {
+  allEvents(): { coordinate: string; inbox_nsec: string; config_relays: string; gen: number }[] {
     const rows = this.db
-      .prepare("SELECT coordinate, inbox_nsec, config_relays FROM events")
+      .prepare("SELECT coordinate, inbox_nsec, config_relays, gen FROM events")
       .all() as any[];
-    return rows.map((r) => ({ ...r, inbox_nsec: this.reveal(r.inbox_nsec) }));
+    return rows.map((r) => ({ ...r, inbox_nsec: this.reveal(r.inbox_nsec), gen: r.gen ?? 0 }));
+  }
+
+  /** Delete an event's stored custody (E_inbox/ECK) row — detach disposes of key
+   *  custody per decision D6. The install_state tombstone survives to bar re-install. */
+  deleteEvent(coordinate: string): void {
+    this.db.prepare("DELETE FROM events WHERE coordinate = ?").run(coordinate);
+  }
+
+  // ── retention-expiry terminal flag (NIP §6.2) ─────────────────────────────
+  /** True once the retention sweep has expired this event (records deleted, paid
+   *  processing parked). Survives restarts so paid work never resumes pre-sweep. */
+  isRetentionExpired(coordinate: string): boolean {
+    const row = this.db.prepare("SELECT retention_expired FROM events WHERE coordinate = ?").get(coordinate) as
+      | { retention_expired: number }
+      | undefined;
+    return !!row && row.retention_expired === 1;
+  }
+
+  /** Mark an event retention-expired (idempotent). */
+  markRetentionExpired(coordinate: string): void {
+    this.db.prepare("UPDATE events SET retention_expired = 1 WHERE coordinate = ?").run(coordinate);
+  }
+
+  /** Lift an event's retention expiry (organizer extended/removed the policy). */
+  clearRetentionExpired(coordinate: string): void {
+    this.db.prepare("UPDATE events SET retention_expired = 0 WHERE coordinate = ?").run(coordinate);
+  }
+
+  // ── durable monotonic-publish watermark (NIP §3.2) ────────────────────────
+  /**
+   * Bump and return the `created_at` for a replaceable publish at `address`
+   * (`${kind}:${d}`): `max(now, last_published_for_address + 1)`, persisted so a
+   * restart keeps §3.2 monotonicity even if the wall clock hasn't advanced past what
+   * was published before the restart (clock skew, a relay that clamps timestamps, or
+   * successive publishes within one second straddling the restart). Atomic under the
+   * single-daemon write lock.
+   */
+  nextPublishCreatedAt(address: string, now: number): number {
+    const row = this.db.prepare("SELECT last_created_at FROM publish_watermarks WHERE address = ?").get(address) as
+      | { last_created_at: number }
+      | undefined;
+    const next = row ? Math.max(now, row.last_created_at + 1) : now;
+    this.db
+      .prepare(
+        `INSERT INTO publish_watermarks (address, last_created_at) VALUES (?, ?)
+         ON CONFLICT(address) DO UPDATE SET last_created_at = excluded.last_created_at`,
+      )
+      .run(address, next);
+    return next;
+  }
+
+  // ── admin-command per-subject watermarks (NIP §3.4) ───────────────────────
+  /** The last applied command's (created_at, rumor_id) for a (coordinate, subject). */
+  getCommandWatermark(coordinate: string, subject: string): { created_at: number; rumor_id: string } | undefined {
+    return this.db
+      .prepare("SELECT created_at, rumor_id FROM command_watermarks WHERE coordinate = ? AND subject = ?")
+      .get(coordinate, subject) as { created_at: number; rumor_id: string } | undefined;
+  }
+  /** Record the watermark of the just-applied command for a (coordinate, subject). */
+  setCommandWatermark(coordinate: string, subject: string, createdAt: number, rumorId: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id) VALUES (?, ?, ?, ?)
+         ON CONFLICT(coordinate, subject) DO UPDATE SET created_at = excluded.created_at, rumor_id = excluded.rumor_id`,
+      )
+      .run(coordinate, subject, createdAt, rumorId);
+  }
+
+  // ── install generation / detach tombstone (NIP §3.5) ──────────────────────
+  /** The highest generation ever installed OR detached for a coordinate (0 if none). */
+  installHighGen(coordinate: string): number {
+    const row = this.db
+      .prepare("SELECT high_gen FROM install_state WHERE coordinate = ?")
+      .get(coordinate) as { high_gen: number } | undefined;
+    return row?.high_gen ?? 0;
+  }
+  /** Whether the coordinate is currently detach-tombstoned (custody deleted). */
+  isInstallTombstoned(coordinate: string): boolean {
+    const row = this.db
+      .prepare("SELECT tombstoned FROM install_state WHERE coordinate = ?")
+      .get(coordinate) as { tombstoned: number } | undefined;
+    return !!row && row.tombstoned === 1;
+  }
+  /** Record a (re)install at `gen`: bump the high-water mark and clear any tombstone. */
+  recordInstalledGen(coordinate: string, gen: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO install_state (coordinate, high_gen, tombstoned, detached_at) VALUES (?, ?, 0, NULL)
+         ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 0, detached_at = NULL`,
+      )
+      .run(coordinate, gen);
+  }
+  /** Durably tombstone a detached install: bump the high-water mark to `gen`. */
+  tombstoneInstall(coordinate: string, gen: number, detachedAt: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO install_state (coordinate, high_gen, tombstoned, detached_at) VALUES (?, ?, 1, ?)
+         ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 1, detached_at = excluded.detached_at`,
+      )
+      .run(coordinate, gen, detachedAt);
+  }
+
+  /** Cancel every pending/running job for an event (detach: stop pending paid work). */
+  cancelJobsForEvent(coordinate: string): number {
+    // Jobs carry the coordinate in their JSON payload; match on it and drop the
+    // non-terminal ones so a detached event's queued work never runs.
+    const info = this.db
+      .prepare(
+        "DELETE FROM jobs WHERE state IN ('pending','running') AND json_extract(payload, '$.coordinate') = ?",
+      )
+      .run(coordinate);
+    return Number(info.changes);
   }
 
   // ── attendees ─────────────────────────────────────────────────────────────
@@ -524,13 +915,21 @@ export class Store {
     transcriptsJson?: string | null;
     correctionJson?: string | null;
     displayName?: string | null;
+    /** Ordering key of this profile submission (NIP §3.3); written only with a profile. */
+    profileRev?: number | null;
+    profileCreatedAt?: number | null;
+    profileRumorId?: string | null;
+    /** Ordering key of this correction (NIP §3.3); written only with a correction. */
+    correctionRev?: number | null;
+    correctionCreatedAt?: number | null;
+    correctionRumorId?: string | null;
     now: number;
   }): void {
     this.db
       .prepare(
-        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, updated_at)
+        `INSERT INTO attendees (coordinate, pubkey, role, status, profile_json, ai_profile_json, profile_hash, source_revision, ai_source_revision, transcripts_json, correction_json, display_name, profile_rev, profile_created_at, profile_rumor_id, correction_rev, correction_created_at, correction_rumor_id, updated_at)
          VALUES (:coordinate, :pubkey, COALESCE(:role, 'attendee'), COALESCE(:status, 'pending'),
-                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :now)
+                 :profileJson, :aiProfileJson, :profileHash, :sourceRevision, :aiSourceRevision, :transcriptsJson, :correctionJson, :displayName, :profileRev, :profileCreatedAt, :profileRumorId, :correctionRev, :correctionCreatedAt, :correctionRumorId, :now)
          ON CONFLICT(coordinate, pubkey) DO UPDATE SET
            role = COALESCE(:role, attendees.role),
            status = COALESCE(:status, attendees.status),
@@ -542,6 +941,12 @@ export class Store {
            transcripts_json = COALESCE(:transcriptsJson, attendees.transcripts_json),
            correction_json = COALESCE(:correctionJson, attendees.correction_json),
            display_name = COALESCE(:displayName, attendees.display_name),
+           profile_rev = COALESCE(:profileRev, attendees.profile_rev),
+           profile_created_at = COALESCE(:profileCreatedAt, attendees.profile_created_at),
+           profile_rumor_id = COALESCE(:profileRumorId, attendees.profile_rumor_id),
+           correction_rev = COALESCE(:correctionRev, attendees.correction_rev),
+           correction_created_at = COALESCE(:correctionCreatedAt, attendees.correction_created_at),
+           correction_rumor_id = COALESCE(:correctionRumorId, attendees.correction_rumor_id),
            updated_at = :now`,
       )
       .run({
@@ -557,6 +962,12 @@ export class Store {
         transcriptsJson: row.transcriptsJson ?? null,
         correctionJson: row.correctionJson ?? null,
         displayName: row.displayName ?? null,
+        profileRev: row.profileRev ?? null,
+        profileCreatedAt: row.profileCreatedAt ?? null,
+        profileRumorId: row.profileRumorId ?? null,
+        correctionRev: row.correctionRev ?? null,
+        correctionCreatedAt: row.correctionCreatedAt ?? null,
+        correctionRumorId: row.correctionRumorId ?? null,
         now: row.now,
       });
   }
@@ -634,8 +1045,28 @@ export class Store {
     /** New media sha256 (x); when it differs from the stored one the transcript is dropped. */
     mediaX: string;
     now: number;
-  }): void {
+  }): boolean {
     const existing = this.getTalk(row.coordinate, row.pubkey, row.talkD);
+    const contentHash = talkContentHash({
+      mediaX: row.mediaX,
+      title: row.title,
+      description: row.description,
+      speakersJson: row.speakersJson,
+      lang: row.lang,
+    });
+    // Reject an out-of-order lower revision (NIP §3.3): relays can deliver history
+    // out of order, and without this a delayed revision 0 would overwrite a live
+    // revision 2 and reset its moderation status to 'pending'.
+    if (existing && row.revision < existing.revision) return false;
+    // Equal-revision rejection (NIP §3.3): a submission whose revision EQUALS the
+    // stored one but whose content DIFFERS is rejected — a content change requires
+    // a revision bump. Equal revision + identical content is an idempotent no-op
+    // (the identical rumor is already deduped upstream; this catches a distinct
+    // rumor carrying the same revision). Legacy rows with a null content_hash can't
+    // be compared, so they fall through and re-apply once (then carry a hash).
+    if (existing && row.revision === existing.revision && existing.content_hash != null) {
+      return false;
+    }
     let keepTranscript: string | null = existing?.transcript_json ?? null;
     if (existing) {
       try {
@@ -647,8 +1078,8 @@ export class Store {
     }
     this.db
       .prepare(
-        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, status, published_at, updated_at)
-         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
+        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, content_hash, status, published_at, updated_at)
+         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, :contentHash, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
          ON CONFLICT(coordinate, pubkey, talk_d) DO UPDATE SET
            title = excluded.title,
            description = excluded.description,
@@ -657,6 +1088,7 @@ export class Store {
            transcript_json = excluded.transcript_json,
            lang = excluded.lang,
            revision = excluded.revision,
+           content_hash = excluded.content_hash,
            status = 'pending',
            updated_at = excluded.updated_at`,
       )
@@ -671,8 +1103,10 @@ export class Store {
         transcriptJson: keepTranscript,
         lang: row.lang,
         revision: row.revision,
+        contentHash,
         now: row.now,
       });
+    return true;
   }
 
   getTalk(coordinate: string, pubkey: string, talkD: string): TalkRow | undefined {
@@ -693,10 +1127,33 @@ export class Store {
     return row.n;
   }
 
-  setTalkTranscript(coordinate: string, pubkey: string, talkD: string, transcriptJson: string, now: number): void {
-    this.db
-      .prepare("UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
-      .run(transcriptJson, now, coordinate, pubkey, talkD);
+  /**
+   * Attach a transcript to a talk, but only if the row's current media still
+   * matches the media the transcript was produced from (audit P0-7). `expectedX`
+   * is the media sha256 the STT ran against; a newer talk revision that
+   * re-recorded the media changes the row's `media_json.x`, so a slow STT result
+   * for the OLD recording finishing after the new one lands is discarded rather
+   * than attached to the wrong media. Returns true if the transcript was written.
+   */
+  setTalkTranscript(
+    coordinate: string,
+    pubkey: string,
+    talkD: string,
+    transcriptJson: string,
+    now: number,
+    expectedX?: string,
+  ): boolean {
+    const info =
+      expectedX === undefined
+        ? this.db
+            .prepare("UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
+            .run(transcriptJson, now, coordinate, pubkey, talkD)
+        : this.db
+            .prepare(
+              "UPDATE talks SET transcript_json = ?, updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ? AND json_extract(media_json, '$.x') = ?",
+            )
+            .run(transcriptJson, now, coordinate, pubkey, talkD, expectedX);
+    return info.changes > 0;
   }
 
   setTalkStatus(
@@ -828,10 +1285,13 @@ export class Store {
     similarity: number;
     complementarity: number;
     reasoning: string;
+    /** ≤ 3 conversation starters addressed to `from` (NIP §6.2). */
+    icebreakers?: string[];
     now: number;
   }): void {
     const [x, y] = row.from < row.to ? [row.from, row.to] : [row.to, row.from];
     const fromIsX = row.from === x;
+    const icebreakersJson = row.icebreakers && row.icebreakers.length > 0 ? JSON.stringify(row.icebreakers) : null;
     const existing = this.db
       .prepare("SELECT inputs_hash FROM pairs WHERE coordinate = ? AND a = ? AND b = ?")
       .get(row.coordinate, x, y) as { inputs_hash: string } | undefined;
@@ -844,31 +1304,33 @@ export class Store {
     if (fromIsX) {
       this.db
         .prepare(
-          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, icebreakers_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(coordinate, a, b) DO UPDATE SET
              inputs_hash = excluded.inputs_hash, score = excluded.score,
              similarity = excluded.similarity, complementarity = excluded.complementarity,
-             reasoning = excluded.reasoning, created_at = excluded.created_at`,
+             reasoning = excluded.reasoning, icebreakers_json = excluded.icebreakers_json,
+             created_at = excluded.created_at`,
         )
-        .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, row.now);
+        .run(row.coordinate, x, y, row.inputsHash, row.score, row.similarity, row.complementarity, row.reasoning, icebreakersJson, row.now);
     } else {
       // b→a direction: write the *_b columns. On INSERT the base (a→b) columns are
       // not yet known — seed them so the NOT NULL constraints hold; the a→b batch
       // overwrites them later.
       this.db
         .prepare(
-          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, score_b, similarity_b, complementarity_b, reasoning_b, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+          `INSERT INTO pairs (coordinate, a, b, inputs_hash, score, similarity, complementarity, reasoning, score_b, similarity_b, complementarity_b, reasoning_b, icebreakers_b_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
            ON CONFLICT(coordinate, a, b) DO UPDATE SET
              inputs_hash = excluded.inputs_hash, score_b = excluded.score_b,
              similarity_b = excluded.similarity_b, complementarity_b = excluded.complementarity_b,
-             reasoning_b = excluded.reasoning_b, created_at = excluded.created_at`,
+             reasoning_b = excluded.reasoning_b, icebreakers_b_json = excluded.icebreakers_b_json,
+             created_at = excluded.created_at`,
         )
         .run(
           row.coordinate, x, y, row.inputsHash,
           row.score, row.similarity, row.complementarity, // seed base cols for NOT NULL
-          row.score, row.similarity, row.complementarity, row.reasoning, row.now,
+          row.score, row.similarity, row.complementarity, row.reasoning, icebreakersJson, row.now,
         );
     }
   }
@@ -884,31 +1346,109 @@ export class Store {
       .run(coordinate, pubkey, pubkey);
   }
 
+  /**
+   * Full purge of an attendee's stored derived artifacts (NIP §6.3 21610,
+   * `delete_data: true`). Removes the coordinator's private DB copies of everything
+   * derived from the attendee's submission — the attendee row (profile, ai_profile,
+   * transcripts_json, correction), their submissions, their per-account nostr
+   * summary, their talks, and the content-addressed STT transcripts for every media
+   * blob they submitted (intro + talk media). Cached pair scores are already dropped
+   * by `clearPairsInvolving` on the revoke path. Idempotent.
+   *
+   * `delete_data: false` withdrawals do NOT call this — those artifacts are retained
+   * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
+   */
+  purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
+    // Collect every media ciphertext hash (`x`) this attendee submitted, so the
+    // corresponding STT transcript rows can be deleted. Transcripts are keyed by
+    // `descriptor.x` (see transcribe.ts). Sources: the attendee's stored profile
+    // media (`profile_json.__media`) and their talk media (`talks.media_json`).
+    const blobHashes = new Set<string>();
+    const att = this.db
+      .prepare("SELECT profile_json FROM attendees WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { profile_json: string | null } | undefined;
+    if (att?.profile_json) {
+      try {
+        const media = (JSON.parse(att.profile_json) as { __media?: { x?: string }[] }).__media ?? [];
+        for (const m of media) if (typeof m.x === "string") blobHashes.add(m.x);
+      } catch {
+        /* malformed stored JSON — nothing to collect */
+      }
+    }
+    const talkRows = this.db
+      .prepare("SELECT media_json FROM talks WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { media_json: string }[];
+    for (const t of talkRows) {
+      try {
+        const x = (JSON.parse(t.media_json) as { x?: string }).x;
+        if (typeof x === "string") blobHashes.add(x);
+      } catch {
+        /* ignore */
+      }
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const delTranscript = this.db.prepare("DELETE FROM transcripts WHERE blob_sha256 = ?");
+      for (const x of blobHashes) delTranscript.run(x);
+      this.db.prepare("DELETE FROM talks WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      this.db.prepare("DELETE FROM submissions WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      this.db.prepare("DELETE FROM nostr_summaries WHERE pubkey = ?").run(pubkey);
+      this.db.prepare("DELETE FROM attendees WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
   pairsFor(coordinate: string, pubkey: string): {
     other: string;
     score: number;
     similarity: number;
     complementarity: number;
     reasoning: string;
+    icebreakers?: string[];
   }[] {
     // Return pubkey's OWN directional view: when pubkey is the stored `a`, the base
     // columns are its outbound (a→b) score/reasoning; when it is `b`, the *_b
     // columns. Scores COALESCE to the shared value for legacy pairwise rows (which
     // set reasoning_b but not score_b); reasoning must NOT fall back — a NULL
-    // reasoning_b means the b→a direction was never scored.
+    // reasoning_b means the b→a direction was never scored. Icebreakers follow the
+    // same directional selection as reasoning.
     const rows = this.db
       .prepare(
         `SELECT CASE WHEN a = ? THEN b ELSE a END AS other,
                 CASE WHEN a = ? THEN score ELSE COALESCE(score_b, score) END AS score,
                 CASE WHEN a = ? THEN similarity ELSE COALESCE(similarity_b, similarity) END AS similarity,
                 CASE WHEN a = ? THEN complementarity ELSE COALESCE(complementarity_b, complementarity) END AS complementarity,
-                CASE WHEN a = ? THEN reasoning ELSE reasoning_b END AS reasoning
+                CASE WHEN a = ? THEN reasoning ELSE reasoning_b END AS reasoning,
+                CASE WHEN a = ? THEN icebreakers_json ELSE icebreakers_b_json END AS icebreakers_json
          FROM pairs WHERE coordinate = ? AND (a = ? OR b = ?)`,
       )
-      .all(pubkey, pubkey, pubkey, pubkey, pubkey, coordinate, pubkey, pubkey) as any[];
+      .all(pubkey, pubkey, pubkey, pubkey, pubkey, pubkey, coordinate, pubkey, pubkey) as any[];
     // Only surface directions that have actually been scored (non-empty reasoning);
     // a row seeded by the reverse direction has an empty/NULL value here.
-    return rows.filter((r) => r.reasoning != null && r.reasoning !== "");
+    return rows
+      .filter((r) => r.reasoning != null && r.reasoning !== "")
+      .map((r) => {
+        let icebreakers: string[] | undefined;
+        if (r.icebreakers_json) {
+          try {
+            const parsed = JSON.parse(r.icebreakers_json);
+            if (Array.isArray(parsed) && parsed.every((s) => typeof s === "string")) icebreakers = parsed;
+          } catch {
+            /* malformed stored JSON — drop icebreakers, keep the match */
+          }
+        }
+        return {
+          other: r.other,
+          score: r.score,
+          similarity: r.similarity,
+          complementarity: r.complementarity,
+          reasoning: r.reasoning,
+          ...(icebreakers ? { icebreakers } : {}),
+        };
+      });
   }
 
   // ── invite usage (first-come, single-use) ─────────────────────────────────
@@ -1032,6 +1572,154 @@ export class Store {
   }
   poisonJobs(): JobRow[] {
     return this.db.prepare("SELECT * FROM jobs WHERE state = 'poison'").all() as any;
+  }
+
+  /**
+   * Park a claimed job in the distinct `waiting` state (spec §9 billing/budget
+   * gates, H-2). Unlike a failure this does NOT consume a retry, set a backoff, or
+   * ever poison — `claimNextJob` never claims a `waiting` row, so blocked paid work
+   * is COALESCED (parked once) instead of retry-spinning against a hard budget/
+   * billing block. `resumeWaitingJobs` re-enqueues it when the block clears. Only
+   * the lease owner may park. Returns true if this worker still owned the job.
+   */
+  parkJob(id: number, reason: string, workerToken?: string): boolean {
+    const sql =
+      "UPDATE jobs SET state = 'waiting', last_error = ?, worker_token = NULL, lease_until = NULL WHERE id = ?" +
+      (workerToken ? " AND worker_token = ?" : "");
+    const args: unknown[] = [reason, id];
+    if (workerToken) args.push(workerToken);
+    return this.db.prepare(sql).run(...(args as any)).changes > 0;
+  }
+
+  /**
+   * Re-enqueue parked (`waiting`) jobs for one coordinate back to `pending`
+   * (billing unblocked, or a budget raised via config reload + organizer
+   * reprocess/recompute). Matches on the coordinate embedded in the job payload.
+   * Returns the number of jobs resumed.
+   */
+  resumeWaitingJobs(coordinate: string): number {
+    const info = this.db
+      .prepare(
+        "UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL WHERE state = 'waiting' AND payload LIKE ?",
+      )
+      .run(`%"coordinate":"${coordinate}"%`);
+    return Number(info.changes);
+  }
+
+  /** Count parked jobs for a coordinate (test/observability helper). */
+  waitingJobCount(coordinate?: string): number {
+    if (coordinate === undefined) {
+      return (this.db.prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting'").get() as any).c;
+    }
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND payload LIKE ?")
+        .get(`%"coordinate":"${coordinate}"%`) as any
+    ).c;
+  }
+
+  /**
+   * Supersede a superseded submission's still-pending/parked pipeline jobs (H-2):
+   * a new submission revision cancels the OLDER revision's `process_attendee` (and
+   * any parked variant) so the coordinator never pays to download+STT+profile a
+   * recording the attendee has already replaced. `prefix` matches the per-attendee
+   * dedupe-key namespace (`proc:<coordinate>:<pubkey>:`); `keepKey` is the new
+   * revision's key (never deleted). Running jobs are left alone — the lease/
+   * compare-and-set logic already discards their stale writes. Returns count deleted.
+   */
+  supersedePendingJobs(prefix: string, keepKey: string): number {
+    const info = this.db
+      .prepare(
+        "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? AND dedupe_key != ?",
+      )
+      .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
+    return Number(info.changes);
+  }
+
+  // ── durable usage accounting (spec §8 budgets, H-2) ───────────────────────
+  // Per-attendee and per-event cumulative actual usage: downloaded ciphertext
+  // BYTES, decoded media DURATION (probed, not declared), and provider spend
+  // attempts (CALLS). Budgets gate paid processing (abuse ceiling, not a product
+  // limit). pubkey = '' rows are event-scoped spend not tied to one attendee.
+  addUsage(
+    coordinate: string,
+    pubkey: string,
+    delta: { bytes?: number; durationSec?: number; calls?: number },
+    now: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO usage (coordinate, pubkey, bytes, duration_sec, calls, updated_at)
+         VALUES (:coordinate, :pubkey, :bytes, :duration_sec, :calls, :now)
+         ON CONFLICT(coordinate, pubkey) DO UPDATE SET
+           bytes = bytes + excluded.bytes,
+           duration_sec = duration_sec + excluded.duration_sec,
+           calls = calls + excluded.calls,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate,
+        pubkey,
+        bytes: delta.bytes ?? 0,
+        duration_sec: delta.durationSec ?? 0,
+        calls: delta.calls ?? 0,
+        now,
+      });
+  }
+
+  /** Cumulative usage for one attendee (defaults to zeros when none recorded). */
+  getUsage(coordinate: string, pubkey: string): { bytes: number; durationSec: number; calls: number } {
+    const row = this.db
+      .prepare("SELECT bytes, duration_sec, calls FROM usage WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { bytes: number; duration_sec: number; calls: number } | undefined;
+    return { bytes: row?.bytes ?? 0, durationSec: row?.duration_sec ?? 0, calls: row?.calls ?? 0 };
+  }
+
+  /** Cumulative usage summed across every attendee for one event. */
+  getEventUsage(coordinate: string): { bytes: number; durationSec: number; calls: number } {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(bytes),0) AS bytes, COALESCE(SUM(duration_sec),0) AS duration_sec, COALESCE(SUM(calls),0) AS calls FROM usage WHERE coordinate = ?",
+      )
+      .get(coordinate) as { bytes: number; duration_sec: number; calls: number };
+    return { bytes: row.bytes, durationSec: row.duration_sec, calls: row.calls };
+  }
+
+  // ── billing state machine (spec §9, D5, §13.4) ────────────────────────────
+  getBillingState(coordinate: string): BillingStateRow | undefined {
+    return this.db.prepare("SELECT * FROM billing_state WHERE coordinate = ?").get(coordinate) as
+      | BillingStateRow
+      | undefined;
+  }
+
+  /** Upsert the persisted billing state for an installation. */
+  setBillingState(row: {
+    coordinate: string;
+    principalKind: string;
+    principalId: string;
+    state: BillingStateRow["state"];
+    reason?: string | null;
+    graceUntil?: number | null;
+    now: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO billing_state (coordinate, principal_kind, principal_id, state, reason, grace_until, updated_at)
+         VALUES (:coordinate, :principal_kind, :principal_id, :state, :reason, :grace_until, :updated_at)
+         ON CONFLICT(coordinate) DO UPDATE SET
+           principal_kind = excluded.principal_kind, principal_id = excluded.principal_id,
+           state = excluded.state, reason = excluded.reason,
+           grace_until = excluded.grace_until, updated_at = excluded.updated_at`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        principal_kind: row.principalKind,
+        principal_id: row.principalId,
+        state: row.state,
+        reason: row.reason ?? null,
+        grace_until: row.graceUntil ?? null,
+        updated_at: row.now,
+      });
   }
 
   // ── Cashu payment journal (audit finding H8) ──────────────────────────────
@@ -1181,18 +1869,27 @@ export class Store {
     return Number(info.changes);
   }
 
-  // ── TTL pruning (audit COORD-24) ──────────────────────────────────────────
+  // ── TTL pruning (audit COORD-24 / P0-1) ───────────────────────────────────
   /**
-   * Drop dedupe rows older than `maxAgeMs` (default 30 days): `seen_rumors`
-   * (by seen_at) and `marmot_consumed_kps` (by created_at). Both are idempotency
-   * ledgers whose entries are useless once the gift-wrap backfill window (days,
-   * not months) has passed. Run at startup + daily. Returns rows deleted.
+   * Drop `marmot_consumed_kps` older than `maxAgeMs` (default 30 days). These are
+   * event-scoped, single-use key-package receipts safe to age out past the
+   * gift-wrap backfill window.
+   *
+   * `seen_rumors` is deliberately NOT pruned here (audit P0-1 interim guard). The
+   * coordinator inbox is re-scanned from `since: 0` on every startup, and fresh
+   * event installs backfill full history — an unbounded horizon. Pruning the
+   * dedupe ledger at 30 days made any command older than the TTL look new on the
+   * next rescan and re-execute (an old revoke rotating the ECK again, an old
+   * recompute re-billing a provider). Retaining the ledger trades bounded storage
+   * (small rows, low command volume) for correctness. This is a band-aid: the
+   * durable fix is a monotonic command/install-generation model (deferred), which
+   * would let the ledger be safely bounded again. Run at startup + daily; returns
+   * rows deleted.
    */
   pruneOldData(now: number, maxAgeMs = 30 * 24 * 60 * 60 * 1000): number {
     const cutoff = now - maxAgeMs;
-    const rumors = this.db.prepare("DELETE FROM seen_rumors WHERE seen_at < ?").run(cutoff);
     const kps = this.db.prepare("DELETE FROM marmot_consumed_kps WHERE created_at < ?").run(cutoff);
-    return Number(rumors.changes) + Number(kps.changes);
+    return Number(kps.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────
@@ -1287,6 +1984,7 @@ export class Store {
     accountPubkey: string;
     chatPubkey: string;
     clientId?: string | null;
+    label?: string | null;
     status?: "active" | "revoked";
     now: number;
   }): boolean {
@@ -1294,10 +1992,11 @@ export class Store {
     if (existing && existing.account_pubkey !== row.accountPubkey) return false;
     this.db
       .prepare(
-        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, status, updated_at)
-         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, COALESCE(:status, 'active'), :now)
+        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, label, status, updated_at)
+         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, :label, COALESCE(:status, 'active'), :now)
          ON CONFLICT(coordinate, chat_pubkey) DO UPDATE SET
            client_id = COALESCE(excluded.client_id, marmot_chat_keys.client_id),
+           label = COALESCE(excluded.label, marmot_chat_keys.label),
            status = COALESCE(:status, marmot_chat_keys.status),
            updated_at = excluded.updated_at`,
       )
@@ -1306,6 +2005,7 @@ export class Store {
         accountPubkey: row.accountPubkey,
         chatPubkey: row.chatPubkey,
         clientId: row.clientId ?? null,
+        label: row.label ?? null,
         status: row.status ?? null,
         now: row.now,
       });
@@ -1356,4 +2056,30 @@ export class Store {
       .prepare("SELECT 1 FROM marmot_consumed_kps WHERE coordinate = ? AND kp_event_id = ?")
       .get(coordinate, kpEventId);
   }
+}
+
+/**
+ * Canonical content hash of a talk submission for NIP §3.3 equal-revision
+ * rejection. The simplest canonicalization sufficient to detect a content change:
+ * the media ciphertext hash `x`, the title, the description, the co-speaker set
+ * (order-independent — sorted), and the language, space-joined and SHA-256'd. Two
+ * submissions with the same revision hash equal iff those fields are identical.
+ */
+export function talkContentHash(fields: {
+  mediaX: string;
+  title: string;
+  description: string;
+  /** JSON of the speakers array (parsed + sorted so co-speaker order is irrelevant). */
+  speakersJson: string;
+  lang: string;
+}): string {
+  let speakers: string[];
+  try {
+    const parsed = JSON.parse(fields.speakersJson);
+    speakers = Array.isArray(parsed) ? [...parsed].map(String).sort() : [];
+  } catch {
+    speakers = [];
+  }
+  const canonical = [fields.mediaX, fields.title, fields.description, speakers.join(","), fields.lang].join(" ");
+  return sha256Hex(utf8ToBytes(canonical));
 }

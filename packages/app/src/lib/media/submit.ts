@@ -11,6 +11,7 @@ import {
   KIND_PROFILE_SUBMISSION,
   KIND_MY_PROFILE,
   KIND_BLOSSOM_SERVERS,
+  MAX_LIBRARY_TEXTS,
   encryptMedia,
   freshCopy,
   blindedD,
@@ -18,6 +19,8 @@ import {
   mediaDescriptorSchema,
   type MediaDescriptor,
   type AttendeeProfile,
+  pickLatest,
+  MAX_SUBMISSION_MEDIA,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
@@ -31,11 +34,30 @@ import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 // The self-copy (31602) and reuse library are decrypted private data, cached
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
 // readiness paint the last intro/library instantly instead of re-decrypting.
-type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string };
+type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string; rev?: number };
+
+/**
+ * Whether a self-copy carries an intro (audit UX-O5). An intro is EITHER a
+ * recording (media of kind "intro") OR an authored text intro (F1). Both the
+ * readiness store and Join's post-approval routing must agree, so this is the
+ * single source of truth — checking only media wrongly told text-intro users to
+ * "record your intro."
+ */
+export function hasIntro(
+  self: { media?: MediaDescriptor[]; introText?: string } | undefined,
+): boolean {
+  return (self?.media ?? []).some((m) => m.kind === "intro") || !!self?.introText?.trim();
+}
+
 function selfCopyKey(coordinate: string): string {
   return `selfcopy:${coordinate}`;
 }
 const MEDIALIB_KEY = "medialib";
+const TEXTLIB_KEY = "textlib";
+
+/** The cross-event reuse library: recorded intros (`media`) + authored text intros
+ *  (`texts`). Both live in the SINGLE per-user `a:null` 31602 entry (§6.2). */
+export type ReuseLibrary = { media: MediaDescriptor[]; texts: string[] };
 
 /** Cached self-copy for a coordinate (no network), or undefined. */
 export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
@@ -44,6 +66,10 @@ export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
 /** Cached reuse-library media (no network), or undefined. */
 export function cachedLibrary(): MediaDescriptor[] | undefined {
   return cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.data;
+}
+/** Cached reuse-library text intros (no network), or undefined. */
+export function cachedTextLibrary(): string[] | undefined {
+  return cacheGet<string[]>(TEXTLIB_KEY)?.data;
 }
 
 /**
@@ -153,11 +179,24 @@ export async function submitProfileAndMedia(
   const attendeePubkey = await signer.getPublicKey();
   const introText = args.introText?.trim() || undefined;
 
+  // Monotonic per-(coordinate) revision (NIP §3.3): the last-sent rev lives on the
+  // per-event self-copy (the client's own durable per-event submission store), so we
+  // read it back and bump on every edit. A first submission is rev 0; nothing else
+  // in the app depends on the exact value — only that it strictly increases per edit.
+  const prevSelf = await loadSelfCopy(signer, ctx, args.blindingKey).catch(() => undefined);
+  const rev = (prevSelf?.rev ?? -1) + 1;
+
+  // v2 (NIP §8): the 21601 submission carries at most MAX_SUBMISSION_MEDIA (4)
+  // descriptors, or the coordinator rejects it wholesale at the schema boundary.
+  // The 31602 self-copy/library keeps the full set (MAX_MEDIA=20).
+  const submissionMedia = args.media.slice(0, MAX_SUBMISSION_MEDIA);
+
   // 21601 → E_inbox (gift-wrapped).
   const submission = {
-    v: 1,
+    v: 2,
+    rev,
     profile: args.profile,
-    media: args.media,
+    media: submissionMedia,
     ...(introText ? { intro_text: introText } : {}),
   };
   const wrap = await signerWrap(signer, ctx.config.inbox, {
@@ -167,10 +206,12 @@ export async function submitProfileAndMedia(
   });
 
   // 31602 self-copy (blinded d over the self-conversation key). Keeps the
-  // attendee's own device holding their authored text intro too.
+  // attendee's own device holding their authored text intro too, and the `rev`
+  // just sent so the next edit bumps from it.
   const selfContent = {
-    v: 1,
+    v: 2,
     a: ctx.coordinate,
+    rev,
     profile: args.profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
@@ -186,26 +227,56 @@ export async function submitProfileAndMedia(
   await Promise.all([
     publishOrQueue(wrap as any, ctx.config.relays),
     publishOrQueue(selfEvent),
-    addToLibrary(signer, args.media, args.blindingKey),
+    // Every submitted intro — recorded OR authored text — is also folded into the
+    // cross-event reuse library so it can be picked at a later event (F1 reuse).
+    addToLibrary(signer, args.blindingKey, {
+      media: args.media,
+      texts: introText ? [introText] : [],
+    }),
   ]);
 }
 
 /**
- * Add media descriptors to the reuse library — the 31602 entry with `a:null` and
- * d blinded over the literal "library" (spec §6.2, §7.3). Merges with existing.
+ * Add media descriptors and/or authored text intros to the reuse library — the
+ * 31602 entry with `a:null` and d blinded over the literal "library" (spec §6.2,
+ * §7.3). This entry is per-USER, not per-event (its d carries no coordinate), so it
+ * spans every event. Merges with the existing entry:
+ *  - media dedup by ciphertext hash `x`;
+ *  - texts dedup by exact string, re-adding an existing text moves it to newest;
+ *  - texts are capped to the most-recent MAX_LIBRARY_TEXTS (keeps the self-encrypted
+ *    entry under the NIP-44 ceiling).
  */
 export async function addToLibrary(
   signer: AppSigner,
-  media: MediaDescriptor[],
   blindingKey: Uint8Array,
+  additions: { media?: MediaDescriptor[]; texts?: string[] },
 ): Promise<void> {
-  if (media.length === 0) return;
+  const media = additions.media ?? [];
+  const texts = (additions.texts ?? []).map((s) => s.trim()).filter(Boolean);
+  if (media.length === 0 && texts.length === 0) return;
+
   const pubkey = await signer.getPublicKey();
   const libD = blindedDLiteral(blindingKey, "library");
-  const existing = await loadLibrary(signer, blindingKey);
+  const existing = await loadLibraryFull(signer, blindingKey);
+
   const byHash = new Map<string, MediaDescriptor>();
-  for (const d of [...existing, ...media]) byHash.set(d.x, d);
-  const content = { v: 1, a: null, media: [...byHash.values()] };
+  for (const d of [...existing.media, ...media]) byHash.set(d.x, d);
+  const mergedMedia = [...byHash.values()];
+
+  const mergedTexts = [...existing.texts];
+  for (const txt of texts) {
+    const at = mergedTexts.indexOf(txt);
+    if (at >= 0) mergedTexts.splice(at, 1); // re-adding bumps it to most-recent
+    mergedTexts.push(txt);
+  }
+  const cappedTexts = mergedTexts.slice(-MAX_LIBRARY_TEXTS);
+
+  const content = {
+    v: 2,
+    a: null,
+    media: mergedMedia,
+    ...(cappedTexts.length ? { intro_texts: cappedTexts } : {}),
+  };
   const cipher = await signer.nip44Encrypt(pubkey, JSON.stringify(content));
   const event = await signer.signEvent({
     kind: KIND_MY_PROFILE,
@@ -214,6 +285,8 @@ export async function addToLibrary(
     content: cipher,
   });
   await publishOrQueue(event);
+  cacheSet(MEDIALIB_KEY, mergedMedia, event.created_at);
+  cacheSet(TEXTLIB_KEY, cappedTexts, event.created_at);
 }
 
 /**
@@ -255,9 +328,7 @@ export async function loadSelfCopy(
   signer: AppSigner,
   ctx: EventContext,
   blindingKey: Uint8Array,
-): Promise<
-  { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string } | undefined
-> {
+): Promise<SelfCopy | undefined> {
   const pubkey = await signer.getPublicKey();
   const d = blindedD(blindingKey, ctx.coordinate, pubkey);
   const events = await fetchEvents({
@@ -265,7 +336,7 @@ export async function loadSelfCopy(
     authors: [pubkey],
     "#d": [d],
   });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(events);
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
@@ -273,11 +344,13 @@ export async function loadSelfCopy(
       profile?: AttendeeProfile;
       media?: MediaDescriptor[];
       intro_text?: string;
+      rev?: number;
     };
     const self: SelfCopy = {
       profile: parsed.profile,
       media: parsed.media ?? [],
       introText: parsed.intro_text,
+      rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
     };
     cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
     return self;
@@ -286,11 +359,14 @@ export async function loadSelfCopy(
   }
 }
 
-/** Load the attendee's reuse-library media descriptors (spec §6.2). */
-export async function loadLibrary(
+/**
+ * Load the attendee's full cross-event reuse library (spec §6.2): recorded intros
+ * AND authored text intros, from the single per-user `a:null` 31602 entry.
+ */
+export async function loadLibraryFull(
   signer: AppSigner,
   blindingKey: Uint8Array,
-): Promise<MediaDescriptor[]> {
+): Promise<ReuseLibrary> {
   const pubkey = await signer.getPublicKey();
   const libD = blindedDLiteral(blindingKey, "library");
   const events = await fetchEvents({
@@ -298,15 +374,27 @@ export async function loadLibrary(
     authors: [pubkey],
     "#d": [libD],
   });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  if (!latest) return [];
+  const latest = pickLatest(events);
+  if (!latest) return { media: [], texts: [] };
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
-    const parsed = JSON.parse(json) as { media?: MediaDescriptor[] };
+    const parsed = JSON.parse(json) as { media?: MediaDescriptor[]; intro_texts?: string[] };
     const media = parsed.media ?? [];
+    // Older library entries (written before text reuse) carry no intro_texts —
+    // treated as an empty text library, so they still load cleanly.
+    const texts = (parsed.intro_texts ?? []).filter((s) => typeof s === "string");
     cacheSet(MEDIALIB_KEY, media, latest.created_at ?? 0);
-    return media;
+    cacheSet(TEXTLIB_KEY, texts, latest.created_at ?? 0);
+    return { media, texts };
   } catch {
-    return [];
+    return { media: [], texts: [] };
   }
+}
+
+/** Load the attendee's reuse-library media descriptors only (spec §6.2). */
+export async function loadLibrary(
+  signer: AppSigner,
+  blindingKey: Uint8Array,
+): Promise<MediaDescriptor[]> {
+  return (await loadLibraryFull(signer, blindingKey)).media;
 }

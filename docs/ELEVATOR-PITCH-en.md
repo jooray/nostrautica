@@ -14,7 +14,7 @@ Once in, each attendee records a short intro video about themselves and, optiona
 
 This is the core idea: the app doesn't just list who's attending — it tells you who you should meet.
 
-Intro videos and talks are transcribed and analyzed to build a picture of each attendee: their interests, skills, and what they're working on. The system then scores every pair of attendees, not just on how similar they are, but on how well they'd complement each other — a cryptographer, a programmer and a designer at a cypherpunk event, or a drummer, bassist and singer at a music gathering. Every match comes with a plain-language explanation of why the two of you should talk, not just a bare score. As more people join, matches keep recalculating, so your "people to meet" list is always current.
+Intro videos and talks are transcribed and analyzed to build a picture of each attendee: their interests, skills, and what they're working on. At smaller events the system scores every pair; at larger events it scores selected likely and deliberately varied candidates, not just on how similar they are, but on how well they'd complement each other — a cryptographer, a programmer and a designer at a cypherpunk event, or a drummer, bassist and singer at a music gathering. Every match comes with a plain-language explanation of why the two of you should talk, not just a bare score. As more people join, matches keep recalculating, so your "people to meet" list is always current.
 
 On top of that, you can see which attendees you already know from your existing social circle, so familiar faces surface too.
 

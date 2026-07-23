@@ -54,6 +54,7 @@ function signedConfig(at: number, relays: string[] = []) {
       created_at: at,
       tags: [
         ["d", IDENT],
+        ["v", "2"],
         ["inbox", inbox],
         ...relays.map((r) => ["relay", r]),
       ],
@@ -105,5 +106,25 @@ describe("loadEventContext — forged-config rejection (APPK-1)", () => {
     routeByKind([signedConfig(1_000, ["wss://event-home.example"])]);
     await loadEventContext(naddr);
     expect(eventRelayHints(coordinate)).toEqual(["wss://event-home.example"]);
+  });
+
+  it("uses edited event metadata as the context cache freshness stamp", async () => {
+    const calendar = finalizeEvent(
+      {
+        kind: KIND_CALENDAR_EVENT,
+        created_at: 2_000,
+        tags: [["d", IDENT], ["title", "Edited"]],
+        content: "",
+      },
+      eidSk,
+    );
+    fetchEvents.mockImplementation((filter: { kinds?: number[] }) => {
+      if (filter.kinds?.[0] === KIND_EVENT_CONFIG) return Promise.resolve([signedConfig(1_000)]);
+      if (filter.kinds?.[0] === KIND_CALENDAR_EVENT) return Promise.resolve([calendar]);
+      return Promise.resolve([]);
+    });
+    const ctx = await loadEventContext(naddr);
+    expect(ctx.title).toBe("Edited");
+    expect(ctx.contextAt).toBe(2_000);
   });
 });

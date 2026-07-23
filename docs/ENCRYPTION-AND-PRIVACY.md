@@ -58,6 +58,7 @@ concrete code issues (F1–F3) have since been fixed.
 | **Coordinator identity** | secp256k1 | operator-provided | env `NOSTRAUTICA_COORDINATOR_NSEC` or `ncryptsec_file` + passphrase | coordinator operator | public key referenced in `31600` `coordinator` tag |
 | **Media key** (AES-256-GCM) | 32 bytes + 12-byte IV | fresh per blob, `aesGcmEncrypt()` | only inside encrypted media descriptors | anyone who can read the descriptor | rides inside `21601`/`31602`/`31603` payloads, never its own event |
 | **Blinding key** | derived / 32-byte seed | self-conversation-key (local) or random seed in `30078` `nostrautica:blindseed` (remote signer) | derived, or self-encrypted `30078` | the user | never (it's a self-secret) |
+| **Remote-signer chat device key** | 32-byte secp256k1 secret | generated locally when a NIP-07/NIP-46 account first opens chat | local Marmot IndexedDB state; self-encrypted blinded `31602` relay backup | the account's chat client | never directly; the coordinator receives only its public key through account-sealed `21607` |
 
 ---
 
@@ -77,6 +78,23 @@ project-wide; the ladder passes `'nip44'` explicitly). Source: `crypto.ts`.
 | Media blobs on Blossom | AES-256-GCM, fresh key+IV per blob, whole-file single-shot | `aesGcmEncrypt`; no chunked/streaming (documented v1 limit) |
 | Blinded `d`-tags | HMAC-SHA256(key, message), first 16 bytes | `blindedD`; key = self-conv-key (31602) or ECK (31603/31605) |
 | Invite proofs | Schnorr sig by the invite key over `sha256("coordinate:attendee-pubkey")` | `makeInviteProof`/`verifyInviteProof` |
+
+### Marmot state and recovery
+
+The remote-signer chat backup contains only the 32-byte chat identity key. It does
+not transfer MLS group/epoch state, key-package material, membership state, or
+history. A second device restores the identity but joins with its own client slot
+and MLS leaf, so its readable history starts at its own join epoch.
+
+Coordinator Marmot state in SQLite is non-reconstructible operational state. Back
+up the database with the coordinator identity key, restore-test it, and keep a
+second administrator for chat-enabled events. Browser logout normally self-encrypts
+chat state; if that best-effort step fails, plaintext local state can remain.
+
+The relay backup is self-encrypted, but relays observe its author/timing. Account
+signer compromise can decrypt it. Backup retrieval failure and confirmed absence
+are not equivalent, and concurrent backup creation can fork identities; these are
+known implementation limitations, not guarantees supplied by the backup format.
 
 **Assessment: primitives are used correctly.** Using the ECK directly as a
 NIP-44 conversation key is unusual but sound — NIP-44's construction takes a

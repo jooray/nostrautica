@@ -15,18 +15,22 @@
     type EventContext,
   } from "$lib/events/event-context.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
-  import { receiveGrants } from "$lib/events/attendee.js";
+  import { receiveGrants, fetchRoster, cachedRoster } from "$lib/events/attendee.js";
+  import { buildDeviceAccountMap, chatMembers } from "$lib/chat/members.js";
+  import type { RosterContent } from "@nostrautica/protocol";
   import { evaluateChatGate } from "$lib/chat/gate.js";
   import { chatSession } from "$lib/chat/session.svelte.js";
   import { fillHeight } from "$lib/components/fill-height.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   import ChatHandoffCard from "$lib/components/ChatHandoffCard.svelte";
   import type { ChatMessage } from "$lib/chat/messages.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -49,6 +53,14 @@
   let sendError = $state<string | null>(null);
   let draft = $state("");
   let sending = $state(false);
+
+  // Draft-safe auto-refresh (App-2): persist the compose text (owner-scoped) and
+  // hold the pending reload while it's non-empty; it applies once the box clears.
+  $effect(() => {
+    const text = draft;
+    saveDraft(`chat:${naddr}`, text);
+    if (text.trim().length > 0) return refreshGuard.hold("chat");
+  });
   // Set once our own membership-resolve pass (grant fetch + shell re-sync) has run.
   let membershipKnown = $state(false);
   // The session itself lives in the shell (chat/session.svelte.ts), started as
@@ -56,9 +68,12 @@
   // page mounts. So this page reads it rather than owning it: no re-handshake on
   // every visit, and the messages that arrived while the user was on other tabs
   // are already here.
-  const chat = $derived(chatSession.chat);
   const messages = $derived(chatSession.messages);
   const chatPubkey = $derived(chatSession.chatPubkey);
+  // Multi-tab (H-7): a read-only follower can't send from this tab — chat is
+  // active in another tab, or Web Locks is unavailable. Show a notice + disable
+  // the composer; the newest messages still render from the leader's broadcast.
+  const readOnly = $derived(chatSession.readOnly);
   // Setup usually completes within seconds (member publishes key package →
   // coordinator adds them → welcome lands). If it's still spinning after a grace
   // period the coordinator may be slow/asleep or a socket dropped — surface a
@@ -68,6 +83,15 @@
   // reactively as new senders show up in `messages`.
   let profiles = $state<Map<string, ProfileMeta>>(new Map());
   let displayMode = $state<DisplayMode>(loadDisplayMode());
+  // The ECK roster's chat_keys map every device key → its account, so N devices of
+  // one person show as one member and one name/colour (NIP §10.1 dedupe).
+  let roster = $state<RosterContent | undefined>(undefined);
+  const deviceAccountMap = $derived(buildDeviceAccountMap(roster));
+  const members = $derived(chatMembers(roster));
+  function accountOf(pubkey: string): string {
+    return deviceAccountMap.get(pubkey) ?? pubkey;
+  }
+  let showMembers = $state(false);
 
   function setDisplayMode(mode: DisplayMode): void {
     displayMode = mode;
@@ -79,6 +103,11 @@
   }
 
   onMount(async () => {
+    // Restore a compose draft left by a previous session/refresh (App-2).
+    if (!draft && session.pubkey) {
+      const saved = loadDraft(`chat:${naddr}`);
+      if (saved) draft = saved;
+    }
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
@@ -91,6 +120,13 @@
         await receiveGrants(session.signer).catch(() => {});
         await eventShell.sync(naddr);
       }
+      // Roster carries the device→account map (chat_keys) for member/name dedupe.
+      roster = cachedRoster(ctx.coordinate);
+      void fetchRoster(ctx)
+        .then((r) => {
+          if (r) roster = r;
+        })
+        .catch(() => {});
     } catch (e) {
       error = e;
     } finally {
@@ -159,7 +195,9 @@
 
   async function send() {
     const text = draft.trim();
-    if (!text || !chat || sending) return;
+    // A leader has its own client; an interactive follower proxies through the
+    // leader tab (chatSession.send). Only a read-only follower can't send.
+    if (!text || sending || readOnly) return;
     sending = true;
     sendError = null;
     try {
@@ -240,9 +278,15 @@
   // Dedup guard is plain (non-reactive) — it only decides what to re-fetch.
   const fetchedProfileFor = new Set<string>();
   $effect(() => {
-    const missing = [...new Set(messages.map((m) => m.pubkey))].filter(
-      (pk) => !fetchedProfileFor.has(pk),
-    );
+    // Fetch both the device kind-0 (fallback name) and the account it maps to
+    // (primary name), plus every chat member's account for the member list.
+    const wanted = new Set<string>();
+    for (const m of messages) {
+      wanted.add(m.pubkey);
+      wanted.add(accountOf(m.pubkey));
+    }
+    for (const mem of members) wanted.add(mem.account);
+    const missing = [...wanted].filter((pk) => !fetchedProfileFor.has(pk));
     if (missing.length === 0) return;
     for (const pk of missing) fetchedProfileFor.add(pk);
     const cached = cachedProfiles(missing);
@@ -258,14 +302,25 @@
   // where every sender in view already is one; strip it for our own display
   // only (the published kind-0 keeps the full branding).
   function nameOf(pubkey: string): string {
-    const raw = profiles.get(pubkey)?.name?.trim();
-    if (!raw) return pubkey.slice(0, 8);
+    // Resolve the device sender to its account name first (roster mapping), then
+    // fall back to the device's own kind-0, then a truncated key.
+    const account = accountOf(pubkey);
+    const raw = (profiles.get(account)?.name ?? profiles.get(pubkey)?.name)?.trim();
+    if (!raw) return account.slice(0, 8);
     return raw.replace(/^Nostrautica\s+/i, "").replace(/\s*\(chat\)\s*$/i, "");
   }
-  // Deterministic per-sender hue (shared with Avatar's gradient) for the IRC
-  // nick colour — same person always renders the same colour everywhere.
+  function pictureOf(pubkey: string): string | undefined {
+    const account = accountOf(pubkey);
+    return profiles.get(account)?.picture ?? profiles.get(pubkey)?.picture;
+  }
+  // Deterministic per-PERSON hue (shared with Avatar's gradient) for the IRC nick
+  // colour — keyed by account, so two devices of one person render one colour.
   function nickHue(pubkey: string): string {
-    return avatarHues(pubkey)[0].toFixed(0);
+    return avatarHues(accountOf(pubkey))[0].toFixed(0);
+  }
+  // Plural-aware "N devices" affix for a chat member.
+  function devicesLabel(n: number): string {
+    return tp("chat.members.devices", n);
   }
 </script>
 
@@ -321,6 +376,23 @@
     </button>
   </div>
 
+  <!-- One entry per person (roster chat_keys dedupe): N devices of one account
+       collapse into one member, with a subtle "N devices" affix. -->
+  {#if members.length > 0}
+    <details class="members" bind:open={showMembers}>
+      <summary>{t("chat.members.title")} · {members.length}</summary>
+      <ul>
+        {#each members as mem (mem.account)}
+          <li>
+            <Avatar pubkey={mem.account} name={nameOf(mem.account)} picture={pictureOf(mem.account)} size={22} />
+            <span class="mname">{nameOf(mem.account)}</span>
+            {#if mem.deviceCount > 1}<span class="devcount">{devicesLabel(mem.deviceCount)}</span>{/if}
+          </li>
+        {/each}
+      </ul>
+    </details>
+  {/if}
+
   <!-- A scroll container must be reachable by keyboard (WCAG 2.1.1) — the
        noninteractive-tabindex rule doesn't account for scrollable regions. -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
@@ -365,9 +437,9 @@
             <div class="msg" class:mine>
               {#if showSender}
                 <Avatar
-                  pubkey={m.pubkey}
-                  name={profiles.get(m.pubkey)?.name}
-                  picture={profiles.get(m.pubkey)?.picture}
+                  pubkey={accountOf(m.pubkey)}
+                  name={nameOf(m.pubkey)}
+                  picture={pictureOf(m.pubkey)}
                   size={26}
                 />
               {:else}
@@ -395,30 +467,40 @@
     </div>
   {/if}
 
-  <form class="compose" bind:this={composerEl} onsubmit={(e) => { e.preventDefault(); void send(); }}>
-    <textarea
-      bind:value={draft}
-      rows="1"
-      placeholder={t("chat.compose.placeholder")}
-      disabled={phase === "setup"}
-      onkeydown={(e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          void send();
-        }
-      }}
-    ></textarea>
-    <button class="send" type="submit" disabled={!draft.trim() || sending || phase === "setup"} aria-label={t("chat.send")}>
-      <Icon name="send" size={20} />
-    </button>
-  </form>
+  {#if readOnly}
+    <div class="disclosure" role="note">
+      <Icon name="info" size={18} />
+      <div>
+        <p style="font-weight:650">{t("chat.otherTab.title")}</p>
+        <p>{t("chat.otherTab.body")}</p>
+      </div>
+    </div>
+  {:else}
+    <form class="compose" bind:this={composerEl} onsubmit={(e) => { e.preventDefault(); void send(); }}>
+      <textarea
+        bind:value={draft}
+        rows="1"
+        placeholder={t("chat.compose.placeholder")}
+        disabled={phase === "setup"}
+        onkeydown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void send();
+          }
+        }}
+      ></textarea>
+      <button class="send" type="submit" disabled={!draft.trim() || sending || phase === "setup"} aria-label={t("chat.send")}>
+        <Icon name="send" size={20} />
+      </button>
+    </form>
+  {/if}
 
   {#if sendError}
     <p class="send-error" role="alert">{sendError}</p>
   {/if}
 
-  {#if chat && ctx && session.signer}
-    <ChatHandoffCard signer={session.signer} {ctx} />
+  {#if ctx}
+    <ChatHandoffCard {ctx} />
   {/if}
 {/if}
 
@@ -486,6 +568,39 @@
     display: flex;
     gap: 0.4rem;
     margin: 0.6rem 0 0.25rem;
+  }
+  .members {
+    margin: 0.1rem 0 0.35rem;
+    font-size: 0.85rem;
+  }
+  .members summary {
+    cursor: pointer;
+    color: var(--text-dim);
+    padding: 0.2rem 0;
+  }
+  .members ul {
+    list-style: none;
+    margin: 0.3rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
+  .members li {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+  }
+  .members .mname {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+  }
+  .members .devcount {
+    font-size: 0.72rem;
+    color: var(--text-dim);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
   }
   .messages {
     display: flex;

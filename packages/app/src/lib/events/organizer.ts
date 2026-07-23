@@ -35,6 +35,7 @@ import {
   base64ToBytes,
   bytesToBase64,
   hexToBytes,
+  bytesToHex,
   blindedD,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
@@ -46,14 +47,18 @@ import {
   type TalksMode,
   type ChatBackend,
   KIND_INVITE_LIST,
+  KIND_APP_DATA,
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
+  ADMIN_COMMAND_TTL_SEC,
+  type EventKeysBackup,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
   type EckVersion,
   type RosterContent,
+  pickLatest,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -104,6 +109,20 @@ export function directoryPublisher(ctx: EventContext): string {
 }
 
 /**
+ * Authors whose coordinator-authored records (31603/31604/31605/31606/31610) a
+ * reader accepts (NIP §3.7 record-authority pinning): the coordinator currently
+ * named in `ctx.config` (the newest fetchable 31600 the caller loaded), plus E_id
+ * (which authors these when the event has no coordinator, and is always a trusted
+ * authority). Records by a formerly assigned coordinator are excluded, so a
+ * detach/replace stops them being trusted. Pair with `onlyByAuthors`.
+ */
+export function acceptedRecordAuthors(ctx: EventContext): string[] {
+  return ctx.config.coordinator
+    ? [ctx.config.coordinator, ctx.config.eidPubkey]
+    : [ctx.config.eidPubkey];
+}
+
+/**
  * Fetch and unwrap all inbound gift wraps to E_inbox, collapsing to the latest
  * join request + submission per attendee (latest by rumor created_at wins).
  */
@@ -112,10 +131,14 @@ export async function fetchPending(
   keys: EventKeys,
 ): Promise<PendingRequest[]> {
   if (!keys.einboxNsecHex) throw new Error("missing E_inbox key");
-  const einboxSk = hexToBytes(keys.einboxNsecHex);
+  // Read the current E_inbox AND any prior inbox retained after a rotation (NIP §3.7):
+  // pre-rotation submissions were sealed to a superseded inbox the organizer still
+  // holds, so history stays readable across a detach/replace.
+  const inboxSks = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])].map((h) => hexToBytes(h));
+  const inboxPubkeys = inboxSks.map((sk) => getPublicKey(sk));
   // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
   const wraps = (await fetchEventsRelayOnly(
-    { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(einboxSk)], since: giftwrapSince() },
+    { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, since: giftwrapSince() },
     ctx.config.relays,
   )) as unknown as GiftWrap[];
 
@@ -125,13 +148,21 @@ export async function fetchPending(
     { at: number; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
   >();
 
-  for (const wrap of wraps) {
-    let rumor;
-    try {
-      rumor = unwrapRumor(wrap, einboxSk);
-    } catch {
-      continue; // not ours / malformed
+  /** Unwrap a wrap with whichever inbox secret it was sealed to (current or prior). */
+  const unwrapAny = (wrap: GiftWrap) => {
+    for (const sk of inboxSks) {
+      try {
+        return unwrapRumor(wrap, sk);
+      } catch {
+        /* try the next inbox secret */
+      }
     }
+    return undefined;
+  };
+
+  for (const wrap of wraps) {
+    const rumor = unwrapAny(wrap);
+    if (!rumor) continue; // not ours / malformed
     if (rumor.kind === KIND_JOIN_REQUEST) {
       let content;
       try {
@@ -223,7 +254,7 @@ export async function approveAttendee(
   // to be E_id (or the coordinator). Sealing with the organizer's personal key
   // would be rejected as forged (the no-coordinator approval path).
   const grant = {
-    v: 1,
+    v: 2,
     a: ctx.coordinate,
     role,
     eck: keys.eck,
@@ -237,7 +268,7 @@ export async function approveAttendee(
   // 2. Directory entry (31603) under ECK, blinded d over ECK, signed by E_id.
   const entryD = blindedD(eckBytes, ctx.coordinate, req.attendeePubkey);
   const entryContent = {
-    v: 1,
+    v: 2,
     pubkey: req.attendeePubkey,
     ...(req.name ? { name: req.name } : {}),
     profile: req.profile ?? { about: "", skills: [], looking_for: "", links: [] },
@@ -259,7 +290,7 @@ export async function approveAttendee(
         ["d", entryD],
         ["a", ctx.coordinate],
         ["eck", String(eck.id)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(eckBytes, JSON.stringify(entryContent)),
     },
@@ -313,12 +344,12 @@ export async function loadRoster(
   const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
   const currentId = eckVersions.reduce((m, v) => Math.max(m, v.id), 1);
   const at = latest?.created_at ?? 0;
-  if (!latest) return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };
+  if (!latest) return { roster: { v: 2, eck_current: currentId, attendees: [] }, at };
   try {
     const { eckDecrypt } = await import("@nostrautica/protocol");
     return { roster: JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent, at };
   } catch {
-    return { roster: { v: 1, eck_current: currentId, attendees: [] }, at };
+    return { roster: { v: 2, eck_current: currentId, attendees: [] }, at };
   }
 }
 
@@ -344,7 +375,7 @@ function buildRosterEvent(
         ["d", identifier],
         ["a", ctx.coordinate],
         ["eck", String(eckId)],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: eckEncrypt(eckBytes, JSON.stringify(content)),
     },
@@ -372,9 +403,12 @@ export async function sendAdminCommand(
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eidSk = hexToBytes(keys.eidNsecHex);
+  // Replay horizon (NIP §3.4): the command is void after created_at + 48h, so an
+  // old command can never re-execute from a coordinator backfill/restore.
+  const expires = Math.floor(Date.now() / 1000) + ADMIN_COMMAND_TTL_SEC;
   const wrap = wrapRumor(eidSk, ctx.config.coordinator, {
     kind: KIND_ADMIN_COMMAND,
-    content: { v: 1, a: ctx.coordinate, cmd, args },
+    content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
   await publishOrQueue(wrap as any, ctx.config.relays);
 }
@@ -400,7 +434,7 @@ export async function addCoOrganizer(
   const wrap = wrapRumor(eidSk, coOrganizerPubkey, {
     kind: KIND_ORGANIZER_GRANT,
     content: {
-      v: 1,
+      v: 2,
       a: ctx.coordinate,
       eid_nsec: keys.eidNsecHex,
       einbox_nsec: keys.einboxNsecHex,
@@ -478,7 +512,7 @@ export async function generateInvites(
     { kinds: [KIND_INVITE_LIST], authors: [ctx.config.eidPubkey], "#d": [splitCoordinate(ctx.coordinate).identifier] },
     ctx.config.relays,
   );
-  const latest = existing.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(existing);
   let invites: { h: string; label?: string }[] = [];
   if (latest) {
     try {
@@ -507,8 +541,8 @@ export async function generateInvites(
     {
       kind: KIND_INVITE_LIST,
       created_at: Math.floor(Date.now() / 1000),
-      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "1"]],
-      content: JSON.stringify({ v: 1, invites }),
+      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "2"]],
+      content: JSON.stringify({ v: 2, invites }),
     },
     eidSk,
   );
@@ -565,7 +599,7 @@ export async function revokeAttendeeClient(
   const { roster, at: rosterAt } = await loadRoster(ctx, prevEckBytes, keys.eck);
   const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
   const publisher = directoryPublisher(ctx);
-  const newRoster: RosterContent = { v: 1, eck_current: newId, attendees: [] };
+  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
   const pubs: Promise<unknown>[] = [publishOrQueue(deletion, ctx.config.relays)];
 
   for (const a of remaining) {
@@ -589,7 +623,7 @@ export async function revokeAttendeeClient(
         {
           kind: KIND_DIRECTORY_ENTRY,
           created_at: Math.floor(Date.now() / 1000),
-          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "1"]],
+          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
           content: eckEncrypt(newEckBytes, JSON.stringify(content)),
         },
         eidSk,
@@ -602,7 +636,7 @@ export async function revokeAttendeeClient(
     const grantWrap = wrapRumor(eidSk, a.pubkey, {
       kind: KIND_KEY_GRANT,
       content: {
-        v: 1,
+        v: 2,
         a: ctx.coordinate,
         role: a.role,
         eck: keys.eck,
@@ -614,6 +648,92 @@ export async function revokeAttendeeClient(
 
   pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
   await Promise.all(pubs);
+}
+
+/**
+ * Rotate the ECK AND the E_inbox on a coordinator detach/replace (NIP §3.7). A
+ * departing coordinator may retain the E_inbox + ECK it held, so both are rotated
+ * to protect FUTURE content: mint a new ECK version and a fresh E_inbox keypair,
+ * re-encrypt every attendee's directory entry + republish the roster under the new
+ * ECK, and re-grant the new ECK to all approved attendees (no attendee removed).
+ * The old E_inbox secret is retained locally (`priorEinboxNsecs`) so the organizer
+ * can still read pre-rotation history; senders always encrypt to the newest config's
+ * inbox, so the rotation is transparent to attendees. Forward-only, and honest about
+ * it: ciphertext already published under the old key/inbox stays readable to whoever
+ * held it. Returns the new inbox pubkey/secret + the full ECK set so the caller can
+ * put them in the replacement 31600 / 21603.
+ */
+async function rotateEckAndInbox(
+  organizer: AppSigner,
+  ctx: EventContext,
+  keys: EventKeys,
+  blindingKey?: Uint8Array,
+): Promise<{ newInboxNsecHex: string; newInboxPubkey: string; eck: EckVersion[] }> {
+  const eidSk = hexToBytes(keys.eidNsecHex!);
+  const eidPubkey = getPublicKey(eidSk);
+  const prevEck = currentEck(keys);
+  if (!prevEck) throw new Error("no ECK available");
+  const prevEckBytes = base64ToBytes(prevEck.key);
+
+  // Mint the new ECK version and a fresh E_inbox keypair.
+  const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
+  const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
+  const newEckBytes = base64ToBytes(newEck.key);
+  const eckAll = [...keys.eck, newEck];
+  const newInboxSk = generateSecretKey();
+  const newInboxNsecHex = bytesToHex(newInboxSk);
+  const newInboxPubkey = getPublicKey(newInboxSk);
+
+  // Re-encrypt every attendee's directory entry under the new ECK (new blinded d),
+  // republish the roster, and re-grant the new ECK set to each — no one removed.
+  const { roster, at: rosterAt } = await loadRoster(ctx, prevEckBytes, keys.eck);
+  const publisher = directoryPublisher(ctx);
+  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
+  const pubs: Promise<unknown>[] = [];
+  for (const a of roster.attendees) {
+    const events = await fetchEvents(
+      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": [a.d] },
+      ctx.config.relays,
+    );
+    const latest = events.sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))[0];
+    let content: unknown;
+    try {
+      content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
+    } catch {
+      content = undefined;
+    }
+    const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
+    newRoster.attendees.push({ pubkey: a.pubkey, d: newD, role: a.role, ...(a.chat_keys ? { chat_keys: a.chat_keys } : {}) });
+    if (content) {
+      const entryEvent = finalizeEvent(
+        {
+          kind: KIND_DIRECTORY_ENTRY,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
+          content: eckEncrypt(newEckBytes, JSON.stringify(content)),
+        },
+        eidSk,
+      );
+      pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
+    }
+    const grantWrap = wrapRumor(eidSk, a.pubkey, {
+      kind: KIND_KEY_GRANT,
+      content: { v: 2, a: ctx.coordinate, role: a.role, eck: eckAll, granted_by: eidPubkey },
+    });
+    pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
+  }
+  pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
+  await Promise.all(pubs);
+
+  // Persist: append the new ECK, retain the old inbox secret for history reading,
+  // and adopt the new inbox as primary.
+  keys.eck = eckAll;
+  if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
+  keys.einboxNsecHex = newInboxNsecHex;
+  await saveEventKeys(keys);
+  if (blindingKey) await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(() => {});
+
+  return { newInboxNsecHex, newInboxPubkey, eck: eckAll };
 }
 
 /**
@@ -634,7 +754,7 @@ export async function revokeAttendeeClient(
  */
 export async function updateEventConfig(
   ctx: EventContext,
-  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[] }>,
+  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[]; retentionDays: number | undefined }>,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
@@ -661,9 +781,10 @@ export async function updateEventConfig(
 }
 
 export async function attachCoordinator(
-  _organizer: AppSigner,
+  organizer: AppSigner,
   ctx: EventContext,
   coordinatorPubkey: string,
+  blindingKey?: Uint8Array,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
@@ -671,8 +792,38 @@ export async function attachCoordinator(
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
 
-  // 1. Republish 31600 with the coordinator tag (signed by E_id).
-  const cfg = { ...ctx.config, coordinator: coordinatorPubkey };
+  // Install generation (NIP §3.5): strictly increase across every attach/detach/
+  // re-attach so a replayed historical 21603 can never re-install. The last-used
+  // gen lives on the local record + the 30078 backup (durable across devices).
+  const gen = (keys.coordinatorGen ?? 0) + 1;
+
+  // 0. Coordinator replacement: if a DIFFERENT coordinator is currently attached,
+  //    detach it first (signed 21604) so it disposes of custody promptly, then rotate
+  //    the ECK + E_inbox (NIP §3.7) — the departing coordinator may retain the keys it
+  //    held, so both are rotated to protect future content. The new grant + config
+  //    below carry the rotated inbox + ECK. A FRESH attach (no prior coordinator, or
+  //    re-attaching the same one) does not rotate — there is no departing custodian.
+  const previous = ctx.config.coordinator;
+  const replacing = !!previous && previous !== coordinatorPubkey;
+  let einboxNsecHex = keys.einboxNsecHex;
+  let einboxPubkey = ctx.config.inbox;
+  let eck = keys.eck;
+  if (replacing) {
+    const expires = Math.floor(Date.now() / 1000) + ADMIN_COMMAND_TTL_SEC;
+    const detachWrap = wrapRumor(eidSk, previous!, {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
+    });
+    await publishOrQueue(detachWrap as any, ctx.config.relays);
+    const rotated = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
+    einboxNsecHex = rotated.newInboxNsecHex;
+    einboxPubkey = rotated.newInboxPubkey;
+    eck = rotated.eck;
+  }
+
+  // 1. Republish 31600 with the three-element coordinator tag (signed by E_id),
+  //    advertising the (possibly rotated) inbox.
+  const cfg = { ...ctx.config, inbox: einboxPubkey, coordinator: coordinatorPubkey, coordinatorGen: gen };
   const built = buildEventConfig(cfg);
   const configEvent = finalizeEvent(
     {
@@ -684,15 +835,17 @@ export async function attachCoordinator(
     eidSk,
   );
 
-  // 2. Gift-wrap the Coordinator Grant (21603), sealed by E_id so the
-  //    coordinator can authenticate the install against the coordinate (F2).
+  // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
+  //    E_id so the coordinator can authenticate the install against the coordinate.
   const grantWrap = wrapRumor(eidSk, coordinatorPubkey, {
     kind: KIND_COORDINATOR_GRANT,
     content: {
-      v: 1,
+      v: 2,
       a: ctx.coordinate,
-      inbox_nsec: keys.einboxNsecHex,
-      eck: keys.eck,
+      gen,
+      // On a replace, the rotated inbox secret + full ECK (incl. the new version).
+      inbox_nsec: einboxNsecHex,
+      eck,
       config_relays: ctx.config.relays,
     },
   });
@@ -701,4 +854,89 @@ export async function attachCoordinator(
     publishOrQueue(configEvent, ctx.config.relays),
     publishOrQueue(grantWrap as any, ctx.config.relays),
   ]);
+
+  // 3. Persist the new gen locally and (durably) in the 30078 backup so a re-attach
+  //    — on this or a fresh device — increments past it instead of colliding.
+  await saveEventKeys({ ...keys, coordinatorGen: gen });
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch(() => {});
+  }
+}
+
+/** Republish the organizer's self-encrypted 30078 event-keys backup with the given
+ *  coordinator generation (NIP §3.5), so the last-used gen survives a device wipe. */
+async function writeEventKeysBackup(
+  organizer: AppSigner,
+  coordinate: string,
+  keys: EventKeys,
+  blindingKey: Uint8Array,
+  coordinatorGen: number,
+): Promise<void> {
+  if (!keys.eidNsecHex || !keys.einboxNsecHex) return;
+  const backup: EventKeysBackup = {
+    v: 2,
+    a: coordinate,
+    eid_nsec: keys.eidNsecHex,
+    einbox_nsec: keys.einboxNsecHex,
+    eck: keys.eck,
+    coordinator_gen: coordinatorGen,
+  };
+  const ownPubkey = await organizer.getPublicKey();
+  const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
+  const d = `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
+  const event = await organizer.signEvent({
+    kind: KIND_APP_DATA,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["d", d]],
+    content,
+  });
+  await publishOrQueue(event);
+}
+
+/**
+ * Detach the currently-attached coordinator (NIP §3.5): republish the 31600 WITHOUT
+ * a coordinator tag (signed by E_id) and send a signed 21604 `detach` command so the
+ * coordinator durably tombstones the install and disposes of key custody (decision
+ * D6). The last-used generation is retained locally, so a later re-attach increments
+ * past it. No-op when no coordinator is attached.
+ */
+export async function detachCoordinator(
+  organizer: AppSigner,
+  ctx: EventContext,
+  blindingKey?: Uint8Array,
+): Promise<void> {
+  const previous = ctx.config.coordinator;
+  if (!previous) return;
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
+    throw new Error("organizer E_id key not available");
+  }
+  const eidSk = hexToBytes(keys.eidNsecHex);
+
+  // 1. Signed 21604 detach to the current coordinator (immediate custody disposal),
+  //    sent up front so the departing coordinator stops serving promptly.
+  const expires = Math.floor(Date.now() / 1000) + ADMIN_COMMAND_TTL_SEC;
+  const detachWrap = wrapRumor(eidSk, previous, {
+    kind: KIND_ADMIN_COMMAND,
+    content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
+  });
+  await publishOrQueue(detachWrap as any, ctx.config.relays);
+
+  // 2. Rotate the ECK + E_inbox (NIP §3.7): a departed coordinator may retain the
+  //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to
+  //    all attendees) to protect future content. Reads the CURRENT (still
+  //    coordinator-authored) records, so it must run before the new config publishes.
+  const { newInboxPubkey } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
+
+  // 3. Republish 31600 without the coordinator tag, advertising the NEW inbox so
+  //    senders encrypt future submissions to the rotated inbox the organizer holds.
+  const { coordinator: _c, coordinatorGen: _g, ...rest } = ctx.config;
+  void _c;
+  void _g;
+  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey });
+  const configEvent = finalizeEvent(
+    { kind: built.kind, created_at: Math.floor(Date.now() / 1000), tags: built.tags, content: built.content },
+    eidSk,
+  );
+  await publishOrQueue(configEvent, ctx.config.relays);
 }

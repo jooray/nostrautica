@@ -50,6 +50,7 @@ const EID = "e".repeat(64);
 
 function pub(d: string, created_at: number, title = "t"): RawPostEvent {
   return {
+    id: `pub-${d}-${created_at}`,
     kind: KIND_LONGFORM,
     pubkey: EID,
     created_at,
@@ -70,16 +71,17 @@ function enc(
   overrides: Partial<{ title: string; published_at: number; content: string }> = {},
 ): RawPostEvent {
   return {
+    id: `enc-${d}-${created_at}`,
     kind: KIND_MEMBERS_POST,
     pubkey: EID,
     created_at,
     tags: [
       ["d", d],
-      ["v", "1"],
+      ["v", "2"],
       ["eck", String(eckId)],
     ],
     content: encryptMembersPost(eck, {
-      v: 1,
+      v: 2,
       title: overrides.title ?? "secret",
       published_at: overrides.published_at ?? created_at,
       content: overrides.content ?? "members body",

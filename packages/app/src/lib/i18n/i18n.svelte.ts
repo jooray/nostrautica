@@ -56,10 +56,20 @@ class I18n {
       if (saved && (LOCALES as string[]).includes(saved)) {
         this.locale = saved as Locale;
         this.explicit = true;
+        if (typeof document !== "undefined") document.documentElement.lang = this.locale;
         return;
       }
     }
     this.locale = detect();
+    // detect() can already return sk/cs from navigator.language — set() and
+    // adoptEventLang() both keep <html lang> in step with the reactive locale,
+    // but init()'s own assignment above didn't, so a returning visitor with an
+    // explicit non-English choice (or a first-time one whose browser language
+    // detect()s to sk/cs) kept the default <html lang="en"> from app.html
+    // after every reload — screen readers and the browser's own
+    // offer-to-translate prompt read the wrong language even though every
+    // visible string was correctly localized.
+    if (typeof document !== "undefined") document.documentElement.lang = this.locale;
   }
 
   set(locale: Locale): void {

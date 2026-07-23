@@ -9,7 +9,7 @@ import {
   configSchema,
   buildAnnounceContent,
   evaluateBilling,
-  isFreeOrganizer,
+  isFreeEid,
   type CoordinatorConfig,
 } from "./config.js";
 import { getPublicKey, generateSecretKey } from "nostr-tools/pure";
@@ -43,9 +43,9 @@ describe("buildAnnounceContent", () => {
 
   it("NEVER leaks the free-organizer allowlist into the public announce", () => {
     const a = buildAnnounceContent(
-      cfg({ pricing: { model: "per_user", free_organizers: ["npub1free"] } }),
+      cfg({ pricing: { model: "per_user", free_eids: ["npub1free"] } }),
     );
-    expect(JSON.stringify(a)).not.toContain("free_organizers");
+    expect(JSON.stringify(a)).not.toContain("free_eids");
     expect(JSON.stringify(a)).not.toContain("npub1free");
   });
 
@@ -87,9 +87,9 @@ describe("evaluateBilling", () => {
     const sk = generateSecretKey();
     const pk = getPublicKey(sk);
     const c = cfg({
-      pricing: { model: "per_user", free_up_to_users: 1, free_organizers: [npubEncode(pk)] },
+      pricing: { model: "per_user", free_up_to_users: 1, free_eids: [npubEncode(pk)] },
     });
-    expect(isFreeOrganizer(c, pk)).toBe(true);
+    expect(isFreeEid(c, pk)).toBe(true);
     expect(evaluateBilling(c, pk, 5000).state).toBe("ok");
     // a different organizer over the tier still pays
     expect(evaluateBilling(c, "b".repeat(64), 5000).state).toBe("payment_required");

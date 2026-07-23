@@ -19,11 +19,13 @@ export type Route =
   | { name: "attendees"; naddr: string }
   | { name: "attendee"; naddr: string; npub: string }
   | { name: "matches"; naddr: string }
+  | { name: "report"; naddr: string }
   | { name: "chat"; naddr: string }
   | { name: "talks"; naddr: string }
   | { name: "talk"; naddr: string; d: string }
   | { name: "myProfile"; naddr: string }
   | { name: "admin"; naddr: string }
+  | { name: "eventSettings"; naddr: string }
   | { name: "posts"; naddr: string }
   | { name: "post"; naddr: string; d: string }
   | { name: "eventMore"; naddr: string }
@@ -76,6 +78,8 @@ export function parseHash(hash: string): Route {
           return { name: "record", naddr, talk: query.get("talk") === "1" };
         case "matches":
           return { name: "matches", naddr };
+        case "report":
+          return { name: "report", naddr };
         case "chat":
           return { name: "chat", naddr };
         case "talks": {
@@ -88,6 +92,8 @@ export function parseHash(hash: string): Route {
           return { name: "eventMore", naddr };
         case "admin":
           return { name: "admin", naddr };
+        case "settings":
+          return { name: "eventSettings", naddr };
         case "posts": {
           const d = segments[3];
           return d ? { name: "post", naddr, d } : { name: "posts", naddr };
@@ -136,6 +142,8 @@ export function buildHash(route: Route): string {
       return `#/e/${route.naddr}/attendees/${route.npub}`;
     case "matches":
       return `#/e/${route.naddr}/matches`;
+    case "report":
+      return `#/e/${route.naddr}/report`;
     case "chat":
       return `#/e/${route.naddr}/chat`;
     case "talks":
@@ -148,6 +156,8 @@ export function buildHash(route: Route): string {
       return `#/e/${route.naddr}/more`;
     case "admin":
       return `#/e/${route.naddr}/admin`;
+    case "eventSettings":
+      return `#/e/${route.naddr}/settings`;
     case "posts":
       return `#/e/${route.naddr}/posts`;
     case "post":
@@ -185,11 +195,13 @@ export function eventNaddr(route: Route): string | undefined {
     case "attendees":
     case "attendee":
     case "matches":
+    case "report":
     case "chat":
     case "talks":
     case "talk":
     case "myProfile":
     case "admin":
+    case "eventSettings":
     case "posts":
     case "post":
     case "eventMore":

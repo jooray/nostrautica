@@ -8,6 +8,7 @@
   import SignInOptions from "$lib/components/SignInOptions.svelte";
   import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let error = $state<string | null>(null);
@@ -101,14 +102,19 @@
     <h2>{t("login.createHeading")}</h2>
     <p class="muted">{t("login.createSub")}</p>
     <div class="row" style="gap:0.75rem;align-items:center;margin-bottom:0.5rem">
-      <label style="cursor:pointer;flex:none;margin:0">
+      <FileButton
+        class="avatar-pick"
+        style="background:none;border:none;padding:0;cursor:pointer;flex:none;margin:0"
+        accept="image/*"
+        onchange={onPicFile}
+        label={t("login.photoAdd")}
+      >
         {#if picPreview}
           <img src={picPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
         {:else}
           <span style="display:flex;width:64px;height:64px;border-radius:50%;border:1px dashed var(--border);align-items:center;justify-content:center;color:var(--text-dim)"><Icon name="plus" size={22} /></span>
         {/if}
-        <input type="file" accept="image/*" onchange={onPicFile} style="display:none" />
-      </label>
+      </FileButton>
       <div class="muted" style="font-size:0.85rem">{t("login.photoAdd")} <span class="badge">{t("login.photoPublic")}</span><br />{t("login.photoTap")}</div>
     </div>
     <label for="nm">{t("login.yourName")}</label>

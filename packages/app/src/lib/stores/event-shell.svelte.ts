@@ -19,6 +19,7 @@ import { loadEventKeys } from "$lib/events/keystore.js";
 import { recoverEventKeys } from "$lib/events/recover.js";
 import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
 import { session } from "$lib/signer/session.svelte.js";
+import { visitorPreview, previewedRole } from "$lib/stores/visitor-preview.svelte.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 export type EventRole = "visitor" | "pending" | "attendee" | "organizer";
@@ -37,12 +38,20 @@ class EventShell {
   loading = $state(false);
   private token = 0;
 
+  /**
+   * The role the shell should render as — the real role, unless the organizer is
+   * previewing the event as a visitor (spec §13), in which case every member/
+   * organizer nav surface is suppressed to the public view.
+   */
+  get effectiveRole(): EventRole {
+    return previewedRole(this.role, visitorPreview.isActive(this.ctx?.coordinate));
+  }
   get isOrganizer(): boolean {
-    return this.role === "organizer";
+    return this.effectiveRole === "organizer";
   }
   /** Approved member (attendee or organizer) — the roster is member-encrypted. */
   get isMember(): boolean {
-    return this.role === "attendee" || this.role === "organizer";
+    return this.effectiveRole === "attendee" || this.effectiveRole === "organizer";
   }
   get showPeople(): boolean {
     return this.isMember;

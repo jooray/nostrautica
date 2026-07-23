@@ -7,6 +7,7 @@ import {
   KIND_GIFT_WRAP,
   KIND_KEY_GRANT,
   KIND_ORGANIZER_GRANT,
+  KIND_COORDINATOR_STATUS,
   KIND_EVENT_CONFIG,
   KIND_CALENDAR_EVENT,
   KIND_DIRECTORY_ENTRY,
@@ -24,6 +25,11 @@ import {
   matchListContentSchema,
   parseCoordinate,
   parseEventConfig,
+  parsePayloadSafe,
+  isNewerProtocolVersion,
+  NewerProtocolVersionError,
+  pickLatest,
+  supersedes,
   type DirectoryEntryContent,
   type RosterContent,
   type MatchListContent,
@@ -38,13 +44,15 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
 import { addEckVersions, applyOrganizerGrant, loadEventKeys, currentEck } from "./keystore.js";
-import { directoryPublisher } from "./organizer.js";
+import { acceptedRecordAuthors } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
+import { recordOwnStatus } from "./attendee-status.js";
 
 /**
  * Authenticate a received 21605 Organizer Grant (spec §8, audit finding C2).
@@ -140,11 +148,15 @@ async function fetchEventConfig(
     relays,
   );
   // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(onlyVerified(events));
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);
-  } catch {
+  } catch (e) {
+    // The config is E_id-signed (onlyVerified + authored by coord.pubkey) — a
+    // trusted authority. A newer protocol version here means this client is stale
+    // (NIP §2 / D2): prompt an update instead of silently dropping the event.
+    if (e instanceof NewerProtocolVersionError) updatePrompt.flag();
     return undefined;
   }
 }
@@ -184,6 +196,9 @@ function markGrantsBackfilled(pubkey: string): void {
  * a clean device. Later scans use the narrow live-overlap window. This mirrors the
  * coordinator's fresh-install vs. recent backfill.
  */
+/** Cap on the persisted grant-wrap memo (audit App-7), mirroring the DM memo. */
+export const MAX_GRANT_WRAPS = 5000;
+
 export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
   const fullBackfill = !hasBackfilledGrants(pubkey);
@@ -247,7 +262,12 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
       // Co-organizer custody: store the full event keys so this device can admin.
       let grant;
       try {
-        grant = organizerGrantContentSchema.parse(JSON.parse(rumor.content));
+        const raw = JSON.parse(rumor.content);
+        // A grant sealed by the E_id/coordinator authority (rumor.pubkey is bound
+        // by signerUnwrap) that carries a newer protocol version means this client
+        // is stale (NIP §2 / D2) — prompt an update. Still definitive: memoize.
+        if (isNewerProtocolVersion(raw)) updatePrompt.flag();
+        grant = organizerGrantContentSchema.parse(raw);
       } catch {
         memo[wrap.id] = true; // malformed — definitive, never re-try
         memoDirty = true;
@@ -282,7 +302,11 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     if (rumor.kind === KIND_KEY_GRANT) {
       let grant;
       try {
-        grant = keyGrantContentSchema.parse(JSON.parse(rumor.content));
+        const raw = JSON.parse(rumor.content);
+        // Newer-protocol grant from the authenticated E_id/coordinator authority:
+        // prompt an update (NIP §2 / D2) before dropping it.
+        if (isNewerProtocolVersion(raw)) updatePrompt.flag();
+        grant = keyGrantContentSchema.parse(raw);
       } catch {
         memo[wrap.id] = true; // malformed — definitive
         memoDirty = true;
@@ -317,6 +341,22 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
       memoDirty = true;
       continue;
     }
+    // Own coordinator status (21606 sealed to this attendee, NIP §6.3): a failure
+    // in THIS attendee's own submission/talk pipeline. Authenticate against the
+    // event's configured coordinator and record it for the modest in-app banner.
+    if (rumor.kind === KIND_COORDINATOR_STATUS) {
+      let coord: string | undefined;
+      try {
+        coord = (JSON.parse(rumor.content) as { a?: string }).a;
+      } catch {
+        /* malformed — still memoize below */
+      }
+      const config = coord ? await configFor(coord, eventRelayHints(coord)) : undefined;
+      recordOwnStatus(rumor, pubkey, config?.coordinator);
+      memo[wrap.id] = true;
+      memoDirty = true;
+      continue;
+    }
     // Any other successfully-unwrapped wrap (a DM, a chat welcome, …) is not a
     // grant — definitively not this scanner's business, so memoize it and never
     // spend a signer round-trip on it here again.
@@ -326,7 +366,19 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   // The full-history scan completed without throwing (a fetch failure would have
   // rejected above), so later scans can safely narrow to the live-overlap window.
   if (fullBackfill) markGrantsBackfilled(pubkey);
-  if (memoDirty) cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
+  if (memoDirty) {
+    // Bound the memo (audit App-7): unlike the DM memo this had no cap, so it
+    // grew one entry per gift wrap ever seen (grants AND every skipped DM/chat
+    // welcome) and never aged. Evict oldest-inserted entries past the cap — a
+    // re-encountered wrap just costs one extra signer unwrap next scan (a perf
+    // cost, never a correctness one), mirroring the DM memo's 3000-cap policy.
+    const keys = Object.keys(memo);
+    if (keys.length > MAX_GRANT_WRAPS) {
+      const keep = new Set(keys.slice(-MAX_GRANT_WRAPS));
+      for (const k of keys) if (!keep.has(k)) delete memo[k];
+    }
+    cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
+  }
   return [...coordinates];
 }
 
@@ -364,24 +416,35 @@ export function cachedRoster(coordinate: string): RosterContent | undefined {
 export async function fetchRoster(ctx: EventContext): Promise<RosterContent | undefined> {
   const eck = await eckBytesFor(ctx.coordinate);
   if (!eck) return undefined;
-  const publisher = directoryPublisher(ctx);
+  const authors = acceptedRecordAuthors(ctx);
   const { identifier } = parseCoordinate(ctx.coordinate);
   // Streamed one-shot: first EOSE + grace instead of the slowest relay — this
   // read gates the whole People screen ("Decrypting the roster…").
   const events = await streamEvents(
-    { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors, "#d": [identifier] },
     { relays: ctx.config.relays },
   ).ready;
-  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  if (!latest) return { v: 1, eck_current: 1, attendees: [] };
+  // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7): only a
+  // record authored by the CURRENTLY assigned coordinator (or E_id) is trusted, so
+  // a hostile relay or cached event from a formerly assigned coordinator is dropped.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)));
+  if (!latest) return { v: 2, eck_current: 1, attendees: [] };
+  // The roster is authored by the coordinator (or E_id) — a trusted authority
+  // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
+  // (prompt an update, NIP §2 / D2) from a garbled one (drop).
+  let raw: unknown;
   try {
-    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(eck, latest.content)));
-    cacheSet(rosterKey(ctx.coordinate), roster, latest.created_at ?? 0);
-    return roster;
+    raw = JSON.parse(eckDecrypt(eck, latest.content));
   } catch {
     return undefined;
   }
+  const parsed = parsePayloadSafe(rosterContentSchema, raw);
+  if (!parsed.ok) {
+    if (parsed.reason === "newer-version") updatePrompt.flag();
+    return undefined;
+  }
+  cacheSet(rosterKey(ctx.coordinate), parsed.value, latest.created_at ?? 0);
+  return parsed.value;
 }
 
 // The decrypted directory entries survive reloads too (owner-scoped) so the
@@ -427,14 +490,14 @@ function chunkDs(ds: string[]): string[][] {
  * applied by the callers, exactly as with a single stream.
  */
 function streamDirectoryEvents(
-  publisher: string,
+  authors: string[],
   ds: string[],
   relays: string[] | undefined,
   onEvent?: StreamOptions["onEvent"],
 ): StreamHandle {
   const parts = chunkDs(ds).map((chunk) =>
     streamEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": chunk },
+      { kinds: [KIND_DIRECTORY_ENTRY], authors, "#d": chunk },
       { relays, ...(onEvent ? { onEvent } : {}) },
     ),
   );
@@ -457,18 +520,18 @@ export async function fetchDirectory(
   const roster = await fetchRoster(ctx);
   if (!roster || roster.attendees.length === 0) return [];
 
-  const publisher = directoryPublisher(ctx);
+  const authors = acceptedRecordAuthors(ctx);
   const ds = roster.attendees.map((a) => a.d);
   // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
   // relay filter-size limits and silently return fewer people.
-  const events = await streamDirectoryEvents(publisher, ds, ctx.config.relays).ready;
+  const events = onlyByAuthors(await streamDirectoryEvents(authors, ds, ctx.config.relays).ready, authors);
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
     const d = e.tags.find((t) => t[0] === "d")?.[1];
     if (!d) continue;
     const prev = latestByD.get(d);
-    if (!prev || (e.created_at ?? 0) > (prev.created_at ?? 0)) latestByD.set(d, e);
+    if (!prev || supersedes(e, prev)) latestByD.set(d, e);
   }
 
   const entries: DirectoryEntryContent[] = [];
@@ -505,15 +568,20 @@ export async function streamDirectory(
 ): Promise<DirectoryStream | undefined> {
   const eck = await eckBytesFor(ctx.coordinate);
   if (!eck) return undefined; // not approved — nothing decryptable
-  const publisher = directoryPublisher(ctx);
+  const authors = acceptedRecordAuthors(ctx);
+  const acceptedAuthors = new Set(acceptedRecordAuthors(ctx));
   const coord = ctx.coordinate;
 
   // Accumulate by PUBKEY (one entry per attendee), latest-wins by created_at, so
   // we can seed from the cached snapshot and a background refresh never flashes
   // the list down to fewer people (CACHING-PLAN §2.3, §3.4).
-  const byPk = new Map<string, { entry: DirectoryEntryContent; at: number }>();
+  // Track the winning event's (created_at, id) per pubkey so replacement follows
+  // the SAME §3.1 rule as fetchDirectory (higher created_at, then lowest id) —
+  // v1's `>=` here silently disagreed with fetchDirectory's `>` on ties. The
+  // cached seed has no source event, so id "" / at 0 loses to any real event.
+  const byPk = new Map<string, { entry: DirectoryEntryContent; at: number; id: string }>();
   const cached = cachedDirectory(coord);
-  if (cached) for (const e of cached) byPk.set(e.pubkey, { entry: e, at: 0 });
+  if (cached) for (const e of cached) byPk.set(e.pubkey, { entry: e, at: 0, id: "" });
   const snapshot = () => [...byPk.values()].map((v) => v.entry);
   let newestAt = 0;
 
@@ -528,13 +596,18 @@ export async function streamDirectory(
     if (!flushTimer) flushTimer = setTimeout(flush, 60);
   };
 
-  const onDirEvent = (e: { tags: string[][]; content: string; created_at?: number }) => {
+  const onDirEvent = (e: { id: string; pubkey?: string; tags: string[][]; content: string; created_at?: number }) => {
     if (!e.tags.some((tg) => tg[0] === "d")) return;
+    // Record-authority pinning (NIP §3.7): ignore a directory entry not authored by
+    // the currently assigned coordinator (or E_id) — a stale-coordinator event.
+    if (e.pubkey !== undefined && !acceptedAuthors.has(e.pubkey)) return;
     const at = e.created_at ?? 0;
     try {
       const entry = directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content)));
       const prev = byPk.get(entry.pubkey);
-      if (!prev || at >= prev.at) byPk.set(entry.pubkey, { entry, at });
+      if (!prev || supersedes({ id: e.id, created_at: at }, { id: prev.id, created_at: prev.at })) {
+        byPk.set(entry.pubkey, { entry, at, id: e.id });
+      }
       if (at > newestAt) newestAt = at;
       scheduleFlush();
     } catch {
@@ -553,7 +626,7 @@ export async function streamDirectory(
     inner?.stop();
     currentDs = ds;
     // Chunked #d filters (UX-22); the composite handle stops/settles them all.
-    inner = streamDirectoryEvents(publisher, ds, ctx.config.relays, onDirEvent);
+    inner = streamDirectoryEvents(authors, ds, ctx.config.relays, onDirEvent);
     return inner;
   };
   const dsChanged = (ds: string[]): boolean =>
@@ -645,7 +718,11 @@ export async function fetchMatches(
     { kinds: [KIND_MATCH_LIST], authors: [coordinator], "#d": [d] },
     { relays: ctx.config.relays },
   ).ready;
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Record-authority pinning (NIP §3.7): a 31605 is authored by the CURRENTLY
+  // assigned coordinator only. Guard the author so a hostile relay's injected event
+  // (higher created_at, wrong author) can't win the latest-pick and shadow the real
+  // list — it would fail to decrypt and drop the attendee's matches.
+  const latest = pickLatest(onlyByAuthors(events, [coordinator]));
   if (!latest) return undefined;
   try {
     const json = await signer.nip44Decrypt(coordinator, latest.content);

@@ -72,6 +72,10 @@ export const KIND_COORDINATOR_STATUS = 21606; // coordinator → organizer (pois
 export const KIND_CHAT_KEY_ATTESTATION = 21607;
 export const KIND_PROFILE_CORRECTION = 21608; // attendee → E_inbox (correct/hide own ai_profile, F3)
 export const KIND_TALK_SUBMISSION = 21609; // attendee → E_inbox (submit/edit a prerecorded talk, F2)
+// Attendee-initiated leave (NIP §6.3 21610): sealed by the attendee's OWN account
+// key to E_inbox. Same effect chain as an organizer revoke (roster/directory/match
+// removal, NIP-09 deletions, ECK rotation), triggered without organizer action.
+export const KIND_ATTENDEE_WITHDRAWAL = 21610; // attendee → E_inbox (leave the event)
 
 /** Rumor kinds — the set of kinds ever delivered inside a NIP-59 gift wrap. */
 export const RUMOR_KINDS = [
@@ -86,6 +90,7 @@ export const RUMOR_KINDS = [
   KIND_CHAT_KEY_ATTESTATION,
   KIND_PROFILE_CORRECTION,
   KIND_TALK_SUBMISSION,
+  KIND_ATTENDEE_WITHDRAWAL,
 ] as const;
 
 export type RumorKind = (typeof RUMOR_KINDS)[number];

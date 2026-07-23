@@ -3,8 +3,128 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#0b0b12" />
+    <meta name="theme-color" content="#0e0e15" />
     <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
+    <!--
+      Anti-FOUC theme resolution (item 3 / UX-40). This runs SYNCHRONOUSLY before
+      the body paints, so the very first frame already carries the user's real
+      theme — a light-preferring visitor never gets the hardcoded-dark flash the
+      static `data-theme="dark"` below would otherwise cause while the JS bundle
+      (theme store) is still loading. Mirrors stores/theme.svelte.ts exactly:
+      same STORAGE_KEY, same "system"→prefers-color-scheme resolution, same
+      --bg colours for the address-bar meta. The theme store re-applies the same
+      value on mount, so this is a pure first-paint accelerator, not a second
+      source of truth. Wrapped in try/catch: any failure falls back to the static
+      dark attribute — identical to today's behaviour.
+    -->
+    <script>
+      (function () {
+        try {
+          var saved = localStorage.getItem("nostrautica:theme");
+          if (saved !== "dark" && saved !== "light" && saved !== "system") saved = "system";
+          var dark =
+            saved === "dark" ||
+            ((saved === "system" || !saved) &&
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+          var m = document.querySelector('meta[name="theme-color"]');
+          if (m) m.content = dark ? "#0e0e15" : "#fafafc";
+        } catch (e) {
+          var systemDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+          document.documentElement.setAttribute("data-theme", systemDark ? "dark" : "light");
+        }
+      })();
+    </script>
+    <!--
+      Cold-boot splash (item 3): an instant, branded static shell so first
+      contentful paint happens BEFORE the JS bundle executes (~0.4-0.8s on a good
+      network, worse at venues). It's plain inline CSS + markup — no fonts, no
+      bundle, no relay — so it paints in the first frame. The app removes
+      #app-splash on mount (routes/+layout.svelte). Theme-aware via the
+      data-theme set by the script above, with a prefers-color-scheme fallback so
+      the splash itself never flashes the wrong colour if that script was skipped.
+    -->
+    <style>
+      #app-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 2147483000;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.15rem;
+        background: #0e0e15;
+        color: #ededf4;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        transition: opacity 0.28s ease;
+        animation: splash-failsafe 0s 15s forwards;
+      }
+      [data-theme="light"] #app-splash {
+        background: #fafafc;
+        color: #17171f;
+      }
+      @media (prefers-color-scheme: light) {
+        html:not([data-theme="dark"]) #app-splash {
+          background: #fafafc;
+          color: #17171f;
+        }
+      }
+      #app-splash .splash-logo {
+        width: 60px;
+        height: 60px;
+      }
+      #app-splash .splash-name {
+        font-size: 1.3rem;
+        font-weight: 700;
+        letter-spacing: 0.01em;
+      }
+      #app-splash .splash-bar {
+        width: 128px;
+        height: 3px;
+        border-radius: 999px;
+        overflow: hidden;
+        background: rgba(124, 92, 255, 0.22);
+      }
+      #app-splash .splash-bar::after {
+        content: "";
+        display: block;
+        height: 100%;
+        width: 38%;
+        border-radius: 999px;
+        background: #7c5cff;
+        animation: splash-slide 1.1s ease-in-out infinite;
+      }
+      @keyframes splash-slide {
+        0% {
+          transform: translateX(-120%);
+        }
+        100% {
+          transform: translateX(340%);
+        }
+      }
+      @keyframes splash-failsafe {
+        to {
+          opacity: 0;
+          visibility: hidden;
+          pointer-events: none;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #app-splash .splash-bar::after {
+          animation: none;
+          width: 100%;
+          opacity: 0.55;
+        }
+      }
+      /* Belt-and-braces: if JS ever fails to remove it, the fade class still
+         takes it out of the way (display:none) so it can't wedge over the app. */
+      #app-splash.splash-hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+    </style>
     <!-- Social preview (shares the branded OG card with the landing page) -->
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Nostrautica" />
@@ -54,6 +174,20 @@
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
+    <!-- Cold-boot splash — removed on mount by routes/+layout.svelte. Sits as a
+         body-level sibling of the SvelteKit mount target so hydration never
+         touches it. aria-hidden: it's a purely visual loading affordance. -->
+    <div id="app-splash" aria-hidden="true">
+      <svg class="splash-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Nostrautica">
+        <rect width="64" height="64" rx="14" fill="#0b0b12" />
+        <path
+          d="M32 12l4.9 12.4L50 26l-9 8.6 2.4 13.4L32 41.6 20.6 48 23 34.6 14 26l13.1-1.6z"
+          fill="#7c5cff"
+        />
+      </svg>
+      <div class="splash-name">Nostrautica</div>
+      <div class="splash-bar"></div>
+    </div>
     <div style="display: contents">%sveltekit.body%</div>
   </body>
 </html>

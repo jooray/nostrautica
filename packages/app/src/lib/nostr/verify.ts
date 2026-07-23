@@ -34,3 +34,17 @@ export function isVerified(ev: Partial<SignedEventLike>): boolean {
 export function onlyVerified<T extends Partial<SignedEventLike>>(events: T[]): T[] {
   return events.filter(isVerified);
 }
+
+/**
+ * Record-authority pinning (NIP §3.7): keep only events authored by one of
+ * `authors` (the coordinator currently named in the newest fetchable 31600, plus
+ * E_id). A record authored by a FORMERLY assigned coordinator — served from a
+ * cache, a hostile relay, or a relay that ignored the author filter — is dropped,
+ * so a detached/replaced coordinator's directory/roster/match/talk records stop
+ * being trusted the moment a newer config no longer names it. `authors` is
+ * empty-safe: an empty allowlist drops everything (fail-closed).
+ */
+export function onlyByAuthors<T extends Partial<SignedEventLike>>(events: T[], authors: string[]): T[] {
+  const allow = new Set(authors);
+  return events.filter((e) => e.pubkey !== undefined && allow.has(e.pubkey));
+}

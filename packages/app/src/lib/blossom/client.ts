@@ -234,6 +234,32 @@ export async function uploadAndMirror(
 }
 
 /**
+ * BUD-02 delete: ask `server` to drop the blob at `sha256`, authorized by a
+ * kind-24242 `delete` auth event signed by the uploader (NIP §6.3 21610: a
+ * withdrawing attendee tears down their own media). Best-effort — returns true on
+ * a 2xx (or 404, already gone), false on any other failure — so a single
+ * unreachable server never blocks the withdrawal. Never throws.
+ */
+export async function deleteBlob(
+  signer: AppSigner,
+  server: string,
+  sha256: string,
+): Promise<boolean> {
+  try {
+    const auth = await buildAuthEvent(signer, { verb: "delete", sha256 });
+    const res = await fetchWithTimeout(
+      `${trimServer(server)}/${sha256}`,
+      { method: "DELETE", headers: { Authorization: authHeader(auth) } },
+      MIRROR_TIMEOUT_MS,
+      `Delete from ${server}`,
+    );
+    return res.ok || res.status === 404;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Hard cap on a media download (audit APPR-4): a malicious directory entry can
  * point at a multi-GB endpoint, and a whole-file `arrayBuffer()` would take the
  * tab down. 250 MB is far above any legit intro/talk video.

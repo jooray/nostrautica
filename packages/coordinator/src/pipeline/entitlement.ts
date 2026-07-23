@@ -55,16 +55,23 @@ export class InviteChecker implements EntitlementChecker {
 
 /**
  * Evaluate a request against a checker chain. First checker to grant wins; if
- * none grant, the request goes to the manual queue.
+ * none grant, the request goes to the manual queue, reported with the LAST
+ * checker's own specific reason (not a generic one) — callers use this to
+ * distinguish "no code presented" / "already used" (retrying changes nothing)
+ * from "code doesn't validate against what we currently have cached" (worth
+ * one bypass re-fetch — see coordinator.ts's handleJoin retry, audit COORD-29
+ * follow-up). With zero checkers configured there's nothing to report, so
+ * that case keeps a generic fallback.
  */
 export function evaluateEntitlement(
   checkers: EntitlementChecker[],
   req: EntitlementRequest,
   now: number,
 ): EntitlementDecision {
+  let last: EntitlementDecision = { grant: false, reason: "no checker granted → manual queue" };
   for (const checker of checkers) {
-    const decision = checker.check(req, now);
-    if (decision.grant) return decision;
+    last = checker.check(req, now);
+    if (last.grant) return last;
   }
-  return { grant: false, reason: "no checker granted → manual queue" };
+  return last;
 }

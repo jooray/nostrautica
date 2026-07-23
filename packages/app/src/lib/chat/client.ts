@@ -23,7 +23,13 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
-import { resolveChatIdentity, buildChatKeyProfile, type ChatIdentity } from "./identity.js";
+import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
+import {
+  resolveChatIdentity,
+  buildChatKeyProfile,
+  defaultDeviceLabel,
+  type ChatIdentity,
+} from "./identity.js";
 import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
 import {
@@ -67,6 +73,12 @@ export class MarmotChat {
   private readonly boundGroups = new Set<string>();
   /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
   private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
+  /** Memoized at most one live roster fetch per client, to reconcile a recorded
+   *  binding against a cold/stale cache (see currentEventGroups). Memoizing the
+   *  RESULT (not just "did we try") matters: if the cache stays stale, every call
+   *  after the first must keep using what the live fetch actually found instead
+   *  of falling back to trusting the (possibly proven-wrong) recorded value. */
+  private liveRosterFetch?: Promise<string | undefined>;
   onMessage?: ChatMessageHandler;
   onStateChange?: () => void;
 
@@ -112,16 +124,14 @@ export class MarmotChat {
    * attestation binding the chat key to the account. Idempotent.
    */
   async ensurePublished(): Promise<void> {
-    // Device-key accounts: publish (or refresh) the chat key's own kind-0 so
-    // other Marmot clients — and our chat UI, which resolves sender names by
-    // fetching this exact pubkey's kind-0 — can show a name/picture instead of
-    // a bare pubkey. Unlike everything below, this is NOT gated on "already
-    // joined": a kind-0 is a plain profile note, not MLS state, so republishing
-    // it here every open also self-heals identities that joined before this
-    // existed (prod report 2026-07-20 — chat showed raw pubkeys for everyone).
-    if (!this.identity.isAccountKey) {
-      await this.ensureChatKeyProfile();
-    }
+    // Publish (or refresh) this device key's own kind-0 (NIP §10.3) so other
+    // Marmot clients — and our chat UI, which resolves sender names by fetching
+    // this exact pubkey's kind-0 — can show a name/picture instead of a bare
+    // pubkey. Every account type has a per-device chat key now (D3), so this is
+    // unconditional. Unlike everything below, it is NOT gated on "already joined":
+    // a kind-0 is a plain profile note, not MLS state, so republishing it here
+    // every open also self-heals identities that joined before this existed.
+    await this.ensureChatKeyProfile();
 
     // Already a joined member OF THIS EVENT's group (APPK-3)? Publish NOTHING
     // else. Re-advertising a fresh kind-30443 key package, or (for device-key
@@ -153,15 +163,15 @@ export class MarmotChat {
     // is retrievable; if not, force a fresh publish to the same `d` slot (the relay
     // replaces in place, so this can't spawn a duplicate).
     await this.ensureKeyPackageOnRelays();
-    // Device-key accounts must attest the chat key to the coordinator (sealed by
-    // the account key). Local-key accounts are their own chat identity — skip.
-    if (!this.identity.isAccountKey) {
-      await sendChatKeyAttestation(this.accountSigner, this.ctx, {
-        op: "add",
-        chatPubkey: this.identity.pubkey,
-        clientId: this.identity.clientId,
-      });
-    }
+    // Every account type attests its per-device chat key to the coordinator (D3),
+    // sealed by the account key and carrying a proof of possession (NIP §10.2).
+    await sendChatKeyAttestation(this.accountSigner, this.ctx, {
+      op: "add",
+      chatPubkey: this.identity.pubkey,
+      clientId: this.identity.clientId,
+      label: defaultDeviceLabel(),
+      deviceSecretKey: this.identity.secretKey,
+    });
   }
 
   /** Publish the device chat key's own kind-0 (name/picture borrowed from the
@@ -329,23 +339,36 @@ export class MarmotChat {
           await this.client.groups.destroy(group.id).catch(() => {});
           continue;
         }
-        // APPK-3: bind this event's coordinate to the joined group so every
-        // later bind/send/membership check targets THIS event's room only.
-        // Never OVERWRITE an existing different binding: a welcome carries no
-        // event coordinate, so with two chat events on the SAME coordinator a
-        // late welcome for the other event is indistinguishable — clobbering
-        // would hijack a working room. (Protocol-level limitation; the first
-        // verified join wins. Both rooms are at least legitimate rooms of this
-        // user with this coordinator — never attacker groups, per the checks
-        // above.)
+        // APPK-3 / NIP §10.4: bind this event's coordinate to the joined group so
+        // every later bind/send/membership check targets THIS event's room only.
+        // A welcome carries no event coordinate, so with two chat events on the
+        // SAME coordinator a welcome for the OTHER event is indistinguishable at
+        // the MLS layer. Ground truth is the coordinator-advertised `nostr_group_id`
+        // on the (member-only, ECK) roster.
+        //
+        // FAIL-CLOSED: a binding is ONLY ever created from a verified roster id
+        // that matches this joined group. Until then the group stays an UNBOUND
+        // CANDIDATE — joined in marmot's pool but never bound, so currentEventGroups()
+        // gives it no listener, no history replay, no display, and no send target.
+        // The old code recorded a first-verified-wins binding whenever the roster
+        // carried no id yet; that could silently adopt another same-coordinator
+        // event's (or an unverified) group as this event's room. currentEventGroups()
+        // repairs the binding later, once the roster (re)publishes the id and matches.
         const joinedId = getNostrGroupIdHex(group.state);
+        const advertised = cachedRoster(this.ctx.coordinate)?.nostr_group_id;
         const existing = await this.recordedEventGroupId();
-        if (existing && existing !== joinedId) {
-          console.warn(
-            "marmot: joined a second coordinator-verified group — keeping this event's existing binding",
-          );
-        } else if (!existing) {
+        if (existing) {
+          if (existing !== joinedId) {
+            console.warn(
+              "marmot: joined another group — keeping this event's existing verified binding",
+            );
+          }
+        } else if (advertised && joinedId === advertised) {
           await this.eventGroups.setItem(this.ctx.coordinate, joinedId).catch(() => {});
+        } else {
+          console.warn(
+            "marmot: joined group left as an unbound candidate (no verified roster id match yet)",
+          );
         }
         await this.client.invites.markAsRead(invite.id).catch(() => {});
       } catch (err) {
@@ -365,27 +388,98 @@ export class MarmotChat {
    * membership goes through here instead of `groups.loadAll()` so attending
    * two chat-enabled events never mixes messages or misdelivers a send.
    *
-   * Migration: installs that joined before event scoping have no recorded
-   * binding. Exactly one joined group whose roster contains this event's
-   * coordinator is adopted (and the binding recorded); zero or ambiguous
-   * matches adopt nothing rather than guessing the wrong room.
+   * Ground truth is the coordinator-advertised `nostr_group_id` on this event's
+   * (member-only, ECK) roster: the authoritative event→group binding an MLS
+   * Welcome cannot carry. We resolve THIS event's group deterministically
+   * against that id instead of guessing "the single coordinator-verified group"
+   * — the old guess silently adopted another same-coordinator event's already-
+   * joined group, which could misdeliver an OUTGOING message (audit APPK-3).
    */
   private async currentEventGroups(): Promise<MarmotGroupLike[]> {
     const all = (await this.client.groups.loadAll().catch(() => [])) as MarmotGroupLike[];
     const recorded = await this.recordedEventGroupId();
-    if (recorded) return all.filter((g) => safeGroupIdHex(g) === recorded);
-    const coordinator = this.ctx.config.coordinator;
-    if (!coordinator) return [];
-    const verified = all.filter((g) => groupHasMember(g, coordinator));
-    if (verified.length === 1) {
-      const group = verified[0]!;
-      const id = safeGroupIdHex(group);
-      if (id) await this.eventGroups.setItem(this.ctx.coordinate, id).catch(() => {});
-      return [group];
+    // Cheap, hot-path-safe: the roster is fetched+cached by the People/event
+    // screens, so the send/bind path reads it without a network round-trip.
+    const advertised = cachedRoster(this.ctx.coordinate)?.nostr_group_id;
+
+    if (recorded) {
+      // A recorded binding that contradicts the authoritative roster is a stale
+      // or (pre-fix) mis-bound entry: nothing re-points it on its own, because the
+      // bind path only ran on a MISSING binding. Reconcile against the roster —
+      // but the CACHE itself can be stale (decrypted+cached before the coordinator
+      // started advertising nostr_group_id, or before this event's group existed),
+      // in which case it silently omits the field and looks identical to "no id
+      // yet". Nothing else on the chat-open path is guaranteed to have refreshed
+      // it (only the People/Admin screens warm this cache), so a wrong recorded
+      // binding could otherwise never self-heal. Try one live read before giving
+      // up — same "cache first, then one network read" shape as the no-binding
+      // branch below. Memoized per client: if the cache never warms, every later
+      // call reuses what that one live fetch found instead of re-fetching (which
+      // would hammer the relay on every send) OR silently reverting to trusting
+      // `recorded` again (which would UN-DO the refusal below on the very next
+      // call, since the cache still can't prove it wrong the second time).
+      let liveAdvertised = advertised;
+      if (!liveAdvertised) {
+        this.liveRosterFetch ??= fetchRoster(this.ctx)
+          .then((r) => r?.nostr_group_id)
+          .catch(() => undefined);
+        liveAdvertised = await this.liveRosterFetch;
+      }
+      // FAIL-CLOSED (NIP §10.4): with NO roster id available at all — cold/stale
+      // cache AND a failed or id-less live fetch — we cannot confirm the recorded
+      // binding still names this event's group. Refuse to route rather than trust an
+      // unverifiable binding (a binding is only ever created from a verified roster
+      // id, but a legacy pre-fix install may hold a fail-open one). Chat stays
+      // "setting up" until the roster republishes the id.
+      if (!liveAdvertised) {
+        console.warn(
+          "marmot: no roster-advertised group id to confirm the recorded binding — refusing to route (fail-closed)",
+        );
+        return [];
+      }
+      if (liveAdvertised !== recorded) {
+        const match = all.filter((g) => safeGroupIdHex(g) === liveAdvertised);
+        if (match.length > 0) {
+          // We hold this event's real group — re-point the binding to it.
+          await this.eventGroups.setItem(this.ctx.coordinate, liveAdvertised).catch(() => {});
+          return match;
+        }
+        // The roster names a group we have NOT joined. The recorded binding is
+        // provably wrong, so returning it would misdeliver; refuse to route until
+        // we're actually added to this event's group (a heal republish follows).
+        console.warn(
+          "marmot: recorded group binding disagrees with the roster and the correct group isn't joined — refusing to route",
+        );
+        return [];
+      }
+      return all.filter((g) => safeGroupIdHex(g) === recorded);
     }
-    if (verified.length > 1) {
+
+    // No recorded binding (a pre-scoping install, or not yet joined). Bind
+    // deterministically to the group the roster names — cache first, then one
+    // network read (this branch stops running as soon as a binding is recorded).
+    const groupId = advertised ?? (await fetchRoster(this.ctx).catch(() => undefined))?.nostr_group_id;
+    if (groupId) {
+      const match = all.filter((g) => safeGroupIdHex(g) === groupId);
+      if (match.length > 0) {
+        await this.eventGroups.setItem(this.ctx.coordinate, groupId).catch(() => {});
+        return match;
+      }
+      // The roster names this event's group but we haven't joined it yet — we're
+      // simply not a member of THIS event's room. Never adopt a different joined
+      // group (that is exactly the misdelivery this fix removes).
+      return [];
+    }
+
+    // The roster advertises no id (a coordinator that predates APPK-3, or no
+    // group exists yet). A correct mechanism now exists, so we deliberately do
+    // NOT fall back to the old "single coordinator-verified group" guess — that
+    // guess is what misrouted a send across two same-coordinator events. Treat
+    // the event as unbound (chat stays "setting up") until the roster republishes
+    // with the id; this degrades gracefully instead of risking the wrong room.
+    if (all.length > 0) {
       console.warn(
-        "marmot: multiple coordinator-verified groups and no recorded binding — refusing to guess",
+        "marmot: no roster-advertised group id and no recorded binding — refusing to guess the room",
       );
     }
     return [];

@@ -10,8 +10,9 @@ similarity *and* complementarity of skills, with plain-language reasoning.
 the app is at `/app`, docs at `/docs`. Nothing to install; it's a static PWA that talks
 only to Nostr relays and Blossom servers.
 
-See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative) and
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md). Product pitch:
+See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative), the
+[protocol registry](docs/PROTOCOL-REGISTRY.md), and [versioning](docs/VERSIONING.md).
+[`docs/archive/IMPLEMENTATION_PLAN.md`](docs/archive/IMPLEMENTATION_PLAN.md) is historical planning material. Product pitch:
 [`docs/ELEVATOR-PITCH-en.md`](docs/ELEVATOR-PITCH-en.md). Guides:
 [organizer](docs/ORGANIZER-GUIDE.md) · [participant](docs/PARTICIPANT-GUIDE.md).
 
@@ -25,15 +26,18 @@ See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative) and
 
 ## Architecture
 
-- **All application state lives in Nostr events**; media lives on Blossom servers
-  (AES-GCM ciphertext). The PWA and the coordinator communicate **only through
+- **Event business records and encrypted content are relay-backed**; media lives on
+  Blossom servers (AES-GCM ciphertext). Browser/coordinator MLS state, payment
+  journals, queues/outboxes, watch progress, and decrypted caches are intentionally
+  local operational state. The PWA and coordinator communicate **only through
   relays** (encrypted events) — there is no app server.
 - **Privacy tiers** (spec §4.1): public (NIP-52 event, profiles), event-encrypted
   (videos, directory, roster — under the Event Content Key), pair-encrypted (match
   lists, coordinator→recipient), user-private (favorites/notes, self-encrypted).
 - **Two event keypairs** (spec §6.1): `E_id` signs the public event/config/invites;
   `E_inbox` receives inbound submissions. The coordinator gets `E_inbox` but never
-  `E_id` — it can read event content but cannot impersonate the event.
+  `E_id` — it cannot impersonate the event, but can process submissions and publish
+  delegated directory, roster, match, talk, status, and chat records.
 - **Cache-first reads**: every relay read paints from a persistent IndexedDB cache
   (`nostrautica-appcache`, owner-scoped for decrypted content, wiped on logout) and
   revalidates in the background (stale-while-revalidate) — a page never blocks on a
@@ -68,17 +72,20 @@ docker compose -f docker/docker-compose.yml up
 ## Deploy
 
 - **PWA** → nsite (`nsyte deploy`, kinds 15128/35128 + Blossom) and/or any static
-  host. See [`packages/app/README-deploy.md`](packages/app/README-deploy.md).
+  host. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and
+  [`packages/app/README-deploy.md`](packages/app/README-deploy.md).
 - **Coordinator** → `docker/coordinator.Dockerfile` (node + ffmpeg), configured by
   [`packages/coordinator/coordinator.example.toml`](packages/coordinator/coordinator.example.toml)
   + env secrets. Installed per-event by a `21603` grant — no per-event server config.
+  See [`docs/COORDINATOR-OPERATOR-GUIDE.md`](docs/COORDINATOR-OPERATOR-GUIDE.md).
 
 ## Providers
 
 All AI I/O goes through three interfaces (`packages/coordinator/src/providers/types.ts`):
-`SttProvider`, `LlmProvider`, `PaymentStrategy`. v1 ships Venice.ai adapters
-(`Authorization: Bearer`); v2 adds Routstr (decentralized, Cashu-paid) behind a
-config flag. STT stays on Venice/local (Routstr has no STT today).
+`SttProvider`, `LlmProvider`, `PaymentStrategy`. Venice is the supported LLM/STT
+path. Routstr is an experimental LLM path only when an explicit node URL is
+configured; discovery and local Whisper are not implemented. Current runtime uses
+one global LLM provider, so mixed per-role provider configuration is not enforced.
 
 ## License
 

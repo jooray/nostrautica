@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { schnorr } from "@noble/curves/secp256k1";
+import { sha256 } from "@noble/hashes/sha256";
+import { utf8ToBytes } from "@noble/hashes/utils";
 import {
   generateEck,
   eckEncrypt,
@@ -130,7 +133,7 @@ describe("AES-256-GCM media", () => {
   });
 });
 
-describe("invite proofs (spec §6.5)", () => {
+describe("invite proofs (NIP §7, v2 challenge)", () => {
   const coord = makeCoordinate("a".repeat(64), "cypherpunk");
   const attendee = getPublicKey(generateSecretKey());
 
@@ -168,6 +171,22 @@ describe("invite proofs (spec §6.5)", () => {
     const proof = makeInviteProof(invite, coord, attendee);
     const tampered = { ...proof, sig: bytesToHex(new Uint8Array(64)) };
     expect(verifyInviteProof(tampered, coord, attendee)).toBe(false);
+  });
+
+  it("rejects a v1-format proof (flag day: v1 challenge no longer verifies)", () => {
+    // Reconstruct the v1 challenge (bare `sha256("<coordinate>:<attendee>")`) and
+    // sign it with a real invite key — this is exactly what a v1 client produced.
+    // Under the v2 domain-separated/injective challenge it MUST fail verification.
+    const invite = generateSecretKey();
+    const invitePubkey = getPublicKey(invite);
+    const v1Digest = sha256(utf8ToBytes(`${coord}:${attendee}`));
+    const v1Proof = { invitePubkey, sig: bytesToHex(schnorr.sign(v1Digest, invite)) };
+    expect(verifyInviteProof(v1Proof, coord, attendee)).toBe(false);
+    const published = new Set([inviteHash(invitePubkey)]);
+    expect(isInviteValid(v1Proof, published, coord, attendee)).toBe(false);
+    // Sanity: a v2 proof by the same key over the same pair DOES verify.
+    const v2Proof = makeInviteProof(invite, coord, attendee);
+    expect(isInviteValid(v2Proof, published, coord, attendee)).toBe(true);
   });
 
   it("isInviteValid returns false (never throws) on malformed proof fields (PROTO-1)", () => {

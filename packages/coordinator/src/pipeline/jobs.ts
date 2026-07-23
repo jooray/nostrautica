@@ -11,6 +11,20 @@ import type { Store, JobRow } from "../store/db.js";
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn }) => Promise<void>;
 export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => void;
 
+/**
+ * A handler throws this to PARK its job (spec §9 billing/budget gates, H-2) rather
+ * than fail it: the job moves to a distinct `waiting` state that `claimNextJob`
+ * never claims, so blocked paid work is coalesced (parked once) instead of
+ * retry-spinning against a hard billing/budget block. It consumes no retry and can
+ * never poison; `store.resumeWaitingJobs` re-enqueues it when the block clears.
+ */
+export class ParkJobError extends Error {
+  constructor(reason: string) {
+    super(reason);
+    this.name = "ParkJobError";
+  }
+}
+
 /** A poisoned job, surfaced so the coordinator can notify the organizer (Q12). */
 export interface PoisonInfo {
   type: string;
@@ -96,6 +110,17 @@ export class JobRunner {
     return this.store.reclaimExpiredLeases(this.now());
   }
 
+  /** Set once shutdown begins: `drain` stops claiming NEW jobs (the in-flight job
+   *  still finishes) so a graceful stop can await active work and then close. */
+  private stopping = false;
+
+  /** Stop claiming new jobs (reliability tail: graceful shutdown drain). The job
+   *  currently executing inside `runOne` is awaited by the caller; no new job is
+   *  claimed after this. Idempotent. */
+  stopClaiming(): void {
+    this.stopping = true;
+  }
+
   /** Run one claimable job under a fresh lease. Returns true if a job was processed. */
   async runOne(): Promise<boolean> {
     const token = randomUUID();
@@ -105,9 +130,11 @@ export class JobRunner {
     return true;
   }
 
-  /** Drain the queue until no runnable jobs remain (bounded to avoid loops). */
+  /** Drain the queue until no runnable jobs remain (bounded to avoid loops). Stops
+   *  claiming new jobs once {@link stopClaiming} has been called (graceful shutdown). */
   async drain(maxIterations = 10_000): Promise<void> {
     for (let i = 0; i < maxIterations; i++) {
+      if (this.stopping) return;
       if (!(await this.runOne())) return;
     }
   }
@@ -118,6 +145,19 @@ export class JobRunner {
       this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true, token);
       return;
     }
+    // Heartbeat the lease while the handler runs (audit P0-6). A pipeline handler
+    // can download + transcode media, call several models, or score a batch — far
+    // longer than the 5-minute lease. Without a heartbeat the lease expires under
+    // an alive-but-slow worker and a second worker reclaims the job, duplicating
+    // paid work. We extend the lease at a third of its length; a handler that
+    // stops heartbeating (a truly dead/hung worker) correctly lets the lease
+    // lapse so recovery can reclaim it. The interval is unref'd so it never keeps
+    // the process alive on its own.
+    const heartbeatMs = Math.max(1, Math.floor(this.leaseMs / 3));
+    const heartbeat = setInterval(() => {
+      this.store.heartbeatJob(job.id, token, this.now() + this.leaseMs);
+    }, heartbeatMs);
+    (heartbeat as { unref?: () => void }).unref?.();
     try {
       await handler(JSON.parse(job.payload), {
         enqueue: (t, k, p) => this.enqueue(t, k, p),
@@ -126,6 +166,16 @@ export class JobRunner {
       // rows — we discard our result rather than clobber the new owner's state.
       this.store.completeJob(job.id, token);
     } catch (err) {
+      // A billing/budget PARK is not a failure: move to `waiting` (coalesced, no
+      // retry consumed, never poisons) — resumed when the block clears (H-2).
+      if (err instanceof ParkJobError) {
+        const parked = this.store.parkJob(job.id, err.message, token);
+        if (parked) {
+          const t = new Date().toISOString().slice(11, 19);
+          console.log(`[${t}] [job] ${job.type} PARKED (waiting): ${err.message.slice(0, 120)}`);
+        }
+        return;
+      }
       const attempts = job.attempts + 1;
       const poison = attempts >= this.maxAttempts;
       const backoff = this.backoffForAttempt(attempts);
@@ -140,6 +190,8 @@ export class JobRunner {
       if (poison && owned && this.onPoison) {
         this.onPoison({ type: job.type, payload: safeParse(job.payload), attempts, error: msg });
       }
+    } finally {
+      clearInterval(heartbeat);
     }
   }
 }

@@ -23,7 +23,13 @@ vi.mock("$lib/signer/keystore.js", () => ({
 // no-op to mock; the lock/unlock calls (audit UX-6) are spied on directly so
 // the wiring tests below can assert on them without touching real storage.
 const { lockEventKeysForLogout, unlockEventKeysForLogin } = vi.hoisted(() => ({
-  lockEventKeysForLogout: vi.fn(async (_encrypt: (pt: string) => Promise<string>, _owner?: string) => {}),
+  lockEventKeysForLogout: vi.fn(
+    async (
+      _encrypt: (pt: string) => Promise<string>,
+      _decrypt: (ct: string) => Promise<string>,
+      _owner?: string,
+    ) => {},
+  ),
   unlockEventKeysForLogin: vi.fn(async (_decrypt: (ct: string) => Promise<string>, _owner?: string) => {}),
 }));
 vi.mock("$lib/events/keystore.js", () => ({
@@ -142,7 +148,7 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
 
     await session.logout();
     expect(lockEventKeysForLogout).toHaveBeenCalledTimes(1);
-    expect(lockEventKeysForLogout.mock.calls[0]![1]).toBe(pubkey);
+    expect(lockEventKeysForLogout.mock.calls[0]![2]).toBe(pubkey); // owner is now the 3rd arg (decrypt added)
     expect(lockChatIdentityForLogout).toHaveBeenCalledTimes(1);
     expect(lockChatIdentityForLogout.mock.calls[0]![0]).toBe(pubkey);
     expect(session.loggedIn).toBe(false);
@@ -176,5 +182,58 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
     });
     await session.createLocalKey();
     expect(resolved).toBe(true);
+  });
+});
+
+describe("logout self-encrypt failure surfacing (H-5)", () => {
+  beforeEach(async () => {
+    await session.logout().catch(() => {});
+    lockEventKeysForLogout.mockReset();
+    lockEventKeysForLogout.mockResolvedValue(undefined);
+    lockChatIdentityForLogout.mockReset();
+    lockChatIdentityForLogout.mockResolvedValue(undefined);
+  });
+
+  it("sets logoutError when key custody cannot be self-encrypted", async () => {
+    await session.createLocalKey();
+    lockEventKeysForLogout.mockRejectedValueOnce(new Error("signer unreachable"));
+    await session.logout();
+    expect(session.logoutError).toBe(true);
+  });
+
+  it("leaves logoutError false on a clean logout, and a fresh login clears a stale one", async () => {
+    await session.createLocalKey();
+    await session.logout();
+    expect(session.logoutError).toBe(false);
+
+    // A prior failed logout left the flag set; logging in clears it.
+    session.logoutError = true;
+    await session.createLocalKey();
+    expect(session.logoutError).toBe(false);
+  });
+});
+
+describe("cross-tab remote logout (H-5)", () => {
+  beforeEach(async () => {
+    await session.logout().catch(() => {});
+    recentEventsClear.mockClear();
+    clearAllJoinSent.mockClear();
+  });
+
+  it("applyRemoteLogout tears down this tab's owner state for the same identity", async () => {
+    await session.createLocalKey();
+    const owner = session.pubkey!;
+    session.applyRemoteLogout(owner);
+    expect(session.loggedIn).toBe(false);
+    expect(session.pubkey).toBeNull();
+    expect(recentEventsClear).toHaveBeenCalled();
+    expect(clearAllJoinSent).toHaveBeenCalled();
+  });
+
+  it("ignores a remote logout for a DIFFERENT identity", async () => {
+    await session.createLocalKey();
+    const other = "f".repeat(64);
+    session.applyRemoteLogout(other);
+    expect(session.loggedIn).toBe(true); // untouched
   });
 });

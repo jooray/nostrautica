@@ -75,7 +75,7 @@ async function makeBackupEvent(
   const coordinate = makeCoordinate(eidPk, "cypherpunk-2026");
   const eckKey = bytesToBase64(generateEck());
   const backup: EventKeysBackup = {
-    v: 1,
+    v: 2,
     ...(opts.includeA ? { a: coordinate } : {}),
     eid_nsec: bytesToHex(eidSk),
     einbox_nsec: bytesToHex(einboxSk),

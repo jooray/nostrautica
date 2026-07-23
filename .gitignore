@@ -22,6 +22,7 @@ docs-site-build/
 
 # local notes, not for the repo
 CLAUDE.md
+AGENTS.md
 benchmarks/matching/cache/
 
 # scratch design assets — kept local, never committed
@@ -34,3 +35,4 @@ docs/internal/
 
 # playwright artifacts
 e2e/test-results/
+RELEASE_ID

@@ -127,6 +127,88 @@ export async function followUser(signer: AppSigner, target: string): Promise<boo
   return publishOrQueue(event);
 }
 
+/** Outcome of a `followAll` run — reported honestly to the user (spec §13). */
+export interface FollowAllResult {
+  /** Newly-followed pubkeys (added to the kind-3 this run). */
+  followed: string[];
+  /** Targets already in the follow list — nothing to do. */
+  alreadyFollowing: string[];
+  /** Targets that could not be followed (the publish failed). */
+  failed: string[];
+}
+
+/** The follow-all plan derived from the current kind-3 tags and the target set. */
+export interface FollowAllPlan {
+  /** True when the current list has zero follows — the empty-list guard trips. */
+  guardTripped: boolean;
+  /** Targets already present in the list. */
+  alreadyFollowing: string[];
+  /** Targets not yet present, to be appended. */
+  toAdd: string[];
+  /** The merged tag set to publish (only when there is something to add). */
+  mergedTags?: Tag[];
+}
+
+/**
+ * Pure planner for `followAll` (spec §13). Splits `targets` against the current
+ * kind-3 `existingTags` into already-following vs. to-add, and reports the same
+ * empty-list guard `followUser` uses: a list with no `p` tags is indistinguishable
+ * from a failed fetch, so appending to it would look like a wiped follow list.
+ */
+export function planFollowAll(existingTags: Tag[], targets: string[]): FollowAllPlan {
+  const following = new Set(existingTags.filter((t) => t[0] === "p").map((t) => t[1]));
+  const seen = new Set<string>();
+  const alreadyFollowing: string[] = [];
+  const toAdd: string[] = [];
+  for (const target of targets) {
+    if (seen.has(target)) continue;
+    seen.add(target);
+    if (following.has(target)) alreadyFollowing.push(target);
+    else toAdd.push(target);
+  }
+  // Guard trips only when we'd actually publish (there's something to add) onto a
+  // list that looks empty/unfetched. If everyone is already followed there's
+  // nothing to publish, so an empty list is harmless.
+  const guardTripped = toAdd.length > 0 && following.size === 0;
+  return {
+    guardTripped,
+    alreadyFollowing,
+    toAdd,
+    ...(toAdd.length && !guardTripped ? { mergedTags: mergeFollowTags(existingTags, toAdd) } : {}),
+  };
+}
+
+/**
+ * Follow many pubkeys at once via a SINGLE kind-3 fetch-merge-append (spec §13
+ * payoff flow): the post-event report's "follow everyone I met / want to meet".
+ * Reuses the same empty-list guard as `followUser` — a fetch with no follows is
+ * refused rather than risk publishing a wiped list. Reports the outcome honestly:
+ * already-following targets are skipped, and if the single publish fails the
+ * to-add targets are reported as failed, never as followed.
+ */
+export async function followAll(signer: AppSigner, targets: string[]): Promise<FollowAllResult> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_CONTACTS, pubkey);
+  const existingTags = (existing?.tags as Tag[]) ?? [];
+  const plan = planFollowAll(existingTags, targets);
+  if (plan.guardTripped) throw new Error(t("error.followListGuard"));
+  if (!plan.mergedTags) {
+    return { followed: [], alreadyFollowing: plan.alreadyFollowing, failed: [] };
+  }
+  try {
+    const event = await signer.signEvent({
+      kind: KIND_CONTACTS,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: plan.mergedTags,
+      content: existing?.content ?? "",
+    });
+    await publishOrQueue(event);
+    return { followed: plan.toAdd, alreadyFollowing: plan.alreadyFollowing, failed: [] };
+  } catch {
+    return { followed: [], alreadyFollowing: plan.alreadyFollowing, failed: plan.toAdd };
+  }
+}
+
 /**
  * Seed a freshly-generated key's follow list with the event's E_id (spec §5.4
  * item 3): generated identities always have a non-empty kind 3, so the

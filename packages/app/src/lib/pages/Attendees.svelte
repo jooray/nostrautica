@@ -10,12 +10,12 @@
   import { fetchFollowSet, fetchProfiles, cachedProfiles, cachedFollowSet, type ProfileMeta } from "$lib/events/social.js";
   import { loadPerEventSettings, toggleSetting, cachedPerEventSettings } from "$lib/events/settings.js";
   import { perfMark } from "$lib/perf.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
-  import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
+  import { directoryEntryFields, searchRank } from "$lib/events/search.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
-  import VirtualList from "$lib/components/VirtualList.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
@@ -58,6 +58,25 @@
   let error = $state<unknown>(null);
 
   if (cachedEntries.length) perfMark("Attendees", "cache-paint");
+
+  // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
+  // mirror, so re-read the roster/directory snapshots when hydration lands while
+  // the list is still empty.
+  $effect(() => {
+    void cacheHydration.version;
+    if (entries.length > 0) return;
+    const c = cachedEventContext(naddr);
+    if (!c) return;
+    ctx ??= c;
+    const de = cachedDirectory(c.coordinate) ?? [];
+    if (de.length === 0) return;
+    entries = de;
+    profiles = cachedProfiles(de.map((e) => e.pubkey));
+    followSet = cachedFollowSet() ?? followSet;
+    settings ??= cachedPerEventSettings(c.coordinate) ?? null;
+    loading = false;
+    perfMark("Attendees", "cache-paint");
+  });
 
   let stream: DirectoryStream | undefined;
   let blindingKey: Uint8Array | null = null;
@@ -194,17 +213,15 @@
     return list;
   });
 
+  // Filter by the active chips first, then run the full-text search (all decrypted
+  // fields, transcripts included) with name matches ranked first (spec §13). The
+  // chip filter is applied before ranking so counts stay honest.
   const visible = $derived(
-    sorted.filter((e) => {
-      if (!passesFilter(e.pubkey)) return false;
-      const hay = buildSearchText([
-        nameOf(e.pubkey, e.profile.about),
-        cardAbout(e),
-        cardSkills(e),
-        e.ai_profile?.summary,
-      ]);
-      return matchesQuery(hay, query);
-    }),
+    searchRank(
+      sorted.filter((e) => passesFilter(e.pubkey)),
+      query,
+      (e) => directoryEntryFields(e, nameOf(e.pubkey, e.profile.about), i18n.locale),
+    ),
   );
 
   const hasFilters = $derived(query.trim().length > 0 || activeFilters.size > 0);
@@ -278,46 +295,54 @@
       <button class="btn inline" onclick={clearFilters}>{t("attendees.filter.clear")}</button>
     </div>
   {:else}
+    <!-- Full roster in the DOM (audit §7.3.5): virtualization mounted only the
+         visible window, so browser Find and screen readers missed offscreen
+         attendees and zoom could clip fixed-height rows. At the spec scale
+         (≤2000, typically ~200) rendering every row is fine, and it's the
+         simplest correct fix. Real list semantics so AT announces "list, N
+         items"; a 2000-row render-perf check is an e2e-phase task. -->
     <div class="card roster">
-      <VirtualList items={visible} itemHeight={60} getKey={(e) => e.pubkey}>
-        {#snippet row(e)}
-          <PersonCard
-            pubkey={e.pubkey}
-            name={nameOf(e.pubkey, e.profile.about)}
-            line={cardAbout(e) || e.ai_profile?.summary}
-            picture={profiles.get(e.pubkey)?.picture}
-            onOpen={() => open(e.pubkey)}
-            last={e.pubkey === visible[visible.length - 1]?.pubkey}
-          >
-            {#snippet trailing()}
-              {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
-              {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
-            {/snippet}
-            {#snippet actions()}
-              {#if session.loggedIn && e.pubkey !== session.pubkey}
-                <button
-                  class="btn inline icon-btn"
-                  aria-pressed={wantToMeet(e.pubkey)}
-                  class:primary={wantToMeet(e.pubkey)}
-                  title={t("attendees.filter.wantToMeet")}
-                  aria-label={t("attendees.filter.wantToMeet")}
-                  onclick={() => toggleWantToMeet(e.pubkey)}
-                >
-                  <Icon name="star" size={16} />
-                </button>
-                <button
-                  class="btn inline icon-btn"
-                  title={t("matches.message")}
-                  aria-label={t("matches.message")}
-                  onclick={() => message(e.pubkey)}
-                >
-                  <Icon name="send" size={16} />
-                </button>
-              {/if}
-            {/snippet}
-          </PersonCard>
-        {/snippet}
-      </VirtualList>
+      <ul class="roster-list" aria-label={t("attendees.rosterLabel")}>
+        {#each visible as e (e.pubkey)}
+          <li>
+            <PersonCard
+              pubkey={e.pubkey}
+              name={nameOf(e.pubkey, e.profile.about)}
+              line={cardAbout(e) || e.ai_profile?.summary}
+              picture={profiles.get(e.pubkey)?.picture}
+              onOpen={() => open(e.pubkey)}
+              last={e.pubkey === visible[visible.length - 1]?.pubkey}
+            >
+              {#snippet trailing()}
+                {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
+                {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
+              {/snippet}
+              {#snippet actions()}
+                {#if session.loggedIn && e.pubkey !== session.pubkey}
+                  <button
+                    class="btn inline icon-btn"
+                    aria-pressed={wantToMeet(e.pubkey)}
+                    class:primary={wantToMeet(e.pubkey)}
+                    title={t("attendees.wantToMeetName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    aria-label={t("attendees.wantToMeetName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    onclick={() => toggleWantToMeet(e.pubkey)}
+                  >
+                    <Icon name="star" size={16} />
+                  </button>
+                  <button
+                    class="btn inline icon-btn"
+                    title={t("attendees.messageName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    aria-label={t("attendees.messageName", { name: nameOf(e.pubkey, e.profile.about) })}
+                    onclick={() => message(e.pubkey)}
+                  >
+                    <Icon name="send" size={16} />
+                  </button>
+                {/if}
+              {/snippet}
+            </PersonCard>
+          </li>
+        {/each}
+      </ul>
     </div>
   {/if}
 {/if}
@@ -330,6 +355,11 @@
   }
   .roster {
     padding: 0.25rem 0.9rem;
+  }
+  .roster-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
   }
   .icon-btn {
     padding: 0.4rem 0.5rem;

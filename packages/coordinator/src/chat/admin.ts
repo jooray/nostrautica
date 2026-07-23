@@ -15,7 +15,11 @@
  */
 import type { Store } from "../store/db.js";
 import type { ChatMls } from "./mls.js";
-import type { ChatKeyAttestationContent } from "@nostrautica/protocol";
+import {
+  verifyChatDeviceProof,
+  MAX_CHAT_KEYS_PER_ACCOUNT,
+  type ChatKeyAttestationContent,
+} from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
 
@@ -23,6 +27,8 @@ export interface MarmotAdminDeps {
   store: Store;
   mls: ChatMls;
   now: () => number;
+  /** The coordinator's own pubkey (hex) — always retained in the admin set. */
+  coordinatorPubkey: string;
   /** Fetch kind-30443 key packages authored by `authors` for this event. */
   fetchKeyPackages(coordinate: string, authors: string[]): Promise<AnyEvent[]>;
   log?: (msg: string) => void;
@@ -32,6 +38,7 @@ export class MarmotAdmin {
   private readonly store: Store;
   private readonly mls: ChatMls;
   private readonly now: () => number;
+  private readonly coordinatorPubkey: string;
   private readonly fetchKeyPackages: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
   private readonly log: (msg: string) => void;
 
@@ -39,6 +46,7 @@ export class MarmotAdmin {
     this.store = deps.store;
     this.mls = deps.mls;
     this.now = deps.now;
+    this.coordinatorPubkey = deps.coordinatorPubkey;
     this.fetchKeyPackages = deps.fetchKeyPackages;
     this.log = deps.log ?? (() => {});
   }
@@ -56,13 +64,20 @@ export class MarmotAdmin {
     if (existing) {
       // A frozen group re-activates when chat is toggled back on (§9 Q4).
       if (existing.status === "frozen") this.store.setMarmotGroupStatus(opts.coordinate, "active");
+      // Reconcile the admin set on every ensureGroup: organizers approved (or
+      // whose chat devices changed) while chat was frozen/offline are promoted
+      // now, and a coordinator that lost its admin state re-asserts it.
+      await this.syncAdmins(opts.coordinate);
       return { mlsGroupIdHex: existing.mls_group_id, nostrGroupIdHex: existing.nostr_group_id };
     }
+    // Create with the coordinator + any already-approved organizer chat devices
+    // as admins (usually just the coordinator at creation time; organizers are
+    // promoted as they approve/attest — see syncAdmins).
     const ids = await this.mls.createGroup({
       name: opts.name,
       description: opts.description,
       relays: opts.relays,
-      adminPubkeys: opts.adminPubkeys,
+      adminPubkeys: opts.adminPubkeys ?? this.desiredAdminPubkeys(opts.coordinate),
     });
     this.store.upsertMarmotGroup({
       coordinate: opts.coordinate,
@@ -130,6 +145,44 @@ export class MarmotAdmin {
     return [...authors];
   }
 
+  // ── second MLS admin: organizer device promotion (§13.2 recovery) ─────────
+  /**
+   * The MLS admin set this event SHOULD have: the coordinator itself plus every
+   * ACTIVE authorized chat identity of every APPROVED organizer-role attendee.
+   * Promoting an organizer's own chat device keys to co-admin is what makes a
+   * coordinator-DB loss survivable — an organizer device can still add/remove
+   * members and rotate metadata when the coordinator's admin state is gone.
+   * The coordinator is ALWAYS retained: dropping it would lock the running bot
+   * out of admin commits.
+   */
+  desiredAdminPubkeys(coordinate: string): string[] {
+    const admins = new Set<string>([this.coordinatorPubkey]);
+    for (const a of this.store.approvedAttendees(coordinate)) {
+      if (a.role !== "organizer") continue;
+      for (const id of this.authorizedIdentities(coordinate, a.pubkey)) admins.add(id);
+    }
+    return [...admins];
+  }
+
+  /** Reconcile the group's on-chain admin set with {@link desiredAdminPubkeys}. */
+  async syncAdmins(coordinate: string): Promise<void> {
+    const group = this.activeGroup(coordinate);
+    if (!group) return;
+    const desired = this.desiredAdminPubkeys(coordinate);
+    await this.mls.setAdmins(group.mls_group_id, desired);
+  }
+
+  /** True if `accountPubkey` is an approved organizer-role attendee of this event. */
+  private isOrganizer(coordinate: string, accountPubkey: string): boolean {
+    const a = this.store.getAttendee(coordinate, accountPubkey);
+    return a?.role === "organizer";
+  }
+
+  /** Re-sync admins only when the changed account is an organizer (cheap gate). */
+  private async maybeSyncAdmins(coordinate: string, accountPubkey: string): Promise<void> {
+    if (this.isOrganizer(coordinate, accountPubkey)) await this.syncAdmins(coordinate);
+  }
+
   // ── watcher fast-path gate (audit COORD-17) ───────────────────────────────
   // The 30443 watcher fires for EVERY key package anyone publishes on public
   // relays; computing eligibleChatAuthors (a DB walk) per event is a DoS surface.
@@ -169,6 +222,8 @@ export class MarmotAdmin {
       if (!authorized.has(kp.pubkey)) continue; // relay returned an unrelated author
       await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp);
     }
+    // An approved organizer's device landing in the group must also be an admin.
+    await this.maybeSyncAdmins(coordinate, accountPubkey);
   }
 
   /**
@@ -240,12 +295,19 @@ export class MarmotAdmin {
    * evict another member's key. Rebinding a chat_pubkey already owned by another
    * account is likewise refused at the store layer (audit COORD-10).
    *
+   * Proof of possession (NIP §10.2): an `op:"add"` MUST carry a `proof` — a BIP-340
+   * signature by the chat DEVICE key over the §10.2 challenge (binding coordinate,
+   * account, chat pubkey, and the rumor's `created_at`). Without a valid proof the
+   * add is rejected, so an account can no longer bind a chat key it doesn't control.
+   * The rumor's `created_at` is passed in because it is part of the signed challenge.
+   *
    * @returns true if the attestation was accepted (recorded), false if rejected.
    */
   async handleAttestation(
     coordinate: string,
     accountPubkey: string,
     content: ChatKeyAttestationContent,
+    createdAt: number,
   ): Promise<boolean> {
     if (content.a !== coordinate) return false;
     const attendee = this.store.getAttendee(coordinate, accountPubkey);
@@ -254,11 +316,37 @@ export class MarmotAdmin {
       return false;
     }
     if (content.op === "add") {
+      // Proof of possession (NIP §10.2): the chat DEVICE key must sign the challenge
+      // that binds this (coordinate, account, chat pubkey, created_at). The schema
+      // already requires `proof` on add; re-verify the signature here before binding.
+      if (
+        !content.proof ||
+        !verifyChatDeviceProof(content.proof, coordinate, accountPubkey, content.chat_pubkey, createdAt)
+      ) {
+        this.log(
+          `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: invalid/missing proof of possession for ${content.chat_pubkey.slice(0, 8)}`,
+        );
+        return false;
+      }
+      // Per-account device cap (NIP §10.1): at most MAX_CHAT_KEYS_PER_ACCOUNT active
+      // keys per account per event. A refresh of an already-active key doesn't count
+      // against the cap; activating a NEW (or previously-revoked) key beyond it does.
+      const active = this.store
+        .chatKeysForAccount(coordinate, accountPubkey)
+        .filter((k) => k.status === "active");
+      const alreadyActive = active.some((k) => k.chat_pubkey === content.chat_pubkey);
+      if (!alreadyActive && active.length >= MAX_CHAT_KEYS_PER_ACCOUNT) {
+        this.log(
+          `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: account already at the ${MAX_CHAT_KEYS_PER_ACCOUNT}-device cap`,
+        );
+        return false;
+      }
       const recorded = this.store.upsertChatKey({
         coordinate,
         accountPubkey,
         chatPubkey: content.chat_pubkey,
         clientId: content.client_id ?? null,
+        label: content.label ?? null,
         status: "active",
         now: this.now(),
       });
@@ -291,6 +379,8 @@ export class MarmotAdmin {
     this.invalidateEligibility(coordinate);
     const group = this.activeGroup(coordinate);
     if (group) await this.mls.removePubkeys(group.mls_group_id, [content.chat_pubkey]);
+    // A revoked organizer device must also lose its co-admin standing.
+    await this.maybeSyncAdmins(coordinate, accountPubkey);
     this.log(`[chat] revoked chat key ${content.chat_pubkey.slice(0, 8)} for ${accountPubkey.slice(0, 8)}`);
     return true;
   }
@@ -310,6 +400,9 @@ export class MarmotAdmin {
     await this.mls.removePubkeys(group.mls_group_id, pubkeys);
     for (const k of chatKeys) this.store.setChatKeyStatus(coordinate, k.chat_pubkey, "revoked", this.now());
     this.invalidateEligibility(coordinate);
+    // A removed organizer must lose co-admin standing (desiredAdminPubkeys keys
+    // off the approved-organizer set, so a removed organizer drops out of it).
+    await this.maybeSyncAdmins(coordinate, accountPubkey);
     this.log(`[chat] removed ${accountPubkey.slice(0, 8)} (+${chatKeys.length} chat key(s)) from ${coordinate}`);
   }
 

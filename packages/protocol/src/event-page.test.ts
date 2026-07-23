@@ -30,7 +30,7 @@ import type { z } from "zod";
 const hex = "a".repeat(64);
 
 const post: MembersPostContent = {
-  v: 1,
+  v: 2,
   title: "Full schedule",
   summary: "with rooms and names",
   image: "https://blossom.example/pic.png",
@@ -49,7 +49,7 @@ describe("31607 members-only post payload", () => {
   it("schema round-trips through JSON (optionals present and absent)", () => {
     roundTrips(membersPostContentSchema, post);
     roundTrips(membersPostContentSchema, {
-      v: 1,
+      v: 2,
       title: "t",
       published_at: 1,
       content: "body",
@@ -93,13 +93,13 @@ describe("31608 event page content", () => {
   ];
 
   it("public content schema round-trips (with and without private)", () => {
-    roundTrips(eventPageContentSchema, { v: 1, sections, private: "ciphertext" });
-    roundTrips(eventPageContentSchema, { v: 1, sections: [] });
+    roundTrips(eventPageContentSchema, { v: 2, sections, private: "ciphertext" });
+    roundTrips(eventPageContentSchema, { v: 2, sections: [] });
   });
 
   it("private payload schema round-trips", () => {
     roundTrips(eventPagePrivateSchema, {
-      v: 1,
+      v: 2,
       menu: [{ label: "Secret map", target: "https://example.com/map", pos: 1 }],
       sections: [{ type: "posts", source: "event", visibility: "members", pos: 0 }],
     });
@@ -108,7 +108,7 @@ describe("31608 event page content", () => {
   it("private payload encrypts/decrypts under the ECK; wrong key rejects", () => {
     const eck = generateEck();
     const priv: EventPagePrivate = {
-      v: 1,
+      v: 2,
       menu: [{ label: "m", target: "nostr:naddr1x", pos: 0 }],
       sections: [{ type: "attendees", pos: 2 }],
     };
@@ -127,7 +127,7 @@ describe("31608 event page content", () => {
       ["r", "https://venue.example", "Venue"],
       ["r", "nostr:naddr1sched", "Schedule"],
     ]);
-    expect(rTagsToMenu([["d", "ev"], ...tags, ["v", "1"]])).toEqual(menu);
+    expect(rTagsToMenu([["d", "ev"], ...tags, ["v", "2"]])).toEqual(menu);
   });
 });
 

@@ -1,65 +1,46 @@
 /**
- * Queued-publish visibility (audit UX-15). `publishOrQueue` (nostr/publish-queue.ts)
- * returns false when an event lands in the durable outbox instead of going out,
- * but nothing surfaced that anywhere — a join request, follow, or DM sent on
- * flaky venue Wi-Fi looked lost. This store keeps a reactive count of what is
- * sitting in the outbox so the shell can show a quiet "will sync" chip, and call
- * sites can warn inline at send time.
+ * Queued-publish visibility (audit UX-15, App-8). `publishOrQueue`
+ * (nostr/publish-queue.ts) returns false when an event lands in the durable
+ * outbox instead of going out, but nothing surfaced that anywhere — a join
+ * request, follow, or DM sent on flaky venue Wi-Fi looked lost. This store keeps
+ * a reactive view of the outbox so the shell can show a quiet "will sync" chip
+ * and, for events that exhausted their retries, a terminal "failed" list the
+ * user can retry or discard (App-8 permanent-failure policy).
  *
- * It reads the SAME IndexedDB the queue persists to (read-only, own connection)
- * — publish-queue.ts owns all writes; this is a passive observer. `noteQueued()`
- * lets a call site that just queued something update the count immediately
- * instead of waiting for the next poll.
+ * publish-queue.ts owns the storage + flush; this is a reactive observer over
+ * its seam (`listQueued`) plus the two user actions (`retryFailed`,
+ * `discardQueued`). `noteQueued()` lets a call site that just queued something
+ * refresh the view immediately instead of waiting for the next poll.
  */
+import {
+  listQueued,
+  retryFailed,
+  discardQueued,
+} from "$lib/nostr/publish-queue.js";
 
-// Mirrors the constants in nostr/publish-queue.ts (its file — do not import
-// internals; the DB contract is the seam).
-const DB_NAME = "nostrautica-outbox";
-const STORE = "queue";
 const POLL_MS = 30_000;
 
-/** Count queued items; 0 when the DB/store doesn't exist or can't be read. */
-async function countQueued(): Promise<number> {
-  if (typeof indexedDB === "undefined") return 0;
-  const db = await new Promise<IDBDatabase | null>((resolve) => {
-    let req: IDBOpenDBRequest;
-    try {
-      req = indexedDB.open(DB_NAME);
-    } catch {
-      resolve(null);
-      return;
-    }
-    // A missing DB means an empty queue — but opening a missing DB would CREATE
-    // it (version 1, without the object store), and publish-queue's own
-    // open-with-upgrade would then never fire its onupgradeneeded, breaking the
-    // queue itself. Abort the upgrade: the just-created empty DB is rolled back
-    // and the open fails, which we treat as "empty".
-    req.onupgradeneeded = () => req.transaction?.abort();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null);
-    req.onblocked = () => resolve(null);
-  });
-  if (!db) return 0;
-  try {
-    if (!db.objectStoreNames.contains(STORE)) return 0;
-    return await new Promise<number>((resolve) => {
-      try {
-        const tx = db.transaction(STORE, "readonly");
-        const req = tx.objectStore(STORE).count();
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => resolve(0);
-      } catch {
-        resolve(0);
-      }
-    });
-  } finally {
-    db.close();
-  }
+/** An item shown in the Sync Status UI for retry/discard (audit §7.4.7). */
+export interface OutboxItem {
+  id: string;
+  kind: number;
+  queuedAt: number;
+  /** Durable flush attempts so far. */
+  attempts: number;
+  /** Message from the most recent failed flush, if any. */
+  lastError?: string;
 }
 
+/** Terminal (exhausted-retries) items — kept as an alias for existing callers. */
+export type FailedOutboxItem = OutboxItem;
+
 class Outbox {
-  /** Events sitting in the durable publish queue right now. */
+  /** Non-terminal events sitting in the durable publish queue right now. */
   pending = $state(0);
+  /** Non-terminal queued items with their type/queued-time/retries (Sync Status). */
+  pendingItems = $state<OutboxItem[]>([]);
+  /** Events that exhausted their retries and await an explicit retry/discard. */
+  failed = $state<OutboxItem[]>([]);
   private started = false;
   private recountTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -76,7 +57,18 @@ class Outbox {
 
   /** Recount now (best-effort, never throws). */
   async refresh(): Promise<void> {
-    this.pending = await countQueued();
+    const items = await listQueued().catch(() => []);
+    const map = (i: (typeof items)[number]): OutboxItem => ({
+      id: i.event.id,
+      kind: i.event.kind,
+      queuedAt: i.queuedAt,
+      attempts: i.attempts ?? 0,
+      lastError: i.lastError,
+    });
+    const pending = items.filter((i) => !i.failed);
+    this.pending = pending.length;
+    this.pendingItems = pending.map(map);
+    this.failed = items.filter((i) => i.failed).map(map);
   }
 
   /** Recount shortly — coalesces bursts (e.g. several queued sends at once). */
@@ -92,6 +84,18 @@ class Outbox {
   noteQueued(): void {
     this.init();
     this.refreshSoon();
+  }
+
+  /** Revive a failed item and flush; then refresh the view. */
+  async retry(id: string): Promise<void> {
+    await retryFailed(id).catch(() => {});
+    await this.refresh();
+  }
+
+  /** Permanently drop a failed (or pending) item; then refresh the view. */
+  async discard(id: string): Promise<void> {
+    await discardQueued(id).catch(() => {});
+    await this.refresh();
   }
 }
 

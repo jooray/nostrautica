@@ -15,8 +15,10 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { uploadPublicImage } from "$lib/media/image.js";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import FileButton from "$lib/components/FileButton.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import type { PostVisibility } from "$lib/events/posts.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
   let {
     title = $bindable(""),
@@ -48,6 +50,13 @@
   let uploading = $state(false);
   let uploadError = $state("");
 
+  // Draft-safe auto-refresh (App-2): hold the pending reload while a post is
+  // being composed, so an automatic deploy doesn't wipe an unsaved draft; it
+  // applies once the editor is submitted, cancelled, or emptied.
+  $effect(() => {
+    if (title.trim().length > 0 || content.trim().length > 0) return refreshGuard.hold("post");
+  });
+
   async function onImageFile(e: Event) {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (!file || !session.signer) return;
@@ -78,11 +87,16 @@
 
   <div class="image-field">
     <input placeholder={t("post.editor.imagePlaceholder")} bind:value={image} />
-    <label class="btn inline upload">
+    <FileButton
+      class="btn inline upload"
+      accept="image/*"
+      onchange={onImageFile}
+      disabled={uploading}
+      label={t("post.editor.upload")}
+    >
       <Icon name="plus" size={15} />
       {uploading ? t("post.editor.uploading") : t("post.editor.upload")}
-      <input type="file" accept="image/*" onchange={onImageFile} disabled={uploading} hidden />
-    </label>
+    </FileButton>
   </div>
   {#if image}
     <img class="image-preview" src={image} alt={t("post.editor.imagePreview")} />

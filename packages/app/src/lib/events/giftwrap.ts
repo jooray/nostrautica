@@ -40,6 +40,10 @@ export interface WrapInput {
   kind: RumorKind;
   content: unknown; // JSON-serializable
   tags?: string[][];
+  /** Override the rumor's `created_at` (unix seconds). Needed when the payload
+   *  embeds a proof that signs over this exact timestamp (e.g. the 21607 chat
+   *  device attestation, NIP §10.2). Defaults to `now`. */
+  created_at?: number;
 }
 
 /** Build a gift wrap addressed to `recipientPubkey`, authored via `signer`. */
@@ -53,7 +57,7 @@ export async function signerWrap(
   // 1. Rumor: unsigned event with an id but no signature.
   const rumorBase = {
     pubkey: author,
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: input.created_at ?? Math.floor(Date.now() / 1000),
     kind: input.kind,
     tags: input.tags ?? [],
     content:

@@ -31,7 +31,8 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
-import { directoryPublisher } from "./organizer.js";
+import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
+import { onlyByAuthors } from "$lib/nostr/verify.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
@@ -72,9 +73,15 @@ export async function fetchTalks(ctx: EventContext): Promise<TalkItem[]> {
   const eck = await eckBytes(ctx.coordinate);
   if (!eck) return [];
   const publisher = directoryPublisher(ctx);
-  const events = await fetchEvents(
-    { kinds: [KIND_TALK], authors: [publisher], "#a": [ctx.coordinate] },
-    ctx.config.relays,
+  // Record-authority pinning (NIP §3.7): only talks authored by the CURRENTLY
+  // assigned coordinator (or E_id) are trusted — a formerly assigned coordinator's
+  // 31610s are ignored once a newer 31600 no longer names it.
+  const events = onlyByAuthors(
+    await fetchEvents(
+      { kinds: [KIND_TALK], authors: [publisher], "#a": [ctx.coordinate] },
+      ctx.config.relays,
+    ),
+    acceptedRecordAuthors(ctx),
   );
   // Keep the latest event per blinded d (a revision replaces the same address).
   const latestByD = new Map<string, (typeof events)[number]>();
@@ -251,7 +258,7 @@ export async function submitTalk(
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_TALK_SUBMISSION,
     content: {
-      v: 1,
+      v: 2,
       a: ctx.coordinate,
       talk_d: args.talkId,
       title: args.title,
@@ -309,4 +316,41 @@ export function loadWatchProgress(coordinate: string, mediaX: string): number {
   } catch {
     return 0;
   }
+}
+
+// ── favorite talks (spec §13 post-event report) ──────────────────────────────
+// A talk favorite is a purely LOCAL marker (owner-scoped cache, wiped on logout),
+// not synced to a record: the wire schema has no per-user talk-favorite field and
+// this phase adds none. Keyed by the talk's blinded `d` (the same id that
+// addresses its detail route and keys the talks cache). The post-event report
+// resolves these d's to titles from the cached talk set.
+function favTalksKey(coordinate: string): string {
+  return `favtalks:${coordinate}`;
+}
+
+/** The set of favorited talk d's for a coordinate (no network). */
+export function favoriteTalks(coordinate: string): string[] {
+  return cacheGet<string[]>(favTalksKey(coordinate))?.data ?? [];
+}
+
+/** True if the given talk `d` is favorited. */
+export function isFavoriteTalk(coordinate: string, d: string): boolean {
+  return favoriteTalks(coordinate).includes(d);
+}
+
+/** Toggle a talk's favorite marker; returns the new favorite d-list. */
+export function toggleFavoriteTalk(coordinate: string, d: string): string[] {
+  const cur = favoriteTalks(coordinate);
+  const next = cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d];
+  cacheSet(favTalksKey(coordinate), next, Math.floor(Date.now() / 1000));
+  return next;
+}
+
+/** Resolve favorited talk d's to `{ d, title }`, dropping ones no longer known. */
+export function favoriteTalkItems(coordinate: string): { d: string; title: string }[] {
+  const favs = favoriteTalks(coordinate);
+  if (favs.length === 0) return [];
+  const talks = cachedTalks(coordinate) ?? [];
+  const byD = new Map(talks.map((it) => [it.d, it.talk.title]));
+  return favs.filter((d) => byD.has(d)).map((d) => ({ d, title: byD.get(d)! }));
 }

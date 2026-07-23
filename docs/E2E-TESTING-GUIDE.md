@@ -21,77 +21,81 @@ Observations about awkward UX go into a local `docs/internal/UI-SUGGESTIONS.md`
 
 ## 1. Test environment
 
-### 1.1 Services
+### 1.1 The orchestrator owns the stack
+
+Do **not** hand-start the relay, Blossom, TLS proxy, and preview server — that is
+exactly how the old quick-start ended up telling you to bind port 3000 twice (the
+docker Blossom AND `blossom.mjs`). One command per tier brings up exactly the
+infrastructure that tier needs, health-probes it, runs the specs, and tears
+everything down with no orphans (`e2e/orchestrator.mjs`, audit §13.7):
 
 ```sh
-# From the repo root
-docker compose -f docker/docker-compose.yml up -d   # strfry relay :7777, blossom :3000
-
-pnpm install
-pnpm --filter @nostrautica/protocol build
-# Point the app at the local infra AND relax the CSP for plain-scheme localhost
-# (ws:/http: are otherwise blocked). PUBLIC_CSP_EXTRA_CONNECT is needed at BUILD
-# time and again for `preview` (it SSRs the shell per request).
-VITE_NOSTRAUTICA_RELAYS=ws://localhost:7777 \
-VITE_NOSTRAUTICA_BLOSSOM=http://localhost:3000 \
-PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" \
-pnpm --filter @nostrautica/app build
-PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" \
-pnpm --filter @nostrautica/app preview --port 4173 --strictPort   # the app under test
-
-No docker? `node e2e/local-infra/relay.mjs` + `node e2e/local-infra/blossom.mjs`
-stand in for the compose services (in-memory), and `nak serve` gives real-relay
-semantics when needed.
+# From the repo root:
+pnpm e2e:smoke         # preview only — the static PWA loads, no relay/blossom
+pnpm e2e:integration   # + relay (nak or in-repo) + Blossom + HTTPS proxy
+pnpm e2e:chat          # + a coordinator with the real Marmot admin bot (a double)
+pnpm e2e:full          # everything, all specs
 ```
 
-- App URL: `http://localhost:4173` (override with `NOSTRAUTICA_URL`).
-- Relay: `ws://localhost:7777` · Blossom: `http://localhost:3000`.
-- Set `NOSTRAUTICA_E2E_RELAY=1` when running the scripted Playwright suite in `e2e/`.
-
-#### HTTPS Blossom for the record flow (required since the C3 hardening)
-
-The media descriptor schema now accepts only `https://` blob URLs (audit C3 —
-SSRF hardening). `e2e/local-infra/blossom.mjs` is plain HTTP by default, so
-**recording an intro/talk and submitting it will fail** ("must be an https
-URL") unless its upload responses are https. Front it with a local
-TLS-terminating proxy and point it at that origin:
+The orchestrator builds the app itself (relay tiers get
+`VITE_NOSTRAUTICA_RELAYS`/`VITE_NOSTRAUTICA_BLOSSOM` pointed at the local stack),
+so you never manage that by hand. Pass extra Playwright args after `--`:
 
 ```sh
-# One-time: a throwaway self-signed cert.
-openssl req -x509 -newkey rsa:2048 -keyout /tmp/nostrautica-tls/key.pem \
-  -out /tmp/nostrautica-tls/cert.pem -days 3 -nodes -subj "/CN=localhost"
-
-# blossom.mjs on :3000 (its upload responses now point at the https origin
-# below instead of hardcoding its own http://localhost:3000), an https proxy
-# on :8443 in front of it.
-BLOSSOM_PUBLIC_BASE_URL=https://localhost:8443 node e2e/local-infra/blossom.mjs &
-node e2e/local-infra/https-proxy.mjs &   # ~20-line https→http proxy to :3000, self-signed cert
-
-# Build the app pointed at the https origin, and trust the self-signed cert:
-VITE_NOSTRAUTICA_BLOSSOM=https://localhost:8443 \
-PUBLIC_CSP_EXTRA_CONNECT=" ws: http: https://localhost:8443" \
-pnpm --filter @nostrautica/app build
+pnpm e2e:integration -- tests/integration/walking-skeleton.spec.ts --headed
 ```
 
-Chromium (headed or Playwright) additionally needs `--ignore-certificate-errors`
-(and `ignoreHTTPSErrors: true` in Playwright context options) to accept the
-self-signed cert — already wired into `e2e/playwright.config.ts`. A real
-deployment's Blossom origin has a real certificate, so this is test-only
-infrastructure, not a product concern.
+Knobs (env): `E2E_SKIP_BUILD=1` reuses an existing build (must already point at
+the local stack); `E2E_RELAY_IMPL=local|nak` forces the relay implementation
+(default: `nak` if on PATH — CLAUDE.md gotcha #3 — else the in-repo relay).
+
+**A selected tier FAILS its setup loudly if its infrastructure can't start** —
+it never silently skips (audit D-11). The exit code is non-zero on any setup or
+test failure, so CI/scripts can gate on it. Ports: preview `4173`, relay `7777`,
+Blossom `3000`, HTTPS proxy `8443` — each bound by exactly ONE process (the
+orchestrator reuses an already-healthy instance instead of double-binding).
+
+To drive the app manually (headed, for the guide's screenshot scenarios), run a
+tier headed against a spec you can watch, e.g.
+`pnpm e2e:integration -- tests/integration/walking-skeleton.spec.ts --headed`.
+For a free-form manual session, start the pieces from `e2e/local-infra/` by hand
+(relay, blossom + https-proxy) and a preview with `PUBLIC_CSP_EXTRA_CONNECT` set,
+then open `http://127.0.0.1:4173` — but the orchestrator is the supported path.
+
+### 1.1.1 Gotcha: HTTPS Blossom (why the proxy exists)
+
+The media descriptor schema accepts only `https://` blob URLs (audit C3 — SSRF
+hardening). `e2e/local-infra/blossom.mjs` is plain HTTP, so **recording an
+intro/talk and submitting it fails** ("must be an https URL") unless its upload
+responses are https. The orchestrator fronts Blossom (`:3000`) with a
+self-signed TLS proxy (`:8443`) and sets `BLOSSOM_PUBLIC_BASE_URL` to the proxy
+origin — it generates the throwaway cert under `/tmp/nostrautica-tls` if absent.
+`http://localhost:3000` is useful only for text-only diagnostics; its media URLs
+are rejected. Chromium accepts the self-signed cert via `--ignore-certificate-errors`
++ `ignoreHTTPSErrors: true`, already wired into `e2e/playwright.config.ts`.
+
+### 1.1.2 Gotcha: CSP is set at RUN time, not just build time
+
+`vite preview` re-renders the CSP shell (`%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%`)
+per request, so the value must be on the RUNNING preview process, not only the
+build. Preview is owned by Playwright's `webServer` (`e2e/playwright.config.ts`),
+whose command sets `PUBLIC_CSP_EXTRA_CONNECT` at run time — a single preview
+owner, so it is never double-bound whether launched by a tier or a bare
+`playwright test`. Without the run-time CSP, every local ws/http connection is
+blocked with only "Relay not connected." to show for it.
 
 ### 1.2 Two test tiers
 
-| Tier | Infrastructure | What is testable |
-|---|---|---|
-| **Tier 1 — no coordinator** | relay + blossom only | identity creation, sign-in, event creation, invites, join, **manual approval**, roster/directory, video record & playback, favorites/notes, follows, settings, i18n, theme, outsider privacy |
-| **Tier 2 — with coordinator** | + coordinator daemon (needs `VENICE_API_KEY`, ffmpeg) | invite-code **auto-approval**, AI profile summaries, the **matches** screen with scores and reasoning, “Recompute all matches” |
+| Tier | Orchestrator tier | Infrastructure | What is testable |
+|---|---|---|---|
+| **Tier 1 — no coordinator** | `e2e:integration` | relay + Blossom | identity, sign-in, event creation, invites, join, **manual approval**, roster/directory, record & playback, favorites/notes, follows, settings, i18n, theme, outsider privacy |
+| **Tier 2 — with coordinator** | `e2e:chat` / `e2e:full` | + coordinator double | Marmot group chat, and (with a real coordinator + `VENICE_API_KEY`, ffmpeg) invite-code **auto-approval**, AI summaries, the **matches** screen, "Recompute all matches" |
 
-Tier 2 costs real API money and takes minutes per attendee (STT + LLM). Run
-Tier 1 fully first; run Tier 2 as a smaller pass (2–3 attendees is enough to
-get matches). Coordinator setup: build `docker/coordinator.Dockerfile`, config
-from `packages/coordinator/coordinator.example.toml`, point its relays at
-`ws://localhost:7777`, note its **npub** — the organizer attaches it in Admin.
-If Tier 2 is unavailable, mark its scenarios *skipped*, not failed.
+The `chat`/`full` tiers start a coordinator DOUBLE (`mock-coordinator-chat.mjs` /
+`mock-coordinator.mjs`) that uses `MockStt`/`MockLlm` — no API money. For a
+Tier-2 pass against the REAL coordinator (real STT/LLM, costs money and minutes),
+build and run `@nostrautica/coordinator` per `docs/COORDINATOR-OPERATOR-GUIDE.md`,
+point its relays at `ws://127.0.0.1:7777`, and attach its **npub** in Admin.
 
 ### 1.3 Fake camera (required for the record flow)
 
@@ -145,12 +149,16 @@ An equivalent alternative is a small Node driver script using Playwright's
 API with named `browser.newContext()` per persona — same isolation, useful if
 MCP is unavailable.
 
-### Option B — scripted regression (already scaffolded)
+### Option B — scripted regression (the tiers)
 
-`e2e/` contains the Playwright suite (`smoke.spec.ts`,
-`walking-skeleton.spec.ts`) using multiple `BrowserContext`s in one test —
-the right home for anything from this guide worth keeping as an automated
-regression. Run: `NOSTRAUTICA_E2E_RELAY=1 pnpm --filter @nostrautica/e2e test`.
+`e2e/tests/` holds the Playwright suite organized by tier: `tests/smoke/`
+(preview-only) and `tests/integration/` (multi-`BrowserContext` create → join →
+approve → roster/directory/record loops) — the right home for anything from this
+guide worth keeping as an automated regression. Run a tier via the orchestrator
+(§1.1), e.g. `pnpm e2e:integration`. The orchestrator sets `NOSTRAUTICA_E2E_RELAY`
+for you once the relay is confirmed up, so the integration specs RUN rather than
+self-skip; running `playwright test` directly (without the orchestrator) leaves
+that env unset and the relay-dependent specs skip — always go through a tier.
 
 ### 2.1 Mobile viewports are part of the test matrix
 

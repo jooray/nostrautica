@@ -2,7 +2,7 @@
 
 A Nostr-native event organizer built around networking, not just attendance. Attendees record short intro videos and optional pre-recorded talks; an AI coordinator transcribes them, enriches them with each person's existing Nostr content, and tells every attendee **who they should meet and why** — scoring pairs on similarity *and* complementarity of skills, with plain-language reasoning.
 
-See `ELEVATOR-PITCH-en.md` / `ELEVATOR-PITCH-sk.md` for the product pitch. This document is the technical specification: every protocol decision is baked in and an implementer should be able to build from it together with `IMPLEMENTATION_PLAN.md`.
+See `ELEVATOR-PITCH-en.md` / `ELEVATOR-PITCH-sk.md` for the product pitch. This document is the technical specification. The complete implemented custom-kind contract is in [PROTOCOL-REGISTRY.md](PROTOCOL-REGISTRY.md); `IMPLEMENTATION_PLAN.md` is historical planning material, not normative behavior.
 
 All protocol facts referenced here (NIP text, Blossom BUDs, Venice.ai endpoints, Routstr RIPs, nsite/NIP-5A gateway behavior, library versions) were verified against primary sources in July 2026. Volatile facts an implementer must re-verify at build time are collected in §15.
 
@@ -15,13 +15,13 @@ Conferences put interesting people in one room and then fail to connect them. No
 - Organizers create an event; attendees join (manual approval or invite link, Cashu tickets later).
 - Each attendee records a **short intro video** (length limit configurable per event) and optionally submits a **pre-recorded talk** about what they're working on.
 - One supported event format has **no live stage talks at all**: talks are watched ahead of time and the venue is used for the conversations the matchmaking points people toward.
-- A coordinator service transcribes videos/talks, summarizes each attendee's existing public Nostr activity, builds an AI profile per attendee, and scores **every pair** on similarity **and** complementarity (cryptographer + programmer + designer at a cypherpunk event; drummer + bassist + singer at a music gathering). Every match carries reasoning text, not just a score.
+- A coordinator service transcribes videos/talks, summarizes each attendee's existing public Nostr activity, builds an AI profile per attendee, and scores pairs on similarity **and** complementarity (cryptographer + programmer + designer at a cypherpunk event; drummer + bassist + singer at a music gathering). Below the configured prefilter threshold it scores every pair; above it, it scores selected high-similarity candidates plus a random low-similarity sample. Every match carries reasoning text, not just a score.
 - Attendees see a ranked "people to meet" list, see who they already follow on Nostr, and can read anyone's recent public posts, rendered nicely.
 - Match lists recompute as new people join.
 
 ## 2. Principles
 
-1. **Nostr-native.** All application state lives in Nostr events on relays; media lives on Blossom servers. The public parts interoperate with the wider Nostr ecosystem (NIP-52 calendar events, kind-0 profiles, kind-3 follows).
+1. **Nostr-native.** Event business records and encrypted content are relay-backed; media lives on Blossom servers. Some operational and cryptographic state is intentionally local: browser/coordinator MLS state, payment journals, queues/outboxes, watch progress, decrypted caches, and each device's own chat identity key — chat identity is per-device and is never backed up to relays or restored onto another device (§5.3). The public parts interoperate with the wider Nostr ecosystem (NIP-52 calendar events, kind-0 profiles, kind-3 follows).
 2. **Static-only frontend.** The PWA is pure static HTML+JS+CSS talking only to relays and Blossom servers. No app server, no API backend. Soft requirement: deployable as an **nsite** (NIP-5A — the site itself hosted on Nostr/Blossom), and on any dumb static host.
 3. **Minimal, honest trusted backend.** Exactly one optional server-side component — the **coordinator** — and it is a headless Nostr client, not an HTTP backend. The PWA never talks to it directly. Its trust envelope is stated explicitly (§4.2).
 4. **Transparent for normies, native for Nostr users.** No crypto jargon required to register; but registering *creates a real Nostr identity* the user can carry into Primal/Amethyst/Damus/Yakihonne (§5.4).
@@ -32,7 +32,7 @@ Conferences put interesting people in one room and then fail to connect them. No
 - **Normie attendee.** Clicks an event link → enters display name → records intro → gets approved → sees who to meet. Under the hood a Nostr keypair was generated; when they set a name/photo/bio a kind-0 profile was published; when they tapped "follow" on people they met, real kind-3 follow events were published. At the end the app tells them: *"You have a Nostr profile now — paste your key into any of these apps and you'll already see posts from the people you met."*
 - **Nostr-native attendee.** Logs in with a NIP-07 extension or Amber via NIP-46. Their existing profile pre-fills registration; their existing posts/boosts improve their matchmaking; their intro video from a previous event can be reused with two clicks and no re-upload.
 - **Organizer.** Creates the event (public NIP-52 event + app config), distributes invite links and/or reviews the join queue, attaches a coordinator, watches the roster fill in, optionally projects the event-wide match board.
-- **Coordinator operator.** Runs the coordinator daemon (their own or the organizer's infrastructure), funds it with a Venice.ai API key (v1) or Cashu tokens for Routstr (v2), and otherwise never touches per-event data manually.
+- **Coordinator operator.** Runs the coordinator daemon (their own or the organizer's infrastructure), funds it with a Venice.ai API key or, optionally, Cashu tokens for an experimental Routstr provider, and otherwise never touches per-event data manually.
 
 ## 4. System architecture
 
@@ -47,8 +47,8 @@ Conferences put interesting people in one room and then fail to connect them. No
                                                                             │ HTTPS
                                                                     ┌───────▼──────────┐
                                                                     │ LLM/STT provider │
-                                                                    │ v1 Venice.ai     │
-                                                                    │ v2 Routstr(Cashu)│
+                                                                    │ Venice.ai        │
+                                                                    │ Routstr (Cashu)  │
                                                                     └──────────────────┘
 ```
 
@@ -68,8 +68,8 @@ Conferences put interesting people in one room and then fail to connect them. No
 
 - **Relays** see only ciphertext for everything above the public tier, plus metadata (event counts, timing, sizes, pubkeys of gift-wrap recipients are hidden by NIP-59 one-time keys, but `E_inbox`'s p-tag is visible on inbound wraps).
 - **Blossom servers** see random bytes (AES-GCM ciphertext) and blob sizes/hashes.
-- **The coordinator can read all event-encrypted content.** This is necessary — it transcribes the videos. It is organizer-chosen infrastructure and must be presented as such in the UI ("this event's AI matchmaking is operated by `<npub>`"). It **cannot impersonate the event** (it never holds the event's signing key) and cannot alter the public event, config, or invite lists.
-- **The LLM/STT provider sees plaintext transcripts and summaries.** v1 mitigations: prefer Venice.ai models flagged private/TEE (§9.4). v2: Routstr nodes chosen by the operator.
+- **The coordinator can read all event-encrypted content.** This is necessary — it transcribes the videos. It is organizer-chosen infrastructure and must be presented as such in the UI ("this event's AI matchmaking is operated by `<npub>`"). It **cannot impersonate the event** (it never holds the event's signing key) or alter public event/config/invite records, but once attached it holds `E_inbox` and ECK custody, issues delegated grants in authorized flows, publishes directory/roster/match/talk/status records, and administers Marmot chat.
+- **The LLM/STT provider sees plaintext transcripts and summaries.** Mitigations: prefer Venice.ai models flagged private/TEE (§9.4), or an operator-chosen Routstr node (experimental).
 - **Revocation is forward-only.** Anyone who ever held a decryption key can decrypt content that was published while that key was current, forever. Key rotation protects *future* content only (§6.3). For conference intro videos and match lists — data of bounded sensitivity and time-bounded relevance — this is an accepted trade-off, and it must be stated in the UI where organizers configure events.
 
 ## 5. Identity & keys
@@ -92,7 +92,9 @@ NIP-04 is banned project-wide (deprecated, `final unrecommended`). All NIP-44 ca
 
 ### 5.3 Multi-device / recovery
 
-Local-key users get multi-device by opening their emailed link or importing the nsec. All app state is on relays (self-encrypted), so a fresh device reconstructs everything from the key alone.
+Local-key users get multi-device by opening their emailed link or importing the nsec. Relay-backed self-encrypted records can be recovered with the key, but local operational state such as caches, queues, and MLS state is not universally reconstructible.
+
+Chat identity is a separate, per-device concern, and this is true for **every** account type — local key, NIP-07, and NIP-46 alike. The first time a browser/device opens event chat it mints its own chat device keypair and attests it to the account with a signed proof of possession (kind 21607, §7.2), carrying a user-editable device label; an account may hold up to 5 concurrent chat device keys per event. There is **no relay backup of a chat device key and no cross-device restore of chat identity** — a lost or logged-out device is handled by revoking its chat key from another still-logged-in device, not by recovering it. Each device gets its own MLS leaf and sees group history only from its own join epoch forward, regardless of account type; this is inherent to MLS (history never syncs, by design), not a Nostrautica limitation, and the device-add UI states it plainly so it reads as design, not data loss.
 
 ### 5.4 Nostr onboarding path (registration IS Nostr onboarding)
 
@@ -148,6 +150,8 @@ Each descriptor exists in two wraps:
 
 Privacy note: reusing the identical blob means the ciphertext hash publicly links a pubkey's presence across events. Acceptable default; the UI offers a **"fresh copy"** option (re-encrypt with a new key/IV → new hash) for users who care.
 
+**Text intros.** Not every intro is a recording: a profile submission also accepts a plain-text intro (`intro_text`, capped at 2000 characters) as a first-class alternative for attendees who can't or won't record — no blob, no descriptor, and it feeds the coordinator's pipeline exactly as a transcript would. The published directory entry echoes it back (`intro_text`) so there's something to show when there's no video to play. The reuse library (§7.3 kind 31602) carries its own list of authored text intros (`intro_texts`) alongside the reusable media descriptors, so a text intro reuses across events the same way a recorded one does.
+
 ### 6.3 Event Content Key (ECK) — the outbound layer
 
 - **ECK** = 32 random bytes generated by the organizer at event creation; versioned (`1, 2, …`).
@@ -170,9 +174,13 @@ An invite code **is an nsec** (the *invite key*):
 
 - The organizer generates N invite keypairs and publishes kind 31601 (signed by `E_id`) containing **`sha256(invite-pubkey)`** per code — hashes, so observers can't enumerate valid codes or front-run them.
 - Invite link: `https://<app>/#/join?event=<naddr>&code=<invite-nsec>` — the code rides the URL **fragment**, never sent to any server (also nsite-compatible: there is no server).
-- The attendee's join request carries proof: `["invite", <invite-pubkey-hex>, <schnorr-sig-hex>]`, where the signature is made with the invite key over `sha256(utf8("<event-coordinate>:<attendee-pubkey>"))`. This **binds the code to the attendee's pubkey** — intercepting the proof doesn't let anyone else use it.
+- The attendee's join request carries proof: `["invite", <invite-pubkey-hex>, <schnorr-sig-hex>]`, where the signature is a BIP-340 signature by the invite key over a domain-separated, injectively-encoded challenge:
+  ```
+  challenge = sha256(utf8(JSON.stringify(["nostrautica-invite-v2", <event-coordinate>, <attendee-pubkey-hex>])))
+  ```
+  The literal first array element is a domain-separation tag, and JSON-array encoding is injective (no colon-joined string that a crafted pubkey/coordinate could re-segment ambiguously). This **binds the code to the attendee's pubkey** — intercepting the proof doesn't let anyone else use it.
 - **Stateless verification** (organizer client and coordinator both, no shared DB): `sha256(invite-pubkey) ∈ 31601` ∧ signature valid.
-- **Single-use, first-come:** the coordinator auto-grants only the earliest join request per invite pubkey (by rumor `created_at`) and records usage locally; later uses fall back to the manual queue. This is eventually consistent, not strongly consistent — the failure mode is benign (extra manual review).
+- **Single-use, first-processed-wins:** each verifier — the coordinator, or the organizer's client when there is no coordinator — claims an invite pubkey against the first join request it processes and records usage locally; later uses of the same code fall back to the manual queue. This is deliberately eventually consistent, not atomic: organizer-client and coordinator claim state are not shared, so two verifiers could each accept the same code from requests that reach them in different orders. The failure mode is benign — an extra attendee lands in manual review rather than being silently rejected — and is documented as the design, not a bug to be papered over.
 - **Cashu later:** the same slot takes a `["payment", ...]` proof tag; the coordinator redeems the token and auto-grants. Approvals are implemented as **pluggable entitlement checkers** so ticketing bolts on without protocol changes (§12).
 
 ### 6.6 Blinded d-tags
@@ -189,9 +197,13 @@ Known metadata leak (accepted, documented): the *count* of directory entries per
 
 ## 7. Protocol: kinds & schemas
 
-Reused standard kinds: **0** profile, **1** notes, **3** follows, **6** reposts, **10002** relay list, **10063** Blossom server list, **1059** gift wrap (NIP-59), **30078** app data (NIP-78), **31923/31924/31925** NIP-52 event/calendar/RSVP.
+This section keeps the product-level narrative — what each kind is for and who signs it. Full field-level schemas, signer/authority rules, and lifecycle detail are normative in PROTOCOL-NIP.md and [PROTOCOL-REGISTRY.md](PROTOCOL-REGISTRY.md); treat the JSON shown below as illustrative, not exhaustive.
 
-Custom kinds: addressable block **31600–31609** and gift-wrap **rumor kinds 21600–21605**. Rumor kinds sit in the ephemeral range deliberately: rumors are never published directly, and if one ever leaks as a signed event through a client bug, relays won't store it. Every payload is versioned: public events carry `["v","1"]`; encrypted JSON payloads carry `"v": 1`.
+Reused standard kinds: **0** profile, **1** notes, **3** follows, **5** deletions (NIP-09), **6** reposts, **13** seals, **10000** mute list, **10002** relay list, **10050** DM relay list, **10063** Blossom server list, **24242** Blossom authorization, **1059** gift wrap (NIP-59), **30078** app data (NIP-78), **31923/31924/31925** NIP-52 event/calendar/RSVP, and Marmot's **30443/443/444/445** for group chat (§7.5).
+
+Custom kinds span addressable kinds **31600–31611** and gift-wrap **rumor kinds 21600–21610**. Rumor kinds sit in the ephemeral range deliberately: rumors are never published directly, and if one ever leaks as a signed event through a client bug, relays won't store it. Every payload is versioned: public events carry `["v","2"]`; encrypted JSON payloads carry `"v": 2`. Parsers reject any other version outright, and a client that observes a newer version from a key it trusts (an event's `E_id`, or its configured coordinator) surfaces an "update the app" prompt rather than guessing at an unknown shape.
+
+**Ordering.** For any two events sharing (kind, author, `d`), the higher `created_at` wins; a tie is broken by the lexicographically lowest event id. Every replaceable-event publisher — coordinator and app alike — sets `created_at` to at least one second past its own previous publish for that address, so same-second collisions between successive updates can't happen. Sender-mutable submissions (profile submissions, corrections, talks) additionally carry an explicit application revision (`rev`, or `revision` for talks) that the client bumps on every edit; the coordinator orders by `(rev, created_at, id)`, never by the sender's timestamp alone, so an out-of-order or replayed older edit can never regress what's published.
 
 Gift-wrap mechanics per NIP-59: rumor (unsigned) → seal kind 13 (NIP-44, signed by true author, empty tags) → wrap kind 1059 (random one-time key, single `p` tag = recipient, `created_at` randomized up to 2 days in the past). Consumers must query with `since = now − 3 days` overlap and dedupe by rumor id.
 
@@ -204,9 +216,9 @@ Gift-wrap mechanics per NIP-59: rumor (unsigned) → seal kind 13 (NIP-44, signe
 tags:
   ["d", <event-d>]                     // same d as the 31923
   ["a", "31923:<E_id-pubkey>:<d>"]
-  ["v", "1"]
+  ["v", "2"]
   ["inbox", <E_inbox-pubkey-hex>]
-  ["coordinator", <coordinator-pubkey-hex>]      // absent = no coordinator
+  ["coordinator", <coordinator-pubkey-hex>, <gen>]  // absent = no coordinator; gen = install generation (§9)
   ["relay", <wss-url>] …                         // event home relays
   ["blossom", <https-url>] …                     // event Blossom servers
   ["max_video_sec", "90"]
@@ -217,6 +229,8 @@ tags:
   ["eck", "1"]                                   // current ECK version number
   ["nostr_context", "100"]                       // N public events per attendee to summarize; "0" = off
   ["lang", "sk"]                                  // event language, ISO 639-1; ABSENT = "en" (default, tag omitted)
+  ["retention", "90"]                             // optional: days after event end the coordinator keeps member records
+  ["talks", "on" | "prerecord-first"]             // optional; ABSENT = "off" (no prerecorded-talks journey)
 content: ""   (reserved for future JSON extension)
 ```
 The `lang` tag sets the event's language (ISO 639-1). It drives the attendee UI
@@ -225,6 +239,26 @@ choice) and the language of all coordinator AI output — match reasoning and pr
 summaries are written in it regardless of what language attendees speak or record
 in. `"en"` is the implicit default, so the tag is omitted for English events
 (an absent tag parses as `"en"`).
+
+The `coordinator` tag's third element, `gen`, is the install generation: a positive
+integer the organizer increases on every attach/detach/re-attach of a coordinator to
+this event, persisted alongside the event's key backup (§6.1). It lets a coordinator
+refuse a replayed historical install grant and lets every reader agree on which
+coordinator is currently authoritative for this event (§9).
+
+The optional `retention` tag (positive integer, days) tells the coordinator to delete
+this event's member records (directory, roster, match lists, talks) via NIP-09 and
+stop processing that many days after the event's end time; an absent tag means
+indefinite retention. Clients surface the declared retention at join time. Deletion
+stays best-effort — relays may not honor a NIP-09 request — so the UI must not
+overpromise it as guaranteed erasure.
+
+The optional `talks` tag turns on the prerecorded-talks journey: absent (equivalent
+to `"off"`) means no Talks destination at all; `"on"` adds Talks alongside People;
+`"prerecord-first"` is the format described in §1 — talks are watched ahead of time
+and featured ahead of People, with the venue reserved for the conversations
+matchmaking points people toward. Talk submissions (21609) and published talks
+(31610, §7.3) are only processed/visible when this tag is not `"off"`.
 
 **kind 30023 — Event updates (NIP-23 long-form, unmodified)** — announcements
 ("schedule posted", "venue change", "afterparty") authored by `E_id` and rendered
@@ -238,12 +272,14 @@ back to `created_at`.
 
 **kind 31601 — Invite List**
 ```
-tags: ["d", <event-d>], ["a", <coordinate>], ["v","1"]
-content: {"v":1, "invites":[ {"h":"<sha256(invite-pubkey) hex>", "label":"vip-1"}, … ]}
+tags: ["d", <event-d>], ["a", <coordinate>], ["v","2"]
+content: {"v":2, "invites":[ {"h":"<sha256(invite-pubkey) hex>", "label":"vip-1"}, … ]}
 ```
 Replaceable — organizer republishes to add/void codes (voiding = removing the hash).
 
 ### 7.2 Gift-wrapped rumors (all delivered as kind 1059 wraps)
+
+The complete rumor registry, including 21606–21610, is maintained in [PROTOCOL-REGISTRY.md](PROTOCOL-REGISTRY.md). The entries below explain the primary flows.
 
 **rumor kind 14 — Direct Message (NIP-17, unmodified)** (→ recipient pubkey, and a
 second wrap → the sender's own pubkey so sent messages are recoverable on any
@@ -259,22 +295,24 @@ No event coupling: DMs are between pubkeys; the event UI is just the entry point
 **rumor kind 21600 — Join Request** (→ `E_inbox.pubkey`)
 ```
 tags: ["a", <coordinate>], ["invite", <invite-pubkey>, <sig-hex>]?   // absent → manual queue
-content: {"v":1, "name":"…", "message":"…", "rsvp_public": false}
+content: {"v":2, "name":"…", "message":"…", "rsvp_public": false}
 ```
 If `rsvp_public` is true the client *also* publishes a standard public kind 31925 RSVP (opt-in checkbox; default private).
 
-**rumor kind 21601 — Profile Submission** (→ `E_inbox.pubkey`; may accompany the join request; latest by `created_at` wins)
+**rumor kind 21601 — Profile Submission** (→ `E_inbox.pubkey`; may accompany the join request)
 ```
 tags: ["a", <coordinate>]
-content: {"v":1,
+content: {"v":2, "rev": <int ≥ 0>,
   "profile": {"about":"…", "skills":["…"], "looking_for":"…", "links":["…"]},
-  "media": [ <media descriptor §6.2>, … ]        // intro; optionally talk
+  "media": [ <media descriptor §6.2>, … ],       // intro; optionally talk
+  "intro_text": "…"?                             // plain-text intro alternative (§6.2)
 }
 ```
+The client maintains `rev` monotonically per event in its own storage and bumps it on every edit. The coordinator applies a submission only when its `(rev, created_at, id)` strictly exceeds the last one it applied (§7 "Ordering") — a stale resend from a slow relay or a race between two open tabs is discarded, never applied over a newer edit.
 
 **rumor kind 21602 — Key Grant** (→ attendee)
 ```
-content: {"v":1, "a": <coordinate>, "role": "attendee" | "organizer",
+content: {"v":2, "a": <coordinate>, "role": "attendee" | "organizer",
           "eck": [ {"id":1, "key":"<base64 32B>"}, … ],
           "granted_by": <organizer-pubkey-hex>}
 ```
@@ -282,34 +320,51 @@ Sent by the organizer (manual approval) or the coordinator (invite auto-approval
 
 **rumor kind 21603 — Coordinator Grant** (→ coordinator; this is how an organizer "installs" the coordinator for an event)
 ```
-content: {"v":1, "a": <coordinate>, "inbox_nsec":"<hex>",
+content: {"v":2, "a": <coordinate>, "gen": <int>, "inbox_nsec":"<hex>",
           "eck":[…], "config_relays":["wss://…"]}
 ```
-Sealed by `E_id` (like 21604): the coordinator authenticates the install by requiring the gift wrap's seal author to equal the coordinate's `E_id` pubkey, rejecting anything else.
+Sealed by `E_id` (like 21604): the coordinator authenticates the install by requiring the gift wrap's seal author to equal the coordinate's `E_id` pubkey, **and** requires this grant's `gen` to match the `gen` the newest fetchable 31600 currently names it at — a config that can't be fetched is retryable, never treated as authorization. A `gen` at or below any generation this coordinator has ever installed or detached for the event is rejected outright, so a replayed historical grant can never re-install (§9).
 
 **rumor kind 21604 — Admin Command** (organizer → coordinator)
 ```
-content: {"v":1, "a": <coordinate>,
-          "cmd": "approve" | "recompute" | "reprocess" | "revoke", "args": { … }}
+content: {"v":2, "a": <coordinate>, "expires": <unix>,
+          "cmd": "approve" | "recompute" | "reprocess" | "revoke" | "detach", "args": { … }}
 ```
-`approve` = grant + publish directory/roster for `args.pubkey` (manual approval routed through the coordinator so directory/roster are authored under the coordinator key); `recompute` = full match recompute (clears the pair cache so every pair is re-scored); `reprocess` = re-run pipeline for a pubkey; `revoke` = remove attendee + trigger ECK rotation. Admin commands are sealed by `E_id` (the coordinator authenticates them as coming from the event authority).
+`approve` = grant + publish directory/roster for `args.pubkey` (manual approval routed through the coordinator so directory/roster are authored under the coordinator key); `recompute` = full match recompute (clears the pair cache so every pair is re-scored); `reprocess` = re-run pipeline for a pubkey; `revoke` = remove attendee + trigger ECK rotation; `detach` (no args) = immediately uninstall the coordinator from this event, with the same effects as a config update that stops naming it (§9). Every command carries `expires` (organizer clients default to `created_at + 172800`, 48h); the coordinator rejects an expired command outright, so a database restore or backfill can never replay an old `revoke` or `recompute`. The coordinator also keeps a per-subject watermark (the affected pubkey, or the coordinate itself for `recompute`/`detach`) and rejects a command older than the last one it applied for that subject, so approve/revoke interleavings resolve deterministically rather than by relay arrival order. Admin commands are sealed by `E_id` (the coordinator authenticates them as coming from the event authority).
 
 **rumor kind 21605 — Organizer Grant** (→ co-organizer; spec §6.1, §13 "multi-organizer")
 ```
-content: {"v":1, "a": <coordinate>, "eid_nsec":"<hex>", "einbox_nsec":"<hex>",
+content: {"v":2, "a": <coordinate>, "eid_nsec":"<hex>", "einbox_nsec":"<hex>",
           "eck":[…], "config_relays":["wss://…"], "granted_by": <organizer-pubkey-hex>}
 ```
-Grants a co-organizer **full key custody** — E_id + E_inbox + ECK — so they can edit the event, approve/revoke attendees, and manage the coordinator. The recipient's client stores it as an organizer key record on the normal grant-receiving scan. (Scoped roles — approve-only vs full custody — remain future work, §13.)
+Grants a co-organizer **full key custody** — E_id + E_inbox + ECK — so they can edit the event, approve/revoke attendees, and manage the coordinator. The recipient's client stores it as an organizer key record on the normal grant-receiving scan. `granted_by` must equal the seal author (`E_id` itself — a co-organizer cannot mint another co-organizer's grant). (Scoped roles — approve-only vs full custody — remain future work, §13.)
+
+**rumor kind 21608 — Profile Correction** (→ `E_inbox.pubkey`; attendee corrects or hides fields of their own derived profile)
+```
+content: {"v":2, "a": <coordinate>, "rev": <int ≥ 0>,
+          "overrides": {"summary":"…", "skills":["…"], …}?,
+          "hidden": false?, "hidden_fields": ["summary", …]?,
+          "report": "…"? }
+```
+Lets an approved attendee override or hide specific fields of their own coordinator-generated `ai_profile` (summary/skills/interests/offers/seeks) — the coordinator's read of a video or talk isn't always right, and this is the fix-it path. Sealed by the attendee's own account key, so a correction can only ever apply to the sender's own entry, and carries the same `rev` ordering as a profile submission (§7 "Ordering") — an out-of-order older correction can never overwrite a newer one. The coordinator stores the correction durably and reapplies it on top of every freshly generated `ai_profile` before publishing the 31603, so it survives reprocessing; the directory entry carries an `ai_profile_edited` marker so viewers see a subtle "edited by attendee" note. **Authored profile fields — `about`, `skills`, `looking_for`, `links`, from the original submission — are never touched by a correction**; only the coordinator-derived `ai_profile` can be overridden or hidden.
+
+**rumor kind 21609 — Talk Submission** (→ `E_inbox.pubkey`; a speaker submits or edits a prerecorded talk) — same authority and shape as a profile submission, but for a talk: title, description, co-speakers, a `kind:"talk"` media descriptor (§6.2), and a stable `talk_d` the speaker chooses once. Editing resubmits the same `talk_d` with a bumped `revision`, replacing the previous talk in place (§7 "Ordering" rejects an equal-revision resubmission whose content actually changed). Only processed when the event's `talks` config (§7.1) is not `"off"`.
+
+**rumor kind 21610 — Attendee Withdrawal** (→ `E_inbox.pubkey`; attendee-initiated leave)
+```
+content: {"v":2, "a": <coordinate>, "delete_data": true}
+```
+Sealed by the attendee's own account key — the attendee removing themselves, without needing an organizer to act. Same effect chain as an organizer `revoke`: roster/directory/match-list removal, NIP-09 deletions, and ECK rotation. The withdrawing client also deletes its own Blossom blobs and its 31602 self-copy. Rejoining afterwards is a fresh join request, not a resurrection of the old one.
 
 ### 7.3 Encrypted addressable events
 
 **kind 31602 — My Event Profile / intro library** (author = attendee; content NIP-44 self-encrypted; `d` blinded with self-conv-key)
-Content = the 21601 content shape plus `"a": <coordinate>`. The attendee's own queryable copy (gift wraps aren't self-queryable — random one-time authors) **and** the reuse library: a special entry with `"a": null` and `d` blinded over the literal string `"library"` holds event-independent media descriptors.
+Content = the 21601 content shape plus `"a": <coordinate>`. The attendee's own queryable copy (gift wraps aren't self-queryable — random one-time authors) **and** the reuse library: a special entry with `"a": null` and `d` blinded over the literal string `"library"` holds event-independent media descriptors **and** authored text intros (`intro_texts`, §6.2) for the same cross-event reuse. There is no chat-identity variant of this kind — chat device keys are never backed up (§5.3, §7.5).
 
 **kind 31603 — Directory Entry** (author = coordinator, or organizer when no coordinator; content encrypted under ECK; `d` blinded with ECK)
 ```
-tags: ["d", <blinded>], ["a", <coordinate>], ["eck","1"], ["v","1"]
-content(ECK): {"v":1, "pubkey": <attendee-hex>,
+tags: ["d", <blinded>], ["a", <coordinate>], ["eck","1"], ["v","2"]
+content(ECK): {"v":2, "pubkey": <attendee-hex>,
   "profile": { … }, "media": [ <descriptors> ],
   "ai_profile": {"summary":"…", "skills":[…], "interests":[…],
                  "offers":[…], "seeks":[…]},        // appears when processing completes
@@ -318,25 +373,39 @@ content(ECK): {"v":1, "pubkey": <attendee-hex>,
 
 **kind 31604 — Roster** (author = coordinator/organizer; ECK; `d` = event-d)
 ```
-content(ECK): {"v":1, "eck_current":1,
-  "attendees":[ {"pubkey":…, "d":"<entry blinded d>", "role":"attendee"}, … ]}
+content(ECK): {"v":2, "eck_current":1,
+  "nostr_group_id":"<optional active Marmot group id>",
+  "attendees":[ {"pubkey":…, "d":"<entry blinded d>", "role":"attendee",
+                 "chat_keys":[ {"pubkey":"…", "label":"Chrome on laptop", "added_at":<unix>}, … ] }, … ]}
 ```
-One small atomic index for cheap sync; entries stay per-attendee events to dodge relay event-size caps.
+One small atomic index for cheap sync; entries stay per-attendee events to dodge relay event-size caps. `chat_keys` lists the per-device chat keys attested to that attendee's account (§7.5), up to 5, so clients can dedupe a member list by account and show "Alice (2 devices)". When present, `nostr_group_id` is the member-only authoritative binding from this event to its active Marmot room. Clients repair a known stale binding when they can fetch this roster and otherwise refuse to guess a room. A current cold-cache/fetch-failure edge remains; clients must not treat a missing routing ID as proof that any joined coordinator room belongs to the event.
 
 **kind 31605 — Match List** (author = coordinator; content NIP-44 coordinator→recipient; `d` blinded with ECK)
 ```
-tags: ["d", <blinded>], ["a", <coordinate>], ["v","1"]
-content(nip44→recipient): {"v":1, "computed_at":<unix>, "matches":[
+tags: ["d", <blinded>], ["a", <coordinate>], ["v","2"]
+content(nip44→recipient): {"v":2, "computed_at":<unix>, "matches":[
   {"pubkey": <hex>, "score":0.87, "similarity":0.60, "complementarity":0.95,
-   "reasoning":"You both build on Nostr; she designs interfaces, you write cryptography — your project needs exactly that."}, … ]}
+   "reasoning":"You both build on Nostr; she designs interfaces, you write cryptography — your project needs exactly that.",
+   "icebreakers":["…", "…"]}, … ]}
 ```
+`icebreakers` is optional — up to 3 short (≤ 280 char) conversation starters the coordinator derives alongside the directional reasoning (§9.3). Clients without support simply ignore the field.
 
-**kind 31606 — Match Matrix** (only when `match_visibility:"event"`; ECK; `d` = event-d) — `{"v":1,"computed_at":…,"pairs":[{"a":<pk>,"b":<pk>,"score":…}]}` (scores only; reasoning stays pairwise).
+**kind 31606 — Match Matrix** (only when `match_visibility:"event"`; ECK; `d` = event-d) — `{"v":2,"computed_at":…,"pairs":[{"a":<pk>,"b":<pk>,"score":…}]}` (scores only; reasoning stays pairwise).
+
+**kind 31610 — Talk** (author = coordinator, or `E_id` when there's no coordinator; content encrypted under ECK; `d` blinded per speaker + talk)
+```
+tags: ["d", <blinded>], ["a", <coordinate>], ["eck", <version>], ["v","2"]
+content(ECK): {"v":2, "pubkey": <speaker-hex>, "talk_d": "…", "title":"…", "description":"…"?,
+  "speakers": [<hex>, …], "media": <descriptor, kind:"talk">,
+  "transcript": { … }?, "lang":"…", "revision": <int>,
+  "status": "pending" | "published" | "rejected", "published_at": <unix>}
+```
+The published, moderated form of a talk submission (21609). The address is blinded per speaker and `talk_d` — `hmac_sha256(ECK, "talk|<coordinate>|<speaker>|<talk_d>")` (§6.6's construction, specialized) — so members can locate a specific talk without a public index leaking who submitted what. `status` supports organizer moderation before a talk is visible to attendees (`talk_publish`/`talk_reject` admin commands, §7.2); `revision` supports editing — the last published revision stays watchable until a newer one publishes. Republished after moderation, after a fresh transcript, and on ECK rotation; an address made obsolete by a new revision or a rotation may receive a NIP-09 deletion.
 
 **kind 30078 — user-private settings** (NIP-78; NIP-44 self-encrypted content)
 - `d = "nostrautica:settings"` — theme, language, relay prefs.
-- `d = "nostrautica:ev:<blinded>"` — per event: `{"v":1,"favorites":[…],"want_to_meet":[…],"met":[…],"notes":{<pubkey>:"…"}}`.
-- `d = "nostrautica:eventkeys:<blinded>"` (organizer) — `E_id`/`E_inbox` nsecs + ECK versions backup.
+- `d = "nostrautica:ev:<blinded>"` — per event: `{"v":2,"favorites":[…],"want_to_meet":[…],"met":[…],"notes":{<pubkey>:"…"}}`.
+- `d = "nostrautica:eventkeys:<blinded>"` (organizer) — `E_id`/`E_inbox` nsecs, ECK versions, and the last coordinator install `gen` the organizer used (§9) — backup.
 
 ### 7.4 Event page customization — theme, menu & layout, members-only posts (author `E_id`)
 
@@ -355,25 +424,25 @@ Three further addressable kinds complete the reserved block (31607–31609). **E
 
 **kind 31607 — Members-only Event Post**
 ```
-tags: ["d", <random-32-hex, chosen at creation, stable across edits>], ["v","1"], ["eck", <version>]
-content(ECK): {"v":1, "title":"…", "summary":"…"?, "image":"…"?,
+tags: ["d", <random-32-hex, chosen at creation, stable across edits>], ["v","2"], ["eck", <version>]
+content(ECK): {"v":2, "title":"…", "summary":"…"?, "image":"…"?,
                "published_at":<unix>, "author":<organizer-pubkey-hex>?,
                "content":"<markdown>"}
 ```
 - No `a` tag and no cleartext metadata; discovery is by query `{kinds:[31607], authors:[E_id]}` (E_id is per-event, so the author fully scopes it). The `d` is random — unlike 31603/31605 nobody needs to *derive* this address, so no blinding construction is needed.
 - **Edits:** republish the same `d`; the body is re-encrypted under the ECK version current at edit time (named by the `eck` tag; readers hold all versions via their 21602 grant); `published_at` inside the ciphertext is preserved. After a revocation rotation, old posts are **not** re-encrypted (the removed attendee already read them — §4.2 revocation honesty); edits and new posts simply use the new version, so a removed attendee can locate a post they knew but cannot read anything written after their removal.
-- **Size:** NIP-44 caps a single payload at 65,535 plaintext bytes — the editor enforces ≤ 60,000 bytes of markdown (also safely under relay event-size caps, plan gotcha #9). Oversize = reject at the editor with a readable error; chunking is out of scope for v1.
+- **Size:** NIP-44 caps a single payload at 65,535 plaintext bytes — the editor enforces ≤ 60,000 bytes of markdown (also safely under relay event-size caps). Oversize = reject at the editor with a readable error; chunking is out of scope (§13 "Chunked media encryption").
 - An `naddr` to a 31607 behaves like any addressable event; a client without the ECK renders a lock + join prompt in place of the content.
 - Markdown (both kinds) renders through the app's escape-first renderer, extended with images, fenced code blocks, tables and nested lists — never raw HTML.
-- Visibility is fixed at creation. v1 offers no public↔members switch (a public post's revisions live on relays forever; the honest workaround is NIP-09 delete + repost, both best-effort).
+- Visibility is fixed at creation. There is no public↔members switch (a public post's revisions live on relays forever; the honest workaround is NIP-09 delete + repost, both best-effort).
 
 **kind 31608 — Event Page (menu + layout)** (`d` = event-d)
 ```
-tags: ["d", <event-d>], ["a", <coordinate>], ["v","1"], ["eck", <version>]?
+tags: ["d", <event-d>], ["a", <coordinate>], ["v","2"], ["eck", <version>]?
       ["r", <target>, <label>] …          // PUBLIC menu items, in display order
-content: {"v":1,
+content: {"v":2,
   "sections":  [ <section>, … ],          // public layout, in order
-  "private":   "<ECK ciphertext of {\"v\":1,
+  "private":   "<ECK ciphertext of {\"v\":2,
                  \"menu\":[{\"label\":…, \"target\":…, \"pos\":<int>}, …],
                  \"sections\":[{…, \"pos\":<int>}, …]}>"   // members-only additions
 }
@@ -383,7 +452,7 @@ content: {"v":1,
   - `nostr:naddr…` → a public 30023 (naddr carries event-relay hints),
   - `nostr:naddr…` → a members-only 31607 (locks for non-members).
   The composer offers a **picker aware of the event's posts** (public and encrypted, latest-by-`d` semantics) alongside a free URL field.
-- **Layout.** `sections` composes the event home below the header, in order. v1 section types:
+- **Layout.** `sections` composes the event home below the header, in order. Section types:
   - `{"type":"posts", "source":"event"|"attendees"|"both", "visibility":"public"|"members"|"both"}` — the blog feed. `event` = E_id-authored (30023 ∪ 31607); `attendees` = public 30023 authored by roster pubkeys carrying `["a", <coordinate>]` (the standard NIP-23 way for attendees to tag their own long-form to the event); `visibility` filters plain vs ECK-encrypted. Everyone sees only what they can decrypt regardless of config.
   - `{"type":"pinned", "refs":[<naddr>, …]}` — explicitly pinned posts, rendered prominently.
   - `{"type":"attendees"}` — roster preview (renders only for members).
@@ -392,35 +461,38 @@ content: {"v":1,
 
 **kind 31609 — Event Theme** (`d` = event-d)
 ```
-tags: ["d", <event-d>], ["a", <coordinate>], ["v","1"]
+tags: ["d", <event-d>], ["a", <coordinate>], ["v","2"]
 content: <raw CSS, ≤ 32 KB>
 ```
 - **Public** — branding applies to visitors too.
 - Applied by injecting a single `<style data-event-theme>` element **only while a route under `#/e/<naddr>` is active**, removed on leaving the event; never active on login, settings, key-backup or DM routes.
 - Deliberately *not* stored in 31600 `content`: 31600 is rebuilt from parsed tags and republished by config flows (e.g. coordinator attach), which would silently drop a content payload.
-- **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages — where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed, and no key material is ever rendered on themed routes.
+- **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages — where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed, but some themed event routes currently reveal sensitive values, including chat handoff and admin invite material. `font-src 'self'` limits remote-font text exfiltration; it does not make themes a secret-safe rendering boundary. Treat an event theme as trusted-organizer UI control.
 
 ### 7.5 Event group chat
 
-Two organizer-choosable chat options per event, declared as `chat` tags on the 31600 config (§7.1). Research, client-interop matrix and scaling analysis: `GROUP-CHAT-FEASIBILITY.md`.
+The only shipped group-chat backend is `marmot`, declared as a `chat` tag on the 31600 config. `GROUP-CHAT-FEASIBILITY.md` and the NIP-17 design are archived/future research, not normative current behavior. See `MULTIDEVICE-CHAT.md` for the full multi-device design and rationale; this section summarizes it.
 
-**Status (as-built).** `marmot` is implemented — protocol schemas, app chat UI, and the coordinator's admin bot all exist and are live-tested against a real relay: the attendee → coordinator direction works end-to-end (key package publish, MLS Add + Welcome), while the coordinator → attendee direction has an open client-side bug (see `MARMOT-GROUP-CHAT.md` §8 for the current gap). It ships labeled alpha/experimental. `nip17` (below) remains design-only: `ChatBackend`/`CHAT_BACKENDS` in `packages/protocol/src/config.ts` currently accept only `"marmot"`, so a `["chat","nip17"]` tag parses as unknown and is dropped.
+**Status (as-built).** `marmot` is implemented and remains experimental. Current config accepts only `"marmot"`; `nip17` is not an interoperable configuration.
 
 ```
-["chat", "nip17"]     // NIP-17 group messages — designed, not yet implemented
-["chat", "marmot"]    // Marmot (MLS) group — implemented (alpha), valid only with a coordinator tag
+["chat", "marmot"]    // Marmot (MLS) group — implemented (experimental), requires a coordinator tag
 ```
-Tag absent = no chat. **Both tags MAY be present** when the organizer offers both (e.g. Marmot event-wide + NIP-17 subgroups) — once `nip17` lands.
 
-- **`nip17`** — standard NIP-17 chat rooms: kind-14 rumors carrying the member set as `p` tags, sealed + gift-wrapped to every member and the sender via the existing §7.2 signer path — **no new kinds**. Bootstrap: any member can message the group; the app derives the p-list from the roster (31604 `attendees` pubkeys + organizer pubkeys) **frozen at chat spawn** — per NIP-17 the room's identity is the exact pubkey+p set, and any change starts a *new* room with clean history, so roster changes surface as an explicit organizer "start chat v2" action, never a silent refresh. Subject convention: `["subject", <31923 title>]` on the first message (any member may rename later; newest wins, per NIP-17). Delivery requires each member's kind 10050 DM-relay list. **Size:** NIP-17's own guidance caps rooms at 10 participants; the composer refuses above ~20 and offers match/table subgroups instead (a NIP-46 sender pays 2 remote signer round-trips per member per message — the practical reason for the cap). **Interop promise:** the room continues, with native push, in clients with NIP-17 *group* support — verified Amethyst and Nostria as of 2026-07; 0xchat unconfirmed pending a live test; most other clients are 1:1-only.
-- **`marmot`** — one MLS group per event (Marmot protocol, kind 443/444/445 family), created and administered by the **coordinator as admin bot**: add-on-approval, remove-on-revoke (real PCS, unlike ECK rotation), auto-add of new key packages from enrolled npubs (multi-device + state-loss healing). The coordinator is a group member and can read the chat — disclosed in UI, consistent with §4.2. **Interop promise:** the chat continues in Whitenoise (and other Marmot clients) — but MLS state is strictly per-client: each client/device joins as its own leaf and reads only **from its join epoch forward**; history never syncs, by design.
-- **Non-members see nothing** under either option: both are E2E-encrypted with no event linkage — kind-1059/445 traffic carries no `a` tag and only ephemeral authors, so it cannot be correlated to the event.
+Tag absent = no chat.
 
-The Marmot path above is implemented as described; the `nip17` path and the dual-backend case remain **not implemented** — tag values and conventions there may still shift (open questions in the feasibility doc, §7).
+- **`marmot`** — one MLS group per event (Marmot protocol, kind 443/444/445 family), created and administered by the **coordinator as admin bot**: add-on-approval, remove-on-revoke (real PCS, unlike ECK rotation), and auto-add of new key packages from enrolled accounts. The coordinator is a group member and can read the chat — disclosed in UI, consistent with §4.2. A member-only roster `nostr_group_id` binds the event to its group when available; a freshly received Welcome sits in an unbound candidate state — no history replay, no display, no sending — until a verified roster confirms it, fail-closed on a roster fetch failure.
+- **Chat identity is per device, for every account type.** Local-key, NIP-07, and NIP-46 accounts all follow the same rule: the first time a browser/device opens event chat it mints its own chat device keypair, held only in that device's local storage. The device attests the key to the account with a gift-wrapped **kind 21607 Chat Device Attestation** to the coordinator — sealed by the account key, carrying a BIP-340 proof of possession signed by the device key itself, plus a user-editable label ("Chrome on laptop"). An account may hold up to **5 concurrent chat device keys per event**. Each device gets its own MLS leaf and its own Welcome, and sees group history only **from its own join epoch forward** — history never syncs between devices, by design, and this is stated plainly in the device-add UI so it reads as design, not data loss.
+- **No relay backup, no cross-device restore.** A chat device key is never self-encrypted to relays and cannot be restored onto another device. A lost or logged-out device is handled by revoking its chat key (another 21607, `op:"revoke"`, from any still-logged-in device, or from Settings → Chat devices), not by recovering it.
+- **Roster.** The 31604 roster's `chat_keys[]` (§7.3) lists every attested device per attendee, so Nostrautica clients dedupe the member list by account ("Alice, 2 devices") and offer per-device revoke.
+- **Device profiles for interop.** Each chat device key publishes its own kind 0, but only to the event's chat relay set — never to the account's general relays: `name` is the account's event display name, `about` references the owning account's npub. This lets external Marmot clients (e.g. White Noise) show a human name instead of a bare device pubkey, and group a person's devices by the referenced npub. Accepted consequence: the device→account link is public on the chat relays; the ECK-encrypted roster `chat_keys` mapping remains the authoritative binding for Nostrautica clients. Organizers/users who want no public chat-relay presence can disable device profiles for the event.
+- **Non-members see nothing**: Marmot traffic is E2E-encrypted and has no application event coordinate. Relay metadata, timing, and (for those who opt in) device-profile names remain observable on the chat relays.
+
+NIP-17 and dual-backend ideas are intentionally deferred and may change before implementation.
 
 ## 8. Flows
 
-**Create event.** Organizer client: generate `E_id`, `E_inbox`, ECK v1 → publish kind 0 for `E_id` (event name/logo) → publish 31923 + 31600 (signed `E_id`) → self-encrypt key backup (30078) → optionally generate invites (31601) → optionally attach coordinator: add `coordinator` tag to 31600 + gift-wrap 21603.
+**Create event.** Organizer client: generate `E_id`, `E_inbox`, ECK v1 → publish kind 0 for `E_id` (event name/logo) → publish 31923 + 31600 (signed `E_id`) → self-encrypt key backup (30078, includes install `gen = 0`) → optionally generate invites (31601) → optionally attach coordinator: bump `gen` to 1, add `["coordinator", <pubkey>, 1]` to 31600, gift-wrap 21603 carrying the same `gen`.
 
 **Join (attendee).** Open event link → login/registration ladder → fill profile, optionally record intro now → send gift-wrapped 21600 (+21601) to `E_inbox`; save self-copy 31602. With an invite code: include the invite proof → coordinator auto-approves → 21602 arrives, usually within seconds. Without: wait for manual approval.
 
@@ -434,7 +506,7 @@ The Marmot path above is implemented as described; the `nip17` path and the dual
 
 **View matches.** Attendee opens `#/e/<naddr>/matches` → fetch own 31605 (compute own blinded `d` from ECK) → decrypt → ranked list with reasoning; tap through to the person's directory entry, their recent kind-1 posts, follow button.
 
-**Social overlay.** Fetch user's kind 3 ∩ roster pubkeys → "you already follow" badges; person view streams their recent notes (kind 1, with NIP-21 mentions, imeta images, link previews — no full thread rendering in v1).
+**Social overlay.** Fetch user's kind 3 ∩ roster pubkeys → "you already follow" badges; person view streams their recent notes (kind 1, with NIP-21 mentions, imeta images, link previews — no full thread rendering currently).
 
 **Direct messages.** Attendee opens a person's profile → Message → NIP-17 conversation view (kind-14 rumor, sealed, double-wrapped: one 1059 to the recipient, one to self). Inbox = subscribe 1059 p-tagging own pubkey → unwrap → keep kind 14 → group by peer, order by rumor `created_at`. Works before/during/after the event and with any NIP-17 client.
 
@@ -448,13 +520,26 @@ The Marmot path above is implemented as described; the `nip17` path and the dual
 
 **Revoke attendee.** Organizer sends 21604 `revoke` (or does it client-side without coordinator): delete 31603 (NIP-09), rotate ECK, re-grant 21602 to remaining attendees, republish roster + future content under new ECK.
 
+**Withdraw (attendee).** Attendee sends 21610 (sealed by their own account key — no organizer action required): the same effect chain as a `revoke` — 31603/roster/match removal, ECK rotation, re-grant to the rest — plus the withdrawing client deletes its own Blossom blobs and its 31602 self-copy. Rejoining later is a fresh join request.
+
+**Detach / replace coordinator.** Organizer edits 31600: bumps `gen`, and either removes the `coordinator` tag (detach) or names a different coordinator at the new `gen` (replace) — or, for an immediate signed detach, sends a 21604 `detach` command. A coordinator that sees a newest fetchable config no longer naming it at its installed `gen` durably tombstones the installation, closes the event's subscriptions, cancels pending paid work, and deletes its `E_inbox`/ECK custody. The organizer rotates the ECK and mints a fresh `E_inbox` keypair (the same machinery as an attendee revoke), publishing the new inbox in the updated 31600 so senders transparently encrypt to it going forward; old inbox secrets stay in the organizer's local key backup for reading history. A newly attached coordinator republishes the event's directory, roster, match lists, and talks under its own key, so members are never left without a readable directory; every reader accepts coordinator-authored records only from whichever coordinator the newest fetchable 31600 currently names.
+
 ## 9. Coordinator service
 
 Headless TypeScript/Node daemon (`packages/coordinator`), sharing `packages/protocol` with the PWA. Interface = Nostr only. Runs fine on one small VPS; ffmpeg is assumed present (and is verified at startup).
 
-### 9.1 State: SQLite, loss-tolerant by construction
+### 9.1 State: SQLite authority and recovery
 
-`better-sqlite3`. Every expensive artifact (transcripts, summaries, LLM profiles, pair scores) is keyed by a content hash of its inputs, so the DB is a **cache/queue whose loss re-costs money but can never corrupt correctness** — a wiped DB re-derives everything from relays + providers. Tables: `events` (coordinate, config snapshot, grants), `attendees`, `submissions` (rumor id, sha256s, status), `jobs` (type, dedupe_key, attempts, state), `transcripts` (blob_sha256 PK → text), `nostr_summaries` (pubkey + inputs_hash → summary), `profiles`, `pairs` (a, b, inputs_hash, score, similarity, complementarity, reasoning), `invite_usage`.
+The implementation uses Node's built-in `node:sqlite`. Content-addressed derived artifacts can often be rebuilt from relays and providers, but the database is **not disposable**. Treat it as durable operational state and follow [COORDINATOR-OPERATOR-GUIDE.md](COORDINATOR-OPERATOR-GUIDE.md).
+
+| State | Recovery property |
+|---|---|
+| Relay-backed public/config/encrypted records and derived transcripts/profiles/pairs | Usually reconstructible, with relay/provider cost and availability consequences. |
+| Jobs, dedupe, invite claims, billing/budget enforcement state, and Cashu journal | Durable operational state. Loss can replay work, lose queue context, reset billing enforcement to `evaluating`, or leave financial outcomes ambiguous. |
+| Coordinator `E_inbox` and ECK custody | Protected at rest under the coordinator identity, but required to resume installed-event processing. |
+| Marmot group/admin state in `marmot_kv` | Non-reconstructible from relay events. Loss can orphan the coordinator's MLS administration role. |
+
+Tables include `events`, `attendees`, `jobs`, transcripts, summaries, profiles, pairs, invite usage, Cashu journal, Marmot groups, and protected Marmot key/value state. Back up SQLite and the coordinator identity together, restore-test it, and maintain a second MLS administrator for chat-enabled events.
 
 ### 9.2 Event loop & pipeline
 
@@ -463,17 +548,22 @@ Subscriptions:
 - Per installed event: `{kinds:[1059], "#p":[E_inbox_pubkey]}` (join requests + submissions; coordinator unwraps with the granted `E_inbox` nsec) and `{kinds:[31600,31601], authors:[E_id]}` (config/invite updates).
 - All gift-wrap subscriptions use `since = now − 3d` (timestamp randomization) with rumor-id dedupe.
 
-Per-submission pipeline — each stage an idempotent job, dedupe key = hash of stage inputs, exponential-backoff retries (max 5, then poison state surfaced to the organizer):
+Per-submission pipeline — each stage an idempotent job, dedupe key = hash of stage inputs, exponential-backoff retries (max 5, then poison state surfaced as a 21606 status to the organizer and, when the failure is scoped to one attendee's own submission or talk, sealed to that attendee too — so the one person who can actually fix it isn't left waiting on the organizer to notice; billing blocks stay organizer-only):
 
 ```
 unwrap → entitlement check ──(invite valid & unused)──► auto-grant 21602, mark usage
       │                    └─(else)──► manual queue (organizer approves)
       ▼ (once approved)
 publish 31603 (profile text immediately)
-      → fetch blob (Blossom GET, verify sha256)
+      → billing/budget gate (§9.5): a blocked event, or an attendee/event past its
+        budget, parks here — before any provider spend
+      → fetch blob (Blossom GET, verify sha256 AND that the actual downloaded
+        ciphertext length matches the descriptor's declared size)
       → decrypt (AES-GCM)
-      → ffmpeg: extract audio, mono 16 kHz Opus/OGG, bitrate to fit provider limit
-        (25 MB for Venice; segment long talks and concatenate transcripts)
+      → ffmpeg: probe real decoded duration and reject media over the event's cap
+        regardless of what the descriptor declared; extract audio, mono 16 kHz
+        Opus/OGG, bitrate to fit provider limit (25 MB for Venice; segment long
+        talks and concatenate transcripts)
       → STT provider → transcript
       → nostr-context: fetch attendee's kind 0 + last N (config §7.1) public events
         (kinds 1, 6, 30023; resolve reposts to their targets), summarize with the
@@ -488,7 +578,9 @@ publish 31603 (profile text immediately)
 ### 9.3 Matching & N² cost control
 
 - Pair scoring prompt takes both `ai_profile`s + event context (title/summary/hashtags from 31923 — REQUIRED input: what counts as a good match depends on what the event is about) and returns strict-JSON `{score, similarity, complementarity, reasoning}`. Scoring must explicitly reward **complementarity** (skills that complete each other for this event's purpose), not just similarity.
+- **Talks feed matching too (§7.1 `talks` tag, `"on"`/`"prerecord-first"`).** When talks are enabled, a speaker's own submitted talk transcripts fold into their `ai_profile` alongside their intro — so recording a talk ahead of a `"prerecord-first"` event improves that speaker's own matches, not just their audience's.
 - **Reasoning is user-facing copy, not analysis.** The `reasoning` field is shown verbatim to the attendee and must read as *"why you should meet this person and what to talk about"* — second person, concrete conversation hooks, the way a good host introduces two guests. No analytical framing (no "this pair scores high because…", no similarity/complementarity vocabulary, no score justification).
+- **Icebreakers.** Alongside the directional reasoning, scoring may also emit up to 3 short (≤ 280 char) `icebreakers` — concrete conversation starters, not restatements of the reasoning (§7.3 kind 31605). The attendee list shows them next to the reasoning; a one-tap "message" action can prefill a DM (§7.2 kind 14) with one, so the coordinator's introduction becomes an actual opening line rather than just a rationale to read.
 - **Batched scoring (cost shape).** Pair-per-call is O(N²) and untenable at ~200 attendees even after the prefilter; scoring SHOULD batch one *target* attendee with K candidates per call (each call returns per-candidate scores + target-directed reasoning; the reverse direction comes from the candidate's own batch). K is a quality/cost trade-off — see `docs/MATCHING-BENCHMARK.md` for the measured curve and the recommended model/prompt/K.
 - **Incremental:** a new joiner costs exactly N−1 new pair jobs; `pairs` rows are keyed by `inputs_hash = sha256(sorted(profileA_hash, profileB_hash))`, so a *changed* profile invalidates only its own pairs and a restart never re-pays for finished pairs. A changed attendee's forward direction (changed→others) batches normally (one target + ≤K candidates); the reverse direction (others→changed) is scored by a mirror **reverse-batch** call (one shared candidate + ≤K targets) so it stays batched instead of degrading to N−1 single-candidate calls. Pairs not involving the changed attendee are never re-scored; both directions of the changed attendee's pairs are invalidated and the affected 31605 lists republish (publish keys are content-addressed, so identical re-deliveries dedupe).
 - **Output language & input-language independence (§7.1 `lang`).** Match reasoning and profile summaries are written in the event language. Attendee inputs — bios, Nostr posts, intro/talk transcripts — may be in ANY language (an English bio at a Slovak event is normal), and the prompts say so explicitly and translate as needed; STT auto-detects the spoken language (no language hint is pinned). Separately, the coordinator translates each attendee's **user-authored** directory fields (`about`, `looking_for`, `skills`) into the event language when their source language differs, publishing the result in `ai_profile.translations` without ever modifying the originals (see §16.2).
@@ -525,18 +617,25 @@ export interface PaymentStrategy {                      // orthogonal to provide
 }
 ```
 
-**v1 adapters — Venice.ai** (`https://api.venice.ai/api/v1`, OpenAI-compatible, `Authorization: Bearer <key>` = `ApiKeyPayment`):
+**Venice.ai adapter** (primary; `https://api.venice.ai/api/v1`, OpenAI-compatible, `Authorization: Bearer <key>` = `ApiKeyPayment`):
 - `VeniceStt`: `POST /audio/transcriptions` (multipart `file` + `model`; 25 MB limit — hence the ffmpeg compression/segmentation stage; models e.g. `openai/whisper-large-v3`, default parakeet).
-- `VeniceLlm`: `POST /chat/completions` with `response_format {type:"json_schema", json_schema:{name, strict:true, schema}}` (schema needs `additionalProperties:false`, all props required); `GET /models` at runtime and filter by `supportsResponseSchema`; `POST /embeddings` for the pre-filter. **Model policy:** config flag `venice.require_private: true` restricts selection to models in Venice's private/TEE tiers (only TEE/E2EE are technically enforced; document per §4.2).
+- `VeniceLlm`: `POST /chat/completions` with `response_format {type:"json_schema", json_schema:{name, strict:true, schema}}` (schema needs `additionalProperties:false`, all props required); `GET /models` at runtime and filter by `supportsResponseSchema`; `POST /embeddings` for the pre-filter. **Model policy:** config flag `venice.require_private: true` restricts selection to models in Venice's private/TEE tiers (only TEE/E2EE are technically enforced; document per §4.2), overridable per role (see "Provider routing" below).
 
-**v2 adapters — Routstr** (decentralized, Cashu-paid, OpenAI-compatible nodes):
-- `RoutstrLlm`: node base URL from config or discovered via Nostr kind 38421 provider announcements (`u` endpoint tags, `mint` tags); `GET /v1/models` (includes `sats_pricing`) and `GET /v1/info` (accepted mints); `POST /v1/chat/completions` is pass-through OpenAI — structured output works iff the upstream model supports it (verify per node at attach time).
+**Routstr adapter (experimental, explicitly configured)** — Routstr is a Cashu-paid, OpenAI-compatible LLM path only when `[providers.routstr].node_url` is set. Kind-38421 provider discovery is design-only and not wired into daemon startup. `RoutstrLlm` uses the configured node URL; structured output depends on the upstream model.
 - `CashuPayment`: either balance mode (`Authorization: Bearer <cashu-token>`, node converts to an `sk-` key) or stateless per-request `X-Cashu: <token>` with **change returned in the `X-Cashu` response header** — `settle()` must persist the change proofs (wallet state via `@cashu/cashu-ts`). The operator experience: *fund the coordinator with Cashu tokens, pick a node and model, done.*
-- Routstr has **no STT today** (audio endpoints "coming soon"), so STT stays on `VeniceStt` or the optional `LocalWhisperStt` (whisper.cpp spawn) — which is why STT and LLM are **separately configurable**.
+- Routstr has **no STT** in this daemon. `VeniceStt` is the only implemented STT provider; `local-whisper` is an unsupported configuration value and startup rejects it.
 
-**Model routing config:** `summaryModel` (cheap; nostr-context summaries), `matchModel` (strong; profiles + pair scoring), `embedModel`. Each is `{provider, model}` so summaries can run on a cheap Venice model while matching runs elsewhere.
+**Provider routing is per role.** Each model role — `summary`, `match`, `embed`, `translate` (STT is a separate single-role slot, §9.6) — configures its own `{provider, model}` pair; roles are not forced onto one global provider instance. At startup the daemon resolves and validates a concrete provider instance per role: a role pointing at an unconfigured provider (missing API key / node URL) fails startup, and a role that requires a private-tier model (`require_private`, a per-role override of the provider-level default) whose resolved model isn't in that provider's own private/TEE catalogue also fails startup — unless the operator explicitly accepts booting unverified. This lets an operator mix providers per role (e.g. summary/match/STT on Venice private-tier, embed on an experimental Routstr node) with the mix enforced, not just declared. The public **31611 Coordinator Announcement**'s per-role privacy disclosure is generated from these resolved, verified routes, not from configured intent, so the privacy map an organizer sees always describes where data actually flows.
 
-### 9.5 Configuration (`coordinator.toml`, illustrative)
+### 9.5 Billing, budgets & media policy
+
+**Billing.** The billing principal is the **event identity** (`E_id`), not a personal organizer account — nothing about an event's config authenticates "the organizer" as a person, so config names `free_eids` (an allowlist of always-free event identities), not `free_organizers`. Billing state is a persisted state machine, `evaluating → ok | grace | blocked`, re-evaluated at coordinator install, on attendee-count change, on every submission revision, on job claim, and immediately before any provider spend, so a verdict can never go stale mid-job. An optional operator-configured grace window lets a newly over-tier event keep running paid work for a bounded period before it transitions to `blocked`; absent, it blocks immediately. `blocked` stops paid provider work only — approvals, revocations, roster/directory maintenance, and status publication are never affected, so a billing block degrades an event to "matching paused," never "event broken." A state transition publishes a 21606 status to the organizer carrying the current billing state and reason.
+
+**Budgets.** Independent of billing, the coordinator enforces generous, operator-configured abuse ceilings — not product limits — on actual (not declared) downloaded ciphertext bytes, decoded media duration, and provider-call counts, tracked both per-attendee and per-event. Exceeding a budget parks further paid processing for that attendee or event (the same waiting state as a billing block) and notifies the organizer; raising the limit and reprocessing resumes it.
+
+**Media policy.** A submitted media descriptor's declared `size` and `duration` are attacker-controlled input, so the coordinator never trusts them for enforcement: it compares the actual downloaded ciphertext length against the declared size and rejects a mismatch (§9.2 pipeline), and it probes the real decoded duration before running STT, rejecting media that exceeds the event's configured limit regardless of what was declared. Per-submission caps on the number of media descriptors and the total declared bytes (§8) are a first, cheap filter before any of this runs.
+
+### 9.6 Configuration (`coordinator.toml`, illustrative)
 
 ```toml
 [identity]        # nsec via env NOSTRAUTICA_COORDINATOR_NSEC, or:
@@ -549,13 +648,13 @@ default = ["wss://relay.primal.net", "wss://relay.damus.io"]
 api_key_env = "VENICE_API_KEY"
 require_private = true
 
-[providers.routstr]        # v2
-node_url = "https://api.routstr.com/v1"   # or discover = true (kind 38421)
+[providers.routstr]        # optional experimental LLM path; node_url is required
+node_url = "https://api.routstr.com/v1"
 mint = "https://mint.example"
 wallet_db = "cashu-wallet.sqlite"
 
 [stt]
-provider = "venice-stt"          # or "local-whisper"
+provider = "venice-stt"          # only implemented STT provider
 model = "openai/whisper-large-v3"
 
 [models]
@@ -568,6 +667,19 @@ prefilter_threshold = 50
 prefilter_top_m = 30
 prefilter_random = 10
 top_k = 20
+
+[pricing]           # §9.5; default model = "free" (no billing enforcement)
+model = "free"
+# free_eids = ["npub1…"]        # event identities always treated as free
+# grace_period_sec = 604800     # optional grace before blocked (default: none)
+
+[budgets]            # §9.5; generous abuse ceilings, not product limits — 0 = unlimited
+# per_attendee_bytes = ...
+# per_event_bytes = ...
+# per_attendee_duration_sec = ...
+# per_event_duration_sec = ...
+# per_attendee_calls = ...
+# per_event_calls = ...
 ```
 
 Installation is protocol-level (21603 grant + 31600 `coordinator` tag) — no per-event server configuration.
@@ -589,12 +701,12 @@ Installation is protocol-level (21603 grant + 31600 `coordinator` tag) — no pe
 ### 10.3 Video capture & playback
 
 - MediaRecorder; mimeType ladder `video/mp4;codecs=avc1` (Safari) → `video/webm;codecs=vp9,opus` → `video/webm`. Visible countdown; hard-stop at `max_video_sec`/`max_talk_sec`; preview + re-record before submit.
-- Encrypt: WebCrypto AES-GCM one-shot in memory (fine for short intros; chunked streaming encryption is a v2 item for large talks — GCM whole-file also means no range-request streaming playback; playback = fetch ciphertext → decrypt → object URL).
+- Encrypt: WebCrypto AES-GCM one-shot in memory (fine for short intros; chunked streaming encryption for large talks is future work, §13 — GCM whole-file also means no range-request streaming playback; playback = fetch ciphertext → decrypt → object URL).
 - Upload: `blossom-client-sdk` — BUD-06 `HEAD /upload` preflight (size/type acceptance), BUD-02 `PUT /upload` (kind 24242 auth event: `t=upload`, `x=sha256`, `expiration`), BUD-04 `PUT /mirror` to remaining event servers + the user's 10063 servers.
 
 ### 10.4 Offline behavior
 
-Dexie cache serves roster, directory entries, matches, and profile metadata offline; ECK + self-keys live in IndexedDB so decryption works offline; decrypted intro videos cached via Cache API (bounded LRU); outgoing events queue and flush on reconnect. Goal: an attendee in a venue with terrible Wi-Fi can still browse people and matches.
+Dexie cache serves roster, directory entries, matches, and profile metadata offline; ECK + self-keys live in IndexedDB so decryption works offline; decrypted intro videos are cached via Cache API (bounded LRU); outgoing events queue and flush on reconnect. These are local caches and operational state, not relay-backed canonical records. Goal: an attendee in a venue with terrible Wi-Fi can still browse people and matches.
 
 ### 10.5 UI chrome
 
@@ -604,37 +716,47 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 
 ## 11. Deployment
 
-- **PWA:** built as fully static output. Primary target: **nsite** — publish with `nsyte deploy` (kinds 15128/35128 manifest + blobs to Blossom; supports NIP-46 bunker signing for CI). `--fallback /index.html` publishes the SPA 404 fallback. Also deploy to a conventional static host (Netlify/Cloudflare/nginx) as mirror; same artifact.
-- **Coordinator:** Dockerfile (node + ffmpeg + whisper.cpp optional); single process + SQLite volume; config via `coordinator.toml` + env secrets.
+See [DEPLOYMENT.md](DEPLOYMENT.md) for supported PWA modes, header guarantees, release verification, and the difference between the nsite reference workflow and an operator-managed conventional host. See [COORDINATOR-OPERATOR-GUIDE.md](COORDINATOR-OPERATOR-GUIDE.md) for coordinator state, backup, and lifecycle requirements.
+
+- **PWA:** fully static output deployable to nsite or a conventional static host. These modes do not have equivalent response-header guarantees.
+- **Coordinator:** Node + ffmpeg/ffprobe plus protected durable SQLite state. Local Whisper is not implemented.
 - **Relays/Blossom:** the app defaults to public infrastructure; organizers can point events at their own relay + Blossom server via 31600 for locality/retention control.
 
 ## 12. Ticketing & approvals
 
-- **v1:** `approval = manual | invite | manual+invite` (§6.5, §8). Both shipping from day one.
-- **Future — Cashu ticketing:** buy a ticket → receive a Cashu token (P2PK-locked to the attendee npub, NIP-61-style; BTCPayServer/mint integration); join request carries `["payment", <cashu-token>]`; the coordinator's entitlement checker redeems it and auto-grants. No protocol change: it is one more checker beside `invite`. Related merged primitives: NIP-60 (relay-stored wallets), NIP-61 (nutzaps). There is **no standard ticketing NIP** — this convention is app-defined and documented here.
+- **Approval modes:** `approval = manual | invite | manual+invite` (§6.5, §8), both available from day one.
+- **Future — Cashu ticketing + door check-in (§13):** buy a ticket → receive a Cashu token (P2PK-locked to the attendee npub, NIP-61-style; BTCPayServer/mint integration); join request carries `["payment", <cashu-token>]`; the coordinator's entitlement checker redeems it and auto-grants. No protocol change: it is one more checker beside `invite`. Related merged primitives: NIP-60 (relay-stored wallets), NIP-61 (nutzaps). There is **no standard ticketing NIP** — this convention is app-defined and documented here.
 
-## 13. Future features (design-compatible, not in v1)
+## 13. Future features
 
-- **Admission micro-app / QR check-in:** attendee shows a QR of a signed statement (pubkey + coordinate + timestamp); door staff verify offline against the ECK roster.
+Design-compatible with the current protocol, not yet built. Most of these need no wire change, or only a small additive one.
+
+- **Post-event report & payoff flow.** A print-friendly (browser print-to-PDF, no server rendering) event report: people met, people wanted-to-meet-but-not-met, favorite talks, personal notes. "Met" stays editable after the event ends, so the report reflects what actually happened at the venue, not just what was planned beforehand. A one-click **follow-all** of everyone marked met or want-to-meet (a single kind-3 append-merge, reusing the existing empty-list guard, §5.4). Any npub list the report offers is a **local-only export**, never a published follow pack: kind 39089 / following.space packs are public events, and publishing "everyone I met at event X" by default would leak the user's participation and social graph — that path is deliberately not the default (a clearly-labeled opt-in "publish as follow pack" could be offered later). No vCard export — the app neither holds nor wants contact data beyond what's already in Nostr profiles. For an app-generated identity, the report is where the flow ends in the "switch to Nostr" moment: an nsec/ncryptsec export walkthrough and links to Primal/Damus/Amethyst/Yakihonne (§5.4).
+- **Client-side search** across decrypted directory entries, profiles, and transcripts.
+- **Offline event pack.** One-tap pre-download of roster, directory, matches, and intro thumbnails, plus a persistent-storage request so mobile browsers are less likely to evict the cache mid-event.
+- **"What's new" affordances:** a new-matches badge, an approval banner, and similar low-key surfaces for what changed since the user's last visit.
+- **Organizer QoL:** duplicate-event/templates (clone an event's config as a starting point); a printable invite sheet (one QR per invite code); a view-as-visitor preview. (A view-as-*member* preview is deliberately not planned — an admin's own member view already *is* the member view. The visitor view genuinely differs — locked members-only posts, hidden members-only menu items/sections — which is the gap worth previewing.)
+- **Cashu ticketing + QR door check-in — one feature, two halves, implemented together.** Ticketing per the existing §12 design (Cashu token entitlement checker, no protocol change). Check-in completes it at the venue door: the attendee's app shows a QR encoding a BIP-340-signed `{coordinate, pubkey, timestamp}` statement; door staff verify it offline against the ECK roster — no connectivity or server needed. Check-in without ticketing is technically possible (roster membership alone is the gate), but it only earns its keep once admission is actually paid, so the two ship together.
 - **Schedules & unconference:** sessions as NIP-52 (31923 children under a 31924 calendar) or NIP-53 (30312/30313 rooms); grid UI; per-person favorites (already in 30078); **.ics export** of the schedule and of "my favorites"; unconference board = attendee-proposed sessions + voting.
-- **Icebreakers:** coordinator emits 2–3 conversation starters per match from the reasoning.
-- **"Introduce us":** one-tap DM to a match **pre-filled with the shared reasoning** (plain NIP-17 DMs themselves shipped in v1, §7.2 kind 14; only the reasoning prefill remains future).
 - **Meeting slots:** free/busy publication and mutual-match time/table suggestions.
-- **Post-event contact export:** consent-gated vCard/npub list of people marked "met".
 - **WoT spam filtering:** rank join requests/discovery by follow-graph distance from the organizer.
-- **Offline event pack:** one-tap pre-download of roster + matches + intro thumbnails.
-- **Match feedback loop:** thumbs up/down (private, 30078) fed into future recomputes.
-- **Multi-organizer roles:** scoped grants (approve-only vs full key custody).
+- **Multi-organizer roles:** scoped grants (approve-only vs full key custody) — today's only co-organizer grant (21605) is full, irrevocable custody (§7.2).
 - **Chunked media encryption:** streaming playback + >25 MB robustness.
-- **Attendee-authored members-only posts:** 31607 signed by attendee keys needs a *blinded* event linkage for discovery (a cleartext `a` tag would publicly tie the author to the event) — deferred; v1 members-only posts are E_id-only (§7.4).
+- **Attendee-authored members-only posts:** 31607 signed by attendee keys needs a *blinded* event linkage for discovery (a cleartext `a` tag would publicly tie the author to the event) — deferred; members-only posts are `E_id`-only today (§7.4).
 - **Nostree mirror:** optionally republish the public menu items as a real NIP-51 kind 30003 bookmark set for interop with list clients.
-- **Per-event group chat — NIP-17 half:** spec in §7.5 — NIP-17 group messages (small events / spawned subgroups, lives on in Amethyst/Nostria), organizer-choosable per event via a 31600 `chat` tag; research in `GROUP-CHAT-FEASIBILITY.md`. (Marmot/MLS, the other half of §7.5, is already implemented — see §7.5's status note. An ECK-encrypted web-only chat was considered and rejected — post-event chats must survive in attendees' own clients.)
+- **Per-event group chat — NIP-17 half:** NIP-17 group messages (small events / spawned subgroups, lives on in Amethyst/Nostria) as an organizer-choosable alternative backend alongside Marmot, via the 31600 `chat` tag; research in `GROUP-CHAT-FEASIBILITY.md`. An ECK-encrypted web-only chat was considered and rejected — post-event chats must survive in attendees' own clients.
+
+**Explicitly considered and not planned:**
+
+- **Match feedback loop.** Attendee ratings biasing future match scoring would need a new opt-in feedback rumor to the coordinator — ratings currently live in user-private 30078, unreadable by the coordinator by design, and giving that up for an unproven quality gain isn't judged worth the privacy trade-off.
+- **Geohash event discovery.** Not until there's real multi-event usage to justify it.
+- **Negentropy sync (NIP-77).** Not until relay support is common enough to matter.
 
 ## 14. Security & threat model summary
 
-**Protected:** submission contents pre-approval (only `E_inbox` holders read them); event content from non-attendees; match reasoning from everyone but the pair (default); user-private data from everyone including the coordinator; event impersonation (only `E_id` signs); invite forgery (hash-hidden pubkeys + pubkey-bound signatures).
+**Protected:** submission contents pre-approval (only `E_inbox` holders read them); event content from non-attendees; match reasoning from everyone but the pair (default); user-private data from everyone including the coordinator; event impersonation (only `E_id` signs); invite forgery (hash-hidden pubkeys + pubkey-bound, domain-separated signatures); coordinator authority (record and grant authority is pinned to whichever coordinator the newest fetchable 31600 currently names at the current `gen` — a detached or replaced coordinator's authored records and grants stop being trusted, §9); chat device binding (a chat key can't be attested without a signed proof of possession, §7.5).
 
-**Leaks (accepted & documented):** attendee *counts* (directory-entry counts per coordinator); blob-hash linkage across events when reusing intros without "fresh copy"; timing correlation on relays; `E_inbox` p-tags on inbound wraps mark *that* someone submitted (not who — wrap authors are one-time keys). Email backup of nsec traverses email infrastructure (user-chosen trade-off, §5.2).
+**Leaks (accepted & documented):** attendee *counts* (directory-entry counts per coordinator); blob-hash linkage across events when reusing intros without "fresh copy"; timing correlation on relays; `E_inbox` p-tags on inbound wraps mark *that* someone submitted (not who — wrap authors are one-time keys); each chat device's kind-0 (published only to chat relays) links it to the owning account's npub, by design (§7.5). Email backup of nsec traverses email infrastructure (user-chosen trade-off, §5.2).
 
 **Trusted parties:** coordinator (reads event content; cannot impersonate); LLM/STT provider (reads transcripts/summaries; mitigate via Venice private/TEE tiers or operator-chosen Routstr nodes); relays/Blossom (ciphertext + metadata only).
 
@@ -653,18 +775,17 @@ Dexie cache serves roster, directory entries, matches, and profile metadata offl
 | nsite gateway behavior (404-status fallback, header policy, manifest sync interval) | test deploy against target gateway (e.g. nsite.lol) |
 | NDK v3 / nostr-tools / blossom-client-sdk APIs | pin versions at P0; notes in IMPLEMENTATION_PLAN.md |
 | Amber NIP-46 behavior (per-connection keys, `logout`) | test against current Amber release |
-| Custom kind collisions (31600–31609, 21600–21605 — re-verified unassigned against the nostr-protocol/nips registry on 2026-07-13, all CLEAR) | re-check nostr-protocol/nips registry before first release |
+| Custom kind collisions (31600–31611, 21600–21610) | re-check nostr-protocol/nips registry before first release; see PROTOCOL-REGISTRY.md |
 
 ---
 
-## 16. Implementation notes & deviations (v1, as built)
+## 16. Implementation notes & deviations (as built)
 
-This section records concrete decisions and small deviations made while building and running v1 (the sections above remain normative intent; this documents *as-built* reality).
+This section records concrete decisions and small deviations made while building and running the coordinator and app (the sections above remain normative intent; this documents *as-built* reality).
 
 ### 16.1 Custom kinds — additions
-- **21605 Organizer Grant** (co-organizer full key custody, §7.2).
-- **21604 Admin Command** gained an `approve` command (§7.2). Admin commands are sealed by `E_id`.
-- Rumor-kind range is now **21600–21605**; re-check the NIPs registry before public release (§15).
+
+The current implemented set is documented in [PROTOCOL-REGISTRY.md](PROTOCOL-REGISTRY.md): addressable kinds 31600–31611 and rumors 21600–21610. Admin commands include `approve`, `talk_publish`, `talk_reject`, and `detach`; all admin commands are sealed by `E_id`.
 
 ### 16.2 Coordinator
 - **Store:** Node's built-in `node:sqlite` (Node ≥ 22.5) instead of `better-sqlite3` — same synchronous embedded-SQLite semantics as §9.1 intends, no fragile native build. Requires Node ≥ 22.5 (CI/Docker pinned to Node 22).

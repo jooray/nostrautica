@@ -14,9 +14,19 @@
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchDirectoryEntry } from "$lib/events/attendee.js";
   import { submitProfileCorrection, type CorrectionInput } from "$lib/events/correction.js";
+  import {
+    fieldsFromProfile,
+    buildAuthoredSubmission,
+    authoredChanged,
+    type AuthoredFields,
+  } from "$lib/events/authored-profile.js";
+  import { loadSelfCopy, submitProfileAndMedia } from "$lib/media/submit.js";
+  import { deriveBlindingKey } from "$lib/events/blinding.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
+  import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import type { MediaDescriptor } from "@nostrautica/protocol";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -27,6 +37,67 @@
   let busy = $state(false);
   let saved = $state(false);
   let saveQueued = $state(false); // correction sits in the offline outbox (UX-15)
+
+  // Authored-profile editing (UX-O3): a real form for the fields the attendee
+  // wrote (about/skills/looking_for/links/text intro), submitting a new 21601 rev
+  // — separate from re-recording media and from AI-profile correction (21608).
+  let editingAuthored = $state(false);
+  let authored = $state<AuthoredFields>({ about: "", skills: "", lookingFor: "", links: "", introText: "" });
+  let authoredBaseline = $state<AuthoredFields>({ about: "", skills: "", lookingFor: "", links: "", introText: "" });
+  let authoredMedia = $state<MediaDescriptor[]>([]); // preserved across an authored edit
+  let authoredBusy = $state(false);
+  let authoredSaved = $state(false);
+  let authoredError = $state<unknown>(null);
+  const authoredDirty = $derived(authoredChanged(authored, authoredBaseline));
+
+  async function openAuthoredEditor() {
+    if (!session.signer || !ctx) return;
+    authoredError = null;
+    authoredSaved = false;
+    // Seed from the self-copy (the attendee's own durable submission, which holds
+    // the authored fields + media + text intro), falling back to the directory
+    // entry's authored profile.
+    let profile = entry?.profile;
+    let introText = entry?.intro_text;
+    let media: MediaDescriptor[] = entry?.media ?? [];
+    try {
+      const bk = await deriveBlindingKey(session.signer);
+      const self = await loadSelfCopy(session.signer, ctx, bk);
+      if (self?.profile) profile = self.profile;
+      if (self?.introText !== undefined) introText = self.introText;
+      if (self?.media?.length) media = self.media;
+    } catch {
+      /* fall back to the directory entry's fields */
+    }
+    const f = fieldsFromProfile(profile, introText);
+    authored = { ...f };
+    authoredBaseline = { ...f };
+    authoredMedia = media;
+    editingAuthored = true;
+  }
+
+  // Hold an auto-refresh while an authored edit is in progress (App-2).
+  $effect(() => {
+    if (editingAuthored && authoredDirty) return refreshGuard.hold("authored");
+  });
+
+  async function saveAuthored() {
+    if (!session.signer || !ctx) return;
+    authoredBusy = true;
+    authoredError = null;
+    authoredSaved = false;
+    try {
+      const bk = await deriveBlindingKey(session.signer);
+      const { profile, introText, media } = buildAuthoredSubmission(authored, authoredMedia);
+      await submitProfileAndMedia(session.signer, ctx, { profile, media, blindingKey: bk, introText });
+      authoredSaved = true;
+      authoredBaseline = { ...authored };
+    } catch (e) {
+      authoredError = e;
+    } finally {
+      authoredBusy = false;
+    }
+  }
 
   // Editable copies of each generated field. List fields are edited as one item
   // per line; summary is free text. `initial` is the loaded baseline so only
@@ -40,6 +111,16 @@
   });
   let hideAll = $state(false);
   let report = $state("");
+
+  // Draft-safe auto-refresh (App-2): hold the pending reload while the organizer
+  // has an unsaved correction/report in progress; it applies once submitted or
+  // cleared. (Values load from the network, so a reload restores them anyway —
+  // this only prevents a reload landing mid-edit.)
+  $effect(() => {
+    const edited =
+      report.trim().length > 0 || AI_PROFILE_FIELDS.some((f) => values[f] !== initial[f]);
+    if (edited) return refreshGuard.hold("profile");
+  });
 
   const isList = (f: AiProfileField) => f !== "summary";
 
@@ -136,22 +217,60 @@
 {#if loading}
   <p class="muted">{t("app.loading")}</p>
 {:else}
-  <!-- You wrote: authored identity fields (edited only via the submission flow). -->
+  <!-- You wrote: authored identity fields. UX-O3 — a real edit form here submits a
+       new 21601 rev; re-recording media and AI correction are separate actions. -->
   <div class="card">
     <div class="field-label">{t("profile.authored.title")}</div>
     <p class="muted small">{t("profile.authored.hint")}</p>
-    {#if entry?.profile.about}<p>{entry.profile.about}</p>{/if}
-    {#if entry?.profile.skills?.length}
-      <div class="row" style="flex-wrap:wrap">
-        {#each entry.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+    {#if !editingAuthored}
+      {#if entry?.profile.about}<p>{entry.profile.about}</p>{/if}
+      {#if entry?.profile.skills?.length}
+        <div class="row" style="flex-wrap:wrap">
+          {#each entry.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+        </div>
+      {/if}
+      {#if entry?.profile.looking_for}
+        <p class="muted">{t("attendee.lookingFor", { value: entry.profile.looking_for })}</p>
+      {/if}
+      {#if entry?.intro_text}<p class="muted">{entry.intro_text}</p>{/if}
+      <div class="row" style="margin-top:0.5rem;flex-wrap:wrap">
+        <button class="btn inline" onclick={openAuthoredEditor}>{t("profile.authored.edit")}</button>
+        <button class="btn inline" onclick={() => router.go({ name: "record", naddr, talk: false })}>
+          {t("profile.authored.rerecord")}
+        </button>
       </div>
+    {:else}
+      {#if authoredError}<ErrorState error={authoredError} />{/if}
+      <div class="editfield">
+        <label for="au-about">{t("profile.authored.about")}</label>
+        <textarea id="au-about" rows="3" bind:value={authored.about}></textarea>
+      </div>
+      <div class="editfield">
+        <label for="au-skills">{t("profile.authored.skills")}</label>
+        <input id="au-skills" bind:value={authored.skills} placeholder={t("profile.authored.skills.placeholder")} />
+      </div>
+      <div class="editfield">
+        <label for="au-lf">{t("profile.authored.lookingFor")}</label>
+        <input id="au-lf" bind:value={authored.lookingFor} />
+      </div>
+      <div class="editfield">
+        <label for="au-links">{t("profile.authored.links")}</label>
+        <textarea id="au-links" rows="2" bind:value={authored.links} placeholder={t("profile.authored.links.placeholder")}></textarea>
+      </div>
+      <div class="editfield">
+        <label for="au-intro">{t("profile.authored.introText")}</label>
+        <textarea id="au-intro" rows="3" bind:value={authored.introText}></textarea>
+        <span class="muted small">{t("profile.authored.introText.hint")}</span>
+      </div>
+      <div class="row" style="flex-wrap:wrap;align-items:center">
+        <button class="btn primary" onclick={saveAuthored} disabled={authoredBusy || !authoredDirty}>
+          {authoredBusy ? t("profile.saving") : t("profile.save")}
+        </button>
+        <button class="btn inline" onclick={() => (editingAuthored = false)}>{t("profile.authored.cancel")}</button>
+        {#if authoredSaved}<span class="badge" role="status">{t("profile.saved")}</span>{/if}
+      </div>
+      {#if authoredSaved}<p class="muted small">{t("profile.authored.saved.hint")}</p>{/if}
     {/if}
-    {#if entry?.profile.looking_for}
-      <p class="muted">{t("attendee.lookingFor", { value: entry.profile.looking_for })}</p>
-    {/if}
-    <button class="btn inline" style="margin-top:0.5rem" onclick={() => router.go({ name: "record", naddr, talk: false })}>
-      {t("profile.authored.edit")}
-    </button>
   </div>
 
   <!-- Generated from your intro: the ai_profile the coordinator built. -->

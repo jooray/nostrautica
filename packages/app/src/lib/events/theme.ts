@@ -66,7 +66,7 @@ export async function publishEventTheme(ctx: EventContext, css: string): Promise
       tags: [
         ["d", identifier],
         ["a", ctx.coordinate],
-        ["v", "1"],
+        ["v", "2"],
       ],
       content: css,
     },

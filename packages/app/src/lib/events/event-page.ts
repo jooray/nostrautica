@@ -83,7 +83,7 @@ export async function fetchEventPage(
     return undefined; // malformed page — behave as if none exists
   }
   const publicMenu = rTagsToMenu(latest.tags);
-  let priv: EventPagePrivate = { v: 1, menu: [], sections: [] };
+  let priv: EventPagePrivate = { v: 2, menu: [], sections: [] };
   if (content.private) {
     const keys = await loadEventKeys(ctx.coordinate);
     const versionId = Number(tag(latest.tags, "eck")) || undefined;
@@ -122,7 +122,7 @@ export async function publishEventPage(
   const tags: string[][] = [
     ["d", identifier],
     ["a", ctx.coordinate],
-    ["v", "1"],
+    ["v", "2"],
   ];
   const hasPrivate =
     menu.privateItems.length > 0 || sections.privateItems.length > 0;
@@ -132,7 +132,7 @@ export async function publishEventPage(
     if (!eck) throw new Error("event content key not available");
     tags.push(["eck", String(eck.id)]);
     privateCiphertext = encryptEventPagePrivate(base64ToBytes(eck.key), {
-      v: 1,
+      v: 2,
       menu: menu.privateItems,
       sections: sections.privateItems,
     });
@@ -145,7 +145,7 @@ export async function publishEventPage(
       created_at: Math.floor(Date.now() / 1000),
       tags,
       content: JSON.stringify({
-        v: 1,
+        v: 2,
         sections: sections.publicItems,
         ...(privateCiphertext ? { private: privateCiphertext } : {}),
       }),

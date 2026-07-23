@@ -49,6 +49,8 @@ export function streamEvents(
   const { relays, graceMs = 400, timeoutMs = 8000, relayOnly = false, onEvent } = opts;
   const deduper = new EventDeduper();
   const byId = new Map<string, NDKEvent>();
+  /** Event ids whose signature already verified in this stream (see below). */
+  const verifiedIds = new Set<string>();
   let sub: NDKSubscription | undefined;
   let stopped = false;
   let settled = false;
@@ -103,29 +105,32 @@ export function streamEvents(
     sub.on("event", (e: NDKEvent) => {
       if (stopped) return;
       const raw = e.rawEvent() as unknown as MinimalEvent;
-      // Central signature check (audit APPK-1 + incident 2026-07-21): every
-      // fetch in the app funnels through here, cache hit or fresh relay event
-      // alike. An event that doesn't verify — most commonly a stale cache
-      // entry from before cache-dexie was configured to persist `sig`, but
-      // equally a genuinely forged/poisoned one — is purged from the cache and
-      // dropped as if it had never arrived. A live subscription keeps running
-      // past this point, so a relay serving the real, validly-signed event
-      // (which it always will, for a stale-cache miss) still delivers it
-      // through this same callback moments later — no separate migration,
-      // reload, or re-login needed.
-      if (!isVerified(raw as never)) {
-        // cache-dexie keys replaceable/addressable events (everything in the
-        // 10000-19999 and 30000-39999 ranges — which is most of what this app
-        // fetches: 31600, 31923, 31603, 31605...) by `tagId()`
-        // ("kind:pubkey:d-tag"), NOT the raw event hash `raw.id`. Deleting by
-        // `raw.id` alone is a silent no-op for those — verified against
-        // cache-dexie's own setEvent()/deleteEventIds() source, and against a
-        // live incident where a stale cache entry survived this exact purge
-        // call. Delete both keys so the fix is correct for replaceable AND
-        // regular (non-replaceable) kinds without needing to special-case them.
-        const ids = [raw.id, e.tagId()];
-        void getNdk().cacheAdapter?.deleteEventIds?.(ids);
-        return;
+      // Central signature check (audit APPK-1): every fetch in the app funnels
+      // through here, cache hit or fresh relay event alike, so an event that
+      // doesn't verify is dropped as if it had never arrived.
+      //
+      // No cache purge here any more. It used to call
+      // `cacheAdapter.deleteEventIds` to self-heal sig-less rows written before
+      // `saveSig: true`, but that never worked: cache-dexie's implementation is
+      // `db.events.where({ id: eventIds }).delete()`, and Dexie's object form
+      // of where() is an EQUALITY match against the whole array, so it never
+      // matches a string key. Those rows were retired by versioning the cache
+      // DB instead (see ndk.ts CACHE_DB_NAME), which is what actually fixed the
+      // 2026-07-21 incident — leaving the purge here would be a broken call on
+      // the hot path pretending to be a safety net.
+      //
+      // Verification is memoized per event id because the same event arrives
+      // once per relay (five write relays by default), and a Schnorr verify is
+      // ~0.5-1ms of synchronous main-thread work — on a 200-person roster that
+      // was hundreds of ms per read, repeated on every navigation, which ate
+      // much of what the cache-first architecture buys. The check still runs
+      // BEFORE the deduper so an unverified event can never poison its
+      // latest-wins state for a replaceable coordinate. Only SUCCESSES are
+      // memoized: caching failures would let anyone drop a genuine event by
+      // racing a same-id copy carrying a bad signature to us first.
+      if (!verifiedIds.has(raw.id)) {
+        if (!isVerified(raw as never)) return;
+        verifiedIds.add(raw.id);
       }
       if (!deduper.accept(raw)) return;
       byId.set(raw.id, e);

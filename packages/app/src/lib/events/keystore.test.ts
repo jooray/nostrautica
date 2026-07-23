@@ -211,7 +211,7 @@ describe("lockEventKeysForLogout / unlockEventKeysForLogin (audit UX-6)", () => 
 
   it("moves a live record into an encrypted snapshot and clears the plaintext", async () => {
     await saveEventKeys(organizerKeys());
-    await lockEventKeysForLogout(selfEncrypt);
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
     expect(await mem.backend.get(A, COORD)).toBeUndefined();
     expect(mem.locked.size).toBe(1);
     const snap = [...mem.locked.values()][0]!;
@@ -224,7 +224,7 @@ describe("lockEventKeysForLogout / unlockEventKeysForLogin (audit UX-6)", () => 
 
   it("round-trips: lock then unlock restores the exact record", async () => {
     await saveEventKeys(organizerKeys());
-    await lockEventKeysForLogout(selfEncrypt);
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
     await unlockEventKeysForLogin(selfDecrypt);
     const keys = await loadEventKeys(COORD);
     expect(keys?.role).toBe("organizer");
@@ -239,14 +239,14 @@ describe("lockEventKeysForLogout / unlockEventKeysForLogin (audit UX-6)", () => 
     await saveEventKeys(organizerKeys());
     await lockEventKeysForLogout(async () => {
       throw new Error("signer unreachable");
-    });
+    }, selfDecrypt);
     expect(await loadEventKeys(COORD)).toBeDefined();
     expect(mem.locked.size).toBe(0);
   });
 
   it("a snapshot that fails to decrypt (wrong/no signer yet) is left locked, not lost", async () => {
     await saveEventKeys(organizerKeys());
-    await lockEventKeysForLogout(selfEncrypt);
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
     await unlockEventKeysForLogin(async () => {
       throw new Error("wrong owner");
     });
@@ -256,7 +256,7 @@ describe("lockEventKeysForLogout / unlockEventKeysForLogin (audit UX-6)", () => 
 
   it("unlock unions ECK versions instead of clobbering a fresher live write", async () => {
     await saveEventKeys(organizerKeys()); // eck v1, organizer
-    await lockEventKeysForLogout(selfEncrypt);
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
     // A 21602 grant landed right after login, before the unlock finished.
     await saveEventKeys({ coordinate: COORD, role: "attendee", eck: [{ id: 2, key: "k2" }] });
     await unlockEventKeysForLogin(selfDecrypt);
@@ -266,11 +266,43 @@ describe("lockEventKeysForLogout / unlockEventKeysForLogin (audit UX-6)", () => 
     expect(keys?.role).toBe("organizer");
   });
 
+  // The key-loss chain found in review, reproduced end to end. Every step here
+  // is a normal thing that happens; only the combination destroys the keys.
+  it("a logout after a FAILED unlock merges into the snapshot instead of clobbering it", async () => {
+    // 1. Organizer logs out normally: full record (E_id + E_inbox + eck v1) locked.
+    await saveEventKeys(organizerKeys());
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
+    expect(mem.locked.size).toBe(1);
+
+    // 2. Next login, the NIP-46 signer is unreachable — unlock fails, so the
+    //    snapshot correctly stays locked and the live store stays empty.
+    await unlockEventKeysForLogin(async () => {
+      throw new Error("signer unreachable");
+    });
+    expect(await loadEventKeys(COORD)).toBeUndefined();
+    expect(mem.locked.size).toBe(1);
+
+    // 3. A 21602 grant lands and writes a STUB live record: one ECK, no nsecs.
+    await saveEventKeys({ coordinate: COORD, role: "attendee", eck: [{ id: 2, key: "k2" }] });
+
+    // 4. The user logs out again. Locking the stub over the snapshot is what
+    //    used to destroy E_id/E_inbox locally.
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
+
+    // 5. Signer is back: unlock must return the organizer INTACT.
+    await unlockEventKeysForLogin(selfDecrypt);
+    const restored = await loadEventKeys(COORD);
+    expect(restored?.eidNsecHex).toBe(organizerKeys().eidNsecHex); // the whole point
+    expect(restored?.einboxNsecHex).toBe(organizerKeys().einboxNsecHex);
+    expect(restored?.role).toBe("organizer"); // authority not downgraded by the stub
+    expect(restored?.eck.map((v) => v.id).sort()).toEqual([1, 2]); // both ECKs survive
+  });
+
   it("locking is scoped to the active owner only", async () => {
     await saveEventKeys(organizerKeys());
     setActiveOwner(B);
     await saveEventKeys({ coordinate: COORD, role: "attendee", eck: [{ id: 1, key: "kB" }] });
-    await lockEventKeysForLogout(selfEncrypt); // locks B only
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt); // locks B only
     expect(mem.locked.size).toBe(1);
     expect([...mem.locked.values()][0]!.owner).toBe(B);
     setActiveOwner(A);

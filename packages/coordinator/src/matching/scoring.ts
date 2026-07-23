@@ -114,6 +114,27 @@ export interface DirectedScore {
   complementarity: number;
   /** Addressed to the TARGET as "you": why the target should meet this candidate. */
   reasoning: string;
+  /** ≤ 3 short conversation starters the TARGET can open with (NIP §6.2). */
+  icebreakers?: string[];
+}
+
+/** Icebreaker bounds (NIP §6.2): ≤ 3 entries, ≤ 280 chars each. */
+export const MAX_ICEBREAKERS = 3;
+export const MAX_ICEBREAKER_LEN = 280;
+
+/**
+ * Coerce a raw model `icebreakers` value into a bounded string[] (NIP §6.2):
+ * keep only non-empty strings, trim to MAX_ICEBREAKER_LEN, cap at MAX_ICEBREAKERS.
+ * Anything else (absent, not an array) yields undefined so the field stays off the
+ * match entry. Publish-boundary URL-neutralization happens later (sanitizeMatchList).
+ */
+function normalizeIcebreakers(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out = raw
+    .filter((s): s is string => typeof s === "string" && s.trim() !== "")
+    .slice(0, MAX_ICEBREAKERS)
+    .map((s) => s.slice(0, MAX_ICEBREAKER_LEN));
+  return out.length > 0 ? out : undefined;
 }
 
 /**
@@ -159,6 +180,11 @@ export const BATCH_SYSTEM_PROMPT = [
   'Example of BAD (never do this): "This pair has high complementarity because both are musicians',
   'seeking bandmates, resulting in a strong match score."',
   "",
+  "icebreakers — up to THREE short conversation starters (each ≤ 280 chars) the target can open",
+  "with when they meet this candidate. Each is a CONCRETE opening line or question grounded in both",
+  "people's actual details — never a restatement of the reasoning or an analytical remark. Return",
+  "fewer (or an empty list) when you can't ground a good one; never pad.",
+  "",
   "Return one entry per candidate, using the candidate's number as `index`. Score EVERY candidate exactly once.",
 ].join("\n");
 
@@ -184,6 +210,12 @@ export const BATCH_SCORE_SCHEMA = {
             description:
               "Addressed to the TARGET as 'you': a host-voice, 1-2 sentence hook for meeting this candidate. No analytical framing.",
           },
+          icebreakers: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Up to 3 short (≤ 280 chars) concrete conversation starters the target can open with. Grounded in both profiles; never a restatement of the reasoning.",
+          },
         },
       },
     },
@@ -196,6 +228,7 @@ interface RawBatchMatch {
   complementarity: number;
   score: number;
   reasoning_for_target: string;
+  icebreakers?: unknown;
 }
 
 /** A candidate in a batch, tagged with the caller's stable id (pubkey). */
@@ -282,11 +315,13 @@ export async function scoreBatch(
     if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
     seen.add(idx);
     const cand = ordered[idx - 1]!;
+    const icebreakers = normalizeIcebreakers(m.icebreakers);
     scores.set(cand.id, {
       score: normalizeScore(m.score),
       similarity: normalizeScore(m.similarity),
       complementarity: normalizeScore(m.complementarity),
       reasoning: m.reasoning_for_target,
+      ...(icebreakers ? { icebreakers } : {}),
     });
   }
 
@@ -337,6 +372,10 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
   " • Name a CONCRETE thing to talk about or do together, drawn from both people's actual details.",
   ' • ABSOLUTELY NO analytical framing: never say "this pair", "based on their profiles", "high',
   '   complementarity", "scores", "match", or explain why a rating was given. No hedging boilerplate.',
+  "",
+  "icebreakers — up to THREE short conversation starters (each ≤ 280 chars) THIS target can open with",
+  "when they meet the shared person. Each is a CONCRETE opening line or question grounded in both",
+  "people's actual details — never a restatement of the reasoning. Return fewer (or none) rather than pad.",
   "",
   "Return one entry per target, using the target's number as `index`. Score EVERY target exactly once.",
 ].join("\n");
@@ -394,11 +433,13 @@ export async function scoreReverseBatch(
     if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
     seen.add(idx);
     const tgt = ordered[idx - 1]!;
+    const icebreakers = normalizeIcebreakers(m.icebreakers);
     scores.set(tgt.id, {
       score: normalizeScore(m.score),
       similarity: normalizeScore(m.similarity),
       complementarity: normalizeScore(m.complementarity),
       reasoning: m.reasoning_for_target,
+      ...(icebreakers ? { icebreakers } : {}),
     });
   }
 

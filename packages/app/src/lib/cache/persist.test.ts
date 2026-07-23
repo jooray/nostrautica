@@ -14,6 +14,7 @@ import {
   cacheSet,
   cacheDelete,
   clearOwnerCache,
+  cacheGeneration,
   pruneCache,
   hydrateAppCache,
   ANON,
@@ -36,6 +37,33 @@ function memBackend() {
     },
   };
   return { backend, store };
+}
+
+/**
+ * Backend that also implements the H-5 owner-prefix range delete AND a versioned
+ * (App-6) put, so the tests can observe the real production code paths rather
+ * than the mirror-only fallback.
+ */
+function fullBackend() {
+  const store = new Map<string, CacheEntry>();
+  const SEP = "\x1f";
+  const backend: PersistBackend = {
+    async getAll() {
+      return [...store.entries()];
+    },
+    async put(k, v) {
+      const existing = store.get(k);
+      // Read-modify-write inside the "transaction" (App-6): drop stale writes.
+      if (!existing || v.at >= existing.at) store.set(k, v);
+    },
+    async delete(keys) {
+      for (const k of keys) store.delete(k);
+    },
+    async deleteByPrefix(prefix) {
+      for (const k of [...store.keys()]) if (k.startsWith(prefix)) store.delete(k);
+    },
+  };
+  return { backend, store, SEP };
 }
 
 const A = "a".repeat(64);
@@ -118,6 +146,84 @@ describe("persist logout wipe + delete", () => {
     cacheSet("k", "v");
     cacheDelete("k");
     expect(cacheGet("k")).toBeUndefined();
+  });
+
+  it("clearOwnerCache range-deletes even a FOREIGN tab's owner keys off disk (H-5)", async () => {
+    const { backend, store, SEP } = fullBackend();
+    __setPersistBackend(backend);
+    // A second tab wrote an owner-scoped key straight to disk — this tab's mirror
+    // never saw it (the leak clearOwnerCache used to miss).
+    store.set(`${A}${SEP}foreign`, { at: 1, data: "secret-from-other-tab" });
+    store.set(`${ANON}${SEP}pub`, { at: 1, data: "public" });
+    setActiveCacheOwner(A);
+    cacheSet("local", "seen-by-this-tab");
+    clearOwnerCache(A);
+    // Give the fire-and-forget range delete a tick to run.
+    await Promise.resolve();
+    expect(store.has(`${A}${SEP}foreign`)).toBe(false); // foreign owner key gone
+    expect(store.has(`${A}${SEP}local`)).toBe(false); // this tab's own key gone
+    expect(store.has(`${ANON}${SEP}pub`)).toBe(true); // anon survives
+  });
+
+  it("bumps the generation so an in-flight write completing after logout is dropped (H-5)", () => {
+    __setPersistBackend(memBackend().backend);
+    setActiveCacheOwner(A);
+    const gen = cacheGeneration();
+    // …async producer starts here, capturing `gen`…
+    clearOwnerCache(A); // logout advances the generation
+    setActiveCacheOwner(A); // (same identity logs back in, mirror is empty)
+    // The slow producer finally writes back, guarded by the stale generation.
+    cacheSet("dir", ["stale-plaintext"], undefined, undefined, gen);
+    expect(cacheGet("dir")).toBeUndefined(); // fenced out — no repopulation
+    // A write guarded by the CURRENT generation still lands.
+    cacheSet("dir", ["fresh"], undefined, undefined, cacheGeneration());
+    expect(cacheGet<string[]>("dir")?.data).toEqual(["fresh"]);
+  });
+});
+
+describe("persist cross-tab disk latest-wins (App-6)", () => {
+  beforeEach(() => __resetPersistForTests());
+
+  it("a stale fire-and-forget put cannot regress newer disk state", async () => {
+    const { backend, store, SEP } = fullBackend();
+    __setPersistBackend(backend);
+    // Tab B already persisted a newer value to disk (at=200) that tab A never saw.
+    store.set(`${A}${SEP}k`, { at: 200, data: "tab-B-newer" });
+    setActiveCacheOwner(A);
+    // Tab A, whose mirror is empty, writes its older value (at=100).
+    cacheSet("k", "tab-A-older", 100);
+    await Promise.resolve();
+    // The versioned put compared on-disk `at` inside the txn and refused the
+    // regression — disk keeps tab B's newer value.
+    expect(store.get(`${A}${SEP}k`)?.data).toBe("tab-B-newer");
+  });
+});
+
+describe("persist hydration generation fence (H-5)", () => {
+  beforeEach(() => __resetPersistForTests());
+
+  it("a logout during a slow hydrate does not repopulate owner plaintext", async () => {
+    let release!: (v: Array<[string, CacheEntry]>) => void;
+    const gate = new Promise<Array<[string, CacheEntry]>>((r) => (release = r));
+    const backend: PersistBackend = {
+      getAll: () => gate,
+      put: async () => {},
+      delete: async () => {},
+    };
+    __setPersistBackend(backend);
+    const p = hydrateAppCache();
+    // Logout lands mid-hydrate (bumps the generation).
+    clearOwnerCache(A);
+    // The bulk read now resolves with the logged-out identity's owner plaintext
+    // plus an anon entry.
+    release([
+      [`${A}\x1fdir`, { at: 10, data: ["owner-plaintext"] }],
+      [`${ANON}\x1ftheme`, { at: 5, data: "css" }],
+    ]);
+    await p;
+    setActiveCacheOwner(A);
+    expect(cacheGet("dir")).toBeUndefined(); // owner plaintext NOT repopulated
+    expect(cacheGet<string>("theme", ANON)?.data).toBe("css"); // anon still warms
   });
 });
 

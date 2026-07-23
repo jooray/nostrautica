@@ -1,9 +1,10 @@
 # Deploying the Nostrautica PWA
 
-The app builds to fully static output (`packages/app/build/`). Two deploy targets,
-same artifact (spec §11).
+The app builds to fully static output (`packages/app/build/`). See
+[`docs/DEPLOYMENT.md`](../../docs/DEPLOYMENT.md) for supported modes and their
+different HTTP-header guarantees.
 
-## Primary: nsite (the site itself hosted on Nostr + Blossom)
+## nsite reference workflow (the site itself hosted on Nostr + Blossom)
 
 Uses [`nsyte`](https://github.com/sandwichfarm/nsyte) to publish the build as an
 nsite (NIP-5A: kinds 15128/35128 manifest + blobs to Blossom).
@@ -24,7 +25,7 @@ npx nsyte deploy packages/app/build --fallback /index.html \
   --bunker "$NSYTE_BUNKER_URI"
 ```
 
-## Mirror: conventional static host (Netlify / Cloudflare / nginx)
+## Conventional static host (Netlify / Cloudflare / nginx)
 
 Serve `packages/app/build/` as static files. Header policy (spec §10.2):
 
@@ -33,3 +34,7 @@ Serve `packages/app/build/` as static files. Header policy (spec §10.2):
 
 The service worker's `autoUpdate` + periodic/visibilitychange checks keep clients
 current within one update-check interval regardless of host.
+
+Unlike nsite gateways, a conventional host can also send response-header CSP and
+`frame-ancestors` policy. Use that mode when anti-framing or host-controlled CSP
+is required.

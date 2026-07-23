@@ -27,6 +27,7 @@ import type { EventContext } from "$lib/events/event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { ChatMessage } from "./messages.js";
 import type { MarmotChat } from "./client.js";
+import { ChatTabCoordinator, type TabRole } from "./tab-leader.js";
 
 /**
  * `setup` — client is up, no group yet (waiting on the coordinator's Add +
@@ -45,6 +46,16 @@ class ChatSessionStore {
   chatPubkey = $state<string | undefined>(undefined);
   /** Reactive by reference only — never deep-proxy the marmot client. */
   chat = $state.raw<MarmotChat | undefined>(undefined);
+  /** This tab's multi-tab role (H-7). Only the leader owns a live client. */
+  tabRole = $state<TabRole>("pending");
+  /**
+   * True when this tab is a follower that cannot send — either Web Locks is
+   * unavailable (no single-writer guarantee) or the leader tab is on a different
+   * event. The UI shows a read-only "chat is active in another tab" notice.
+   */
+  readOnly = $state(false);
+  /** The multi-tab coordinator (leader election + follower proxy). */
+  private coordinator?: ChatTabCoordinator;
 
   /** Guards against a superseded start (event switch / logout) writing state. */
   private token = 0;
@@ -67,7 +78,7 @@ class ChatSessionStore {
     signer: AppSigner,
     owner: string | null,
   ): Promise<void> {
-    if (this.naddr === naddr && this.owner === owner && (this.chat || this.starting)) {
+    if (this.naddr === naddr && this.owner === owner && (this.chat || this.coordinator || this.starting)) {
       await this.starting;
       return;
     }
@@ -81,13 +92,68 @@ class ChatSessionStore {
 
   private async begin(): Promise<void> {
     const tok = ++this.token;
+    // Retire any coordinator from a prior begin() (retry) before electing afresh.
+    this.coordinator?.dispose();
+    this.coordinator = undefined;
+    this.tabRole = "pending";
+    this.readOnly = false;
     const ctx = this.ctx;
     const signer = this.signer;
     if (!ctx || !signer) return;
     this.phase = "setup";
     this.error = null;
     const run = (async () => {
-      // The whole marmot-ts + ts-mls stack (~220 kB gz) is lazy — a chat-off
+      // Multi-tab leadership (H-7): exactly one tab per account owns the live client
+      // and all MLS mutation; other tabs proxy through a BroadcastChannel. Scope the
+      // election to the account so two tabs never mutate the shared per-identity
+      // IndexedDB MLS state concurrently.
+      const scope = this.owner ?? (await signer.getPublicKey());
+      if (tok !== this.token) return;
+      const coordinator = new ChatTabCoordinator({
+        scope,
+        onRoleChange: (role) => {
+          if (tok !== this.token) return;
+          this.tabRole = role;
+          this.recomputeReadOnly();
+        },
+        onLeaderState: (coordinate, messages) => {
+          // Follower render: adopt the leader's de-duped, sorted list wholesale.
+          if (tok !== this.token || coordinate !== ctx.coordinate) return;
+          this.messages = messages;
+          this.recomputeReadOnly();
+          if (this.phase !== "ready") this.phase = "ready";
+        },
+        onSendRequest: async (text) => {
+          // Leader executes a follower's proxied send on the real client.
+          if (!this.chat) throw new Error("no chat session");
+          await this.chat.send(text);
+        },
+        onSyncRequest: () => {
+          if (tok === this.token) coordinator.broadcastState(ctx.coordinate, this.messages);
+        },
+      });
+      this.coordinator = coordinator;
+      await coordinator.whenSettled;
+      if (tok !== this.token) {
+        coordinator.dispose();
+        return;
+      }
+
+      if (coordinator.role !== "leader") {
+        // Follower: construct NO client. Resolve our own chat pubkey (a cheap
+        // IndexedDB read, no MLS client) so "my" bubbles still highlight, and render
+        // from the leader's broadcasts. The room is "ready" — it shows the leader's
+        // messages, or the active-in-another-tab notice when read-only.
+        const { resolveChatIdentity } = await import("./identity.js");
+        const id = await resolveChatIdentity(signer).catch(() => undefined);
+        if (tok !== this.token) return;
+        this.chatPubkey = id?.pubkey;
+        this.recomputeReadOnly();
+        this.phase = "ready";
+        return;
+      }
+
+      // Leader: the whole marmot-ts + ts-mls stack (~220 kB gz) is lazy — a chat-off
       // event, or a non-member, never loads it.
       const { MarmotChat } = await import("./client.js");
       const chat = await MarmotChat.create({ accountSigner: signer, ctx });
@@ -97,13 +163,24 @@ class ChatSessionStore {
       }
       this.chat = chat;
       this.chatPubkey = chat.identity.pubkey;
+      this.recomputeReadOnly();
       chat.onMessage = (m) => {
         if (tok !== this.token) return;
         this.ingest(m);
+        // Mirror the fresh list to follower tabs.
+        coordinator.broadcastState(ctx.coordinate, this.messages);
       };
       chat.onStateChange = () => {
         if (tok === this.token) void this.syncPhase(tok);
       };
+      // First v2 chat session: best-effort retire the account's legacy 31602
+      // chat-device-key backup (NIP §7.5). Leader-only + once-per-account gated, so
+      // followers don't duplicate it. Fire-and-forget — never blocks the handshake.
+      void import("./legacy-cleanup.js")
+        .then(({ deleteLegacyChatDeviceKeyBackup }) =>
+          deleteLegacyChatDeviceKeyBackup(signer, ctx.config.relays),
+        )
+        .catch(() => {});
       // Publish the key package (+ attestation for device-key accounts) so the
       // coordinator can add us, then listen for the welcome and 445 traffic.
       await chat.ensurePublished();
@@ -128,6 +205,16 @@ class ChatSessionStore {
     this.messages = [...this.messages, m].sort((a, b) => a.createdAt - b.createdAt);
   }
 
+  /** A follower is read-only unless the Web Locks leader is serving THIS event. */
+  private recomputeReadOnly(): void {
+    const c = this.coordinator;
+    if (!c || c.role === "leader") {
+      this.readOnly = false;
+      return;
+    }
+    this.readOnly = !(c.usingWebLocks && c.leaderCoordinate === this.ctx?.coordinate);
+  }
+
   /** Joined a group ⇒ the room is usable. */
   private async syncPhase(tok: number): Promise<void> {
     const gid = await this.chat?.nostrGroupId().catch(() => undefined);
@@ -146,8 +233,18 @@ class ChatSessionStore {
   }
 
   async send(text: string): Promise<void> {
-    if (!this.chat) throw new Error("no chat session");
-    await this.chat.send(text);
+    // Leader owns the client and sends directly.
+    if (this.chat) {
+      await this.chat.send(text);
+      return;
+    }
+    // Interactive follower proxies the send to the leader tab (Web Locks path only).
+    const c = this.coordinator;
+    if (c && c.role === "follower" && !this.readOnly) {
+      await c.proxySend(text);
+      return;
+    }
+    throw new Error("no chat session");
   }
 
   /**
@@ -165,6 +262,11 @@ class ChatSessionStore {
   dispose(): void {
     this.token++;
     this.starting = undefined;
+    // Release leadership so another tab can take over immediately.
+    this.coordinator?.dispose();
+    this.coordinator = undefined;
+    this.tabRole = "pending";
+    this.readOnly = false;
     this.chat?.dispose();
     this.chat = undefined;
     this.chatPubkey = undefined;

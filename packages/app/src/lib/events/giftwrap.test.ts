@@ -13,7 +13,7 @@ import {
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
 import { LocalSigner } from "$lib/signer/local.js";
 
-const payload = { v: 1, name: "Alice", message: "hi", rsvp_public: false };
+const payload = { v: 2, name: "Alice", message: "hi", rsvp_public: false };
 
 describe("signer-based gift wrap ↔ protocol raw-key gift wrap", () => {
   it("app-wrapped rumor is unwrappable by the protocol raw-key path (coordinator side)", async () => {

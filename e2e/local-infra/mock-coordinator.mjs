@@ -69,6 +69,14 @@ function handler({ user, schemaName }) {
   if (schemaName === "nostr_summary") {
     return { summary: "Posts regularly about open hardware, cryptography, and mentoring newcomers to Nostr." };
   }
+  // profile.ts's translation step (schema profile_translation.v1) requires
+  // source_lang + needs_translation on every response; the double never
+  // implemented it, so every process_attendee run retried this step to
+  // exhaustion (visible as repeated "failed the profile_translation
+  // contract" in the coordinator log even though matching itself succeeded).
+  if (schemaName === "profile_translation") {
+    return { source_lang: "en", needs_translation: false };
+  }
   if (schemaName === "pair_score") {
     // Reward complementarity: designer + engineer + hardware mentor fit together.
     const complementarity = 0.9;
@@ -81,6 +89,27 @@ function handler({ user, schemaName }) {
         "You should meet them — your goals line up with what they bring, and their skills fill exactly the gap you named you're looking for.",
       reasoning_for_b:
         "Worth meeting: they're looking for precisely what you offer, and you'd each cover the other's blind spot for this event.",
+    };
+  }
+  // matcher.ts's actual pipeline scores via batch_score / reverse_batch_score
+  // (scoring.ts scoreBatch / scoreReverseBatch), not the single-pair schema
+  // above -- this double predates that batching and only ever implemented
+  // pair_score, so every real match run failed with "batch response missing
+  // N candidate(s)" and retried until it gave up. Both batch schemas share
+  // the same response shape ({ matches: [{ index, ... }] }), one entry per
+  // "--- CANDIDATE n ---" / "--- TARGET n ---" block in the prompt.
+  if (schemaName === "batch_score" || schemaName === "reverse_batch_score") {
+    const blocks = [...(user || "").matchAll(/--- (?:CANDIDATE|TARGET) (\d+) ---/g)];
+    return {
+      matches: blocks.map(([, n]) => ({
+        index: Number(n),
+        score: 0.86,
+        similarity: 0.55,
+        complementarity: 0.9,
+        reasoning_for_target:
+          "You should meet them — your goals line up with what they bring, and their skills fill exactly the gap you named you're looking for.",
+        icebreakers: ["What are you working on for this event?"],
+      })),
     };
   }
   return {};
@@ -106,6 +135,7 @@ const coordinator = new Coordinator({
   summaryModel: { provider: "mock", model: "mock-cheap" },
   matchModel: modelRef,
   embedModel: { provider: "mock", model: "mock-embed" },
+  translateModel: { provider: "mock", model: "mock-translate" },
   defaultRelays: [RELAY],
   // Skip Blossom download + ffmpeg entirely — feed a canned transcript per media.
   transcribe: async () =>

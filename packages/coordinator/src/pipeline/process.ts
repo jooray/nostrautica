@@ -10,9 +10,9 @@
  * fixtures and mock providers.
  */
 import type { AiProfile, AttendeeProfile, MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
-import type { LlmProvider, SttProvider, ModelRef } from "../providers/types.js";
+import type { SttProvider, RoleRoute } from "../providers/types.js";
 import type { Store } from "../store/db.js";
-import { transcribeMedia, type TranscriptResult } from "./transcribe.js";
+import { transcribeMedia, MediaPolicyError, type TranscriptResult } from "./transcribe.js";
 import {
   buildAiProfile,
   summarizeNostr,
@@ -28,10 +28,11 @@ export interface ProcessDeps {
   store: Store;
   stt: SttProvider;
   sttModel: string;
-  llm: LlmProvider;
-  summaryModel: ModelRef;
-  matchModel: ModelRef;
-  translateModel: ModelRef;
+  /** Per-role provider routes (audit H-1): each stage runs on its OWN resolved
+   *  provider instance + model, not a single global LLM. */
+  summary: RoleRoute;
+  match: RoleRoute;
+  translate: RoleRoute;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /**
    * Override the transcription stage (tests inject to skip real Blossom/ffmpeg).
@@ -43,6 +44,12 @@ export interface ProcessDeps {
   blossomOrigins?: string[];
   /** Max media bytes per blob download (audit C3). */
   maxMediaBytes?: number;
+  /** Real decoded-duration limit for intro media (audit H-3); 0/undefined ⇒ none. */
+  maxDurationSec?: number;
+  /** Injectable duration probe (tests). */
+  probeDuration?: (media: Uint8Array, mime: string) => Promise<number>;
+  /** Account actual downloaded bytes + probed duration into the usage budgets (H-2/H-3). */
+  onMediaUsage?: (usage: { bytes: number; durationSec: number }) => void;
   /** Fetch the attendee's kind-0 + last N public posts (resolved reposts). */
   fetchNostrContext: (pubkey: string, n: number) => Promise<NostrPost[]>;
   nostrContextN: number;
@@ -100,6 +107,9 @@ export async function processAttendee(
           fetchBlob: deps.fetchBlob,
           blossomOrigins: deps.blossomOrigins,
           maxMediaBytes: deps.maxMediaBytes,
+          maxDurationSec: deps.maxDurationSec,
+          probeDuration: deps.probeDuration,
+          onUsage: deps.onMediaUsage,
           now,
         },
         descriptor,
@@ -107,7 +117,16 @@ export async function processAttendee(
   const transcripts: string[] = []; // text fed into buildAiProfile
   const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
-    const r = await transcribe(descriptor);
+    // A media-policy rejection (declared-size mismatch / over-duration, audit H-3)
+    // rejects THAT media only — an empty transcript is cached, no STT, and the
+    // other media/attendee continue — rather than poisoning the whole attendee.
+    let r: string | TranscriptResult;
+    try {
+      r = await transcribe(descriptor);
+    } catch (e) {
+      if (e instanceof MediaPolicyError) continue;
+      throw e;
+    }
     const text = typeof r === "string" ? r : r.text;
     const detected = typeof r === "string" ? undefined : r.lang;
     if (text) {
@@ -140,14 +159,17 @@ export async function processAttendee(
   if (deps.nostrContextN > 0) {
     const posts = await deps.fetchNostrContext(input.pubkey, deps.nostrContextN);
     if (posts.length > 0) {
-      const inputsHash = nostrInputsHash(input.pubkey, posts, deps.lang);
+      // Include the summary provider/model in the cache key (audit H-1): a role
+      // rerouted to a different provider/model must not reuse the old summary.
+      const summaryModelKey = `${deps.summary.provider}:${deps.summary.model}`;
+      const inputsHash = nostrInputsHash(input.pubkey, posts, deps.lang, summaryModelKey);
       const cached = deps.store.getSummary(input.pubkey, inputsHash);
       if (cached !== undefined) {
         nostrSummary = cached;
       } else {
         nostrSummary = await summarizeNostr(
-          deps.llm,
-          deps.summaryModel,
+          deps.summary.llm,
+          deps.summary,
           input.pubkey,
           posts,
           deps.lang,
@@ -174,16 +196,16 @@ export async function processAttendee(
     aiProfile = { summary: "", skills: [], interests: [], offers: [], seeks: [] };
   } else {
     const profileInputs = { transcripts, profile: input.profile, nostrSummary, lang: deps.lang };
-    const profileModelKey = `${deps.matchModel.provider}:${deps.matchModel.model}`;
+    const profileModelKey = `${deps.match.provider}:${deps.match.model}`;
     const profileKey = profileInputsHash(profileInputs, profileModelKey);
     aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
     if (!aiProfile) {
-      aiProfile = await buildAiProfile(deps.llm, deps.matchModel, profileInputs);
+      aiProfile = await buildAiProfile(deps.match.llm, deps.match, profileInputs);
       deps.store.putArtifact({
         stage: "ai_profile",
         inputsHash: profileKey,
-        provider: deps.matchModel.provider,
-        model: deps.matchModel.model,
+        provider: deps.match.provider,
+        model: deps.match.model,
         output: aiProfile,
         now: now(),
       });
@@ -199,16 +221,16 @@ export async function processAttendee(
     looking_for: input.profile.looking_for,
     skills: input.profile.skills,
   };
-  const trModelKey = `${deps.translateModel.provider}:${deps.translateModel.model}`;
+  const trModelKey = `${deps.translate.provider}:${deps.translate.model}`;
   const trKey = translationInputsHash(trFields, deps.lang, trModelKey);
   let translations = deps.store.getArtifact("translation", trKey) as AiProfileType["translations"] | null | undefined;
   if (translations === undefined) {
-    translations = (await translateProfileFields(deps.llm, deps.translateModel, deps.lang, trFields)) ?? null;
+    translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields)) ?? null;
     deps.store.putArtifact({
       stage: "translation",
       inputsHash: trKey,
-      provider: deps.translateModel.provider,
-      model: deps.translateModel.model,
+      provider: deps.translate.provider,
+      model: deps.translate.model,
       output: translations,
       now: now(),
     });

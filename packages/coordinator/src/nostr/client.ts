@@ -73,8 +73,12 @@ export class NostrClient {
     });
   }
 
-  /** Publish a signed event to the given relays; resolves when any accepts. */
-  async publish(event: NostrEvent, relays: string[] = this.defaultRelays): Promise<void> {
+  /** Publish a signed event to the given relays; resolves when any accepts. The
+   *  outcome's `replaced` flag is set when a relay answered "replaced/have newer" for
+   *  a replaceable event, so the coordinator can reconcile via the §3.1 comparator
+   *  (reliability tail) instead of silently dropping the genuinely-newest event. */
+  async publish(event: NostrEvent, relays: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
+    let replaced = false;
     await Promise.any(
       this.pool.publish(relays, event).map((p) =>
         p.catch((err) => {
@@ -85,9 +89,10 @@ export class NostrClient {
           // strfry's "replaced: have newer event".
           const reason = String((err as Error)?.message ?? err);
           if (/\b(duplicate|replaced)\b/i.test(reason)) {
-            // Logged at debug (audit COORD-27): with clock skew or a second
-            // coordinator instance running, "replaced: have newer" can silently
-            // drop the GENUINELY newest event — make the path observable.
+            // A "replaced: have newer" (not a plain "duplicate") means a competing
+            // event superseded ours — flag it so the coordinator reconciles (audit
+            // COORD-27): with clock skew this can silently drop the newest event.
+            if (/\breplaced\b/i.test(reason)) replaced = true;
             console.debug(
               `[nostr] kind ${event.kind} ${event.id.slice(0, 8)} already-stored (${reason.slice(0, 80)}) — treating as success`,
             );
@@ -97,6 +102,7 @@ export class NostrClient {
         }),
       ),
     );
+    return { replaced };
   }
 
   close(): void {

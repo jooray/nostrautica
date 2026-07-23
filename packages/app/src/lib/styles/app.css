@@ -301,6 +301,21 @@ select:disabled {
   opacity: 0.55;
   cursor: not-allowed;
 }
+/* Invalid fields carry a non-color cue (border weight) as well as the danger
+   colour, so the error is perceivable without colour (audit §7.3.7). */
+input[aria-invalid="true"],
+textarea[aria-invalid="true"],
+select[aria-invalid="true"] {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px var(--danger);
+}
+/* Shared field-level error message (audit §7.3.7): rendered as
+   <p id="{field}-error" class="field-error"> and linked via aria-describedby. */
+.field-error {
+  margin: 0.25rem 0 0;
+  color: var(--danger);
+  font-size: 0.85rem;
+}
 
 label,
 .field-label {
@@ -405,5 +420,22 @@ h2 {
   }
   .btn:active {
     transform: none;
+  }
+}
+
+/* Print (spec §13 report): strip the app chrome so a print-to-PDF of a report
+   route is clean paper. The fixed navs / top bar / skip link never belong on the
+   page. Any element marked .no-print is also removed. */
+@media print {
+  .topbar,
+  .bottom-nav,
+  .event-nav,
+  .skip-link,
+  .no-print {
+    display: none !important;
+  }
+  .app-shell,
+  main {
+    padding-bottom: 0 !important;
   }
 }

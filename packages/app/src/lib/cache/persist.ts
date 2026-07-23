@@ -32,6 +32,8 @@
  * with an in-memory backend (the test env has no IndexedDB).
  */
 
+import { cacheHydration } from "./hydration.svelte.js";
+
 /** A stored value: the derived data plus the newest `created_at` it came from. */
 export interface CacheEntry<T = unknown> {
   at: number;
@@ -84,8 +86,23 @@ function resolveScope(explicit?: string): string | null {
 export interface PersistBackend {
   /** One bulk read at boot. */
   getAll(): Promise<Array<[string, CacheEntry]>>;
+  /**
+   * Versioned put (App-6): the write lands only if the incoming `at` is >= the
+   * value already on disk, compared INSIDE the transaction. This makes disk
+   * latest-wins across tabs — tab A's stale fire-and-forget write can no longer
+   * regress tab B's newer disk state, because A's older `at` loses the on-disk
+   * compare even though A's in-memory mirror never saw B's newer value.
+   */
   put(compositeKey: string, entry: CacheEntry): Promise<void>;
   delete(compositeKeys: string[]): Promise<void>;
+  /**
+   * Delete every key under an owner prefix in ONE transaction (H-5). Deletes by
+   * key RANGE, not by a list the caller enumerated, so a foreign tab's
+   * owner-scoped writes — absent from this tab's in-memory mirror — die too.
+   * Optional so the lightweight in-memory test backends need not implement it;
+   * `clearOwnerCache` falls back to mirror-known keys when it is missing.
+   */
+  deleteByPrefix?(prefix: string): Promise<void>;
 }
 
 const DB_NAME = "nostrautica-appcache";
@@ -134,7 +151,12 @@ const indexedDbBackend: PersistBackend = {
     const db = await openDb();
     try {
       const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(entry, compositeKey);
+      const os = tx.objectStore(STORE);
+      // Read-modify-write inside the transaction (App-6): compare the on-disk
+      // `at` and skip the write when this value is older, so a stale cross-tab
+      // write can't regress newer disk state.
+      const existing = (await reqAsync(os.get(compositeKey))) as CacheEntry | undefined;
+      if (!existing || entry.at >= existing.at) os.put(entry, compositeKey);
       await new Promise<void>((resolve, reject) => {
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
@@ -150,6 +172,23 @@ const indexedDbBackend: PersistBackend = {
       const tx = db.transaction(STORE, "readwrite");
       const os = tx.objectStore(STORE);
       for (const k of compositeKeys) os.delete(k);
+      await new Promise<void>((resolve, reject) => {
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } finally {
+      db.close();
+    }
+  },
+  async deleteByPrefix(prefix) {
+    const db = await openDb();
+    try {
+      const tx = db.transaction(STORE, "readwrite");
+      const os = tx.objectStore(STORE);
+      // Half-open range [prefix, prefix + <0xFFFF sentinel>) covers exactly the
+      // keys beginning with `prefix` (the composite key is `${owner}\x1f${key}`).
+      const range = IDBKeyRange.bound(prefix, prefix + "￿", false, false);
+      os.delete(range);
       await new Promise<void>((resolve, reject) => {
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
@@ -176,6 +215,21 @@ let hydrated = false;
 let hydrating: Promise<void> | null = null;
 
 /**
+ * Owner-cache generation (H-5). Bumped every time owner-scoped state is
+ * invalidated (logout / `clearOwnerCache`). A hydration or asynchronous cache
+ * write that STARTED before a logout but only COMPLETES after it must not
+ * repopulate memory or disk with the logged-out identity's plaintext — so those
+ * async paths capture the generation up front and drop their result if it has
+ * since advanced.
+ */
+let generation = 0;
+
+/** The current owner-cache generation. Capture before an async op, re-check after. */
+export function cacheGeneration(): number {
+  return generation;
+}
+
+/**
  * One bulk read at boot to fill the synchronous mirror. Bounded (§1.1): resolves
  * after 1500 ms even if IDB is slow/broken — the mirror simply stays (partly)
  * empty and the app works exactly as it did before this cache existed.
@@ -186,6 +240,7 @@ let hydrating: Promise<void> | null = null;
 export function hydrateAppCache(): Promise<void> {
   if (hydrated) return Promise.resolve();
   if (hydrating) return hydrating;
+  const startGen = generation;
   hydrating = new Promise<void>((resolve) => {
     let settled = false;
     const done = () => {
@@ -193,6 +248,10 @@ export function hydrateAppCache(): Promise<void> {
       settled = true;
       hydrated = true;
       hydrating = null;
+      // Wake cache-backed pages so they re-read the now-warm mirror (§7.4.5).
+      // Boot no longer awaits this, so the signal is how pages get their
+      // cache-paint after rendering immediately.
+      cacheHydration.markHydrated();
       resolve();
     };
     // Bound: never let a slow/broken IDB block boot.
@@ -200,8 +259,16 @@ export function hydrateAppCache(): Promise<void> {
     (async () => {
       if (!backend) return;
       const all = await backend.getAll();
+      // Generation fence (H-5): a logout that landed while this bulk read was in
+      // flight bumped the generation. Do NOT repopulate the mirror with the
+      // logged-out identity's owner-scoped plaintext; anon (public) entries are
+      // safe to keep warming boot.
+      const wiped = generation !== startGen;
+      const anonPrefix = `${ANON}${SEP}`;
       for (const [k, v] of all) {
-        if (v && typeof v.at === "number") mirror.set(k, v);
+        if (!v || typeof v.at !== "number") continue;
+        if (wiped && !k.startsWith(anonPrefix)) continue;
+        mirror.set(k, v);
       }
     })()
       .catch(() => {
@@ -230,7 +297,18 @@ export function cacheGet<T>(key: string, scope?: string): CacheEntry<T> | undefi
  * event timestamp. Owner-scoped writes with no active identity are a silent
  * no-op (paint-only layer, never throws).
  */
-export function cacheSet<T>(key: string, data: T, at?: number, scope?: string): void {
+export function cacheSet<T>(
+  key: string,
+  data: T,
+  at?: number,
+  scope?: string,
+  guardGeneration?: number,
+): void {
+  // Generation fence (H-5): an async producer (e.g. an swr fetcher) captures the
+  // generation before it starts and passes it here; if a logout advanced the
+  // generation meanwhile, drop the write so a slow refresh can't repopulate the
+  // logged-out identity's plaintext in memory or on disk.
+  if (guardGeneration !== undefined && guardGeneration !== generation) return;
   const s = resolveScope(scope);
   if (s === null) return;
   const ck = compositeKey(s, key);
@@ -259,11 +337,19 @@ export function cacheDelete(key: string, scope?: string): void {
  * Anon (public) entries are untouched.
  */
 export function clearOwnerCache(owner: string): void {
+  // Bump the generation FIRST so any hydration/async write already in flight for
+  // this identity is fenced out (H-5) — even if its completion races this wipe.
+  generation++;
   const prefix = `${owner}${SEP}`;
   const keys: string[] = [];
   for (const k of mirror.keys()) if (k.startsWith(prefix)) keys.push(k);
   for (const k of keys) mirror.delete(k);
-  void backend?.delete(keys).catch(() => {});
+  // Delete by owner-prefix RANGE in one transaction (H-5): this removes keys
+  // another tab wrote that never entered this tab's mirror, closing the leak
+  // where a second tab's decrypted copy survived the first tab's logout. Fall
+  // back to the mirror-known list only when the backend can't range-delete.
+  if (backend?.deleteByPrefix) void backend.deleteByPrefix(prefix).catch(() => {});
+  else void backend?.delete(keys).catch(() => {});
 }
 
 /**
@@ -293,4 +379,5 @@ export function __resetPersistForTests(): void {
   hydrated = false;
   hydrating = null;
   activeOwner = null;
+  generation = 0;
 }

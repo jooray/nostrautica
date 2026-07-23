@@ -35,7 +35,7 @@ function status(
   over: Partial<CoordinatorStatusContent> = {},
 ): CoordinatorStatusContent {
   return {
-    v: 1,
+    v: 2,
     a: "31923:eid:evt",
     stage: "process_attendee",
     state: "poison",

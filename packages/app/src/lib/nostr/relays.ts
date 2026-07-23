@@ -51,7 +51,9 @@ export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://purplerelay.com"];
  * relay list doesn't overlap ours. Unioned into new chat-enabled events'
  * relays at creation (create.ts) so both directions work by default.
  */
-export const WHITENOISE_RELAYS = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
+export const WHITENOISE_RELAYS = ENV_RELAYS
+  ? []
+  : ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
 
 /**
  * Relays advertised in the `nostrconnect://` URI (NIP-46). Dedicated signer

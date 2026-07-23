@@ -1,13 +1,100 @@
 /**
  * Zod schemas for every encrypted/JSON payload in spec §7. Every payload is
- * versioned (`"v": 1`). These validate what we parse off relays before trusting
- * it — malformed or hostile payloads are rejected at the boundary.
+ * versioned (`"v": 2`, wire v2). These validate what we parse off relays before
+ * trusting it — malformed or hostile payloads are rejected at the boundary.
+ *
+ * Wire v2 (NIP §2, decisions D1/D2) is a STRICT, flag-day parse: `v` must be
+ * exactly `2`. v1's forward-tolerant `z.number().int().positive()` is gone —
+ * a future breaking payload would have been silently misparsed as v1. A payload
+ * declaring a higher `v` is now REJECTED and, when it comes from a trusted
+ * authority, surfaced as an "update the app" prompt (see the version helpers
+ * below).
  */
 import { z } from "zod";
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
-const version = z.literal(1).or(z.number().int().positive()); // accept v1; forward-tolerant
+/** The public-event `["v", …]` tag value for this protocol version ("2"). */
+export const PROTOCOL_VERSION_TAG = String(PROTOCOL_VERSION);
+
+// Strict wire version (NIP §2, D1): exactly `2`, not "any positive integer".
+const version = z.literal(PROTOCOL_VERSION);
+
+/**
+ * Thrown when a payload/event declares an integer protocol version strictly
+ * NEWER than this client understands (`v > PROTOCOL_VERSION`). Distinct from a
+ * generic malformed-payload error so callers can tell "from the future" (prompt
+ * the user to update, NIP §2 / D2) apart from "hostile/garbled" (drop silently).
+ */
+export class NewerProtocolVersionError extends Error {
+  readonly newerVersion: number;
+  constructor(newerVersion: number) {
+    super(
+      `payload requires protocol v${newerVersion}; this client speaks v${PROTOCOL_VERSION} — update required`,
+    );
+    this.name = "NewerProtocolVersionError";
+    this.newerVersion = newerVersion;
+  }
+}
+
+/** The integer `v` of a raw JSON payload object, or undefined when absent/non-integer. */
+export function readPayloadVersion(raw: unknown): number | undefined {
+  if (raw && typeof raw === "object" && "v" in raw) {
+    const v = (raw as { v: unknown }).v;
+    if (typeof v === "number" && Number.isInteger(v)) return v;
+  }
+  return undefined;
+}
+
+/** The integer version from a public event's `["v", …]` tag, or undefined. */
+export function readEventVersionTag(tags: string[][]): number | undefined {
+  const raw = tags.find((t) => t[0] === "v")?.[1];
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : undefined;
+}
+
+/**
+ * True when a public event carries exactly `["v","2"]`. Readers of public custom
+ * kinds MUST ignore events failing this (NIP §2): an absent or mismatched tag
+ * means the event is not a v2 event this client can trust.
+ */
+export function hasCurrentVersionTag(tags: string[][]): boolean {
+  return readEventVersionTag(tags) === PROTOCOL_VERSION;
+}
+
+/** True when a raw payload declares an integer `v` strictly newer than this client. */
+export function isNewerProtocolVersion(raw: unknown): boolean {
+  const v = readPayloadVersion(raw);
+  return v !== undefined && v > PROTOCOL_VERSION;
+}
+
+/** True when a public event's `["v", …]` tag names a version newer than this client. */
+export function isNewerVersionTag(tags: string[][]): boolean {
+  const v = readEventVersionTag(tags);
+  return v !== undefined && v > PROTOCOL_VERSION;
+}
+
+/**
+ * Discriminated parse result: distinguishes a NEWER-version payload (update the
+ * app, D2) from a generic invalid one, so a caller reading from a trusted
+ * authority key can drive the update prompt rather than silently dropping the
+ * event. On the happy path this is just `schema.parse` with a typed wrapper.
+ */
+export type ParseResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; reason: "newer-version"; version: number }
+  | { ok: false; reason: "invalid"; error: z.ZodError };
+
+export function parsePayloadSafe<T>(schema: z.ZodType<T>, raw: unknown): ParseResult<T> {
+  const res = schema.safeParse(raw);
+  if (res.success) return { ok: true, value: res.data };
+  const v = readPayloadVersion(raw);
+  if (v !== undefined && v > PROTOCOL_VERSION) {
+    return { ok: false, reason: "newer-version", version: v };
+  }
+  return { ok: false, reason: "invalid", error: res.error };
+}
 
 // Lowercase-only (audit PROTO-6): every downstream comparison is case-sensitive,
 // so an uppercase-A-F pubkey that validated could never match anything.
@@ -47,13 +134,15 @@ function httpsUrl(maxLen?: number) {
 // `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an
 // unexpected field is rejected rather than silently ignored. Key/nonce lengths are
 // validated (C3) so a malformed descriptor can't reach the crypto layer.
-export const mediaDescriptorSchema = z
+const mediaDescriptorBase = z
   .object({
     kind: z.enum(["intro", "talk"]),
     url: z.array(httpsUrl()).min(1),
     x: hex32, // sha256 of ciphertext
     ox: hex32, // sha256 of plaintext
-    size: z.number().int().nonnegative(),
+    // v2 (NIP §8): a real blob is at least 1 byte — AES-GCM always emits ≥ the
+    // 16-byte tag — so `size: 0` is no longer a valid descriptor.
+    size: z.number().int().min(1),
     m: z.string(), // mime type
     duration: z.number().nonnegative().optional(),
     "encryption-algorithm": z.literal("aes-gcm"),
@@ -61,6 +150,28 @@ export const mediaDescriptorSchema = z
     "decryption-nonce": base64Bytes(12, "decryption-nonce"), // 12 bytes b64
   })
   .strict();
+
+/**
+ * v2 (NIP §8): `duration` is REQUIRED for audio/* and video/* media. The
+ * coordinator gates STT and pipeline segmentation on it and enforces per-event
+ * duration limits against the declared value, so an a/v descriptor without a
+ * duration is incomplete. Text/image descriptors leave it optional.
+ */
+function requireAvDuration(
+  val: { m: string; duration?: number },
+  ctx: z.RefinementCtx,
+): void {
+  const isAv = val.m.startsWith("audio/") || val.m.startsWith("video/");
+  if (isAv && val.duration === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["duration"],
+      message: "duration is required for audio/video media",
+    });
+  }
+}
+
+export const mediaDescriptorSchema = mediaDescriptorBase.superRefine(requireAvDuration);
 export type MediaDescriptor = z.infer<typeof mediaDescriptorSchema>;
 
 // Pre-upload draft: identical to mediaDescriptorSchema but `url` may be empty,
@@ -68,10 +179,12 @@ export type MediaDescriptor = z.infer<typeof mediaDescriptorSchema>;
 // `encryptMedia` validates this draft at encrypt time; the finalized descriptor
 // (real https URLs filled in) is validated against the strict schema at upload
 // time. Without this, encrypting an intro throws on the placeholder URL before a
-// single byte is uploaded.
-export const mediaDescriptorDraftSchema = mediaDescriptorSchema
+// single byte is uploaded. The a/v-duration rule applies here too, so the
+// recorder can't produce a durationless a/v blob even before upload.
+export const mediaDescriptorDraftSchema = mediaDescriptorBase
   .extend({ url: z.array(z.string()) })
-  .strict();
+  .strict()
+  .superRefine(requireAvDuration);
 
 // ── Media transcript (spec §9.2, audit A1) ───────────────────────────────────
 // A transcript tied to a specific media blob by its ciphertext hash `x`. The
@@ -81,11 +194,16 @@ export const mediaDescriptorDraftSchema = mediaDescriptorSchema
 // Because `x` is content-addressed, re-recording an intro changes `x` and orphans
 // the old transcript — the directory-entry schema below validates that every
 // transcript still references live media (stale transcripts are dropped).
+/** BCP-47 language tag chars (audit P2). */
+export const MAX_LANG = 35;
+/** STT/authored transcript body cap (audit P2). */
+export const MAX_TRANSCRIPT_TEXT = 100_000;
+
 export const mediaTranscriptSchema = z
   .object({
     x: hex32, // the media descriptor's `x` this transcript belongs to
-    text: z.string(),
-    lang: z.string(), // ISO-639-1 detected by STT, or the authored source language
+    text: z.string().max(MAX_TRANSCRIPT_TEXT),
+    lang: z.string().max(MAX_LANG), // ISO-639-1 detected by STT, or the authored source language
     source: z.enum(["stt", "authored"]),
     updated_at: z.number().int(),
   })
@@ -94,6 +212,11 @@ export type MediaTranscript = z.infer<typeof mediaTranscriptSchema>;
 
 /** Upper bound on a text intro / authored transcript (spec F1, ~2000 chars). */
 export const MAX_INTRO_TEXT = 2000;
+
+/** How many authored text intros the cross-event reuse library retains (F1 reuse).
+ *  Bounded (like MAX_MEDIA) so the self-encrypted library entry can't grow past the
+ *  NIP-44 ceiling; the loader keeps the most recent ones and drops older overflow. */
+export const MAX_LIBRARY_TEXTS = 20;
 
 // ── Boundary length caps (audit PROTO-4) ─────────────────────────────────────
 // These payloads are parsed straight off relays and most ride inside NIP-44
@@ -112,9 +235,24 @@ export const MAX_INVITE_LABEL = 100;
 export const MAX_INVITES = 10000; // 31601 invites array items
 export const MAX_REASONING = 2000; // per-match reasoning
 export const MAX_MATCHES = 100; // 31605 matches array items
+// Icebreakers (31605, NIP §6.2): ≤ 3 short conversation starters per match entry,
+// ≤ 280 chars each — concrete opening lines the coordinator derives alongside the
+// directional reasoning, not a restatement of it.
+export const MAX_ICEBREAKERS = 3;
+export const MAX_ICEBREAKER = 280;
 export const MAX_ROSTER = 2000; // 31604 attendees array items
 export const MAX_RELAYS = 30; // relay URL array items
-export const MAX_MEDIA = 20; // media descriptors per payload
+export const MAX_MEDIA = 20; // media descriptors per 31602 self-copy / reuse library
+// v2 (NIP §8): a 21601 profile submission carries at most 4 processed media
+// descriptors — aligned with the coordinator's long-standing MAX_MEDIA_PER_SUBMISSION
+// enforcement. The 31602 self-copy/library keeps MAX_MEDIA (it legitimately holds more).
+export const MAX_SUBMISSION_MEDIA = 4;
+export const MAX_D = 200; // blinded `d` identifier chars (roster/directory)
+export const MAX_MATCH_PAIRS = 200_000; // 31606 match-matrix pairs array items
+export const MAX_TITLE = 300; // members-post title
+export const MAX_POST_BODY = 100_000; // members-post markdown body
+export const MAX_NOTES = 2000; // per-event private note map entries
+export const MAX_NOTE = 5000; // chars per per-event private note
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
@@ -129,19 +267,19 @@ export type AttendeeProfile = z.infer<typeof attendeeProfileSchema>;
 // event language, shown when the viewer reads the event language and the source
 // text was written in a different one. Never overwrites the user's originals.
 export const profileTranslationSchema = z.object({
-  lang: z.string(), // target (event) language, ISO 639-1
-  about: z.string().optional(),
-  looking_for: z.string().optional(),
-  skills: z.array(z.string()).optional(),
+  lang: z.string().max(MAX_LANG), // target (event) language, ISO 639-1
+  about: z.string().max(MAX_ABOUT).optional(),
+  looking_for: z.string().max(MAX_LOOKING_FOR).optional(),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
 });
 export type ProfileTranslation = z.infer<typeof profileTranslationSchema>;
 
 export const aiProfileSchema = z.object({
-  summary: z.string(),
-  skills: z.array(z.string()),
-  interests: z.array(z.string()),
-  offers: z.array(z.string()),
-  seeks: z.array(z.string()),
+  summary: z.string().max(MAX_ABOUT),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
+  interests: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
+  offers: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
+  seeks: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS),
   // Present when the attendee's own profile language differs from the event's.
   translations: profileTranslationSchema.optional(),
 });
@@ -173,8 +311,13 @@ export type JoinRequestContent = z.infer<typeof joinRequestContentSchema>;
 // ── 21601 Profile Submission rumor content ───────────────────────────────────
 export const profileSubmissionContentSchema = z.object({
   v: version,
+  // Application revision (NIP §3.3, required): the client maintains it monotonically
+  // per (coordinate) in its own storage and bumps it on every edit. The coordinator
+  // orders submissions by (rev, created_at, id) — sender timestamps are never the
+  // primary ordering key — so an out-of-order older edit can never regress the profile.
+  rev: z.number().int().nonnegative(),
   profile: attendeeProfileSchema,
-  media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
+  media: z.array(mediaDescriptorSchema).max(MAX_SUBMISSION_MEDIA).default([]),
   // A plain-text intro (spec F1): an alternative to an audio/video intro for
   // attendees who can't/won't record. Feeds the ai_profile like a transcript,
   // but has NO media blob. Bounded so it can't bloat the encrypted submission.
@@ -198,19 +341,26 @@ export type ProfileSubmissionContent = z.infer<
 export const AI_PROFILE_FIELDS = ["summary", "skills", "interests", "offers", "seeks"] as const;
 export type AiProfileField = (typeof AI_PROFILE_FIELDS)[number];
 
-/** Per-field overrides of the generated ai_profile. */
+/** Per-field overrides of the generated ai_profile. v2 (NIP §8): bounded exactly
+ *  like `ai_profile` (summary ≤ 5000, ≤ 50 list items of ≤ 200 chars) — v1's
+ *  unbounded overrides were a storage-amplification bug (an approved attendee could
+ *  push arbitrarily large text the coordinator stored and merged into every 31603). */
 export const aiProfileOverrideSchema = z.object({
-  summary: z.string().optional(),
-  skills: z.array(z.string()).optional(),
-  interests: z.array(z.string()).optional(),
-  offers: z.array(z.string()).optional(),
-  seeks: z.array(z.string()).optional(),
+  summary: z.string().max(MAX_ABOUT).optional(),
+  skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
+  interests: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
+  offers: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
+  seeks: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).optional(),
 });
 export type AiProfileOverride = z.infer<typeof aiProfileOverrideSchema>;
 
 export const profileCorrectionContentSchema = z.object({
   v: version,
   a: z.string(), // coordinate this correction applies to
+  // Application revision (NIP §3.3, required): same monotonic-per-(coordinate,kind)
+  // rule and same total order as the 21601 profile submission — an out-of-order
+  // older correction can never overwrite a newer one.
+  rev: z.number().int().nonnegative(),
   // Replace named ai_profile fields with the attendee's own text/lists.
   overrides: aiProfileOverrideSchema.optional(),
   // true = publish the directory entry with NO ai_profile (self-authored fallback).
@@ -247,6 +397,10 @@ export type KeyGrantContent = z.infer<typeof keyGrantContentSchema>;
 export const coordinatorGrantContentSchema = z.object({
   v: version,
   a: z.string(),
+  // Install generation (NIP §3.5, required): must match the newest 31600's gen for
+  // a fresh install, and be strictly greater than the highest gen ever installed or
+  // detached for the coordinate — a replayed historical grant can never re-install.
+  gen: z.number().int().positive(),
   inbox_nsec: secretKeyHex, // hex privkey of E_inbox
   eck: z.array(eckVersionSchema),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
@@ -256,13 +410,21 @@ export type CoordinatorGrantContent = z.infer<
 >;
 
 // ── 21604 Admin Command rumor content ────────────────────────────────────────
+/** Default admin-command lifetime (NIP §3.4): a command is void 48h after it was
+ *  issued, so an old revoke/recompute can never re-execute from a backfill/restore. */
+export const ADMIN_COMMAND_TTL_SEC = 172_800; // 48 hours
+
 export const adminCommandContentSchema = z.object({
   v: version,
   a: z.string(),
   // talk_publish / talk_reject moderate a submitted talk (F2, audit U11); args
-  // carry { pubkey, talk_d }.
-  cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject"]),
+  // carry { pubkey, talk_d }. `detach` (NIP §3.5) uninstalls the coordinator from
+  // the event (no args) with the same effects as a config-based detach.
+  cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject", "detach"]),
   args: z.record(z.unknown()).default({}),
+  // Replay horizon (NIP §3.4, required): unix seconds after which the command is
+  // void. The coordinator skips an expired command on live delivery AND on backfill.
+  expires: z.number().int(),
 });
 export type AdminCommandContent = z.infer<typeof adminCommandContentSchema>;
 
@@ -319,6 +481,27 @@ export const talkContentSchema = z
   .refine((v) => v.media.kind === "talk", "talk media must be kind:'talk'");
 export type TalkContent = z.infer<typeof talkContentSchema>;
 
+// ── 21610 Attendee Withdrawal rumor content (attendee → E_inbox) ─────────────
+// The attendee removing THEMSELVES from the event, without organizer action. Sealed
+// by the attendee's own account key; the coordinator binds the subject to the seal
+// author (an attendee can only withdraw themselves). Same effect chain as an organizer
+// `revoke` (roster/directory/match removal, NIP-09 deletions, ECK rotation). Ordering
+// uses the §3.4 per-subject watermark, subject = the sender.
+//
+// `delete_data` (default true): full deletion — the coordinator also purges its stored
+// processed artifacts (transcripts, ai_profile, pair-cache rows). `delete_data: false`
+// removes the attendee from FUTURE publications but retains those artifacts so a later
+// re-approval avoids reprocessing spend. `.strict()`: read off a relay and acted on, so
+// an unexpected field is a hard error.
+export const withdrawalContentSchema = z
+  .object({
+    v: version,
+    a: z.string(), // coordinate this withdrawal applies to
+    delete_data: z.boolean().default(true),
+  })
+  .strict();
+export type WithdrawalContent = z.infer<typeof withdrawalContentSchema>;
+
 // ── 21605 Organizer Grant rumor content (co-organizer, full key custody) ─────
 export const organizerGrantContentSchema = z.object({
   v: version,
@@ -332,13 +515,32 @@ export const organizerGrantContentSchema = z.object({
 export type OrganizerGrantContent = z.infer<typeof organizerGrantContentSchema>;
 
 // ── 31602 My Event Profile / intro library (self-encrypted) ──────────────────
+// The `a:null` reuse-library entry is a SINGLE per-user store (its `d` is blinded
+// over the literal "library", NOT over an event coordinate), so it spans every
+// event the user joins. `intro_texts` carries authored TEXT intros for cross-event
+// reuse — the text counterpart of the reusable `media` descriptors. It lives only
+// on the `a:null` entry; per-event self-copies (a = coordinate) leave it unset.
 export const myProfileContentSchema = z.object({
   v: version,
   a: z.string().nullable(), // null = the reuse-library entry
   profile: attendeeProfileSchema.optional(),
   media: z.array(mediaDescriptorSchema).max(MAX_MEDIA).default([]),
+  intro_texts: z.array(z.string().max(MAX_INTRO_TEXT)).max(MAX_LIBRARY_TEXTS).optional(),
+  // The per-(coordinate) profile-submission revision counter (NIP §3.3). The
+  // per-event self-copy is the client's own durable store for per-event submission
+  // state, so the `rev` last sent in a 21601 lives here and is bumped on every edit
+  // (survives a device change, unlike a device-local counter). Absent on the
+  // reuse-library entry and on pre-rev self-copies (treated as "no submission yet").
+  rev: z.number().int().nonnegative().optional(),
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
+
+// ── 31602 chat device-key backup RETIRED (NIP §6.2 / §10, decision D3) ───────
+// The v1 shared-chat-identity design self-encrypted a remote-signer account's MLS
+// device key as a per-user 31602 entry so a second browser could restore the SAME
+// key. Wire v2 mints a per-DEVICE chat key for every account type — there is no
+// shared key to back up or restore (a lost device is revoked, not recovered), so
+// this schema variant and its app module are gone. See `docs/MULTIDEVICE-CHAT.md` §5.
 
 // ── 31603 Directory Entry content (ECK) ──────────────────────────────────────
 export const directoryEntryContentSchema = z
@@ -378,39 +580,91 @@ export const directoryEntryContentSchema = z
   });
 export type DirectoryEntryContent = z.infer<typeof directoryEntryContentSchema>;
 
-// ── 21607 Chat-key Attestation rumor content (Marmot §3.3) ───────────────────
-// Binds an app-generated chat *device* key to an account, for NIP-46/NIP-07 users
-// who cannot raw-sign the mandatory MLS account-identity-proof with their account
-// key. Gift-wrapped attendee → coordinator, sealed (kind 13) by the *account* key,
-// so the coordinator authenticates the binding exactly as it authenticates a 21600
-// join (seal author = the enrolled account npub). `op:"revoke"` (lost device) tells
-// the coordinator to remove that chat key's leaves and stop re-adding it.
+// ── 21607 Chat Device Attestation rumor content (NIP §10.2, v2) ──────────────
+// Binds a per-device chat key to an account. Every device (all account types, per
+// decision D3) mints its own chat key and attests it: a 21607 rumor gift-wrapped
+// attendee → coordinator, sealed (kind 13) by the *account* key (so the coordinator
+// authenticates the binding as it authenticates a 21600 join) AND — for `op:"add"`
+// — carrying a `proof` of possession: a BIP-340 signature by the chat DEVICE key
+// over the §10.2 challenge (see `makeChatDeviceProof`). The coordinator MUST verify
+// the proof before binding, closing v1's mis-binding/griefing gap. `op:"revoke"`
+// (lost/retired device) needs no proof — the account is evicting a key it named,
+// possession is irrelevant.
+
+/** Human-readable per-device label ("Chrome on laptop"), user-editable (NIP §10.2). */
+export const MAX_CHAT_KEY_LABEL = 60;
+/** Stable per-device 30443 slot id carried in the attestation. */
+export const MAX_CHAT_KEY_CLIENT_ID = 120;
+/** Concurrent device keys one account may hold per event (NIP §10.1). */
+export const MAX_CHAT_KEYS_PER_ACCOUNT = 5;
+
 export const chatKeyAttestationContentSchema = z
   .object({
     v: version,
     a: z.string(), // coordinate this attestation applies to
     op: z.enum(["add", "revoke"]),
-    chat_pubkey: hex32, // the app-generated chat device key (MLS account identity)
-    client_id: z.string().optional(), // stable per-device 30443 slot id
+    chat_pubkey: hex32, // the per-device chat key (MLS account identity for this device)
+    label: z.string().max(MAX_CHAT_KEY_LABEL).optional(), // required on add (see refine)
+    client_id: z.string().max(MAX_CHAT_KEY_CLIENT_ID).optional(), // stable 30443 slot id
+    proof: z.string().regex(/^[0-9a-f]{128}$/, "expected 128-hex schnorr sig").optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.op !== "add") return;
+    // Proof of possession is REQUIRED on add — a device without one can't be bound
+    // (the coordinator additionally re-verifies the signature). Label is required so
+    // the roster/device UI always has a human name for the device.
+    if (val.proof === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["proof"],
+        message: "proof of possession is required for op:'add'",
+      });
+    }
+    if (val.label === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["label"],
+        message: "label is required for op:'add'",
+      });
+    }
+  });
 export type ChatKeyAttestationContent = z.infer<typeof chatKeyAttestationContentSchema>;
 
 // ── 31604 Roster content (ECK) ───────────────────────────────────────────────
-// `chat_pubkey` (Marmot §4.4, additive — old clients ignore it): for NIP-46/NIP-07
-// attendees whose MLS identity is a separate chat device key, this maps the chat
-// npub back to the account so the chat UI can render members as people. Absent for
-// local-key attendees (their account key IS the chat identity).
+// `chat_keys` (NIP §6.2 / §10.1): the per-DEVICE chat keys attested to each account
+// (up to MAX_CHAT_KEYS_PER_ACCOUNT). Replaces v1's never-populated singular
+// `chat_pubkey`; Nostrautica clients dedupe the member list by account and render
+// per-device labels/revoke UI from it. Each entry carries the device pubkey, its
+// human label, and when it was bound. Absent for attendees with no attested device
+// (e.g. an account that hasn't opened chat).
+//
+// `nostr_group_id` (NIP §10.4): the routing id (445 `#h` tag) of this event's MLS
+// group — the authoritative event→group binding an MLS Welcome cannot carry, so a
+// member holding two same-coordinator events' groups binds deterministically to ITS
+// OWN group instead of guessing (audit APPK-3). Absent for chat-off events and for
+// coordinators/organizers that predate this field.
+
+/** One attested per-device chat key on the roster (NIP §6.2). */
+export const rosterChatKeySchema = z.object({
+  pubkey: hex32, // the per-device chat key
+  label: z.string().max(MAX_CHAT_KEY_LABEL).optional(),
+  added_at: z.number().int(),
+});
+export type RosterChatKey = z.infer<typeof rosterChatKeySchema>;
+
 export const rosterContentSchema = z.object({
   v: version,
   eck_current: z.number().int().positive(),
+  nostr_group_id: hex32.optional(), // Marmot MLS routing id of this event's group (§10.4)
   attendees: z
     .array(
       z.object({
         pubkey: hex32,
-        d: z.string(), // entry's blinded d
+        d: z.string().max(MAX_D), // entry's blinded d
         role: z.enum(["attendee", "organizer"]),
-        chat_pubkey: hex32.optional(), // Marmot chat device key, when distinct (§4.4)
+        // Per-device chat keys attested to this account (NIP §6.2), ≤ 5 per attendee.
+        chat_keys: z.array(rosterChatKeySchema).max(MAX_CHAT_KEYS_PER_ACCOUNT).optional(),
       }),
     )
     .max(MAX_ROSTER),
@@ -424,6 +678,9 @@ export const matchSchema = z.object({
   similarity: z.number(),
   complementarity: z.number(),
   reasoning: z.string().max(MAX_REASONING),
+  // Additive (NIP §6.2): ≤ 3 short conversation starters. A client without support
+  // simply ignores the field; an oversized/overlong list is rejected at parse.
+  icebreakers: z.array(z.string().max(MAX_ICEBREAKER)).max(MAX_ICEBREAKERS).optional(),
 });
 export type Match = z.infer<typeof matchSchema>;
 
@@ -438,9 +695,9 @@ export type MatchListContent = z.infer<typeof matchListContentSchema>;
 export const matchMatrixContentSchema = z.object({
   v: version,
   computed_at: z.number().int(),
-  pairs: z.array(
-    z.object({ a: hex32, b: hex32, score: z.number() }),
-  ),
+  pairs: z
+    .array(z.object({ a: hex32, b: hex32, score: z.number() }))
+    .max(MAX_MATCH_PAIRS),
 });
 export type MatchMatrixContent = z.infer<typeof matchMatrixContentSchema>;
 
@@ -450,12 +707,12 @@ export type MatchMatrixContent = z.infer<typeof matchMatrixContentSchema>;
 // organizer attribution.
 export const membersPostContentSchema = z.object({
   v: version,
-  title: z.string(),
-  summary: z.string().optional(),
-  image: z.string().optional(),
+  title: z.string().max(MAX_TITLE),
+  summary: z.string().max(MAX_MESSAGE).optional(),
+  image: z.string().max(MAX_URL).optional(),
   published_at: z.number().int(),
   author: hex32.optional(),
-  content: z.string(), // markdown
+  content: z.string().max(MAX_POST_BODY), // markdown
 });
 export type MembersPostContent = z.infer<typeof membersPostContentSchema>;
 
@@ -483,8 +740,8 @@ export const eventPageSectionSchema = z.discriminatedUnion("type", [
 export type EventPageSection = z.infer<typeof eventPageSectionSchema>;
 
 export const menuItemSchema = z.object({
-  label: z.string(),
-  target: z.string(), // https: URL or nostr:naddr…
+  label: z.string().max(MAX_NAME),
+  target: z.string().max(MAX_URL), // https: URL or nostr:naddr…
 });
 export type MenuItem = z.infer<typeof menuItemSchema>;
 
@@ -516,17 +773,25 @@ export type EventPageContent = z.infer<typeof eventPageContentSchema>;
 export const userSettingsSchema = z.object({
   v: version,
   theme: z.enum(["light", "dark", "system"]).default("system"),
-  language: z.string().default("en"),
-  relays: z.array(z.string()).max(MAX_RELAYS).default([]),
+  language: z.string().max(MAX_LANG).default("en"),
+  relays: z.array(z.string().max(MAX_URL)).max(MAX_RELAYS).default([]),
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
 export const perEventSettingsSchema = z.object({
   v: version,
-  favorites: z.array(hex32).default([]),
-  want_to_meet: z.array(hex32).default([]),
-  met: z.array(hex32).default([]),
-  notes: z.record(z.string()).default({}),
+  favorites: z.array(hex32).max(MAX_ROSTER).default([]),
+  want_to_meet: z.array(hex32).max(MAX_ROSTER).default([]),
+  met: z.array(hex32).max(MAX_ROSTER).default([]),
+  // Bound both the per-note length and the number of notes (audit P2): an
+  // unbounded record is a DoS vector and can push the payload past the NIP-44
+  // ceiling.
+  notes: z
+    .record(z.string().max(MAX_NOTE))
+    .refine((r) => Object.keys(r).length <= MAX_NOTES, {
+      message: `too many notes (max ${MAX_NOTES})`,
+    })
+    .default({}),
 });
 export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 
@@ -539,6 +804,10 @@ export const eventKeysBackupSchema = z.object({
   eid_nsec: secretKeyHex,
   einbox_nsec: secretKeyHex,
   eck: z.array(eckVersionSchema),
+  // Last coordinator install generation the organizer used (NIP §3.5). Absent = 0
+  // (never attached, or a backup written before generations); a re-attach reads it
+  // back and uses lastGen + 1, so generations strictly increase across devices.
+  coordinator_gen: z.number().int().nonnegative().optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 
@@ -612,7 +881,15 @@ export const coordinatorAnnounceSchema = z.object({
 });
 export type CoordinatorAnnounce = z.infer<typeof coordinatorAnnounceSchema>;
 
-/** Parse-and-validate helper that throws a descriptive error on mismatch. */
+/**
+ * Parse-and-validate helper. Throws `NewerProtocolVersionError` when the payload
+ * declares an integer `v` newer than this client (so callers can prompt an
+ * update, NIP §2 / D2), and the underlying `ZodError` otherwise.
+ */
 export function parsePayload<T>(schema: z.ZodType<T>, raw: unknown): T {
-  return schema.parse(raw);
+  const res = schema.safeParse(raw);
+  if (res.success) return res.data;
+  const v = readPayloadVersion(raw);
+  if (v !== undefined && v > PROTOCOL_VERSION) throw new NewerProtocolVersionError(v);
+  throw res.error;
 }
