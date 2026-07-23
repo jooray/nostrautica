@@ -24,6 +24,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { loadSelfCopy } from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 export interface JoinInput {
@@ -71,6 +72,19 @@ export async function sendJoinRequest(
     rsvp_public: !!input.rsvpPublic,
   };
 
+  // Application revision (NIP §3.3), REQUIRED on the 21601 submission — the
+  // coordinator orders profile submissions by (rev, created_at, id) and drops any
+  // rumor missing it as permanently unprocessable ("invalid_type … path rev").
+  // join.ts omitted it, so every attendee's join-time skills/looking_for silently
+  // never reached matching (prod incident 2026-07-23). It shares the SAME
+  // monotonic per-(coordinate) counter as later Record/profile edits: the counter
+  // lives on the 31602 self-copy, so a post-join edit reads this value back
+  // (loadSelfCopy) and bumps past it, cleanly superseding the join submission. A
+  // first join is rev 0; the self-copy written below carries it so the next edit
+  // bumps from it.
+  const prevSelf = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
+  const rev = (prevSelf?.rev ?? -1) + 1;
+
   const wraps: Promise<unknown>[] = [
     signerWrap(signer, inboxPubkey, {
       kind: KIND_JOIN_REQUEST,
@@ -83,6 +97,7 @@ export async function sendJoinRequest(
   if (input.profile) {
     const submission = {
       v: 2,
+      rev,
       profile: input.profile,
       // v2 (NIP §8): the 21601 submission caps media at MAX_SUBMISSION_MEDIA (4);
       // the 31602 self-copy below keeps the full set (MAX_MEDIA).
@@ -102,6 +117,7 @@ export async function sendJoinRequest(
   const selfContent = {
     v: 2,
     a: ctx.coordinate,
+    rev,
     profile: input.profile,
     media: input.media ?? [],
   };
