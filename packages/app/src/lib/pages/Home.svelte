@@ -17,6 +17,17 @@
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
+
+  // "No events yet" is only the truth once the relay scans have SETTLED. On a
+  // fresh browser the keystore is empty and the events arrive from the async
+  // recovery/grant scan — showing the empty state before then wrongly tells a
+  // returning organizer they have nothing. Until we settle (or the first event
+  // lands), show "Loading your events…" instead. `settled` flips when the scan
+  // resolves, when there's no signer to scan with, or via a hard timeout so a
+  // hung relay can never leave the user spinning forever.
+  let settled = $state(false);
+  const loadingEvents = $derived(session.loggedIn && events.length === 0 && !settled);
+
   const roleLabel = {
     organizer: "home.role.organizer",
     attendee: "home.role.attendee",
@@ -73,15 +84,21 @@
     //  - recoverEventKeys: 30078 backups → events this identity CREATED (E_id).
     //  - receiveGrants: 21602/21605 gift-wraps → events APPROVED into / co-organizer.
     if (session.signer) {
+      // Backstop: never let a hung relay strand the user on the spinner. The
+      // scans have their own ~8s hard cap, so this only fires if something wedges.
+      const guard = setTimeout(() => (settled = true), 12000);
       void Promise.allSettled([
         recoverEventKeys(session.signer),
         receiveGrants(session.signer),
       ]).then(async () => {
+        clearTimeout(guard);
         backfillFromKeystore(await listEventKeys().catch(() => []));
         void enrichEvents();
+        settled = true;
         perfMark("Home", "network-settled");
       });
     } else {
+      settled = true;
       perfMark("Home", "network-settled");
     }
   });
@@ -173,6 +190,8 @@
       {t("home.createEvent")}
     </button>
   </div>
+{:else if loadingEvents}
+  <p class="muted">{t("home.loadingEvents")}</p>
 {:else}
   <div class="card">
     <h2>{t("home.noEvents")}</h2>
