@@ -2150,6 +2150,80 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     const p2 = await joinOnly(h, generateSecretKey(), "design");
     expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
   });
+
+  // Regression (prod incident): after the v2 deploy the coordinator crash-looped at
+  // startup because a still-installed pre-v2 event's newest 31600 carried ["v","1"];
+  // parseEventConfig threw "unsupported v tag 1" out of installEvent → start() → fatal.
+  it("startup restore: a stored event whose newest 31600 is v1 SUSPENDS while other v2 events restore (no crash)", async () => {
+    const h = await setup(); // event A (cypherpunk, v2) installed at gen 1, in the store
+    // A healthy peer B (v2) so we can prove one bad event doesn't block the others.
+    const eidB = generateSecretKey();
+    const inboxB = generateSecretKey();
+    const { coord2, grantWrap } = grantAndSeed(h, eidB, inboxB, "healthy-peer", 1);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeDefined(); // B installed
+
+    // A's newest fetchable 31600 is now a pre-v2 wire config (newer created_at wins).
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100, id: "cfg-v1-restore", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "1"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"]],
+    } as any);
+
+    // A fresh Coordinator on the SAME persistent store runs start() — exactly a restart.
+    const restarted = new Coordinator({
+      store: h.store, transport: h.transport, coordSk: h.coordSk,
+      llm: new MockLlm(() => ({})), stt: new MockStt(), sttModel: "mock",
+      summaryModel: { provider: "mock", model: "mock-cheap" },
+      matchModel: { provider: "mock", model: "mock-strong" },
+      embedModel: { provider: "mock", model: "mock-embed" },
+      translateModel: { provider: "mock", model: "mock-cheap" },
+      defaultRelays: ["wss://test"], sleep: async () => {}, now: () => h.clock.t,
+    });
+    await expect(restarted.start()).resolves.toBeUndefined(); // starts, does NOT crash
+
+    // A: custody RETAINED — suspended, not detached, not tombstoned.
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(false);
+    // B: restored fine — the v1 event did not abort the restore loop.
+    expect(h.store.getEvent(coord2)).toBeDefined();
+    expect(h.store.isInstallTombstoned(coord2)).toBe(false);
+  });
+
+  it("a live 31600 update carrying ['v','1'] is ignored (not applied, not a detach), no crash", async () => {
+    const h = await setup(); // serving with a v2 config, matching "on"
+    // A NEWER but pre-v2 config delivered on the live subscription. It names this
+    // daemon at the current gen, so if parsing didn't fail-soft it would flip
+    // matching off / be applied; the pre-v2 guard must drop it BEFORE any effect.
+    const v1Update = {
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 999, id: "cfg-live-v1", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "1"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "off"]],
+    };
+    await expect(h.coordinator.handleConfigUpdate(h.coordinate, v1Update as any)).resolves.toBeUndefined();
+    // Not detached, still serving, and the stored config is UNCHANGED (still v2/on).
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(false);
+    const stored = JSON.parse(h.store.getEvent(h.coordinate)!.config_json);
+    expect(stored.matching).toBe("on");
+  });
+
+  it("a fresh 21603 grant whose authorizing 31600 is v1 is retryable (never installs blind), no crash", async () => {
+    const h = await setup();
+    const eidB = generateSecretKey();
+    const inboxB = generateSecretKey();
+    const coordB = makeCoordinate(getPublicKey(eidB), "v1-grant");
+    // The only fetchable 31600 for this event is a pre-v2 config — unparseable, so
+    // it can never authorize the grant. Same class as an unfetchable config: the
+    // grant is retryable (left unseen), NOT installed, and must not crash the daemon.
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(eidB), created_at: 1, id: "cfg-v1-grant", sig: "", content: "",
+      tags: [["d", "v1-grant"], ["v", "1"], ["inbox", getPublicKey(inboxB)], ["coordinator", getPublicKey(h.coordSk), "1"]],
+    } as any);
+    const grantWrap = wrapRumor(eidB, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: coordB, gen: 1, inbox_nsec: bytesToHex(inboxB), eck: [{ id: 1, key: bytesToBase64(generateEck()) }], config_relays: ["wss://test"] },
+    });
+    await expect(h.coordinator.handleCoordinatorWrap(grantWrap as any)).resolves.toBeUndefined();
+    expect(h.store.getEvent(coordB)).toBeUndefined();
+  });
 });
 
 describe("audit COORD-4 — server-side media caps + empty-input skip", () => {

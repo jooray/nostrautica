@@ -372,7 +372,7 @@ export class Coordinator {
    * or names another coordinator/gen (detach). An unfetchable config is never
    * treated as authorization to run NOR as a detach.
    */
-  private suspended = new Map<string, { inboxSkHex: string; eck: EckVersion[]; configRelays: string[]; gen: number; retryAt: number; attempts: number }>();
+  private suspended = new Map<string, { inboxSkHex: string; eck: EckVersion[]; configRelays: string[]; gen: number; retryAt: number; attempts: number; reason: string }>();
   private closers: Array<() => void> = [];
   /**
    * Rumor ids whose handler is currently in flight (audit P0-3). Subscription
@@ -604,7 +604,27 @@ export class Coordinator {
     // disagreed with the convention and with every other reader.
     const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31600));
     const evtEvent = cfgEvents.find((e) => e.kind === 31923);
-    const config = cfgEvent ? parseEventConfig(eidPubkey, cfgEvent.tags) : undefined;
+    // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
+    // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
+    // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
+    // never an authorization to run, never a detach. The `!config` branches below
+    // already do the right thing (grant → retryable throw; restore → SUSPENDED with
+    // backoff). This catch is what keeps a per-event parse failure from propagating
+    // through installEvent → Coordinator.start and crash-looping the daemon — the
+    // production incident where, right after the v2 deploy, startup revalidation of
+    // still-installed pre-v2 events threw "unsupported v tag 1" out of start().
+    let config: EventConfig | undefined;
+    let configParseError: string | undefined;
+    if (cfgEvent) {
+      try {
+        config = parseEventConfig(eidPubkey, cfgEvent.tags);
+      } catch (e) {
+        // Keep the reason for the SUSPENDED log below, but do NOT log here: the
+        // restore path re-fetches+re-parses on every backoff cycle, so logging at
+        // this site would spam once per retry. suspendEvent logs the transition once.
+        configParseError = e instanceof Error ? e.message : String(e);
+      }
+    }
 
     // Install authorization (audit COORD-3, P0-4, NIP §3.5).
     const source = grant.source ?? "restore";
@@ -673,7 +693,15 @@ export class Coordinator {
       if (!config) {
         // Unfetchable config is NOT authorization to run and NOT a detach — keep the
         // event SUSPENDED (no subscriptions, no processing) and retry with backoff.
-        this.suspendEvent(grant, gen);
+        // A present-but-unparseable config (pre-v2 `v` tag, malformed tag) lands here
+        // too via configParseError, with a reason that makes the log unambiguous.
+        this.suspendEvent(
+          grant,
+          gen,
+          configParseError
+            ? `newest 31600 present but unparseable (${configParseError})`
+            : "newest 31600 not fetchable",
+        );
         return;
       }
       if (config.coordinator !== this.coordPubkey || config.coordinatorGen !== gen) {
@@ -769,6 +797,7 @@ export class Coordinator {
   private suspendEvent(
     grant: { coordinate: string; inboxSkHex: string; eck: EckVersion[]; configRelays: string[] },
     gen: number,
+    reason = "newest 31600 not fetchable",
   ): void {
     // Make sure a previously-live instance stops serving while suspended.
     for (const map of [this.inboxSubs, this.configSubs, this.chatSubs]) {
@@ -787,8 +816,16 @@ export class Coordinator {
       gen,
       retryAt: this.now() + backoff,
       attempts,
+      reason,
     });
-    log(`[install] SUSPENDED ${grant.coordinate}: newest 31600 not fetchable — not resumed, retry in ${backoff}ms (attempt ${attempts})`);
+    // Log the suspension only on a STATE CHANGE — the first time an event is
+    // suspended, or when the reason differs from the prior cycle. A config that
+    // stays permanently unresolvable (e.g. a pre-v2 ["v","1"] event that will never
+    // become v2) is retried forever on backoff; logging every cycle would spam the
+    // daemon log indefinitely, so steady-state retries stay silent.
+    if (!prev || prev.reason !== reason) {
+      log(`[install] SUSPENDED ${grant.coordinate}: ${reason} — not resumed, retry in ${backoff}ms (attempt ${attempts})`);
+    }
   }
 
   /**
@@ -2617,15 +2654,24 @@ export class Coordinator {
     // by retrySuspendedEvents) rather than resumed leniently. Already-known events use
     // the 3-day live-overlap window (backfill "recent").
     for (const row of this.deps.store.allEvents()) {
-      await this.installEvent({
-        coordinate: row.coordinate,
-        inboxSkHex: row.inbox_nsec,
-        eck: this.eckFromStore(row.coordinate),
-        configRelays: JSON.parse(row.config_relays),
-        gen: row.gen,
-        backfill: "recent",
-        source: "restore",
-      });
+      // Defense in depth: one event's restore must never abort start() or block the
+      // OTHER stored events from restoring. installEvent already routes a bad/pre-v2
+      // config to the SUSPENDED path rather than throwing, but any unexpected
+      // per-event failure is caught here so the daemon still boots and serves the
+      // rest (prod incident: a single pre-v2 config threw out of start() → crash-loop).
+      try {
+        await this.installEvent({
+          coordinate: row.coordinate,
+          inboxSkHex: row.inbox_nsec,
+          eck: this.eckFromStore(row.coordinate),
+          configRelays: JSON.parse(row.config_relays),
+          gen: row.gen,
+          backfill: "recent",
+          source: "restore",
+        });
+      } catch (e) {
+        log(`[boot] restore of ${row.coordinate} failed: ${e instanceof Error ? e.message : e} — skipping, other events continue`);
+      }
     }
 
     // One-shot FULL-history fetch of the coordinator's own inbox (audit COORD-11):
