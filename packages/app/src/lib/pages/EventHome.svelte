@@ -27,6 +27,7 @@
   import Icon from "$lib/components/icons/Icon.svelte";
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { perfMark } from "$lib/perf.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
@@ -65,6 +66,26 @@
   );
   let installHint = $state(false);
   if (cachedCtx && (page || eventPosts.length)) perfMark("EventHome", "cache-paint");
+
+  // Cache-paint after background hydration (§7.4.5). Boot no longer blocks on the
+  // mirror, so on a cold open the cached snapshots above may be empty; re-read
+  // them the moment hydration lands. Guarded to act only while still cold — once
+  // ctx is set (here or by the network path) this no-ops.
+  $effect(() => {
+    void cacheHydration.version;
+    if (ctx) return;
+    const c = cachedEventContext(naddr);
+    if (!c) return;
+    ctx = c;
+    page ??= cachedEventPage(c.coordinate);
+    if (eventPosts.length === 0) eventPosts = cachedEventPosts(c.coordinate) ?? [];
+    if (attendeePosts.length === 0) attendeePosts = cachedAttendeePosts(c.coordinate) ?? [];
+    rosterCount ??= cachedRoster(c.coordinate)?.attendees.length;
+    if (page || eventPosts.length) {
+      bodyLoading = false;
+      perfMark("EventHome", "cache-paint");
+    }
+  });
 
   const installHintId = "event-page";
 

@@ -13,6 +13,7 @@
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { perfMark } from "$lib/perf.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -44,6 +45,24 @@
   let access = $state<"unknown" | "visitor" | "pending" | "member">("unknown");
 
   if (matches.length) perfMark("Matches", "cache-paint");
+
+  // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
+  // mirror, so re-read matches/directory snapshots once hydration lands while the
+  // list is still empty.
+  $effect(() => {
+    void cacheHydration.version;
+    if (matches.length > 0) return;
+    const c = cachedEventContext(naddr);
+    if (!c) return;
+    ctx ??= c;
+    const list = cachedMatches(c.coordinate);
+    if (!list || list.matches.length === 0) return;
+    matches = list.matches;
+    names = new Map((cachedDirectory(c.coordinate) ?? []).map((e) => [e.pubkey, e]));
+    profiles = cachedProfiles(list.matches.map((m) => m.pubkey));
+    loading = false;
+    perfMark("Matches", "cache-paint");
+  });
 
   onMount(async () => {
     try {

@@ -32,6 +32,8 @@
  * with an in-memory backend (the test env has no IndexedDB).
  */
 
+import { cacheHydration } from "./hydration.svelte.js";
+
 /** A stored value: the derived data plus the newest `created_at` it came from. */
 export interface CacheEntry<T = unknown> {
   at: number;
@@ -246,6 +248,10 @@ export function hydrateAppCache(): Promise<void> {
       settled = true;
       hydrated = true;
       hydrating = null;
+      // Wake cache-backed pages so they re-read the now-warm mirror (§7.4.5).
+      // Boot no longer awaits this, so the signal is how pages get their
+      // cache-paint after rendering immediately.
+      cacheHydration.markHydrated();
       resolve();
     };
     // Bound: never let a slow/broken IDB block boot.

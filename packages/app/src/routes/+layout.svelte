@@ -52,10 +52,12 @@
     // and never waits for the async boot below (registerPwa inits it too,
     // idempotently, as a backstop). SW-independent.
     install.init();
-    // Warm the persistent app-cache mirror BEFORE booting so every page's
-    // cachedX() helper paints on first render (CACHING-PLAN §1.1). Bounded to
-    // 1500 ms internally, so a slow/broken IDB never blocks boot.
-    await hydrateAppCache();
+    // Warm the persistent app-cache mirror in the BACKGROUND (§7.4.5). Boot no
+    // longer awaits this — the shell + route render immediately, and cache-backed
+    // pages re-read the mirror when `cacheHydration` fires (they watch it), so a
+    // slow/broken IndexedDB never delays first paint by up to 1.5 s. Fire-and-
+    // forget; `hydrateAppCache` is internally idempotent + bounded.
+    void hydrateAppCache();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
     await consumeNsecFromHash();
     // UX-19: never gate the shell on a NIP-46 reconnect — a dead signer relay

@@ -10,6 +10,7 @@
   import { fetchFollowSet, fetchProfiles, cachedProfiles, cachedFollowSet, type ProfileMeta } from "$lib/events/social.js";
   import { loadPerEventSettings, toggleSetting, cachedPerEventSettings } from "$lib/events/settings.js";
   import { perfMark } from "$lib/perf.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { buildSearchText, matchesQuery } from "$lib/events/roster.js";
@@ -57,6 +58,25 @@
   let error = $state<unknown>(null);
 
   if (cachedEntries.length) perfMark("Attendees", "cache-paint");
+
+  // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
+  // mirror, so re-read the roster/directory snapshots when hydration lands while
+  // the list is still empty.
+  $effect(() => {
+    void cacheHydration.version;
+    if (entries.length > 0) return;
+    const c = cachedEventContext(naddr);
+    if (!c) return;
+    ctx ??= c;
+    const de = cachedDirectory(c.coordinate) ?? [];
+    if (de.length === 0) return;
+    entries = de;
+    profiles = cachedProfiles(de.map((e) => e.pubkey));
+    followSet = cachedFollowSet() ?? followSet;
+    settings ??= cachedPerEventSettings(c.coordinate) ?? null;
+    loading = false;
+    perfMark("Attendees", "cache-paint");
+  });
 
   let stream: DirectoryStream | undefined;
   let blindingKey: Uint8Array | null = null;

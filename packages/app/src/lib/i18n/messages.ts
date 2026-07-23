@@ -13,6 +13,7 @@ export const messages = {
     // App shell / nav
     "app.tagline": "Meet the right people at events.",
     "app.loading": "Loading…",
+    "route.loadFailed": "This section couldn't be loaded. Check your connection and try again.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — you can still browse cached people and matches; changes will sync when you reconnect.",
@@ -1141,6 +1142,7 @@ export const messages = {
     // App shell / nav
     "app.tagline": "Stretnite tých správnych ľudí na podujatiach.",
     "app.loading": "Načítava sa…",
+    "route.loadFailed": "Túto časť sa nepodarilo načítať. Skontrolujte pripojenie a skúste znova.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Bez pripojenia — stále si môžete prezerať uložených ľudí a spojenia; zmeny sa zosynchronizujú po opätovnom pripojení.",
@@ -2280,6 +2282,7 @@ export const messages = {
     // Kostra aplikace / navigace
     "app.tagline": "Poznejte na akcích ty správné lidi.",
     "app.loading": "Načítání…",
+    "route.loadFailed": "Tuto část se nepodařilo načíst. Zkontrolujte připojení a zkuste to znovu.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — stále si můžete prohlížet uložené lidi a spojení; změny se synchronizují po opětovném připojení.",
