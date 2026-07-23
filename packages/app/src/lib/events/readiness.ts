@@ -47,6 +47,11 @@ export interface Readiness {
   primary?: { labelKey: MessageKey; route: Route }; // exactly one, or none when complete
   /** True when a matches list exists — the UI offers a secondary "See your matches". */
   matchesReady: boolean;
+  /**
+   * True only when the viewer is an approved member (attendee/organizer) — People
+   * is member-gated, so "See who's here" must not be offered otherwise (UX-O4).
+   */
+  viewerIsMember: boolean;
 }
 
 const LABEL: Record<ReadinessStepId, MessageKey> = {
@@ -195,11 +200,16 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
   const allComplete = currentIndex === -1;
 
   // Exactly one primary CTA: the first action-required step (never waiting /
-  // in-progress / checking). None when everything is complete.
-  const actionStep = steps.find((s) => s.state === "action-required");
+  // in-progress / checking). Role-derived (UX-O4): a non-member's only actionable
+  // step is "joined" — a pending/visitor user must never be pushed to back up or
+  // record an intro when the actual blocker is joining/approval. Backup + intro
+  // become primaries only once the viewer is a member.
+  const actionStep = isMember
+    ? steps.find((s) => s.state === "action-required")
+    : steps.find((s) => s.id === "joined" && s.state === "action-required");
   const primary = actionStep ? primaryFor(actionStep.id, input.naddr) : undefined;
 
   const matchesReady = steps.some((s) => s.id === "matches" && s.state === "complete");
 
-  return { steps, doneCount, currentIndex, allComplete, primary, matchesReady };
+  return { steps, doneCount, currentIndex, allComplete, primary, matchesReady, viewerIsMember: isMember };
 }

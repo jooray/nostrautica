@@ -24,6 +24,12 @@
   import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { joinSentAt, markJoinSent, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
+  import { storeInvite, loadInvite, clearInvite } from "$lib/stores/invite-store.js";
+  import {
+    classifyProfileLoad,
+    canSubmitLoggedIn,
+    type ProfileLoadState,
+  } from "$lib/events/profile-load.js";
   import {
     prefetchOrganizerProfiles,
     prefetchJoinLanding,
@@ -81,11 +87,19 @@
   let newPicFile = $state<File | null>(null);
   let newPicPreview = $state(""); // local object URL (uploaded on submit)
   // Existing-Nostr-user profile, fetched read-only from their kind-0 (never edited).
-  let profileLoading = $state(false);
-  let profileLoaded = $state(false);
+  // A load-state machine (UX-O1) distinguishes loaded / no-public-profile / failed
+  // so a transient relay error never silently submits an anonymous-looking request.
+  let profileState = $state<ProfileLoadState>("idle");
+  const profileLoading = $derived(profileState === "loading");
+  const profileLoaded = $derived(
+    profileState === "loaded" || profileState === "empty" || profileState === "failed",
+  );
   let existingName = $state("");
   let existingAbout = $state("");
   let existingPicture = $state("");
+  // Event-local display name (UX-O1): editable for logged-in users, prefilled from
+  // the loaded kind-0 name. Sent with the join request; NEVER republishes kind 0.
+  let eventDisplayName = $state("");
 
   function onPicFile(e: Event) {
     const f = (e.target as HTMLInputElement).files?.[0];
@@ -130,6 +144,15 @@
         ? receiveGrants(session.signer).catch(() => {})
         : Promise.resolve();
       ctx = await loadEventContext(naddr);
+      // Invite persistence (UX-O2): stash a just-arrived code keyed by event so a
+      // reload / mobile signer handoff doesn't silently downgrade to manual
+      // approval; or restore one stashed on a previous visit this session.
+      if (code) {
+        storeInvite(ctx.coordinate, code);
+      } else {
+        const stored = loadInvite(ctx.coordinate);
+        if (stored) code = stored;
+      }
       // While the user reads the form / scans the Amber QR, warm what the next
       // screens render: organizer profiles here, EventHome after joining.
       prefetchOrganizerProfiles(ctx);
@@ -204,7 +227,7 @@
   // When signed in (already, or via the sign-in options here), load the profile
   // from kind-0 — read-only. We never modify an existing user's kind-0.
   $effect(() => {
-    if (session.loggedIn && !profileLoaded && !profileLoading) void loadExistingProfile();
+    if (session.loggedIn && profileState === "idle") void loadExistingProfile();
     if (session.loggedIn && !libraryLoaded) void loadReuseLibrary();
     // The moment a signer lands (sign-in mid-join), front-run the post-login
     // step: approval status + the roster the user will open next. Both warmers
@@ -217,19 +240,24 @@
 
   async function loadExistingProfile() {
     if (!session.signer) return;
-    profileLoading = true;
+    profileState = "loading";
+    let failed = false;
+    let fetched: { name?: string; about?: string; picture?: string } | undefined;
     try {
       const pubkey = await session.signer.getPublicKey();
       const me = await fetchProfiles([pubkey]);
-      existingName = me.get(pubkey)?.name ?? "";
-      existingAbout = me.get(pubkey)?.about ?? "";
-      existingPicture = me.get(pubkey)?.picture ?? "";
+      fetched = me.get(pubkey);
     } catch {
-      /* leave blank */
-    } finally {
-      profileLoading = false;
-      profileLoaded = true;
+      failed = true; // a fetch error is NOT an empty profile (UX-O1)
     }
+    const r = classifyProfileLoad(fetched, failed);
+    profileState = r.state;
+    existingName = r.name;
+    existingAbout = r.about;
+    existingPicture = r.picture;
+    // Prefill the event-local name from a loaded profile; on empty/failed the user
+    // must supply one, so leave whatever they've already typed.
+    if (r.state === "loaded" && !eventDisplayName.trim()) eventDisplayName = r.name;
   }
 
   async function submit() {
@@ -271,8 +299,15 @@
           await seedFollows(session.signer!, parseCoordinate(ctx.coordinate).pubkey).catch(() => {});
         }
         // Existing Nostr user — use their kind-0 profile as-is; never touch it.
-        if (!profileLoaded) await loadExistingProfile();
-        displayName = existingName;
+        if (profileState === "idle" || profileState === "loading") await loadExistingProfile();
+        // Honest-submit gate (UX-O1): a failed load or an empty public profile
+        // must not produce an anonymous-looking request — require an event-local
+        // display name (which never modifies kind 0).
+        if (!canSubmitLoggedIn(profileState, eventDisplayName)) {
+          error = t("join.error.nameRequired");
+          return;
+        }
+        displayName = eventDisplayName.trim() || existingName;
         about = existingAbout;
       }
 
@@ -317,6 +352,9 @@
       // — the organizer can't approve what hasn't reached them yet.
       sentQueued = !published;
       if (sentQueued) outbox.noteQueued();
+      // The invite has served its purpose (queued or published) — drop the
+      // stashed code so it can't be reused or leak past this join (UX-O2).
+      clearInvite(ctx.coordinate);
       markJoinSent(ctx.coordinate); // survives reload → waiting state, not pristine form (P2)
       recentEvents.record({ coordinate: ctx.coordinate, naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
@@ -436,30 +474,53 @@
     <div class="or-divider">{t("join.or")}</div>
   {/if}
 
+  {#if code}
+    <!-- Invite persistence indicator (UX-O2): survives reload / signer round-trip. -->
+    <p class="muted" role="status" style="margin:0 0 0.5rem">
+      <span class="badge ok">{t("join.inviteRecognized")}</span>
+    </p>
+  {/if}
+
   <div class="card stack">
     {#if session.loggedIn}
-      <!-- Existing Nostr user: profile shown read-only from their kind-0. -->
-      {#if profileLoading}
+      <!-- Existing Nostr user: kind-0 shown read-only; a load-state machine (UX-O1)
+           separates loaded / no-public-profile / failed so a relay error never
+           submits an anonymous-looking request. -->
+      {#if profileState === "loading" || profileState === "idle"}
         <p class="muted">{t("join.fetchingProfile")}</p>
-      {:else}
-        <div class="row" style="gap:0.75rem;align-items:center">
-          {#if existingPicture}
-            <img src={existingPicture} alt="" width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
-          {/if}
-          <div>
-            <div class="field-label">{t("join.displayName")}</div>
-            <p style="margin:0">{existingName || t("join.noName")}</p>
-          </div>
+      {:else if profileState === "failed"}
+        <div class="card warn" style="margin:0">
+          <strong>{t("join.profile.failed.title")}</strong>
+          <p class="muted" style="margin:0.25rem 0 0.5rem">{t("join.profile.failed.body")}</p>
+          <button class="btn inline" onclick={() => void loadExistingProfile()}>
+            {t("join.profile.retry")}
+          </button>
         </div>
-        {#if existingAbout}
-          <div>
-            <div class="field-label">{t("join.aboutYou")}</div>
-            <p class="muted" style="margin:0">{existingAbout}</p>
+      {:else}
+        {#if profileState === "loaded"}
+          <div class="row" style="gap:0.75rem;align-items:center">
+            {#if existingPicture}
+              <img src={existingPicture} alt="" width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
+            {/if}
+            {#if existingAbout}
+              <div>
+                <div class="field-label">{t("join.aboutYou")}</div>
+                <p class="muted" style="margin:0">{existingAbout}</p>
+              </div>
+            {/if}
           </div>
+          <p class="muted">{t("join.fromProfile")}</p>
+        {:else}
+          <!-- No public kind-0 profile: not an error, but we need a name for this
+               event (UX-O1) — kind 0 is never modified. -->
+          <p class="muted">{t("join.profile.empty")}</p>
         {/if}
-        <p class="muted">
-          {t("join.fromProfile")}
-        </p>
+      {/if}
+      {#if profileState !== "loading" && profileState !== "idle"}
+        <div>
+          <label for="edn">{t("join.displayName")} <span class="muted" style="font-weight:400">{t("join.displayNameEvent")}</span></label>
+          <input id="edn" bind:value={eventDisplayName} placeholder={t("join.namePlaceholder")} />
+        </div>
       {/if}
     {:else}
       <!-- New user: name + bio + photo become the public Nostr profile. -->
@@ -528,7 +589,11 @@
       </div>
     {/if}
 
-    <button class="btn primary" onclick={submit} disabled={busy || profileLoading}>
+    <button
+      class="btn primary"
+      onclick={submit}
+      disabled={busy || profileLoading || (session.loggedIn && !canSubmitLoggedIn(profileState, eventDisplayName))}
+    >
       {busy ? t("join.sending") : session.loggedIn ? t("join.send") : t("join.createAndJoin")}
     </button>
   </div>

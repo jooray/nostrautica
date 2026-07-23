@@ -38,9 +38,12 @@
         {t("readiness.cta.matches")}
       </button>
     {/if}
-    <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
-      {t("event.seeWhosHere")}
-    </button>
+    {#if readiness.viewerIsMember}
+      <!-- People is member-gated (UX-O4): only offer "See who's here" to members. -->
+      <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
+        {t("event.seeWhosHere")}
+      </button>
+    {/if}
   {:else}
     <div class="head">
       <strong>{t("readiness.title")}</strong>
@@ -78,9 +81,12 @@
         {t("readiness.cta.matches")}
       </button>
     {/if}
-    <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
-      {t("event.seeWhosHere")}
-    </button>
+    {#if readiness.viewerIsMember}
+      <!-- People is member-gated (UX-O4): only offer "See who's here" to members. -->
+      <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
+        {t("event.seeWhosHere")}
+      </button>
+    {/if}
   {/if}
 </div>
 

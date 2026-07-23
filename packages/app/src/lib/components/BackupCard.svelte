@@ -7,6 +7,7 @@
   import { toNsec, toNcryptsec, mailtoBackup } from "$lib/signer/backup.js";
   import { markBackedUp } from "$lib/stores/backup-nag.svelte.js";
   import { markKeyBackedUp } from "$lib/events/key-backup.js";
+  import { advanceStage, isSecured, type BackupStage } from "$lib/stores/backup-stages.js";
   import { enterSecretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -15,9 +16,29 @@
   // render it on themed event routes.
   onMount(() => enterSecretSurface());
 
-  /** Record a durable, relay-persisted backup marker (honest readiness signal). */
-  function markDurable() {
-    if (session.signer) markKeyBackedUp(session.signer).catch(() => {});
+  // Truthful backup stages (UX-O7): copying/exporting reaches "copied" (visible,
+  // not secured); an explicit "I saved it" confirmation publishes the durable
+  // marker and reaches "confirmed" — the only stage the nag/readiness trusts.
+  let stage = $state<BackupStage>("none");
+  let confirming = $state(false);
+  let confirmError = $state(false);
+
+  async function confirmSaved() {
+    stage = advanceStage(stage, "saved");
+    confirming = true;
+    confirmError = false;
+    try {
+      // The durable, relay-persisted marker IS the honest readiness signal — a
+      // failed publish must NOT claim "backed up", so we await it and surface
+      // failure (retryable) instead of firing-and-forgetting.
+      if (session.signer) await markKeyBackedUp(session.signer);
+      markBackedUp();
+      stage = advanceStage(stage, "confirmed");
+    } catch {
+      confirmError = true; // stays "saved" — honest and retryable
+    } finally {
+      confirming = false;
+    }
   }
 
   const sk = $derived(session.signer?.getSecretKey?.());
@@ -41,8 +62,9 @@
     try {
       await navigator.clipboard.writeText(text);
       copied = label;
-      markBackedUp();
-      markDurable();
+      // Copying is "copied", NOT "secured" (UX-O7) — securing is the explicit
+      // confirmation below.
+      stage = advanceStage(stage, "copied");
       setTimeout(() => (copied = null), 2000);
     } catch {
       copied = null;
@@ -58,8 +80,7 @@
 
   function downloadNcryptsec() {
     if (!ncryptsec) return;
-    markBackedUp();
-    markDurable();
+    stage = advanceStage(stage, "copied");
     const blob = new Blob([ncryptsec], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -74,8 +95,7 @@
   // secret in it (which CSS/extensions could read, and which lingers in markup).
   function emailBackup() {
     if (!sk) return;
-    markBackedUp();
-    markDurable();
+    stage = advanceStage(stage, "copied");
     window.location.href = mailtoBackup(appBase, sk);
   }
 </script>
@@ -91,6 +111,33 @@
   <p class="muted" style="margin-top:0.5rem">
     {t("backup.warning.a")} <strong>{t("backup.warning.keepSecret")}</strong>{t("backup.warning.b")}
   </p>
+
+  <!-- Truthful stages (UX-O7): copied ≠ secured. Once the secret is copied or
+       exported, ask for an explicit "I saved it somewhere safe", which publishes
+       the durable marker and only then reports "Backup confirmed". -->
+  {#if stage !== "none"}
+    <div class="card" style="margin-top:0.5rem;background:var(--bg-elev2)">
+      {#if isSecured(stage)}
+        <span class="badge ok" role="status">{t("backup.stage.confirmed")}</span>
+      {:else if stage === "saved"}
+        {#if confirming}
+          <span class="badge" role="status">{t("backup.stage.confirming")}</span>
+        {:else}
+          <span class="badge" role="status">{t("backup.stage.saved")}</span>
+          {#if confirmError}
+            <p class="muted" style="color:var(--danger);margin:0.25rem 0 0.5rem">{t("backup.stage.confirmFailed")}</p>
+            <button class="btn inline" onclick={confirmSaved}>{t("backup.stage.retry")}</button>
+          {/if}
+        {/if}
+      {:else}
+        <!-- copied -->
+        <p class="muted" role="status" style="margin:0 0 0.5rem">{t("backup.stage.copied")}</p>
+        <button class="btn inline primary" onclick={confirmSaved} disabled={confirming}>
+          {t("backup.stage.iSavedIt")}
+        </button>
+      {/if}
+    </div>
+  {/if}
 
   <details style="margin-top:0.5rem">
     <summary class="muted" style="cursor:pointer">{t("backup.more")}</summary>

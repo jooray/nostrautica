@@ -378,6 +378,14 @@ export const messages = {
     "join.aboutYou": "About you",
     "join.fromProfile":
       "From your Nostr profile — we won't change it. To update it, edit it in your Nostr app and it shows up here.",
+    "join.inviteRecognized": "Invite recognized",
+    "join.displayNameEvent": "(for this event — your Nostr profile stays as is)",
+    "join.profile.failed.title": "Couldn't load your profile",
+    "join.profile.failed.body":
+      "We couldn't reach the relays to fetch your Nostr profile. Retry, or just enter a display name for this event.",
+    "join.profile.retry": "Retry",
+    "join.profile.empty":
+      "You don't have a public Nostr profile yet. Enter a display name for this event — your Nostr profile isn't changed.",
     "join.publicNote": "Name, photo and bio are public — everything else stays inside the event.",
     "join.photoPublic": "public",
     "join.photoAdd": "Photo",
@@ -565,6 +573,13 @@ export const messages = {
     "backup.noKey": "Your key lives in your signer — back it up there. Nothing to export here.",
     "backup.copied": "Copied ✓ — now paste it into a Nostr app",
     "backup.copyKey": "Copy my secret key",
+    "backup.stage.copied": "Secret copied. Copying isn't a backup yet — save it somewhere safe.",
+    "backup.stage.iSavedIt": "I saved it somewhere safe",
+    "backup.stage.saved": "Saved somewhere safe",
+    "backup.stage.confirming": "Confirming backup…",
+    "backup.stage.confirmed": "Backup confirmed ✓",
+    "backup.stage.confirmFailed": "Couldn't record the backup marker — try again.",
+    "backup.stage.retry": "Retry",
     "backup.warning.a": "This is your private key. It's like your password —",
     "backup.warning.keepSecret": "keep it secret",
     "backup.warning.b":
@@ -1410,6 +1425,14 @@ export const messages = {
     "join.aboutYou": "O vás",
     "join.fromProfile":
       "Z vášho profilu na Nostri — nemeníme ho. Ak ho chcete upraviť, upravte ho vo svojej Nostr aplikácii a zobrazí sa tu.",
+    "join.inviteRecognized": "Pozvánka rozpoznaná",
+    "join.displayNameEvent": "(pre toto podujatie — váš Nostr profil zostáva nezmenený)",
+    "join.profile.failed.title": "Nepodarilo sa načítať váš profil",
+    "join.profile.failed.body":
+      "Nepodarilo sa spojiť s relaymi a načítať váš Nostr profil. Skúste znova alebo jednoducho zadajte meno pre toto podujatie.",
+    "join.profile.retry": "Skúsiť znova",
+    "join.profile.empty":
+      "Zatiaľ nemáte verejný Nostr profil. Zadajte meno pre toto podujatie — váš Nostr profil sa nemení.",
     "join.publicNote":
       "Meno, fotka a bio sú verejné — všetko ostatné zostáva vnútri podujatia.",
     "join.photoPublic": "verejné",
@@ -1602,6 +1625,13 @@ export const messages = {
       "Váš kľúč žije vo vašom podpisovači — zálohujte si ho tam. Tu nie je čo exportovať.",
     "backup.copied": "Skopírované ✓ — teraz ho vložte do Nostr aplikácie",
     "backup.copyKey": "Kopírovať môj tajný kľúč",
+    "backup.stage.copied": "Tajný kľúč skopírovaný. Kopírovanie ešte nie je záloha — uložte ho na bezpečné miesto.",
+    "backup.stage.iSavedIt": "Uložil som ho na bezpečné miesto",
+    "backup.stage.saved": "Uložené na bezpečnom mieste",
+    "backup.stage.confirming": "Potvrdzuje sa záloha…",
+    "backup.stage.confirmed": "Záloha potvrdená ✓",
+    "backup.stage.confirmFailed": "Nepodarilo sa zaznamenať značku zálohy — skúste znova.",
+    "backup.stage.retry": "Zopakovať",
     "backup.warning.a": "Toto je váš súkromný kľúč. Je ako vaše heslo —",
     "backup.warning.keepSecret": "držte ho v tajnosti",
     "backup.warning.b":
@@ -2449,6 +2479,14 @@ export const messages = {
     "join.aboutYou": "O vás",
     "join.fromProfile":
       "Z vašeho profilu na Nostru — neměníme ho. Chcete-li ho upravit, udělejte to ve své Nostr aplikaci a zobrazí se to tady.",
+    "join.inviteRecognized": "Pozvánka rozpoznána",
+    "join.displayNameEvent": "(pro tuto akci — váš Nostr profil zůstává beze změny)",
+    "join.profile.failed.title": "Nepodařilo se načíst váš profil",
+    "join.profile.failed.body":
+      "Nepodařilo se spojit s relaji a načíst váš Nostr profil. Zkuste to znovu nebo jednoduše zadejte jméno pro tuto akci.",
+    "join.profile.retry": "Zkusit znovu",
+    "join.profile.empty":
+      "Zatím nemáte veřejný Nostr profil. Zadejte jméno pro tuto akci — váš Nostr profil se nemění.",
     "join.publicNote": "Jméno, fotka a bio jsou veřejné — všechno ostatní zůstává uvnitř akce.",
     "join.photoPublic": "veřejné",
     "join.photoAdd": "Fotka",
@@ -2638,6 +2676,13 @@ export const messages = {
     "backup.noKey": "Váš klíč žije ve vašem podpisovači — zazálohujte si ho tam. Tady není co exportovat.",
     "backup.copied": "Zkopírováno ✓ — teď ho vložte do Nostr aplikace",
     "backup.copyKey": "Kopírovat můj tajný klíč",
+    "backup.stage.copied": "Tajný klíč zkopírován. Kopírování ještě není záloha — uložte ho na bezpečné místo.",
+    "backup.stage.iSavedIt": "Uložil jsem ho na bezpečné místo",
+    "backup.stage.saved": "Uloženo na bezpečném místě",
+    "backup.stage.confirming": "Potvrzuje se záloha…",
+    "backup.stage.confirmed": "Záloha potvrzena ✓",
+    "backup.stage.confirmFailed": "Nepodařilo se zaznamenat značku zálohy — zkuste znovu.",
+    "backup.stage.retry": "Zopakovat",
     "backup.warning.a": "Toto je váš soukromý klíč. Je jako vaše heslo —",
     "backup.warning.keepSecret": "držte ho v tajnosti",
     "backup.warning.b":
