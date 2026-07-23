@@ -12,10 +12,13 @@
     saveWatchProgress,
     loadWatchProgress,
     setTalkEditDraft,
+    isFavoriteTalk,
+    toggleFavoriteTalk,
   } from "$lib/events/talks.js";
   import { cachedProfiles } from "$lib/events/social.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -35,8 +38,16 @@
   let resumeAt = $state(0);
   let loading = $state(talk === null);
   let error = $state<unknown>(null);
+  // Favorite marker (spec §13 report): local-only, keyed by the talk's blinded d.
+  let favorite = $state(cachedCtx ? isFavoriteTalk(cachedCtx.coordinate, d) : false);
 
   if (talk) perfMark("TalkDetail", "cache-paint");
+
+  function toggleFavorite() {
+    if (!ctx) return;
+    const next = toggleFavoriteTalk(ctx.coordinate, d);
+    favorite = next.includes(d);
+  }
 
   const isOwn = $derived(!!talk && !!session.pubkey && talk.pubkey === session.pubkey);
 
@@ -95,7 +106,19 @@
   <div class="card" role="status"><p class="muted">{t("talks.notFound")}</p></div>
 {:else}
   <div class="card">
-    <h1 style="margin:0 0 0.5rem">{talk.title}</h1>
+    <div class="row" style="align-items:flex-start;justify-content:space-between;gap:0.5rem">
+      <h1 style="margin:0 0 0.5rem">{talk.title}</h1>
+      <button
+        class="btn inline icon-btn"
+        aria-pressed={favorite}
+        class:primary={favorite}
+        title={favorite ? t("talks.favorite.remove") : t("talks.favorite.add")}
+        aria-label={favorite ? t("talks.favorite.remove") : t("talks.favorite.add")}
+        onclick={toggleFavorite}
+      >
+        <Icon name="star" size={18} />
+      </button>
+    </div>
     <div class="row" style="align-items:center;gap:0.5rem">
       <Avatar pubkey={talk.pubkey} name={speakerName} size={32} />
       <span class="muted">{speakerName || t("talks.speaker")}</span>
@@ -122,3 +145,11 @@
     {/if}
   </div>
 {/if}
+
+<style>
+  .icon-btn {
+    padding: 0.4rem 0.5rem;
+    line-height: 0;
+    flex: none;
+  }
+</style>

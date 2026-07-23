@@ -317,3 +317,40 @@ export function loadWatchProgress(coordinate: string, mediaX: string): number {
     return 0;
   }
 }
+
+// ── favorite talks (spec §13 post-event report) ──────────────────────────────
+// A talk favorite is a purely LOCAL marker (owner-scoped cache, wiped on logout),
+// not synced to a record: the wire schema has no per-user talk-favorite field and
+// this phase adds none. Keyed by the talk's blinded `d` (the same id that
+// addresses its detail route and keys the talks cache). The post-event report
+// resolves these d's to titles from the cached talk set.
+function favTalksKey(coordinate: string): string {
+  return `favtalks:${coordinate}`;
+}
+
+/** The set of favorited talk d's for a coordinate (no network). */
+export function favoriteTalks(coordinate: string): string[] {
+  return cacheGet<string[]>(favTalksKey(coordinate))?.data ?? [];
+}
+
+/** True if the given talk `d` is favorited. */
+export function isFavoriteTalk(coordinate: string, d: string): boolean {
+  return favoriteTalks(coordinate).includes(d);
+}
+
+/** Toggle a talk's favorite marker; returns the new favorite d-list. */
+export function toggleFavoriteTalk(coordinate: string, d: string): string[] {
+  const cur = favoriteTalks(coordinate);
+  const next = cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d];
+  cacheSet(favTalksKey(coordinate), next, Math.floor(Date.now() / 1000));
+  return next;
+}
+
+/** Resolve favorited talk d's to `{ d, title }`, dropping ones no longer known. */
+export function favoriteTalkItems(coordinate: string): { d: string; title: string }[] {
+  const favs = favoriteTalks(coordinate);
+  if (favs.length === 0) return [];
+  const talks = cachedTalks(coordinate) ?? [];
+  const byD = new Map(talks.map((it) => [it.d, it.talk.title]));
+  return favs.filter((d) => byD.has(d)).map((d) => ({ d, title: byD.get(d)! }));
+}

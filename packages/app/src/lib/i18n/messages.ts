@@ -318,6 +318,7 @@ export const messages = {
     "event.attendeesSection": "Who's here",
     "event.attendeesSection.count": "{n} people so far",
     "event.allPosts": "All posts ›",
+    "event.report": "Event report",
     "eventheader.link": "Event ›",
 
     // Posts (spec §7.4)
@@ -1087,6 +1088,8 @@ export const messages = {
     "talks.speaker": "Speaker",
     "talks.resuming": "Resuming from {sec}s",
     "talks.edit": "Edit / replace this talk",
+    "talks.favorite.add": "Favorite this talk",
+    "talks.favorite.remove": "Remove from favorites",
     "talks.editing": "Editing your talk — recording a new clip replaces the current one.",
     "talks.field.title": "Talk title",
     "talks.field.title.placeholder": "e.g. Zero-knowledge proofs for beginners",
@@ -1186,6 +1189,40 @@ export const messages = {
     "record.text.placeholder": "Tell other attendees who you are, what you do, and who you'd like to meet…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Use this intro",
+
+    // Post-event report & payoff (spec §13)
+    "title.report": "Event report",
+    "report.kicker": "Post-event report",
+    "report.title": "Event report",
+    "report.print": "Print / save PDF",
+    "report.loading": "Assembling your report…",
+    "report.empty":
+      "Nothing to report yet — mark people you met or want to meet, favorite talks, and jot notes as you go.",
+    "report.empty.people": "Go to People",
+    "report.followAll": "Follow everyone",
+    "report.copyNpubs": "Copy npubs",
+    "report.copied": "Copied",
+    "report.downloadNpubs": "Download .txt",
+    "report.followConfirm.title": "Follow on Nostr",
+    "report.followConfirm.body":
+      "Uncheck anyone you'd rather not follow. This appends to your existing follow list — it never replaces it.",
+    "report.followSelected": "Follow {n}",
+    "report.following": "Following…",
+    "report.cancel": "Cancel",
+    "report.followed.one": "Followed {n} person",
+    "report.followed.many": "Followed {n} people",
+    "report.alreadyFollowing.one": "{n} already followed",
+    "report.alreadyFollowing.many": "{n} already followed",
+    "report.followFailed.one": "{n} couldn't be followed",
+    "report.followFailed.many": "{n} couldn't be followed",
+    "report.met": "People you met",
+    "report.wantedNotMet": "Wanted to meet",
+    "report.favoriteTalks": "Favorite talks",
+    "report.notes": "Your notes",
+    "report.switch.title": "Take your identity anywhere",
+    "report.switch.body":
+      "This event created a Nostr key for you. Back it up and use it in any Nostr app.",
+    "report.switch.action": "Back up & explore Nostr",
   },
   sk: {
     // App shell / nav
@@ -1499,6 +1536,7 @@ export const messages = {
     "event.attendeesSection": "Kto tu je",
     "event.attendeesSection.count": "Zatiaľ {n} ľudí",
     "event.allPosts": "Všetky príspevky ›",
+    "event.report": "Správa z podujatia",
     "eventheader.link": "Podujatie ›",
 
     // Posts (spec §7.4)
@@ -2276,6 +2314,8 @@ export const messages = {
     "talks.speaker": "Prednášajúci",
     "talks.resuming": "Pokračuje od {sec}s",
     "talks.edit": "Upraviť / nahradiť prednášku",
+    "talks.favorite.add": "Pridať prednášku k obľúbeným",
+    "talks.favorite.remove": "Odobrať z obľúbených",
     "talks.editing": "Upravujete svoju prednášku — nová nahrávka nahradí súčasnú.",
     "talks.field.title": "Názov prednášky",
     "talks.field.title.placeholder": "napr. Dôkazy s nulovou znalosťou pre začiatočníkov",
@@ -2376,6 +2416,43 @@ export const messages = {
     "record.text.placeholder": "Povedzte ostatným účastníkom, kto ste, čo robíte a koho by ste chceli stretnúť…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Použiť toto predstavenie",
+
+    // Post-event report & payoff (spec §13)
+    "title.report": "Správa z podujatia",
+    "report.kicker": "Správa po podujatí",
+    "report.title": "Správa z podujatia",
+    "report.print": "Tlačiť / uložiť PDF",
+    "report.loading": "Zostavujeme vašu správu…",
+    "report.empty":
+      "Zatiaľ niet čo zhrnúť — priebežne označujte ľudí, ktorých ste stretli alebo chcete stretnúť, obľúbené prednášky a poznámky.",
+    "report.empty.people": "Prejsť na Ľudí",
+    "report.followAll": "Sledovať všetkých",
+    "report.copyNpubs": "Kopírovať npub-y",
+    "report.copied": "Skopírované",
+    "report.downloadNpubs": "Stiahnuť .txt",
+    "report.followConfirm.title": "Sledovať na Nostri",
+    "report.followConfirm.body":
+      "Odznačte každého, koho radšej sledovať nechcete. Pridá sa to k vášmu existujúcemu zoznamu sledovaných — nikdy ho nenahradí.",
+    "report.followSelected": "Sledovať {n}",
+    "report.following": "Sledujem…",
+    "report.cancel": "Zrušiť",
+    "report.followed.one": "Sledujete {n} osobu",
+    "report.followed.few": "Sledujete {n} osoby",
+    "report.followed.many": "Sledujete {n} osôb",
+    "report.alreadyFollowing.one": "{n} už sledujete",
+    "report.alreadyFollowing.few": "{n} už sledujete",
+    "report.alreadyFollowing.many": "{n} už sledujete",
+    "report.followFailed.one": "{n} sa nepodarilo sledovať",
+    "report.followFailed.few": "{n} sa nepodarilo sledovať",
+    "report.followFailed.many": "{n} sa nepodarilo sledovať",
+    "report.met": "Ľudia, ktorých ste stretli",
+    "report.wantedNotMet": "Chceli ste stretnúť",
+    "report.favoriteTalks": "Obľúbené prednášky",
+    "report.notes": "Vaše poznámky",
+    "report.switch.title": "Vezmite si svoju identitu kamkoľvek",
+    "report.switch.body":
+      "Toto podujatie vám vytvorilo Nostr kľúč. Zálohujte si ho a používajte v ktorejkoľvek Nostr aplikácii.",
+    "report.switch.action": "Zálohovať a objaviť Nostr",
   },
   cs: {
     // Kostra aplikace / navigace
@@ -2689,6 +2766,7 @@ export const messages = {
     "event.attendeesSection": "Kdo tu je",
     "event.attendeesSection.count": "Zatím {n} lidí",
     "event.allPosts": "Všechny příspěvky ›",
+    "event.report": "Zpráva z akce",
     "eventheader.link": "Akce ›",
 
     // Příspěvky (spec §7.4)
@@ -3467,6 +3545,8 @@ export const messages = {
     "talks.speaker": "Přednášející",
     "talks.resuming": "Pokračuje od {sec}s",
     "talks.edit": "Upravit / nahradit přednášku",
+    "talks.favorite.add": "Přidat přednášku k oblíbeným",
+    "talks.favorite.remove": "Odebrat z oblíbených",
     "talks.editing": "Upravujete svou přednášku — nová nahrávka nahradí tu současnou.",
     "talks.field.title": "Název přednášky",
     "talks.field.title.placeholder": "např. Důkazy s nulovou znalostí pro začátečníky",
@@ -3570,6 +3650,43 @@ export const messages = {
       "Řekněte ostatním účastníkům, kdo jste, co děláte a koho byste chtěli potkat…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Použít toto představení",
+
+    // Post-event report & payoff (spec §13)
+    "title.report": "Zpráva z akce",
+    "report.kicker": "Zpráva po akci",
+    "report.title": "Zpráva z akce",
+    "report.print": "Tisk / uložit PDF",
+    "report.loading": "Sestavujeme vaši zprávu…",
+    "report.empty":
+      "Zatím není co shrnout — průběžně označujte lidi, které jste potkali nebo chcete potkat, oblíbené přednášky a poznámky.",
+    "report.empty.people": "Přejít na Lidi",
+    "report.followAll": "Sledovat všechny",
+    "report.copyNpubs": "Kopírovat npub-y",
+    "report.copied": "Zkopírováno",
+    "report.downloadNpubs": "Stáhnout .txt",
+    "report.followConfirm.title": "Sledovat na Nostru",
+    "report.followConfirm.body":
+      "Odznačte každého, koho raději sledovat nechcete. Přidá se to k vašemu stávajícímu seznamu sledovaných — nikdy jej nenahradí.",
+    "report.followSelected": "Sledovat {n}",
+    "report.following": "Sleduji…",
+    "report.cancel": "Zrušit",
+    "report.followed.one": "Sledujete {n} osobu",
+    "report.followed.few": "Sledujete {n} osoby",
+    "report.followed.many": "Sledujete {n} osob",
+    "report.alreadyFollowing.one": "{n} už sledujete",
+    "report.alreadyFollowing.few": "{n} už sledujete",
+    "report.alreadyFollowing.many": "{n} už sledujete",
+    "report.followFailed.one": "{n} se nepodařilo sledovat",
+    "report.followFailed.few": "{n} se nepodařilo sledovat",
+    "report.followFailed.many": "{n} se nepodařilo sledovat",
+    "report.met": "Lidé, které jste potkali",
+    "report.wantedNotMet": "Chtěli jste potkat",
+    "report.favoriteTalks": "Oblíbené přednášky",
+    "report.notes": "Vaše poznámky",
+    "report.switch.title": "Vezměte si svou identitu kamkoli",
+    "report.switch.body":
+      "Tato akce vám vytvořila Nostr klíč. Zálohujte si jej a používejte v jakékoli Nostr aplikaci.",
+    "report.switch.action": "Zálohovat a objevit Nostr",
   },
 } as const;
 

@@ -422,3 +422,20 @@ h2 {
     transform: none;
   }
 }
+
+/* Print (spec §13 report): strip the app chrome so a print-to-PDF of a report
+   route is clean paper. The fixed navs / top bar / skip link never belong on the
+   page. Any element marked .no-print is also removed. */
+@media print {
+  .topbar,
+  .bottom-nav,
+  .event-nav,
+  .skip-link,
+  .no-print {
+    display: none !important;
+  }
+  .app-shell,
+  main {
+    padding-bottom: 0 !important;
+  }
+}

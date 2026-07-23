@@ -31,6 +31,7 @@
   const loadAdmin = () => import("$lib/pages/Admin.svelte");
   const loadEventSettings = () => import("$lib/pages/EventSettings.svelte");
   const loadPosts = () => import("$lib/pages/Posts.svelte");
+  const loadReport = () => import("$lib/pages/Report.svelte");
   const loadPost = () => import("$lib/pages/Post.svelte");
   const loadDm = () => import("$lib/pages/Dm.svelte");
   const loadDmChat = () => import("$lib/pages/DmChat.svelte");
@@ -60,6 +61,8 @@
   {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
 {:else if route.name === "matches"}
   {#key route.naddr}<Matches naddr={route.naddr} />{/key}
+{:else if route.name === "report"}
+  {#key route.naddr}<LazyRoute loader={loadReport} props={{ naddr: route.naddr }} />{/key}
 {:else if route.name === "chat"}
   {#key route.naddr}<LazyRoute loader={loadEventChat} props={{ naddr: route.naddr }} />{/key}
 {:else if route.name === "talks"}

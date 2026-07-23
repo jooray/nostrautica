@@ -321,6 +321,10 @@
     [...eventPosts].sort((a, b) => b.publishedAt - a.publishedAt)[0],
   );
 
+  // The event has ended: its end time is in the past (spec §13 — the report
+  // becomes prominent, though it's reachable anytime).
+  const eventEnded = $derived(!!ctx?.end && ctx.end * 1000 < Date.now());
+
   // Own coordinator-status notices (21606 sealed to this attendee, NIP §6.3):
   // a poison in the attendee's own submission/talk pipeline surfaces as a modest
   // banner, seeded from cache and kept live by the grant scan.
@@ -398,6 +402,16 @@
     <button class="btn menu-btn" onclick={() => router.go({ name: "posts", naddr })}>
       <Icon name="horn" size={17} />{t("event.allPosts")}
     </button>
+    {#if approved}
+      <!-- Post-event report (spec §13): available anytime, emphasized once ended. -->
+      <button
+        class="btn menu-btn"
+        class:primary={eventEnded}
+        onclick={() => router.go({ name: "report", naddr })}
+      >
+        <Icon name="pennant" size={17} />{t("event.report")}
+      </button>
+    {/if}
   </nav>
 
   <!-- Readiness journey (§4.1): one honest next action, derived from real state.
