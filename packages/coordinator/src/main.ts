@@ -25,8 +25,9 @@ import { resolveRoleRoutes, disclosureFromRoutes } from "./providers/routes.js";
 import type { LlmProvider, SttProvider } from "./providers/types.js";
 import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
+import { isCliSubcommand, runCli } from "./cli.js";
 
-async function main(): Promise<void> {
+async function runDaemon(): Promise<void> {
   const configPath = process.argv[2] ?? "coordinator.toml";
   const config = loadConfig(configPath);
   const dbPath = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "coordinator.sqlite";
@@ -231,6 +232,20 @@ async function main(): Promise<void> {
     if (stopped) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
+}
+
+/**
+ * Entry point. When argv[2] is an operator subcommand (`backup`, `verify-backup`,
+ * `restore`, `doctor`) dispatch to the CLI; otherwise argv[2] is the daemon's
+ * config path (unchanged) and we run the coordinator loop.
+ */
+async function main(): Promise<void> {
+  const verb = process.argv[2];
+  if (isCliSubcommand(verb)) {
+    const code = await runCli(verb, process.argv.slice(3));
+    process.exit(code);
+  }
+  await runDaemon();
 }
 
 main().catch((err) => {

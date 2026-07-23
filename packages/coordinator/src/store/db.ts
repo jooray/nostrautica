@@ -22,6 +22,20 @@ import { selfEncrypt, selfDecrypt, sha256Hex, utf8ToBytes } from "@nostrautica/p
 /** Prefix marking a column value as NIP-44-encrypted under the identity key. */
 const ENC_PREFIX = "nip44:";
 
+/**
+ * The store's logical schema version, written to SQLite's `PRAGMA user_version`
+ * on every open. It exists so the backup/restore tooling (store/backup.ts) can
+ * refuse to restore a snapshot taken by a NEWER binary onto an older one: the
+ * on-disk shape would carry columns/semantics this build can't honor. Bump this
+ * whenever a migration changes the durable shape in a way a downgrade can't
+ * tolerate. Historic databases open at `user_version = 0` and are transparently
+ * brought up to the current value by the in-constructor migrations.
+ */
+export const SCHEMA_VERSION = 1;
+
+/** The at-rest encryption prefix, exported for the backup tool's decryption proof. */
+export const AT_REST_ENC_PREFIX = ENC_PREFIX;
+
 /** Handle to an acquired single-daemon lock; call `release` on shutdown. */
 export interface DaemonLock {
   release(): void;
@@ -589,12 +603,77 @@ export class Store {
       )`,
     );
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
+    // Record the logical schema version so the backup/restore tooling can reason
+    // about downgrade safety. The in-place migrations above have already brought
+    // the durable shape up to SCHEMA_VERSION, so stamping it here is correct.
+    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
   }
 
   close(): void {
     this.db.close();
+  }
+
+  // ── backup / integrity primitives (store/backup.ts, §13.2) ─────────────────
+  /** The schema version recorded in this database (SQLite `user_version`). */
+  schemaVersion(): number {
+    const row = this.db.prepare("PRAGMA user_version").get() as { user_version: number };
+    return row.user_version;
+  }
+
+  /**
+   * Run `PRAGMA integrity_check` and return "ok" or a joined description of the
+   * problems SQLite reports. A healthy database returns the single row "ok".
+   */
+  integrityCheck(): string {
+    const rows = this.db.prepare("PRAGMA integrity_check").all() as { integrity_check: string }[];
+    const msgs = rows.map((r) => r.integrity_check);
+    return msgs.length === 1 && msgs[0] === "ok" ? "ok" : msgs.join("; ");
+  }
+
+  /**
+   * Write a consistent snapshot of this database to `destPath` via `VACUUM INTO`.
+   * Under WAL, the vacuum reads a single committed snapshot even while the daemon
+   * keeps writing, so the copy is crash-consistent without stopping the process.
+   * `destPath` must not already exist (SQLite refuses to overwrite). The path is
+   * a SQL string literal (no bind slot for VACUUM INTO), so single quotes are
+   * doubled to keep it safe.
+   */
+  backupTo(destPath: string): void {
+    const literal = destPath.replace(/'/g, "''");
+    this.db.exec(`VACUUM INTO '${literal}'`);
+  }
+
+  /** Count of installed events (rows carrying custodied E_inbox/ECK material). */
+  installedEventCount(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Prove every protected event-key row decrypts under the loaded identity: read
+   * each `inbox_nsec`/`eck_json`, decrypt it, and confirm the plaintext is the
+   * expected shape (nsec → 32-byte hex, eck_json → parseable JSON). Throws on the
+   * first row that fails. Returns the number of rows verified. A store opened
+   * without an identity key throws immediately (it cannot prove anything).
+   */
+  verifyProtectedRowsDecrypt(): number {
+    if (!this.identitySk) throw new Error("no identity key: cannot verify protected rows decrypt");
+    const rows = this.db.prepare("SELECT coordinate, inbox_nsec, eck_json FROM events").all() as {
+      coordinate: string;
+      inbox_nsec: string;
+      eck_json: string;
+    }[];
+    for (const row of rows) {
+      const nsec = this.reveal(row.inbox_nsec);
+      if (!/^[0-9a-f]{64}$/i.test(nsec)) {
+        throw new Error(`event ${row.coordinate}: decrypted inbox_nsec is not 32-byte hex`);
+      }
+      const eck = this.reveal(row.eck_json);
+      JSON.parse(eck); // throws if the decrypted ECK custody isn't valid JSON
+    }
+    return rows.length;
   }
 
   // ── at-rest protection of event-key columns (F1) ──────────────────────────
