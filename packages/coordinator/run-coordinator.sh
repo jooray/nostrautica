@@ -8,4 +8,12 @@ cd "$(dirname "$0")"
 [ -f .env ] && { set -a; . ./.env; set +a; }
 : "${VENICE_API_KEY:?set VENICE_API_KEY in the environment}"
 
+# Release identity: the deploy hook writes the pushed revision into RELEASE_ID at
+# the repo root (the rsynced tree has no .git to derive it from). An explicit
+# NOSTRAUTICA_RELEASE_ID in the environment/.env always wins.
+if [ -z "${NOSTRAUTICA_RELEASE_ID:-}" ] && [ -f ../../RELEASE_ID ]; then
+  NOSTRAUTICA_RELEASE_ID="$(cat ../../RELEASE_ID)"
+  export NOSTRAUTICA_RELEASE_ID
+fi
+
 node dist/main.js coordinator.toml

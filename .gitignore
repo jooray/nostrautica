@@ -35,3 +35,4 @@ docs/internal/
 
 # playwright artifacts
 e2e/test-results/
+RELEASE_ID
