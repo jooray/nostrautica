@@ -18,11 +18,28 @@ function rawEd25519ToPKCS8(rawKey) {
     const content = new Uint8Array([...version, ...algorithmSeq, ...privateKeyField]);
     return new Uint8Array([0x30, content.length, ...content]);
 }
+// NOSTRAUTICA PATCH (carried — re-apply on vendor bump, see packages/vendor/README.md):
+// gate the WebCrypto path on ACTUAL Ed25519 support, not on `subtle` existing.
+// Chromium/WebView < 137 exposes crypto.subtle but throws "Algorithm: Unrecognized
+// name" for Ed25519; those browsers previously could never create an MLS key
+// package. Probe once; fall through to the pure-JS @noble/curves path when absent.
+// The probe key is the Ed25519 base point (a known-valid raw public key), so both
+// length-checking and point-validating import implementations accept it.
+const ED25519_PROBE_KEY = new Uint8Array([0x58, ...new Array(31).fill(0x66)]);
+async function supportsWebCryptoEd25519(subtle) {
+    try {
+        await subtle.importKey("raw", ED25519_PROBE_KEY, "Ed25519", false, ["verify"]);
+        return true;
+    }
+    catch {
+        return false;
+    }
+}
 export async function makeNobleSignatureImpl(alg) {
     switch (alg) {
         case "Ed25519": {
             const subtle = globalThis.crypto?.subtle;
-            if (subtle !== undefined) {
+            if (subtle !== undefined && (await supportsWebCryptoEd25519(subtle))) {
                 return {
                     async sign(signKey, message) {
                         const keyData = signKey.length === 32 ? rawEd25519ToPKCS8(signKey) : signKey;

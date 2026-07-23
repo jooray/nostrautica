@@ -94,6 +94,9 @@ importers:
       svelte-check:
         specifier: ^4.1.1
         version: 4.7.2(picomatch@4.0.5)(svelte@5.56.4(@typescript-eslint/types@8.63.0))(typescript@5.9.3)
+      ts-mls:
+        specifier: workspace:*
+        version: link:../vendor/ts-mls
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -210,6 +213,9 @@ importers:
       '@hpke/core':
         specifier: ^1.9.0
         version: 1.9.0
+      '@hpke/dhkem-x25519':
+        specifier: 1.8.0
+        version: 1.8.0
       '@hpke/dhkem-x448':
         specifier: 1.8.0
         version: 1.8.0
