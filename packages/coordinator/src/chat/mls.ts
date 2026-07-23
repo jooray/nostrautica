@@ -58,6 +58,15 @@ export interface ChatMls {
    * the app's defaults, not a way to narrow a group's reach.
    */
   ensureRelays(mlsGroupIdHex: string, relays: string[]): Promise<void>;
+  /** The group's current admin pubkey set (admin-policy.v1). */
+  getAdmins(mlsGroupIdHex: string): Promise<string[]>;
+  /**
+   * Replace the group's admin set with EXACTLY `adminPubkeys` (admin-policy.v1 is
+   * re-encoded in full). A no-op when the set already matches. The caller is
+   * responsible for including the coordinator's own key — dropping it would lock
+   * the coordinator out of admin commits.
+   */
+  setAdmins(mlsGroupIdHex: string, adminPubkeys: string[]): Promise<void>;
 }
 
 /** Build a real `MarmotClient`-backed {@link ChatMls} off the coordinator key. */
@@ -204,6 +213,27 @@ export class MarmotClientMls implements ChatMls {
       if (union.length === current.length) return; // already routes to every relay we want
       const ctx = group.session.proposalContext();
       const proposals = await proposeUpdateMetadata({ relays: union })(ctx);
+      await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
+    });
+  }
+
+  async getAdmins(mlsGroupIdHex: string): Promise<string[]> {
+    const group = await this.client.groups.get(mlsGroupIdHex);
+    return group.groupData?.adminPubkeys ?? [];
+  }
+
+  async setAdmins(mlsGroupIdHex: string, adminPubkeys: string[]): Promise<void> {
+    await this.serialize(mlsGroupIdHex, async () => {
+      const group = await this.client.groups.get(mlsGroupIdHex);
+      const current = group.groupData?.adminPubkeys ?? [];
+      // admin-policy.v1 is a full-replacement component (proposeUpdateMetadata
+      // re-encodes it whole), so `adminPubkeys` must already be the COMPLETE
+      // desired set including the coordinator. No-op when it's unchanged
+      // (order-insensitive) so a re-sync doesn't spend an epoch for nothing.
+      const want = [...new Set(adminPubkeys)];
+      if (want.length === current.length && want.every((k) => current.includes(k))) return;
+      const ctx = group.session.proposalContext();
+      const proposals = await proposeUpdateMetadata({ adminPubkeys: want })(ctx);
       await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
     });
   }

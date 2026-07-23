@@ -25,13 +25,18 @@ class FakeMls implements ChatMls {
   removed: string[][] = [];
   ingested: AnyEvent[][] = [];
   relays = new Map<string, string[]>();
+  admins = new Map<string, string[]>();
+  createdWithAdmins: string[] | undefined;
   eligible = true;
   created = 0;
   throwOnInvite = new Set<string>();
 
-  async createGroup(): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }> {
+  async createGroup(opts?: { adminPubkeys?: string[] }): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }> {
     this.created++;
-    return { mlsGroupIdHex: "mls-" + this.created, nostrGroupIdHex: "ng-" + this.created };
+    this.createdWithAdmins = opts?.adminPubkeys;
+    const id = "mls-" + this.created;
+    if (opts?.adminPubkeys) this.admins.set(id, opts.adminPubkeys);
+    return { mlsGroupIdHex: id, nostrGroupIdHex: "ng-" + this.created };
   }
   async isEligible(): Promise<boolean> {
     return this.eligible;
@@ -63,11 +68,20 @@ class FakeMls implements ChatMls {
     if (missing.length === 0) return;
     this.relays.set(group, [...(this.relays.get(group) ?? []), ...missing]);
   }
+  async getAdmins(group: string): Promise<string[]> {
+    return this.admins.get(group) ?? [];
+  }
+  async setAdmins(group: string, adminPubkeys: string[]): Promise<void> {
+    this.admins.set(group, [...adminPubkeys]);
+  }
 }
 
 function kpEvent(pubkey: string, id: string): AnyEvent {
   return { id, pubkey, kind: 30443, tags: [] };
 }
+
+/** The coordinator's own pubkey — always retained in the MLS admin set. */
+const COORDINATOR = "c".repeat(64);
 
 /** Build an admin whose key-package fetch returns the pre-seeded events per author. */
 function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = []) {
@@ -76,6 +90,7 @@ function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = []) {
     store,
     mls,
     now,
+    coordinatorPubkey: COORDINATOR,
     fetchKeyPackages: async (_coordinate, authors) =>
       kps.filter((e) => authors.includes(e.pubkey)),
   });
@@ -586,4 +601,88 @@ describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
     expect(mls.ingested).toEqual([evs]);
   });
 });
+});
+
+describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recovery)", () => {
+  it("creates the group with the coordinator as the sole admin when no organizer is approved", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    // No approved organizer yet → the coordinator is the only admin.
+    expect(mls.createdWithAdmins).toEqual([COORDINATOR]);
+    expect(mls.admins.get("mls-1")).toEqual([COORDINATOR]);
+  });
+
+  it("promotes an approved organizer's account key and attested device to co-admin", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    // ACCOUNT is an approved ORGANIZER; its account key is an authorized identity.
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 1 });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    // At creation, the coordinator + the organizer's account key are admins.
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+
+    // Attesting the organizer's chat device promotes THAT device to admin too.
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    expect(ok).toBe(true);
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT, CHATKEY].sort());
+  });
+
+  it("does NOT promote a non-organizer attendee's device", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 }); // role defaults to attendee
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    // The device is a member but never an admin — the admin set stays coordinator-only.
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+    expect(mls.admins.get("mls-1")).toEqual([COORDINATOR]);
+  });
+
+  it("drops a revoked organizer device from the admin set", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 1 });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT, CHATKEY].sort());
+
+    // Revoking that device removes it from the admin set (its key is no longer active).
+    await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+  });
+
+  it("drops a removed organizer entirely from the admin set", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1")]);
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 1 });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+
+    // The revoke effect chain marks the attendee non-approved, then removes them;
+    // desiredAdminPubkeys keys off approved organizers, so they drop out.
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "revoked", now: 2 });
+    await admin.handleRevoke(COORD, ACCOUNT);
+    expect(mls.admins.get("mls-1")).toEqual([COORDINATOR]);
+  });
+
+  it("re-asserts the admin set on ensureGroup for an existing group (recovery re-sync)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(mls.admins.get("mls-1")).toEqual([COORDINATOR]);
+
+    // An organizer is approved AFTER the group already existed; re-ensuring the
+    // group (e.g. on the next install/config reload) promotes them.
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 3 });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+  });
 });

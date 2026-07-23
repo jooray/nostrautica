@@ -2387,6 +2387,13 @@ class StubMls implements ChatMls {
     return [];
   }
   async ensureRelays() {}
+  admins: string[] = [];
+  async getAdmins() {
+    return this.admins;
+  }
+  async setAdmins(_g: string, adminPubkeys: string[]) {
+    this.admins = adminPubkeys;
+  }
 }
 
 describe("audit COORD-9 — MLS membership runs through the durable job runner", () => {

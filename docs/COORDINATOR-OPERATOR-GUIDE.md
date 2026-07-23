@@ -256,15 +256,20 @@ This is why §7 takes a backup *before* the upgrade — it is your rollback poin
 
 **Coordinator DB loss.** Restore the most recent verified backup (§6). The relay
 world re-converges the reconstructible artifacts; the backup restores the durable
-state (jobs, journal, custody, Marmot admin). Without a backup, the coordinator's
-MLS admin role for every chat-enabled event is orphaned — the group survives on
-relays but the coordinator can no longer add or remove members. **Restore, or keep
-a current backup; there is no other recovery of MLS admin state.**
+state (jobs, journal, custody, Marmot admin).
 
-Do **not** rely on "enrolling a second administrator" — the current build creates
-each group with the coordinator as admin. (Automatic promotion of organizer chat
-devices to co-admins is tracked in the second-admin work; until it ships, backup
-is the recovery path.)
+**Second MLS admin (automatic).** For every chat-enabled event, the coordinator
+keeps the group's admin set equal to *itself plus every active chat device of
+every approved organizer-role attendee*. It sets this at group creation and
+re-reconciles it whenever an organizer is approved, attests or revokes a chat
+device, or is removed (and re-asserts it on each `ensureGroup`, so an organizer
+approved while chat was offline is promoted on the next install/config reload).
+This is deliberate recovery insurance: if the coordinator's DB (hence its MLS
+admin state) is lost and no backup exists, an **organizer's own device is still a
+group admin** and can add/remove members and rotate metadata. There is nothing to
+enroll by hand — promotion is automatic for organizer-role attendees. Keeping a
+current backup is still the primary recovery path; organizer co-admin is the
+backstop when a backup is unavailable.
 
 **Detach / reassignment.** Coordinator detachment has known implementation limits.
 A config edit alone is not a verified immediate erasure of coordinator custody —

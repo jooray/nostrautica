@@ -413,6 +413,7 @@ export class Coordinator {
         store: deps.store,
         mls: deps.chatMls,
         now: this.now,
+        coordinatorPubkey: this.coordPubkey,
         fetchKeyPackages: (coordinate, authors) => this.fetchKeyPackages(coordinate, authors),
         log,
       });
