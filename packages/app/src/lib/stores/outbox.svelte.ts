@@ -20,18 +20,27 @@ import {
 
 const POLL_MS = 30_000;
 
-/** A terminal item shown in the outbox UI for retry/discard. */
-export interface FailedOutboxItem {
+/** An item shown in the Sync Status UI for retry/discard (audit §7.4.7). */
+export interface OutboxItem {
   id: string;
   kind: number;
   queuedAt: number;
+  /** Durable flush attempts so far. */
+  attempts: number;
+  /** Message from the most recent failed flush, if any. */
+  lastError?: string;
 }
+
+/** Terminal (exhausted-retries) items — kept as an alias for existing callers. */
+export type FailedOutboxItem = OutboxItem;
 
 class Outbox {
   /** Non-terminal events sitting in the durable publish queue right now. */
   pending = $state(0);
+  /** Non-terminal queued items with their type/queued-time/retries (Sync Status). */
+  pendingItems = $state<OutboxItem[]>([]);
   /** Events that exhausted their retries and await an explicit retry/discard. */
-  failed = $state<FailedOutboxItem[]>([]);
+  failed = $state<OutboxItem[]>([]);
   private started = false;
   private recountTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -49,10 +58,17 @@ class Outbox {
   /** Recount now (best-effort, never throws). */
   async refresh(): Promise<void> {
     const items = await listQueued().catch(() => []);
-    this.pending = items.filter((i) => !i.failed).length;
-    this.failed = items
-      .filter((i) => i.failed)
-      .map((i) => ({ id: i.event.id, kind: i.event.kind, queuedAt: i.queuedAt }));
+    const map = (i: (typeof items)[number]): OutboxItem => ({
+      id: i.event.id,
+      kind: i.event.kind,
+      queuedAt: i.queuedAt,
+      attempts: i.attempts ?? 0,
+      lastError: i.lastError,
+    });
+    const pending = items.filter((i) => !i.failed);
+    this.pending = pending.length;
+    this.pendingItems = pending.map(map);
+    this.failed = items.filter((i) => i.failed).map(map);
   }
 
   /** Recount shortly — coalesces bursts (e.g. several queued sends at once). */

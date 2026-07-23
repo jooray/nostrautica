@@ -120,7 +120,10 @@
   }
   button {
     position: relative;
-    flex: 1;
+    flex: 1 1 0;
+    /* min-width:0 lets flex items shrink below content size so a full 6-item bar
+       stays on one row at 320px / 200% zoom / long translated labels (§7.4.8). */
+    min-width: 0;
     max-width: 6rem;
     min-height: var(--nav-target);
     display: flex;
@@ -160,5 +163,18 @@
     font-size: 0.75rem;
     font-weight: 600;
     white-space: nowrap;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Very narrow / high-zoom: shrink labels a touch so a long translated label
+     ("Nastavenia", "Aktualizace") never forces horizontal overflow. */
+  @media (max-width: 360px) {
+    .lbl {
+      font-size: 0.68rem;
+    }
+    button {
+      padding: 0.25rem 0.1rem;
+    }
   }
 </style>

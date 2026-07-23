@@ -13,6 +13,7 @@
   import { initSessionBroadcast } from "$lib/signer/session-broadcast.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
+  import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
@@ -46,6 +47,7 @@
     theme.init();
     i18n.init();
     online.init();
+    connectivity.init();
     recentEvents.init();
     router.init();
     // UX-21: capture beforeinstallprompt synchronously — it fires once, early,
@@ -208,9 +210,20 @@
       </button>
     </div>
   {/if}
-  {#if !online.isOnline}
+  <!-- Layered connectivity (§7.4.6): distinguish no-internet from the conference-
+       WiFi case (online but WSS blocked) from a draining outbox — one banner,
+       the right message. Only shown when something is actually wrong. -->
+  {#if connectivity.overall === "offline"}
     <div class="card warn" style="margin:0.5rem 0" role="status" aria-live="polite">
       {t("app.offline")}
+    </div>
+  {:else if connectivity.overall === "relay-blocked"}
+    <div class="card warn" style="margin:0.5rem 0" role="status" aria-live="polite">
+      {t("conn.relayBlocked")}
+    </div>
+  {:else if connectivity.overall === "syncing"}
+    <div class="card" style="margin:0.5rem 0" role="status" aria-live="polite">
+      {t("conn.syncing")}
     </div>
   {/if}
   {#if refreshGuard.updateWaiting}

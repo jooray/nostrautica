@@ -30,6 +30,8 @@ export interface QueuedItem {
   attempts: number;
   /** Terminal: exhausted `MAX_FLUSH_ATTEMPTS`, awaiting user retry/discard. */
   failed?: boolean;
+  /** Message from the most recent failed flush (audit §7.4.7 Sync Status). */
+  lastError?: string;
 }
 
 /** After this many failed durable flushes an item is parked as `failed`. */
@@ -217,10 +219,11 @@ async function flushQueueCore(): Promise<FlushResult> {
       await publishSigned(item.event, item.relays);
       await backend.delete(item.event.id);
       sent++;
-    } catch {
+    } catch (e) {
       const attempts = (item.attempts ?? 0) + 1;
       const failed = attempts >= MAX_FLUSH_ATTEMPTS;
-      await backend.put({ ...item, attempts, failed }).catch(() => {});
+      const lastError = e instanceof Error ? e.message : String(e);
+      await backend.put({ ...item, attempts, failed, lastError }).catch(() => {});
     }
   }
   const after = await backend.getAll();

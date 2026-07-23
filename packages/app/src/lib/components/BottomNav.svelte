@@ -61,7 +61,9 @@
   }
   button {
     position: relative;
-    flex: 1;
+    flex: 1 1 0;
+    /* Shrink below content so labels never force horizontal overflow (§7.4.8). */
+    min-width: 0;
     max-width: 6rem;
     min-height: var(--nav-target);
     display: flex;
@@ -100,5 +102,14 @@
   .lbl {
     font-size: 0.75rem;
     font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @media (max-width: 360px) {
+    .lbl {
+      font-size: 0.68rem;
+    }
   }
 </style>

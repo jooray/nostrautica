@@ -30,6 +30,7 @@
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
   import EventHeader from "$lib/components/EventHeader.svelte";
+  import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
   import ReadinessJourney from "$lib/components/ReadinessJourney.svelte";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
@@ -361,6 +362,10 @@
 {:else}
   <EventHeader {ctx} status={overviewStatus} />
   {#if ctx.summary}<p class="summary">{ctx.summary}</p>{/if}
+
+  <!-- Full logistics (§7.4.9): start/end + time zone, happening-now state,
+       add-to-calendar (.ics), directions. -->
+  <LogisticsBlock {ctx} />
 
   <!-- Own-pipeline failure notices (21606 → attendee, NIP §6.3): modest, per stage. -->
   {#each ownPoison as st (st.stage)}

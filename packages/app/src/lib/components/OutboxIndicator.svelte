@@ -15,41 +15,69 @@
   const when = (sec: number) => new Date(sec).toLocaleTimeString();
 </script>
 
-{#if outbox.pending > 0}
-  <span class="chip" role="status">{tp("outbox.pending", outbox.pending)}</span>
-{/if}
-
-{#if outbox.failed.length > 0}
+{#if outbox.pending > 0 || outbox.failed.length > 0}
   <span class="failed-wrap">
     <button
       type="button"
-      class="chip failed"
+      class="chip"
+      class:failed={outbox.failed.length > 0}
       aria-expanded={open}
       onclick={() => (open = !open)}
     >
-      {tp("outbox.failed", outbox.failed.length)}
+      {outbox.failed.length > 0
+        ? tp("outbox.failed", outbox.failed.length)
+        : tp("outbox.pending", outbox.pending)}
     </button>
     {#if open}
-      <div class="panel card" role="group" aria-label={t("outbox.failed.title")}>
-        <ul>
-          {#each outbox.failed as item (item.id)}
-            <li>
-              <span class="meta">{t("outbox.item", { kind: item.kind })} · {when(item.queuedAt)}</span>
-              <span class="acts">
-                <button type="button" class="btn inline" onclick={() => void outbox.retry(item.id)}>
-                  {t("outbox.retry")}
-                </button>
-                <button
-                  type="button"
-                  class="btn inline ghost danger"
-                  onclick={() => void outbox.discard(item.id)}
-                >
-                  {t("outbox.discard")}
-                </button>
-              </span>
-            </li>
-          {/each}
-        </ul>
+      <!-- Sync Status (audit §7.4.7): item type, queued time, retries, last error,
+           retry-now, safe cancel — for both waiting and failed items. -->
+      <div class="panel card" role="group" aria-label={t("outbox.syncStatus")}>
+        {#if outbox.failed.length > 0}
+          <h3>{t("outbox.failed.title")}</h3>
+          <ul>
+            {#each outbox.failed as item (item.id)}
+              <li>
+                <span class="meta">
+                  {t("outbox.item", { kind: item.kind })} · {when(item.queuedAt)} · {t("outbox.retries", { n: item.attempts })}
+                </span>
+                {#if item.lastError}<span class="err">{item.lastError}</span>{/if}
+                <span class="acts">
+                  <button type="button" class="btn inline" onclick={() => void outbox.retry(item.id)}>
+                    {t("outbox.retry")}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn inline ghost danger"
+                    onclick={() => void outbox.discard(item.id)}
+                  >
+                    {t("outbox.discard")}
+                  </button>
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if outbox.pendingItems.length > 0}
+          <h3>{t("outbox.waiting.title")}</h3>
+          <ul>
+            {#each outbox.pendingItems as item (item.id)}
+              <li>
+                <span class="meta">
+                  {t("outbox.item", { kind: item.kind })} · {when(item.queuedAt)}{#if item.attempts > 0} · {t("outbox.retries", { n: item.attempts })}{/if}
+                </span>
+                <span class="acts">
+                  <button
+                    type="button"
+                    class="btn inline ghost danger"
+                    onclick={() => void outbox.discard(item.id)}
+                  >
+                    {t("outbox.discard")}
+                  </button>
+                </span>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </div>
     {/if}
   </span>
@@ -99,9 +127,20 @@
     justify-content: space-between;
     gap: 0.4rem;
   }
+  .panel h3 {
+    margin: 0.25rem 0 0.15rem;
+    font-size: 0.8rem;
+  }
   .meta {
     font-size: 0.78rem;
     color: var(--text-dim);
+  }
+  .err {
+    display: block;
+    width: 100%;
+    font-size: 0.75rem;
+    color: var(--danger);
+    word-break: break-word;
   }
   .acts {
     display: flex;

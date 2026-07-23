@@ -26,6 +26,8 @@
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { online } from "$lib/stores/online.svelte.js";
+  import { classifyDeviceError, deviceErrorMessageKey } from "$lib/media/device-error.js";
+  import type { MessageKey } from "$lib/i18n/messages.js";
 
   let { naddr, talk }: { naddr: string; talk: boolean } = $props();
   const kind = $derived<"intro" | "talk">(talk ? "talk" : "intro");
@@ -209,6 +211,7 @@
   async function enableCamera() {
     error = null;
     try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new TypeError("no mediaDevices");
       stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "user" },
         audio: true,
@@ -220,17 +223,19 @@
       }
       startMeter(stream);
     } catch (e) {
-      error = new Error(t("record.error.camera", { reason: (e as Error).message }));
+      // Distinct recovery per cause (§7.4.10): denied / absent / busy / unsupported.
+      error = new Error(t(deviceErrorMessageKey(classifyDeviceError(e), false) as MessageKey));
     }
   }
 
   async function enableMic() {
     error = null;
     try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new TypeError("no mediaDevices");
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       startMeter(stream);
     } catch (e) {
-      error = new Error(t("record.error.mic", { reason: (e as Error).message }));
+      error = new Error(t(deviceErrorMessageKey(classifyDeviceError(e), true) as MessageKey));
     }
   }
 

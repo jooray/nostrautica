@@ -128,6 +128,20 @@ export async function connectNdk(): Promise<NDK> {
 }
 
 /**
+ * How many relays are currently connected (audit §7.4.6 — real relay health, not
+ * just navigator.onLine). Conference Wi-Fi often reports online while blocking
+ * WSS, so a 0 here with the browser "online" is the tell. Never throws; returns 0
+ * before the pool exists.
+ */
+export function connectedRelayCount(): number {
+  try {
+    return ndk?.pool?.connectedRelays().length ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * A relay URL the app will actually open (audit APPR-8): `wss://` only —
  * plaintext `ws://` to a remote host would expose all event traffic to
  * interception. The one exception is loopback (`ws://localhost` / `127.0.0.1` /
