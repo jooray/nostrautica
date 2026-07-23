@@ -15,13 +15,16 @@
   let { naddr }: { naddr: string } = $props();
 
   const route = $derived(router.route);
-  // New-matches-since-last-visit badge (spec §13). Recompute whenever the shell's
-  // event (and thus its cached match list) changes.
-  const newMatches = $derived.by(() => {
-    const coord = eventShell.ctx?.coordinate;
+  // New-matches-since-last-visit badge (spec §13). The refresh is a WRITE to
+  // whatsNew.counts — it must run in an effect, never inside a $derived
+  // (mutating $state from a derived throws Svelte's state_unsafe_mutation and
+  // breaks the render). The derived below only reads the resulting badge.
+  const coord = $derived(eventShell.ctx?.coordinate ?? "");
+  $effect(() => {
+    void coord;
     if (coord) whatsNew.refreshMatches(coord);
-    return whatsNew.matchBadge(coord);
   });
+  const newMatches = $derived(coord ? whatsNew.matchBadge(coord) : 0);
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
