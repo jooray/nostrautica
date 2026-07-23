@@ -11,6 +11,7 @@
   import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
+  import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
@@ -61,6 +62,7 @@
     names = new Map((cachedDirectory(c.coordinate) ?? []).map((e) => [e.pubkey, e]));
     profiles = cachedProfiles(list.matches.map((m) => m.pubkey));
     loading = false;
+    whatsNew.markMatchesSeen(c.coordinate);
     perfMark("Matches", "cache-paint");
   });
 
@@ -88,6 +90,8 @@
       const list = await fetchMatches(session.signer, ctx);
       matches = list?.matches ?? [];
       loading = false;
+      // Viewing the Matches page clears the new-matches watermark (spec §13).
+      whatsNew.markMatchesSeen(ctx.coordinate);
       // Powers the cause-aware empty state ("record your intro" when that's why).
       void readinessStore.load(ctx, session.signer);
       await Promise.allSettled([

@@ -43,6 +43,8 @@
   import ReadinessJourney from "$lib/components/ReadinessJourney.svelte";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
+  import { whatsNew } from "$lib/stores/whats-new.svelte.js";
+  import { visitorPreview } from "$lib/stores/visitor-preview.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -74,6 +76,18 @@
     cachedCtx ? cachedRoster(cachedCtx.coordinate)?.attendees.length : undefined,
   );
   let installHint = $state(false);
+  // "You were approved" banner (spec §13): shown once when approval landed since
+  // the last visit (watermark in whats-new), then acknowledged.
+  let showApprovedBanner = $state(false);
+  function checkApprovalBanner(coordinate: string) {
+    if (whatsNew.approvalIsNew(coordinate, true)) {
+      showApprovedBanner = true;
+      whatsNew.markApprovedSeen(coordinate);
+    }
+  }
+  function dismissApproved() {
+    showApprovedBanner = false;
+  }
   if (cachedCtx && (page || eventPosts.length)) perfMark("EventHome", "cache-paint");
 
   // Cache-paint after background hydration (§7.4.5). Boot no longer blocks on the
@@ -118,6 +132,7 @@
         approved = true;
         requestPending = false;
         clearJoinSent(ctx.coordinate);
+        checkApprovalBanner(ctx.coordinate);
         // The ECK just landed: the public pass ran keyless — re-fetch so
         // members-only page sections and posts decrypt, and warm the tabs.
         const [pageRes, postsRes] = await Promise.allSettled([
@@ -170,7 +185,10 @@
       await grantsScan;
       approved = await isApproved(ctx.coordinate);
       // The join-sent marker outlives a reload; approval supersedes it (P2).
-      if (approved) clearJoinSent(ctx.coordinate);
+      if (approved) {
+        clearJoinSent(ctx.coordinate);
+        checkApprovalBanner(ctx.coordinate);
+      }
       else {
         requestPending = joinSentAt(ctx.coordinate) !== undefined;
         // Keep watching for the approval while the page stays open (UX-9).
@@ -333,6 +351,32 @@
   // becomes prominent, though it's reachable anytime).
   const eventEnded = $derived(!!ctx?.end && ctx.end * 1000 < Date.now());
 
+  // "View as visitor" (spec §13): an organizer previewing the public view. While
+  // active, every member/organizer surface below is suppressed to the effective
+  // (visitor) role, so they see exactly what a non-member sees.
+  const previewing = $derived(!!ctx && visitorPreview.isActive(ctx.coordinate));
+  const effApproved = $derived(approved && !previewing);
+  const effOrganizer = $derived(organizer && !previewing);
+  function toggleVisitorPreview() {
+    if (ctx) visitorPreview.toggle(ctx.coordinate);
+  }
+
+  async function duplicateEvent() {
+    if (!ctx) return;
+    const { buildDuplicatePrefill } = await import("$lib/events/duplicate.js");
+    const { setDuplicateDraft } = await import("$lib/stores/duplicate-draft.js");
+    setDuplicateDraft(
+      buildDuplicatePrefill({
+        title: ctx.title,
+        summary: ctx.summary,
+        icon: ctx.icon,
+        config: ctx.config,
+        copyPrefix: (title) => t("event.duplicate.copyOf", { title }),
+      }),
+    );
+    router.go({ name: "create" });
+  }
+
   // Offline event pack (spec §13): one-tap pre-download of roster/directory/
   // matches/talks/profiles + a persistent-storage request, so the app works at a
   // venue with no signal. Everything rides the existing cache layer.
@@ -404,6 +448,15 @@
   <p class="muted">{t("event.loading")}</p>
 {:else}
   <EventHeader {ctx} status={overviewStatus} />
+
+  {#if showApprovedBanner}
+    <!-- "You were approved" (spec §13): one line, shown once, dismissible. -->
+    <div class="card ok approved-banner" role="status">
+      <span><Icon name="check" size={16} /> {t("event.approvedBanner")}</span>
+      <button class="btn inline ghost" onclick={dismissApproved} aria-label={t("event.approvedBanner.dismiss")}>✕</button>
+    </div>
+  {/if}
+
   {#if ctx.summary}<p class="summary">{ctx.summary}</p>{/if}
 
   <!-- Full logistics (§7.4.9): start/end + time zone, happening-now state,
@@ -425,23 +478,43 @@
   <!-- One unified event menu (user feedback 2026-07-16: admin was up top, other
        links stranded at the bottom): organizer admin + custom 31608 items +
        the posts archive, as one prominent grid. -->
+  {#if previewing}
+    <!-- Exit bar for the visitor preview (spec §13). -->
+    <div class="card visitor-preview-bar" role="status">
+      <span>{t("event.viewAsVisitor.active")}</span>
+      <button class="btn inline primary" onclick={toggleVisitorPreview}>{t("event.viewAsVisitor.exit")}</button>
+    </div>
+  {/if}
+
   <nav class="menu-grid" data-event-menu>
-    {#if organizer}
+    {#if effOrganizer}
       <button class="btn menu-btn" onclick={() => router.go({ name: "admin", naddr })}>
         <Icon name="sliders" size={17} />{t("event.organizerAdmin")}
       </button>
     {/if}
     {#if page}
       {#each page.menu as item (item.label + item.target)}
-        <button class="btn menu-btn" onclick={() => openMenuTarget(item.target)}>
-          {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
-        </button>
+        {#if !(previewing && item.membersOnly)}
+          <button class="btn menu-btn" onclick={() => openMenuTarget(item.target)}>
+            {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
+          </button>
+        {/if}
       {/each}
     {/if}
     <button class="btn menu-btn" onclick={() => router.go({ name: "posts", naddr })}>
       <Icon name="horn" size={17} />{t("event.allPosts")}
     </button>
-    {#if approved}
+    {#if organizer && !previewing}
+      <!-- Enter the visitor preview (organizers only). -->
+      <button class="btn menu-btn" onclick={toggleVisitorPreview}>
+        <Icon name="person" size={17} />{t("event.viewAsVisitor")}
+      </button>
+      <!-- Duplicate this event's config into a fresh event (organizers only). -->
+      <button class="btn menu-btn" onclick={duplicateEvent}>
+        <Icon name="copy" size={17} />{t("event.duplicate")}
+      </button>
+    {/if}
+    {#if effApproved}
       <!-- Post-event report (spec §13): available anytime, emphasized once ended. -->
       <button
         class="btn menu-btn"
@@ -455,11 +528,11 @@
 
   <!-- Readiness journey (§4.1): one honest next action, derived from real state.
        Visitors see the Join CTA as step 1; approved members see intro/matches. -->
-  {#if readinessStore.readiness}
+  {#if readinessStore.readiness && !previewing}
     <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
   {/if}
 
-  {#if approved}
+  {#if effApproved}
     <!-- Offline event pack (spec §13): pre-download + persistent storage. -->
     <div class="card offline">
       <div class="row" style="justify-content:space-between;align-items:flex-start;gap:0.5rem;flex-wrap:wrap">
@@ -497,7 +570,7 @@
     <PostCard post={latestPost} {naddr} full />
   {/if}
 
-  {#if approved && installHint}
+  {#if effApproved && installHint}
     <!-- One-time, dismissable install hint (UI-SUGGESTIONS #24). Never shown in
          standalone mode; Chrome/Android gets the real prompt, iOS instructions. -->
     <div class="card">
@@ -550,7 +623,7 @@
             <PostCard {post} {naddr} full />
           {/each}
         {/if}
-      {:else if section.type === "attendees" && approved}
+      {:else if section.type === "attendees" && effApproved}
         <!-- Roster preview — renders only for members (spec §7.4). -->
         <div class="card">
           <strong>{t("event.attendeesSection")}</strong>
@@ -582,7 +655,7 @@
   {/if}
 
   <!-- Leave event (NIP §6.3 21610): enrolled attendees only, confirm-guarded. -->
-  {#if approved && !organizer}
+  {#if effApproved && !effOrganizer}
     <div class="leave-zone">
       {#if leftMessage}
         <p class="muted" role="status">{leftMessage}</p>
@@ -646,6 +719,24 @@
   }
   .summary {
     margin: 0.25rem 0 0.75rem;
+  }
+  .approved-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+  .approved-banner span {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .visitor-preview-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
   .kicker {
     text-transform: uppercase;

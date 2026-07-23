@@ -1234,6 +1234,20 @@ export const messages = {
     "report.switch.body":
       "This event created a Nostr key for you. Back it up and use it in any Nostr app.",
     "report.switch.action": "Back up & explore Nostr",
+    "nav.matches.new": "{n} new matches",
+    "event.approvedBanner": "You’re approved — welcome in.",
+    "event.approvedBanner.dismiss": "Dismiss",
+    "event.viewAsVisitor": "View as visitor",
+    "event.viewAsVisitor.active": "Previewing the public view — members-only parts are hidden.",
+    "event.viewAsVisitor.exit": "Exit preview",
+    "event.duplicate": "Duplicate event",
+    "event.duplicate.copyOf": "Copy of {title}",
+    "create.duplicatedFrom": "Starting from a copy of “{title}”. A brand-new event with fresh keys will be created.",
+    "admin.invites.printSheet": "Print invite sheet",
+    "admin.inviteSheet.title": "Invite sheet",
+    "admin.inviteSheet.print": "Print",
+    "admin.inviteSheet.close": "Close",
+    "admin.inviteSheet.scanHint": "Scan to join",
   },
   sk: {
     // App shell / nav
@@ -2475,6 +2489,20 @@ export const messages = {
     "report.switch.body":
       "Toto podujatie vám vytvorilo Nostr kľúč. Zálohujte si ho a používajte v ktorejkoľvek Nostr aplikácii.",
     "report.switch.action": "Zálohovať a objaviť Nostr",
+    "nav.matches.new": "{n} nových spojení",
+    "event.approvedBanner": "Ste schválení — vitajte.",
+    "event.approvedBanner.dismiss": "Zavrieť",
+    "event.viewAsVisitor": "Zobraziť ako návštevník",
+    "event.viewAsVisitor.active": "Náhľad verejného zobrazenia — časti len pre členov sú skryté.",
+    "event.viewAsVisitor.exit": "Ukončiť náhľad",
+    "event.duplicate": "Duplikovať podujatie",
+    "event.duplicate.copyOf": "Kópia: {title}",
+    "create.duplicatedFrom": "Vychádzate z kópie „{title}“. Vytvorí sa úplne nové podujatie s novými kľúčmi.",
+    "admin.invites.printSheet": "Tlačiť hárok pozvánok",
+    "admin.inviteSheet.title": "Hárok pozvánok",
+    "admin.inviteSheet.print": "Tlačiť",
+    "admin.inviteSheet.close": "Zavrieť",
+    "admin.inviteSheet.scanHint": "Naskenujte a pripojte sa",
   },
   cs: {
     // Kostra aplikace / navigace
@@ -3720,6 +3748,20 @@ export const messages = {
     "report.switch.body":
       "Tato akce vám vytvořila Nostr klíč. Zálohujte si jej a používejte v jakékoli Nostr aplikaci.",
     "report.switch.action": "Zálohovat a objevit Nostr",
+    "nav.matches.new": "{n} nových spojení",
+    "event.approvedBanner": "Jste schváleni — vítejte.",
+    "event.approvedBanner.dismiss": "Zavřít",
+    "event.viewAsVisitor": "Zobrazit jako návštěvník",
+    "event.viewAsVisitor.active": "Náhled veřejného zobrazení — části jen pro členy jsou skryté.",
+    "event.viewAsVisitor.exit": "Ukončit náhled",
+    "event.duplicate": "Duplikovat akci",
+    "event.duplicate.copyOf": "Kopie: {title}",
+    "create.duplicatedFrom": "Vycházíte z kopie „{title}“. Vytvoří se zcela nová akce s novými klíči.",
+    "admin.invites.printSheet": "Tisk archu pozvánek",
+    "admin.inviteSheet.title": "Arch pozvánek",
+    "admin.inviteSheet.print": "Tisk",
+    "admin.inviteSheet.close": "Zavřít",
+    "admin.inviteSheet.scanHint": "Naskenujte a připojte se",
   },
 } as const;
 

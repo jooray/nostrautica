@@ -47,6 +47,7 @@
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
   import QrCode from "$lib/components/QrCode.svelte";
   import SecretSurface from "$lib/components/SecretSurface.svelte";
+  import InviteSheet from "$lib/components/InviteSheet.svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { publishEventUpdate } from "$lib/events/updates.js";
   import {
@@ -536,6 +537,7 @@
   let inviteCount = $state(5);
   let invites = $state<GeneratedInvite[]>([]);
   let generating = $state(false);
+  let showInviteSheet = $state(false);
 
   async function makeInvites() {
     if (!ctx || !session.signer) return;
@@ -1178,14 +1180,18 @@
            suppress the organizer's event CSS while they're on screen so no
            31609 stylesheet can exfiltrate them. -->
       <SecretSurface>
-        {#if invites.length > 1}
-          <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
+        <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
+          {#if invites.length > 1}
             <button class="btn inline" onclick={copyAllLinks}>
               {copiedAllLinks ? t("admin.invites.copiedAll") : t("admin.invites.copyAll")}
             </button>
             <button class="btn inline" onclick={downloadLinksFile}>{t("admin.invites.download")}</button>
-          </div>
-        {/if}
+          {/if}
+          <!-- Printable invite sheet (spec §13): QR per unused code, N per page. -->
+          <button class="btn inline" onclick={() => (showInviteSheet = true)}>
+            {t("admin.invites.printSheet")}
+          </button>
+        </div>
         {#each invites as inv (inv.nsec)}
           <div class="card" style="background:var(--bg-elev2)">
             <div class="row" style="justify-content:space-between">
@@ -1229,6 +1235,14 @@
 
 {#if detailProps}
   <AdminPersonDrawer {...detailProps} onClose={() => (detailPubkey = null)} />
+{/if}
+
+{#if showInviteSheet}
+  <InviteSheet
+    {invites}
+    eventTitle={ctx?.title ?? ""}
+    onClose={() => (showInviteSheet = false)}
+  />
 {/if}
 
 <style>

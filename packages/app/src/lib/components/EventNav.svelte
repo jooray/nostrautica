@@ -8,12 +8,20 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
+  import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
 
   let { naddr }: { naddr: string } = $props();
 
   const route = $derived(router.route);
+  // New-matches-since-last-visit badge (spec §13). Recompute whenever the shell's
+  // event (and thus its cached match list) changes.
+  const newMatches = $derived.by(() => {
+    const coord = eventShell.ctx?.coordinate;
+    if (coord) whatsNew.refreshMatches(coord);
+    return whatsNew.matchBadge(coord);
+  });
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
@@ -63,7 +71,16 @@
       class:active={active("matches")}
       onclick={() => router.go({ name: "matches", naddr })}
     >
-      <span class="ico"><Icon name="constellation" size={24} /></span><span class="lbl">{t("nav.matches")}</span>
+      <span class="ico">
+        <Icon name="constellation" size={24} />
+        {#if newMatches > 0 && !active("matches")}
+          <span class="badge-count" aria-hidden="true">{newMatches > 9 ? "9+" : newMatches}</span>
+        {/if}
+      </span><span class="lbl"
+        >{t("nav.matches")}{#if newMatches > 0 && !active("matches")}<span class="visually-hidden"
+            >{t("nav.matches.new", { n: newMatches })}</span
+          >{/if}</span
+      >
     </button>
   {/if}
 
@@ -158,6 +175,23 @@
     place-items: center;
     line-height: 0;
     min-height: 24px;
+    position: relative;
+  }
+  .badge-count {
+    position: absolute;
+    top: -6px;
+    left: 50%;
+    transform: translateX(30%);
+    min-width: 1rem;
+    padding: 0 0.2rem;
+    height: 1rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: var(--bg, #fff);
+    font-size: 0.62rem;
+    font-weight: 800;
+    line-height: 1rem;
+    text-align: center;
   }
   .lbl {
     font-size: 0.75rem;

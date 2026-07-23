@@ -30,6 +30,7 @@
   import { onMount } from "svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
+  import { takeDuplicateDraft } from "$lib/stores/duplicate-draft.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
@@ -72,7 +73,30 @@
   // must not be lost to a mid-typing deploy. Persist them (owner-scoped once the
   // key exists) and hold the pending reload while either is non-empty — it
   // applies automatically once the form is empty or the event is created.
+  // Duplicate-event prefill (spec §13): a "Duplicate event" action stashed a
+  // config-only prefill (never keys / coordinate / d — see events/duplicate.ts).
+  // Consuming it here fills the form; the event is still created fresh on submit.
+  let duplicatedFrom = $state<string | null>(null);
+
   onMount(() => {
+    const dup = takeDuplicateDraft();
+    if (dup) {
+      title = dup.title;
+      summary = dup.summary;
+      iconUrl = dup.iconUrl;
+      bannerUrl = dup.bannerUrl;
+      talks = dup.talks;
+      matching = dup.matching;
+      matchVisibility = dup.matchVisibility;
+      approval = dup.approval;
+      lang = dup.lang;
+      maxVideoUnlimited = dup.maxVideoSec === UNLIMITED_SEC;
+      if (!maxVideoUnlimited) maxVideoMinutes = dup.maxVideoSec / 60;
+      maxTalkUnlimited = dup.maxTalkSec === UNLIMITED_SEC;
+      if (!maxTalkUnlimited) maxTalkMinutes = dup.maxTalkSec / 60;
+      chatEnabled = dup.chatEnabled;
+      duplicatedFrom = dup.title;
+    }
     if (!session.pubkey) return;
     if (!title) title = loadDraft("create:title") ?? "";
     if (!summary) summary = loadDraft("create:summary") ?? "";
@@ -335,6 +359,12 @@
 </script>
 
 <h1>{t("create.title")}</h1>
+
+{#if duplicatedFrom && !created}
+  <div class="card" role="status">
+    <p class="muted" style="margin:0">{t("create.duplicatedFrom", { title: duplicatedFrom })}</p>
+  </div>
+{/if}
 
 {#if created}
   <div class="card">
