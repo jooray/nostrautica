@@ -41,6 +41,7 @@
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
+  import { recoverFromStaleChunk } from "$lib/stale-chunk.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
 
@@ -385,6 +386,9 @@
       // loop is internally guarded against duplicates.
       void pollForGrant();
     } catch (e) {
+      // Post-deploy stale shell: missing hashed chunk mid-submit. Reload once
+      // rather than strand the user on "Něco se pokazilo" + TypeError (PWA §10.2).
+      if (recoverFromStaleChunk(e)) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;

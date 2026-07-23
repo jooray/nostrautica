@@ -80,6 +80,31 @@ export function errorDetail(reason: unknown): string {
 }
 
 /**
+ * True when a dynamic `import()` failed because the browser is still running a
+ * pre-deploy module graph whose content-hashed chunks were deleted by the new
+ * build ("Failed to fetch dynamically imported module: …/W3Bonw05.js"). Not a
+ * real app bug — a normal reload picks up the new shell. Match Chrome/Firefox/
+ * Safari phrasings so LazyRoute / vite:preloadError can auto-recover.
+ */
+const STALE_CHUNK_PATTERNS = [
+  /failed to fetch dynamically imported module/i,
+  /error loading dynamically imported module/i,
+  /importing a module script failed/i,
+  /loading chunk [\w.-]+ failed/i,
+];
+
+export function isStaleChunkError(reason: unknown): boolean {
+  const msg =
+    reason instanceof Error
+      ? reason.message
+      : typeof reason === "string"
+        ? reason
+        : ((reason as { message?: unknown })?.message ?? "");
+  if (typeof msg !== "string" || !msg) return false;
+  return STALE_CHUNK_PATTERNS.some((re) => re.test(msg));
+}
+
+/**
  * Install a global handler that prevents benign relay rejections from becoming
  * uncaught exceptions. Call once at app boot. Non-relay errors are left alone so
  * real bugs still surface.

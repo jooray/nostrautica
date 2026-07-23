@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isBenignRelayError, categorizeError, errorDetail } from "./errors.js";
+import { isBenignRelayError, categorizeError, errorDetail, isStaleChunkError } from "./errors.js";
 
 describe("isBenignRelayError", () => {
   it("recognizes expected relay publish rejections", () => {
@@ -55,5 +55,29 @@ describe("errorDetail (Q3) redaction", () => {
     expect(d).not.toContain("a".repeat(64));
     expect(d).toContain("…");
     expect(d).not.toMatch(/nsec1[0-9a-z]{5,}/);
+  });
+});
+
+describe("isStaleChunkError (post-deploy missing chunk)", () => {
+  it("recognizes browser phrasings for a deleted content-hashed chunk", () => {
+    for (const m of [
+      "Failed to fetch dynamically imported module: https://example/app/_app/immutable/chunks/W3Bonw05.js",
+      "TypeError: error loading dynamically imported module",
+      "Importing a module script failed.",
+      "Loading chunk 5 failed.\n(error: https://example/chunk.js)",
+    ]) {
+      expect(isStaleChunkError(new Error(m)), m).toBe(true);
+    }
+  });
+
+  it("does not treat ordinary network/app errors as stale chunks", () => {
+    for (const m of [
+      "Failed to fetch",
+      "NetworkError when attempting to fetch resource.",
+      "Cannot read properties of undefined",
+      "not found",
+    ]) {
+      expect(isStaleChunkError(new Error(m)), m).toBe(false);
+    }
   });
 });

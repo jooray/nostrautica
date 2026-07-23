@@ -10,6 +10,7 @@
    */
   import type { Component } from "svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { recoverFromStaleChunk } from "$lib/stale-chunk.js";
 
   // A single wrapper renders route components with differing prop shapes, which
   // one static type can't express — props flow through untyped by design (each
@@ -36,8 +37,11 @@
       .then((m) => {
         if (alive) Resolved = m.default;
       })
-      .catch(() => {
-        if (alive) failed = true;
+      .catch((err) => {
+        // Post-deploy stale shell: missing content-hashed chunk → auto-reload
+        // once (PWA §10.2). Only surface the dead-end message if recovery did
+        // not fire (offline, or we already reloaded once this tab).
+        if (alive && !recoverFromStaleChunk(err)) failed = true;
       });
     return () => {
       alive = false;

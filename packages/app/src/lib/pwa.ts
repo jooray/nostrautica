@@ -26,7 +26,6 @@ import { registerSW } from "virtual:pwa-register";
 import { install } from "$lib/stores/install.svelte.js";
 import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 import { ControllerLatch } from "$lib/pwa-latch.js";
-
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 export function registerPwa(): void {

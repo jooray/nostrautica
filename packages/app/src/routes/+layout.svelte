@@ -18,6 +18,7 @@
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
+  import { installStaleChunkRecovery } from "$lib/stale-chunk.js";
   import { registerPwa } from "$lib/pwa.js";
   import { install } from "$lib/stores/install.svelte.js";
   import { hydrateAppCache } from "$lib/cache/persist.js";
@@ -61,6 +62,10 @@
     // bundle can be identified from the console without server access.
     console.info(releaseSummary());
     installRelayErrorGuard();
+    // Post-deploy missing-chunk recovery (PWA §10.2): one-shot reload on
+    // vite:preloadError / unhandled dynamic-import TypeError so users never
+    // need a manual hard refresh after a push.
+    installStaleChunkRecovery();
     // H-5: drop this identity's owner state here if another tab logs it out.
     initSessionBroadcast((owner) => session.applyRemoteLogout(owner));
     theme.init();
