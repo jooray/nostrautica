@@ -1,9 +1,13 @@
+<!-- GENERATED FILE — do not edit by hand.
+     Source of truth: packages/protocol/src/registry.ts (CUSTOM_KIND_REGISTRY).
+     Regenerate with `pnpm gen:registry`. The prose sections live in
+     renderRegistryDoc(); the tables are generated from the typed registry. -->
 # Nostrautica Protocol Registry
 
 **Status:** Compact index of every custom event kind. **`docs/PROTOCOL-NIP.md` is the
 normative specification** — full per-kind content schemas, cryptographic constructions,
-ordering rules, and rationale live there; this document is a quick-reference table, kept
-in the same change as any new custom kind or field.
+ordering rules, and rationale live there; this document is a quick-reference table,
+generated from the typed `CUSTOM_KIND_REGISTRY` in `packages/protocol/src/registry.ts`.
 
 **Ordering (PROTOCOL-NIP.md §3.1):** for any two events sharing (kind, author, `d`), the
 event with the higher `created_at` wins; on a tie, the event with the lexicographically

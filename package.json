@@ -15,6 +15,8 @@
     "typecheck": "pnpm -r --filter=!@nostrautica/e2e typecheck",
     "lint": "pnpm -r --filter=!@nostrautica/e2e lint",
     "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "gen:registry": "pnpm --filter @nostrautica/protocol build && node scripts/gen-registry.mjs",
+    "audit": "pnpm audit --audit-level high",
     "e2e": "pnpm --filter @nostrautica/e2e test",
     "e2e:smoke": "node e2e/orchestrator.mjs smoke",
     "e2e:integration": "node e2e/orchestrator.mjs integration",

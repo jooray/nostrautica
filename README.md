@@ -12,7 +12,7 @@ only to Nostr relays and Blossom servers.
 
 See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative), the
 [protocol registry](docs/PROTOCOL-REGISTRY.md), and [versioning](docs/VERSIONING.md).
-[`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) is historical planning material. Product pitch:
+[`docs/archive/IMPLEMENTATION_PLAN.md`](docs/archive/IMPLEMENTATION_PLAN.md) is historical planning material. Product pitch:
 [`docs/ELEVATOR-PITCH-en.md`](docs/ELEVATOR-PITCH-en.md). Guides:
 [organizer](docs/ORGANIZER-GUIDE.md) · [participant](docs/PARTICIPANT-GUIDE.md).
 

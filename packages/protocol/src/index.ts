@@ -3,6 +3,7 @@
  * coordinator. Zero UI/server dependencies (spec / IMPLEMENTATION_PLAN §0).
  */
 export * from "./kinds.js";
+export * from "./registry.js";
 export * from "./crypto.js";
 export * from "./giftwrap.js";
 export * from "./coordinate.js";

@@ -49,7 +49,7 @@ const SECTIONS = [
     docs: [
       { file: "SPECIFICATION.md", title: "Specification" },
       { file: "THREAT-MODEL.md", title: "Threat Model" },
-      { file: "IMPLEMENTATION_PLAN.md", title: "Implementation Plan" },
+      { file: "PROTOCOL-REGISTRY.md", title: "Protocol Registry" },
     ],
   },
   {
