@@ -8,9 +8,12 @@
   import { receiveGrants } from "$lib/events/attendee.js";
   import {
     attachCoordinator,
+    detachCoordinator,
     addCoOrganizer,
     updateEventConfig,
+    fetchCoordinatorLastSeen,
   } from "$lib/events/organizer.js";
+  import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { updateEventMetadata } from "$lib/events/event-metadata.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
@@ -223,7 +226,10 @@
     posts = await fetchEventPosts(ctx).catch(() => []);
     await loadEventPage();
     await loadTheme();
-    if (!ctx.config.coordinator) await loadCoordinators();
+    // Coordinators list feeds both the attach picker and the replace picker; the
+    // lifecycle view additionally loads the attached coordinator's announcement.
+    await loadCoordinators();
+    if (ctx.config.coordinator) await loadCoordinatorLifecycle();
   }
 
   async function pollForOrganizerGrant() {
@@ -258,6 +264,101 @@
   let coordinatorInput = $state("");
   let attaching = $state(false);
   let attached = $state(false);
+
+  // Coordinator lifecycle view (UX-A8): identity + announcement + last-seen +
+  // test-connection + re-send grant + replace + detach with consequence text.
+  let coordAnnounce = $state<DiscoveredCoordinator | undefined>(undefined);
+  let coordLastSeen = $state<number | undefined>(undefined);
+  let showReplace = $state(false); // reveals the picker/paste for replacement
+  let resending = $state(false);
+  let resent = $state(false);
+  let detaching = $state(false);
+  let confirmingDetach = $state(false);
+  let testing = $state(false);
+  let testResult = $state<"ok" | "unreachable" | null>(null);
+
+  async function loadCoordinatorLifecycle() {
+    if (!ctx?.config.coordinator) return;
+    const coordPk = ctx.config.coordinator;
+    // Announcement (31611): reuse the discovery fetch and pick this coordinator.
+    void fetchCoordinators()
+      .then((list) => {
+        coordAnnounce = list.find((c) => c.pubkey === coordPk);
+      })
+      .catch(() => {});
+    void fetchCoordinatorLastSeen(ctx)
+      .then((s) => (coordLastSeen = s))
+      .catch(() => {});
+  }
+
+  function sinceLabel(unixSec: number): string {
+    const s = Math.max(0, Math.floor(Date.now() / 1000) - unixSec);
+    if (s < 90) return t("admin.coord.justNow");
+    if (s < 3600) return t("admin.coord.minAgo", { n: Math.round(s / 60) });
+    if (s < 86400) return t("admin.coord.hAgo", { n: Math.round(s / 3600) });
+    return t("admin.coord.dAgo", { n: Math.round(s / 86400) });
+  }
+
+  // Test connection (UX-A8): re-fetch the announcement + latest status/last-seen
+  // and report whether the coordinator is reachable.
+  async function testConnection() {
+    if (!ctx?.config.coordinator) return;
+    testing = true;
+    testResult = null;
+    error = null;
+    try {
+      const list = await fetchCoordinators().catch(() => []);
+      coordAnnounce = list.find((c) => c.pubkey === ctx!.config.coordinator) ?? coordAnnounce;
+      const seen = await fetchCoordinatorLastSeen(ctx).catch(() => undefined);
+      if (seen !== undefined) coordLastSeen = seen;
+      // Also try a status read when we hold E_id (a stronger liveness signal).
+      if (keys?.eidNsecHex) {
+        await fetchCoordinatorStatuses(ctx, keys.eidNsecHex).catch(() => []);
+      }
+      testResult = coordAnnounce || seen !== undefined ? "ok" : "unreachable";
+    } finally {
+      testing = false;
+    }
+  }
+
+  // Re-send the coordinator grant (UX-A8): re-attaching the SAME coordinator
+  // re-issues the 21603 grant (bumping the install generation) without rotating.
+  async function resendGrant() {
+    if (!ctx || !session.signer || !ctx.config.coordinator) return;
+    resending = true;
+    resent = false;
+    error = null;
+    try {
+      const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
+      await attachCoordinator(session.signer, ctx, ctx.config.coordinator, blindingKey);
+      resent = true;
+      setTimeout(() => (resent = false), 2000);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      resending = false;
+    }
+  }
+
+  async function detach() {
+    if (!ctx || !session.signer || !ctx.config.coordinator) return;
+    detaching = true;
+    confirmingDetach = false;
+    error = null;
+    try {
+      const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
+      await detachCoordinator(session.signer, ctx, blindingKey);
+      // Reflect the detach locally so the UI returns to the attach flow.
+      ctx = { ...ctx, config: { ...ctx.config, coordinator: undefined } };
+      coordAnnounce = undefined;
+      coordLastSeen = undefined;
+      await loadCoordinators();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      detaching = false;
+    }
+  }
 
   // Prerecorded-talks mode (spec F2). Editing republishes the 31600 config; the
   // coordinator picks up the change live (audit H5). Seeded from the loaded config.
@@ -849,22 +950,13 @@
 
   <div class="card">
     <div class="field-label">{t("admin.coordinator.title")}</div>
-    {#if ctx?.config.coordinator}
-      <p class="muted">{t("admin.coordinator.attached")} <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
-      <p class="muted" style="margin:0.25rem 0 0">{t("admin.coordinator.attachedManage")}</p>
-    {:else if attached}
-      <p class="muted">{t("admin.coordinator.attachedOk")}</p>
-    {:else}
-      <p class="muted">
-        {t("admin.coordinator.body")}
-      </p>
 
-      <!-- Discovered coordinators (kind 31611) — pick one, no npub needed. -->
+    {#snippet pickerBody(replace: boolean)}
       {#if loadingCoordinators}
         <p class="muted">{t("admin.coordinator.discovering")}</p>
-      {:else if coordinators.length}
+      {:else if coordinators.filter((c) => c.pubkey !== ctx?.config.coordinator).length}
         <div class="stack" style="gap:0.5rem;margin:0.5rem 0">
-          {#each coordinators as c (c.pubkey)}
+          {#each coordinators.filter((c) => c.pubkey !== ctx?.config.coordinator) as c (c.pubkey)}
             <div class="card coord-card">
               <div class="row" style="gap:0.6rem;align-items:flex-start">
                 {#if c.announce.picture}
@@ -890,14 +982,13 @@
                 </div>
               </div>
               <div class="row" style="margin-top:0.5rem;gap:0.5rem;flex-wrap:wrap">
-                <!-- terms_url comes from a SELF-PUBLISHED announcement: render
-                     only a parseable https: URL (audit APPR-1) — announcements
-                     already on relays predate the schema's https validation. -->
                 {#if httpsUrl(c.announce.terms_url)}
                   <a class="btn inline" href={httpsUrl(c.announce.terms_url)} target="_blank" rel="noopener noreferrer">{t("admin.coordinator.terms")}</a>
                 {/if}
                 <button class="btn inline primary" onclick={() => attachPubkey(c.pubkey)} disabled={attaching}>
-                  {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attachThis")}
+                  {attaching
+                    ? t("admin.coordinator.attaching")
+                    : replace ? t("admin.coordinator.replaceThis") : t("admin.coordinator.attachThis")}
                 </button>
               </div>
             </div>
@@ -911,9 +1002,83 @@
         <summary class="muted" style="cursor:pointer">{t("admin.coordinator.paste")}</summary>
         <input style="margin-top:0.5rem" placeholder={t("admin.coordinator.placeholder")} bind:value={coordinatorInput} />
         <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
-          {attaching ? t("admin.coordinator.attaching") : t("admin.coordinator.attach")}
+          {attaching ? t("admin.coordinator.attaching") : replace ? t("admin.coordinator.replace") : t("admin.coordinator.attach")}
         </button>
       </details>
+    {/snippet}
+
+    {#if ctx?.config.coordinator}
+      <!-- Lifecycle view (UX-A8): identity, announcement, last-seen, and the full
+           set of controls once attached. -->
+      <p class="muted">{t("admin.coordinator.identity")}
+        <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
+      {#if coordAnnounce}
+        <div class="row" style="gap:0.6rem;align-items:center;margin:0.35rem 0">
+          {#if coordAnnounce.announce.picture}<img src={coordAnnounce.announce.picture} alt="" class="coord-logo" />{/if}
+          <div>
+            <strong>{coordAnnounce.announce.name}</strong>
+            <span class="badge">{pricingLabel(coordAnnounce.announce)}</span>
+          </div>
+        </div>
+        <div class="row" style="flex-wrap:wrap;gap:0.3rem">
+          {#if coordAnnounce.announce.features?.matching}<span class="badge">{t("admin.coordinator.feat.matching")}</span>{/if}
+          {#if coordAnnounce.announce.features?.talks}<span class="badge">{t("admin.coordinator.feat.talks")}</span>{/if}
+          {#if coordAnnounce.announce.features?.chat?.length}<span class="badge">{t("admin.coordinator.feat.chat")}</span>{/if}
+          {#if coordAnnounce.announce.privacy}
+            {#each Object.entries(coordAnnounce.announce.privacy).filter(([, v]) => v !== "private") as [role] (role)}
+              <span class="badge warn">{role}: {t("admin.coordinator.nonPrivate")}</span>
+            {/each}
+          {/if}
+        </div>
+      {/if}
+      <p class="muted" style="margin:0.35rem 0">
+        {t("admin.coordinator.lastSeen")}
+        {#if coordLastSeen === undefined}
+          <span class="badge warn">{t("admin.checkingStatus")}</span>
+        {:else}
+          <span class="badge {Math.floor(Date.now() / 1000) - coordLastSeen > 3600 ? 'warn' : 'ok'}">{sinceLabel(coordLastSeen)}</span>
+        {/if}
+      </p>
+
+      <div class="row" style="flex-wrap:wrap;gap:0.5rem;margin-top:0.5rem">
+        <button class="btn inline" onclick={testConnection} disabled={testing}>
+          {testing ? t("admin.coordinator.testing") : t("admin.coordinator.test")}
+        </button>
+        <button class="btn inline" onclick={resendGrant} disabled={resending}>
+          {resending ? t("admin.coordinator.resending") : t("admin.coordinator.resend")}
+        </button>
+        <button class="btn inline" onclick={() => (showReplace = !showReplace)}>{t("admin.coordinator.replace")}</button>
+      </div>
+      {#if testResult === "ok"}<p class="muted" role="status" style="margin:0.35rem 0 0">{t("admin.coordinator.testOk")}</p>{/if}
+      {#if testResult === "unreachable"}<p class="muted" style="color:var(--danger);margin:0.35rem 0 0">{t("admin.coordinator.testFail")}</p>{/if}
+      {#if resent}<p class="muted" role="status" style="margin:0.35rem 0 0">{t("admin.coordinator.resent")}</p>{/if}
+
+      {#if showReplace}
+        <div class="card" style="background:var(--bg-elev2);margin-top:0.5rem">
+          <p class="muted" style="margin:0 0 0.25rem">{t("admin.coordinator.replace.body")}</p>
+          {@render pickerBody(true)}
+        </div>
+      {/if}
+
+      <!-- Detach with explicit consequences (keys rotate, chat admin orphaned). -->
+      <div class="card" style="border-left:3px solid var(--danger);margin-top:0.75rem">
+        {#if confirmingDetach}
+          <p class="muted" style="margin:0 0 0.5rem">{t("admin.coordinator.detach.consequence")}</p>
+          <div class="row">
+            <button class="btn inline danger" onclick={detach} disabled={detaching}>
+              {detaching ? t("admin.coordinator.detaching") : t("admin.coordinator.detach.confirm")}
+            </button>
+            <button class="btn inline" onclick={() => (confirmingDetach = false)}>{t("admin.revoke.keep")}</button>
+          </div>
+        {:else}
+          <button class="btn inline danger" onclick={() => (confirmingDetach = true)}>{t("admin.coordinator.detach")}</button>
+        {/if}
+      </div>
+    {:else if attached}
+      <p class="muted">{t("admin.coordinator.attachedOk")}</p>
+    {:else}
+      <p class="muted">{t("admin.coordinator.body")}</p>
+      {@render pickerBody(false)}
     {/if}
   </div>
 
