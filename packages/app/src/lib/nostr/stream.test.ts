@@ -139,6 +139,33 @@ describe("streamEvents", () => {
     expect(got).toEqual(["new"]);
   });
 
+  // Audit P2: equal-created_at siblings must converge on the lowest id for BOTH
+  // the live onEvent stream AND the ready snapshot, regardless of arrival order.
+  it("equal-time replaceable siblings converge on the lowest id, both orders (audit P2)", async () => {
+    for (const order of [
+      ["a", "b"],
+      ["b", "a"],
+    ]) {
+      const got: string[] = [];
+      const h = streamEvents(
+        { kinds: [31600] },
+        { graceMs: 100, timeoutMs: 5000, onEvent: (e: any) => got.push(e.id) },
+      );
+      const mk = (id: string) =>
+        fakeEvent({ id, kind: 31600, pubkey: "a", tags: [["d", "x"]], created_at: 100 });
+      currentSub.emit("event", mk(order[0]));
+      currentSub.emit("event", mk(order[1]));
+      currentSub.emit("eose");
+      await vi.advanceTimersByTimeAsync(100);
+      const snap = await h.ready;
+      // Snapshot converges on "a" either way.
+      expect(snap.map((e: any) => e.id)).toEqual(["a"]);
+      // Live stream: "a" first → only "a"; "b" first → "b" then the superseding "a".
+      expect(got).toEqual(order[0] === "a" ? ["a"] : ["b", "a"]);
+      h.stop();
+    }
+  });
+
   it("stop() is idempotent and always settles ready", async () => {
     const h = streamEvents({ kinds: [1] });
     h.stop();
