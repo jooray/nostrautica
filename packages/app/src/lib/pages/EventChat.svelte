@@ -48,6 +48,7 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let error = $state<unknown>(null);
   let sendError = $state<string | null>(null);

@@ -23,6 +23,7 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   // Cache-first paint (§2.3): matches/names/profiles from the persistent cache so
   // the page shows the ranked list instantly on revisit, then refreshes.
@@ -37,6 +38,7 @@
   let profiles = $state<Map<string, ProfileMeta>>(
     cachedList ? cachedProfiles(cachedList.matches.map((m) => m.pubkey)) : new Map(),
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
   let loading = $state(matches.length === 0);
   let error = $state<unknown>(null);
   let noCoordinator = $state(false);
@@ -45,6 +47,7 @@
   // empty list. "visitor" = signed in, no ECK and no pending join marker.
   let access = $state<"unknown" | "visitor" | "pending" | "member">("unknown");
 
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (matches.length) perfMark("Matches", "cache-paint");
 
   // Cache-paint after background hydration (§7.4.5): boot no longer waits on the

@@ -149,6 +149,12 @@
     {:else}
     <p class="muted hint">{t("cropper.hint")}</p>
 
+    <!-- Custom pan/zoom crop surface: focusable and fully keyboard-operable (arrow keys
+         pan via onViewportKey, mirroring pointer drag) with an aria-label. role="group"
+         is non-interactive per ARIA, so these fire as false positives on an intentionally
+         interactive widget that is already accessible. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <div
       class="viewport"
       role="group"

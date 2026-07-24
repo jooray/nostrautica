@@ -21,15 +21,19 @@
 
   let { naddr, d }: { naddr: string; d: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<string | null>(null);
   // Cache-first (§2.4): paint the post from the cached feeds instantly instead
   // of always round-tripping, then refresh in the background.
+  // svelte-ignore state_referenced_locally -- d is constant for this instance ({#key} remounts on change)
   let post = $state<EventPost | undefined>(
     cachedCtx ? cachedPostByD(cachedCtx.coordinate, d) : undefined,
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let loading = $state(post === undefined);
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (post) perfMark("Post", "cache-paint");
 
   onMount(async () => {

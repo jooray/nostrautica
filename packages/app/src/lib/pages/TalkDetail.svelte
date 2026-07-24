@@ -26,22 +26,28 @@
 
   let { naddr, d }: { naddr: string; d: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   // Cache-first (§2.5): the talk set was decrypted once — don't re-decrypt the
   // whole set on every open; paint this talk from cache, refresh in background.
+  // svelte-ignore state_referenced_locally -- d is constant for this instance ({#key} remounts on change)
   let talk = $state<TalkContent | null>(
     cachedCtx ? (cachedTalk(cachedCtx.coordinate, d) ?? null) : null,
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let speakerName = $state(
     talk ? (cachedProfiles([talk.pubkey]).get(talk.pubkey)?.name ?? "") : "",
   );
   let resumeAt = $state(0);
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let loading = $state(talk === null);
   let error = $state<unknown>(null);
   // Favorite marker (spec §13 report): local-only, keyed by the talk's blinded d.
+  // svelte-ignore state_referenced_locally -- d is constant for this instance ({#key} remounts on change)
   let favorite = $state(cachedCtx ? isFavoriteTalk(cachedCtx.coordinate, d) : false);
 
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (talk) perfMark("TalkDetail", "cache-paint");
 
   function toggleFavorite() {

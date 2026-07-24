@@ -12,14 +12,17 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   // Cache-first paint (§2.5): last-seen talks render instantly, then refresh.
   let items = $state<TalkItem[]>(cachedCtx ? (cachedTalks(cachedCtx.coordinate) ?? []) : []);
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let loading = $state(items.length === 0);
   let error = $state<unknown>(null);
   let gatedOff = $state(false);
 
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (items.length) perfMark("Talks", "cache-paint");
 
   onMount(async () => {

@@ -260,15 +260,6 @@
     flex: 1;
     min-width: 0;
   }
-  .upload {
-    width: auto;
-    flex: none;
-    white-space: nowrap;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
   .image-preview {
     max-width: 100%;
     max-height: 160px;

@@ -27,6 +27,7 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<string | null>(null);
@@ -38,7 +39,9 @@
   let attendeePosts = $state<EventPost[]>(
     (cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? [],
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted values
   let loading = $state(eventPosts.length === 0 && attendeePosts.length === 0);
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (!loading) perfMark("Posts", "cache-paint");
 
   let source = $state<"event" | "attendees" | "both">("both");

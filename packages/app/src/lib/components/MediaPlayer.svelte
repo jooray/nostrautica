@@ -119,7 +119,10 @@
       ontimeupdate={onTimeUpdate}
     ></audio>
   {:else}
-    {#if !captionsUrl}<!-- svelte-ignore a11y_media_has_caption -->{/if}
+    <!-- Captions come from an optional transcript track, rendered below only when a
+         transcript exists; user-recorded talk/intro clips frequently have none, so a
+         caption track is not always available for this player. -->
+    <!-- svelte-ignore a11y_media_has_caption -->
     <video
       bind:this={mediaEl}
       src={url}

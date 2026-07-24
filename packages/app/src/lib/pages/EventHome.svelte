@@ -49,6 +49,7 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<string | null>(null);
@@ -68,6 +69,7 @@
   let attendeePosts = $state<EventPost[]>((cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? []);
   // The body below the header is still fetching — show a skeleton only on a cold
   // open (no cached posts/page to paint).
+  // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
   let bodyLoading = $state(eventPosts.length === 0 && !page);
   let pinnedPosts = $state<Map<string, EventPost>>(new Map());
   // Seed the attendees-section count from the cached roster (§2.4) so the widget
@@ -88,6 +90,7 @@
   function dismissApproved() {
     showApprovedBanner = false;
   }
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted values
   if (cachedCtx && (page || eventPosts.length)) perfMark("EventHome", "cache-paint");
 
   // Cache-paint after background hydration (§7.4.5). Boot no longer blocks on the

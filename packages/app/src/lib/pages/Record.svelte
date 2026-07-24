@@ -88,6 +88,7 @@
 
   // Cache-first (§2.7): the composer opens instantly with the last library/intro
   // from cache while the fresh copies refresh in the background.
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<unknown>(null);
@@ -139,6 +140,7 @@
   const unlimited = $derived(maxSec === UNLIMITED_SEC);
   const textLeft = $derived(MAX_INTRO_TEXT - textIntro.length);
 
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted values
   if (cachedCtx && (library.length || textLibrary.length || textIntro)) perfMark("Record", "cache-paint");
 
   // Draft-safe auto-refresh (App-2, audit U4): an automatic service-worker

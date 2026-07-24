@@ -32,6 +32,7 @@
     onError: (message: string) => void;
   } = $props();
 
+  // svelte-ignore state_referenced_locally -- initialPosts is a paint-once cache prop; live updates come via load()
   let posts = $state<EventPost[]>(initialPosts);
   let postTitle = $state("");
   let postSummary = $state("");

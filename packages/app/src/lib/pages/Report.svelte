@@ -26,18 +26,21 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let settings = $state<PerEventSettings | null>(
     cachedCtx ? (cachedPerEventSettings(cachedCtx.coordinate) ?? null) : null,
   );
   let entries = $state<DirectoryEntryContent[]>(cachedCtx ? (cachedDirectory(cachedCtx.coordinate) ?? []) : []);
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let profiles = $state<Map<string, ProfileMeta>>(
     cachedProfiles(entries.map((e) => e.pubkey)),
   );
   let favTalks = $state<{ d: string; title: string }[]>(
     cachedCtx ? favoriteTalkItems(cachedCtx.coordinate) : [],
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let loading = $state(ctx === null);
   let error = $state<unknown>(null);
   let blindingKey: Uint8Array | null = null;
