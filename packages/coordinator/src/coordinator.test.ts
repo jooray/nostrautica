@@ -97,6 +97,14 @@ class FakeTransport implements Transport {
       sub.closed = true;
     };
   }
+  /** C9 make-before-break: relay sets (sorted, space-joined) the probe reports as
+   *  UNREACHABLE. Any other set is reachable. Also records every probed set. */
+  unreachableRelays = new Set<string>();
+  probed: string[][] = [];
+  async probe(relays: string[]): Promise<boolean> {
+    this.probed.push(relays);
+    return !this.unreachableRelays.has([...relays].sort().join(" "));
+  }
 }
 
 const FIXTURES = {
@@ -318,6 +326,13 @@ async function setup(
       perAttendeeCalls: number;
       perEventCalls: number;
     };
+    /** C2 race hook: awaited by the injected transcribe BEFORE it returns, so a test
+     *  can pause a specific revision's STT/LLM mid-flight and interleave a newer one. */
+    beforeTranscribe?: (descriptor: any) => Promise<void>;
+    /** C1 attach test: skip the auto-install so the test can drive installEvent via a
+     *  grant wrap (and inject a mid-install failure). */
+    skipAutoInstall?: boolean;
+    transcribeError?: string;
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -397,6 +412,7 @@ async function setup(
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
     transcribe: async (descriptor) => {
+      if (opts.beforeTranscribe) await opts.beforeTranscribe(descriptor);
       if (opts.failTranscribe) throw new Error(opts.transcribeError ?? "could not fetch blob (simulated)");
       const cached = store.getTranscript(descriptor.x);
       if (cached !== undefined) return cached;
@@ -410,9 +426,11 @@ async function setup(
   // the seeded 31600 names this coordinator at gen 1). A foreignCoordinator seed
   // names a DIFFERENT coordinator, so the grant is rejected and the event never
   // installs — the behavior those tests assert.
-  await coordinator.installEvent({
-    coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
-  });
+  if (!opts.skipAutoInstall) {
+    await coordinator.installEvent({
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+  }
 
   return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
 }
@@ -2539,14 +2557,17 @@ class StubMls implements ChatMls {
 }
 
 describe("audit COORD-9 — MLS membership runs through the durable job runner", () => {
-  it("approval enqueues chat_sync_member; the member is added on drain", async () => {
+  it("approval enqueues chat_sync_member; the attested device is added on drain", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto"); // auto-approved → job enqueued
-    h.transport.seed.push({ kind: 30443, pubkey: pk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    // P6: the account attests a device key; the DEVICE key is what gets added.
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
     await h.coordinator.jobs.drain();
-    expect(mls.invited).toEqual([pk]);
+    expect(mls.invited).toEqual([devicePk]);
   });
 
   it("a persistently failing sync poisons and surfaces a 21606 to the organizer", async () => {
@@ -2555,7 +2576,9 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     const h = await setup(0, { chat: true, chatMls: mls });
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto");
-    h.transport.seed.push({ kind: 30443, pubkey: pk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
     await h.coordinator.jobs.drain(); // attempt 1 fails, long-tail backoff begins
     expect(mls.invited).toEqual([]);
     // Burn through the retry schedule (virtual clock) until the job poisons.
@@ -3605,5 +3628,279 @@ describe("NIP §6.2 — retention sweep", () => {
     await h.coordinator.retentionSweep();
     expect(h.transport.published.slice(before2).some((e) => e.kind === KIND_DELETION)).toBe(false);
     expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBe(profileBefore);
+  });
+});
+
+// ── audit C8 / P9 / C9 / C2 / C1 regression suites ───────────────────────────
+
+/** A live 31600 config-update event superseding the seeded install config. */
+function configUpdate(h: Harness, extraTags: string[][], createdAt: number): NostrEvent {
+  return {
+    kind: 31600,
+    pubkey: getPublicKey(h.eidSk),
+    created_at: createdAt,
+    id: `cfg-${createdAt}-${Math.floor(Math.random() * 1e6)}`,
+    tags: [
+      ["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)],
+      ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"],
+      ...extraTags,
+    ],
+    content: "",
+    sig: "",
+  } as any;
+}
+
+describe("audit C8 — live duration limits keep the ffprobe-side caps in sync", () => {
+  it("lowering max_video_sec/max_talk_sec updates ALL THREE decoded-duration caps atomically", async () => {
+    const h = await setup(0, { maxVideoSec: 600, maxTalkSec: 1200 });
+    expect(h.coordinator.durationLimitsOf(h.coordinate)).toEqual({
+      maxMediaSec: 1200, maxIntroSec: 600, maxTalkSec: 1200,
+    });
+    // A live config edit lowers the limits. Pre-fix only maxMediaSec followed; the
+    // authoritative ffprobe caps (maxIntroSec/maxTalkSec) stayed at install values.
+    await h.coordinator.handleConfigUpdate(
+      h.coordinate,
+      configUpdate(h, [["max_video_sec", "60"], ["max_talk_sec", "120"]], 2),
+    );
+    expect(h.coordinator.durationLimitsOf(h.coordinate)).toEqual({
+      maxMediaSec: 120, maxIntroSec: 60, maxTalkSec: 120,
+    });
+  });
+
+  it("raising the limits lifts the decoded-duration caps too", async () => {
+    const h = await setup(0, { maxVideoSec: 60, maxTalkSec: 60 });
+    expect(h.coordinator.durationLimitsOf(h.coordinate)!.maxIntroSec).toBe(60);
+    await h.coordinator.handleConfigUpdate(
+      h.coordinate,
+      configUpdate(h, [["max_video_sec", "300"], ["max_talk_sec", "900"]], 2),
+    );
+    expect(h.coordinator.durationLimitsOf(h.coordinate)).toEqual({
+      maxMediaSec: 900, maxIntroSec: 300, maxTalkSec: 900,
+    });
+  });
+});
+
+describe("audit P9 — 31923 metadata selection uses the latest-event comparator", () => {
+  it("selects the NEWEST 31923 revision regardless of relay return order (retention anchor)", async () => {
+    const h = await setup(0, {
+      extraSeed: ({ eidPubkey, d }) => [
+        // A STALE revision (older, earlier end) returned before the newest one.
+        { kind: 31923, pubkey: eidPubkey, created_at: 3, tags: [["d", d], ["title", "Stale"], ["end", "1000"]], content: "", id: "ev-stale", sig: "" } as any,
+        { kind: 31923, pubkey: eidPubkey, created_at: 10, tags: [["d", d], ["title", "Latest"], ["end", "5000"]], content: "", id: "ev-latest", sig: "" } as any,
+      ],
+    });
+    // pickLatest → the ca=10 revision (end 5000), not the first-returned base/stale.
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(5000);
+  });
+
+  it("a live 31923 edit re-times the retention anchor; a stale revision is ignored", async () => {
+    const h = await setup(0, { eventEndSec: 1000 });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600),
+    )!;
+    // A newer 31923 moves the end date.
+    cfgSub.onEvent({
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "ev-20",
+      tags: [["d", "cypherpunk"], ["title", "Moved"], ["end", "8000"]], content: "", sig: "",
+    } as any);
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+    // A stale (older) 31923 does NOT regress it.
+    cfgSub.onEvent({
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 4, id: "ev-4",
+      tags: [["d", "cypherpunk"], ["title", "Stale"], ["end", "1"]], content: "", sig: "",
+    } as any);
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+  });
+});
+
+describe("audit C9 — relay handover is make-before-break", () => {
+  it("a probe-failing candidate relay set never cuts off the healthy subscription; it promotes when reachable", async () => {
+    const h = await setup();
+    const inboxSubs0 = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs0).toHaveLength(1);
+    expect(inboxSubs0[0]!.relays).toEqual(["wss://test"]);
+
+    // The organizer edits relays to an UNREACHABLE set (typo / outage).
+    h.transport.unreachableRelays.add("wss://bad.relay");
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", "wss://bad.relay"]], 2));
+
+    // The healthy old subscription is STILL open, no new inbox sub on the bad relays,
+    // and the candidate is persisted separately as pending.
+    const inboxSubs1 = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs1).toHaveLength(1);
+    expect(inboxSubs1[0]!.closed).toBe(false);
+    expect(h.store.getPendingRelays(h.coordinate)).toEqual(["wss://bad.relay"]);
+
+    // Once the relay recovers, the periodic retry PROMOTES it: new sub opens, old retires.
+    h.transport.unreachableRelays.clear();
+    await h.coordinator.retryRelayHandovers();
+    const inboxSubs2 = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs2.some((s) => !s.closed && s.relays?.includes("wss://bad.relay"))).toBe(true);
+    expect(inboxSubs2[0]!.closed).toBe(true); // the original was retired only after promotion
+    expect(h.store.getPendingRelays(h.coordinate)).toBeUndefined();
+  });
+});
+
+describe("audit C2 — a running attendee job cannot overwrite a newer submission", () => {
+  it("pausing rev1 mid-STT while rev2 lands discards rev1's stale commit and matching", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => { signalReached = r; });
+    const X1 = "11".repeat(32);
+    const X2 = "22".repeat(32);
+    const h = await setup(0, {
+      beforeTranscribe: async (d: any) => {
+        if (d.x === X1) { signalReached(); await gate; }
+      },
+    });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto"); // approved, rev 0
+    await h.coordinator.jobs.drain();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const submit = async (rev: number, about: string, x: string, size: number) => {
+      h.stt.setTranscript(String(size), `transcript for ${about}`);
+      const w = wrapRumor(sk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 2, rev, profile: { about, skills: ["zk"], looking_for: "", links: [] }, media: [mediaDesc(size, x, "video/webm")] },
+        tags: [["a", h.coordinate]],
+      });
+      await h.coordinator.handleInboxWrap(h.coordinate, w as any);
+    };
+
+    // rev1 lands; claim+start ITS job (only) — it blocks inside transcribe(X1).
+    await submit(1, "REV1", X1, 501);
+    const r1 = h.store.getAttendee(h.coordinate, pk)!.source_revision!;
+    const j1 = h.coordinator.jobs.runOne(); // claims rev1, pauses mid-STT
+    await reached;
+
+    // rev2 lands while rev1 is paused, and its job runs to COMPLETION first —
+    // committing rev2's ai_profile (source_revision now r2).
+    await submit(2, "REV2", X2, 502);
+    const r2 = h.store.getAttendee(h.coordinate, pk)!.source_revision!;
+    expect(r2).not.toBe(r1);
+    await h.coordinator.jobs.drain(); // rev1 is leased/running, so drain runs rev2 only
+    expect(h.store.getAttendee(h.coordinate, pk)!.ai_source_revision).toBe(r2);
+
+    // NOW release the stale rev1: it finishes but its conditional commit finds
+    // source_revision has moved to r2 and is DISCARDED — it must NOT clobber rev2's
+    // already-committed newer profile.
+    release();
+    await j1;
+    const row = h.store.getAttendee(h.coordinate, pk)!;
+    expect(row.ai_source_revision).toBe(r2);
+    expect(row.ai_source_revision).not.toBe(r1);
+  });
+});
+
+describe("audit C1 — commands resume to full completion after a partial failure", () => {
+  /** A raw admin wrap with a FIXED created_at, so redelivery is the SAME rumor. */
+  function adminWrapAt(h: Harness, cmd: string, args: Record<string, unknown>, createdAt: number): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd, args, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+  }
+
+  it("approve: a grant-publish failure leaves the rumor UNSEEN and the op PENDING; the same rumor resumes", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const now = Math.floor(h.clock.t / 1000);
+    const wrap = adminWrapAt(h, "approve", { pubkey: pk }, now + 100);
+    const grantsBefore = grantsTo(h, sk).length;
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${pk}`)!.state).toBe("pending");
+    expect(grantsTo(h, sk).length).toBe(grantsBefore); // re-grant never published
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(grantsTo(h, sk).length).toBe(grantsBefore + 1);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(true);
+    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${pk}`)!.state).toBe("complete");
+  });
+
+  it("revoke: a mid-rotation publish failure resumes WITHOUT minting a second ECK", async () => {
+    const h = await setup();
+    const leaverSk = generateSecretKey();
+    const stayerSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    await join(h, stayerSk, "design");
+    await h.coordinator.jobs.drain();
+    expect(h.coordinator.eckOf(h.coordinate).length).toBe(1);
+    const now = Math.floor(h.clock.t / 1000);
+    const wrap = adminWrapAt(h, "revoke", { pubkey: leaverPk }, now + 100);
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    // The new ECK was minted exactly ONCE (persisted) even though every publish failed.
+    expect(h.coordinator.eckOf(h.coordinate).length).toBe(2);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${leaverPk}`)!.state).toBe("pending");
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(h.coordinator.eckOf(h.coordinate).length).toBe(2); // NOT 3 — no second mint on resume
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("revoked");
+    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${leaverPk}`)!.state).toBe("complete");
+  });
+
+  it("delete_data withdrawal is NOT acknowledged until the data is actually purged", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pk)!;
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_ATTENDEE_WITHDRAWAL,
+      content: { v: 2, a: h.coordinate, delete_data: true },
+      tags: [["a", h.coordinate]],
+    });
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    // The revoke chain failed mid-publish → rumor UNSEEN, data STILL present.
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false);
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).not.toBeUndefined();
+    expect(h.store.getCommandWatermark(h.coordinate, `withdraw:${pk}`)!.state).toBe("pending");
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    // Only now, after the purge actually ran, is it acknowledged.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getTranscript(x)).toBeUndefined();
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    expect(h.store.getCommandWatermark(h.coordinate, `withdraw:${pk}`)!.state).toBe("complete");
+  });
+
+  it("attach: an install that throws mid-chat-setup RESUMES on the same grant (gen-check allows it)", async () => {
+    const mls = new StubMls();
+    let calls = 0;
+    mls.createGroup = async () => {
+      if (calls++ === 0) throw new Error("simulated MLS outage");
+      return { mlsGroupIdHex: "mls-1", nostrGroupIdHex: "ng-1" };
+    };
+    const h = await setup(0, { chat: true, chatMls: mls, skipAutoInstall: true });
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    // attempt 1 threw in ensureChat AFTER recordInstalledGen bumped the high-water mark
+    // to gen 1; the inline retry re-entered installEvent at gen == highGen and was
+    // allowed to RESUME (pre-fix: rejected as stale), so the group was finally created.
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    expect(h.store.getMarmotGroup(h.coordinate)).toBeDefined();
   });
 });

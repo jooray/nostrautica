@@ -26,6 +26,7 @@ import {
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
+  KIND_CALENDAR_EVENT,
   KIND_DELETION,
   KIND_NOTE,
   KIND_REPOST,
@@ -87,6 +88,7 @@ import { processAttendee } from "./pipeline/process.js";
 import type { NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
+  pairInputsHash,
   scoreBatch,
   scoreReverseBatch,
   type BatchCandidate,
@@ -200,6 +202,10 @@ export interface PublishOutcome {
 export interface Transport {
   publish(event: NostrEvent, relays?: string[]): Promise<void | PublishOutcome>;
   fetch(filter: any, relays?: string[], timeoutMs?: number): Promise<NostrEvent[]>;
+  /** Prove a relay set is reachable (≥1 relay connects/EOSEs) before a relay
+   *  handover promotes it (audit C9). Optional: a transport without it degrades to
+   *  the old break-before-make behavior. */
+  probe?(relays: string[], timeoutMs?: number): Promise<boolean>;
 }
 
 const short = (pk: string) => pk.slice(0, 8);
@@ -348,6 +354,11 @@ interface EventState {
   /** The event's end time (unix seconds) from its 31923 `end` tag (falls back to
    *  `start`), the anchor the retention window counts from. 0 when unknown. */
   eventEndSec: number;
+  /** Newest applied 31923 metadata event id + timestamp (audit P9 replaceable
+   *  ordering). A live 31923 edit is applied only when it SUPERSEDES this, so a
+   *  shuffled relay re-read can never regress title/eventEndSec to a stale revision. */
+  metaEventId?: string;
+  metaCreatedAt: number;
   /** True once the retention sweep has expired this event: paid processing is parked
    *  and member records have been deleted. A terminal state distinct from billing park. */
   retentionExpired?: boolean;
@@ -444,7 +455,12 @@ export class Coordinator {
   // ── job handlers (the pipeline, spec §9.2) ─────────────────────────────────
   private registerJobHandlers(): void {
     this.jobs.register("process_attendee", async (p, { enqueue }) => {
-      await this.processAttendeeJob(p.coordinate, p.pubkey);
+      const committed = await this.processAttendeeJob(p.coordinate, p.pubkey);
+      // Enqueue matching ONLY when the ai_profile was actually committed (audit C2):
+      // a stale run whose result was discarded (a newer submission superseded it
+      // mid-flight) must not enqueue a recompute off data that was never written —
+      // that would score the newer roster against a hash the DB no longer holds.
+      if (!committed) return;
       // Key the recompute by the attendee's resulting profile hash: re-delivery of
       // the same submission dedupes, a CHANGED profile gets a fresh recompute.
       const hash = this.deps.store.getAttendee(p.coordinate, p.pubkey)?.profile_hash ?? "none";
@@ -617,7 +633,12 @@ export class Coordinator {
     // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
     // disagreed with the convention and with every other reader.
     const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31600));
-    const evtEvent = cfgEvents.find((e) => e.kind === 31923);
+    // Newest 31923 wins too (audit P9): relays return replaceable events in arbitrary
+    // order and this event controls the title and, critically, `eventEndSec` — the
+    // anchor the retention sweep deletes member records from. v1 took the FIRST
+    // returned 31923, so a shuffled relay order (or a restart) could select a stale
+    // revision with an earlier end date and expire member records prematurely.
+    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31923));
     // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
     // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
     // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
@@ -663,15 +684,33 @@ export class Coordinator {
         );
         return;
       }
-      // A gen at or below the highest ever installed/detached is a hard reject — a
-      // replayed historical grant can never re-install (checked BEFORE the config-gen
-      // match so a stale grant is rejected outright, not endlessly retried).
+      // A gen BELOW the highest ever installed/detached is a hard reject — a replayed
+      // historical grant can never re-install. A gen EQUAL to it is normally a replay
+      // of an already-consumed grant, EXCEPT when it is a RESUME of a partially
+      // completed install of that same gen (audit C1): if installEvent threw after
+      // recordInstalledGen bumped the high-water mark (e.g. ensureChat/billing failed
+      // mid-install), the event row is still present and NOT tombstoned, and the same
+      // grant redelivered must be allowed to run to completion rather than be rejected
+      // as stale. A tombstoned coordinate (detached) or a missing event row at the
+      // high gen is a genuine replay and stays rejected.
       const highGen = this.deps.store.installHighGen(grant.coordinate);
-      if (gen <= highGen) {
+      if (gen < highGen) {
         log(
-          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} ≤ the highest generation ever installed/detached (${highGen}) — replayed or stale`,
+          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} < the highest generation ever installed/detached (${highGen}) — replayed or stale`,
         );
         return;
+      }
+      if (gen === highGen) {
+        const resumable =
+          this.deps.store.getEvent(grant.coordinate) !== undefined &&
+          !this.deps.store.isInstallTombstoned(grant.coordinate);
+        if (!resumable) {
+          log(
+            `[install] REJECTED ${grant.coordinate}: grant gen ${gen} = the high-water mark (${highGen}) with no resumable install — replayed or stale`,
+          );
+          return;
+        }
+        log(`[install] ${grant.coordinate}: resuming a partially-completed install at gen ${gen}`);
       }
       // Gen mismatch with the newest fetchable config (NIP §3.7). Two cases:
       //  • grant gen > config gen — the 31600 we fetched is OLDER than the grant (the
@@ -772,6 +811,8 @@ export class Coordinator {
       gen,
       retentionDays: config?.retentionDays,
       eventEndSec: parseEventEndSec(evtEvent),
+      metaEventId: evtEvent?.id,
+      metaCreatedAt: evtEvent?.created_at ?? 0,
       retentionExpired: this.deps.store.isRetentionExpired(grant.coordinate) || undefined,
     };
     this.events.set(grant.coordinate, state);
@@ -867,6 +908,21 @@ export class Coordinator {
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
     const latest = state.eck.reduce((m, v) => (v.id > m.id ? v : m));
     return { bytes: base64ToBytes(latest.key), id: latest.id };
+  }
+
+  /** Persist the event's current ECK set (audit C1: after a rotation mint). */
+  private persistEck(state: EventState): void {
+    const row = this.deps.store.getEvent(state.coordinate);
+    if (row) {
+      this.deps.store.upsertEvent({
+        coordinate: state.coordinate,
+        configJson: row.config_json,
+        inboxNsec: row.inbox_nsec,
+        eckJson: JSON.stringify(state.eck),
+        configRelays: row.config_relays,
+        now: this.now(),
+      });
+    }
   }
 
   private publishKeys(state: EventState): PublishKeys {
@@ -1097,32 +1153,41 @@ export class Coordinator {
     order: { createdAt: number; rumorId: string },
   ): Promise<void> {
     if (content.a !== state.coordinate) return;
-    // Per-subject watermark (NIP §3.4): reject a withdrawal that does not supersede
-    // the last one applied for this sender, so a re-delivered stale rumor after a
-    // rejoin can never re-withdraw the freshly re-approved attendee.
+    // Per-subject ordering + durable resume (NIP §3.4 + audit C1): reject a stale
+    // DISTINCT withdrawal (so a re-delivered old rumor can't re-withdraw after a
+    // rejoin), but let the SAME rumor RESUME until its effect chain is durably
+    // 'complete'. The operation is marked complete only AFTER the revoke — and, for
+    // a delete_data withdrawal, AFTER the artifacts are actually purged — so the
+    // rumor is never acknowledged while data still exists (audit C1: a delete_data
+    // withdrawal must not be acked until data is purged).
     const subject = `withdraw:${pubkey}`;
-    const wm = this.deps.store.getCommandWatermark(state.coordinate, subject);
-    if (wm && !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: wm.rumor_id, created_at: wm.created_at })) {
-      log(`[withdraw] skipped stale withdrawal from ${short(pubkey)}: does not supersede watermark`);
+    if (this.beginOrderedOperation(state.coordinate, subject, order) === "skip") {
+      log(`[withdraw] skipped withdrawal from ${short(pubkey)}: stale distinct rumor or already fully applied`);
       return;
     }
-    this.deps.store.setCommandWatermark(state.coordinate, subject, order.createdAt, order.rumorId);
 
     const existing = this.deps.store.getAttendee(state.coordinate, pubkey);
     if (!existing) {
       log(`[withdraw] ${short(pubkey)} not enrolled — nothing to withdraw`);
+      // Nothing to do — the operation is complete.
+      this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
       return;
     }
     log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
-    // The public effect chain is identical to an organizer revoke (idempotent).
-    await this.revokeAttendee(state, pubkey);
+    // The public effect chain is identical to an organizer revoke (idempotent, and
+    // its ECK rotation resumes idempotently via the same operation progress).
+    await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
     if (content.delete_data) {
       // Full deletion: purge the coordinator's stored derived artifacts for this
       // attendee. The public directory/roster/match records were already removed
-      // by revokeAttendee; this removes the private DB copies too.
+      // by revokeAttendee; this removes the private DB copies too. If this throws,
+      // the operation stays 'pending' (not completed below) so the withdrawal is
+      // retried and re-purged — never acknowledged with data still present.
       this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
       log(`[withdraw] purged stored artifacts for ${short(pubkey)}`);
     }
+    // The full withdrawal (revoke + optional purge) completed — mark it durably done.
+    this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
   }
 
   /**
@@ -1398,7 +1463,15 @@ export class Coordinator {
     // by the compare-and-set on source_revision / media x).
     const cancelled = this.deps.store.supersedePendingJobs(`proc:${coordinate}:${pubkey}:`, key);
     if (cancelled > 0) log(`[pipeline] ${short(pubkey)}: superseded ${cancelled} stale pending process job(s)`);
-    this.jobs.enqueue("process_attendee", key, { coordinate, pubkey });
+    // Carry the expected source revision in the payload (audit C2). The job's
+    // conditional commit is gated on the revision it actually READS at execution
+    // (the authoritative "what this run derived from"); this payload copy records
+    // the revision that was current at enqueue for traceability/debugging.
+    this.jobs.enqueue("process_attendee", key, {
+      coordinate,
+      pubkey,
+      sourceRevision: attendee?.source_revision ?? null,
+    });
   }
 
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
@@ -1664,17 +1737,24 @@ export class Coordinator {
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
-  private async processAttendeeJob(coordinate: string, pubkey: string): Promise<void> {
+  /**
+   * Run the AI pipeline for one attendee and CONDITIONALLY commit the result
+   * (audit C2). Returns true iff the ai_profile was actually written — i.e. the
+   * attendee's `source_revision` still matched the revision this run derived from.
+   * A stale run (a newer submission landed mid-STT/LLM) returns false so the caller
+   * skips enqueuing matching off a result that was discarded.
+   */
+  private async processAttendeeJob(coordinate: string, pubkey: string): Promise<boolean> {
     const state = this.events.get(coordinate);
-    if (!state) return;
+    if (!state) return false;
     // Re-check config at execution time (audit H4): a job queued while matching was
     // ON must not call any provider if matching has since been turned OFF.
-    if (state.matching === "off") return;
+    if (state.matching === "off") return false;
     // Spend gate (spec §8/§9): a blocked event OR exceeded budget parks this before
     // any STT/LLM spend.
     await this.assertSpendAllowed(coordinate, pubkey);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-    if (!attendee) return;
+    if (!attendee) return false;
     const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Server-side media caps (audit COORD-4): per-descriptor duration cap (the
     // event's configured max) and a total-download budget per submission —
@@ -1712,7 +1792,13 @@ export class Coordinator {
       { pubkey, profile, media: cappedMedia, introText, extraTranscripts },
     );
 
-    this.deps.store.upsertAttendee({
+    // Conditional commit (audit C2): write the ai_profile ONLY if the attendee's
+    // source_revision is still the one this run derived from. A newer submission
+    // that landed while STT/LLM ran has already advanced source_revision, so this
+    // matches 0 rows and the stale result is discarded — a running job can no longer
+    // overwrite a newer submission's data. The newer revision's own process job
+    // (enqueued by handleSubmission) recomputes and commits against ITS revision.
+    const committed = this.deps.store.commitAiProfile({
       coordinate,
       pubkey,
       aiProfileJson: JSON.stringify(aiProfile),
@@ -1721,13 +1807,19 @@ export class Coordinator {
       // Always write the fresh set (may be "[]") so a re-record overwrites stale
       // transcripts rather than leaving old ones via COALESCE.
       transcriptsJson: JSON.stringify(transcripts),
+      expectedSourceRevision: attendee.source_revision,
       now: this.now(),
     });
+    if (!committed) {
+      log(`[pipeline] ${short(pubkey)}: discarded stale ai_profile — a newer submission landed during processing`);
+      return false;
+    }
     // The pipeline succeeded: clear any previously surfaced poison status for
     // this attendee's stages (audit COORD-15) so the organizer view recovers.
     this.deps.store.clearPoisonStatuses(coordinate, pubkey);
     await this.publishDirectory(state, pubkey);
     log(`[pipeline] ${short(pubkey)} ai_profile ready — skills: ${aiProfile.skills.slice(0, 4).join(", ")}`);
+    return true;
   }
 
   /**
@@ -2053,6 +2145,10 @@ export class Coordinator {
         log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: an attendee was revoked during scoring`);
         continue;
       }
+      if (!this.pairInputsCurrent(coordinate, p)) {
+        log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: a profile changed during scoring (inputs_hash moved)`);
+        continue;
+      }
       recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
       scored.push(p);
       log(
@@ -2113,6 +2209,10 @@ export class Coordinator {
         log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: an attendee was revoked during scoring`);
         continue;
       }
+      if (!this.pairInputsCurrent(coordinate, p)) {
+        log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: a profile changed during scoring (inputs_hash moved)`);
+        continue;
+      }
       recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
       scored.push(p);
       log(
@@ -2142,6 +2242,22 @@ export class Coordinator {
       this.deps.store.getAttendee(coordinate, a)?.status === "approved" &&
       this.deps.store.getAttendee(coordinate, b)?.status === "approved"
     );
+  }
+
+  /**
+   * The pair's inputs_hash still matches BOTH endpoints' current profile hashes
+   * (audit C2). Scoring captures a pair's inputs_hash at selection, awaits the
+   * provider, then writes — if either endpoint's ai_profile was recomputed during
+   * that call (a newer submission committed a different profile_hash), the score was
+   * computed against inputs the DB no longer holds. Rechecked immediately before the
+   * write so a score derived from stale inputs is discarded, not stored under the
+   * now-current inputs_hash. Returns false if either profile hash is missing.
+   */
+  private pairInputsCurrent(coordinate: string, pair: CandidatePair): boolean {
+    const ha = this.deps.store.getAttendee(coordinate, pair.a)?.profile_hash;
+    const hb = this.deps.store.getAttendee(coordinate, pair.b)?.profile_hash;
+    if (!ha || !hb) return false;
+    return pairInputsHash(ha, hb) === pair.inputsHash;
   }
 
   /** Display name from the join request (B1), for name-aware match reasoning. */
@@ -2243,29 +2359,24 @@ export class Coordinator {
       return;
     }
 
-    // Per-subject ordering (NIP §3.4): reject a command strictly older than the
-    // watermark of the last applied command for this (coordinate, subject). Approve
-    // vs revoke interleavings then resolve deterministically by (created_at, id)
-    // instead of relay arrival order. Different subjects have independent watermarks.
+    // Per-subject ordering + durable resume (NIP §3.4 + audit C1): reject a DISTINCT
+    // command strictly older than the last operation for this (coordinate, subject),
+    // but let the SAME rumor RESUME until it has a durable 'complete' marker. The
+    // operation is recorded 'pending' here and marked 'complete' only after the full
+    // effect chain below succeeds — so a mid-effect crash (grant/roster/deletion
+    // publish, DB write) is retried instead of being suppressed by its own watermark
+    // and falsely acknowledged. Approve vs revoke interleavings still resolve
+    // deterministically by (created_at, id); different subjects are independent.
     const subject = this.commandSubject(coordinate, cmd, args);
-    if (order) {
-      const wm = this.deps.store.getCommandWatermark(coordinate, subject);
-      if (wm && !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: wm.rumor_id, created_at: wm.created_at })) {
-        log(`[admin] skipped stale "${cmd}" for ${subject}: (${order.createdAt},${order.rumorId.slice(0, 8)}) does not supersede watermark (${wm.created_at},${wm.rumor_id.slice(0, 8)})`);
-        return;
-      }
+    if (order && this.beginOrderedOperation(coordinate, subject, order) === "skip") {
+      log(`[admin] skipped "${cmd}" for ${subject}: stale distinct command or already fully applied`);
+      return;
     }
-    // The command passed ordering — record the new watermark up front so a later
-    // out-of-order duplicate is rejected even if this handler throws mid-effect
-    // (the effects are idempotent; re-running an older command must not).
-    if (order) this.deps.store.setCommandWatermark(coordinate, subject, order.createdAt, order.rumorId);
 
     if (cmd === "detach") {
       // Signed immediate detach (NIP §3.5): same effects as a config-based detach.
       await this.detachEvent(coordinate, { reason: "21604 detach command" });
-      return;
-    }
-    if (cmd === "approve") {
+    } else if (cmd === "approve") {
       // Manual approval routed through the coordinator so IT grants the ECK and
       // publishes the directory/roster (attendees discover those under the
       // coordinator's key).
@@ -2305,18 +2416,56 @@ export class Coordinator {
       }
     } else if (cmd === "revoke") {
       const pubkey = String(args.pubkey ?? "");
-      if (pubkey) await this.revokeAttendee(state, pubkey);
+      // Pass the operation context so the ECK rotation resumes idempotently on a
+      // retry (audit C1): the intended new key is minted once and reused, never
+      // re-minted, and missing grants/roster are repaired by the idempotent republish.
+      if (pubkey) await this.revokeAttendee(state, pubkey, order ? { subject, rumorId: order.rumorId } : undefined);
     } else if (cmd === "talk_publish") {
       // Moderate a submitted talk: publish its 31610 (spec F2). No-op if talks are off.
-      if (state.talks === "off") return;
-      const pubkey = String(args.pubkey ?? "");
-      const talkD = String(args.talk_d ?? "");
-      if (pubkey && talkD) await this.publishTalk(state, pubkey, talkD);
+      if (state.talks !== "off") {
+        const pubkey = String(args.pubkey ?? "");
+        const talkD = String(args.talk_d ?? "");
+        if (pubkey && talkD) await this.publishTalk(state, pubkey, talkD);
+      }
     } else if (cmd === "talk_reject") {
       const pubkey = String(args.pubkey ?? "");
       const talkD = String(args.talk_d ?? "");
       if (pubkey && talkD) await this.rejectTalk(state, pubkey, talkD);
     }
+
+    // The full effect chain completed — durably mark the operation complete (audit
+    // C1). The watermark now means "last FULLY applied command": a later out-of-order
+    // duplicate is rejected, while a redelivery of THIS rumor before this point (a
+    // crash mid-effect left it 'pending') is allowed to resume rather than suppressed.
+    if (order) this.deps.store.completeCommandOp(coordinate, subject, order.rumorId);
+  }
+
+  /**
+   * Ordering + resume gate for a durable command operation (audit C1). Returns
+   * "skip" to reject (a stale DISTINCT command, or a re-delivery of an
+   * already-'complete' rumor), or "run" to proceed — in which case the operation is
+   * (re-)recorded 'pending' and the caller MUST mark it complete on success. The
+   * SAME rumor is always allowed to resume while its operation is still 'pending'.
+   */
+  private beginOrderedOperation(
+    coordinate: string,
+    subject: string,
+    order: { createdAt: number; rumorId: string },
+  ): "skip" | "run" {
+    const op = this.deps.store.getCommandWatermark(coordinate, subject);
+    if (op) {
+      if (op.rumor_id === order.rumorId) {
+        if (op.state === "complete") return "skip"; // already fully applied — idempotent
+        // pending same rumor → resume
+      } else if (
+        !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: op.rumor_id, created_at: op.created_at })
+      ) {
+        return "skip"; // older/equal DISTINCT command
+      }
+      // a strictly-newer distinct command takes the subject over
+    }
+    this.deps.store.beginCommandOp(coordinate, subject, order.createdAt, order.rumorId, this.now());
+    return "run";
   }
 
   /**
@@ -2324,12 +2473,61 @@ export class Coordinator {
    * old ciphertexts stay readable to old key-holders, but all FUTURE directory/
    * roster/match content is encrypted under the new ECK, which the removed
    * attendee never receives. Their directory entry is deleted (NIP-09).
+   *
+   * ECK authority (audit P5, maintainer decision): the current ECK version is
+   * defined by the coordinator-signed grants (21602) and roster (31604), NOT by the
+   * `eck` tag in the E_id-signed 31600. That tag is BOOTSTRAP-ONLY — the initial key
+   * a fresh install is granted — and the coordinator never reads it as the
+   * current-version authority (`config.eck` is parsed by the protocol layer but
+   * never consulted here). A coordinator cannot sign the E_id's 31600, so rotation
+   * advances the key purely through grants/roster and leaves NO state expecting a
+   * 31600 `eck` update. See handoff for the doc impact on PROTOCOL-NIP.md.
    */
-  async revokeAttendee(state: EventState, removedPubkey: string): Promise<void> {
-    const prev = this.currentEck(state); // capture the pre-rotation ECK
+  async revokeAttendee(
+    state: EventState,
+    removedPubkey: string,
+    opCtx?: { subject: string; rumorId: string },
+  ): Promise<void> {
+    // Durable idempotent ECK-rotation state machine (audit C1). The intended new key
+    // is minted EXACTLY ONCE per operation and recorded in the command's progress
+    // BEFORE state.eck / eck_json are touched. A retry (in-memory, or after a crash)
+    // reuses the recorded key instead of minting a fresh one — pre-fix each retry
+    // ran `max(id)+1` and minted ANOTHER ECK, so a rotation interrupted mid-republish
+    // produced duplicate rotations and stranded grants. `prevBytes` is the
+    // pre-rotation ECK, recovered from `prevId` so a resume (where state.eck already
+    // holds the new key) still deletes the removed entry at the OLD blinded d.
+    const progress = opCtx ? this.deps.store.getCommandOpProgress(state.coordinate, opCtx.subject) : {};
+    const rot = progress.eckRotation as { newId: number; newKey: string; prevId: number } | undefined;
+    let newId: number;
+    let prevBytes: Uint8Array;
+    if (rot) {
+      // RESUME: reuse the already-decided rotation.
+      newId = rot.newId;
+      const prevVer = state.eck.find((v) => v.id === rot.prevId);
+      prevBytes = prevVer ? base64ToBytes(prevVer.key) : this.currentEck(state).bytes;
+      if (!state.eck.some((v) => v.id === newId)) {
+        state.eck = [...state.eck, { id: newId, key: rot.newKey }];
+        this.persistEck(state);
+      }
+    } else {
+      const prev = this.currentEck(state); // capture the pre-rotation ECK
+      prevBytes = prev.bytes;
+      newId = state.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
+      const newKey = bytesToBase64(generateEck());
+      // Record the intended rotation FIRST (durable), so a retry never re-mints.
+      if (opCtx) {
+        this.deps.store.setCommandOpProgress(state.coordinate, opCtx.subject, opCtx.rumorId, {
+          ...progress,
+          eckRotation: { newId, newKey, prevId: prev.id },
+        });
+      }
+      state.eck = [...state.eck, { id: newId, key: newKey }];
+      this.persistEck(state);
+    }
 
-    // 1. Delete the removed attendee's directory entry (addressable, NIP-09).
-    const removedD = blindedD(prev.bytes, state.coordinate, removedPubkey);
+    // 1. Delete the removed attendee's directory entry (addressable, NIP-09) at the
+    //    PRE-rotation blinded d.
+    const removedD = blindedD(prevBytes, state.coordinate, removedPubkey);
     const deletion = finalizeEvent(
       {
         kind: KIND_DELETION,
@@ -2341,17 +2539,8 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // 2. Mark removed, then mint the new ECK version.
+    // 2. Mark removed (idempotent).
     this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey: removedPubkey, status: "revoked", now: this.now() });
-    const newId = state.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
-    state.eck = [...state.eck, { id: newId, key: bytesToBase64(generateEck()) }];
-    const row = this.deps.store.getEvent(state.coordinate);
-    if (row) {
-      this.deps.store.upsertEvent({
-        coordinate: state.coordinate, configJson: row.config_json, inboxNsec: row.inbox_nsec,
-        eckJson: JSON.stringify(state.eck), configRelays: row.config_relays, now: this.now(),
-      });
-    }
 
     // 3. Drop every cached pair that involves the removed attendee so remaining
     //    lists/matrix don't reference them after rotation (audit H3).
@@ -2757,6 +2946,13 @@ export class Coordinator {
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.push(() => clearInterval(retentionTimer));
+    // Resume any relay handover left pending by a transient outage or a restart
+    // (audit C9): probe the stored candidate and promote it once reachable. Run once
+    // at boot, then periodically.
+    await this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`));
+    const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
+    if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
+    this.closers.push(() => clearInterval(relayTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
   }
@@ -2868,6 +3064,87 @@ export class Coordinator {
     return row ? (JSON.parse(row.eck_json) as EckVersion[]) : [];
   }
 
+  // ── relay handover: make-before-break (audit C9) ──────────────────────────
+  /**
+   * Prove a candidate relay set reachable via the transport probe (≥1 relay
+   * connects/EOSEs). A transport with no `probe` degrades to "assume reachable" so
+   * older/fake transports keep the previous immediate-promote behavior.
+   */
+  private async probeRelays(relays: string[]): Promise<boolean> {
+    const probe = (this.deps.transport as { probe?: (r: string[], t?: number) => Promise<boolean> }).probe;
+    if (!probe) return true;
+    try {
+      return await probe.call(this.deps.transport, relays);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Begin a make-before-break relay handover (audit C9): record the candidate set
+   * durably (separate from the last-known-good `config_relays`), prove it reachable,
+   * and only then promote. If the probe fails the old subscriptions stay live and
+   * the candidate stays pending — retried by {@link retryRelayHandovers} on a timer
+   * and on restart — so a typo'd or briefly-unreachable relay list never orphans a
+   * healthy event.
+   */
+  private async beginRelayHandover(state: EventState, candidate: string[]): Promise<void> {
+    this.deps.store.setPendingRelays(state.coordinate, candidate);
+    const reachable = await this.probeRelays(candidate);
+    if (!reachable) {
+      log(
+        `[relay] handover for ${state.coordinate} DEFERRED — candidate ${candidate.join(",")} not reachable; staying on last-known-good ${state.configRelays.join(",")}`,
+      );
+      return;
+    }
+    this.promoteRelays(state, candidate);
+  }
+
+  /** Promote a proven candidate relay set: persist as last-known-good, clear the
+   *  pending marker, and repoint the E_inbox/config/chat subscriptions (COORD-8). */
+  private promoteRelays(state: EventState, candidate: string[]): void {
+    state.configRelays = candidate;
+    const row = this.deps.store.getEvent(state.coordinate);
+    if (row) {
+      this.deps.store.upsertEvent({
+        coordinate: state.coordinate,
+        configJson: row.config_json,
+        inboxNsec: row.inbox_nsec,
+        eckJson: row.eck_json,
+        configRelays: JSON.stringify(candidate),
+        now: this.now(),
+      });
+    }
+    this.deps.store.clearPendingRelays(state.coordinate);
+    this.subscribeEventInbox(state, giftwrapSince(Math.floor(this.now() / 1000)));
+    this.subscribeEventConfig(state);
+    if (state.chat) this.subscribeChat(state);
+    log(`[relay] handover for ${state.coordinate} PROMOTED to ${candidate.join(",")} (proven reachable)`);
+  }
+
+  /**
+   * Retry every event with a pending relay handover (audit C9): re-probe the stored
+   * candidate and promote it if it is now reachable. Driven by a periodic timer in
+   * {@link start} and run once at boot so a handover deferred by a transient relay
+   * outage (or interrupted by a restart) completes on its own once relays recover.
+   */
+  async retryRelayHandovers(): Promise<void> {
+    for (const coordinate of this.deps.store.coordinatesWithPendingRelays()) {
+      const state = this.events.get(coordinate);
+      const candidate = this.deps.store.getPendingRelays(coordinate);
+      if (!state || !candidate) {
+        // Event no longer live (detached) — drop a dangling candidate.
+        if (!state) this.deps.store.clearPendingRelays(coordinate);
+        continue;
+      }
+      if (relayKey(candidate) === relayKey(state.configRelays)) {
+        this.deps.store.clearPendingRelays(coordinate); // already on it
+        continue;
+      }
+      if (await this.probeRelays(candidate)) this.promoteRelays(state, candidate);
+    }
+  }
+
   private subscribeCoordInbox(): () => void {
     return (this.deps.transport as any).subscribe?.(
       { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: giftwrapSince() },
@@ -2902,11 +3179,18 @@ export class Coordinator {
     const key = `${state.eidPubkey}:${state.identifier}|${relayKey(state.configRelays)}`;
     this.replaceSubscription(this.configSubs, state.coordinate, key, () =>
       (this.deps.transport as any).subscribe?.(
-        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST], authors: [state.eidPubkey], "#d": [state.identifier] },
+        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST, KIND_CALENDAR_EVENT], authors: [state.eidPubkey], "#d": [state.identifier] },
         (e: NostrEvent) => {
           if (e.kind === KIND_INVITE_LIST) {
             this.inviteHashCache.delete(state.coordinate);
             log(`[join] invite list updated for "${state.scoringCtx.title}" — invite cache invalidated`);
+            return;
+          }
+          // Live 31923 metadata edit (audit P9): the title/summary and — critically —
+          // the retention anchor `eventEndSec` are editable after install, so watch
+          // for a superseding revision instead of only reading the 31923 once.
+          if (e.kind === KIND_CALENDAR_EVENT) {
+            this.handleMetaUpdate(state.coordinate, e);
             return;
           }
           void this.handleConfigUpdate(state.coordinate, e).catch(() => {});
@@ -2914,6 +3198,40 @@ export class Coordinator {
         state.configRelays,
       ),
     );
+  }
+
+  /**
+   * Apply a live 31923 metadata edit (audit P9). Accepted only from this event's
+   * E_id, matching its `d`, and only when it SUPERSEDES the applied metadata under
+   * the global §3.1 comparator (strictly newer, or same created_at with a lower id).
+   * Updates the scoring context (title/summary/hashtags) and, decisively, the
+   * retention anchor `eventEndSec` — so a moved end date re-times the retention
+   * sweep instead of leaving it pinned to the install-time value.
+   */
+  private handleMetaUpdate(coordinate: string, event: NostrEvent): void {
+    const state = this.events.get(coordinate);
+    if (!state) return;
+    if (event.kind !== KIND_CALENDAR_EVENT) return;
+    if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
+    const d = event.tags.find((t) => t[0] === "d")?.[1];
+    if (d !== state.identifier) return; // wrong event
+    if (state.metaEventId) {
+      if (!supersedes({ id: event.id, created_at: event.created_at }, { id: state.metaEventId, created_at: state.metaCreatedAt })) {
+        return;
+      }
+    } else if (event.created_at < state.metaCreatedAt) {
+      return;
+    }
+    state.eventEndSec = parseEventEndSec(event);
+    state.scoringCtx = {
+      ...state.scoringCtx,
+      title: event.tags.find((t) => t[0] === "title")?.[1] ?? state.scoringCtx.title,
+      summary: event.tags.find((t) => t[0] === "summary")?.[1] ?? state.scoringCtx.summary,
+      hashtags: event.tags.filter((t) => t[0] === "t").map((t) => t[1]!),
+    };
+    state.metaEventId = event.id;
+    state.metaCreatedAt = event.created_at;
+    log(`[config] applied live 31923 metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
   }
 
   /**
@@ -2985,7 +3303,14 @@ export class Coordinator {
     // Apply to persisted config + in-memory state. Relay tags are untrusted
     // input — validated (wss-only, deduped, capped, audit COORD-16).
     const configRelays = sanitizeRelayUrls(config.relays);
-    const relays = configRelays.length ? configRelays : state.configRelays;
+    const candidateRelays = configRelays.length ? configRelays : state.configRelays;
+    // Make-before-break relay handover (audit C9): a relay CHANGE does NOT
+    // immediately repoint subscriptions or persist as last-known-good. We keep
+    // config_relays (last-known-good) live and record the candidate SEPARATELY, then
+    // prove the candidate reachable before promoting — so a typo'd relay list can
+    // never cut a healthy event off from its current relays.
+    const relayChanged = relayKey(state.configRelays) !== relayKey(candidateRelays);
+    const persistedRelays = relayChanged ? state.configRelays : candidateRelays;
     const eventRow = this.deps.store.getEvent(coordinate);
     if (eventRow) {
       this.deps.store.upsertEvent({
@@ -2993,7 +3318,7 @@ export class Coordinator {
         configJson: JSON.stringify(config),
         inboxNsec: eventRow.inbox_nsec,
         eckJson: eventRow.eck_json,
-        configRelays: JSON.stringify(relays),
+        configRelays: JSON.stringify(persistedRelays),
         now: this.now(),
       });
     }
@@ -3004,8 +3329,17 @@ export class Coordinator {
     state.scoringCtx = { ...state.scoringCtx, lang: config.lang };
     state.nostrContextN = config.nostrContext;
     state.blossomOrigins = config.blossom;
+    // Duration caps (audit C8): update ALL THREE limits atomically. maxMediaSec is
+    // the declared-duration screen; maxIntroSec/maxTalkSec are the authoritative
+    // ffprobe-side decoded-duration enforcement (H-3). Pre-fix only maxMediaSec was
+    // refreshed here, so after a live limit change the ffprobe check kept enforcing
+    // the INSTALL-time value — an understated descriptor could pass the (lowered)
+    // declared screen and then be transcribed under the stale (higher) real limit.
     state.maxMediaSec = effectiveMaxMediaSec(Math.max(config.maxVideoSec, config.maxTalkSec));
-    state.configRelays = relays;
+    state.maxIntroSec = effectiveMaxMediaSec(config.maxVideoSec);
+    state.maxTalkSec = effectiveMaxMediaSec(config.maxTalkSec);
+    // state.configRelays stays the last-known-good set until a handover is PROVEN
+    // (audit C9). It is advanced only in promoteRelays, below.
     state.chat = isMarmotChatEnabled(config);
     state.retentionDays = config.retentionDays;
     state.configEventId = event.id;
@@ -3024,13 +3358,12 @@ export class Coordinator {
     }
     log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
 
-    // Relay handover (audit COORD-8): the E_inbox / config / chat subscriptions
-    // are keyed by their relay set, so a relay change re-creates them on the new
-    // relays instead of staying pinned to the old ones.
-    if (relayKey(prev.relays) !== relayKey(state.configRelays)) {
-      this.subscribeEventInbox(state, giftwrapSince(Math.floor(this.now() / 1000)));
-      this.subscribeEventConfig(state);
-      if (state.chat) this.subscribeChat(state);
+    // Relay handover (audit COORD-8 + C9 make-before-break): the E_inbox / config /
+    // chat subscriptions are keyed by their relay set. A relay change opens the new
+    // set only AFTER it is proven reachable (beginRelayHandover); the healthy old
+    // subscriptions stay live until then, so a bad candidate never cuts off the event.
+    if (relayChanged) {
+      await this.beginRelayHandover(state, candidateRelays);
     }
 
     // Effects.
@@ -3308,6 +3641,19 @@ export class Coordinator {
   // expose for grant version bumping
   eckOf(coordinate: string): EckVersion[] {
     return this.events.get(coordinate)?.eck ?? [];
+  }
+
+  /** Test accessor: the event's live decoded-duration limits (audit C8) — the
+   *  authoritative ffprobe-side caps that must track config reloads. */
+  durationLimitsOf(coordinate: string): { maxMediaSec: number; maxIntroSec: number; maxTalkSec: number } | undefined {
+    const s = this.events.get(coordinate);
+    return s ? { maxMediaSec: s.maxMediaSec, maxIntroSec: s.maxIntroSec, maxTalkSec: s.maxTalkSec } : undefined;
+  }
+
+  /** Test accessor: the event's retention anchor `eventEndSec` (audit P9) — driven
+   *  by the newest 31923 metadata revision. */
+  eventEndSecOf(coordinate: string): number | undefined {
+    return this.events.get(coordinate)?.eventEndSec;
   }
 
   /** Grant a fresh key backup shape for a coordinator-issued grant. */

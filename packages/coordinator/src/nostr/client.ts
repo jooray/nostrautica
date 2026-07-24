@@ -73,6 +73,39 @@ export class NostrClient {
     });
   }
 
+  /**
+   * Prove a relay set is usable BEFORE a make-before-break handover promotes it
+   * (audit C9). Opens a cheap short-lived subscription and resolves `true` as soon
+   * as ANY relay in the set connects and reaches EOSE (or returns an event);
+   * resolves `false` if none does before `timeoutMs`. A typo'd or dead relay set
+   * therefore never replaces a healthy subscription — the caller keeps the
+   * last-known-good relays live until this returns true.
+   */
+  probe(relays: string[], timeoutMs = 5000): Promise<boolean> {
+    if (relays.length === 0) return Promise.resolve(false);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (v: boolean) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+          sub.close();
+        } catch {
+          /* already closed */
+        }
+        resolve(v);
+      };
+      // limit:0 asks only for EOSE (no historical events) — the cheapest possible
+      // liveness probe. Reaching EOSE proves a relay connection was established.
+      const sub = this.pool.subscribe(relays, { kinds: [1], limit: 0 } as any, {
+        onevent: () => finish(true),
+        oneose: () => finish(true),
+      });
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
+  }
+
   /** Publish a signed event to the given relays; resolves when any accepts. The
    *  outcome's `replaced` flag is set when a relay answered "replaced/have newer" for
    *  a replaceable event, so the coordinator can reconcile via the §3.1 comparator

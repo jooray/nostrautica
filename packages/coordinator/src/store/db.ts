@@ -627,6 +627,33 @@ export class Store {
     } catch {
       /* column already exists */
     }
+    // Migration (audit C1): durable command-operation state. `state` tracks whether
+    // the command whose (created_at, rumor_id) is recorded has FULLY completed its
+    // effect chain ('complete') or is still in progress ('pending'); `progress_json`
+    // carries per-operation resume state (the ECK-rotation state machine). Legacy
+    // rows default to 'complete' — they were watermarks the old up-front code set,
+    // representing commands it already acknowledged. Pre-fix the watermark was
+    // written BEFORE the effects ran, so a mid-command crash acked the rumor while
+    // leaving grants/roster/deletion unfinished; now the watermark means LAST FULLY
+    // APPLIED command and the same rumor may resume until 'complete' is durably set.
+    for (const col of ["state TEXT NOT NULL DEFAULT 'complete'", "progress_json TEXT"]) {
+      try {
+        this.db.exec(`ALTER TABLE command_watermarks ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
+    }
+    // Migration (audit C9): the CANDIDATE relay set of an in-progress relay handover,
+    // persisted separately from config_relays (the last-known-good set). A config
+    // edit that changes relays writes the candidate here and only promotes it to
+    // config_relays once it is PROVEN reachable (a probe reaches EOSE), so a typo'd
+    // relay list never cuts a healthy event off from its current relays. NULL when
+    // no handover is pending. A restart resumes an unfinished handover from here.
+    try {
+      this.db.exec("ALTER TABLE events ADD COLUMN pending_relays TEXT");
+    } catch {
+      /* column already exists */
+    }
     // Migration (wire-v2 §3.2): durable monotonic-publish watermark per replaceable
     // address, so restarts keep created_at monotonic instead of relying on the wall
     // clock having advanced past everything published before the restart.
@@ -843,6 +870,37 @@ export class Store {
     this.db.prepare("UPDATE events SET retention_expired = 0 WHERE coordinate = ?").run(coordinate);
   }
 
+  // ── relay-handover candidate set (audit C9) ───────────────────────────────
+  /** Record the CANDIDATE relay set of an in-progress make-before-break handover,
+   *  kept separate from config_relays (last-known-good) until it is proven reachable. */
+  setPendingRelays(coordinate: string, relays: string[]): void {
+    this.db.prepare("UPDATE events SET pending_relays = ? WHERE coordinate = ?").run(JSON.stringify(relays), coordinate);
+  }
+  /** The candidate relay set of a pending handover, or undefined when none. */
+  getPendingRelays(coordinate: string): string[] | undefined {
+    const row = this.db.prepare("SELECT pending_relays FROM events WHERE coordinate = ?").get(coordinate) as
+      | { pending_relays: string | null }
+      | undefined;
+    if (!row?.pending_relays) return undefined;
+    try {
+      const v = JSON.parse(row.pending_relays);
+      return Array.isArray(v) ? (v as string[]) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  /** Clear a pending handover's candidate set (promoted, or abandoned). */
+  clearPendingRelays(coordinate: string): void {
+    this.db.prepare("UPDATE events SET pending_relays = NULL WHERE coordinate = ?").run(coordinate);
+  }
+  /** Coordinates that currently have a pending relay handover (restart resume). */
+  coordinatesWithPendingRelays(): string[] {
+    const rows = this.db
+      .prepare("SELECT coordinate FROM events WHERE pending_relays IS NOT NULL")
+      .all() as { coordinate: string }[];
+    return rows.map((r) => r.coordinate);
+  }
+
   // ── durable monotonic-publish watermark (NIP §3.2) ────────────────────────
   /**
    * Bump and return the `created_at` for a replaceable publish at `address`
@@ -866,21 +924,79 @@ export class Store {
     return next;
   }
 
-  // ── admin-command per-subject watermarks (NIP §3.4) ───────────────────────
-  /** The last applied command's (created_at, rumor_id) for a (coordinate, subject). */
-  getCommandWatermark(coordinate: string, subject: string): { created_at: number; rumor_id: string } | undefined {
+  // ── admin-command per-subject operation state (NIP §3.4 + audit C1) ────────
+  /**
+   * The current command operation for a (coordinate, subject): its ordering key
+   * (created_at, rumor_id), completion `state`, and any resume `progress_json`. The
+   * recorded command is the newest one accepted for the subject; `state` says
+   * whether its effect chain has FULLY completed. A stale/older DISTINCT command is
+   * rejected against this; the SAME rumor may resume while `state` is 'pending'.
+   */
+  getCommandWatermark(
+    coordinate: string,
+    subject: string,
+  ): { created_at: number; rumor_id: string; state: string; progress_json: string | null } | undefined {
     return this.db
-      .prepare("SELECT created_at, rumor_id FROM command_watermarks WHERE coordinate = ? AND subject = ?")
-      .get(coordinate, subject) as { created_at: number; rumor_id: string } | undefined;
+      .prepare("SELECT created_at, rumor_id, state, progress_json FROM command_watermarks WHERE coordinate = ? AND subject = ?")
+      .get(coordinate, subject) as
+      | { created_at: number; rumor_id: string; state: string; progress_json: string | null }
+      | undefined;
   }
-  /** Record the watermark of the just-applied command for a (coordinate, subject). */
+  /**
+   * Record the watermark of a fully-applied command (state 'complete'). Kept for
+   * back-compat with callers that apply a command atomically; the resumable path
+   * uses {@link beginCommandOp} + {@link completeCommandOp} instead.
+   */
   setCommandWatermark(coordinate: string, subject: string, createdAt: number, rumorId: string): void {
     this.db
       .prepare(
-        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id) VALUES (?, ?, ?, ?)
-         ON CONFLICT(coordinate, subject) DO UPDATE SET created_at = excluded.created_at, rumor_id = excluded.rumor_id`,
+        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, 'complete', NULL)
+         ON CONFLICT(coordinate, subject) DO UPDATE SET created_at = excluded.created_at, rumor_id = excluded.rumor_id, state = 'complete', progress_json = NULL`,
       )
       .run(coordinate, subject, createdAt, rumorId);
+  }
+  /**
+   * Mark a command's effect chain as STARTED but not yet complete (audit C1). Sets
+   * the operation to this (created_at, rumor_id) with state 'pending'. Progress is
+   * PRESERVED when the same rumor is resuming (so a mid-rotation ECK id survives a
+   * retry) and RESET when a different (newer) command takes the subject over.
+   */
+  beginCommandOp(coordinate: string, subject: string, createdAt: number, rumorId: string, _now: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, 'pending', NULL)
+         ON CONFLICT(coordinate, subject) DO UPDATE SET
+           created_at = excluded.created_at,
+           rumor_id = excluded.rumor_id,
+           state = 'pending',
+           progress_json = CASE WHEN command_watermarks.rumor_id = excluded.rumor_id THEN command_watermarks.progress_json ELSE NULL END`,
+      )
+      .run(coordinate, subject, createdAt, rumorId);
+  }
+  /** Mark the current command operation for a subject as fully complete (audit C1).
+   *  No-op if a different rumor has since taken the subject over. */
+  completeCommandOp(coordinate: string, subject: string, rumorId: string): void {
+    this.db
+      .prepare("UPDATE command_watermarks SET state = 'complete' WHERE coordinate = ? AND subject = ? AND rumor_id = ?")
+      .run(coordinate, subject, rumorId);
+  }
+  /** The parsed resume progress for a subject's current operation (audit C1). */
+  getCommandOpProgress(coordinate: string, subject: string): Record<string, unknown> {
+    const row = this.getCommandWatermark(coordinate, subject);
+    if (!row?.progress_json) return {};
+    try {
+      const v = JSON.parse(row.progress_json);
+      return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+  /** Persist resume progress for a subject's current operation, only while it is
+   *  still the recorded rumor (audit C1: ECK-rotation state machine). */
+  setCommandOpProgress(coordinate: string, subject: string, rumorId: string, progress: Record<string, unknown>): void {
+    this.db
+      .prepare("UPDATE command_watermarks SET progress_json = ? WHERE coordinate = ? AND subject = ? AND rumor_id = ?")
+      .run(JSON.stringify(progress), coordinate, subject, rumorId);
   }
 
   // ── install generation / detach tombstone (NIP §3.5) ──────────────────────
@@ -1010,6 +1126,51 @@ export class Store {
     return this.db
       .prepare("SELECT * FROM attendees WHERE coordinate = ? AND pubkey = ?")
       .get(coordinate, pubkey) as AttendeeRow | undefined;
+  }
+
+  /**
+   * Compare-and-set commit of a completed AI pipeline run (audit C2). The
+   * ai_profile / profile_hash / transcripts are written ONLY when the attendee's
+   * current `source_revision` still equals the revision the run was derived from
+   * (`expectedSourceRevision`). If a newer submission landed while the STT/LLM
+   * calls were in flight, the row's source_revision has already advanced and this
+   * write matches 0 rows — the stale result is discarded instead of overwriting the
+   * newer submission's data (and its enqueue of matching is skipped by the caller).
+   * `IS` (not `=`) so a NULL expected/stored revision compares correctly on legacy
+   * rows. Returns true iff the row was updated.
+   */
+  commitAiProfile(row: {
+    coordinate: string;
+    pubkey: string;
+    aiProfileJson: string;
+    profileHash: string;
+    aiSourceRevision: string | null;
+    transcriptsJson: string;
+    expectedSourceRevision: string | null;
+    now: number;
+  }): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE attendees SET
+           ai_profile_json = :aiProfileJson,
+           profile_hash = :profileHash,
+           ai_source_revision = :aiSourceRevision,
+           transcripts_json = :transcriptsJson,
+           updated_at = :now
+         WHERE coordinate = :coordinate AND pubkey = :pubkey
+           AND source_revision IS :expectedSourceRevision`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        pubkey: row.pubkey,
+        aiProfileJson: row.aiProfileJson,
+        profileHash: row.profileHash,
+        aiSourceRevision: row.aiSourceRevision,
+        transcriptsJson: row.transcriptsJson,
+        expectedSourceRevision: row.expectedSourceRevision,
+        now: row.now,
+      });
+    return Number(info.changes) > 0;
   }
 
   approvedAttendees(coordinate: string): {
