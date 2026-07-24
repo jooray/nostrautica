@@ -13,7 +13,7 @@ All protocol facts referenced here (NIP text, Blossom BUDs, Venice.ai endpoints,
 Conferences put interesting people in one room and then fail to connect them. Nostrautica treats networking as the main event:
 
 - Organizers create an event; attendees join (manual approval or invite link, Cashu tickets later).
-- Each attendee records a **short intro video** (length limit configurable per event) and optionally submits a **pre-recorded talk** about what they're working on.
+- Each attendee records a **short intro video** (length limit configurable per event) and optionally submits a **pre-recorded talk** about what they're working on — recorded in-browser, uploaded as a file, or provided as an unlisted **YouTube / direct-`.mp4` URL** for talks too large for Blossom. Intro and talk playback has a **speed control** (1×/1.5×/2×). Talks are only transcribed and used for matching when the speaker opts in.
 - One supported event format has **no live stage talks at all**: talks are watched ahead of time and the venue is used for the conversations the matchmaking points people toward.
 - A coordinator service transcribes videos/talks, summarizes each attendee's existing public Nostr activity, builds an AI profile per attendee, and scores pairs on similarity **and** complementarity (cryptographer + programmer + designer at a cypherpunk event; drummer + bassist + singer at a music gathering). Below the configured prefilter threshold it scores every pair; above it, it scores selected high-similarity candidates plus a random low-similarity sample. Every match carries reasoning text, not just a score.
 - Attendees see a ranked "people to meet" list, see who they already follow on Nostr, and can read anyone's recent public posts, rendered nicely.
@@ -348,7 +348,7 @@ content: {"v":2, "a": <coordinate>, "rev": <int ≥ 0>,
 ```
 Lets an approved attendee override or hide specific fields of their own coordinator-generated `ai_profile` (summary/skills/interests/offers/seeks) — the coordinator's read of a video or talk isn't always right, and this is the fix-it path. Sealed by the attendee's own account key, so a correction can only ever apply to the sender's own entry, and carries the same `rev` ordering as a profile submission (§7 "Ordering") — an out-of-order older correction can never overwrite a newer one. The coordinator stores the correction durably and reapplies it on top of every freshly generated `ai_profile` before publishing the 31603, so it survives reprocessing; the directory entry carries an `ai_profile_edited` marker so viewers see a subtle "edited by attendee" note. **Authored profile fields — `about`, `skills`, `looking_for`, `links`, from the original submission — are never touched by a correction**; only the coordinator-derived `ai_profile` can be overridden or hidden.
 
-**rumor kind 21609 — Talk Submission** (→ `E_inbox.pubkey`; a speaker submits or edits a prerecorded talk) — same authority and shape as a profile submission, but for a talk: title, description, co-speakers, a `kind:"talk"` media descriptor (§6.2), and a stable `talk_d` the speaker chooses once. Editing resubmits the same `talk_d` with a bumped `revision`, replacing the previous talk in place (§7 "Ordering" rejects an equal-revision resubmission whose content actually changed). Only processed when the event's `talks` config (§7.1) is not `"off"`.
+**rumor kind 21609 — Talk Submission** (→ `E_inbox.pubkey`; a speaker submits or edits a prerecorded talk) — same authority and shape as a profile submission, but for a talk: title, description, co-speakers, a stable `talk_d` the speaker chooses once, and **exactly one** video source — a `kind:"talk"` **`media`** descriptor (§6.2, a recording or uploaded file) **or** an **`external_url`** (+ `external_kind:"youtube"|"video"`, see kind 31610). A `process_for_matching` boolean (default **false**) is the only thing that opts a Blossom talk into coordinator transcription + matching: talks are **not** transcribed or fed into matching by default, so `process_talk` STT runs only for opted-in Blossom talks (external talks are never fetched at all). Editing resubmits the same `talk_d` with a bumped `revision`, replacing the previous talk in place (§7 "Ordering" rejects an equal-revision resubmission whose content actually changed). Only processed when the event's `talks` config (§7.1) is not `"off"`.
 
 **rumor kind 21610 — Attendee Withdrawal** (→ `E_inbox.pubkey`; attendee-initiated leave)
 ```
@@ -396,11 +396,16 @@ content(nip44→recipient): {"v":2, "computed_at":<unix>, "matches":[
 ```
 tags: ["d", <blinded>], ["a", <coordinate>], ["eck", <version>], ["v","2"]
 content(ECK): {"v":2, "pubkey": <speaker-hex>, "talk_d": "…", "title":"…", "description":"…"?,
-  "speakers": [<hex>, …], "media": <descriptor, kind:"talk">,
+  "speakers": [<hex>, …],
+  "media": <descriptor, kind:"talk">?,          // Blossom recording/upload
+  "external_url": "https://…"?, "external_kind": "youtube" | "video"?,  // OR external
+  "source_type": "recording" | "upload" | "external"?,
   "transcript": { … }?, "lang":"…", "revision": <int>,
   "status": "pending" | "published" | "rejected", "published_at": <unix>}
 ```
 The published, moderated form of a talk submission (21609). The address is blinded per speaker and `talk_d` — `hmac_sha256(ECK, "talk|<coordinate>|<speaker>|<talk_d>")` (§6.6's construction, specialized) — so members can locate a specific talk without a public index leaking who submitted what. `status` supports organizer moderation before a talk is visible to attendees (`talk_publish`/`talk_reject` admin commands, §7.2); `revision` supports editing — the last published revision stays watchable until a newer one publishes. Republished after moderation, after a fresh transcript, and on ECK rotation; an address made obsolete by a new revision or a rotation may receive a NIP-09 deletion.
+
+A talk carries **exactly one** video source: a `kind:"talk"` **`media`** descriptor (an in-browser recording or an uploaded file, encrypted + on Blossom) **or** an **`external_url`** (+ `external_kind`) — an unlisted YouTube link or a direct `.mp4` URL the speaker hosts elsewhere, for clips too large for Blossom (>~1 GB). The external URL rides inside the ECK-encrypted content, so it is members-only even though the file it points at is public; the coordinator **never fetches** an external URL (the §6.2 media-fetch SSRF allowlist is Blossom-origin-only), so external talks are view-only — never transcribed, never fed into matching. Clients play a YouTube `external_kind` via a `youtube-nocookie` embed and a `video` one via a plain `<video>`.
 
 **kind 30078 — user-private settings** (NIP-78; NIP-44 self-encrypted content)
 - `d = "nostrautica:settings"` — theme, language, relay prefs.

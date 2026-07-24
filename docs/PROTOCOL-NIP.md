@@ -529,7 +529,10 @@ silently drop them.
     title: string 1..200,
     description: string ≤2000 (default ""),
     speakers: hex32[] (default []),   // co-speakers; the submitter is implicit
-    media: MediaDescriptor,           // kind MUST be "talk"
+    media?: MediaDescriptor,          // kind MUST be "talk"; present for recording/upload
+    external_url?: https URL ≤2048,   // XOR with media: a YouTube or direct-mp4 URL
+    external_kind?: "youtube" | "video",  // required when external_url is set
+    source_type?: "recording" | "upload" | "external",
     transcript?: MediaTranscript,
     lang: string,
     revision: int ≥0,
@@ -537,8 +540,14 @@ silently drop them.
     published_at: int
   }
   ```
-  Only `status: "published"` talks are ever put on the wire in practice; `"pending"`/
-  `"rejected"` describe the moderation queue the coordinator keeps privately.
+  Additive fields (2026-07-24, no `v` bump): a talk carries **exactly one** of `media`
+  (a Blossom recording/upload) or `external_url` (+ `external_kind`) — an unlisted YouTube
+  link or a direct `.mp4` the speaker hosts off-Blossom, for clips too large to upload.
+  The URL is inside the ECK ciphertext (members-only); the coordinator never fetches an
+  `external_url` (the §8 media-fetch allowlist is Blossom-origin-only), so external talks
+  are view-only — never transcribed or matched. Only `status: "published"` talks are ever
+  put on the wire in practice; `"pending"`/`"rejected"` describe the moderation queue the
+  coordinator keeps privately.
 
 #### `31611` — Coordinator Announcement
 
@@ -762,7 +771,7 @@ relay-visible event on its own.
 
 - **Seal author → recipient:** the speaker (attendee account) → `E_inbox`.
 - **Tags:** `["a", <coordinate>]`.
-- **Content** (`.strict()`, and `media.kind` **MUST** be `"talk"`):
+- **Content** (`.strict()`; a present `media.kind` **MUST** be `"talk"`):
   ```
   {
     v: 2,
@@ -771,12 +780,22 @@ relay-visible event on its own.
     title: string 1..200,
     description: string ≤2000 (default ""),
     speakers: hex32[] (default []),  // co-speakers; the submitter is implicit
-    media: MediaDescriptor,
+    media?: MediaDescriptor,         // XOR external_url (exactly one required)
+    external_url?: https URL ≤2048,  // YouTube or direct-mp4 URL hosted off-Blossom
+    external_kind?: "youtube" | "video",   // required when external_url is set
+    source_type?: "recording" | "upload" | "external",
+    process_for_matching: bool (default false),  // opt-in to STT + matching
     revision: int ≥0 (default 0)
   }
   ```
-  Ordering per §3.3. Normative caps: at most 10 distinct `talk_d` per speaker per event
-  (edits to an existing `talk_d` are uncapped).
+  Ordering per §3.3. A talk carries **exactly one** of `media` (Blossom recording/upload)
+  or `external_url` (+ `external_kind`); this is a shared schema refinement with `31610`.
+  `process_for_matching` (default **false**, additive 2026-07-24) is the only thing that
+  opts a Blossom talk into coordinator transcription + matching — un-opted talks are stored
+  and publishable but never transcribed, and external talks are never fetched at all. Since
+  the content is `.strict()`, the app and coordinator ship these additive fields in lockstep.
+  Normative caps: at most 10 distinct `talk_d` per speaker per event (edits to an existing
+  `talk_d` are uncapped).
 
 #### `21610` — Attendee Withdrawal
 
@@ -944,9 +963,15 @@ relays):
 
 ## 11. Talks
 
-Normative caps: at most 10 distinct `talk_d` per speaker per event; a talk media
-descriptor's `kind` must be `"talk"`; a published `31610` is republished under a new ECK
-on rotation, with the old-address copy NIP-09-deleted.
+Normative caps: at most 10 distinct `talk_d` per speaker per event; a talk carries
+**exactly one** of a `media` descriptor (whose `kind` must be `"talk"`) or an `external_url`
+(+ `external_kind:"youtube"|"video"`); a published `31610` is republished under a new ECK
+on rotation, with the old-address copy NIP-09-deleted. External-URL talks (a YouTube link
+or a direct `.mp4` hosted off-Blossom, for clips too large to upload) live inside the
+ECK-encrypted content — members-only — but are **never fetched by the coordinator** (the §8
+media-fetch allowlist is Blossom-origin-only), so they are view-only: never transcribed,
+never fed into matching. `process_for_matching` (default false) gates whether a Blossom talk
+is transcribed and folded into matching at all; talks are not matched by default.
 
 ## 12. Deletions
 
