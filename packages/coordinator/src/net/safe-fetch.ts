@@ -188,6 +188,92 @@ export function pinnedDispatcher(addresses: { address: string; family: 4 | 6 }[]
 }
 
 /**
+ * Resolve a URL's host to public addresses and return a dispatcher pinned to them
+ * (audit R22): the same DNS-resolution + public-address check + pin the blob
+ * downloader applies, so a configured provider hostname that resolves to (or rebinds
+ * to) a private/loopback/reserved address can't receive bearer credentials or
+ * attendee prompts. IP literals short-circuit DNS. Throws {@link SafeFetchError} on
+ * any non-public answer.
+ */
+export async function pinnedDispatcherFor(
+  rawUrl: string,
+  opts: { lookupFn?: typeof lookup } = {},
+): Promise<Dispatcher> {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new SafeFetchError(`invalid URL`, false);
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  let addresses: { address: string; family: 4 | 6 }[];
+  if (isIP(host)) {
+    addresses = [{ address: host, family: isIP(host) as 4 | 6 }];
+  } else {
+    const resolve = opts.lookupFn ?? lookup;
+    let resolved: { address: string; family: number }[];
+    try {
+      resolved = await resolve(host, { all: true });
+    } catch {
+      throw new SafeFetchError(`DNS resolution failed`, true);
+    }
+    addresses = resolved
+      .filter((a) => isIP(a.address) !== 0)
+      .map((a) => ({ address: a.address, family: isIP(a.address) as 4 | 6 }));
+  }
+  if (addresses.length === 0) throw new SafeFetchError(`no addresses resolved`, true);
+  for (const { address } of addresses) {
+    if (isBlockedAddress(address)) {
+      throw new SafeFetchError(`resolved to a blocked (private/loopback/reserved) address`, false);
+    }
+  }
+  return pinnedDispatcher(addresses);
+}
+
+/** DNS-pinning policy for operator-configured provider requests (audit R22). */
+export interface ProviderNetPolicy {
+  /**
+   * DEV ONLY: skip DNS pinning and allow the provider host to resolve to a
+   * loopback/private address (a local test provider). Mirrors the coordinator's
+   * `security.allow_insecure_urls` knob. Default false = pin + public-only.
+   */
+  allowInsecure?: boolean;
+  /** Injectable DNS resolver (tests); defaults to node:dns lookup. */
+  lookupFn?: typeof lookup;
+}
+
+/**
+ * Run a provider HTTP request under the same DNS pinning as {@link safeFetch}
+ * (audit R22). Resolves + validates the host, pins the connection to the validated
+ * public addresses for the life of the request, invokes `handle` to read the body
+ * (while the caller's `signal` deadline is still armed), then closes the pinned
+ * dispatcher. Under `allowInsecure` (dev) it skips pinning and fetches directly so a
+ * local test provider still works. The caller keeps ownership of timeouts/signals
+ * via the `init.signal` it passes.
+ */
+export async function guardedProviderFetch<T>(
+  rawUrl: string,
+  init: RequestInit,
+  policy: ProviderNetPolicy,
+  handle: (res: Response) => Promise<T>,
+): Promise<T> {
+  if (policy.allowInsecure) {
+    return handle(await fetch(rawUrl, init));
+  }
+  const dispatcher = await pinnedDispatcherFor(rawUrl, { lookupFn: policy.lookupFn });
+  try {
+    const res = await fetch(rawUrl, {
+      ...init,
+      // Same undici@7 Dispatcher shape as safeFetch — cast through unknown.
+      dispatcher: dispatcher as unknown as NonNullable<RequestInit["dispatcher"]>,
+    });
+    return await handle(res);
+  } finally {
+    await dispatcher.close().catch(() => {});
+  }
+}
+
+/**
  * Download a URL under the SSRF/DoS guard. Follows manual redirects (each
  * re-validated) up to the cap and returns the body bytes, aborting if the stream
  * exceeds `maxBytes` or the wall-clock timeout.

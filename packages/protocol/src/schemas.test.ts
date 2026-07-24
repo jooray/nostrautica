@@ -145,6 +145,27 @@ describe("every §7 payload round-trips through JSON", () => {
     ).toThrow();
   });
 
+  it("21603/21602 grants reject a non-31923 coordinate `a` (audit R18)", () => {
+    // An alias kind against the same author/identifier would open a divergent
+    // capacity/accounting namespace — the schema now rejects it at the boundary.
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "1:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      keyGrantContentSchema.parse({
+        v: 2, a: "31600:" + hex + ":ev", role: "attendee", eck: [{ id: 1, key: b64_32 }], granted_by: hex,
+      }),
+    ).toThrow();
+    // The canonical 31923 coordinate is still accepted.
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
+      }),
+    ).not.toThrow();
+  });
+
   it("21604 admin command", () =>
     roundTrips(adminCommandContentSchema, {
       v: 2,

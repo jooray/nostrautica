@@ -40,6 +40,8 @@ describe("RoutstrLlm proof accounting on failure (COORD-5 / H-4)", () => {
     const llm = new RoutstrLlm({
       nodeUrl: "https://node/v1",
       payment: { prepare: async () => ({ "X-Cashu": "tok" }), settle: async () => {}, fail },
+      // This unit test mocks global.fetch; skip R22 DNS pinning for the fake host.
+      net: { allowInsecure: true },
     });
     await expect(llm.completeStructured(req)).rejects.toThrow(/ECONNRESET/);
     expect(fail).toHaveBeenCalledTimes(1);
@@ -55,6 +57,8 @@ describe("RoutstrLlm proof accounting on failure (COORD-5 / H-4)", () => {
     const llm = new RoutstrLlm({
       nodeUrl: "https://node/v1",
       payment: { prepare: async () => ({}), settle: async () => {}, fail },
+      // This unit test mocks global.fetch; skip R22 DNS pinning for the fake host.
+      net: { allowInsecure: true },
     });
     await expect(llm.completeStructured(req)).rejects.toThrow(/502/);
     expect(fail).toHaveBeenCalledTimes(1);

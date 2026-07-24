@@ -34,6 +34,7 @@ import {
   KIND_PROFILE,
   giftwrapSince,
   unwrapRumor,
+  unwrapRumorEnvelope,
   eckDecrypt,
   base64ToBytes,
   hexToBytes,
@@ -59,6 +60,7 @@ import {
   AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
+  parseEventCoordinate,
   type EckVersion,
   type EventConfig,
   type TalksMode,
@@ -137,6 +139,17 @@ const MAX_MEDIA_PER_SUBMISSION = 4;
 /** Total media bytes downloaded per submission (audit COORD-4). */
 const MAX_SUBMISSION_MEDIA_BYTES = 500 * 1024 * 1024;
 
+/**
+ * Per-FILE media cap (audit R17 follow-up): 250 MiB, the same bound the app's
+ * client precheck and playback/download enforce (MAX_MEDIA_DOWNLOAD_BYTES in
+ * app/blossom/client.ts). Without a per-file cap here, several files that each pass
+ * the client's 250 MiB check (e.g. 3×250 MiB) would each be accepted individually
+ * yet blow the 500 MiB aggregate budget with a confusing late, partial skip. A
+ * single descriptor over this bound is rejected up front with a clear reason —
+ * anything the app would have refused to upload/play is refused server-side too.
+ */
+const MAX_MEDIA_FILE_BYTES = 250 * 1024 * 1024;
+
 /** Distinct talks (by talk_d) one speaker may submit per event (audit COORD-4:
  *  unbounded talk submissions each triggered their own paid STT job). Editing
  *  an already-submitted talk_d is never capped — only new ones. */
@@ -156,6 +169,15 @@ const INBOX_RATE_WINDOW_MS = 60_000;
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
 /** Max inbound rumors accepted for ONE event per window across all senders. */
 const MAX_RUMORS_PER_EVENT_WINDOW = 600;
+/**
+ * Rate-bucket key for the coordinator's OWN inbox (audit R4): anyone can publish a
+ * kind-1059 wrap to the coordinator's public pubkey, so its inbox needs the same
+ * per-sender / per-inbox gate the event inboxes have — applied BEFORE the durable
+ * install/admin dispatch. A fixed key (not a real coordinate) shares the inbox_rate
+ * table; the per-inbox bucket bounds how many rate rows a distinct-sender flood can
+ * create per window (once the inbox total is over budget, per-sender rows stop).
+ */
+const COORD_INBOX_RATE_KEY = "coordinator-inbox";
 
 /** Bounded inbound work queue (audit C3): global concurrent handlers + queue depth.
  *  Subscription callbacks are dispatched through this so a burst of gift wraps can't
@@ -223,6 +245,14 @@ export interface PublishOutcome {
 export interface Transport {
   publish(event: NostrEvent, relays?: string[]): Promise<void | PublishOutcome>;
   fetch(filter: any, relays?: string[], timeoutMs?: number): Promise<NostrEvent[]>;
+  /** PAGINATED full-history fetch (audit R4): walks the whole history in `until`-
+   *  windowed pages so a >5000-event flood can't truncate startup recovery. Optional:
+   *  a transport without it degrades to the (capped) one-shot `fetch`. */
+  fetchAll?(
+    filter: any,
+    relays?: string[],
+    opts?: { pageSize?: number; overlapSec?: number; maxTotal?: number; timeoutMs?: number },
+  ): Promise<NostrEvent[]>;
   /** Prove a relay set is reachable (≥1 relay connects/EOSEs) before a relay
    *  handover promotes it (audit C9). Optional: a transport without it degrades to
    *  the old break-before-make behavior. */
@@ -1060,14 +1090,19 @@ export class Coordinator {
     if (this.deps.store.isRumorSeen(wrap.id)) return undefined;
     let rumor: Rumor;
     try {
-      rumor = unwrapRumor(wrap, recipientSk);
+      // R19: take the UNTOUCHED authenticated rumor (its created_at is exactly
+      // what the seal author signed, so rumor.id still hashes its contents and
+      // durable command ordering is not processing-time-dependent). The protocol
+      // no longer clamps in place; this handler enforces the future-date bound
+      // itself (below), dropping — not silently clamping — a future-dated rumor.
+      rumor = unwrapRumorEnvelope(wrap, recipientSk).rumor;
     } catch {
       this.deps.store.markRumorSeen(wrap.id, this.now()); // can never decrypt — drop
       return undefined;
     }
     // Freshness (COORD-11): drop rumors future-dated > 15 min (clock-skew guard
-    // against replay-with-shifted-timestamp; the protocol layer clamps too —
-    // defense in depth here).
+    // against replay-with-shifted-timestamp). With R19 the rumor is unmutated, so
+    // this bound now acts on the authenticated created_at.
     if (typeof rumor.created_at === "number" && rumor.created_at > Math.floor(this.now() / 1000) + 15 * 60) {
       log(`[wrap] dropped future-dated rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}, created_at ${rumor.created_at})`);
       this.deps.store.markRumorSeen(rumor.id, this.now());
@@ -1176,7 +1211,7 @@ export class Coordinator {
    * `fn`'s result, and prunes the chain when it is the tail so the map stays bounded.
    */
   private withSubjectLock<T>(coordinate: string, subject: string, fn: () => Promise<T>): Promise<T> {
-    const key = `${coordinate} ${subject}`;
+    const key = `${coordinate}\u0000${subject}`;
     const prev = this.subjectChains.get(key) ?? Promise.resolve();
     const run = prev.then(fn, fn);
     // Store a settle-swallowing tail so a rejection never becomes an unhandled
@@ -1298,6 +1333,16 @@ export class Coordinator {
   async handleCoordinatorWrap(wrap: GiftWrap): Promise<void> {
     const rumor = this.unwrapFresh(wrap, this.deps.coordSk);
     if (!rumor) return;
+    // Rate-limit the coordinator's OWN inbox BEFORE any durable dispatch (audit R4):
+    // the inbox is publicly addressable, so gate per-sender / per-inbox exactly like
+    // an event inbox. A rate-rejected wrap is left UNSEEN (not written to the durable
+    // seen ledger) so the ledger can't be grown by a flood — a legitimately-throttled
+    // rumor is simply retried by a later backfill rescan once the burst subsides.
+    if (!this.inboxRateAllows(COORD_INBOX_RATE_KEY, rumor.pubkey)) {
+      log(`[coord-inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)}`);
+      this.inFlightRumors.delete(rumor.id);
+      return;
+    }
     await this.processRumorWithRetry(wrap.id, rumor, async () => {
       if (rumor.kind === KIND_COORDINATOR_GRANT) {
         const grant = coordinatorGrantContentSchema.parse(JSON.parse(rumor.content));
@@ -1305,7 +1350,10 @@ export class Coordinator {
         // sealed by the event's E_id — rumor.pubkey is the verified seal author —
         // exactly the check 21604 admin commands already get. Otherwise anyone with
         // a plausible-looking payload could "install" an event and pick its relays.
-        const eidPubkey = parseCoordinate(grant.a).pubkey;
+        // The grant `a` is a canonical 31923 event coordinate (schema-enforced,
+        // audit R18) — re-assert it here so a non-event alias can never install a
+        // divergent namespace even if the payload reached this boundary another way.
+        const eidPubkey = parseEventCoordinate(grant.a).pubkey;
         if (rumor.pubkey !== eidPubkey) {
           log(`[install] REJECTED 21603 for ${grant.a}: seal author ${short(rumor.pubkey)} is not E_id ${short(eidPubkey)}`);
           return;
@@ -1360,14 +1408,16 @@ export class Coordinator {
     if (!state) return;
     const rumor = this.unwrapFresh(wrap, state.inboxSk);
     if (!rumor) return;
-    // Durable per-sender / per-event rate accounting (audit C3): a sender or event
-    // flooding the inbox is dropped (rumor + wrap marked seen so the flood dedupes).
+    // Durable per-sender / per-event rate accounting (audit C3). A sender or event
+    // flooding the inbox is DROPPED but left UNSEEN (audit R4): marking rate-rejected
+    // wraps seen permanently grew the seen ledger with attacker-chosen ids AND
+    // permanently discarded a legitimately-throttled rumor. Leaving it unseen bounds
+    // the ledger and lets a later backfill rescan recover a genuine rumor once the
+    // burst subsides; a sustained flood is simply re-dropped by this gate each pass.
     // The in-flight claim taken by unwrapFresh is released here since we bypass
     // processRumorWithRetry (which would otherwise release it).
     if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
       log(`[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate}`);
-      this.deps.store.markRumorSeen(rumor.id, this.now());
-      this.deps.store.markRumorSeen(wrap.id, this.now());
       this.inFlightRumors.delete(rumor.id);
       return;
     }
@@ -2167,6 +2217,13 @@ export class Coordinator {
     for (const d of media) {
       if (typeof d.duration === "number" && d.duration > state.maxMediaSec) {
         log(`[pipeline] ${short(pubkey)}: skipping ${d.duration}s media (over the ${state.maxMediaSec}s cap)`);
+        continue;
+      }
+      // Per-file cap (R17 follow-up): reject a single descriptor larger than the
+      // app's own 250 MiB upload/playback bound with a clear reason, instead of
+      // letting it silently consume — or overflow — the aggregate budget.
+      if (d.size > MAX_MEDIA_FILE_BYTES) {
+        log(`[pipeline] ${short(pubkey)}: skipping ${d.size}-byte media (over the ${MAX_MEDIA_FILE_BYTES}-byte per-file cap; the app rejects it too)`);
         continue;
       }
       if (totalBytes + d.size > MAX_SUBMISSION_MEDIA_BYTES) {
@@ -3349,7 +3406,9 @@ export class Coordinator {
     // install grants/admin commands sent during a longer outage would be missed.
     // Already-handled rumors dedupe via the seen ledger.
     try {
-      const wraps = await this.deps.transport.fetch(
+      // Paginated so a >5000-wrap flood on the public coordinator inbox can't crowd a
+      // legitimate older install grant / admin command out of recovery (audit R4).
+      const wraps = await this.fetchFullHistory(
         { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: 0 },
         this.deps.defaultRelays,
       );
@@ -3477,7 +3536,10 @@ export class Coordinator {
   ): void {
     const existing = map.get(coordinate);
     if (existing?.key === key) return; // idempotent
-    existing?.close();
+    // Make-before-break (audit R10): open the NEW subscription FIRST, register it,
+    // and only THEN close the old one — so there is never a window with no live
+    // subscription for this coordinate during a relay handover. Cross-subscription
+    // dedupe (seen_rumors + in-flight claim) makes the brief overlap safe.
     let closed = false;
     const raw = open();
     const close = () => {
@@ -3487,11 +3549,24 @@ export class Coordinator {
     };
     map.set(coordinate, { key, close });
     this.closers.push(close);
+    existing?.close();
   }
 
   private eckFromStore(coordinate: string): EckVersion[] {
     const row = this.deps.store.getEvent(coordinate);
     return row ? (JSON.parse(row.eck_json) as EckVersion[]) : [];
+  }
+
+  /**
+   * Full-history fetch that PAGINATES when the transport supports it (audit R4), so a
+   * >5000-event flood can't silently truncate startup recovery and crowd out a
+   * legitimate older install/join. Falls back to the capped one-shot `fetch` for a
+   * transport without `fetchAll`.
+   */
+  private async fetchFullHistory(filter: any, relays: string[]): Promise<NostrEvent[]> {
+    const fetchAll = (this.deps.transport as Transport).fetchAll;
+    if (fetchAll) return fetchAll.call(this.deps.transport, filter, relays);
+    return this.deps.transport.fetch(filter, relays);
   }
 
   // ── relay handover: make-before-break (audit C9) ──────────────────────────
@@ -3510,16 +3585,51 @@ export class Coordinator {
     }
   }
 
+  /** True while `candidate` is STILL the durable pending handover target for the
+   *  coordinate (audit R10 compare-and-set): a newer config that recorded a different
+   *  candidate — or a completed promotion that cleared it — makes this false, so a
+   *  stale handover stops before repointing subscriptions. */
+  private isPendingCandidate(coordinate: string, candidate: string[]): boolean {
+    const pending = this.deps.store.getPendingRelays(coordinate);
+    return !!pending && relayKey(pending) === relayKey(candidate);
+  }
+
   /**
-   * Begin a make-before-break relay handover (audit C9): record the candidate set
-   * durably (separate from the last-known-good `config_relays`), prove it reachable,
-   * and only then promote. If the probe fails the old subscriptions stay live and
-   * the candidate stays pending — retried by {@link retryRelayHandovers} on a timer
-   * and on restart — so a typo'd or briefly-unreachable relay list never orphans a
-   * healthy event.
+   * Bounded catch-up on the CANDIDATE relays before a handover promotion (audit R10):
+   * pull the event's E_inbox history from the new relay set and run each wrap through
+   * the normal inbox path (deduped by seen_rumors), so a rumor delivered only to the
+   * new relays is not lost across the swap — AND the candidate is proven to actually
+   * serve the event's data, not merely EOSE a dummy filter. Errors are swallowed (the
+   * handover simply defers to a later retry).
+   */
+  private async catchUpInboxOnRelays(state: EventState, relays: string[]): Promise<void> {
+    const inboxPk = getPublicKey(state.inboxSk);
+    const since = giftwrapSince(Math.floor(this.now() / 1000));
+    let wraps: NostrEvent[];
+    try {
+      wraps = (await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
+        relays,
+      )) as unknown as NostrEvent[];
+    } catch (e) {
+      log(`[relay] candidate catch-up for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    for (const w of wraps) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
+  }
+
+  /**
+   * Make-before-break relay handover (audit C9 + R10). The candidate is already
+   * recorded durably (under the config lock, so `pending` reflects the newest config).
+   * Here: compare-and-set that this candidate is still current, prove it reachable,
+   * complete a bounded catch-up on the REAL candidate relays, re-check the CAS (a newer
+   * config may have superseded during the awaits), and only then promote — opening the
+   * new subscriptions before retiring the old. A superseded or unreachable candidate
+   * leaves the healthy old subscriptions live; the timer/restart retries the still-
+   * pending one, so a typo'd or briefly-unreachable relay list never orphans an event.
    */
   private async beginRelayHandover(state: EventState, candidate: string[]): Promise<void> {
-    this.deps.store.setPendingRelays(state.coordinate, candidate);
+    if (!this.isPendingCandidate(state.coordinate, candidate)) return; // already superseded
     const reachable = await this.probeRelays(candidate);
     if (!reachable) {
       log(
@@ -3527,12 +3637,30 @@ export class Coordinator {
       );
       return;
     }
+    // Re-check BEFORE the (bounded) catch-up work, and again after it, so a newer
+    // config that landed during the probe/fetch wins the compare-and-set.
+    if (!this.isPendingCandidate(state.coordinate, candidate)) {
+      log(`[relay] handover for ${state.coordinate} candidate superseded during probe — not promoting`);
+      return;
+    }
+    await this.catchUpInboxOnRelays(state, candidate);
+    if (!this.isPendingCandidate(state.coordinate, candidate)) {
+      log(`[relay] handover for ${state.coordinate} candidate superseded during catch-up — not promoting`);
+      return;
+    }
     this.promoteRelays(state, candidate);
   }
 
   /** Promote a proven candidate relay set: persist as last-known-good, clear the
-   *  pending marker, and repoint the E_inbox/config/chat subscriptions (COORD-8). */
+   *  pending marker, and repoint the E_inbox/config/chat subscriptions (COORD-8,
+   *  open-before-close). Guarded by the R10 compare-and-set: a candidate a newer
+   *  config already superseded is NOT promoted (and its pending marker is left for the
+   *  newer candidate). */
   private promoteRelays(state: EventState, candidate: string[]): void {
+    if (!this.isPendingCandidate(state.coordinate, candidate)) {
+      log(`[relay] handover for ${state.coordinate}: candidate superseded — not promoting`);
+      return;
+    }
     state.configRelays = candidate;
     const row = this.deps.store.getEvent(state.coordinate);
     if (row) {
@@ -3571,7 +3699,11 @@ export class Coordinator {
         this.deps.store.clearPendingRelays(coordinate); // already on it
         continue;
       }
-      if (await this.probeRelays(candidate)) this.promoteRelays(state, candidate);
+      // Route through the same probe → catch-up → compare-and-set → promote path
+      // (audit R10). Promotion re-validates the durable pending marker at its
+      // (synchronous) entry, so a candidate a concurrently-applied newer config just
+      // superseded is not promoted even without holding the config lock here.
+      await this.beginRelayHandover(state, candidate);
     }
   }
 
@@ -3623,7 +3755,9 @@ export class Coordinator {
     const inboxPk = getPublicKey(state.inboxSk);
     let wraps: NostrEvent[];
     try {
-      wraps = (await this.deps.transport.fetch(
+      // Paginated full-history walk (audit R4): a >5000-wrap flood on the public
+      // event inbox can't truncate recovery and crowd out an older legitimate join.
+      wraps = (await this.fetchFullHistory(
         { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
         state.configRelays,
       )) as unknown as NostrEvent[];
@@ -3722,13 +3856,37 @@ export class Coordinator {
    * ignored. Diffs drive effects: matching/visibility (H4), relay handover, and
    * language/context invalidation.
    */
+  /**
+   * Handle a live 31600 config update (audit H5 + R10). The APPLY runs under a
+   * per-coordinate config lock so concurrent config callbacks can't interleave their
+   * read-modify-write of the applied-config watermark — the newest config's relay
+   * candidate is what ends up in the durable pending marker. The relay handover then
+   * runs OUTSIDE the lock and promotes only via compare-and-set against that pending
+   * marker, so a slow handover for an older config can never promote after a newer
+   * config recorded a different candidate.
+   */
   async handleConfigUpdate(coordinate: string, event: NostrEvent): Promise<void> {
+    const candidate = await this.withSubjectLock(coordinate, "config", () =>
+      this.applyConfigUpdate(coordinate, event),
+    );
+    if (candidate) {
+      const state = this.events.get(coordinate);
+      if (state) await this.beginRelayHandover(state, candidate);
+    }
+  }
+
+  /**
+   * Apply a live 31600 config (audit H5) under the config lock; returns the relay
+   * candidate to hand over to when the relay set CHANGED (else undefined). See
+   * {@link handleConfigUpdate} for the concurrency contract.
+   */
+  private async applyConfigUpdate(coordinate: string, event: NostrEvent): Promise<string[] | undefined> {
     const state = this.events.get(coordinate);
-    if (!state) return;
-    if (event.kind !== KIND_EVENT_CONFIG) return;
-    if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
+    if (!state) return undefined;
+    if (event.kind !== KIND_EVENT_CONFIG) return undefined;
+    if (event.pubkey !== state.eidPubkey) return undefined; // must be signed by E_id
     const d = event.tags.find((t) => t[0] === "d")?.[1];
-    if (d !== state.identifier) return; // wrong event
+    if (d !== state.identifier) return undefined; // wrong event
     // Replaceable ordering (§3.1): ignore a config that does not SUPERSEDE the one
     // already applied — strictly newer, or same created_at with a lower id. v1
     // rejected `id <=` (kept the HIGHER id on a tie); v2 keeps the lowest id, in
@@ -3740,10 +3898,10 @@ export class Coordinator {
           { id: state.configEventId, created_at: state.configCreatedAt },
         )
       ) {
-        return;
+        return undefined;
       }
     } else if (event.created_at < state.configCreatedAt) {
-      return;
+      return undefined;
     }
 
     let config: EventConfig;
@@ -3751,7 +3909,7 @@ export class Coordinator {
       config = parseEventConfig(state.eidPubkey, event.tags);
     } catch {
       log(`[config] ignored malformed 31600 for ${short(state.eidPubkey)}`);
-      return;
+      return undefined;
     }
 
     // Durable detach (NIP §3.5, decision D6): the newest 31600 is a detach signal
@@ -3769,7 +3927,7 @@ export class Coordinator {
             : "no longer names a coordinator";
       log(`[config] 31600 for ${coordinate} ${why} — detaching from this daemon`);
       await this.detachEvent(coordinate, { gen: state.gen, reason: `config update: ${why}` });
-      return;
+      return undefined;
     }
 
     const prev = {
@@ -3839,12 +3997,13 @@ export class Coordinator {
     }
     log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
 
-    // Relay handover (audit COORD-8 + C9 make-before-break): the E_inbox / config /
-    // chat subscriptions are keyed by their relay set. A relay change opens the new
-    // set only AFTER it is proven reachable (beginRelayHandover); the healthy old
-    // subscriptions stay live until then, so a bad candidate never cuts off the event.
+    // Relay handover (audit COORD-8 + C9 + R10 make-before-break): a relay change
+    // records the candidate DURABLY under the config lock (so pending reflects the
+    // newest config), and the actual probe/catch-up/promote runs after the lock in
+    // {@link handleConfigUpdate} via compare-and-set. The healthy old subscriptions
+    // stay live until the candidate is proven reachable and caught up.
     if (relayChanged) {
-      await this.beginRelayHandover(state, candidateRelays);
+      this.deps.store.setPendingRelays(coordinate, candidateRelays);
     }
 
     // Effects.
@@ -3870,6 +4029,8 @@ export class Coordinator {
       if (state.chat) await this.ensureChat(state);
       else this.marmot.freeze(coordinate);
     }
+    // The caller runs the relay handover (outside the lock) for the recorded candidate.
+    return relayChanged ? candidateRelays : undefined;
   }
 
   // ── billing state machine (spec §9, D5, §13.4) ─────────────────────────────

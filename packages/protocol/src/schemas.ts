@@ -11,6 +11,7 @@
  * below).
  */
 import { z } from "zod";
+import { isEventCoordinate } from "./coordinate.js";
 
 export const PROTOCOL_VERSION = 2;
 
@@ -100,6 +101,18 @@ export function parsePayloadSafe<T>(schema: z.ZodType<T>, raw: unknown): ParseRe
 // so an uppercase-A-F pubkey that validated could never match anything.
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/, "expected 32-byte hex");
 const base64 = z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, "expected base64");
+
+/**
+ * A canonical Nostrautica EVENT coordinate `31923:<E_id pubkey>:<d>` (audit R18):
+ * a `kind:pubkey:d` whose kind is exactly 31923. Used for the `a` of grants that
+ * INSTALL/AUTHORIZE an event identity, so an alias kind (e.g. `1:<E_id>:d`) can't
+ * open a divergent capacity/accounting namespace against the same author. Other
+ * `a` fields (corrections, per-event self-copies, library `a:null`) stay generic
+ * strings — only the install/key grant establishes the event's server-side identity.
+ */
+const eventCoordinate = z
+  .string()
+  .refine(isEventCoordinate, "expected a 31923 event coordinate (kind:pubkey:d)");
 
 /**
  * Byte length a canonical base64 string decodes to, or -1 if the string is not a
@@ -386,7 +399,7 @@ const secretKeyHex = hex32;
 
 export const keyGrantContentSchema = z.object({
   v: version,
-  a: z.string(), // coordinate
+  a: eventCoordinate, // 31923 event coordinate (audit R18)
   role: z.enum(["attendee", "organizer"]),
   eck: z.array(eckVersionSchema),
   granted_by: hex32,
@@ -396,7 +409,7 @@ export type KeyGrantContent = z.infer<typeof keyGrantContentSchema>;
 // ── 21603 Coordinator Grant rumor content ────────────────────────────────────
 export const coordinatorGrantContentSchema = z.object({
   v: version,
-  a: z.string(),
+  a: eventCoordinate, // 31923 event coordinate (audit R18) — the installed event's identity
   // Install generation (NIP §3.5, required): must match the newest 31600's gen for
   // a fresh install, and be strictly greater than the highest gen ever installed or
   // detached for the coordinate — a replayed historical grant can never re-install.

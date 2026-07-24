@@ -5,7 +5,13 @@
  * hash checks.
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { safeFetch, isBlockedAddress, SafeFetchError, pinnedLookup } from "./safe-fetch.js";
+import {
+  safeFetch,
+  isBlockedAddress,
+  SafeFetchError,
+  pinnedLookup,
+  guardedProviderFetch,
+} from "./safe-fetch.js";
 
 const ALLOW = "https://blossom.example";
 
@@ -81,6 +87,50 @@ describe("pinnedLookup (audit COORD-6)", () => {
     ).rejects.toMatchObject({ retryable: false });
     const spy = vi.spyOn(globalThis, "fetch");
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("guardedProviderFetch (audit R22)", () => {
+  it("pins a public provider host and passes a dispatcher to fetch", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const lookupFn = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]) as any;
+    const out = await guardedProviderFetch(
+      "https://api.venice.ai/api/v1/models",
+      { headers: { authorization: "Bearer secret" } },
+      { lookupFn },
+      async (res) => (await res.json()) as unknown,
+    );
+    expect(out).toEqual({});
+    const init = spy.mock.calls[0]![1] as any;
+    expect(init.dispatcher).toBeDefined(); // pinned to the resolved public IP
+    expect(init.headers.authorization).toBe("Bearer secret");
+  });
+
+  it("rejects a provider host that resolves to a private address (no request, no leaked bearer)", async () => {
+    const spy = vi.spyOn(globalThis, "fetch");
+    const lookupFn = vi.fn(async () => [{ address: "169.254.169.254", family: 4 }]) as any;
+    await expect(
+      guardedProviderFetch(
+        "https://metadata.attacker.example/v1/chat",
+        { headers: { authorization: "Bearer secret" } },
+        { lookupFn },
+        async (res) => res.text(),
+      ),
+    ).rejects.toBeInstanceOf(SafeFetchError);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("under allowInsecure (dev) skips pinning and fetches directly", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok", { status: 200 }));
+    const out = await guardedProviderFetch(
+      "http://localhost:8080/v1/models",
+      {},
+      { allowInsecure: true },
+      async (res) => res.text(),
+    );
+    expect(out).toBe("ok");
+    const init = spy.mock.calls[0]![1] as any;
+    expect(init?.dispatcher).toBeUndefined(); // no pinning in dev
   });
 });
 

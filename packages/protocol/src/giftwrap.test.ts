@@ -4,6 +4,8 @@ import { nip44Encrypt } from "./crypto.js";
 import {
   wrapRumor,
   unwrapRumor,
+  unwrapRumorEnvelope,
+  rumorEffectiveCreatedAt,
   rumorPayload,
   giftwrapSince,
   RUMOR_MAX_CLOCK_SKEW_SEC,
@@ -392,5 +394,50 @@ describe("rumor created_at clamping (PROTO-8)", () => {
       });
       expect(unwrapRumor(wrap, inboxSk).created_at).toBe(ts);
     }
+  });
+});
+
+describe("unwrap envelope preserves authenticated fields (audit R19)", () => {
+  it("returns the untouched rumor (created_at hashes to id) + a separate effectiveCreatedAt", () => {
+    const inboxSk = generateSecretKey();
+    const sender = generateSecretKey();
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 2 * 86400; // 2 days ahead
+    const wrap = wrapRumor(sender, getPublicKey(inboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "time traveler" },
+      created_at: future,
+    });
+    const { rumor, effectiveCreatedAt } = unwrapRumorEnvelope(wrap, inboxSk);
+    // The rumor is AUTHENTICATED and UNMUTATED: created_at is exactly what was
+    // signed, so recomputing its id over its own fields still matches (the R19 fix:
+    // the clamp no longer breaks id integrity).
+    expect(rumor.created_at).toBe(future);
+    expect(rumor.id).toBe(
+      getEventHash({
+        pubkey: rumor.pubkey,
+        created_at: rumor.created_at,
+        kind: rumor.kind,
+        tags: rumor.tags,
+        content: rumor.content,
+      }),
+    );
+    // effectiveCreatedAt is the clamped ordering value, separate from the rumor.
+    expect(effectiveCreatedAt).toBeLessThanOrEqual(
+      Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC,
+    );
+    expect(effectiveCreatedAt).toBeLessThan(future);
+    // The backward-compat unwrapRumor still returns the clamped created_at (app path).
+    expect(unwrapRumor(wrap, inboxSk).created_at).toBe(effectiveCreatedAt);
+  });
+
+  it("rumorEffectiveCreatedAt clamps only future timestamps", () => {
+    const now = 1_000_000;
+    expect(rumorEffectiveCreatedAt(now - 100, now)).toBe(now - 100);
+    expect(rumorEffectiveCreatedAt(now, now)).toBe(now);
+    expect(rumorEffectiveCreatedAt(now + RUMOR_MAX_CLOCK_SKEW_SEC - 1, now)).toBe(
+      now + RUMOR_MAX_CLOCK_SKEW_SEC - 1,
+    );
+    expect(rumorEffectiveCreatedAt(now + 10 * 86400, now)).toBe(now + RUMOR_MAX_CLOCK_SKEW_SEC);
   });
 });

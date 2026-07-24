@@ -37,7 +37,7 @@ const ENC_PREFIX = "nip44:";
  * boundary advances `user_version` through an ordered, transactional migration, and
  * an open refuses a database whose `user_version` exceeds this constant.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
@@ -281,12 +281,54 @@ function applyMembershipSubjectMerge(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Quarantine legacy pipeline artifacts with no ownership ref (audit R11, version 4).
+ * Schema v2 introduced `artifact_refs` for reference-counted deletion but never
+ * backfilled the `pipeline_artifacts` that already existed — those pre-v2 rows have
+ * NO ref, so a purge (which discovers artifacts only through `artifact_refs`) can
+ * never reach them and they survive forever (unbounded growth + attendee-derived
+ * text retained past retention). This migration:
+ *   1. adds the `quarantined_at` column (guarded — earlier partial runs / new DBs
+ *      already have it via the baseline DDL);
+ *   2. stamps `quarantined_at = now` on every artifact that has no `artifact_refs`
+ *      row, so pruneOldData can GC it after a grace window.
+ * It is NON-destructive: a live event still using such an artifact re-touches it via
+ * a cache hit (see `recordArtifactRef`), which clears the quarantine before the GC
+ * window elapses, so nothing an active event needs is lost.
+ */
+function applyArtifactLegacyQuarantine(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(pipeline_artifacts)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "quarantined_at")) {
+    db.exec("ALTER TABLE pipeline_artifacts ADD COLUMN quarantined_at INTEGER");
+  }
+  const now = Date.now();
+  const hasRefs = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifact_refs'")
+    .get();
+  if (hasRefs) {
+    db.prepare(
+      `UPDATE pipeline_artifacts SET quarantined_at = ?
+         WHERE quarantined_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM artifact_refs r
+             WHERE r.stage = pipeline_artifacts.stage AND r.inputs_hash = pipeline_artifacts.inputs_hash
+           )`,
+    ).run(now);
+  } else {
+    // A database old enough to have no artifact_refs table at all has no ownership
+    // records whatsoever → every existing artifact is legacy.
+    db.prepare("UPDATE pipeline_artifacts SET quarantined_at = ? WHERE quarantined_at IS NULL").run(now);
+  }
+}
+
 /** The ordered numbered migrations (audit O3). Version 1 is the historical baseline
  *  (applied unconditionally by {@link applyBaselineDDL}); version 2 is the audit
- *  remediation batch; version 3 unifies the membership command subject (audit R2). */
+ *  remediation batch; version 3 unifies the membership command subject (audit R2);
+ *  version 4 quarantines legacy unreferenced pipeline artifacts (audit R11). */
 const MIGRATIONS: Migration[] = [
   { version: 2, up: applyRemediationDDL },
   { version: 3, up: applyMembershipSubjectMerge },
+  { version: 4, up: applyArtifactLegacyQuarantine },
 ];
 
 /**
@@ -717,6 +759,13 @@ CREATE TABLE IF NOT EXISTS pipeline_artifacts (
   model TEXT NOT NULL,
   output_json TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  -- Set (unix ms) when the artifact is a LEGACY orphan with no ownership ref
+  -- (audit R11): pre-v2 artifacts predate artifact_refs, so a ref-counted purge
+  -- would never find them. The v4 migration quarantines every unreferenced artifact;
+  -- recording an ownership ref (creation or cache hit) clears it, and pruneOldData
+  -- GCs artifacts still quarantined + unreferenced after a grace window. NULL = a
+  -- normally-owned artifact.
+  quarantined_at INTEGER,
   PRIMARY KEY (stage, inputs_hash)
 );
 -- Prerecorded talks (spec F2, audit U11). One row per (coordinate, speaker, talk_d).
@@ -2511,12 +2560,47 @@ export class Store {
       )
       .run(row.stage, row.inputsHash, row.provider, row.model, this.protect(JSON.stringify(row.output)), row.now);
     if (row.owner) {
-      this.db
-        .prepare(
-          "INSERT OR IGNORE INTO artifact_refs (stage, inputs_hash, coordinate, pubkey, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .run(row.stage, row.inputsHash, row.owner.coordinate, row.owner.pubkey, row.now);
+      this.recordArtifactRef(row.stage, row.inputsHash, row.owner, row.now);
     }
+  }
+
+  /**
+   * Record an ownership reference to a content-addressed pipeline artifact WITHOUT
+   * rewriting its payload (audit R11). Called on every USE of an artifact — both a
+   * fresh generation (via {@link putArtifact}) and a CACHE HIT, so a second event
+   * that reuses a shared artifact actually becomes an owner and the ref count is
+   * correct at purge time. Also clears any legacy quarantine flag: an artifact that
+   * now has a live owner must not be GC'd as an orphan. Idempotent.
+   */
+  recordArtifactRef(
+    stage: string,
+    inputsHash: string,
+    owner: { coordinate: string; pubkey: string },
+    now: number,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO artifact_refs (stage, inputs_hash, coordinate, pubkey, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(stage, inputsHash, owner.coordinate, owner.pubkey, now);
+    this.db
+      .prepare("UPDATE pipeline_artifacts SET quarantined_at = NULL WHERE stage = ? AND inputs_hash = ?")
+      .run(stage, inputsHash);
+  }
+
+  /**
+   * Record an ownership reference to a per-account nostr summary on a CACHE HIT
+   * (audit R11) — the miss path already records it via {@link putSummary}. Without
+   * this a second event reusing a cached summary never becomes an owner, so a purge
+   * could delete a summary another event still uses (or leave it unattributed).
+   * Idempotent; does not rewrite the summary payload.
+   */
+  recordSummaryRef(pubkey: string, inputsHash: string, coordinate: string, now: number): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO summary_refs (pubkey, inputs_hash, coordinate, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(pubkey, inputsHash, coordinate, now);
   }
 
   // ── organizer-visible job status (audit Q12) ──────────────────────────────
@@ -2580,7 +2664,36 @@ export class Store {
   pruneOldData(now: number, maxAgeMs = 30 * 24 * 60 * 60 * 1000): number {
     const cutoff = now - maxAgeMs;
     const kps = this.db.prepare("DELETE FROM marmot_consumed_kps WHERE created_at < ?").run(cutoff);
-    return Number(kps.changes);
+    // Legacy artifact GC (audit R11): drop artifacts the v4 migration quarantined
+    // (no ownership ref) that are STILL unreferenced after the grace window — a live
+    // event would have re-touched (and un-quarantined) them via a cache hit by now.
+    // Bounds unbounded pre-v2 artifact growth and expires attendee-derived text that
+    // no current event owns.
+    const legacy = this.db
+      .prepare(
+        `DELETE FROM pipeline_artifacts
+           WHERE quarantined_at IS NOT NULL AND quarantined_at < ?
+             AND NOT EXISTS (
+               SELECT 1 FROM artifact_refs r
+               WHERE r.stage = pipeline_artifacts.stage AND r.inputs_hash = pipeline_artifacts.inputs_hash
+             )`,
+      )
+      .run(cutoff);
+    // Expire dead inbox rate buckets (audit R4): a (coordinate, sender) row whose last
+    // window is long past is only kept alive by having been touched; dropping stale
+    // ones bounds the table against a distinct-sender flood. Windows are 60s, so a
+    // one-hour retention is generous — a currently-relevant bucket is far newer.
+    const rate = this.db
+      .prepare("DELETE FROM inbox_rate WHERE window_start < ?")
+      .run(now - 60 * 60 * 1000);
+    // Expire terminal job rows (audit R4): 'done'/'poison' jobs are kept only briefly
+    // (debugging/idempotency) then GC'd, so the queue table can't grow without bound.
+    // Re-running a long-past job is safe — its inputs are content-addressed (cached,
+    // no re-bill) and its rumor is already in the seen ledger.
+    const jobs = this.db
+      .prepare("DELETE FROM jobs WHERE state IN ('done', 'poison') AND COALESCE(claimed_at, 0) < ?")
+      .run(cutoff);
+    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────

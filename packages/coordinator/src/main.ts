@@ -27,7 +27,7 @@ import type { LlmProvider, SttProvider } from "./providers/types.js";
 import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
 import { isCliSubcommand, runCli } from "./cli.js";
-import { releaseSummary, coordinatorRelease } from "./release.js";
+import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
 
 async function runDaemon(): Promise<void> {
   // Release provenance (§13.9): tie the running daemon to a specific build.
@@ -35,6 +35,19 @@ async function runDaemon(): Promise<void> {
   const configPath = process.argv[2] ?? "coordinator.toml";
   const config = loadConfig(configPath);
   const dbPath = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "coordinator.sqlite";
+
+  // Release provenance policy (R23): a production build should be tie-able to a
+  // specific source revision. `allow_insecure_urls` is the coordinator's dev knob;
+  // outside dev, warn loudly (not fatal — a source-rsync deploy without .git that
+  // hasn't set NOSTRAUTICA_GIT_SHA/RELEASE_ID must still be able to (re)start) so an
+  // operator notices and injects provenance. The strict throwing form
+  // (assertReleaseProvenance) is exercised by the release tests.
+  if (!config.security.allow_insecure_urls && !provenanceIsKnown()) {
+    console.warn(
+      "[coordinator] WARNING: release provenance is unknown (gitSha: unknown, no NOSTRAUTICA_RELEASE_ID) — " +
+        "set NOSTRAUTICA_GIT_SHA or NOSTRAUTICA_RELEASE_ID so this daemon can be tied to a build (§13.9, R23)",
+    );
+  }
 
   await verifyFfmpeg().catch(() => {
     throw new Error("ffmpeg not found — install ffmpeg (and ffprobe) and retry");
@@ -65,6 +78,11 @@ async function runDaemon(): Promise<void> {
 
   // STT stays on Venice/local — Routstr has no STT today (spec §9.4).
   const apiKey = veniceApiKey(config);
+  // DNS pinning for provider requests (audit R22): resolve + public-only + pin,
+  // mirroring blob-fetch SSRF hardening, unless the dev insecure knob is set (local
+  // provider). Operator-authored endpoints, so this is trusted-boundary defense in
+  // depth against a misconfigured/rebinding hostname, not wire-controlled input.
+  const providerNet = { allowInsecure: config.security.allow_insecure_urls };
   const veniceOpts = apiKey
     ? {
         payment: new ApiKeyPayment(apiKey),
@@ -73,6 +91,7 @@ async function runDaemon(): Promise<void> {
         // relax it via models.<role>.require_private = false, spec §16.2), so the
         // adapter must return the unfiltered list here.
         requirePrivate: false,
+        net: providerNet,
       }
     : undefined;
 
@@ -105,7 +124,7 @@ async function runDaemon(): Promise<void> {
     if (quarantined > 0) {
       console.log(`[coordinator] cashu: quarantined ${quarantined} interrupted reservation(s) as ambiguous`);
     }
-    providers.routstr = new RoutstrLlm({ nodeUrl, payment });
+    providers.routstr = new RoutstrLlm({ nodeUrl, payment, net: providerNet });
     console.log(`[coordinator] Routstr ${nodeUrl} (Cashu) available for routing`);
   }
 
@@ -145,6 +164,9 @@ async function runDaemon(): Promise<void> {
   const chatNetwork = makeChatNetwork({
     transport: client as unknown as import("./chat/network.js").ChatNetworkTransport,
     defaultRelays: config.relays.default,
+    // Enforce the operator relay allowlist on untrusted kind-10050 inbox relays
+    // discovered for Marmot chat, same as key-package NIP-65 discovery (audit R20).
+    relayPolicy,
   });
   const { mls: chatMls } = createMarmotClientMls({ store, coordSk, network: chatNetwork });
   await chatMls.loadAll().catch((e) => console.warn("[chat] loadAll failed:", e));

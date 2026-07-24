@@ -14,7 +14,7 @@ import type {
   Subscribable,
 } from "@internet-privacy/marmot-ts/client";
 import { INBOX_RELAY_LIST_KIND } from "@internet-privacy/marmot-ts/core";
-import { sanitizeRelayUrls } from "../net/relay-urls.js";
+import { sanitizeRelayUrls, type RelayPolicy } from "../net/relay-urls.js";
 
 /** Any Nostr event shape (structurally shared between nostr-tools and applesauce). */
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
@@ -31,6 +31,14 @@ export interface ChatNetworkOptions {
   transport: ChatNetworkTransport;
   /** Relays used when a per-user lookup finds no inbox list. */
   defaultRelays: string[];
+  /**
+   * Operator relay policy (audit R20/C4) applied to relays discovered from an
+   * untrusted kind-10050 inbox list. The connect-time guard already blocks
+   * private-network SSRF, but WITHOUT this an approved chat user's inbox list could
+   * fan the daemon out to any public relay, bypassing the operator's allowlist.
+   * Defaults to `{}` (wss-only, deduped, capped — the historical behavior).
+   */
+  relayPolicy?: RelayPolicy;
 }
 
 function asArray<T>(x: T | T[]): T[] {
@@ -38,7 +46,7 @@ function asArray<T>(x: T | T[]): T[] {
 }
 
 export function makeChatNetwork(opts: ChatNetworkOptions): NostrNetworkInterface {
-  const { transport, defaultRelays } = opts;
+  const { transport, defaultRelays, relayPolicy = {} } = opts;
   return {
     async publish(relays, event): Promise<Record<string, PublishResponse>> {
       const targets = relays.length ? relays : defaultRelays;
@@ -95,9 +103,13 @@ export function makeChatNetwork(opts: ChatNetworkOptions): NostrNetworkInterface
         (a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0),
       )[0];
       if (!latest) return defaultRelays;
-      // Untrusted input (audit COORD-16): wss-only, well-formed, deduped, capped.
+      // Untrusted input (audit COORD-16 + R20): wss-only, well-formed, deduped,
+      // capped — AND filtered through the operator relay allowlist, so an approved
+      // chat user's kind-10050 inbox list can't push the daemon past the operator's
+      // intended public-relay egress restriction.
       const relays = sanitizeRelayUrls(
         latest.tags.filter((t) => t[0] === "relay" && typeof t[1] === "string").map((t) => t[1]!),
+        relayPolicy,
       );
       return relays.length ? relays : defaultRelays;
     },

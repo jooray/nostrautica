@@ -182,6 +182,9 @@ export async function processAttendee(
       const cached = deps.store.getSummary(input.pubkey, inputsHash);
       if (cached !== undefined) {
         nostrSummary = cached;
+        // Cache hit (audit R11): record this event's ownership of the shared
+        // per-account summary so a purge reference-counts it correctly.
+        if (owner) deps.store.recordSummaryRef(input.pubkey, inputsHash, owner.coordinate, now());
       } else {
         nostrSummary = await summarizeNostr(
           deps.summary.llm,
@@ -229,6 +232,11 @@ export async function processAttendee(
         now: now(),
         owner,
       });
+    } else if (owner) {
+      // Cache hit (audit R11): this event is now an owner of the shared artifact —
+      // record the ref so a purge reference-counts it (and clear any legacy
+      // quarantine) instead of the second event freeloading without attribution.
+      deps.store.recordArtifactRef("ai_profile", profileKey, owner, now());
     }
   }
 
@@ -256,6 +264,10 @@ export async function processAttendee(
       now: now(),
       owner,
     });
+  } else if (owner) {
+    // Cache hit — a cached `null` (nothing to translate) is still a hit; record this
+    // event's ownership ref (audit R11) so purge reference-counts the translation.
+    deps.store.recordArtifactRef("translation", trKey, owner, now());
   }
   if (translations) aiProfile.translations = translations;
   return { aiProfile, transcripts: published };

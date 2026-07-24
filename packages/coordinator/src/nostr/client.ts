@@ -49,6 +49,57 @@ export class NostrClient {
     return () => sub.close();
   }
 
+  /**
+   * PAGINATED full-history fetch (audit R4): the one-shot {@link fetch} stops at the
+   * {@link MAX_FETCH_EVENTS} cap and SILENTLY TRUNCATES, so an adversary who floods a
+   * public inbox with kind-1059 wraps can crowd a legitimate older install/join out of
+   * startup recovery. This walks the whole history in `until`-windowed pages, bounding
+   * MEMORY PER PAGE (not per history), deduping across pages, and detecting completeness
+   * (a short page = the end of history). Each page's window is `until = <oldest seen> +
+   * overlapSec` so an event exactly on a page boundary is never skipped (deduped by id).
+   *
+   * Termination: stops on a short page (complete), on a page that adds no NEW events
+   * (no forward progress — e.g. a dense same-second cluster the relay can't page past),
+   * or at `maxTotal` (a hard safety bound). Callers process every returned event through
+   * the normal seen-ledger-deduped path, so re-fetched boundary/overlap events are free.
+   */
+  async fetchAll(
+    filter: Filter,
+    relays: string[] = this.defaultRelays,
+    opts: { pageSize?: number; overlapSec?: number; maxTotal?: number; timeoutMs?: number } = {},
+  ): Promise<NostrEvent[]> {
+    const pageSize = opts.pageSize ?? MAX_FETCH_EVENTS;
+    const overlapSec = opts.overlapSec ?? 1;
+    const maxTotal = opts.maxTotal ?? Number.POSITIVE_INFINITY;
+    const timeoutMs = opts.timeoutMs ?? 5000;
+    const seen = new Set<string>();
+    const all: NostrEvent[] = [];
+    let until = filter.until;
+    for (;;) {
+      const page = await this.fetch({ ...filter, until, limit: pageSize }, relays, timeoutMs, pageSize);
+      let added = 0;
+      let oldest = Number.POSITIVE_INFINITY;
+      for (const e of page) {
+        if (e.created_at < oldest) oldest = e.created_at;
+        if (!seen.has(e.id)) {
+          seen.add(e.id);
+          all.push(e);
+          added++;
+        }
+      }
+      // Complete: the relay returned fewer than a full page → end of history reached.
+      if (page.length < pageSize) break;
+      // No forward progress (all duplicates / can't page past a same-second cluster).
+      if (added === 0 || !Number.isFinite(oldest)) break;
+      if (all.length >= maxTotal) break;
+      // Next window: at/just after the oldest we saw, WITH overlap (deduped by id).
+      const nextUntil = oldest + overlapSec;
+      if (until !== undefined && nextUntil >= until) break; // window can't advance
+      until = nextUntil;
+    }
+    return all;
+  }
+
   /** One-shot fetch: collect events until EOSE or timeout, then close. */
   fetch(
     filter: Filter,

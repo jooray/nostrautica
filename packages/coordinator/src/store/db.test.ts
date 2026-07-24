@@ -265,6 +265,42 @@ describe("TTL pruning (audit COORD-24 / P0-1)", () => {
     expect(store.isKpConsumed("31923:aaaa:ev", "fresh-kp")).toBe(true);
     store.close();
   });
+
+  it("expires dead inbox rate buckets and terminal job rows (audit R4)", () => {
+    const store = new Store();
+    const db = (store as any).db;
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = 100 * DAY;
+    // Inbox rate buckets: a currently-active sender + a long-dead one.
+    store.bumpInboxRate("31923:x:e", "fresh-sender", now, 60_000);
+    db.prepare("INSERT INTO inbox_rate (coordinate, pubkey, window_start, count) VALUES (?, ?, ?, ?)").run(
+      "31923:x:e",
+      "stale-sender",
+      now - 2 * 60 * 60 * 1000, // 2h old (windows are 60s)
+      5,
+    );
+    // Jobs: old terminal (done/poison) + a fresh terminal + a pending one.
+    const insJob = db.prepare(
+      "INSERT INTO jobs (type, dedupe_key, payload, state, claimed_at) VALUES (?, ?, ?, ?, ?)",
+    );
+    insJob.run("t", "k-old-done", "{}", "done", now - 40 * DAY);
+    insJob.run("t", "k-old-poison", "{}", "poison", now - 40 * DAY);
+    insJob.run("t", "k-fresh-done", "{}", "done", now - 1 * DAY);
+    insJob.run("t", "k-pending", "{}", "pending", now - 40 * DAY);
+
+    store.pruneOldData(now);
+
+    const rateSenders = (db.prepare("SELECT pubkey FROM inbox_rate").all() as { pubkey: string }[]).map((r) => r.pubkey);
+    expect(rateSenders).toContain("fresh-sender");
+    expect(rateSenders).not.toContain("stale-sender"); // dead window GC'd
+
+    const jobKeys = (db.prepare("SELECT dedupe_key FROM jobs").all() as { dedupe_key: string }[]).map((r) => r.dedupe_key);
+    expect(jobKeys).not.toContain("k-old-done"); // terminal + old → GC'd
+    expect(jobKeys).not.toContain("k-old-poison");
+    expect(jobKeys).toContain("k-fresh-done"); // terminal but recent → kept
+    expect(jobKeys).toContain("k-pending"); // non-terminal → never age-expired
+    store.close();
+  });
 });
 
 describe("talk transcript compare-and-set (audit P0-7)", () => {
@@ -508,6 +544,107 @@ describe("schema migrations (audit O3)", () => {
     expect(store.getCommandWatermark("31923:e:x", "member:bob")).toMatchObject({ created_at: 50, rumor_id: "r-bob" });
     // The talk: subject is untouched.
     expect(store.getCommandWatermark("31923:e:x", "talk:carol:t1")).toMatchObject({ rumor_id: "r-talk" });
+    store.close();
+  });
+
+  it("quarantines a legacy unreferenced pipeline artifact and GCs it after the grace window (audit R11)", async () => {
+    const path = tmpDb();
+    // A v2-shaped DB: an OLD pipeline_artifacts (no quarantined_at column) holding a
+    // row with NO artifact_refs — exactly the pre-v2 legacy artifact the ref-counted
+    // purge can never reach, so it would survive forever.
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      `CREATE TABLE pipeline_artifacts (stage TEXT NOT NULL, inputs_hash TEXT NOT NULL,
+         provider TEXT NOT NULL, model TEXT NOT NULL, output_json TEXT NOT NULL,
+         created_at INTEGER NOT NULL, PRIMARY KEY (stage, inputs_hash))`,
+    );
+    raw
+      .prepare(
+        "INSERT INTO pipeline_artifacts (stage, inputs_hash, provider, model, output_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("ai_profile", "legacyhash", "venice", "m", "{}", 1);
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    const db = (store as any).db;
+    const q = db
+      .prepare("SELECT quarantined_at FROM pipeline_artifacts WHERE stage='ai_profile' AND inputs_hash='legacyhash'")
+      .get() as { quarantined_at: number | null };
+    expect(q.quarantined_at).not.toBeNull(); // migration quarantined the orphan
+
+    // A prune within the grace window keeps it (recently quarantined).
+    store.pruneOldData(q.quarantined_at! + 1000);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM pipeline_artifacts").get() as { n: number }).n).toBe(1);
+
+    // After the grace window elapses, a still-unreferenced orphan is GC'd.
+    store.pruneOldData(q.quarantined_at! + 31 * 24 * 60 * 60 * 1000);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM pipeline_artifacts").get() as { n: number }).n).toBe(0);
+    store.close();
+  });
+
+  it("a live event reclaims a quarantined legacy artifact via a cache-hit ref (audit R11)", async () => {
+    const path = tmpDb();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      `CREATE TABLE pipeline_artifacts (stage TEXT NOT NULL, inputs_hash TEXT NOT NULL,
+         provider TEXT NOT NULL, model TEXT NOT NULL, output_json TEXT NOT NULL,
+         created_at INTEGER NOT NULL, PRIMARY KEY (stage, inputs_hash))`,
+    );
+    raw
+      .prepare(
+        "INSERT INTO pipeline_artifacts (stage, inputs_hash, provider, model, output_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run("ai_profile", "legacyhash", "venice", "m", "{}", 1);
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+
+    const store = new Store(path);
+    const db = (store as any).db;
+    // A live event uses the artifact via a cache hit → records ownership, clearing
+    // the quarantine. The GC must then NEVER delete it even long after the window.
+    store.recordArtifactRef("ai_profile", "legacyhash", { coordinate: "31923:e:live", pubkey: "alice" }, 5);
+    const q = db
+      .prepare("SELECT quarantined_at FROM pipeline_artifacts WHERE inputs_hash='legacyhash'")
+      .get() as { quarantined_at: number | null };
+    expect(q.quarantined_at).toBeNull(); // reclaimed
+    store.pruneOldData(1000 * 24 * 60 * 60 * 1000); // way past any window
+    expect((db.prepare("SELECT COUNT(*) AS n FROM pipeline_artifacts").get() as { n: number }).n).toBe(1);
+    store.close();
+  });
+
+  it("cross-event cache-hit refcounting: a shared artifact survives until every owner purges (audit R11)", () => {
+    const store = new Store();
+    const c1 = "31923:e:one";
+    const c2 = "31923:e:two";
+    store.upsertAttendee({ coordinate: c1, pubkey: "alice", status: "approved", now: 1 });
+    store.upsertAttendee({ coordinate: c2, pubkey: "alice", status: "approved", now: 1 });
+    // Event 1 GENERATES the artifact (records ownership).
+    store.putArtifact({
+      stage: "ai_profile",
+      inputsHash: "shared",
+      provider: "venice",
+      model: "m",
+      output: { summary: "x" },
+      now: 1,
+      owner: { coordinate: c1, pubkey: "alice" },
+    });
+    // Event 2 gets a CACHE HIT and records its own ownership (the R11 fix).
+    store.recordArtifactRef("ai_profile", "shared", { coordinate: c2, pubkey: "alice" }, 2);
+    const db = (store as any).db;
+    expect(
+      (db.prepare("SELECT COUNT(*) AS n FROM artifact_refs WHERE inputs_hash='shared'").get() as { n: number }).n,
+    ).toBe(2);
+
+    // Purging event 1 must NOT delete the artifact — event 2 still owns it.
+    store.purgeEventArtifacts(c1);
+    expect(store.getArtifact("ai_profile", "shared")).toEqual({ summary: "x" });
+    // Purging event 2 (the last owner) finally deletes it.
+    store.purgeEventArtifacts(c2);
+    expect(store.getArtifact("ai_profile", "shared")).toBeUndefined();
     store.close();
   });
 });

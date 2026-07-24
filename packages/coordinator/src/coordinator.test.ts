@@ -111,8 +111,12 @@ class FakeTransport implements Transport {
    *  UNREACHABLE. Any other set is reachable. Also records every probed set. */
   unreachableRelays = new Set<string>();
   probed: string[][] = [];
+  /** Test hook (audit R10 CAS gate): awaited at the START of a probe so a test can
+   *  hold an OLDER config's handover mid-probe while a NEWER config supersedes it. */
+  onProbe?: (relays: string[]) => Promise<void> | void;
   async probe(relays: string[]): Promise<boolean> {
     this.probed.push(relays);
+    if (this.onProbe) await this.onProbe(relays);
     return !this.unreachableRelays.has([...relays].sort().join(" "));
   }
 }
@@ -2440,16 +2444,19 @@ describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
 
   it("caps total downloaded bytes per submission at 500 MB", async () => {
     const h = await setup();
-    const BIG = 300 * 1024 * 1024;
+    // Each file is within the 250 MiB per-file cap (R17 follow-up); three of them
+    // together exceed the 500 MiB cumulative budget so the third is dropped.
+    const BIG = 200 * 1024 * 1024;
     h.stt.setTranscript(String(BIG), "big file transcript");
     const sk = generateSecretKey();
     const media = [
       mediaDesc(BIG, "a".repeat(64), "video/webm"),
-      mediaDesc(BIG, "b".repeat(64), "video/webm"), // over the cumulative budget
+      mediaDesc(BIG, "b".repeat(64), "video/webm"),
+      mediaDesc(BIG, "c".repeat(64), "video/webm"), // over the cumulative budget
     ];
     await joinCustom(h, sk, "tester", ["zk"], { media });
     await h.coordinator.jobs.drain();
-    expect(h.stt.calls).toBe(1); // only the first descriptor was transcribed
+    expect(h.stt.calls).toBe(2); // the first two fit; the third exceeds the budget
   });
 
   it("skips the paid ai_profile call when ALL inputs are empty", async () => {
@@ -3082,6 +3089,35 @@ describe("H-2 §8 — usage budgets gate paid processing", () => {
     // accounting, so per-attendee call accounting is what we can assert here: the
     // process job spent, recording ≥ 1 call.
     expect(h.store.getUsage(h.coordinate, aPk).calls).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("R17 follow-up — per-file media cap (consistent with the app's 250 MiB bound)", () => {
+  const MiB = 1024 * 1024;
+  const mk = (sha: string, sizeBytes: number) =>
+    ({ size: sizeBytes, duration: 10, url: [], sha256: sha.repeat(64), mime: "video/mp4" }) as any;
+
+  it("rejects a single descriptor over the 250 MiB per-file cap, keeps in-cap files", async () => {
+    const h = await setup();
+    const state = { maxMediaSec: 900 } as any;
+    const out = (h.coordinator as any).capMedia(state, "pk", [mk("a", 100 * MiB), mk("b", 300 * MiB)]);
+    // The 300 MiB file (which the app would refuse to upload/play) is dropped; the
+    // 100 MiB one is kept — no confusing late aggregate-only failure.
+    expect(out).toHaveLength(1);
+    expect(out[0].sha256).toBe("a".repeat(64));
+  });
+
+  it("still enforces the 500 MiB aggregate across multiple in-cap files", async () => {
+    const h = await setup();
+    const state = { maxMediaSec: 900 } as any;
+    // Three 250 MiB files each pass the per-file cap; the aggregate budget fits two,
+    // the third overflows and is dropped (the R17 scenario, now bounded predictably).
+    const out = (h.coordinator as any).capMedia(state, "pk", [
+      mk("a", 250 * MiB),
+      mk("b", 250 * MiB),
+      mk("c", 250 * MiB),
+    ]);
+    expect(out).toHaveLength(2);
   });
 });
 
@@ -3824,6 +3860,64 @@ describe("audit C9 — relay handover is make-before-break", () => {
     expect(inboxSubs2.some((s) => !s.closed && s.relays?.includes("wss://bad.relay"))).toBe(true);
     expect(inboxSubs2[0]!.closed).toBe(true); // the original was retired only after promotion
     expect(h.store.getPendingRelays(h.coordinate)).toBeUndefined();
+  });
+
+  it("a slow handover for an OLDER config never promotes after a newer config wins (audit R10 CAS)", async () => {
+    const h = await setup();
+    // Gate config A's probe so its handover stalls mid-probe (an unserialized
+    // callback could otherwise finish and promote A after the newer config B).
+    let releaseA: () => void = () => {};
+    const aGate = new Promise<void>((r) => { releaseA = r; });
+    h.transport.onProbe = async (relays) => {
+      if (relays.includes("wss://a.relay")) await aGate;
+    };
+
+    // Config A (rev 2): switch relays to a.relay. Kick off but DON'T await — its
+    // handover blocks on the gated probe after the (serialized) apply records pending.
+    const pA = h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", "wss://a.relay"]], 2));
+    await new Promise((r) => setTimeout(r, 5)); // let A apply + reach the gated probe
+    expect(h.store.getPendingRelays(h.coordinate)).toEqual(["wss://a.relay"]);
+
+    // Config B (rev 3, NEWER): switch relays to b.relay. Its probe isn't gated, so it
+    // catches up and PROMOTES b.relay, and its apply overwrote pending to b.relay.
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", "wss://b.relay"]], 3));
+
+    // Release A's gated probe: A's handover resumes but must compare-and-set-veto,
+    // because the pending target is now b.relay (B superseded it).
+    releaseA();
+    await pA;
+
+    const inboxOpen = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059) && !s.closed);
+    expect(inboxOpen.some((s) => s.relays?.includes("wss://b.relay"))).toBe(true);
+    expect(inboxOpen.some((s) => s.relays?.includes("wss://a.relay"))).toBe(false);
+    // b.relay was promoted (pending cleared); the stale A handover promoted nothing.
+    expect(h.store.getPendingRelays(h.coordinate)).toBeUndefined();
+  });
+});
+
+describe("audit R4 — the coordinator's own inbox is rate-gated before durable accounting", () => {
+  it("drops a single sender's flood past the per-sender window WITHOUT marking the excess seen", async () => {
+    const h = await setup();
+    const coordPub = getPublicKey(h.coordSk);
+    const baseSec = Math.floor(h.clock.t / 1000);
+    // 40 distinct admin commands from ONE sender (E_id) in a single rate window.
+    // MAX_RUMORS_PER_SENDER_WINDOW is 30, so 30 are accepted and 10 are rate-dropped.
+    const wraps = Array.from({ length: 40 }, (_, i) =>
+      wrapRumor(h.eidSk, coordPub, {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "recompute" },
+        created_at: baseSec + i, // distinct rumor ids, all within the same 60s window
+      }),
+    );
+    for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
+
+    const seen = wraps.map((w) => h.store.isRumorSeen((w as any).id));
+    const acceptedCount = seen.filter(Boolean).length;
+    // Exactly the per-sender window was accepted (and marked seen); the rest were
+    // dropped and left UNSEEN — so a flood cannot grow the durable seen ledger (R4).
+    expect(acceptedCount).toBe(30);
+    expect(seen.slice(0, 30).every(Boolean)).toBe(true);
+    expect(seen.slice(30).some(Boolean)).toBe(false);
   });
 });
 

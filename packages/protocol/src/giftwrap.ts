@@ -141,13 +141,45 @@ export function assertVerifiedSeal(raw: unknown): asserts raw is Seal {
 }
 
 /**
- * Structural + binding + integrity checks applied to a just-decrypted rumor,
- * shared by every unwrap path (protocol raw-key and app signer). Asserts the
- * rumor shape, binds its claimed author to the verified seal author, recomputes
- * and checks its id, then clamps a future-dated `created_at` (PROTO-8). Returns
- * the validated rumor.
+ * A validated rumor together with the effective timestamp local ordering policy
+ * should use (audit R19). `rumor` is the ORIGINAL, authenticated event: every
+ * field is exactly what the seal author signed, so `rumor.id` still hashes its
+ * contents and stays a stable dedupe key. `effectiveCreatedAt` is `rumor.created_at`
+ * clamped to at most now + {@link RUMOR_MAX_CLOCK_SKEW_SEC} (PROTO-8) — a separate
+ * value a caller may use for first-come/latest-wins ordering WITHOUT mutating the
+ * authenticated rumor. This keeps ordering from being processing-time-dependent on
+ * the authenticated object and lets independent unwrappers agree on the rumor's id.
  */
-export function finalizeUnwrappedRumor(raw: unknown, sealPubkey: string): Rumor {
+export interface UnwrappedRumor {
+  rumor: Rumor;
+  effectiveCreatedAt: number;
+}
+
+/**
+ * `created_at` clamped to at most now + skew (PROTO-8): a future-dated rumor gains
+ * no ordering advantage. Past/within-skew timestamps pass through unchanged. Pure —
+ * takes the reference time so callers/tests can pin it.
+ */
+export function rumorEffectiveCreatedAt(
+  createdAt: number,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): number {
+  const maxCreatedAt = nowSec + RUMOR_MAX_CLOCK_SKEW_SEC;
+  return createdAt > maxCreatedAt ? maxCreatedAt : createdAt;
+}
+
+/**
+ * Structural + binding + integrity checks applied to a just-decrypted rumor,
+ * WITHOUT mutating it (audit R19). Asserts the rumor shape, binds its claimed
+ * author to the verified seal author, and recomputes/checks its id. Returns the
+ * untouched authenticated rumor plus the clamped `effectiveCreatedAt` for local
+ * ordering policy. This is the mutation-free core the coordinator and any
+ * ordering-correct consumer should use.
+ */
+export function finalizeUnwrappedRumorEnvelope(
+  raw: unknown,
+  sealPubkey: string,
+): UnwrappedRumor {
   assertRumorShape(raw);
   const rumor = raw;
   if (rumor.pubkey !== sealPubkey) {
@@ -167,13 +199,24 @@ export function finalizeUnwrappedRumor(raw: unknown, sealPubkey: string): Rumor 
   if (rumor.id !== expectedId) {
     throw new Error("rumor id does not match its contents");
   }
-  // created_at is unauthenticated but drives first-come/latest-wins ordering:
-  // clamp future-dated rumors to at most now + skew (PROTO-8). Past timestamps
-  // pass through unchanged. The verified id is left alone so it stays a stable
-  // dedupe key.
-  const maxCreatedAt = Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC;
-  if (rumor.created_at > maxCreatedAt) rumor.created_at = maxCreatedAt;
-  return rumor;
+  // Authenticated fields are preserved; ordering uses the separate clamped value.
+  return { rumor, effectiveCreatedAt: rumorEffectiveCreatedAt(rumor.created_at) };
+}
+
+/**
+ * Backward-compatible finalizer (app path): same checks as
+ * {@link finalizeUnwrappedRumorEnvelope}, but returns a Rumor whose `created_at`
+ * is the clamped effective value (PROTO-8), so existing first-come/latest-wins
+ * consumers keep the timestamp-clamp protection without a call-site change. Unlike
+ * the pre-R19 version this does NOT mutate the input — it returns a shallow copy —
+ * so the caller's decrypted object is never altered. Ordering-correct consumers
+ * that also need the untouched authenticated rumor should call the Envelope form.
+ */
+export function finalizeUnwrappedRumor(raw: unknown, sealPubkey: string): Rumor {
+  const { rumor, effectiveCreatedAt } = finalizeUnwrappedRumorEnvelope(raw, sealPubkey);
+  return effectiveCreatedAt === rumor.created_at
+    ? rumor
+    : { ...rumor, created_at: effectiveCreatedAt };
 }
 
 export interface RumorInput {
@@ -228,6 +271,24 @@ export function wrapRumor(
  * app's `signerUnwrap`).
  */
 export function unwrapRumor(wrap: GiftWrap, recipientSk: Uint8Array): Rumor {
+  const { rumor, effectiveCreatedAt } = unwrapRumorEnvelope(wrap, recipientSk);
+  return effectiveCreatedAt === rumor.created_at
+    ? rumor
+    : { ...rumor, created_at: effectiveCreatedAt };
+}
+
+/**
+ * Like {@link unwrapRumor} but returns the untouched authenticated rumor plus the
+ * clamped `effectiveCreatedAt` (audit R19). The returned `rumor.created_at` is
+ * exactly what the seal author signed, so `rumor.id` still hashes its contents;
+ * use `effectiveCreatedAt` for local first-come/latest-wins ordering. The
+ * coordinator uses this so its durable command ordering is authenticated and not
+ * processing-time-dependent.
+ */
+export function unwrapRumorEnvelope(
+  wrap: GiftWrap,
+  recipientSk: Uint8Array,
+): UnwrappedRumor {
   if (wrap.kind !== KIND_GIFT_WRAP) {
     throw new Error(`not a gift wrap (kind ${wrap.kind})`);
   }
@@ -241,7 +302,7 @@ export function unwrapRumor(wrap: GiftWrap, recipientSk: Uint8Array): Rumor {
   const rumor: unknown = JSON.parse(
     nip44Decrypt(recipientSk, seal.pubkey, seal.content),
   );
-  return finalizeUnwrappedRumor(rumor, seal.pubkey);
+  return finalizeUnwrappedRumorEnvelope(rumor, seal.pubkey);
 }
 
 /** Parse a rumor's JSON content into a typed value (caller validates with zod). */

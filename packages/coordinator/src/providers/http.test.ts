@@ -124,6 +124,8 @@ describe("shutdown aborts a REAL provider adapter path (audit R13)", () => {
       baseUrl: "https://api.venice.ai/api/v1",
       // A no-op payment strategy (ApiKeyPayment shape) — no real key needed.
       payment: { prepare: async () => ({}), settle: async () => {} },
+      // This test mocks global.fetch to hang; skip R22 DNS pinning for the host.
+      net: { allowInsecure: true },
     });
 
     const ac = new AbortController();
