@@ -9,7 +9,8 @@
  * overlap) and dedupe by rumor id — see `giftwrapSince`.
  */
 import { wrapEvent } from "nostr-tools/nip59";
-import { getEventHash, getPublicKey } from "nostr-tools/pure";
+import { getEventHash, getPublicKey, verifyEvent } from "nostr-tools/pure";
+import type { Event as NostrEvent } from "nostr-tools/pure";
 import type { RumorKind } from "./kinds.js";
 import { KIND_GIFT_WRAP, KIND_SEAL } from "./kinds.js";
 import { nip44Decrypt } from "./crypto.js";
@@ -24,6 +25,7 @@ import { nip44Decrypt } from "./crypto.js";
 export const RUMOR_MAX_CLOCK_SKEW_SEC = 15 * 60;
 
 const HEX32 = /^[0-9a-f]{64}$/;
+const HEX64_SIG = /^[0-9a-f]{128}$/;
 
 /**
  * Structural validation of a just-decrypted rumor (audit PROTO-2): a hand-rolled
@@ -81,6 +83,99 @@ export interface GiftWrap {
   sig: string;
 }
 
+/** A signed NIP-59 seal (kind 13, empty tags) whose author is verified. */
+export interface Seal {
+  id: string;
+  pubkey: string;
+  created_at: number;
+  kind: number;
+  tags: string[][];
+  content: string;
+  sig: string;
+}
+
+/**
+ * Verify a just-decrypted seal (audit P1). Successful NIP-44 decryption does NOT
+ * authenticate the seal's author: ECDH gives both parties the same conversation
+ * key, so a holder of `recipientSk` can encrypt a seal under the key derived from
+ * `recipientSk` and ANY claimed sender pubkey. Only the kind-13 Schnorr signature
+ * proves who authored the seal — and downstream authorization (21603/21604 admin
+ * commands, 21600/21601/21608/21609/21610 attendee actions) trusts the resulting
+ * `rumor.pubkey` as an authenticated identity. So the seal must be a complete,
+ * signed kind-13 event with empty tags whose id hashes its contents and whose
+ * signature verifies, BEFORE its content is decrypted.
+ */
+export function assertVerifiedSeal(raw: unknown): asserts raw is Seal {
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error("seal is not an object");
+  }
+  const s = raw as Record<string, unknown>;
+  if (s.kind !== KIND_SEAL) {
+    throw new Error(`inner event is not a seal (kind ${String(s.kind)})`);
+  }
+  if (typeof s.pubkey !== "string" || !HEX32.test(s.pubkey)) {
+    throw new Error("seal pubkey is not 64-char lowercase hex");
+  }
+  if (typeof s.id !== "string" || !HEX32.test(s.id)) {
+    throw new Error("seal id is not 64-char lowercase hex");
+  }
+  if (typeof s.sig !== "string" || !HEX64_SIG.test(s.sig)) {
+    throw new Error("seal sig is not 128-char lowercase hex");
+  }
+  if (typeof s.created_at !== "number" || !Number.isFinite(s.created_at)) {
+    throw new Error("seal created_at is not a finite number");
+  }
+  if (typeof s.content !== "string") {
+    throw new Error("seal content is not a string");
+  }
+  // NIP-59 requires the seal to carry no tags; a non-empty set is malformed and
+  // must never reach signature verification as if it were a legitimate seal.
+  if (!Array.isArray(s.tags) || s.tags.length !== 0) {
+    throw new Error("seal tags must be empty (NIP-59)");
+  }
+  // Recompute the id and verify the Schnorr signature — this, not decryption, is
+  // what authenticates s.pubkey as the seal author.
+  if (!verifyEvent(s as unknown as NostrEvent)) {
+    throw new Error("seal signature is invalid");
+  }
+}
+
+/**
+ * Structural + binding + integrity checks applied to a just-decrypted rumor,
+ * shared by every unwrap path (protocol raw-key and app signer). Asserts the
+ * rumor shape, binds its claimed author to the verified seal author, recomputes
+ * and checks its id, then clamps a future-dated `created_at` (PROTO-8). Returns
+ * the validated rumor.
+ */
+export function finalizeUnwrappedRumor(raw: unknown, sealPubkey: string): Rumor {
+  assertRumorShape(raw);
+  const rumor = raw;
+  if (rumor.pubkey !== sealPubkey) {
+    throw new Error("rumor/seal author mismatch");
+  }
+  // The rumor id is sender-chosen but consumers dedupe by it — recompute it over
+  // the unsigned-event serialization (the same construction nostr-tools'
+  // createRumor uses in wrapRumor) and reject a mismatch, so a hand-rolled seal
+  // can't smuggle in an arbitrary id.
+  const expectedId = getEventHash({
+    pubkey: rumor.pubkey,
+    created_at: rumor.created_at,
+    kind: rumor.kind,
+    tags: rumor.tags,
+    content: rumor.content,
+  });
+  if (rumor.id !== expectedId) {
+    throw new Error("rumor id does not match its contents");
+  }
+  // created_at is unauthenticated but drives first-come/latest-wins ordering:
+  // clamp future-dated rumors to at most now + skew (PROTO-8). Past timestamps
+  // pass through unchanged. The verified id is left alone so it stays a stable
+  // dedupe key.
+  const maxCreatedAt = Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC;
+  if (rumor.created_at > maxCreatedAt) rumor.created_at = maxCreatedAt;
+  return rumor;
+}
+
 export interface RumorInput {
   kind: RumorKind;
   /** JSON-serializable payload; stringified into rumor content. */
@@ -119,46 +214,34 @@ export function wrapRumor(
 
 /**
  * Unwrap a gift wrap addressed to `recipientSk`, returning the inner rumor.
- * Throws if the wrap is not decryptable by this key.
+ * Throws if the wrap is not decryptable by this key or fails verification.
  *
- * Unlike nostr-tools' `unwrapEvent`, this enforces the NIP-59 author binding:
- * `rumor.pubkey` must equal the seal's author. The seal author is authenticated
- * by the NIP-44 decryption itself (the ciphertext only decrypts under
- * ECDH(recipientSk, seal.pubkey), which the sealer can only compute with
- * seal.pubkey's secret key), so after this check `rumor.pubkey` is trustworthy —
- * the 21603/21604 `seal-author == E_id` checks depend on it (mirrors the app's
- * `signerUnwrap`).
+ * Unlike nostr-tools' `unwrapEvent`, this enforces the NIP-59 author binding
+ * AGAINST A VERIFIED SEAL. NIP-44 decryption does NOT authenticate the sender:
+ * ECDH(recipientSk, seal.pubkey) equals ECDH(sealSk, recipientPk), so anyone
+ * holding `recipientSk` can encrypt a seal under any claimed sender pubkey and it
+ * will decrypt. Only the seal's kind-13 Schnorr signature proves seal authorship.
+ * So we verify the outer 1059 wrap (defense in depth), require a complete signed
+ * kind-13 seal with empty tags, then bind `rumor.pubkey === seal.pubkey` — after
+ * which `rumor.pubkey` is a trustworthy authenticated identity the 21603/21604
+ * `seal-author == E_id` and attendee-action checks depend on (mirrored by the
+ * app's `signerUnwrap`).
  */
 export function unwrapRumor(wrap: GiftWrap, recipientSk: Uint8Array): Rumor {
   if (wrap.kind !== KIND_GIFT_WRAP) {
     throw new Error(`not a gift wrap (kind ${wrap.kind})`);
   }
-  const seal = JSON.parse(nip44Decrypt(recipientSk, wrap.pubkey, wrap.content));
-  if (seal.kind !== KIND_SEAL) throw new Error("inner event is not a seal");
-  const rumor: unknown = JSON.parse(nip44Decrypt(recipientSk, seal.pubkey, seal.content));
-  assertRumorShape(rumor);
-  if (rumor.pubkey !== seal.pubkey) throw new Error("rumor/seal author mismatch");
-  // The rumor id is sender-chosen but consumers dedupe by it — recompute it over
-  // the unsigned-event serialization (the same construction nostr-tools'
-  // createRumor uses in wrapRumor) and reject a mismatch, so a hand-rolled seal
-  // can't smuggle in an arbitrary id.
-  const expectedId = getEventHash({
-    pubkey: rumor.pubkey,
-    created_at: rumor.created_at,
-    kind: rumor.kind,
-    tags: rumor.tags,
-    content: rumor.content,
-  });
-  if (rumor.id !== expectedId) {
-    throw new Error("rumor id does not match its contents");
+  if (!verifyEvent(wrap as unknown as NostrEvent)) {
+    throw new Error("gift wrap signature is invalid");
   }
-  // created_at is unauthenticated but drives first-come/latest-wins ordering:
-  // clamp future-dated rumors to at most now + skew (PROTO-8). Past timestamps
-  // pass through unchanged. The verified id is left alone so it stays a stable
-  // dedupe key.
-  const maxCreatedAt = Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC;
-  if (rumor.created_at > maxCreatedAt) rumor.created_at = maxCreatedAt;
-  return rumor;
+  const seal: unknown = JSON.parse(
+    nip44Decrypt(recipientSk, wrap.pubkey, wrap.content),
+  );
+  assertVerifiedSeal(seal);
+  const rumor: unknown = JSON.parse(
+    nip44Decrypt(recipientSk, seal.pubkey, seal.content),
+  );
+  return finalizeUnwrappedRumor(rumor, seal.pubkey);
 }
 
 /** Parse a rumor's JSON content into a typed value (caller validates with zod). */

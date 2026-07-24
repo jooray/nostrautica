@@ -17,12 +17,14 @@ import {
   generateSecretKey,
   getPublicKey,
   getEventHash,
+  verifyEvent,
 } from "nostr-tools/pure";
-import type { UnsignedEvent } from "nostr-tools/pure";
+import type { Event as NostrEvent, UnsignedEvent } from "nostr-tools/pure";
 import {
   KIND_GIFT_WRAP,
   KIND_SEAL,
-  RUMOR_MAX_CLOCK_SKEW_SEC,
+  assertVerifiedSeal,
+  finalizeUnwrappedRumor,
   nip44Encrypt,
   type RumorKind,
 } from "@nostrautica/protocol";
@@ -92,26 +94,32 @@ export async function signerWrap(
   return wrap as GiftWrap;
 }
 
-/** Unwrap a gift wrap addressed to the signer's user, returning the inner rumor. */
+/**
+ * Unwrap a gift wrap addressed to the signer's user, returning the inner rumor.
+ *
+ * This must apply the SAME checks as the protocol package's `unwrapRumor` (audit
+ * P1). NIP-44 decryption does not authenticate the seal author — ECDH gives both
+ * parties the same conversation key — so a holder of the recipient secret can
+ * forge a seal under any claimed sender pubkey. The seal's kind-13 signature is
+ * the only proof of authorship, and downstream authorization treats the resulting
+ * `rumor.pubkey` as authenticated. So we verify the outer 1059 wrap (defense in
+ * depth), verify the seal (`assertVerifiedSeal`: complete signed kind-13, empty
+ * tags, id + Schnorr), then run the shared rumor shape/binding/id/clamp checks.
+ */
 export async function signerUnwrap(
   signer: AppSigner,
   wrap: GiftWrap,
 ): Promise<Rumor> {
   if (wrap.kind !== KIND_GIFT_WRAP) throw new Error("not a gift wrap");
+  if (!verifyEvent(wrap as unknown as NostrEvent)) {
+    throw new Error("gift wrap signature is invalid");
+  }
   const sealJson = await signer.nip44Decrypt(wrap.pubkey, wrap.content);
-  const seal = JSON.parse(sealJson);
-  if (seal.kind !== KIND_SEAL) throw new Error("inner event is not a seal");
+  const seal: unknown = JSON.parse(sealJson);
+  assertVerifiedSeal(seal);
   const rumorJson = await signer.nip44Decrypt(seal.pubkey, seal.content);
-  const rumor = JSON.parse(rumorJson) as Rumor;
-  // Bind the rumor's claimed author to the seal's verified author (NIP-59).
-  if (rumor.pubkey !== seal.pubkey) throw new Error("rumor/seal author mismatch");
-  // created_at is unauthenticated but drives first-come/latest-wins ordering
-  // (invite approval, replaceable events): clamp future-dated rumors to at most
-  // now + skew (PROTO-8), mirroring the protocol package's unwrapRumor clamp so
-  // the signer path gets the same protection.
-  const maxCreatedAt = Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC;
-  if (rumor.created_at > maxCreatedAt) rumor.created_at = maxCreatedAt;
-  return rumor;
+  const rumor: unknown = JSON.parse(rumorJson);
+  return finalizeUnwrappedRumor(rumor, seal.pubkey);
 }
 
 export { getPublicKey };
