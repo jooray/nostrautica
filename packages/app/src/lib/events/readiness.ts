@@ -20,9 +20,17 @@ export type ReadinessStepState =
 
 export interface ReadinessInput {
   naddr: string;
-  role: "visitor" | "pending" | "attendee" | "organizer";
+  /**
+   * "unknown" = the viewer's custody could not be READ (an IndexedDB error, or
+   * an identity that hasn't finished arriving) — deliberately distinct from
+   * "visitor", which is the positive claim "this identity holds nothing for this
+   * event". Collapsing the two is what put "1 of 5 · Join this event" on an
+   * organizer's own event: every owner-scoped read answers "no" while a NIP-46
+   * session is still restoring, and that was rendered as a fact about the user.
+   */
+  role: "unknown" | "visitor" | "pending" | "attendee" | "organizer";
   signerMethod?: "local" | "nip07" | "nip46";
-  backupAcked: boolean;
+  backupAcked?: boolean; // undefined = the durable backup marker isn't known yet
   hasIntro?: boolean; // undefined = self-copy fetch failed / offline
   processed?: boolean; // undefined = unknown
   matchesAvailable?: boolean; // undefined = unknown
@@ -89,6 +97,17 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
   let joined: ReadinessStep;
   if (isMember) {
     joined = { id: "joined", state: "complete", labelKey: LABEL.joined };
+  } else if (input.role === "unknown") {
+    // Custody unreadable: say so instead of guessing. "action-required" here is
+    // an accusation ("you are not a member of this event") that costs the viewer
+    // a wrong CTA and — before this — a persisted snapshot repeating it on every
+    // later visit. "checking" makes no claim and carries no CTA.
+    joined = {
+      id: "joined",
+      state: "checking",
+      labelKey: LABEL.joined,
+      hintKey: "readiness.hint.checking",
+    };
   } else if (input.role === "pending") {
     joined = {
       id: "joined",
@@ -111,14 +130,26 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
       labelKey: LABEL.backup,
       hintKey: "readiness.hint.signerKey",
     };
-  } else if (input.backupAcked) {
+  } else if (input.backupAcked === true) {
     backup = { id: "backup", state: "complete", labelKey: LABEL.backup };
-  } else {
+  } else if (input.backupAcked === false) {
     backup = {
       id: "backup",
       state: "action-required",
       labelKey: LABEL.backup,
       hintKey: "readiness.hint.backup",
+    };
+  } else {
+    // The durable (relay-persisted) backup marker hasn't been read yet — the
+    // store paints from local state first and only then asks the relays. The
+    // device-local "I saved it" dismissal is NOT a stand-in: treating it as one
+    // is the dishonesty `key-backup.ts` exists to undo, and the monotonic latch
+    // would make that one wrong "complete" permanent.
+    backup = {
+      id: "backup",
+      state: "checking",
+      labelKey: LABEL.backup,
+      hintKey: "readiness.hint.checking",
     };
   }
   steps.push(backup);

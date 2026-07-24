@@ -255,6 +255,9 @@ export const messages = {
     "op.pageQueued": "Saved — your event page will publish when you're back online. Attendees still see the old page.",
     "op.themePublished": "Your theme was published.",
     "op.themeQueued": "Saved — your theme will publish when you're back online. Attendees still see the old theme.",
+    "op.coOrgSent": "The organizer keys were sent to your co-organizer.",
+    "op.coOrgQueued":
+      "Saved — the organizer keys will send when you're back online. Your co-organizer can't unlock the event until they do.",
     "create.error.identityFailed": "Couldn't create your identity — please retry.",
     "create.error.loginToUpload":
       "Log in (or create the event first) to upload images — generated ones are used meanwhile.",
@@ -273,6 +276,14 @@ export const messages = {
     "event.ownStatus.title": "Processing problem",
     "event.ownStatus.submission": "Your profile couldn't be processed — try re-submitting.",
     "event.ownStatus.talk": "Your talk couldn't be processed — try re-recording.",
+    "event.recoverKeys.title": "Organizer on a new device?",
+    "event.recoverKeys.body":
+      "If you created this event with this account, its keys have an encrypted backup on the relays. Restoring asks your signer to unlock it.",
+    "event.recoverKeys.action": "Restore my organizer keys",
+    "event.recoverKeys.working": "Restoring…",
+    "event.recoverKeys.restored": "Your organizer keys are back on this device.",
+    "event.recoverKeys.empty": "No key backup for this event was found for this account.",
+    "event.recoverKeys.failed": "Couldn't restore your keys — check your connection or signer and try again.",
     "event.retention.line": "Your event data is deleted {days} days after the event.",
     "event.leave.action": "Leave event",
     "event.leave.confirm": "Leave this event? This sends a request to the organizer to remove your directory entry and matches and delete your intro media. It takes effect once they process it.",
@@ -759,7 +770,13 @@ export const messages = {
     "admin.grant.step2": "Paste this npub and add it.",
     "admin.grant.step3":
       "Keep this page open — it unlocks here automatically once the grant arrives.",
-    "admin.grant.waiting": "Waiting for the grant…",
+    "admin.grant.waiting": "Checking for the grant every few seconds…",
+    "admin.grant.waitingSigner":
+      "Waiting for your signer to connect — checking starts as soon as it does.",
+    "admin.grant.notChecking": "Automatic checking has stopped.",
+    "admin.grant.lastChecked": "Last checked at {time}.",
+    "admin.grant.checkNow": "Check now",
+    "admin.grant.checkingNow": "Checking…",
     "admin.loading": "Loading pending requests…",
     "admin.refreshing": "Refreshing…",
     "admin.pending.one": "{n} pending request ↓",
@@ -1582,6 +1599,9 @@ export const messages = {
     "op.pageQueued": "Uložené — stránka sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodnú stránku.",
     "op.themePublished": "Vzhľad bol zverejnený.",
     "op.themeQueued": "Uložené — vzhľad sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodný vzhľad.",
+    "op.coOrgSent": "Organizátorské kľúče boli odoslané spoluorganizátorovi.",
+    "op.coOrgQueued":
+      "Uložené — organizátorské kľúče sa odošlú po pripojení. Dovtedy si spoluorganizátor podujatie neodomkne.",
     "create.error.identityFailed": "Nepodarilo sa vytvoriť vašu identitu — skúste to znova.",
     "create.error.loginToUpload":
       "Ak chcete nahrať obrázky, prihláste sa (alebo najprv vytvorte podujatie) — dovtedy sa použijú vygenerované.",
@@ -1600,6 +1620,14 @@ export const messages = {
     "event.ownStatus.title": "Problém so spracovaním",
     "event.ownStatus.submission": "Tvoj profil sa nepodarilo spracovať — skús ho odoslať znova.",
     "event.ownStatus.talk": "Tvoju prednášku sa nepodarilo spracovať — skús ju nahrať znova.",
+    "event.recoverKeys.title": "Organizátor na novom zariadení?",
+    "event.recoverKeys.body":
+      "Ak si toto podujatie vytvoril týmto účtom, jeho kľúče majú šifrovanú zálohu na relayoch. Obnovenie požiada tvoj podpisovač o jej odomknutie.",
+    "event.recoverKeys.action": "Obnoviť moje organizátorské kľúče",
+    "event.recoverKeys.working": "Obnovuje sa…",
+    "event.recoverKeys.restored": "Tvoje organizátorské kľúče sú späť na tomto zariadení.",
+    "event.recoverKeys.empty": "Pre tento účet sa nenašla žiadna záloha kľúčov k tomuto podujatiu.",
+    "event.recoverKeys.failed": "Kľúče sa nepodarilo obnoviť — skontroluj pripojenie alebo podpisovač a skús to znova.",
     "event.retention.line": "Tvoje údaje z podujatia sa vymažú {days} dní po podujatí.",
     "event.leave.action": "Opustiť podujatie",
     "event.leave.confirm": "Opustiť toto podujatie? Odošle sa žiadosť organizátorovi, aby odstránil tvoj záznam v adresári a zhody a vymazal tvoje intro médiá. Prejaví sa to, keď ju spracuje.",
@@ -2092,7 +2120,13 @@ export const messages = {
     "admin.grant.step2": "Vložte tento npub a pridajte ho.",
     "admin.grant.step3":
       "Nechajte túto stránku otvorenú — po doručení udelenia sa tu automaticky odomkne.",
-    "admin.grant.waiting": "Čaká sa na udelenie…",
+    "admin.grant.waiting": "Každých pár sekúnd sa kontroluje, či udelenie prišlo…",
+    "admin.grant.waitingSigner":
+      "Čaká sa na pripojenie podpisovača — kontrola sa spustí hneď, ako sa pripojí.",
+    "admin.grant.notChecking": "Automatická kontrola sa zastavila.",
+    "admin.grant.lastChecked": "Naposledy skontrolované o {time}.",
+    "admin.grant.checkNow": "Skontrolovať teraz",
+    "admin.grant.checkingNow": "Kontroluje sa…",
     "admin.loading": "Načítavajú sa čakajúce žiadosti…",
     "admin.refreshing": "Obnovuje sa…",
     "admin.pending.one": "{n} čakajúca žiadosť ↓",
@@ -2922,6 +2956,9 @@ export const messages = {
     "op.pageQueued": "Uloženo — stránka se zveřejní po připojení. Účastníci zatím vidí původní stránku.",
     "op.themePublished": "Vzhled byl zveřejněn.",
     "op.themeQueued": "Uloženo — vzhled se zveřejní po připojení. Účastníci zatím vidí původní vzhled.",
+    "op.coOrgSent": "Organizátorské klíče byly odeslány spoluorganizátorovi.",
+    "op.coOrgQueued":
+      "Uloženo — organizátorské klíče se odešlou po připojení. Do té doby si spoluorganizátor akci neodemkne.",
     "create.error.identityFailed": "Vytvoření identity se nezdařilo — zkuste to prosím znovu.",
     "create.error.loginToUpload":
       "Pro nahrání obrázků se přihlaste (nebo nejprve vytvořte akci) — mezitím se použijí vygenerované.",
@@ -2940,6 +2977,14 @@ export const messages = {
     "event.ownStatus.title": "Problém se zpracováním",
     "event.ownStatus.submission": "Tvůj profil se nepodařilo zpracovat — zkus ho odeslat znovu.",
     "event.ownStatus.talk": "Tvou přednášku se nepodařilo zpracovat — zkus ji nahrát znovu.",
+    "event.recoverKeys.title": "Organizátor na novém zařízení?",
+    "event.recoverKeys.body":
+      "Pokud jsi tuto akci vytvořil tímto účtem, její klíče mají šifrovanou zálohu na relayích. Obnovení požádá tvůj podpisovač o její odemknutí.",
+    "event.recoverKeys.action": "Obnovit mé organizátorské klíče",
+    "event.recoverKeys.working": "Obnovuje se…",
+    "event.recoverKeys.restored": "Tvé organizátorské klíče jsou zpět na tomto zařízení.",
+    "event.recoverKeys.empty": "Pro tento účet se nenašla žádná záloha klíčů k této akci.",
+    "event.recoverKeys.failed": "Klíče se nepodařilo obnovit — zkontroluj připojení nebo podpisovač a zkus to znovu.",
     "event.retention.line": "Tvá data z akce se smažou {days} dní po akci.",
     "event.leave.action": "Opustit akci",
     "event.leave.confirm": "Opustit tuto akci? Odešle se žádost organizátorovi, aby odstranil tvůj záznam v adresáři a shody a smazal tvá intro média. Projeví se to, až ji zpracuje.",
@@ -3430,7 +3475,13 @@ export const messages = {
     "admin.grant.step2": "Vložte tento npub a přidejte ho.",
     "admin.grant.step3":
       "Nechte tuto stránku otevřenou — po doručení oprávnění se tady automaticky odemkne.",
-    "admin.grant.waiting": "Čeká se na udělení…",
+    "admin.grant.waiting": "Každých pár sekund se kontroluje, zda udělení dorazilo…",
+    "admin.grant.waitingSigner":
+      "Čeká se na připojení podepisovače — kontrola začne, jakmile se připojí.",
+    "admin.grant.notChecking": "Automatická kontrola se zastavila.",
+    "admin.grant.lastChecked": "Naposledy zkontrolováno v {time}.",
+    "admin.grant.checkNow": "Zkontrolovat nyní",
+    "admin.grant.checkingNow": "Kontroluje se…",
     "admin.loading": "Načítání čekajících žádostí…",
     "admin.refreshing": "Obnovování…",
     "admin.pending.one": "{n} čekající žádost ↓",
