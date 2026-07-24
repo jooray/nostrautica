@@ -1,0 +1,2125 @@
+{
+  "model": "deepseek-v4-flash",
+  "k": 4,
+  "before": {
+    "label": "IB0-before",
+    "failed": 0,
+    "rows": [
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p03",
+        "text": "Ask Priya about the hardest part of protecting sources — I bet your Rust expertise on cryptographic protocols could be useful to her.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p03",
+        "text": "What's the most surprising thing you've learned about surveillance while making your documentaries?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p06",
+        "text": "Sunny, I hear you designed Copperwake — Dmitri here is a Rust engineer who builds payments infrastructure, you two might have some interesting hardware-software crossover to talk about.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p06",
+        "text": "What's your favorite synth to tinker with right now?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p09",
+        "text": "Bao, Dmitri here is a Rust engineer who builds payments infrastructure — your leaked dataset on financial crime sounds like something he could help you find patterns in.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p09",
+        "text": "What's the biggest pattern you're hoping to find in that dataset?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p12",
+        "text": "Fatima, Dmitri here builds payments infrastructure and wants to work on something mission-driven — your communities need exactly that kind of technical partner.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p02",
+        "candidate": "p12",
+        "text": "What's the biggest barrier your communities face when trying to access banking or identity tools?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p02",
+        "text": "I've got users and funding for a censorship-resistant payments app — want to hear how Ferrous Tideline could fit into the backend?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p02",
+        "text": "What's the hardest part of building payments infra at scale, and what would you do differently if you were starting from scratch?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p02",
+        "text": "If you could co-found something that makes grassroots organizing easier, what would the first sprint look like?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p08",
+        "text": "Your Kestrel Mesh stack sounds fascinating — I'm building Handbasket Rails for grassroots payments, and I'd love to hear how you think about making complex tech usable.",
+        "violations": [
+          "THEFT"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p08",
+        "text": "What's the hardest UX challenge you've faced making a technical tool feel simple?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p11",
+        "text": "I'm building Handbasket Rails for grassroots organizers — your self-custody workshops sound like exactly the kind of education our users need.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p11",
+        "text": "How do you make Bitcoin self-custody click for people who've never used a wallet before?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p01",
+        "candidate": "p11",
+        "text": "I'd love to talk about running a joint workshop where we teach financial sovereignty to mutual-aid groups.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p08",
+        "text": "You designed Pelagic Standard — Jonah specializes in making intimidating tools simple. Could you two figure out a way to make source-protection workflows feel as easy as sending a text?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p08",
+        "text": "Jonah left ad-tech to work on private products. Ask him how he'd approach designing a secure submission interface for whistleblowers that doesn't scare them off.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p08",
+        "text": "You both care about design systems — compare notes on Pelagic Standard and how Jonah's UX research could help you build a version that journalists actually want to use.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p11",
+        "text": "Casimir runs self-custody workshops but only reaches crypto insiders — you work with whistleblowers who need to protect their identities and assets. Could you two design a workshop on financial sovereignty for sources?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p11",
+        "text": "You defend whistleblowers — Casimir teaches self-custody. Ask him how he'd help a source secure their bitcoin without ever touching a centralized exchange.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p11",
+        "text": "Casimir's Quillfeather Press zines could be a great format for your Pelagic Standard design system — ask him if he's ever thought about a zine on source protection.",
+        "violations": [
+          "THEFT",
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p04",
+        "candidate": "p14",
+        "text": "Rosa built Sundial Custody, a key-management library — you work with whistleblowers who need to protect their keys. Ask her what the biggest security pitfalls are in her library's design.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p04",
+        "text": "I'm working on a documentary about whistleblowers and need to protect sources before filming — how early do you usually get involved with storytellers?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p04",
+        "text": "Your work defending leakers sounds exactly like the kind of legal ally I've been searching for — could we talk about what a pre-publication partnership looks like?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p04",
+        "text": "I wrote a novel called The Vellum Cipher about surveillance and secrets — I'd love to hear your take on how fiction and law intersect around source protection.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p07",
+        "text": "Your work on making cryptography usable is fascinating — I'm always thinking about how to make complex surveillance stories accessible to audiences.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p07",
+        "text": "I host a podcast too — Salt & Signal sounds great; what's the most surprising thing you've learned about making crypto approachable?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p10",
+        "text": "I work with massive surveillance datasets and need someone who can find patterns in the noise — your graph analysis skills could be exactly what I need.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p10",
+        "text": "I'm a documentary filmmaker tracking dissent and surveillance — I bet you'd love to get your hands on the kind of messy data I encounter.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p10",
+        "text": "You're between jobs and looking for a high-impact dataset — I might have exactly the kind of story-driven data problem you're seeking.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p13",
+        "text": "Your hardware security work sounds impressive — I'm always interested in how physical devices intersect with surveillance and privacy.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p03",
+        "candidate": "p13",
+        "text": "What's the most surprising vulnerability you've found in a 'secure' device?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p05",
+        "candidate": "p06",
+        "text": "I'm a drummer hunting for a bassist — Sunny plays bass and is new in town, want to jam and see if our rhythm clicks?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p05",
+        "candidate": "p06",
+        "text": "You built Nightjar Ledger, I built Copperwake — maybe we can compare notes on audit vs hardware security over coffee.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p05",
+        "candidate": "p06",
+        "text": "What's your dream first cover song for a band that's half DevOps, half firmware?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p05",
+        "candidate": "p12",
+        "text": "You're into self-hosting and community tools — Fatima works with communities shut out of banking, maybe your Nightjar Ledger could help them track their own finances?",
+        "violations": [
+          "THEFT",
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p06",
+        "candidate": "p07",
+        "text": "You're into hardware wallets — I built Copperwake. What's the hardest part of making ZK proofs actually usable for people like us?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p06",
+        "candidate": "p10",
+        "text": "You recorded an album — I'm a bassist and synth tinkerer new in town looking for bandmates. What kind of music is Marrowlight?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p06",
+        "candidate": "p13",
+        "text": "I designed Copperwake, a hardware wallet — you design secure hardware and need firmware help. Want to swap notes on tamper-evident enclosures and embedded code?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p06",
+        "candidate": "p16",
+        "text": "You help privacy tools get distribution — I built Copperwake, a hardware wallet. What's the best way to get a freedom-tech product into people's hands without selling out?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p08",
+        "text": "You should grab Jonah — he's a product designer who left ad-tech specifically to make intimidating tools feel simple, and you've been hunting for exactly that kind of partner to make your ZK protocols usable. Ask him how he'd approach turning a zero-knowledge proof into a one-click experience.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p08",
+        "text": "What's the most unusable powerful tool you've ever redesigned, and what did you learn from it?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p08",
+        "text": "If you had to explain a zero-knowledge proof to someone who only uses a phone, where would you start?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p11",
+        "text": "Casimir runs self-custody workshops and a zine imprint — you might swap ideas on how to reach people who aren't already crypto insiders.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p11",
+        "text": "What's the biggest gap you see between your workshops and the people who actually need them?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p14",
+        "text": "Rosa built Sundial Custody, a key-management library in Rust — you could talk about the pain of implementing crypto close to the metal.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p14",
+        "text": "What's the hardest part about writing defensive cryptographic code in firmware?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p17",
+        "text": "Nadia funds early freedom-tech teams — you could pitch her on the vision behind your cryptographic protocols.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p07",
+        "candidate": "p17",
+        "text": "What's the most common mistake you see first-time privacy-tech founders make?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p08",
+        "candidate": "p12",
+        "text": "I've been building Kestrel Mesh to help people stay connected without the internet — your communities sound like exactly who I want to reach. What's the biggest barrier they face when trying to get a bank account?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p08",
+        "candidate": "p12",
+        "text": "You mentioned Tessellate Bay — I'd love to hear how you've built trust there. I'm trying to make tools that don't feel like surveillance, and I think you'd have great insight into what actually works on the ground.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p08",
+        "candidate": "p15",
+        "text": "You made a documentary about anonymity — I'd love to hear how you made that accessible. I'm a designer trying to make privacy tools that people actually want to use.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p08",
+        "candidate": "p15",
+        "text": "Your threat models for journalists sound exactly like the kind of deep technical work I'm looking to partner with. What's the most common mistake you see in tools that claim to protect sources?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p08",
+        "candidate": "p18",
+        "text": "I heard you run a grant programme — what kind of projects do you fund? I'm working on a mesh network stack and curious if that fits.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p08",
+        "candidate": "p18",
+        "text": "You're a photographer — I've been thinking about how to make privacy tools feel less intimidating. Do you think visual design could help?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p09",
+        "candidate": "p10",
+        "text": "I've got a massive leaked dataset that's drowning me — want to help me find the patterns that'll break the story?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p09",
+        "candidate": "p10",
+        "text": "Your graph analysis skills sound perfect for tracing the money flows in my dataset — want to grab a coffee and see if the data clicks?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p09",
+        "candidate": "p10",
+        "text": "I wrote The Ostrich Protocol on financial crime — your anomaly detection could be exactly what I need to surface the hidden connections.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p11",
+        "text": "You recorded an album called Marrowlight — Casimir runs Quillfeather Press, a zine imprint. Have you ever thought about releasing a companion zine for the album?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p11",
+        "text": "Casimir runs self-custody workshops for non-technical people — you're a data scientist who loves messy real-world data. What would it take to analyze the adoption patterns of Bitcoin in underserved communities?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p14",
+        "text": "Rosa built Sundial Custody, a key-management library — you're a data scientist who loves graph analysis and anomaly detection. Could her library's transaction patterns be a dataset for detecting wallet misuse?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p14",
+        "text": "You're between jobs and craving meaningful work — Rosa is stuck doing web work and wants to get back to firmware. What would it take to build a secure device that generates a graph of your own data sovereignty?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p17",
+        "text": "Nadia funds freedom-tech teams — you're a data scientist seeking a high-impact dataset. What privacy or censorship problem would she want you to analyze with graph methods?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p17",
+        "text": "You recorded Marrowlight — Nadia founded Ironwood Assembly, a conference series. Could your album be a soundtrack for her next event?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p20",
+        "text": "Lars runs Vantablack Kitchen, a supper club — you recorded Marrowlight. Have you ever thought about hosting a listening dinner pairing your album with his food?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p10",
+        "candidate": "p20",
+        "text": "Lars is a veteran network engineer turned beekeeper — you're a data scientist who loves graph analysis. Could the social network of a beehive be modeled as a graph?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p11",
+        "candidate": "p12",
+        "text": "You study metadata leakage — I teach people how to not leak their bitcoin. Think there's a crossover between deanonymization and self-custody that we should talk about?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p11",
+        "candidate": "p12",
+        "text": "You made a documentary — I run a zine imprint. Ever thought about turning your threat models into a zine for activists?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p11",
+        "candidate": "p18",
+        "text": "You're building a censorship-resistant payments app for grassroots organizers — I teach people how to hold their own bitcoin. Want to talk about how self-custody could fit into Handbasket Rails?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p11",
+        "candidate": "p18",
+        "text": "You need a senior Rust engineer — I'm a Bitcoin protocol dev who's been looking for a mission-driven project to apply my skills to. Tell me about your biggest technical challenge.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p11",
+        "candidate": "p18",
+        "text": "You've got users and funding but no engineering — I've got deep bitcoin expertise and a zine imprint. What if we prototyped a self-custody onboarding flow for your organizers?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p02",
+        "text": "I'm building tools for people who've been locked out of banking — your Rust payments experience could make them real. Want to grab a coffee and talk about what a refugee-first wallet might look like?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p02",
+        "text": "You mentioned wanting a mission-driven founder with users — I've got the users and a co-op space. What's the first thing you'd build if you knew a hundred families needed it tomorrow?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p19",
+        "text": "Your community members are scared off by security jargon — I rewrite that stuff into plain language. Want to look at one of your onboarding flows together and see where we can make it less intimidating?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p19",
+        "text": "I've got a co-op space where we run workshops for people new to privacy tools. Could you help me turn the instructions into something someone with no tech background could follow?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p16",
+        "text": "You're looking for a product that needs distribution — I've got a community that needs practical money and identity tools. Want to talk about what it would take to bring something to them?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p16",
+        "text": "I run a co-op space full of people who'd love to test and spread a privacy tool if it actually worked for them. What's the most promising thing you've seen that's stuck in the engineering phase?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p13",
+        "text": "I work with communities that need secure hardware for storing identity documents — do you think your tamper-resistant designs could be adapted for people who aren't tech-savvy?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p12",
+        "candidate": "p13",
+        "text": "You mentioned the Ashgrove Method — I run workshops at a co-op space. Could that curriculum be taught to people who've never held a soldering iron?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p14",
+        "text": "I've been looking for someone who actually wants to write tight, close-to-metal firmware for secure devices — want to see if your Sundial Custody library could run on one of my tamper-evident boards?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p14",
+        "text": "What's the most defensive C or Rust pattern you've used that you think every hardware security project should adopt?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p17",
+        "text": "What kind of freedom-tech teams are you most excited to back right now?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p17",
+        "text": "Have you seen any hardware security startups that caught your attention recently?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p20",
+        "text": "What's the most surprising thing you've learned about networking from beekeeping?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p20",
+        "text": "I'd love to hear some of your war stories from the early days of BGP.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p03",
+        "text": "What kind of surveillance stories are you chasing right now?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p13",
+        "candidate": "p03",
+        "text": "How do you think about protecting sources when you're filming in high-risk environments?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p14",
+        "candidate": "p15",
+        "text": "Ask Aleksy about the biggest metadata leak he found while making Brambleway — I bet it's a story you'd never guess.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p14",
+        "candidate": "p01",
+        "text": "Mara is building a censorship-resistant payments app and needs a Rust firmware engineer — ask her what hardware she's targeting for Handbasket Rails.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p14",
+        "candidate": "p01",
+        "text": "Tell Mara you wrote Sundial Custody — she's been looking for someone who can do secure key management on the metal.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p14",
+        "candidate": "p01",
+        "text": "Ask Mara how her grassroots organizers handle offline payments — that's a firmware problem waiting for a solution.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p14",
+        "candidate": "p04",
+        "text": "Ask Gideon what the most common firmware-level security mistake he's seen in whistleblower cases.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p16",
+        "text": "I've got a pile of deanonymization research that's never left the lab — want to help me figure out which parts could actually ship as a tool?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p16",
+        "text": "What's the hardest part of taking a privacy paper and turning it into something people install?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p16",
+        "text": "If I handed you a threat model for a journalist covering a protest, what would you need from me to make it useful for a real newsroom?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p19",
+        "text": "Your threat models are probably written for academics — I rewrite security instructions so activists can actually follow them. Want to try one of yours on me?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p19",
+        "text": "What's the scariest instruction you've seen in a privacy tool that made you think 'no journalist would ever figure this out'?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p19",
+        "text": "I've got a documentary about metadata risks — Halima, could you help me make the companion guide something a source would actually read?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p02",
+        "text": "I've got research on traffic analysis that needs a Rust backend to become a real tool — want to build something that actually protects sources?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p02",
+        "text": "What's the hardest part of turning a cryptographic protocol into production code? I've got the protocol analysis, I need the builder.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p15",
+        "candidate": "p02",
+        "text": "If I gave you a spec for a metadata-free messaging layer, how fast could you prototype it in Rust?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p16",
+        "candidate": "p20",
+        "text": "Ask Lars what the weirdest BGP routing problem he ever fixed was — he's got decades of war stories.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p16",
+        "candidate": "p20",
+        "text": "If you're into bees, ask him how beekeeping compares to running a network.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p01",
+        "text": "You're looking for a mission-obsessed early team — Mara has users and funding but needs a Rust co-founder. What's the hardest part of building for grassroots organizers?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p01",
+        "text": "Mara's payments app is already in the hands of mutual-aid groups — ask her what feature requests keep coming up from the field.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p04",
+        "text": "Gideon has defended whistleblowers and wants to partner with storytellers early — ask him what the most common legal mistake sources make before they reach out.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p04",
+        "text": "You've funded freedom-tech teams; Gideon's Pelagic Standard is a design system for source protection. How do you see legal and technical protections overlapping?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p07",
+        "text": "Elena's ZK protocols are powerful but unusable — ask her what the biggest UX gap is between her research and a tool a journalist could actually use.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p07",
+        "text": "You mentor founders who need to ship usable privacy tools — Elena is desperate for a product designer. What would your ideal designer need to understand about ZK proofs?",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p17",
+        "candidate": "p18",
+        "text": "Theo runs Petrichor Fund — ask him what kind of projects he's funded and what he's hoping to learn about the privacy scene here.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p19",
+        "text": "I'm curious — what's the scariest security instruction you've ever rewritten?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p19",
+        "text": "Your Longshore Atlas sounds fascinating — how do you map clarity onto a tool's safety?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p02",
+        "text": "You're a Rust engineer who wants a mission — I run a grant programme that might fund something you'd build.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p02",
+        "text": "What's the most frustrating thing about corporate fintech that you'd fix in a freedom-tech project?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p05",
+        "text": "I'm a hobby photographer — do you ever shoot your band's gigs?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p05",
+        "text": "What's the best venue you've played in the tech scene?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p08",
+        "text": "I'm a full-stack dev who's curious about privacy — your Kestrel Mesh sounds like something I'd love to learn about.",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p18",
+        "candidate": "p08",
+        "text": "What's the hardest part of making a mesh network feel simple to use?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p19",
+        "candidate": "p20",
+        "text": "I noticed you're a filmmaker covering surveillance — I'm a UX writer who thinks about how to make security tools less scary for the people who need them most. How do you balance telling a hard story without putting your subjects at risk?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p19",
+        "candidate": "p20",
+        "text": "Your novel The Vellum Cipher sounds fascinating — I run Longshore Atlas, a mapping project. What's the most surprising thing you've learned about how surveillance actually works on the ground?",
+        "violations": [
+          "THEFT"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p19",
+        "candidate": "p06",
+        "text": "You've got a massive leaked dataset and need a data scientist — I'm a UX writer who thinks about how to make complex information clear. What kind of patterns are you hoping to find in the transaction data?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p19",
+        "candidate": "p06",
+        "text": "Your research paper The Ostrich Protocol sounds right up my alley — I run Longshore Atlas, a mapping project. How do you decide which stories are worth chasing when you're drowning in data?",
+        "violations": []
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p20",
+        "candidate": "p01",
+        "text": "Mara is building a payments app for grassroots organizers and needs a senior Rust engineer as a technical co-founder — you've got decades of networking wisdom and could mentor her through the infrastructure side. Ask her what the biggest bottleneck is in her current prototype.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p20",
+        "candidate": "p01",
+        "text": "You've mentored plenty of younger engineers — Mara is a mission-driven founder who could really use your kind of guidance on the networking and reliability side of her app. Ask her how she's handling payment routing right now.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p20",
+        "candidate": "p04",
+        "text": "Gideon defends whistleblowers and sources — you might have some war stories about network-level surveillance from your BGP days that could inform his legal risk assessments. Ask him what the most common technical mistake sources make.",
+        "violations": [
+          "BRIEFING"
+        ]
+      },
+      {
+        "variant": "IB0-before",
+        "target": "p20",
+        "candidate": "p10",
+        "text": "Ingrid is a data scientist who loves messy real-world data — you've probably seen some wild BGP routing anomalies in your career that she'd love to analyze. Ask her what kind of patterns she finds most interesting.",
+        "violations": [
+          "BRIEFING"
+        ]
+      }
+    ],
+    "summary": {
+      "total": 127,
+      "attributionErrors": 4,
+      "attributionErrorPct": 3.1,
+      "theft": 4,
+      "falseClaim": 0,
+      "briefing": 29,
+      "briefingPct": 22.8,
+      "clean": 96,
+      "cleanPct": 75.6
+    }
+  },
+  "after": {
+    "label": "IB1-shipped",
+    "failed": 0,
+    "rows": [
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p02",
+        "text": "Hi Dmitri — I'm building Handbasket Rails, a censorship-resistant payments app for grassroots organizers, and I desperately need a senior Rust engineer as a co-founder. Would you be open to chatting about the mission?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p02",
+        "text": "I've got users, funding, and a real problem worth solving — but zero engineering capacity. Your Ferrous Tideline crate and payments infrastructure experience sound exactly like what I need. Want to grab coffee here?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p02",
+        "text": "I'm Mara — I run a funded mutual-aid payments startup and I'm looking for a technical co-founder who wants a mission over a paycheck. Your profile screams 'that person.' Can we talk?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p08",
+        "text": "Hi Jonah — I'm building Handbasket Rails, a censorship-resistant payments app that's powerful but probably needs a UX overhaul. I hear you make intimidating tools feel simple — want to collaborate?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p08",
+        "text": "I've got a funded mission-driven payments app that grassroots organizers use, but the UX is rough. You left ad-tech to work on meaningful private products — sounds like we could help each other.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p08",
+        "text": "Hey Jonah — your Kestrel Mesh stack and my Handbasket Rails both aim to put people back in control. I need a designer who can make complex crypto feel simple. Interested?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p11",
+        "text": "Hi Casimir — I run a mutual-aid payments app for grassroots organizers who desperately need financial sovereignty. You run self-custody workshops but only reach insiders — I think we can fix that together.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p11",
+        "text": "I'm building Handbasket Rails for underserved communities, and you want to bring Bitcoin education to non-technical people. Want to partner on a workshop that actually reaches the folks who need it?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p01",
+        "candidate": "p11",
+        "text": "Hey Casimir — your Quillfeather Press zines and my Handbasket Rails app could be a powerful combo for reaching community organizers with real self-custody tools. Want to brainstorm?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p03",
+        "text": "Hi Priya — I'm a Rust engineer who's been building payment infrastructure and I'm looking for a mission that matters. I'd love to hear about the source protection challenges you face and whether my crypto background could help.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p03",
+        "text": "I read about The Vellum Cipher — the intersection of surveillance and storytelling is exactly the kind of meaningful work I want to apply my skills to. Would you be open to chatting about how a technical co-founder could support your next project?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p03",
+        "text": "Your work on documenting dissent is incredible. I've been building cryptographic tools for years and I'm ready to use them for something that protects real people — could we talk about what legal/technical protections your sources need?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p09",
+        "text": "Hi Bao — I'm a Rust engineer who's built payment systems and I'm looking for a mission that matters. I'd love to hear about the leaked dataset you're working with and whether my data analysis skills could help surface patterns.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p09",
+        "text": "Your work on financial crime is exactly the kind of meaningful problem I want to apply my skills to. I've spent years building payment infrastructure — could we talk about what patterns you're trying to find in that dataset?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p09",
+        "text": "I read The Ostrich Protocol — the intersection of financial forensics and investigative journalism is fascinating. I'm a systems engineer looking for a real problem to solve, and your dataset sounds like the perfect challenge.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p12",
+        "text": "Hi Fatima — I'm a Rust engineer who's built payment systems and I'm looking for a mission that matters. I'd love to talk about how my technical skills could help bring practical money tools to the communities you work with.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p12",
+        "text": "Your work with refugee and immigrant communities is exactly the kind of meaningful problem I want to solve. I've spent years building payment infrastructure — could we talk about what identity and banking tools your networks need most?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p02",
+        "candidate": "p12",
+        "text": "I'm a senior engineer looking to co-found something that puts people back in control of their money and identity. Your community access and my technical skills could be a powerful combination — would you be open to exploring that?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p03",
+        "candidate": "p04",
+        "text": "Hi Gideon — I'm working on a documentary about a high-stakes whistleblower and I need legal protection for my sources before I start filming. Would you be open to a quick chat about risk assessment?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p03",
+        "candidate": "p04",
+        "text": "Hey Gideon — I'm a filmmaker covering surveillance and dissent, and I'm looking for a lawyer who can help shield sources pre-publication. Your work on whistleblower defense sounds exactly like what I need.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p03",
+        "candidate": "p04",
+        "text": "Gideon — I'm Priya, a documentary filmmaker. I have a story that needs legal scaffolding before cameras roll. Could we talk about how you'd approach source protection for a film project?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p03",
+        "candidate": "p07",
+        "text": "Hi Elena — I'm a filmmaker working on surveillance stories, and I'm curious how ZK proofs could protect sources' identities in documentary footage. Would you have a moment to explain the basics?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p03",
+        "candidate": "p10",
+        "text": "Hi Ingrid — I'm a documentary filmmaker with a lot of messy data from surveillance research. I'd love to hear how you'd approach finding patterns in it.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p03",
+        "candidate": "p10",
+        "text": "Hey Ingrid — I have a huge dataset from my documentary work on dissent that I think could use graph analysis. Would you be interested in taking a look?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p04",
+        "candidate": "p08",
+        "text": "Hi Jonah — I'm Gideon, a lawyer working on source protection. I built a design system called Pelagic Standard and I'm looking for a designer who can make intimidating security tools feel simple. Want to chat about making Pelagic Standard work for your Kestrel Mesh?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p04",
+        "candidate": "p08",
+        "text": "Hey Jonah — I defend whistleblowers and I'm trying to get legal protections built into the design of tools, not bolted on after. Your UX background and my design system could be a powerful combo — interested in a hallway conversation?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p04",
+        "candidate": "p08",
+        "text": "Jonah — I'm Gideon. I do source-protection law and I've been thinking about how to make digital-security counseling feel less scary for journalists. You left ad-tech for meaningful privacy work — want to swap ideas on usable security?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p04",
+        "candidate": "p11",
+        "text": "Hi Casimir — I'm Gideon, a lawyer working on source protection. Your self-custody workshops sound great, and I'm curious if you've ever thought about applying that model to digital-security training for journalists.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p04",
+        "candidate": "p11",
+        "text": "Hey Casimir — I defend whistleblowers and I'm always looking for ways to reach non-technical people with security tools. Your Quillfeather Press zines are interesting — want to talk about a collaboration?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p05",
+        "candidate": "p06",
+        "text": "Hey Sunny — I'm a drummer looking to start a serious band and I hear you're a bassist. Want to jam and see if we lock in?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p05",
+        "candidate": "p06",
+        "text": "I built Nightjar Ledger, an audit toolkit — you made Copperwake. Maybe we can talk hardware sync over a practice session?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p05",
+        "candidate": "p06",
+        "text": "You're into synth tinkering and I'm into percussion — I'd love to hear what kind of sound you're chasing.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p06",
+        "candidate": "p13",
+        "text": "Hi Kenji — I'm a firmware engineer and hardware wallet designer. I'd love to talk about making your secure devices' code as robust as your hardware.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p06",
+        "candidate": "p13",
+        "text": "Hey Kenji — I built Copperwake, a hardware wallet. Your tamper-evident devices sound like a perfect fit for my embedded skills. Want to collaborate?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p06",
+        "candidate": "p13",
+        "text": "Hi Kenji — I do embedded firmware and hardware security. Your Ashgrove Method curriculum sounds fascinating — I'd love to hear how you teach physical security.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p08",
+        "text": "Hey Jonah — I'm desperate for a product designer who can make my ZK protocols not feel like a root canal. Your Kestrel Mesh work sounds like exactly the kind of meaningful tech I want to collaborate on.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p08",
+        "text": "I host Salt & Signal and I'd love to have you on to talk about designing for privacy — your ad-tech refugee story is exactly the perspective my listeners need.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p08",
+        "text": "Your profile says you're looking for a deep technical partner whose powerful work suffers from poor usability. That's me, 100%. Want to grab coffee and see if my MPC stuff could use your touch?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p11",
+        "text": "Hey Casimir — I love that you're running self-custody workshops. I'm trying to make my cryptography usable for normal people too, and I'd love to hear how you think about reaching non-technical users.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p11",
+        "text": "I host Salt & Signal — would you be up for a conversation about the gap between Bitcoin education and actual adoption outside crypto circles?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p14",
+        "text": "Hey Rosa — I see you built Sundial Custody and love cryptographic implementations. I'm an applied cryptographer looking for firmware collaborators who actually care about getting the crypto right on the metal.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p14",
+        "text": "Your defensive firmware work sounds like exactly the kind of engineering rigor my protocols need. Want to talk about what a secure device running my ZK proofs might look like?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p17",
+        "text": "Hi Nadia — I'm an applied cryptographer transitioning from academia to practice, and I'm looking for early-stage funding and mentorship. I think my ZK protocols could be the kind of freedom tech you invest in.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p07",
+        "candidate": "p17",
+        "text": "I host Salt & Signal — would you be interested in coming on to talk about what you look for in mission-driven privacy startups?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p09",
+        "text": "Hi Bao — I'm a designer who makes complex tools simple. I'd love to hear about the patterns you're trying to surface in that leaked dataset — maybe I can help you think about how to visualize it.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p09",
+        "text": "Hey Bao — I read about The Ostrich Protocol. If you're drowning in transaction data, I know a thing or two about making messy data navigable. Want to grab coffee and talk about what you're looking for?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p09",
+        "text": "Hi Bao — I work on mesh networking and privacy tools. Your financial crime investigation sounds fascinating — I'd be curious to hear what kind of data scientist you're hoping to find.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p12",
+        "text": "Hi Fatima — I build Kestrel Mesh, a mesh-network stack for communities that can't rely on centralized infrastructure. Your work with refugees and immigrants sounds exactly like the kind of community I want to help. Want to talk about what tools they need most?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p12",
+        "text": "Hey Fatima — I'm a product designer who left ad-tech to work on privacy tools. I'd love to hear about the banking and identity problems your communities face — maybe we can figure out something practical together.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p12",
+        "text": "Hi Fatima — Tessellate Bay sounds incredible. I design tools for people who need to control their own data and money. I'd love to learn from you about what would actually be useful on the ground.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p15",
+        "text": "Hi Aleksy — I'm a designer who makes intimidating technical tools simple. Your research on metadata leakage sounds like exactly the kind of powerful tech that needs a good UX. Want to talk about how we could ship your findings?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p15",
+        "text": "Hey Aleksy — I build Kestrel Mesh, a mesh-network stack. I'd love to hear your threat models for protecting activists — maybe we can make something that actually works for them.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p15",
+        "text": "Hi Aleksy — I saw you're looking for builders to turn your research into shipped tools. I'm a product designer who specializes in making complex privacy tools usable. Let's talk about what you're working on.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p18",
+        "text": "Hi Theo — I'm a designer working on privacy tools. If you're curious about the cypherpunk scene, I'd be happy to chat about what I'm building and introduce you to some folks.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p08",
+        "candidate": "p18",
+        "text": "Hey Theo — I run Kestrel Mesh, a mesh-network project. If you're looking for a low-stakes side project, I could use some web help for the project's landing page.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p09",
+        "candidate": "p10",
+        "text": "Hi Ingrid — I'm sitting on a massive leaked financial dataset that I need to turn into a story. Your graph analysis and anomaly detection sound exactly like what I'm missing. Would you be open to a chat about collaborating?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p09",
+        "candidate": "p10",
+        "text": "Hey Ingrid — I've got a huge dataset from a sanctions evasion investigation and I'm drowning in it. I read you love messy real-world data and pattern detection — want to team up?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p09",
+        "candidate": "p10",
+        "text": "Hi Ingrid — I'm a journalist with a leaked transaction dataset that needs a data scientist's eye. Your work on anomaly detection could be the key to breaking this story open. Interested?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p11",
+        "text": "Hey Casimir — I'm a data scientist looking for a domain-expert partner. Your work on self-custody workshops sounds fascinating — I'd love to hear how you think about reaching non-technical users.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p11",
+        "text": "Hi Casimir — I recorded an album called Marrowlight and I'm curious about your zine imprint Quillfeather Press. Could we talk about how art and financial sovereignty might cross-pollinate?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p11",
+        "text": "Casimir — I work with messy real-world data and anomaly detection. If you ever wanted to analyze workshop attendance patterns or wallet adoption trends, I'd be game to collaborate.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p14",
+        "text": "Hi Rosa — I'm a data scientist who loves messy real-world data, and you build defensive firmware. I'd love to hear about the security challenges you face in embedded crypto implementations.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p14",
+        "text": "Hey Rosa — I work with anomaly detection and graph analysis. Your Sundial Custody library sounds like a fascinating system — could we talk about how you approach key management from a security perspective?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p14",
+        "text": "Rosa — I'm between jobs and craving meaningful work. If you ever need someone to analyze firmware telemetry or detect anomalies in device behavior, I'd be excited to collaborate.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p17",
+        "text": "Hi Nadia — I'm a data scientist looking for a high-impact dataset and a domain-expert partner. I'd love to hear what kind of privacy or censorship problems you think are most ripe for a data-driven approach.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p17",
+        "text": "Nadia — I'm between jobs and craving meaningful work. If you know any early freedom-tech teams that need someone to turn messy data into actionable insights, I'd love to be introduced.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p17",
+        "text": "Hey Nadia — I recorded an album called Marrowlight and I'm curious about your Ironwood Assembly conference series. Could we talk about how art and freedom tech might intersect?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p20",
+        "text": "Hi Lars — I'm a data scientist who works with graph analysis and anomaly detection. I'd love to hear your war stories about BGP and legacy networking — there might be some fascinating data patterns there.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p20",
+        "text": "Lars — I recorded an album called Marrowlight. I hear you run Vantablack Kitchen — could we talk about how art and food might create interesting conversations?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p10",
+        "candidate": "p20",
+        "text": "Hey Lars — I'm between jobs and looking for meaningful work. I'd be curious to hear your perspective on how networking infrastructure has evolved and what you think the next big challenge is.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p12",
+        "text": "Hi Fatima — I run self-custody workshops but they never reach the people who need them most. Your work with refugee communities is exactly the kind of partnership I've been looking for. Could we talk about bringing a workshop to Tessellate Bay?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p12",
+        "text": "I've been trying to figure out how to make Bitcoin education actually useful for people shut out of banking — and you've already built the trust I'm missing. Would you be open to co-designing a session with me?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p12",
+        "text": "Your co-op space sounds incredible. I'd love to run a self-custody workshop there for your community — I can handle the tech side, and you know what they actually need.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p15",
+        "text": "Hi Aleksy — I'm building a zine imprint and I think your research on metadata leakage could reach a totally different audience if we turned it into a comic or pamphlet. Want to grab coffee and brainstorm?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p15",
+        "text": "Your documentary work plus my workshop curriculum could make a really powerful combo — I'd love to talk about how to turn your threat models into something non-technical people can actually use.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p15",
+        "text": "I've been looking for ways to make deanonymization risks tangible for the communities I work with. Your research could be the missing piece — want to collaborate on a zine?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p18",
+        "text": "Hey Theo — I'm always looking for people who can help make technical concepts more accessible. If you're curious about the privacy scene, I'd be happy to chat about what I'm working on.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p18",
+        "text": "I run a zine imprint — if you ever want to collaborate on a photo essay about the cypherpunk scene, let me know.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p01",
+        "text": "Hi Mara — I'm a Bitcoin protocol developer who's been trying to reach grassroots organizers, and it sounds like you're building exactly the kind of app they need. Want to talk about how self-custody could fit into Handbasket Rails?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p01",
+        "text": "Your payments app for organizers sounds like the perfect use case for the self-custody tools I teach. I'd love to explore how we could integrate them — want to grab a coffee?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p11",
+        "candidate": "p01",
+        "text": "I run a zine imprint and I think your work on Handbasket Rails would make a great story for a non-technical audience. Want to collaborate on a piece?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p02",
+        "text": "Hi Dmitri — I run Tessellate Bay, a co-op space, and I'm looking for a technical co-founder to build practical money tools for refugee communities. Your Rust and payments experience sounds exactly like what we need. Would you be open to a call?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p02",
+        "text": "I've been searching for a patient engineer who wants to build financial infrastructure for people shut out of banking. Your work on payments systems and Ferrous Tideline makes me think you'd be the right person. Want to grab coffee at the unconference?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p02",
+        "text": "I organize with immigrant communities who need real privacy tools, not just theory. I'd love to hear your thoughts on what a usable, self-sovereign payment system could look like for people with no credit history.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p19",
+        "text": "Hi Halima — I work with communities who find security tools intimidating and unusable. Your plain-language approach sounds like exactly what we need to make privacy tools accessible. Would you be interested in collaborating on onboarding guides?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p19",
+        "text": "I run a co-op space where we teach digital safety to refugees. I'd love to talk about how to rewrite security instructions so they actually make sense to people who aren't tech experts.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p19",
+        "text": "Your Longshore Atlas project sounds fascinating. I'm always looking for ways to map community needs — want to swap notes on how we both approach clarity and trust?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p16",
+        "text": "Hi Yusuf — I've built deep trust with refugee communities who need privacy tools, but we have zero distribution. Your experience scaling open-source products ethically sounds like a perfect fit. Want to chat about what a go-to-market strategy for community-led tools looks like?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p16",
+        "text": "I'm looking for someone who understands how to bring freedom-tech to underserved users without exploiting them. Your work on The Halcyon Index and ethical marketing really resonates. Would you be open to brainstorming?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p16",
+        "text": "I run Tessellate Bay, a co-op space that could be a launchpad for privacy tools. I'd love to hear your thoughts on how to reach communities that aren't on traditional tech radar.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p12",
+        "candidate": "p13",
+        "text": "Hi Kenji — I work with communities who need secure hardware for storing identity and money. Your cold-storage gadgets sound relevant. Would you be open to a conversation about what features would make them usable for non-technical people?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p14",
+        "text": "Hi Rosa — I'm building tamper-evident cold-storage hardware and I need firmware that's as tight as the case. Your Sundial Custody library sounds like exactly the kind of code I want running on my boards.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p14",
+        "text": "Rosa, I've got the enclosures and secure elements designed, but the firmware side is where I need a partner. Would you be open to pairing your Rust skills with my hardware for a real secure-device project?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p14",
+        "text": "I wrote the Ashgrove Method for hardware security training — I'd love to hear how you'd approach teaching the firmware half of that curriculum.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p17",
+        "text": "Hi Nadia — I'm building secure hardware for self-sovereignty, and I'd love to hear what you look for in a freedom-tech team before you write a check.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p17",
+        "text": "Nadia, I'm a first-time founder working on tamper-resistant cold storage. If you're open to it, I'd value your perspective on fundraising strategy for a hardware privacy startup.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p20",
+        "text": "Hi Lars — I'm a hardware hacker working on secure devices, and I'd love to hear your war stories from the early days of networking. Any lessons that still apply to building trusted systems today?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p03",
+        "text": "Hi Priya — I'm building hardware for privacy and self-sovereignty, and I think your documentary work on surveillance and dissent is incredibly important. I'd love to hear how you protect sources when you're filming.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p13",
+        "candidate": "p03",
+        "text": "Priya, I wrote the Ashgrove Method as a training curriculum for hardware security — I'm curious if you've ever thought about how physical tamper evidence could be part of a journalist's source-protection toolkit.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p01",
+        "text": "Hi Mara — I'm a Rust firmware engineer who built Sundial Custody, a key-management library. I'd love to hear about Handbasket Rails and what kind of secure payments infrastructure you need.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p01",
+        "text": "Hey Mara — I've been doing embedded crypto work and I'm looking for a mission-driven project. Your payments app for grassroots organizers sounds exactly like the kind of thing I want to build firmware for.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p01",
+        "text": "Hi Mara — I'm Rosa, I wrote Sundial Custody. I'm a Rust dev who wants to get back to metal. If you need a technical co-founder who cares about censorship resistance, let's talk.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p15",
+        "text": "Hi Aleksy — I'm a firmware engineer who built Sundial Custody, a key-management library. Your work on metadata leakage and deanonymization is exactly the kind of threat model I need to harden my code against.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p15",
+        "text": "Hey Aleksy — I'm Rosa, I do embedded crypto. I'd love to talk about how traffic analysis could compromise a secure device's key management, and how to build defenses in from the start.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p15",
+        "text": "Hi Aleksy — I saw you directed Brambleway. I'm a firmware engineer who cares about source protection — I'd love to hear how your research could inform the design of secure hardware for journalists.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p04",
+        "text": "Hi Gideon — I'm a firmware engineer who built Sundial Custody, a key-management library. I'd be curious to hear how you think about source protection in the context of hardware security.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p04",
+        "text": "Hey Gideon — I'm Rosa, I do embedded crypto. Your work on whistleblower defense is fascinating — I'd love to know if there are specific technical threats you see that firmware could help mitigate.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p14",
+        "candidate": "p18",
+        "text": "Hi Theo — I'm Rosa, an embedded firmware engineer. If you're curious about the cypherpunk scene, I'd be happy to chat about what I'm working on with Sundial Custody.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p16",
+        "text": "Hi Yusuf — I've got a documentary and a pile of research on metadata leakage that needs to reach people who can use it. Want to talk about how we could get that into the hands of builders and journalists?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p16",
+        "text": "Hey Yusuf — I'm a privacy researcher with a documentary and some threat-modeling work that's never been properly distributed. Your growth background sounds exactly like what I need. Free to chat at Reclaim?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p16",
+        "text": "Hi Yusuf — I'm looking for someone who can help get academic privacy research into real-world tools. Your ethical marketing approach is rare. Want to grab coffee and see if there's a fit?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p19",
+        "text": "Hi Halima — I'm a privacy researcher whose threat models and findings are dense and academic. I'd love your help making them clear and usable for the journalists and activists I'm trying to reach.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p19",
+        "text": "Hey Halima — I've got a documentary about privacy and a lot of research on metadata leakage, but I know the language is too academic. Could you help me rewrite it so it actually helps people?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p19",
+        "text": "Hi Halima — Your focus on turning scary security language into clear instructions is exactly what my work needs. I'm trying to get threat models to journalists — want to talk about how we could collaborate?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p02",
+        "text": "Hi Dmitri — I'm a privacy researcher with deep knowledge of anonymity systems and a documentary about the space, but I need a senior Rust engineer to help build the tools. Sound like something you'd want to co-found?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p02",
+        "text": "Hey Dmitri — I've got the threat models and protocol analysis for privacy tools, but I need someone who can actually build the infrastructure. Your Rust and payments background is exactly what I'm looking for in a co-founder.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p15",
+        "candidate": "p02",
+        "text": "Hi Dmitri — I'm looking for a mission-driven Rust engineer to turn my research into shipped tools. Your experience with cryptographic protocols and payments infrastructure seems like a perfect fit. Want to talk?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p17",
+        "text": "Hi Nadia — I've been looking for investors who understand freedom tech. I'd love to tell you about the product I'm trying to bring to market and hear what you look for in early teams.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p17",
+        "text": "Hey Nadia — I compiled The Halcyon Index, a dataset on privacy tools. Would you be interested in a walkthrough? I think it could help you spot promising teams.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p17",
+        "text": "Hi Nadia — I'm a growth specialist for privacy startups, and I'm hunting for a great product that needs distribution. If you know any teams that fit, I'd love an intro.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p20",
+        "text": "Hi Lars — I hear you're a veteran network engineer. I'd love to hear your war stories over coffee sometime.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p20",
+        "text": "Hey Lars — I'm working on distributing privacy tools and could use some perspective on the old-school internet. What's the most surprising thing you learned from BGP?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p03",
+        "text": "Hi Priya — I'm a growth specialist for privacy tools, and I think your documentary work on surveillance could reach a huge audience. Want to talk about how we might collaborate on distribution?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p03",
+        "text": "Hey Priya — I compiled The Halcyon Index, a dataset on privacy tools. If you're researching surveillance, it might have some useful leads for your next film.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p03",
+        "text": "Hi Priya — I work with freedom-tech startups that need visibility. If you ever want to feature a tool in your documentary, I can connect you with the right teams.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p06",
+        "text": "Hi Sunny — I'm a growth specialist for privacy tools, and I see you designed Copperwake. I'd love to talk about how to get it into more people's hands.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p06",
+        "text": "Hey Sunny — I'm looking for a great freedom-tech product that needs distribution. Copperwake sounds exactly like what I'm after — want to grab coffee and chat?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p16",
+        "candidate": "p06",
+        "text": "Hi Sunny — I compiled The Halcyon Index, a dataset on privacy tools. I'd love to include Copperwake and help you reach a wider audience.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p01",
+        "text": "Hi Mara — I write early checks into freedom tech and mentor first-time founders. Your Handbasket Rails app sounds exactly like the kind of mission I back. Want to grab coffee and talk about fundraising strategy?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p01",
+        "text": "I'm Nadia — I love that you're building a censorship-resistant payments app for grassroots organizers. I've mentored a bunch of non-technical founders through the early stages. What's your biggest blocker right now?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p01",
+        "text": "Hey Mara — I run Ironwood Assembly and I'm always looking for mission-driven teams to feature. Would you be open to telling me more about Handbasket Rails and what you need to scale?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p04",
+        "text": "Hi Gideon — I'm an angel investor focused on freedom tech, and your work defending whistleblowers is exactly the kind of mission I want to support. I'd love to hear about the cases you're working on and how I can help.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p04",
+        "text": "I'm Nadia — I run Ironwood Assembly, and I think your source-protection work would be a powerful story for our audience. Would you be open to speaking at the next event?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p04",
+        "text": "Hey Gideon — I mentor founders solving censorship and privacy problems. Your legal expertise protecting sources is a critical piece of the puzzle. How can I connect you with the right storytellers?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p07",
+        "text": "Hi Elena — I'm an angel investor focused on freedom tech, and your ZK protocols sound like exactly the kind of deep tech I want to back. I'd love to hear about what you're building and how I can help you find a product designer.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p07",
+        "text": "I'm Nadia — I mentor early-stage founders, and I know how hard it is to bridge the gap between powerful tech and usable products. What's your biggest challenge in making your cryptography approachable?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p07",
+        "text": "Hey Elena — I run Ironwood Assembly, and I think your work on making ZK proofs usable would be a fantastic talk. Would you be open to presenting at the next event?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p18",
+        "text": "Hi Theo — I'm an angel investor in freedom tech. I hear you run Petrichor Fund — what kind of projects do you typically fund?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p17",
+        "candidate": "p18",
+        "text": "I'm Nadia — I mentor early-stage founders. If you're looking for a side project in the privacy space, I might know some teams that could use full-stack help.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p19",
+        "text": "Hi Halima — I run a small grant programme and I'm curious how you'd rewrite a security tool's onboarding to be less scary. Want to grab coffee and chat about it?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p19",
+        "text": "Hey Halima — I'm new to the privacy scene and your work on plain-language security sounds fascinating. Could I buy you a drink and pick your brain about what you've learned?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p02",
+        "text": "Hi Dmitri — I run a grant programme and I'm looking for a mission-driven Rust engineer to help build something meaningful. Want to chat about what you're looking for?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p02",
+        "text": "Hey Dmitri — I'm a full-stack dev curious about the cypherpunk scene and you're exactly the kind of engineer I'd love to learn from. Free for a coffee?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p02",
+        "text": "Hi Dmitri — I've got a small fund and a lot of curiosity about freedom tech. If you're open to co-founding something, I'd love to hear what you'd build.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p05",
+        "text": "Hi Tomás — I'm a hobby photographer and I hear you're a drummer. Any chance you'd want to jam or just talk music over a beer?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p08",
+        "text": "Hi Jonah — I'm a full-stack dev who's curious about privacy tools, and you're a designer who makes complex tech simple. Want to grab a coffee and see if we could build something together?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p08",
+        "text": "Hey Jonah — I run a grant programme and I'm looking for projects that need both solid engineering and great UX. Your work on Kestrel Mesh sounds right up my alley — want to chat?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p18",
+        "candidate": "p08",
+        "text": "Hi Jonah — I'm new to the cypherpunk scene but I build web stuff. If you've got a tool that needs a frontend or a grant application written, I'd love to help.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p19",
+        "candidate": "p03",
+        "text": "Hi Priya — I'm a plain-language specialist who helps security projects communicate clearly. Your documentary work on surveillance sounds fascinating — I'd love to talk about how clear language could protect your sources.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p19",
+        "candidate": "p03",
+        "text": "Hey Priya — I lead Longshore Atlas, a mapping project. I'm wondering if plain-language design could help make your source-protection materials more accessible. Want to grab coffee?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p19",
+        "candidate": "p03",
+        "text": "Hi Priya — I rewrite intimidating security instructions into clear, calm text. If your documentary subjects need to understand complex safety steps, I'd love to help.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p19",
+        "candidate": "p09",
+        "text": "Hi Bao — I'm a plain-language specialist who helps security projects communicate clearly. You mentioned a leaked dataset — I'd love to help you write up the findings in a way that's clear and actionable.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p19",
+        "candidate": "p09",
+        "text": "Hey Bao — I lead Longshore Atlas, a mapping project. If you need help making your financial crime story accessible to a wider audience, I'd love to collaborate.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p19",
+        "candidate": "p09",
+        "text": "Hi Bao — I rewrite intimidating security instructions into clear, calm text. Your investigative work on sanctions evasion sounds like it could use that kind of clarity — want to chat?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p01",
+        "text": "Hi Mara — I run a supper club called Vantablack Kitchen and love hearing about mission-driven projects. What's the biggest challenge you're facing with Handbasket Rails right now?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p01",
+        "text": "Hey Mara — I've spent decades in networking and now mentor younger engineers. If you ever want a sounding board for the technical side of your payments app, I'd be happy to chat.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p04",
+        "text": "Hi Gideon — I'm a retired network engineer who cares about privacy infrastructure. I'd love to hear about the source-protection challenges you've seen in the field.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p04",
+        "text": "Hey Gideon — I run a supper club and love connecting people with different expertise. If you're ever looking for a safe space to talk about whistleblower cases, Vantablack Kitchen is open.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p07",
+        "text": "Hi Elena — I'm a retired network engineer who loves learning about new tech. Your work on ZK proofs sounds fascinating — what's the hardest part about making it usable?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p07",
+        "text": "Hey Elena — I host a supper club and love conversations that bridge different worlds. If you ever want to talk cryptography over a meal, Vantablack Kitchen is your place.",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p10",
+        "text": "Hi Ingrid — I'm a retired network engineer who's seen a lot of messy data in my time. What kind of dataset are you hoping to find at this conference?",
+        "violations": []
+      },
+      {
+        "variant": "IB1-shipped",
+        "target": "p20",
+        "candidate": "p10",
+        "text": "Hey Ingrid — I run a supper club and love hearing about people's projects. If you ever want to talk graph analysis over a meal, Vantablack Kitchen is open.",
+        "violations": []
+      }
+    ],
+    "summary": {
+      "total": 162,
+      "attributionErrors": 0,
+      "attributionErrorPct": 0,
+      "theft": 0,
+      "falseClaim": 0,
+      "briefing": 0,
+      "briefingPct": 0,
+      "clean": 162,
+      "cleanPct": 100
+    }
+  }
+}
