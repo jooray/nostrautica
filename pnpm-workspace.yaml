@@ -13,5 +13,8 @@ patchedDependencies:
 # chains. fast-uri: host-confusion (GHSA, patched ≥3.1.4). cookie: name/path/domain
 # validation (patched ≥0.7.0).
 overrides:
+  # postcss: source-map path traversal / .map disclosure (GHSA-r28c-9q8g-f849,
+  # patched >=8.5.18) — build-time only on a static deploy, but the high gate fails.
+  postcss: ">=8.5.18"
   fast-uri: "^3.1.4"
   cookie: "^0.7.0"
