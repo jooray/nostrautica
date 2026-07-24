@@ -138,11 +138,17 @@ Na stránke niekoho iného ho môžete **Sledovať**, klepnutím na **Napísať 
 
 ## 4.5 Prednášky (ak ich organizátor zapol)
 
-Niektoré podujatia umožňujú účastníkom posielať krátke prednahraté prednášky namiesto stretnutia naživo — alebo ešte pred ním. Ak je to pre vaše podujatie zapnuté, v spodnej lište sa objaví záložka **Prednášky**. Klepnite na **Pridať prednášku**, dajte jej titulok a krátky popis, potom ju nahrajte alebo napíšte úplne rovnako ako predstavenie (§3). Ide to k organizátorovi na zverejnenie, kým to nie je vidieť pre nikoho, takže nečakajte, že sa to objaví okamžite.
+Niektoré podujatia umožňujú účastníkom posielať krátke prednahraté prednášky namiesto stretnutia naživo — alebo ešte pred ním. Ak je to pre vaše podujatie zapnuté, v spodnej lište sa objaví záložka **Prednášky**. Klepnite na **Pridať prednášku**, dajte jej titulok a krátky popis a potom zvoľte, ako video poskytnete:
+
+- **Nahrať** priamo v prehliadači (ako predstavenie, §3),
+- **Nahrať súbor**, ktorý už máte, alebo
+- **Vložiť URL** — neverejný **YouTube** odkaz alebo priamy **.mp4** odkaz. Toto je najlepšia voľba pre prednášku, ktorá je príliš veľká na nahranie; video zostáva tam, kde ho hostujete, a šifrovaný je pre podujatie len *odkaz*.
+
+Je tu aj políčko **„Spracovať túto prednášku pre spájanie?"**, štandardne vypnuté: nechajte ho vypnuté a prednáška sa jednoducho zverejní na sledovanie; zapnite ho a koordinátor ju aj prepíše a použije na zlepšenie vašich spojení. (Prednášky s vloženou URL sa nikdy nespracúvajú — sú len na sledovanie.) Tak či onak ide prednáška k organizátorovi na zverejnenie, kým to nie je vidieť pre nikoho, takže nečakajte, že sa to objaví okamžite.
 
 ![Zoznam prednášok](images/participant-sk/26-talks-empty-light.png)
 
-Sledovanie prednášky si pamätá, kde ste skončili, takže môžete zatvoriť aplikáciu a pokračovať neskôr, a — rovnako ako pri vašom vlastnom predstavení — je dostupný prepis, ak ju rečník nahral namiesto napísania.
+Sledovanie prednášky si pamätá, kde ste skončili, takže môžete zatvoriť aplikáciu a pokračovať neskôr, a prehrávač má **ovládanie rýchlosti** (1×/1,5×/2×) na rýchlejšie zvládnutie dlhej prednášky. Prepis je dostupný, keď rečník prednášku zapol na spracovanie.
 
 ## 5. Vaše spojenia
 

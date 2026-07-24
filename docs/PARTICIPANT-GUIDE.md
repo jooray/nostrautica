@@ -211,15 +211,27 @@ Nostr mute, so it carries to other Nostr apps too):
 Some events let attendees submit short prerecorded talks instead of — or ahead
 of — meeting in person. If it's on for your event, a **Talks** tab appears in
 the bottom bar. Tap **Submit a talk**, give it a title and a short description,
-then record or write it exactly like your intro (§3). It goes to the organizer
-to publish before it's visible to anyone, so don't expect it to show up
-instantly.
+then choose how to provide the video:
+
+- **Record** it in the browser (like your intro, §3),
+- **Upload a file** you already have, or
+- **Paste a URL** — an unlisted **YouTube** link or a direct **.mp4** link. This
+  is the way to go for a talk too large to upload; the video stays wherever you
+  host it and only the *link* is encrypted to the event.
+
+There's also a **"Process this talk for matching?"** checkbox, off by default:
+leave it off and your talk is simply published for people to watch; tick it and
+the coordinator will also transcribe it and use it to sharpen your matches.
+(Pasted-URL talks are never processed — they're watch-only.) Either way the talk
+goes to the organizer to publish before it's visible to anyone, so don't expect
+it to show up instantly.
 
 ![The Talks list](images/participant/26-talks-empty-light.png)
 
-Watching a talk remembers where you left off, so you can close the app and
-pick it up later, and — like your own intro — a transcript is available if the
-speaker recorded rather than wrote it.
+Watching a talk remembers where you left off, so you can close the app and pick
+it up later, and the player has a **speed control** (1×/1.5×/2×) for getting
+through a long talk faster. A transcript is available when the speaker opted
+their talk into processing.
 
 ## 5. Your matches
 

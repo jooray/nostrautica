@@ -371,7 +371,15 @@ view for everything that isn't visitor-specific.
 **Prerecorded talks.** In **Admin → Settings → Prerecorded talks**, switch it *On*
 (or *Prerecord-first*, which puts Talks ahead of People in attendees' nav —
 good for a "watch ahead, meet at the venue" format) and **Save**. Approved
-attendees can then submit short talks from the same composer used for intros.
+attendees can then submit short talks — recorded in the browser, uploaded as a
+file, or given as an unlisted **YouTube / .mp4 URL** (useful for talks too large
+to upload; the coordinator never fetches these, so URL talks are watch-only).
+
+Note that **talks no longer feed matching by default**: a speaker chooses, per
+talk, whether to tick *"Process this talk for matching?"*. Leave that in mind if
+a submitted talk doesn't appear in anyone's match reasoning — that's expected
+unless the speaker opted in (and it never happens for URL talks). This keeps
+transcription costs off talks nobody asked to match.
 
 Submitted talks don't go live by themselves. A **Talks moderation** card
 further down **Administration** lists everything waiting for review — **Preview**

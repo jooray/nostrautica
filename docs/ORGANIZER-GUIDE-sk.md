@@ -255,7 +255,9 @@ pre návštevníka.
 
 ## 6.5 Prednášky a skupinový chat (obe novinky, obe voliteľné)
 
-**Prednahraté prednášky.** V **Administrácia → Nastavenia → Prednahraté prednášky** to prepnite na *Zapnuté* (alebo *Najprv prednahraté*, čo v navigácii účastníkov posunie Prednášky pred Ľudí — vhodné pre formát „pozrite si vopred, stretnite sa na mieste") a **Uložte**. Schválení účastníci potom môžu posielať krátke prednášky z toho istého editora ako pri predstavení.
+**Prednahraté prednášky.** V **Administrácia → Nastavenia → Prednahraté prednášky** to prepnite na *Zapnuté* (alebo *Najprv prednahraté*, čo v navigácii účastníkov posunie Prednášky pred Ľudí — vhodné pre formát „pozrite si vopred, stretnite sa na mieste") a **Uložte**. Schválení účastníci potom môžu posielať krátke prednášky — nahraté v prehliadači, nahraté ako súbor, alebo zadané ako neverejná **YouTube / .mp4 URL** (vhodné pre prednášky príliš veľké na nahranie; koordinátor tieto nikdy nesťahuje, takže URL prednášky sú len na sledovanie).
+
+Všimnite si, že **prednášky už štandardne nevstupujú do spájania**: rečník pri každej prednáške zvolí, či zaškrtne *„Spracovať túto prednášku pre spájanie?"*. Majte to na pamäti, ak sa odoslaná prednáška neobjaví v zdôvodnení niečích spojení — to je očakávané, pokiaľ sa rečník neprihlásil (a pri URL prednáškach sa to nestane nikdy). Šetrí to náklady na prepis prednášok, ktoré nikto nechcel spájať.
 
 Odoslané prednášky sa samé nezverejnia. Karta **Moderovanie prednášok** nižšie v **Administrácii** zobrazuje všetko, čo čaká na kontrolu — pri každej klepnite na **Ukážka**, potom ju buď **Zverejnite**, aby si ju účastníci mohli pozrieť, alebo **Zamietnite**. Kým to tu neurobíte, nikto okrem vás nič, čo účastník pošle, neuvidí (zverejnenie navyše potrebuje pripojeného koordinátora, rovnako ako zvyšok administrácie). Vyhľadávanie/filter v Ľuďoch (§3) má filter **Poslaná prednáška**, takže sa na rušnom podujatí viete presunúť rovno k tým, čo na vás čakajú, bez rolovania celým zoznamom.
 
