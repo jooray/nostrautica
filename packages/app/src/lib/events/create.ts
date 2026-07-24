@@ -68,6 +68,29 @@ export interface CreatedEvent {
   config: EventConfig;
 }
 
+/** Cap on the number of NIP-52 `D` day tags emitted (audit P8). 60 days is a
+ *  defensible ceiling for a single meetup/conference and bounds the tag count on
+ *  an absurd or misconfigured start..end range. Documented for the spec agent. */
+export const MAX_DAY_TAGS = 60;
+
+/**
+ * NIP-52 uppercase `D` day-index tags (audit P8): one tag per UTC calendar day
+ * the event spans (`start`..`end` inclusive), formatted `YYYY-MM-DD`, so strict
+ * or date-indexed calendar clients can discover the event on each of its days.
+ * `end` absent or before `start` yields a single tag for the start day. The
+ * count is capped at {@link MAX_DAY_TAGS}. Times are unix SECONDS.
+ */
+export function dayIndexTags(start: number, end?: number): string[][] {
+  const SEC_PER_DAY = 86400;
+  const startDay = Math.floor(start / SEC_PER_DAY);
+  const endDay = end !== undefined && end >= start ? Math.floor(end / SEC_PER_DAY) : startDay;
+  const tags: string[][] = [];
+  for (let day = startDay; day <= endDay && tags.length < MAX_DAY_TAGS; day++) {
+    tags.push(["D", new Date(day * SEC_PER_DAY * 1000).toISOString().slice(0, 10)]);
+  }
+  return tags;
+}
+
 function slug(title: string): string {
   const base = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
   const rand = bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
@@ -116,6 +139,8 @@ export async function createEvent(
     ["start", String(input.start)],
   ];
   if (input.end) eventTags.push(["end", String(input.end)]);
+  // NIP-52 `D` day-index tags — one per UTC day the event covers (audit P8).
+  for (const t of dayIndexTags(input.start, input.end)) eventTags.push(t);
   if (input.summary) eventTags.push(["summary", input.summary]);
   if (input.banner) eventTags.push(["image", input.banner]);
   if (input.location) eventTags.push(["location", input.location]);
