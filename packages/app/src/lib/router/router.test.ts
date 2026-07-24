@@ -169,6 +169,50 @@ describe("router hierarchical up()", () => {
   });
 });
 
+describe("active event context (Bug 1)", () => {
+  it("carries the origin event up from the chat list, so DM → chat → event → home", () => {
+    // Walk from an event into the group chat list into a DM (the reported flow).
+    go(EVENT);
+    router.setEventOrigin(EVENT.naddr); // the layout sets this on the event route
+    go(DM);
+    go(DM_PEER);
+    // up() from the DM thread → the conversation list…
+    router.up();
+    fw.navigate(buildHash(DM));
+    expect(router.route).toEqual(DM);
+    // …then the chat list rises to the ORIGIN EVENT, not the global events list…
+    router.up();
+    fw.navigate(buildHash(EVENT));
+    expect(router.route).toEqual(EVENT);
+    // …and only the event home rises to All events.
+    router.up();
+    fw.navigate(buildHash(HOME));
+    expect(router.route).toEqual(HOME);
+  });
+
+  it("without an origin, the chat list rises to home (no fabricated context)", () => {
+    // Fresh tab straight to the chat list: no event context was ever set.
+    fw.navigate(buildHash(DM));
+    router.up();
+    fw.navigate(buildHash(HOME));
+    expect(router.route).toEqual(HOME);
+  });
+
+  it("setEventOrigin is idempotent and clearable", () => {
+    router.setEventOrigin(EVENT.naddr);
+    expect(router.eventOrigin).toBe(EVENT.naddr);
+    router.setEventOrigin(EVENT.naddr); // no-op
+    expect(router.eventOrigin).toBe(EVENT.naddr);
+    router.setEventOrigin(undefined);
+    expect(router.eventOrigin).toBeUndefined();
+  });
+
+  it("upLabelKey on the chat list names the event (Overview) when a context is set", () => {
+    expect(upLabelKey(DM)).toBe("nav.back"); // no context → generic Back
+    expect(upLabelKey(DM, EVENT.naddr)).toBe("nav.overview"); // context → rises to the event
+  });
+});
+
 describe("upLabelKey names the destination", () => {
   it("labels the event home button 'All events'", () => {
     expect(upLabelKey(EVENT)).toBe("more.allEvents");
