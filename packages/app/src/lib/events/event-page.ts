@@ -31,6 +31,7 @@ import {
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
@@ -112,7 +113,7 @@ export async function fetchEventPage(
 export async function publishEventPage(
   ctx: EventContext,
   model: EventPageModel,
-): Promise<void> {
+): Promise<PublishOutcome> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const { pubkey: eidPubkey, identifier } = parseCoordinate(ctx.coordinate);
@@ -146,7 +147,7 @@ export async function publishEventPage(
   });
   // Monotonic republish (audit P3): a same-second re-save of the page must win
   // the §3.1 tie-break, or the editor's change silently doesn't take.
-  await publishMonotonic({
+  const { published } = await publishMonotonic({
     kind: KIND_EVENT_PAGE,
     author: eidPubkey,
     identifier,
@@ -157,6 +158,7 @@ export async function publishEventPage(
         hexToBytes(keys.eidNsecHex!),
       ),
   });
+  return toOutcome(published);
 }
 
 // ── Menu targets ─────────────────────────────────────────────────────────────

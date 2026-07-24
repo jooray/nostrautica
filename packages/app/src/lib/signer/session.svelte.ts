@@ -31,6 +31,7 @@ import { lockChatIdentityForLogout, unlockChatIdentityForLogin } from "$lib/chat
 import { clearBlindingCache } from "$lib/events/blinding.js";
 import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
 import { discardQueuedForOwner } from "$lib/nostr/publish-queue.js";
+import { outbox } from "$lib/stores/outbox.svelte.js";
 import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 import { clearAllJoinSent } from "$lib/stores/join-sent.svelte.js";
 import { router } from "$lib/router/router.svelte.js";
@@ -114,6 +115,12 @@ class Session {
     await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch((e) => {
       console.warn("[session] chat-identity unlock failed; device key remains locked", e);
     });
+    // R21: the reactive outbox is owner-filtered but caches the PREVIOUS account's
+    // items until its next poll. Clear it synchronously the moment the new owner is
+    // scoped, then refresh so this account sees only its own queue — never a flash
+    // of the prior identity's pending sends on a shared device.
+    outbox.reset();
+    void outbox.refresh();
     return true;
   }
 
@@ -247,7 +254,12 @@ class Session {
     // during the next person's session is the cross-account leak we're closing. The
     // Me page warns the user first when any exist (the count is shown before this
     // runs); this is the durable teardown so every logout path drops them.
-    if (owner) void discardQueuedForOwner(owner).catch(() => {});
+    // R21: AWAIT the discard BEFORE dropping owner scope — otherwise the discard
+    // races the next login and the durable rows can outlive it — and synchronously
+    // clear the reactive outbox view so the next account never sees this queue's
+    // metadata or its retry/discard controls.
+    if (owner) await discardQueuedForOwner(owner).catch(() => {});
+    outbox.reset();
     if (owner) clearOwnerCache(owner);
     setActiveOwner(null);
     setActiveCacheOwner(null);
@@ -284,6 +296,10 @@ class Session {
     if (this.pubkey && this.pubkey !== owner) return;
     // Supersede any in-flight restore/adoption in THIS tab too (H-6 interplay).
     this.nextOp();
+    // R21: the originating tab already discarded this owner's queued items from
+    // shared IndexedDB; drop this tab's reactive outbox view synchronously so it
+    // doesn't keep showing them until its next poll.
+    outbox.reset();
     clearOwnerCache(owner);
     setActiveOwner(null);
     setActiveCacheOwner(null);

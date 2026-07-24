@@ -318,10 +318,17 @@
         );
       }
       created = result;
-      opStatus.published(t("op.eventCreated"));
-      // Event published — the compose drafts are spent (App-2).
-      clearDraft("create:title");
-      clearDraft("create:summary");
+      // R9: report honestly. On venue Wi-Fi that allows HTTPS but blocks WSS the
+      // create events are safely queued but NOT yet visible — say so, and KEEP the
+      // compose drafts so nothing is lost if the queued publish never lands.
+      if (result.outcome === "queued") {
+        opStatus.queued(t("op.eventCreateQueued"));
+      } else {
+        opStatus.published(t("op.eventCreated"));
+        // Event published for real — the compose drafts are spent (App-2).
+        clearDraft("create:title");
+        clearDraft("create:summary");
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

@@ -86,6 +86,22 @@ class Outbox {
     this.refreshSoon();
   }
 
+  /**
+   * Synchronously drop the reactive view (audit R21). Called on logout / account
+   * change so the next identity never briefly sees the previous account's queued
+   * events (kind/time/error) or its retry/discard controls before the next poll.
+   * A pending coalesced recount is cancelled too, so it can't repaint stale data.
+   */
+  reset(): void {
+    if (this.recountTimer) {
+      clearTimeout(this.recountTimer);
+      this.recountTimer = undefined;
+    }
+    this.pending = 0;
+    this.pendingItems = [];
+    this.failed = [];
+  }
+
   /** Revive a failed item and flush; then refresh the view. */
   async retry(id: string): Promise<void> {
     await retryFailed(id).catch(() => {});

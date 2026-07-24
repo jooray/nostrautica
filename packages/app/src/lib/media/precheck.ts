@@ -1,20 +1,25 @@
 /**
- * Client-side media precheck (audit U13). A selected file used to be uploaded
- * unconditionally — the user could wait through a full encrypt + Blossom upload
- * for a clip that was predictably over the event's limit, only to have the
+ * Client-side media precheck (audit U13 / R17). A selected file used to be
+ * uploaded unconditionally — the user could wait through a full encrypt + Blossom
+ * upload for a clip that was predictably over the event's limit, only to have the
  * coordinator reject it. This compares the KNOWN file size and (when metadata
  * loaded cheaply) duration against the event's configured limits and fails early
  * with a clear, actionable message. The server-side checks stay authoritative;
  * this only spares the user an upload that was always going to be rejected.
  */
+import { MAX_MEDIA_DOWNLOAD_BYTES } from "$lib/blossom/client.js";
 
 /**
- * Absolute upper bound on an upload (bytes). There is no per-event size cap in
- * the config, so this is a generous client-side sanity ceiling that catches an
- * obviously-invalid selection (e.g. a multi-gigabyte movie) before it starts
- * encrypting/uploading. 1 GiB comfortably clears any legitimate intro/talk clip.
+ * Absolute upper bound on an upload (bytes). R17: this MUST equal the playback
+ * ceiling — `MAX_MEDIA_DOWNLOAD_BYTES` (250 MiB) in blossom/client.ts, the same
+ * limit `playback.ts` refuses a descriptor over. The precheck previously accepted
+ * up to 1 GiB, so a 300 MiB clip could encrypt + upload "successfully" and then
+ * be unplayable in the very same app. Sharing ONE constant guarantees anything
+ * accepted for upload is playable. (The coordinator's per-submission AGGREGATE
+ * cap across all media is higher — 500 MiB over up to 4 descriptors — so this
+ * per-file playback bound is the tightest honest limit; see handoff.)
  */
-export const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES = MAX_MEDIA_DOWNLOAD_BYTES;
 
 export interface MediaLimitViolation {
   kind: "duration" | "size";

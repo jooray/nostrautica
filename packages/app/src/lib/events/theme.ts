@@ -14,6 +14,7 @@ import {
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
@@ -47,9 +48,11 @@ export async function fetchEventTheme(ctx: EventContext): Promise<string | undef
 
 /**
  * Publish the event theme signed by E_id. An empty string clears the theme
- * (replaceable event with empty content). Rejects CSS over 32 KB.
+ * (replaceable event with empty content). Rejects CSS over 32 KB. Returns the
+ * publication outcome (R9) so the editor can distinguish a WSS-blocked queued
+ * save (keep the draft) from a relay-confirmed publish.
  */
-export async function publishEventTheme(ctx: EventContext, css: string): Promise<void> {
+export async function publishEventTheme(ctx: EventContext, css: string): Promise<PublishOutcome> {
   const bytes = utf8ByteLength(css);
   if (bytes > MAX_THEME_CSS_BYTES) {
     throw new Error(
@@ -61,7 +64,7 @@ export async function publishEventTheme(ctx: EventContext, css: string): Promise
   const { pubkey: eidPubkey, identifier } = parseCoordinate(ctx.coordinate);
   // Monotonic republish (audit P3): a same-second theme edit (or clear) must win
   // the §3.1 tie-break, or the change silently doesn't take.
-  await publishMonotonic({
+  const { published } = await publishMonotonic({
     kind: KIND_EVENT_THEME,
     author: eidPubkey,
     identifier,
@@ -81,4 +84,5 @@ export async function publishEventTheme(ctx: EventContext, css: string): Promise
         hexToBytes(keys.eidNsecHex!),
       ),
   });
+  return toOutcome(published);
 }

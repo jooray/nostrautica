@@ -51,6 +51,7 @@
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
@@ -156,7 +157,7 @@
     metadataSaved = false;
     error = null;
     try {
-      ctx = await updateEventMetadata(ctx, {
+      const { ctx: updated, outcome } = await updateEventMetadata(ctx, {
         title: metadataTitle.trim(),
         summary: metadataSummary.trim(),
         start: Math.floor(new Date(metadataStart).getTime() / 1000),
@@ -165,6 +166,7 @@
         icon: metadataIcon.trim() || undefined,
         banner: metadataBanner.trim() || undefined,
       });
+      ctx = updated;
       recentEvents.record({
         coordinate: ctx.coordinate,
         naddr: ctx.naddr,
@@ -172,8 +174,16 @@
         icon: ctx.icon,
         role: "organizer",
       });
-      metadataSaved = true;
-      setTimeout(() => (metadataSaved = false), 1500);
+      // R9: distinguish a relay-confirmed publish from a WSS-blocked queue. The
+      // inline "Saved ✓" tick shows only on a real publish; either way the honest
+      // status line tells the organizer whether attendees can see the change yet.
+      if (outcome === "queued") {
+        opStatus.queued(t("op.eventUpdateQueued"));
+      } else {
+        opStatus.published(t("op.eventUpdated"));
+        metadataSaved = true;
+        setTimeout(() => (metadataSaved = false), 1500);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -601,9 +611,16 @@
     pageSaved = false;
     error = null;
     try {
-      await publishEventPage(ctx, { menu: pageMenu, sections: pageSections });
-      pageSaved = true;
-      setTimeout(() => (pageSaved = false), 2000);
+      const outcome = await publishEventPage(ctx, { menu: pageMenu, sections: pageSections });
+      // R9: only claim "saved ✓" / published on a real relay publish; a queued
+      // save is honest about attendees still seeing the old page.
+      if (outcome === "queued") {
+        opStatus.queued(t("op.pageQueued"));
+      } else {
+        opStatus.published(t("op.pagePublished"));
+        pageSaved = true;
+        setTimeout(() => (pageSaved = false), 2000);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -678,15 +695,23 @@
     themeBusy = true;
     error = null;
     try {
-      await publishEventTheme(ctx, themeCss);
-      previewEventTheme(naddr, themeCss); // published = what you see
+      const outcome = await publishEventTheme(ctx, themeCss);
+      previewEventTheme(naddr, themeCss); // published = what you see (locally)
       themePreviewing = false;
-      themePublished = true;
-      // U9: published — retire the unsent draft.
-      publishedTheme = themeCss;
-      if (themeDraftId) clearDraft(themeDraftId);
-      themeDraftRestored = false;
-      setTimeout(() => (themePublished = false), 2000);
+      if (outcome === "queued") {
+        // R9 + U9: a WSS-blocked save only queued the theme — it is NOT live for
+        // attendees, so KEEP the durable draft (clearing it here would lose the
+        // unsent CSS if the queued publish never lands) and say so honestly.
+        opStatus.queued(t("op.themeQueued"));
+      } else {
+        themePublished = true;
+        // U9: really published — retire the unsent draft.
+        publishedTheme = themeCss;
+        if (themeDraftId) clearDraft(themeDraftId);
+        themeDraftRestored = false;
+        opStatus.published(t("op.themePublished"));
+        setTimeout(() => (themePublished = false), 2000);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

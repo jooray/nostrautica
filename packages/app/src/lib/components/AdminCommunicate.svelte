@@ -19,6 +19,7 @@
   import { publishEventUpdate } from "$lib/events/updates.js";
   import PostEditor from "./PostEditor.svelte";
   import { saveFormDraft, loadFormDraft, clearDraft } from "$lib/stores/drafts.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -114,19 +115,28 @@
         image: postImage.trim() || undefined,
         content: postContent,
       };
-      if (postVisibility === "members") {
-        await publishMembersPost(ctx, {
-          ...base,
-          // Optional attribution: which organizer wrote it (inside the ciphertext).
-          author: postEditing ? postEditing.author : (session.pubkey ?? undefined),
-        });
+      const outcome =
+        postVisibility === "members"
+          ? (
+              await publishMembersPost(ctx, {
+                ...base,
+                // Optional attribution: which organizer wrote it (inside the ciphertext).
+                author: postEditing ? postEditing.author : (session.pubkey ?? undefined),
+              })
+            ).outcome
+          : (await publishEventUpdate(ctx, base)).outcome;
+      // R9: on a WSS-blocked queue the post is NOT visible to attendees yet, so
+      // KEEP the durable draft (only editing a brand-new post has one) and report
+      // honestly. Only a real relay publish retires the draft + resets the editor.
+      if (outcome === "queued") {
+        opStatus.queued(t("op.postQueued"));
       } else {
-        await publishEventUpdate(ctx, base);
+        resetEditor();
+        // Published for real — the durable draft is no longer needed (U9).
+        clearDraft(draftId);
+        restoredDraft = false;
+        opStatus.published(t("op.postPublished"));
       }
-      resetEditor();
-      // Published — the durable draft is no longer needed (U9).
-      clearDraft(draftId);
-      restoredDraft = false;
       await loadUpdates();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
