@@ -70,9 +70,9 @@ import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
-import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -446,12 +446,19 @@ export async function sendAdminCommand(
  * ECK) to the co-organizer's pubkey so they get full organizer custody — they can
  * edit the event, approve attendees, and manage the coordinator. Their client
  * picks it up via the normal grant-receiving path.
+ *
+ * Returns the publication outcome. The caller MUST NOT report this as done on a
+ * bare resolve: `publishOrQueue` persists to the durable outbox when WSS is
+ * blocked or every retry fails, and the settings page used to paint a flat
+ * "Sent ✓" either way — telling one organizer the hand-off had happened while
+ * the wrap was still sitting in this device's IndexedDB and the other device
+ * waited forever.
  */
 export async function addCoOrganizer(
   organizer: AppSigner,
   ctx: EventContext,
   coOrganizerPubkey: string,
-): Promise<void> {
+): Promise<PublishOutcome> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
     throw new Error("organizer keys not available on this device");
@@ -471,7 +478,109 @@ export async function addCoOrganizer(
       granted_by: getPublicKey(eidSk),
     },
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  // Publish to the event's own relays UNIONED with the app defaults, because the
+  // two halves of this hand-off disagreed about where to look: this wrap went to
+  // `ctx.config.relays`, while the receiving side (attendee.receiveGrants) scans
+  // DEFAULT_RELAYS only. For an event created with a custom relay set the grant
+  // therefore landed exactly where the co-organizer's client never reads, and
+  // their Admin page waited on a grant that was published and unreachable. The
+  // union keeps the event's relays authoritative and guarantees the overlap the
+  // reader needs.
+  return toOutcome(
+    await publishOrQueue(wrap as any, unionRelays(ctx.config.relays, DEFAULT_RELAYS)),
+  );
+}
+
+/** How often the organizer-grant wait re-checks while the page stays open. */
+export const ORGANIZER_GRANT_POLL_MS = 4000;
+
+/**
+ * One pass of the "do I hold the organizer keys yet?" check behind the Admin /
+ * Event-settings grant-wait card: pull any newly-arrived gift wraps into local
+ * custody, then re-read this device's keys for the coordinate. Resolves to the
+ * organizer keys once this device holds them, undefined while it doesn't.
+ *
+ * `signer` is nullable ON PURPOSE, and a null one skips ONLY the grant scan. Two
+ * different things are missing during a session restore and both used to read as
+ * "you are not the organizer": there is no signer to unwrap inbound 21605 grants
+ * with, AND there is no active keystore owner yet (the session sets it in
+ * `adopt()`), so `loadEventKeys` returns undefined even on a device that already
+ * holds the keys. With a NIP-46 signer the layout deliberately does not await the
+ * restore — it is a bunker connect plus a getPublicKey round-trip — so a page can
+ * mount squarely inside that window. Re-reading the keystore on every pass, with
+ * or without a signer, is what lets both resolve on a later pass instead of
+ * needing a navigation away and back.
+ *
+ * `receiveGrants` is injected rather than imported: it lives in attendee.ts,
+ * which already imports this module, and an import cycle is not worth saving the
+ * caller one argument.
+ */
+export async function checkForOrganizerGrant(
+  coordinate: string,
+  signer: AppSigner | null,
+  receiveGrants: (signer: AppSigner) => Promise<unknown>,
+): Promise<EventKeys | undefined> {
+  if (signer) await receiveGrants(signer);
+  const keys = await loadEventKeys(coordinate);
+  return keys?.role === "organizer" ? keys : undefined;
+}
+
+export interface OrganizerGrantPollOptions {
+  coordinate: string;
+  /** Read FRESH on every tick — never captured once (see below). */
+  signer: () => AppSigner | null;
+  receiveGrants: (signer: AppSigner) => Promise<unknown>;
+  /** Stop the wait: the page was destroyed, or the keys arrived another way. */
+  stopped: () => boolean;
+  /** Called once, with the keys, as soon as this device holds organizer custody. */
+  onGranted: (keys: EventKeys) => void | Promise<void>;
+  /** After every completed pass, with whether a signer was available for it. */
+  onChecked?: (signerReady: boolean) => void;
+  intervalMs?: number;
+}
+
+/**
+ * Poll {@link checkForOrganizerGrant} until this device is granted organizer
+ * custody — the receiving half of {@link addCoOrganizer} (spec §6.1 co-organizer
+ * hand-off, and the same path a second device of the same organizer takes).
+ *
+ * The loop starts UNCONDITIONALLY, before any signer exists, and re-reads
+ * `signer()` every pass. Its predecessor opened with an `if (!session.signer)
+ * return` and was started exactly once from `onMount`: on a NIP-46 device whose
+ * session restore hadn't finished yet, the wait ended before it ever ran a single
+ * check. `session.npub` painted a second later, so the card looked perfectly
+ * healthy while nothing at all was polling — the grant sat on the relay, a reload
+ * replayed the same race, and only navigating away and back (a remount with the
+ * signer already present) unstuck it (device-B report 2026-07-24).
+ *
+ * Every pass is fully guarded, too. `receiveGrants` was `.catch()`-ed but
+ * `loadEventKeys` was not, so a single rejected keystore read rejected the loop's
+ * promise — which both callers `void` — and the wait died silently for the rest
+ * of the page's life.
+ */
+export async function pollForOrganizerGrant(opts: OrganizerGrantPollOptions): Promise<void> {
+  const intervalMs = opts.intervalMs ?? ORGANIZER_GRANT_POLL_MS;
+  while (!opts.stopped()) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    if (opts.stopped()) return;
+    const signer = opts.signer();
+    let granted: EventKeys | undefined;
+    try {
+      granted = await checkForOrganizerGrant(opts.coordinate, signer, opts.receiveGrants);
+    } catch {
+      /* an unreachable relay, a declined signer prompt, a storage hiccup — one
+         bad pass must never end the wait; the next tick retries it */
+    }
+    opts.onChecked?.(signer !== null);
+    if (opts.stopped()) return;
+    if (!granted) continue;
+    try {
+      await opts.onGranted(granted);
+    } catch {
+      /* the caller surfaces its own load failure; custody is already ours */
+    }
+    return;
+  }
 }
 
 /**

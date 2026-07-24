@@ -129,6 +129,19 @@ function openDb(): Promise<IDBDatabase> {
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+    // A version upgrade blocked by another tab still holding an older-version
+    // connection open fires `blocked` and then NOTHING: without this handler the
+    // promise never settles, so every caller awaiting it — loadEventKeys on the
+    // Admin/Settings mount path included — hangs forever with no error and no
+    // timeout, which reads as "this device holds no keys" that never resolves.
+    // Rejecting turns an unrecoverable hang into a surfaced failure the caller
+    // can report and retry (the grant poll re-checks on its next pass).
+    req.onblocked = () =>
+      reject(
+        new Error(
+          "event key store upgrade is blocked by another open tab — close the app's other tabs and retry",
+        ),
+      );
   });
 }
 

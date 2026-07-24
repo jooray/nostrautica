@@ -37,6 +37,8 @@
     generateInvites,
     revokeAttendeeClient,
     sendAdminCommand,
+    checkForOrganizerGrant,
+    pollForOrganizerGrant,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -275,7 +277,11 @@
         // The organizer keys may arrive as a 21605 grant (co-organizer / hand-off
         // to another device) — poll while the page is open so it unlocks without a
         // manual reload (P2 recovery path). Same receiveGrants channel the app uses.
-        void pollForOrganizerGrant();
+        // Note this can also fire on a device that DOES hold the keys: with a
+        // NIP-46 session still restoring there is no active keystore owner yet, so
+        // the loadEventKeys above returns undefined regardless of what is stored.
+        // The poll re-reads the keystore every pass, which repairs that too.
+        void startGrantWait();
         return;
       }
       // Organizer role but still no E_id after recovery: writes will fail, so
@@ -326,27 +332,85 @@
     coordLastSeen = cachedCoordinatorLastSeen(coord) ?? coordLastSeen;
   }
 
-  async function pollForOrganizerGrant() {
-    if (!ctx || !session.signer) return;
-    while (notOrganizer && !destroyed) {
-      await new Promise((r) => setTimeout(r, 4000));
-      if (destroyed) return;
-      await receiveGrants(session.signer).catch(() => {});
-      const k = await loadEventKeys(ctx.coordinate);
-      if (k && k.role === "organizer") {
-        keys = k;
-        notOrganizer = false;
-        loading = true;
-        try {
-          await refresh();
-          void refreshLiveness();
-        } finally {
-          loading = false;
-        }
-        return;
-      }
+  // ── Waiting for organizer custody (P2 recovery path) ───────────────────────
+  // The card below used to print a static "Waiting for the grant…" with nothing
+  // behind it. These make the wait's real state renderable — and give the
+  // organizer a manual check, which is what would have let the device-B report
+  // (2026-07-24) self-recover instead of looking permanently locked out.
+  let grantWaiting = $state(false); // a poll loop is actually running
+  let grantChecking = $state(false); // a manual "Check now" is in flight
+  let grantCheckedAt = $state<number | undefined>(undefined); // ms, last completed pass
+  let grantCheckError = $state<string | null>(null);
+
+  async function startGrantWait() {
+    if (!ctx || grantWaiting) return; // never two loops for one page
+    const coordinate = ctx.coordinate;
+    grantWaiting = true;
+    try {
+      await pollForOrganizerGrant({
+        coordinate,
+        // Read per pass, not captured: with NIP-46 the signer lands seconds after
+        // mount (routes/+layout.svelte doesn't await the restore), and the old
+        // poll's up-front `if (!session.signer) return` meant it never ran at all.
+        signer: () => session.signer,
+        receiveGrants,
+        stopped: () => destroyed || !notOrganizer,
+        onChecked: () => (grantCheckedAt = Date.now()),
+        onGranted: adoptOrganizerKeys,
+      });
+    } finally {
+      grantWaiting = false;
     }
   }
+
+  /** Manual "Check now": the same pass the poll runs, on demand. */
+  async function checkGrantNow() {
+    if (!ctx || grantChecking) return;
+    grantChecking = true;
+    grantCheckError = null;
+    try {
+      const k = await checkForOrganizerGrant(ctx.coordinate, session.signer, receiveGrants);
+      grantCheckedAt = Date.now();
+      if (k) await adoptOrganizerKeys(k);
+    } catch (e) {
+      // Unlike the poll, a manual check reports its failure — the user asked.
+      grantCheckError = e instanceof Error ? e.message : String(e);
+    } finally {
+      grantChecking = false;
+    }
+  }
+
+  /** Unlock the page with organizer keys that arrived after mount. */
+  async function adoptOrganizerKeys(k: EventKeys) {
+    keys = k;
+    missingEidKey = !k.eidNsecHex;
+    notOrganizer = false;
+    loading = true;
+    try {
+      await refresh();
+      void refreshLiveness();
+    } finally {
+      loading = false;
+    }
+  }
+
+  // The keystore is owner-scoped and resolves against the ACTIVE owner, which the
+  // session only sets once its restore completes. A page that mounted before that
+  // (the NIP-46 window above) read an empty keystore, so a device that DOES hold
+  // the organizer keys shows the "not the organizer" card. Re-read the moment the
+  // signer lands rather than making the user wait for the next poll pass — it's a
+  // local IndexedDB read, and receiveGrants is deliberately left to the poll so
+  // the two paths can't both scan relays at once.
+  $effect(() => {
+    const signer = session.signer;
+    if (!signer || !notOrganizer || !ctx) return;
+    const coordinate = ctx.coordinate;
+    void loadEventKeys(coordinate)
+      .then((k) => {
+        if (k?.role === "organizer" && !destroyed && notOrganizer) void adoptOrganizerKeys(k);
+      })
+      .catch(() => {});
+  });
 
   async function refreshLiveness() {
     if (!ctx?.config.coordinator) return;
@@ -759,7 +823,30 @@
       <li>{t("admin.grant.step2")}</li>
       <li>{t("admin.grant.step3")}</li>
     </ol>
-    <p class="muted" style="margin-top:0.5rem">{t("admin.grant.waiting")}</p>
+    <!-- Truthful wait state: this line used to read "Waiting for the grant…"
+         unconditionally, with nothing behind it once the poll had bailed out. It
+         now says which of the three real states the page is in, and the button
+         gives a way out that doesn't require knowing to navigate away and back. -->
+    <p class="muted" role="status" aria-live="polite" style="margin-top:0.5rem">
+      {#if !session.signer}
+        {t("admin.grant.waitingSigner")}
+      {:else if grantWaiting}
+        {t("admin.grant.waiting")}
+      {:else}
+        {t("admin.grant.notChecking")}
+      {/if}
+      {#if grantCheckedAt !== undefined}
+        {t("admin.grant.lastChecked", {
+          time: new Date(grantCheckedAt).toLocaleTimeString(),
+        })}
+      {/if}
+    </p>
+    <button class="btn inline" onclick={() => void checkGrantNow()} disabled={grantChecking}>
+      {grantChecking ? t("admin.grant.checkingNow") : t("admin.grant.checkNow")}
+    </button>
+    {#if grantCheckError}
+      <p class="muted" style="color:var(--danger);margin:0.5rem 0 0">{grantCheckError}</p>
+    {/if}
   </div>
 {:else if loading}
   <p class="muted">{t("admin.loading")}</p>
