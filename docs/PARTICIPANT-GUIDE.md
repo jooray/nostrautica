@@ -228,12 +228,18 @@ then choose how to provide the video:
   is the way to go for a talk too large to upload; the video stays wherever you
   host it and only the *link* is encrypted to the event.
 
+![Submitting a talk — pick a video source and, optionally, opt in to matching](images/participant/27-talks-submit-light.png)
+
 There's also a **"Process this talk for matching?"** checkbox, off by default:
 leave it off and your talk is simply published for people to watch; tick it and
 the coordinator will also transcribe it and use it to sharpen your matches.
 (Pasted-URL talks are never processed — they're watch-only.) Either way the talk
 goes to the organizer to publish before it's visible to anyone, so don't expect
 it to show up instantly.
+
+Pasting a link shows a quick confirmation once the app recognizes it:
+
+![The video-URL field, with "Detected: YouTube video"](images/participant/27b-talks-url-light.png)
 
 ![The Talks list](images/participant/26-talks-empty-light.png)
 

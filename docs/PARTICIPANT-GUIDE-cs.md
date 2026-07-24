@@ -151,7 +151,13 @@ Některé akce umožňují účastníkům přidávat krátké přednatočené p�
 - **Nahrát soubor**, který už máte, nebo
 - **Vložit URL** — neveřejný **YouTube** odkaz nebo přímý **.mp4** odkaz. To je nejlepší volba pro přednášku, která je příliš velká na nahrání; video zůstává tam, kde ho hostujete, a šifrovaný je pro akci jen *odkaz*.
 
+![Odesílání přednášky — výběr zdroje videa a volitelné zapnutí párování](images/participant-cs/27-talks-submit-light.png)
+
 Je tu také políčko **„Zpracovat tuto přednášku pro párování?"**, ve výchozím stavu vypnuté: nechte ho vypnuté a přednáška se jednoduše zveřejní ke sledování; zapněte ho a koordinátor ji také přepíše a použije ke zlepšení vašich spojení. (Přednášky s vloženou URL se nikdy nezpracovávají — jsou jen ke sledování.) Tak či onak jde přednáška k organizátorovi ke zveřejnění, než je vidět pro kohokoli, takže nečekejte, že se to objeví hned.
+
+Po vložení odkazu appka hned potvrdí, že ho rozpoznala:
+
+![Pole s URL videa a rozpoznaným YouTube odkazem](images/participant-cs/27b-talks-url-light.png)
 
 ![Seznam přednášek](images/participant-cs/26-talks-empty-light.png)
 

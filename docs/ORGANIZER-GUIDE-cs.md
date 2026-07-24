@@ -265,7 +265,11 @@ pro návštěvníka.
 
 **Přednatočené přednášky.** V **Administrace → Nastavení → Přednatočené přednášky** to přepněte na *Zapnuto* (nebo *Nejprve nahrávka*, což v navigaci účastníků posune Přednášky před Lidi — vhodné pro formát „podívejte se předem, setkejte se na místě") a **Uložte**. Schválení účastníci pak mohou přidávat krátké přednášky — nahrané v prohlížeči, nahrané jako soubor, nebo zadané jako neveřejná **YouTube / .mp4 URL** (vhodné pro přednášky příliš velké na nahrání; koordinátor tyto nikdy nestahuje, takže URL přednášky jsou jen ke sledování).
 
+![Odesílání přednášky — výběr zdroje videa a volitelné zapnutí párování](images/participant/27-talks-submit-light.png)
+
 Všimněte si, že **přednášky už ve výchozím stavu nevstupují do párování**: řečník u každé přednášky zvolí, zda zaškrtne *„Zpracovat tuto přednášku pro párování?"*. Mějte to na paměti, pokud se odeslaná přednáška neobjeví ve zdůvodnění něčích spojení — to je očekávané, pokud se řečník nepřihlásil (a u URL přednášek se to nestane nikdy). Šetří to náklady na přepis přednášek, které nikdo nechtěl párovat.
+
+![Pole s URL videa a rozpoznaným YouTube odkazem](images/participant/27b-talks-url-light.png)
 
 Odeslané přednášky se samy nezveřejní. Karta **Moderování přednášek** níž v **Administraci** zobrazuje všechno, co čeká na kontrolu — u každé klepněte na **Ukázka**, pak ji buď **Zveřejněte**, aby si ji účastníci mohli pustit, nebo **Zamítněte**. Dokud to tady neuděláte, nikdo kromě vás nic, co účastník pošle, neuvidí (zveřejnění navíc potřebuje připojeného koordinátora, stejně jako zbytek administrace). Vyhledávání/filtr v Lidech (§3) má filtr **Poslaná přednáška**, takže se na rušné akci můžete přesunout rovnou k těm, co na vás čekají, bez rolování celým seznamem.
 

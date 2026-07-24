@@ -394,11 +394,15 @@ attendees can then submit short talks — recorded in the browser, uploaded as a
 file, or given as an unlisted **YouTube / .mp4 URL** (useful for talks too large
 to upload; the coordinator never fetches these, so URL talks are watch-only).
 
+![Submitting a talk — pick a video source and, optionally, opt in to matching](images/participant/27-talks-submit-light.png)
+
 Note that **talks no longer feed matching by default**: a speaker chooses, per
 talk, whether to tick *"Process this talk for matching?"*. Leave that in mind if
 a submitted talk doesn't appear in anyone's match reasoning — that's expected
 unless the speaker opted in (and it never happens for URL talks). This keeps
 transcription costs off talks nobody asked to match.
+
+![The video-URL field, with "Detected: YouTube video"](images/participant/27b-talks-url-light.png)
 
 Submitted talks don't go live by themselves. A **Talks moderation** card
 further down **Administration** lists everything waiting for review — **Preview**

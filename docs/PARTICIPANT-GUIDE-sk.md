@@ -152,7 +152,13 @@ Niektoré podujatia umožňujú účastníkom posielať krátke prednahraté pre
 - **Nahrať súbor**, ktorý už máte, alebo
 - **Vložiť URL** — neverejný **YouTube** odkaz alebo priamy **.mp4** odkaz. Toto je najlepšia voľba pre prednášku, ktorá je príliš veľká na nahranie; video zostáva tam, kde ho hostujete, a šifrovaný je pre podujatie len *odkaz*.
 
+![Odosielanie prednášky — výber zdroja videa a voliteľné zapnutie spájania](images/participant-sk/27-talks-submit-light.png)
+
 Je tu aj políčko **„Spracovať túto prednášku pre spájanie?"**, štandardne vypnuté: nechajte ho vypnuté a prednáška sa jednoducho zverejní na sledovanie; zapnite ho a koordinátor ju aj prepíše a použije na zlepšenie vašich spojení. (Prednášky s vloženou URL sa nikdy nespracúvajú — sú len na sledovanie.) Tak či onak ide prednáška k organizátorovi na zverejnenie, kým to nie je vidieť pre nikoho, takže nečakajte, že sa to objaví okamžite.
+
+Po vložení odkazu appka hneď potvrdí, že ho rozpoznala:
+
+![Pole s URL videa a rozpoznaným YouTube odkazom](images/participant-sk/27b-talks-url-light.png)
 
 ![Zoznam prednášok](images/participant-sk/26-talks-empty-light.png)
 
