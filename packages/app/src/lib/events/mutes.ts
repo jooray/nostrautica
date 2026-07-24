@@ -14,8 +14,9 @@
  */
 import { KIND_MUTE_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
+import type { VerifiedEvent } from "nostr-tools/pure";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 
 export type Tag = string[];
 
@@ -84,13 +85,20 @@ export async function saveMuteList(signer: AppSigner, state: MuteListState): Pro
   const content = state.privateTags.length
     ? await signer.nip44Encrypt(pubkey, JSON.stringify(state.privateTags))
     : "";
-  const event = await signer.signEvent({
+  // Monotonic (R6): kind-10000 is replaceable; a rapid mute-then-unmute must win
+  // the §3.1 tie-break rather than tie on created_at and lose the id comparison.
+  await publishMonotonic({
     kind: KIND_MUTE_LIST,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: state.publicTags,
-    content,
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_MUTE_LIST,
+        created_at,
+        tags: state.publicTags,
+        content,
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
 }
 
 /**

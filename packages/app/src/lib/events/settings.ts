@@ -11,9 +11,10 @@ import {
   type PerEventSettings,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
+import type { VerifiedEvent } from "nostr-tools/pure";
 import type { EventContext } from "./event-context.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // User-private per-event settings are decrypted with the user's self-key, so
@@ -70,13 +71,16 @@ async function saveSettings(
   const pubkey = await signer.getPublicKey();
   const d = await settingsD(signer, ctx, blindingKey);
   const content = await signer.nip44Encrypt(pubkey, JSON.stringify(settings));
-  const event = await signer.signEvent({
+  // Monotonic (R6): kind-30078 is addressable by `d`; a same-second re-save
+  // (toggle then note) must win the §3.1 tie-break rather than tie-and-lose.
+  await publishMonotonic({
     kind: KIND_APP_DATA,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["d", d]],
-    content,
+    author: pubkey,
+    identifier: d,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({ kind: KIND_APP_DATA, created_at, tags: [["d", d]], content }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
 }
 
 function toggle(list: string[], pubkey: string): string[] {

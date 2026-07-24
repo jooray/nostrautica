@@ -8,12 +8,14 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { KIND_MUTE_LIST } from "@nostrautica/protocol";
 import type { VerifiedEvent } from "nostr-tools/pure";
 
-const { fetchEvents, publishOrQueue } = vi.hoisted(() => ({
+// saveMuteList now publishes through publishMonotonic (R6). The mock invokes the
+// caller's `sign` so the round-trip still exercises the real signEvent path.
+const { fetchEvents, publishMonotonic } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
-  publishOrQueue: vi.fn(),
+  publishMonotonic: vi.fn(),
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents }));
-vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue }));
+vi.mock("$lib/nostr/monotonic.js", () => ({ publishMonotonic }));
 
 import {
   addPrivateMute,
@@ -83,7 +85,12 @@ describe("fetch/merge/write round-trip", () => {
 
   beforeEach(() => {
     fetchEvents.mockReset();
-    publishOrQueue.mockReset();
+    publishMonotonic.mockReset().mockImplementation(
+      async (input: { sign: (t: number) => unknown | Promise<unknown> }) => {
+        await input.sign(1_000); // drives signer.signEvent → store.content
+        return { published: true, createdAt: 1_000 };
+      },
+    );
   });
 
   it("decrypts existing private items and preserves unknown public tags on write", async () => {
@@ -105,7 +112,7 @@ describe("fetch/merge/write round-trip", () => {
     const muted = await setMuted(s, PK, true);
     expect(muted.has(PK)).toBe(true);
     expect(muted.has(OTHER)).toBe(true); // pre-existing private mute survived
-    expect(publishOrQueue).toHaveBeenCalledTimes(1);
+    expect(publishMonotonic).toHaveBeenCalledTimes(1);
     // The new pubkey went into the encrypted content, not a public tag.
     const written = JSON.parse(store.content.replace(/^enc:/, ""));
     expect(written).toContainEqual(["p", PK]);

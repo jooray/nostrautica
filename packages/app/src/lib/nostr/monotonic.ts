@@ -29,12 +29,71 @@
  * newer event, this read sees it and the next publish steps above it rather than
  * fighting it with a stale timestamp. `publishSigned` surfaces no structured
  * per-relay "replaced by newer" response, so read-before-write is the mechanism.
+ *
+ * ATOMICITY (audit R6): the read-floor → sign → bump sequence MUST be atomic per
+ * owner+address, or two concurrent calls for the same address both read the same
+ * floor, sign the same created_at, and the lower random id wins the §3.1 tie —
+ * silently keeping whichever operation happened to sign a smaller id, not the
+ * one the user did last. We serialize the critical section with a Web Lock
+ * (`navigator.locks`, cross-tab), falling back to an in-process async mutex for
+ * engines/tests without Web Locks. The lock is held only through the watermark
+ * bump; the network publish runs outside it. Cross-tab correctness rides on the
+ * persisted, latest-wins watermark (a second tab's critical section runs after
+ * the first releases the lock, and reads the bumped watermark).
  */
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { pickLatest } from "@nostrautica/protocol";
 import { fetchEventsRelayOnly } from "./ndk.js";
 import { publishOrQueue } from "./publish-queue.js";
 import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
+
+// ── Per-address serialization (R6) ───────────────────────────────────────────
+
+/** The subset of `navigator.locks` used here (also the injectable test seam). */
+export interface MonotonicLockManager {
+  request(name: string, callback: () => Promise<unknown>): Promise<unknown>;
+}
+
+let lockMgr: MonotonicLockManager | null | undefined; // undefined = use default
+
+function defaultLocks(): MonotonicLockManager | null {
+  if (typeof navigator !== "undefined" && "locks" in navigator) {
+    return (navigator as unknown as { locks: MonotonicLockManager }).locks;
+  }
+  return null;
+}
+
+/** Inject (or, with null, force the in-process fallback for) the lock manager. */
+export function __setMonotonicLocks(l: MonotonicLockManager | null | undefined): void {
+  lockMgr = l;
+}
+
+// In-process async mutex: a per-name tail promise chain. Used when no Web Locks
+// manager exists (Node/test) so concurrent same-address calls in one realm still
+// serialize deterministically — this is what the R6 two-context test exercises.
+const tails = new Map<string, Promise<void>>();
+
+async function withInProcessLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const prev = tails.get(name) ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  const mine = prev.then(() => gate);
+  tails.set(name, mine);
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+    if (tails.get(name) === mine) tails.delete(name); // no waiter queued behind us
+  }
+}
+
+/** Run `fn` holding the exclusive lock for `name` (Web Lock or in-process). */
+async function withAddressLock<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const mgr = lockMgr === undefined ? defaultLocks() : lockMgr;
+  if (mgr) return (await mgr.request(name, fn)) as T;
+  return withInProcessLock(name, fn);
+}
 
 /** The address a replaceable/addressable event occupies: `kind:pubkey[:d]`. */
 export function eventAddress(kind: number, author: string, identifier?: string): string {
@@ -93,30 +152,41 @@ export async function publishMonotonic(input: MonotonicInput): Promise<Monotonic
   const address = eventAddress(input.kind, input.author, input.identifier);
   const owner = input.owner ?? activeCacheOwner() ?? ANON;
 
-  let relayAt = 0;
-  try {
-    const filter =
-      input.identifier !== undefined
-        ? { kinds: [input.kind], authors: [input.author], "#d": [input.identifier] }
-        : { kinds: [input.kind], authors: [input.author] };
-    const winner = pickLatest(
-      (await fetchEventsRelayOnly(filter, input.relays)) as unknown as {
-        id: string;
-        created_at?: number;
-      }[],
-    );
-    relayAt = winner?.created_at ?? 0;
-  } catch {
-    /* offline / no relays — the local watermark alone still bounds us */
-  }
+  // Reserve the timestamp under a per-owner+address lock (R6): read-floor → sign
+  // → bump must be atomic, or two concurrent callers reserve the same created_at.
+  const { event, createdAt } = await withAddressLock(`mono:${owner}:${address}`, async () => {
+    let relayAt = 0;
+    try {
+      const filter =
+        input.identifier !== undefined
+          ? { kinds: [input.kind], authors: [input.author], "#d": [input.identifier] }
+          : { kinds: [input.kind], authors: [input.author] };
+      const winner = pickLatest(
+        (await fetchEventsRelayOnly(filter, input.relays)) as unknown as {
+          id: string;
+          created_at?: number;
+        }[],
+      );
+      relayAt = winner?.created_at ?? 0;
+    } catch {
+      /* offline / no relays — the local watermark alone still bounds us */
+    }
 
-  const floor = Math.max(publishWatermark(address, owner), relayAt);
-  const createdAt = Math.max(Math.floor(Date.now() / 1000), floor + 1);
+    const floor = Math.max(publishWatermark(address, owner), relayAt);
+    const createdAt = Math.max(Math.floor(Date.now() / 1000), floor + 1);
 
-  const event = await input.sign(createdAt);
-  // Advance the watermark BEFORE awaiting the publish: a queued (offline) publish
-  // must still raise the floor so the next call for this address is above it.
-  bumpWatermark(address, createdAt, owner);
+    const event = await input.sign(createdAt);
+    // Advance the watermark BEFORE releasing the lock (and before the publish): a
+    // queued (offline) publish must still raise the floor, and the next caller —
+    // this tab or, via the persisted latest-wins watermark, another tab — must
+    // see this reservation before it computes its own.
+    bumpWatermark(address, createdAt, owner);
+    return { event, createdAt };
+  });
+
+  // The network publish runs OUTSIDE the lock — serializing timestamp reservation
+  // is enough; holding the lock across a slow WSS publish would needlessly stall
+  // the next same-address reservation.
   const published = await publishOrQueue(event, input.relays);
   return { published, createdAt };
 }

@@ -11,8 +11,9 @@
  */
 import { KIND_APP_DATA } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
+import type { VerifiedEvent } from "nostr-tools/pure";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 const KEY_BACKUP_D = "nostrautica:keybackup";
@@ -31,13 +32,21 @@ export async function markKeyBackedUp(signer: AppSigner): Promise<void> {
     pubkey,
     JSON.stringify({ v: 1, at: Math.floor(Date.now() / 1000) }),
   );
-  const event = await signer.signEvent({
+  // Monotonic (R6): the replaceable 30078 marker must win the §3.1 tie-break so a
+  // re-confirmation never ties-and-loses against the previous marker.
+  await publishMonotonic({
     kind: KIND_APP_DATA,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["d", KEY_BACKUP_D]],
-    content,
+    author: pubkey,
+    identifier: KEY_BACKUP_D,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_APP_DATA,
+        created_at,
+        tags: [["d", KEY_BACKUP_D]],
+        content,
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
   confirmed.add(pubkey);
   cacheSet(KEY_BACKUP_CACHE_KEY, true, Math.floor(Date.now() / 1000), pubkey);
 }

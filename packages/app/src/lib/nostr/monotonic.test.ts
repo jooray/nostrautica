@@ -157,4 +157,43 @@ describe("publishMonotonic", () => {
     expect(eventAddress(10050, AUTHOR)).toBe(`10050:${AUTHOR}`);
     expect(eventAddress(31600, AUTHOR, "d1")).toBe(`31600:${AUTHOR}:d1`);
   });
+
+  it("reserves DISTINCT timestamps for two concurrent same-address publishes (R6)", async () => {
+    // Both start in the same wall-clock second with an empty relay + no watermark.
+    // Without the per-address lock both would read floor 0 and sign `NOW`; the
+    // random lower id would then win the §3.1 tie instead of the later operation.
+    // The lock must serialize them onto NOW and NOW+1.
+    let inSign = 0;
+    let maxConcurrentSigns = 0;
+    const signAt: number[] = [];
+    const sign = async (t: number) => {
+      // Prove the critical sections don't overlap: only one sign runs at a time.
+      inSign++;
+      maxConcurrentSigns = Math.max(maxConcurrentSigns, inSign);
+      await Promise.resolve();
+      signAt.push(t);
+      inSign--;
+      return signed(t);
+    };
+    const call = () =>
+      publishMonotonic({ kind: 31600, author: AUTHOR, identifier: "d1", sign });
+
+    const [a, b] = await Promise.all([call(), call()]);
+    expect(maxConcurrentSigns).toBe(1); // never two critical sections at once
+    expect(new Set([a.createdAt, b.createdAt]).size).toBe(2); // distinct reservations
+    expect([a.createdAt, b.createdAt].sort()).toEqual([NOW, NOW + 1]);
+    expect(signAt.sort()).toEqual([NOW, NOW + 1]);
+  });
+
+  it("serializes two independent contexts on the shared persisted watermark (R6)", async () => {
+    // Simulate two tabs: each does its own read/sign/bump. Interleaved by the
+    // in-process lock (no navigator.locks in the test env), they must not collide.
+    const outcomes = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        publishMonotonic({ kind: 10002, author: AUTHOR, sign: (t) => signed(t) }),
+      ),
+    );
+    const stamps = outcomes.map((o) => o.createdAt).sort((x, y) => x - y);
+    expect(stamps).toEqual([NOW, NOW + 1, NOW + 2, NOW + 3]); // strictly monotonic
+  });
 });
