@@ -1,5 +1,24 @@
 import { describe, it, expect } from "vitest";
-import { isYouTubeUrl, youTubeId, youTubeEmbedUrl, classifyTalkUrl, talkUrlHost } from "./external.js";
+import {
+  isYouTubeUrl,
+  youTubeId,
+  youTubeEmbedUrl,
+  classifyTalkUrl,
+  talkUrlHost,
+  externalReferrerPolicy,
+} from "./external.js";
+
+describe("externalReferrerPolicy (Bug 4: YouTube Error 153)", () => {
+  it("the YouTube iframe sends its origin (a stripped referrer → Error 153)", () => {
+    // Regression guard: this MUST NOT be "no-referrer" — YouTube's embedded
+    // player refuses to start without a referrer.
+    expect(externalReferrerPolicy("youtube")).toBe("origin");
+  });
+
+  it("a direct <video> keeps the most private choice: no referrer", () => {
+    expect(externalReferrerPolicy("video")).toBe("no-referrer");
+  });
+});
 
 describe("external talk URL helpers", () => {
   it("recognizes YouTube URLs across shapes", () => {

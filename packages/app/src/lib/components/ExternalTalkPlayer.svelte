@@ -5,7 +5,12 @@
   // as the encrypted player). The URL was decrypted from the ECK-encrypted talk
   // content, so this only renders for members.
   import type { TalkExternalKind } from "@nostrautica/protocol";
-  import { youTubeId, youTubeEmbedUrl, talkUrlHost } from "$lib/media/external.js";
+  import {
+    youTubeId,
+    youTubeEmbedUrl,
+    talkUrlHost,
+    externalReferrerPolicy,
+  } from "$lib/media/external.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { url, kind }: { url: string; kind: TalkExternalKind } = $props();
@@ -21,6 +26,13 @@
   // timing / referrer to a speaker-controlled host (YouTube embed OR a direct
   // <video src>) — which could be a tracking endpoint, not a video. We show the
   // host and a plain-language note that playback contacts it, then load on click.
+  //
+  // Referrer policy is per-source (see below): the direct <video> sends NO
+  // referrer, but the YouTube iframe MUST send its origin — YouTube's embedded
+  // player refuses to play with a stripped referrer and returns Error 153 ("Video
+  // player configuration error"). `referrerpolicy="origin"` sends only the scheme
+  // + host (never the full hash-routed URL), so it stays privacy-preserving while
+  // satisfying the embed's referrer check.
   const host = $derived(talkUrlHost(url));
   let loaded = $state(false);
 
@@ -31,7 +43,7 @@
   function directVideo(node: HTMLVideoElement, u: string) {
     // `referrerPolicy` isn't in the DOM typing for media elements, but the
     // attribute is honored by browsers — set it before src so it applies.
-    node.setAttribute("referrerpolicy", "no-referrer");
+    node.setAttribute("referrerpolicy", externalReferrerPolicy("video"));
     node.src = u;
     return {
       update(next: string) {
@@ -84,7 +96,7 @@
         loading="lazy"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
         allowfullscreen
-        referrerpolicy="no-referrer"
+        referrerpolicy={externalReferrerPolicy("youtube")}
       ></iframe>
     </div>
   {:else}

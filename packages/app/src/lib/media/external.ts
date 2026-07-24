@@ -75,6 +75,21 @@ export function youTubeEmbedUrl(id: string): string {
 }
 
 /**
+ * The referrer policy for an external talk source (audit U10 vs YouTube Error 153).
+ *
+ * A direct `<video>` sends NO referrer — nothing about the video needs it, and a
+ * stripped referrer is the most private choice. A YouTube embed is the exception:
+ * its player refuses to start with a stripped referrer and shows Error 153 ("Video
+ * player configuration error"), so it MUST send `origin` — only the scheme+host,
+ * never the full (hash-routed) URL, so it stays privacy-preserving while passing
+ * the embed's referrer check. Keeping this a pure function makes the invariant
+ * ("YouTube ≠ no-referrer") testable without rendering the player.
+ */
+export function externalReferrerPolicy(kind: TalkExternalKind): "origin" | "no-referrer" {
+  return kind === "youtube" ? "origin" : "no-referrer";
+}
+
+/**
  * The host a talk URL will contact, for the pre-load privacy gate (audit U10) —
  * so the viewer sees WHO playback reaches before any third-party request fires.
  * Returns null for an unusable URL.
