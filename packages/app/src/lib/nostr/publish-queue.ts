@@ -21,6 +21,7 @@
  */
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { publishSigned } from "./ndk.js";
+import { activeCacheOwner } from "$lib/cache/persist.js";
 
 export interface QueuedItem {
   event: VerifiedEvent;
@@ -32,10 +33,35 @@ export interface QueuedItem {
   failed?: boolean;
   /** Message from the most recent failed flush (audit §7.4.7 Sync Status). */
   lastError?: string;
+  /**
+   * Immutable pubkey of the account that queued this item (audit U1). Set once at
+   * enqueue time from the active cache owner and NEVER rewritten. The flusher and
+   * the outbox UI only ever touch items whose `owner` matches the CURRENTLY active
+   * account, so on a shared device account B never sees, flushes, or publishes
+   * account A's already-signed actions. `undefined` marks a legacy pre-U1 item
+   * (no attribution) — those are dropped on the next flush rather than risk
+   * publishing them under the wrong identity.
+   */
+  owner?: string;
 }
 
 /** After this many failed durable flushes an item is parked as `failed`. */
 export const MAX_FLUSH_ATTEMPTS = 5;
+
+/**
+ * Per-event publication outcome (audit U2). `publishOrQueue` returns a bare
+ * boolean; submitters that fan out into several events surface these so the UI
+ * can distinguish "went to a relay" from "only saved locally, will send later"
+ * instead of collapsing everything to a false "done". Venue Wi-Fi routinely
+ * allows HTTPS (Blossom uploads) while blocking WSS (relay publishes), so an
+ * upload succeeding is never evidence the relay event went out.
+ */
+export type PublishOutcome = "published" | "queued";
+
+/** Map `publishOrQueue`'s boolean to the richer outcome (U2). */
+export function toOutcome(published: boolean): PublishOutcome {
+  return published ? "published" : "queued";
+}
 
 const DB_NAME = "nostrautica-outbox";
 const STORE = "queue";
@@ -187,8 +213,20 @@ export async function publishOrQueue(
     relays: relays ? [...relays] : undefined,
     queuedAt: Date.now(),
     attempts: 0,
+    // U1: stamp the queuing account. Falls back to the event author when logged
+    // out (no active cache owner) so an item is never silently ownerless — the
+    // author signed it, so it belongs to that key.
+    owner: activeCacheOwner() ?? event.pubkey,
   });
   return false;
+}
+
+/**
+ * Whether `item` belongs to the account `active` (U1). A legacy item with no
+ * `owner` belongs to no one — never flushed or shown, dropped on next flush.
+ */
+function ownedBy(item: QueuedItem, active: string | null): boolean {
+  return item.owner !== undefined && item.owner === active;
 }
 
 export interface FlushResult {
@@ -211,9 +249,22 @@ export async function flushQueue(): Promise<FlushResult> {
 
 async function flushQueueCore(): Promise<FlushResult> {
   if (!backend) return { sent: 0, remaining: 0, failed: 0 };
+  const active = activeCacheOwner();
   const items = (await backend.getAll()).sort((a, b) => a.queuedAt - b.queuedAt);
   let sent = 0;
   for (const item of items) {
+    // U1 migration: a legacy ownerless item (queued before U1) has no attribution,
+    // so we cannot know which account signed it. Dropping is the safe choice — the
+    // alternative (publishing it under whoever is active now) is exactly the
+    // cross-account leak this finding closes. Rare: only offline items straddling
+    // the upgrade.
+    if (item.owner === undefined) {
+      await backend.delete(item.event.id).catch(() => {});
+      continue;
+    }
+    // Only ever publish the ACTIVE account's items. Another account's queued items
+    // stay untouched and invisible until that identity is active again (U1).
+    if (!ownedBy(item, active)) continue;
     if (item.failed) continue; // terminal — never auto-retried
     try {
       await publishSigned(item.event, item.relays);
@@ -226,7 +277,7 @@ async function flushQueueCore(): Promise<FlushResult> {
       await backend.put({ ...item, attempts, failed, lastError }).catch(() => {});
     }
   }
-  const after = await backend.getAll();
+  const after = (await backend.getAll()).filter((i) => ownedBy(i, active));
   return {
     sent,
     remaining: after.filter((i) => !i.failed).length,
@@ -234,10 +285,37 @@ async function flushQueueCore(): Promise<FlushResult> {
   };
 }
 
-/** Every queued item (for the outbox UI observer). Empty when unavailable. */
+/**
+ * The ACTIVE account's queued items (for the outbox UI observer), newest-queued
+ * last. Another account's items and legacy ownerless items are never returned, so
+ * the Sync Status UI can never display or act on an item that isn't the current
+ * user's (U1). Empty when unavailable.
+ */
 export async function listQueued(): Promise<QueuedItem[]> {
   if (!backend) return [];
-  return (await backend.getAll()).sort((a, b) => a.queuedAt - b.queuedAt);
+  const active = activeCacheOwner();
+  return (await backend.getAll())
+    .filter((i) => ownedBy(i, active))
+    .sort((a, b) => a.queuedAt - b.queuedAt);
+}
+
+/** How many items (pending + failed) the given account has queued (U1). */
+export async function countQueuedForOwner(owner: string): Promise<number> {
+  if (!backend) return 0;
+  return (await backend.getAll()).filter((i) => i.owner === owner).length;
+}
+
+/**
+ * Permanently drop every item queued by `owner` (U1). Called from `logout()`:
+ * per the maintainer decision, a logout DISCARDS that account's still-unsent
+ * actions (the UI warns first when any exist) rather than leaving already-signed
+ * events to publish silently in a later session. Returns how many were removed.
+ */
+export async function discardQueuedForOwner(owner: string): Promise<number> {
+  if (!backend) return 0;
+  const mine = (await backend.getAll()).filter((i) => i.owner === owner);
+  for (const item of mine) await backend.delete(item.event.id).catch(() => {});
+  return mine.length;
 }
 
 /**
@@ -272,10 +350,13 @@ export function installQueueFlusher(): void {
   // A getAll a minute is cheap; only flush when there's something still pending
   // (a terminal-failed item is not retried, so it doesn't keep the sweep busy).
   setInterval(() => {
+    const active = activeCacheOwner();
     void backend
       ?.getAll()
       .then((items) => {
-        if (items.some((i) => !i.failed)) void flushQueue();
+        // Only sweep when the ACTIVE account has something non-terminal pending —
+        // another account's queued items must not keep the flusher busy (U1).
+        if (items.some((i) => !i.failed && ownedBy(i, active))) void flushQueue();
       })
       .catch(() => {});
   }, FLUSH_INTERVAL_MS);

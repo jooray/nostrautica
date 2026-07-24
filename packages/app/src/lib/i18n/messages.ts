@@ -31,6 +31,8 @@ export const messages = {
 
     // Background sync (audit UX-15)
     "sync.queued": "Saved — will send when you're back online.",
+    "draft.restored": "Restored an unsent draft.",
+    "draft.discard": "Discard draft",
     "outbox.pending.one": "{n} change waiting to send",
     "outbox.pending.many": "{n} changes waiting to send",
     "outbox.failed.one": "{n} couldn't be sent",
@@ -239,7 +241,9 @@ export const messages = {
     "form.errorSummary.title": "Please fix the following:",
     "op.queued": "Saved — your {what} will send when you're back online.",
     "op.introPublished": "Your intro was published.",
+    "op.introSubmittedProcessing": "Your intro was sent — the coordinator is processing it.",
     "op.talkSubmitted": "Your talk was submitted to the coordinator.",
+    "op.talkAwaitingModeration": "Your talk was sent — it's awaiting the organizer's review.",
     "op.eventCreated": "Your event was created and published.",
     "create.error.identityFailed": "Couldn't create your identity — please retry.",
     "create.error.loginToUpload":
@@ -261,11 +265,13 @@ export const messages = {
     "event.ownStatus.talk": "Your talk couldn't be processed — try re-recording.",
     "event.retention.line": "Your event data is deleted {days} days after the event.",
     "event.leave.action": "Leave event",
-    "event.leave.confirm": "Leave this event? Your directory entry and matches are removed, and your intro media is deleted.",
+    "event.leave.confirm": "Leave this event? This sends a request to the organizer to remove your directory entry and matches and delete your intro media. It takes effect once they process it.",
     "event.leave.confirmYes": "Leave event",
     "event.leave.cancel": "Cancel",
     "event.leave.leaving": "Leaving…",
     "event.leave.done": "You've left this event.",
+    "event.leave.requested": "Your request to leave was sent. The organizer will remove your entry, matches and media — this can take a moment.",
+    "event.leave.queued": "Your request to leave is saved and will send when you reconnect. You haven't left yet.",
     "event.leave.failed": "Couldn't leave — please try again.",
     "event.latest": "Latest",
 
@@ -464,10 +470,24 @@ export const messages = {
     "record.intro.title": "Record your intro",
     "record.intro": "Record your intro",
     "record.uploaded": "Uploaded ✓ Your {kind} is encrypted and shared with this event's attendees.",
+    "record.done.queued":
+      "Saved on this device ✓ Your {kind} is encrypted and will be sent as soon as you reconnect to a relay — it hasn't reached the event yet.",
+    "record.done.introPublished":
+      "Published ✓ Your {kind} is encrypted and shared with this event's attendees.",
+    "record.done.introProcessing":
+      "Sent ✓ Your {kind} is encrypted and on its way — the coordinator is processing it now.",
+    "record.done.talkModeration":
+      "Sent ✓ Your {kind} is encrypted and submitted — it will appear once the organizer approves it.",
     "record.kind.intro": "intro",
     "record.kind.talk": "talk",
     "record.backToEvent": "Back to event",
     "record.loginFirst": "Log in first",
+    "record.role.loggedOut": "Log in to record or upload for this event.",
+    "record.role.resolving": "Checking your access to this event…",
+    "record.role.pending": "Your request to join is still awaiting the organizer's approval. Once you're approved you'll be able to record and upload here.",
+    "record.role.revoked": "You're no longer a member of this event, so recording and uploading are closed. Ask the organizer if you think this is a mistake.",
+    "record.role.visitor": "Only approved members can record or upload for this event. Join the event first.",
+    "record.role.join": "Join this event",
     "record.reuse.title": "Reuse a previous intro",
     "record.reuse.body":
       "Pick an intro you recorded or wrote at another event — reuse it as-is, or make a fresh copy that isn't linkable across events.",
@@ -635,6 +655,10 @@ export const messages = {
       "These are independent Nostr apps — like different clients for the same account. Copy your key below, open one, choose “log in with a key”, and paste it in — your profile and the people you followed are already there.",
     "me.backupKey": "Back up your key",
     "me.logout": "Log out",
+    "me.logout.warnUnsent":
+      "You have {n} unsent action(s) waiting to send. Logging out will discard them — they won't be published. Log out anyway?",
+    "me.logout.confirmDiscard": "Log out and discard",
+    "me.logout.cancel": "Stay logged in",
 
     // Backup card
     "backup.noKey": "Your key lives in your signer — back it up there. Nothing to export here.",
@@ -1234,6 +1258,8 @@ export const messages = {
     "record.error.talkTitle": "Give your talk a title.",
     "record.error.disclosure": "Please confirm you understand what’s shared before submitting.",
     "record.error.textRequired": "Write your intro before submitting.",
+    "record.error.tooLong": "That clip is {actual}s, but this event's limit is {limit}s. Trim it, compress it, or re-record something shorter.",
+    "record.error.tooLarge": "That file is too large to upload (over {limitMb} MB). Compress it or pick a shorter clip.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Event report",
@@ -1306,6 +1332,8 @@ export const messages = {
 
     // Synchronizácia na pozadí (audit UX-15)
     "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
+    "draft.restored": "Obnovený neodoslaný koncept.",
+    "draft.discard": "Zahodiť koncept",
     "outbox.pending.one": "{n} zmena čaká na odoslanie",
     "outbox.pending.few": "{n} zmeny čakajú na odoslanie",
     "outbox.pending.many": "{n} zmien čaká na odoslanie",
@@ -1517,7 +1545,9 @@ export const messages = {
     "form.errorSummary.title": "Opravte, prosím, nasledujúce:",
     "op.queued": "Uložené — vaše {what} sa odošle po pripojení.",
     "op.introPublished": "Vaše predstavenie bolo zverejnené.",
+    "op.introSubmittedProcessing": "Vaše predstavenie bolo odoslané — koordinátor ho spracúva.",
     "op.talkSubmitted": "Vaša prednáška bola odoslaná koordinátorovi.",
+    "op.talkAwaitingModeration": "Vaša prednáška bola odoslaná — čaká na schválenie organizátorom.",
     "op.eventCreated": "Vaše podujatie bolo vytvorené a zverejnené.",
     "create.error.identityFailed": "Nepodarilo sa vytvoriť vašu identitu — skúste to znova.",
     "create.error.loginToUpload":
@@ -1539,11 +1569,13 @@ export const messages = {
     "event.ownStatus.talk": "Tvoju prednášku sa nepodarilo spracovať — skús ju nahrať znova.",
     "event.retention.line": "Tvoje údaje z podujatia sa vymažú {days} dní po podujatí.",
     "event.leave.action": "Opustiť podujatie",
-    "event.leave.confirm": "Opustiť toto podujatie? Tvoj záznam v adresári a zhody sa odstránia a tvoje intro médiá sa vymažú.",
+    "event.leave.confirm": "Opustiť toto podujatie? Odošle sa žiadosť organizátorovi, aby odstránil tvoj záznam v adresári a zhody a vymazal tvoje intro médiá. Prejaví sa to, keď ju spracuje.",
     "event.leave.confirmYes": "Opustiť podujatie",
     "event.leave.cancel": "Zrušiť",
     "event.leave.leaving": "Opúšťam…",
     "event.leave.done": "Opustil si toto podujatie.",
+    "event.leave.requested": "Tvoja žiadosť o odchod bola odoslaná. Organizátor odstráni tvoj záznam, zhody a médiá — môže to chvíľu trvať.",
+    "event.leave.queued": "Tvoja žiadosť o odchod je uložená a odošle sa po opätovnom pripojení. Zatiaľ si neodišiel.",
     "event.leave.failed": "Nepodarilo sa odísť — skús to znova.",
     "event.latest": "Najnovšie",
 
@@ -1745,10 +1777,24 @@ export const messages = {
     "record.intro": "Nahrajte svoje predstavenie",
     "record.uploaded":
       "Nahrané ✓ Vaše {kind} je zašifrované a zdieľané s účastníkmi tohto podujatia.",
+    "record.done.queued":
+      "Uložené na tomto zariadení ✓ Vaše {kind} je zašifrované a odošle sa hneď po pripojení k relay — zatiaľ sa k podujatiu nedostalo.",
+    "record.done.introPublished":
+      "Zverejnené ✓ Vaše {kind} je zašifrované a zdieľané s účastníkmi tohto podujatia.",
+    "record.done.introProcessing":
+      "Odoslané ✓ Vaše {kind} je zašifrované a na ceste — koordinátor ho práve spracúva.",
+    "record.done.talkModeration":
+      "Odoslané ✓ Vaše {kind} je zašifrované a odovzdané — zobrazí sa po schválení organizátorom.",
     "record.kind.intro": "predstavenie",
     "record.kind.talk": "prednáška",
     "record.backToEvent": "Späť na podujatie",
     "record.loginFirst": "Najprv sa prihláste",
+    "record.role.loggedOut": "Ak chcete nahrávať alebo nahrať súbor pre toto podujatie, prihláste sa.",
+    "record.role.resolving": "Overujeme váš prístup k tomuto podujatiu…",
+    "record.role.pending": "Vaša žiadosť o pripojenie stále čaká na schválenie organizátorom. Po schválení tu budete môcť nahrávať a nahrať súbory.",
+    "record.role.revoked": "Už nie ste členom tohto podujatia, takže nahrávanie a nahrávanie súborov je uzavreté. Ak si myslíte, že ide o omyl, opýtajte sa organizátora.",
+    "record.role.visitor": "Nahrávať alebo nahrať súbory pre toto podujatie môžu len schválení členovia. Najprv sa pripojte k podujatiu.",
+    "record.role.join": "Pripojiť sa k podujatiu",
     "record.reuse.title": "Znova použiť predchádzajúce predstavenie",
     "record.reuse.body":
       "Vyberte si predstavenie, ktoré ste nahrali alebo napísali na inom podujatí — použite ho tak, ako je, alebo si spravte čerstvú kópiu, ktorá nie je prepojiteľná medzi podujatiami.",
@@ -1918,6 +1964,10 @@ export const messages = {
       "Toto sú nezávislé aplikácie na Nostri — ako rôzni klienti pre ten istý účet. Skopírujte si kľúč nižšie, otvorte niektorú z nich, zvoľte „prihlásiť sa kľúčom“ a vložte ho — váš profil aj ľudia, ktorých sledujete, tam už sú.",
     "me.backupKey": "Zálohujte si kľúč",
     "me.logout": "Odhlásiť sa",
+    "me.logout.warnUnsent":
+      "Máte {n} neodoslaných akcií čakajúcich na odoslanie. Odhlásením sa zahodia — nezverejnia sa. Napriek tomu sa odhlásiť?",
+    "me.logout.confirmDiscard": "Odhlásiť a zahodiť",
+    "me.logout.cancel": "Zostať prihlásený",
 
     // Backup card
     "backup.noKey":
@@ -2522,6 +2572,8 @@ export const messages = {
     "record.error.talkTitle": "Pomenujte svoju prednášku.",
     "record.error.disclosure": "Pred odoslaním potvrďte, že rozumiete, čo sa zdieľa.",
     "record.error.textRequired": "Pred odoslaním napíšte svoje predstavenie.",
+    "record.error.tooLong": "Táto nahrávka má {actual} s, ale limit tohto podujatia je {limit} s. Skráťte ju, skomprimujte alebo nahrajte kratšiu.",
+    "record.error.tooLarge": "Tento súbor je príliš veľký na nahranie (viac než {limitMb} MB). Skomprimujte ho alebo vyberte kratšiu nahrávku.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Správa z podujatia",
@@ -2597,6 +2649,8 @@ export const messages = {
 
     // Synchronizace na pozadí (audit UX-15)
     "sync.queued": "Uloženo — odešle se po obnovení připojení.",
+    "draft.restored": "Obnoven neodeslaný koncept.",
+    "draft.discard": "Zahodit koncept",
     "outbox.pending.one": "{n} změna čeká na odeslání",
     "outbox.pending.few": "{n} změny čekají na odeslání",
     "outbox.pending.many": "{n} změn čeká na odeslání",
@@ -2808,7 +2862,9 @@ export const messages = {
     "form.errorSummary.title": "Opravte prosím následující:",
     "op.queued": "Uloženo — vaše {what} se odešle po připojení.",
     "op.introPublished": "Vaše představení bylo zveřejněno.",
+    "op.introSubmittedProcessing": "Vaše představení bylo odesláno — koordinátor jej zpracovává.",
     "op.talkSubmitted": "Vaše přednáška byla odeslána koordinátorovi.",
+    "op.talkAwaitingModeration": "Vaše přednáška byla odeslána — čeká na schválení organizátorem.",
     "op.eventCreated": "Vaše akce byla vytvořena a zveřejněna.",
     "create.error.identityFailed": "Vytvoření identity se nezdařilo — zkuste to prosím znovu.",
     "create.error.loginToUpload":
@@ -2830,11 +2886,13 @@ export const messages = {
     "event.ownStatus.talk": "Tvou přednášku se nepodařilo zpracovat — zkus ji nahrát znovu.",
     "event.retention.line": "Tvá data z akce se smažou {days} dní po akci.",
     "event.leave.action": "Opustit akci",
-    "event.leave.confirm": "Opustit tuto akci? Tvůj záznam v adresáři a shody budou odstraněny a tvá intro média smazána.",
+    "event.leave.confirm": "Opustit tuto akci? Odešle se žádost organizátorovi, aby odstranil tvůj záznam v adresáři a shody a smazal tvá intro média. Projeví se to, až ji zpracuje.",
     "event.leave.confirmYes": "Opustit akci",
     "event.leave.cancel": "Zrušit",
     "event.leave.leaving": "Opouštím…",
     "event.leave.done": "Opustil jsi tuto akci.",
+    "event.leave.requested": "Tvá žádost o odchod byla odeslána. Organizátor odstraní tvůj záznam, shody a média — může to chvíli trvat.",
+    "event.leave.queued": "Tvá žádost o odchod je uložena a odešle se po opětovném připojení. Zatím jsi neodešel.",
     "event.leave.failed": "Nepodařilo se odejít — zkus to znovu.",
     "event.latest": "Nejnovější",
 
@@ -3035,10 +3093,24 @@ export const messages = {
     "record.intro": "Nahrajte své představení",
     "record.uploaded":
       "Nahráno ✓ Vaše {kind} je zašifrováno a sdíleno s účastníky této akce.",
+    "record.done.queued":
+      "Uloženo v tomto zařízení ✓ Vaše {kind} je zašifrováno a odešle se, jakmile se znovu připojíte k relay — zatím se k akci nedostalo.",
+    "record.done.introPublished":
+      "Zveřejněno ✓ Vaše {kind} je zašifrováno a sdíleno s účastníky této akce.",
+    "record.done.introProcessing":
+      "Odesláno ✓ Vaše {kind} je zašifrováno a na cestě — koordinátor jej právě zpracovává.",
+    "record.done.talkModeration":
+      "Odesláno ✓ Vaše {kind} je zašifrováno a odevzdáno — zobrazí se po schválení organizátorem.",
     "record.kind.intro": "představení",
     "record.kind.talk": "přednáška",
     "record.backToEvent": "Zpět na akci",
     "record.loginFirst": "Nejprve se přihlaste",
+    "record.role.loggedOut": "Chcete-li nahrávat nebo nahrát soubor pro tuto akci, přihlaste se.",
+    "record.role.resolving": "Ověřujeme váš přístup k této akci…",
+    "record.role.pending": "Vaše žádost o připojení stále čeká na schválení organizátorem. Po schválení zde budete moci nahrávat a nahrávat soubory.",
+    "record.role.revoked": "Už nejste členem této akce, takže nahrávání a nahrávání souborů je uzavřeno. Pokud si myslíte, že jde o omyl, zeptejte se organizátora.",
+    "record.role.visitor": "Nahrávat nebo nahrávat soubory pro tuto akci mohou jen schválení členové. Nejprve se připojte k akci.",
+    "record.role.join": "Připojit se k akci",
     "record.reuse.title": "Znovu použít předchozí představení",
     "record.reuse.body":
       "Vyberte si představení, které jste nahráli nebo napsali na jiné akci — použijte ho tak, jak je, nebo si vytvořte čerstvou kopii, která není propojitelná mezi akcemi.",
@@ -3207,6 +3279,10 @@ export const messages = {
       "Toto jsou nezávislé aplikace na Nostru — jako různí klienti pro stejný účet. Zkopírujte si klíč níže, otevřete některou z nich, zvolte „přihlásit se klíčem“ a vložte ho tam — váš profil i lidé, které sledujete, tam už jsou.",
     "me.backupKey": "Zazálohujte si klíč",
     "me.logout": "Odhlásit se",
+    "me.logout.warnUnsent":
+      "Máte {n} neodeslaných akcí čekajících na odeslání. Odhlášením se zahodí — nezveřejní se. Přesto se odhlásit?",
+    "me.logout.confirmDiscard": "Odhlásit a zahodit",
+    "me.logout.cancel": "Zůstat přihlášen",
 
     // Karta zálohy
     "backup.noKey": "Váš klíč žije ve vašem podpisovači — zazálohujte si ho tam. Tady není co exportovat.",
@@ -3817,6 +3893,8 @@ export const messages = {
     "record.error.talkTitle": "Pojmenujte svou přednášku.",
     "record.error.disclosure": "Před odesláním potvrďte, že rozumíte, co se sdílí.",
     "record.error.textRequired": "Před odesláním napište své představení.",
+    "record.error.tooLong": "Tato nahrávka má {actual} s, ale limit této akce je {limit} s. Zkraťte ji, zkomprimujte nebo nahrajte kratší.",
+    "record.error.tooLarge": "Tento soubor je příliš velký k nahrání (více než {limitMb} MB). Zkomprimujte jej nebo vyberte kratší nahrávku.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Zpráva z akce",

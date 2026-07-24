@@ -30,6 +30,7 @@ import {
 import { lockChatIdentityForLogout, unlockChatIdentityForLogin } from "$lib/chat/identity.js";
 import { clearBlindingCache } from "$lib/events/blinding.js";
 import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
+import { discardQueuedForOwner } from "$lib/nostr/publish-queue.js";
 import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 import { clearAllJoinSent } from "$lib/stores/join-sent.svelte.js";
 import { router } from "$lib/router/router.svelte.js";
@@ -241,6 +242,12 @@ class Session {
     // Wipe every decrypted app-cache copy for this identity BEFORE dropping the
     // owner (CACHING-PLAN §3.1), then unscope. Anon (public) entries survive.
     const owner = this.pubkey;
+    // U1: discard this account's still-unsent outbox actions on logout. They were
+    // signed by this identity; on a shared device leaving them to publish silently
+    // during the next person's session is the cross-account leak we're closing. The
+    // Me page warns the user first when any exist (the count is shown before this
+    // runs); this is the durable teardown so every logout path drops them.
+    if (owner) void discardQueuedForOwner(owner).catch(() => {});
     if (owner) clearOwnerCache(owner);
     setActiveOwner(null);
     setActiveCacheOwner(null);
