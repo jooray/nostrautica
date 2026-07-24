@@ -61,7 +61,12 @@ class FakeTransport implements Transport {
   /** Replaceable addresses (`${kind}:${d}`) for which the next publish reports
    *  "replaced/have newer" — drives the reliability-tail reconciliation path. */
   replacedAddresses = new Set<string>();
+  /** Test hook (audit R1 concurrency gate): awaited at the START of a publish so a
+   *  test can hold a command's effect chain in-flight (holding its subject mutex)
+   *  while a concurrent command is dispatched. */
+  onPublish?: (event: NostrEvent) => Promise<void> | void;
   async publish(event: NostrEvent): Promise<void | { replaced?: boolean }> {
+    if (this.onPublish) await this.onPublish(event);
     if (this.failPublishes > 0) {
       this.failPublishes--;
       throw new Error("simulated relay outage");
@@ -333,7 +338,7 @@ async function setup(
     };
     /** C2 race hook: awaited by the injected transcribe BEFORE it returns, so a test
      *  can pause a specific revision's STT/LLM mid-flight and interleave a newer one. */
-    beforeTranscribe?: (descriptor: any) => Promise<void>;
+    beforeTranscribe?: (descriptor: any, signal?: AbortSignal) => Promise<void>;
     /** C1 attach test: skip the auto-install so the test can drive installEvent via a
      *  grant wrap (and inject a mid-install failure). */
     skipAutoInstall?: boolean;
@@ -416,12 +421,12 @@ async function setup(
     sleep: async () => {},
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
-    transcribe: async (descriptor) => {
-      if (opts.beforeTranscribe) await opts.beforeTranscribe(descriptor);
+    transcribe: async (descriptor, signal) => {
+      if (opts.beforeTranscribe) await opts.beforeTranscribe(descriptor, signal);
       if (opts.failTranscribe) throw new Error(opts.transcribeError ?? "could not fetch blob (simulated)");
       const cached = store.getTranscript(descriptor.x);
       if (cached !== undefined) return cached;
-      const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" });
+      const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" }, { signal });
       store.putTranscript(descriptor.x, text, 1);
       return text;
     },
@@ -1829,10 +1834,10 @@ describe("NIP §3.4 — admin command expiry + per-subject watermarks", () => {
     // Reprocess B at T=now+10 (older than A's watermark, but a DIFFERENT subject)
     // → applies (independent watermark). Observable via an enqueued process job.
     await sendAdminAt(h, "reprocess", { pubkey: bPk }, now + 10, exp);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${bPk}`)).toMatchObject({ created_at: now + 10 });
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${bPk}`)).toMatchObject({ created_at: now + 10 });
     // A reprocess for A older than A's watermark is rejected (watermark unchanged).
     await sendAdminAt(h, "reprocess", { pubkey: aPk }, now + 20, exp);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${aPk}`)!.created_at).toBe(now + 50);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${aPk}`)!.created_at).toBe(now + 50);
   });
 
   it("approve/revoke interleavings converge per subject regardless of arrival order", async () => {
@@ -3896,14 +3901,14 @@ describe("audit C1 — commands resume to full completion after a partial failur
     h.transport.failPublishes = 99;
     await h.coordinator.handleCoordinatorWrap(wrap);
     expect(h.store.isRumorSeen(wrap.id)).toBe(false);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${pk}`)!.state).toBe("pending");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("pending");
     expect(grantsTo(h, sk).length).toBe(grantsBefore); // re-grant never published
 
     h.transport.failPublishes = 0;
     await h.coordinator.handleCoordinatorWrap(wrap);
     expect(grantsTo(h, sk).length).toBe(grantsBefore + 1);
     expect(h.store.isRumorSeen(wrap.id)).toBe(true);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${pk}`)!.state).toBe("complete");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("complete");
   });
 
   it("revoke: a mid-rotation publish failure resumes WITHOUT minting a second ECK", async () => {
@@ -3922,13 +3927,13 @@ describe("audit C1 — commands resume to full completion after a partial failur
     // The new ECK was minted exactly ONCE (persisted) even though every publish failed.
     expect(h.coordinator.eckOf(h.coordinate).length).toBe(2);
     expect(h.store.isRumorSeen(wrap.id)).toBe(false);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${leaverPk}`)!.state).toBe("pending");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${leaverPk}`)!.state).toBe("pending");
 
     h.transport.failPublishes = 0;
     await h.coordinator.handleCoordinatorWrap(wrap);
     expect(h.coordinator.eckOf(h.coordinate).length).toBe(2); // NOT 3 — no second mint on resume
     expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("revoked");
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${leaverPk}`)!.state).toBe("complete");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${leaverPk}`)!.state).toBe("complete");
   });
 
   it("delete_data withdrawal is NOT acknowledged until the data is actually purged", async () => {
@@ -3950,7 +3955,7 @@ describe("audit C1 — commands resume to full completion after a partial failur
     expect(h.store.isRumorSeen((wrap as any).id)).toBe(false);
     expect(h.store.getTranscript(x)).not.toBeUndefined();
     expect(h.store.getAttendee(h.coordinate, pk)).not.toBeUndefined();
-    expect(h.store.getCommandWatermark(h.coordinate, `withdraw:${pk}`)!.state).toBe("pending");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("pending");
 
     h.transport.failPublishes = 0;
     await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
@@ -3958,7 +3963,7 @@ describe("audit C1 — commands resume to full completion after a partial failur
     expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
     expect(h.store.getTranscript(x)).toBeUndefined();
     expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
-    expect(h.store.getCommandWatermark(h.coordinate, `withdraw:${pk}`)!.state).toBe("complete");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("complete");
   });
 
   it("attach: an install that throws mid-chat-setup RESUMES on the same grant (gen-check allows it)", async () => {
@@ -3982,6 +3987,243 @@ describe("audit C1 — commands resume to full completion after a partial failur
     // allowed to RESUME (pre-fix: rejected as stale), so the group was finally created.
     expect(h.store.getEvent(h.coordinate)).toBeDefined();
     expect(h.store.getMarmotGroup(h.coordinate)).toBeDefined();
+  });
+});
+
+// ── audit R1/R2/R3/R12 — concurrency, membership ordering, retention lifecycle ──
+describe("audit R1 — same-subject commands are serialized, not merely ordered", () => {
+  function adminWrapAt(h: Harness, cmd: string, args: Record<string, unknown>, createdAt: number): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd, args, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+  }
+
+  it("a paused older revoke and a concurrent newer approve converge to the NEWER decision", async () => {
+    const h = await setup();
+    const leaverSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    await join(h, generateSecretKey(), "design"); // a stayer so revoke has re-grant work
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("approved");
+
+    const now = Math.floor(h.clock.t / 1000);
+    const revokeWrap = adminWrapAt(h, "revoke", { pubkey: leaverPk }, now + 100); // OLDER
+    const approveWrap = adminWrapAt(h, "approve", { pubkey: leaverPk }, now + 200); // NEWER
+
+    // Hold the revoke's FIRST publish (its directory deletion) so the revoke is
+    // in-flight — holding the member: subject mutex — when the newer approve is
+    // dispatched concurrently. Pre-fix (no mutex) the approve would run to completion
+    // in this window and then the resuming older revoke would overwrite it → revoked.
+    let releaseRevoke: () => void = () => {};
+    const gate = new Promise<void>((r) => (releaseRevoke = r));
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => (signalReached = r));
+    let gatedOnce = false;
+    h.transport.onPublish = async (e) => {
+      if (!gatedOnce && e.kind === KIND_DELETION) {
+        gatedOnce = true;
+        signalReached();
+        await gate;
+      }
+    };
+
+    const revokeRun = h.coordinator.handleCoordinatorWrap(revokeWrap);
+    await reached; // the revoke holds the subject mutex, blocked at its deletion publish
+    const approveRun = h.coordinator.handleCoordinatorWrap(approveWrap); // must WAIT on the mutex
+    await new Promise((r) => setTimeout(r, 5)); // give the approve every chance to (wrongly) run
+    releaseRevoke();
+    await Promise.all([revokeRun, approveRun]);
+    await h.coordinator.jobs.drain();
+
+    // The mutex serialized them; the newer approve superseded the older revoke, so
+    // the final membership is APPROVED.
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("approved");
+    // A redelivery of the stale older revoke is now rejected by the watermark.
+    await h.coordinator.handleCoordinatorWrap(adminWrapAt(h, "revoke", { pubkey: leaverPk }, now + 100));
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("approved");
+  });
+});
+
+describe("audit R2 — withdrawals share the membership watermark with approve/revoke", () => {
+  it("a DISTINCT older withdrawal delivered AFTER a newer reapproval is rejected (no revoke, no purge)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pk)!;
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+
+    const now = Math.floor(h.clock.t / 1000);
+    // A NEWER organizer (re)approval records the member: watermark at now+200.
+    const approveWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "approve", args: { pubkey: pk }, expires: now + 200 + 172_800 },
+      created_at: now + 200,
+    });
+    await h.coordinator.handleCoordinatorWrap(approveWrap);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.created_at).toBe(now + 200);
+
+    // A DISTINCT, strictly OLDER withdrawal (created_at now+100) arrives afterward.
+    // Pre-fix it ordered under its own `withdraw:` watermark (empty) and would revoke
+    // + purge; now it orders against the member: watermark and is rejected.
+    await withdraw(h, sk, { deleteData: true, createdAt: now + 100 });
+
+    expect(h.store.getAttendee(h.coordinate, pk)!.status).toBe("approved");
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+    // The membership watermark still reflects the newer approval, not the withdrawal.
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.created_at).toBe(now + 200);
+  });
+});
+
+describe("audit R3 — retention is a resumable lifecycle; running jobs can't recreate purged data", () => {
+  it("resumes local deletion after a crash BETWEEN the terminal mark and the purge", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pk)!;
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+
+    // First sweep: the local PURGE throws (a disk error / crash) — this is the exact
+    // window the pre-fix code recorded the durable terminal mark in BEFORE purging, so
+    // a crash here left the event marked-expired forever with data still present. The
+    // fixed order purges FIRST and marks LAST, so a purge failure leaves the event NOT
+    // durably expired and the next sweep resumes.
+    const realPurge = h.store.purgeEventArtifacts.bind(h.store);
+    let failPurge = true;
+    (h.store as any).purgeEventArtifacts = (c: string) => {
+      if (failPurge) { failPurge = false; throw new Error("simulated disk failure mid-purge"); }
+      return realPurge(c);
+    };
+
+    await h.coordinator.retentionSweep();
+    // The event must NOT be durably recorded as expired (the mark comes AFTER purge),
+    // and the local data must still be present so it can be resumed.
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)).not.toBeUndefined();
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+
+    // Next sweep (restart): purge succeeds, resumes to completion, THEN marks expired.
+    await h.coordinator.retentionSweep();
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getTranscript(x)).toBeUndefined();
+  });
+
+  it("a job held mid-STT across a retention expiry is aborted and recreates nothing", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const X = "ab".repeat(32);
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => (signalReached = r));
+    const h = await setup(0, {
+      retentionDays: 7,
+      eventEndSec: nowSec - 30 * 86_400,
+      beforeTranscribe: async (d: any, signal?: AbortSignal) => {
+        if (d.x === X) {
+          signalReached();
+          // Block until the per-event/shutdown signal aborts (audit R13/R3).
+          await new Promise<void>((_res, rej) => {
+            if (signal?.aborted) return rej(signal.reason ?? new Error("aborted"));
+            signal?.addEventListener("abort", () => rej(signal.reason ?? new Error("aborted")), { once: true });
+          });
+        }
+      },
+    });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // A fresh submission enqueues a process_attendee job for blob X; run it — it
+    // blocks inside transcribe(X).
+    h.stt.setTranscript("777", "held transcript");
+    const sub = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: nextSubmissionRev(pk), profile: { about: "held", skills: ["zk"], looking_for: "", links: [] }, media: [mediaDesc(777, X, "video/webm")] },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, sub as any);
+    const job = h.coordinator.jobs.runOne(); // claims + runs, blocks mid-STT
+    await reached;
+
+    // Expire retention while the job is held: it aborts the in-flight handler, awaits
+    // it, then purges. The held job must not recreate a transcript / ai_profile.
+    await h.coordinator.retentionSweep();
+    await job;
+
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getTranscript(X)).toBeUndefined();
+  });
+
+  it("a job held mid-STT across a DETACH is aborted and cannot publish with stale state", async () => {
+    const X = "cd".repeat(32);
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => (signalReached = r));
+    const h = await setup(0, {
+      beforeTranscribe: async (d: any, signal?: AbortSignal) => {
+        if (d.x === X) {
+          signalReached();
+          await new Promise<void>((_res, rej) => {
+            if (signal?.aborted) return rej(signal.reason ?? new Error("aborted"));
+            signal?.addEventListener("abort", () => rej(signal.reason ?? new Error("aborted")), { once: true });
+          });
+        }
+      },
+    });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    h.stt.setTranscript("778", "held transcript");
+    const sub = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: nextSubmissionRev(pk), profile: { about: "held", skills: ["zk"], looking_for: "", links: [] }, media: [mediaDesc(778, X, "video/webm")] },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, sub as any);
+    const job = h.coordinator.jobs.runOne();
+    await reached;
+
+    const before = h.transport.published.length;
+    // Detach while the job is held: aborts + awaits the handler, THEN deletes custody.
+    await h.coordinator.detachEvent(h.coordinate, { reason: "test detach" });
+    await job;
+
+    // Custody is gone and the held job published NOTHING after detach (no directory /
+    // roster / grant using the captured pre-detach state), nor wrote the transcript.
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.getTranscript(X)).toBeUndefined();
+    expect(
+      h.transport.published
+        .slice(before)
+        .some((e) => [KIND_DIRECTORY_ENTRY, KIND_ROSTER, KIND_KEY_GRANT].includes(e.kind)),
+    ).toBe(false);
+  });
+});
+
+describe("audit R12 — event-wide retention purge clears every personal identifier", () => {
+  it("purges command watermarks, jobs, and marmot chat/key-package rows", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // A membership command leaves a member: watermark carrying the attendee pubkey.
+    await admin(h, "reprocess", { pubkey: pk });
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)).toBeDefined();
+
+    await h.coordinator.retentionSweep();
+
+    // Every event-scoped personal-identifier table is empty for this coordinate.
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)).toBeUndefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    const remainingJobs = (h.store as any)["db"]
+      .prepare("SELECT COUNT(*) AS n FROM jobs WHERE json_extract(payload, '$.coordinate') = ?")
+      .get(h.coordinate) as { n: number };
+    expect(remainingJobs.n).toBe(0);
   });
 });
 

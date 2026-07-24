@@ -87,6 +87,7 @@ export class VeniceLlm implements LlmProvider {
     temperature?: number;
     maxTokens?: number;
     validate?: (raw: unknown) => T;
+    signal?: AbortSignal;
   }): Promise<{ value: T; usage: TokenUsage }> {
     const headers = await this.headers(req.maxTokens);
     const body = await withProviderTimeout(
@@ -127,6 +128,7 @@ export class VeniceLlm implements LlmProvider {
         await this.opts.payment.settle(res.headers);
         return parsed;
       },
+      req.signal,
     );
     const content = body.choices?.[0]?.message?.content;
     if (typeof content !== "string") {
@@ -152,7 +154,7 @@ export class VeniceLlm implements LlmProvider {
     };
   }
 
-  async embed(texts: string[], model?: string): Promise<number[][]> {
+  async embed(texts: string[], model?: string, callerSignal?: AbortSignal): Promise<number[][]> {
     const headers = await this.headers();
     const body = await withProviderTimeout(
       "Venice embeddings",
@@ -167,6 +169,7 @@ export class VeniceLlm implements LlmProvider {
         if (!res.ok) throw await httpError(res, "Venice embeddings");
         return (await res.json()) as { data?: { embedding: number[] }[] };
       },
+      callerSignal,
     );
     const embedModel = model ?? "text-embedding-bge-m3";
     return (body.data ?? []).map((d, i) => {
@@ -201,7 +204,7 @@ export class VeniceStt implements SttProvider {
 
   async transcribe(
     audio: { data: Uint8Array; mime: string; language?: string },
-    opts?: { model?: string },
+    opts?: { model?: string; signal?: AbortSignal },
   ): Promise<{ text: string; language?: string }> {
     if (audio.data.length > VENICE_STT_MAX_BYTES) {
       throw new Error(
@@ -231,6 +234,7 @@ export class VeniceStt implements SttProvider {
         if (!res.ok) throw await httpError(res, "Venice STT");
         return (await res.json()) as { text?: unknown; language?: unknown };
       },
+      opts?.signal,
     );
     if (body.text !== undefined && typeof body.text !== "string") {
       throw new ProviderContractError(this.id, "stt", opts?.model ?? "openai/whisper-large-v3", "text was not a string");

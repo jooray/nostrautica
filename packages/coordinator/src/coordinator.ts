@@ -286,9 +286,12 @@ export interface CoordinatorDeps {
   matchRng?: () => number;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /** Override the transcription stage (tests inject to skip Blossom/ffmpeg).
-   *  May return text only, or a {@link TranscriptResult} with a detected language. */
+   *  May return text only, or a {@link TranscriptResult} with a detected language.
+   *  Receives the caller cancellation signal (audit R13) so an injected implementation
+   *  can honor shutdown / per-event teardown. */
   transcribe?: (
     descriptor: MediaDescriptor,
+    signal?: AbortSignal,
   ) => Promise<string | import("./pipeline/transcribe.js").TranscriptResult>;
   /** Max media bytes to download per blob (audit C3). */
   maxMediaBytes?: number;
@@ -450,6 +453,29 @@ export class Coordinator {
   private readonly inboundQueue: Array<() => Promise<void>> = [];
   private inboundRunning = 0;
   private inboundDropped = 0;
+  /**
+   * Per-(coordinate, subject) in-process async mutex (audit R1). The inbound
+   * scheduler runs up to 8 handlers concurrently, so two DISTINCT commands for the
+   * same membership subject (e.g. an older revoke and a newer approve) could execute
+   * concurrently and interleave — an older revoke finishing AFTER a newer approve and
+   * winning, despite the durable (created_at, id) comparator. This serializes a
+   * subject's whole effect chain (the watermark read/upsert PLUS the async
+   * grant/roster/deletion/publish that follows), so same-subject transitions apply
+   * strictly one at a time and the comparator's ordering actually holds. Belt: the
+   * per-mutation ownership token ({@link stillOwnsSubject}) stops a handler that is
+   * somehow past the mutex yet superseded from producing side effects.
+   */
+  private readonly subjectChains = new Map<string, Promise<unknown>>();
+  /** Per-event cancellation (audit R3): retention/detach abort an event's in-flight
+   *  job handlers and AWAIT them before purging/deleting custody, so a running
+   *  STT/LLM/publish can't recreate purged derived data or publish with stale state. */
+  private readonly eventAbort = new Map<string, AbortController>();
+  /** In-flight event-scoped job bodies, tracked per coordinate so retention/detach can
+   *  await their unwinding after aborting (audit R3). */
+  private readonly activeEventHandlers = new Map<string, Set<Promise<void>>>();
+  /** Coordinates whose retention expiry is currently running (audit R3): guards the
+   *  boot + hourly sweeps against double-executing the same event's expiry. */
+  private readonly retentionInProgress = new Set<string>();
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -492,7 +518,10 @@ export class Coordinator {
   // ── job handlers (the pipeline, spec §9.2) ─────────────────────────────────
   private registerJobHandlers(): void {
     this.jobs.register("process_attendee", async (p, { enqueue, signal }) => {
-      const committed = await this.processAttendeeJob(p.coordinate, p.pubkey, signal);
+      let committed = false;
+      await this.runEventJob(p.coordinate, signal, async (sig) => {
+        committed = await this.processAttendeeJob(p.coordinate, p.pubkey, sig);
+      });
       // Enqueue matching ONLY when the ai_profile was actually committed (audit C2):
       // a stale run whose result was discarded (a newer submission superseded it
       // mid-flight) must not enqueue a recompute off data that was never written —
@@ -507,14 +536,15 @@ export class Coordinator {
       });
     });
 
-    this.jobs.register("match_recompute", async (p, { enqueue }) => {
+    this.jobs.register("match_recompute", async (p, { enqueue, signal }) => {
+     await this.runEventJob(p.coordinate, signal, async (sig) => {
       // Re-check config at execution (audit H4): matching may have been turned off
       // after this job was queued — exit before any embedding/scoring provider call.
       if (this.events.get(p.coordinate)?.matching === "off") return;
       // Spend gate (spec §8/§9): billing block OR exceeded budget parks this before
       // any embed spend.
       await this.assertSpendAllowed(p.coordinate, p.pubkey);
-      const pairs = await this.selectPairs(p.coordinate, p.pubkey);
+      const pairs = await this.selectPairs(p.coordinate, p.pubkey, sig);
       if (!pairs.length) return;
       // FORWARD direction (p.pubkey → others): one target + ≤K candidates per call.
       // Group the target's pending directed pairs into ≤K-candidate batches (one
@@ -550,12 +580,14 @@ export class Coordinator {
       if (reverse.length) {
         log(`[match] reverse: ${reverse.length} target(s) → ${short(p.pubkey)} in ${Math.ceil(reverse.length / this.batchSize)} batch(es)`);
       }
+     });
     });
 
-    this.jobs.register("score_batch", async (p, { enqueue }) => {
+    this.jobs.register("score_batch", async (p, { enqueue, signal }) => {
+     await this.runEventJob(p.coordinate, signal, async (sig) => {
       await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.a);
       const pairs = p.pairs as CandidatePair[];
-      const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs);
+      const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs, sig);
       // A directed write only changes the TARGET's list (the candidate's own view
       // comes from their own batch), so only the target republishes. The key
       // carries the scored set's content hash so new scores trigger a fresh
@@ -575,12 +607,14 @@ export class Coordinator {
       if (missing > 0) {
         throw new Error(`batch response missing ${missing} candidate(s); retrying unscored remainder`);
       }
+     });
     });
 
-    this.jobs.register("score_reverse_batch", async (p, { enqueue }) => {
+    this.jobs.register("score_reverse_batch", async (p, { enqueue, signal }) => {
+     await this.runEventJob(p.coordinate, signal, async (sig) => {
       await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.b);
       const pairs = p.pairs as CandidatePair[];
-      const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs);
+      const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs, sig);
       // Each reverse pair {a: other, b: shared} writes the OTHER's directed row, so
       // every distinct target republishes its own list. Group scored pairs by target.
       const byTarget = new Map<string, CandidatePair[]>();
@@ -598,30 +632,39 @@ export class Coordinator {
       if (missing > 0) {
         throw new Error(`reverse batch missing ${missing} target(s); retrying unscored remainder`);
       }
+     });
     });
 
-    this.jobs.register("publish_matches", async (p) => {
-      await this.publishMatchesJob(p.coordinate, p.pubkey);
+    this.jobs.register("publish_matches", async (p, { signal }) => {
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.publishMatchesJob(p.coordinate, p.pubkey);
+      });
     });
 
     // Transcribe a submitted talk (spec F2). Reuses the intro transcription pipeline
     // unchanged (audio.ts segments long talks). The transcript is stored on the talk
     // row (published on the 31610 at talk_publish time) and folded into the speaker's
     // ai_profile so the talk feeds matching (§9.2).
-    this.jobs.register("process_talk", async (p) => {
-      await this.processTalkJob(p.coordinate, p.pubkey, p.talkD as string);
+    this.jobs.register("process_talk", async (p, { signal }) => {
+      await this.runEventJob(p.coordinate, signal, async (sig) => {
+        await this.processTalkJob(p.coordinate, p.pubkey, p.talkD as string, sig);
+      });
     });
 
     // Marmot MLS membership changes (§4.2, audit COORD-9): add/remove run through
     // the durable runner so a transient marmot/relay failure retries instead of
     // stranding membership drift; persistent failure poisons → organizer 21606.
-    this.jobs.register("chat_sync_member", async (p) => {
+    this.jobs.register("chat_sync_member", async (p, { signal }) => {
       if (!this.marmot) return;
-      await this.marmot.syncMember(p.coordinate, p.pubkey);
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.marmot!.syncMember(p.coordinate, p.pubkey);
+      });
     });
-    this.jobs.register("chat_revoke_member", async (p) => {
+    this.jobs.register("chat_revoke_member", async (p, { signal }) => {
       if (!this.marmot) return;
-      await this.marmot.handleRevoke(p.coordinate, p.pubkey);
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.marmot!.handleRevoke(p.coordinate, p.pubkey);
+      });
     });
   }
 
@@ -1127,6 +1170,118 @@ export class Coordinator {
   }
 
   /**
+   * Serialize `fn` against every other holder of the same (coordinate, subject) —
+   * the per-subject async mutex (audit R1). Runs `fn` after the prior holder settles
+   * (success OR failure — one failed transition never deadlocks the next), returns
+   * `fn`'s result, and prunes the chain when it is the tail so the map stays bounded.
+   */
+  private withSubjectLock<T>(coordinate: string, subject: string, fn: () => Promise<T>): Promise<T> {
+    const key = `${coordinate} ${subject}`;
+    const prev = this.subjectChains.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    // Store a settle-swallowing tail so a rejection never becomes an unhandled
+    // rejection and the next waiter still runs.
+    const tail = run.then(
+      () => {},
+      () => {},
+    );
+    this.subjectChains.set(key, tail);
+    void tail.then(() => {
+      if (this.subjectChains.get(key) === tail) this.subjectChains.delete(key);
+    });
+    return run;
+  }
+
+  /**
+   * True while `rumorId` is still the recorded owner of (coordinate, subject) — a
+   * newer distinct command has NOT superseded it (audit R1 ownership token). Checked
+   * before a durable mutation/publish so a superseded handler that somehow got past
+   * the per-subject mutex stops producing side effects. No watermark (order-less
+   * operation) ⇒ true (nothing to supersede).
+   */
+  private stillOwnsSubject(coordinate: string, subject: string, rumorId: string): boolean {
+    const op = this.deps.store.getCommandWatermark(coordinate, subject);
+    return !op || op.rumor_id === rumorId;
+  }
+
+  /** The per-event abort signal (audit R3), created lazily and reused until the event
+   *  is torn down. Combined into each event-scoped job handler's signal. */
+  private eventSignal(coordinate: string): AbortSignal {
+    let ac = this.eventAbort.get(coordinate);
+    if (!ac) {
+      ac = new AbortController();
+      this.eventAbort.set(coordinate, ac);
+    }
+    return ac.signal;
+  }
+
+  /**
+   * Run an event-scoped job body under a combined (job/shutdown ∪ per-event) abort
+   * signal, tracked so retention/detach can await its completion before purging
+   * (audit R3). A per-event teardown (the event signal fired but NOT the shutdown/job
+   * signal) is swallowed — the event is going away and its jobs are about to be
+   * cancelled, so the handler stops cleanly and the runner completes the job rather
+   * than retrying it toward poison. A shutdown abort or a real error propagates.
+   */
+  private async runEventJob(
+    coordinate: string,
+    jobSignal: AbortSignal,
+    fn: (signal: AbortSignal) => Promise<void>,
+  ): Promise<void> {
+    const eventSig = this.eventSignal(coordinate);
+    const combined = AbortSignal.any([jobSignal, eventSig]);
+    const set = this.activeEventHandlers.get(coordinate) ?? new Set<Promise<void>>();
+    this.activeEventHandlers.set(coordinate, set);
+    const p = (async () => {
+      try {
+        await fn(combined);
+      } catch (e) {
+        if (eventSig.aborted && !jobSignal.aborted) {
+          log(`[job] event ${coordinate} torn down mid-handler — stopped (will be cancelled)`);
+          return;
+        }
+        throw e;
+      }
+    })();
+    set.add(p);
+    try {
+      await p;
+    } finally {
+      set.delete(p);
+      if (set.size === 0) this.activeEventHandlers.delete(coordinate);
+    }
+  }
+
+  /**
+   * Abort every in-flight handler for an event and AWAIT their unwinding (audit R3),
+   * so a subsequent purge / custody delete never races a handler that could recreate
+   * purged data or publish with captured state. Resets the controller afterward so a
+   * later re-install of the same coordinate runs under a fresh signal.
+   */
+  private async stopAndAwaitEventHandlers(coordinate: string): Promise<void> {
+    this.eventAbort.get(coordinate)?.abort(new Error("event lifecycle ended"));
+    const set = this.activeEventHandlers.get(coordinate);
+    if (set && set.size > 0) await Promise.allSettled([...set]);
+    this.eventAbort.delete(coordinate);
+  }
+
+  /**
+   * The event is still live at the generation a handler captured, its retention
+   * window is open, and it is not detach-tombstoned (audit R3). A job handler
+   * re-checks this immediately before every durable write / publication so an aborted
+   * or superseded run — one that detached or expired mid-flight — cannot recreate
+   * derived rows or publish using now-stale state.
+   */
+  private eventStillLive(coordinate: string, gen?: number): boolean {
+    const s = this.events.get(coordinate);
+    if (!s) return false;
+    if (s.retentionExpired || this.deps.store.isRetentionExpired(coordinate)) return false;
+    if (this.deps.store.isInstallTombstoned(coordinate)) return false;
+    if (gen !== undefined && s.gen !== gen) return false;
+    return true;
+  }
+
+  /**
    * Durable inbox rate gate (audit C3): accept at most MAX_RUMORS_PER_SENDER_WINDOW
    * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
    * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
@@ -1296,41 +1451,52 @@ export class Coordinator {
     order: { createdAt: number; rumorId: string },
   ): Promise<void> {
     if (content.a !== state.coordinate) return;
-    // Per-subject ordering + durable resume (NIP §3.4 + audit C1): reject a stale
-    // DISTINCT withdrawal (so a re-delivered old rumor can't re-withdraw after a
-    // rejoin), but let the SAME rumor RESUME until its effect chain is durably
-    // 'complete'. The operation is marked complete only AFTER the revoke — and, for
-    // a delete_data withdrawal, AFTER the artifacts are actually purged — so the
-    // rumor is never acknowledged while data still exists (audit C1: a delete_data
-    // withdrawal must not be acked until data is purged).
-    const subject = `withdraw:${pubkey}`;
-    if (this.beginOrderedOperation(state.coordinate, subject, order) === "skip") {
-      log(`[withdraw] skipped withdrawal from ${short(pubkey)}: stale distinct rumor or already fully applied`);
-      return;
-    }
+    // Unified membership subject (audit R2): a withdrawal shares the `member:<pk>`
+    // watermark with organizer approve/revoke, so a delayed old withdrawal orders
+    // against a NEWER reapproval and is rejected — pre-fix it used an independent
+    // `withdraw:<pk>` watermark and could undo a newer approval (and purge data).
+    const subject = `member:${pubkey}`;
+    // Serialize the whole withdrawal effect chain for this member subject (audit R1),
+    // so it can't interleave with a concurrent organizer approve/revoke for the same
+    // attendee.
+    await this.withSubjectLock(state.coordinate, subject, async () => {
+      // Per-subject ordering + durable resume (NIP §3.4 + audit C1): reject a stale
+      // DISTINCT membership transition (so a re-delivered old withdrawal can't undo a
+      // rejoin), but let the SAME rumor RESUME until its effect chain is durably
+      // 'complete'. The operation is marked complete only AFTER the revoke — and, for
+      // a delete_data withdrawal, AFTER the artifacts are actually purged — so the
+      // rumor is never acknowledged while data still exists (audit C1).
+      if (this.beginOrderedOperation(state.coordinate, subject, order) === "skip") {
+        log(`[withdraw] skipped withdrawal from ${short(pubkey)}: stale distinct transition or already fully applied`);
+        return;
+      }
 
-    const existing = this.deps.store.getAttendee(state.coordinate, pubkey);
-    if (!existing) {
-      log(`[withdraw] ${short(pubkey)} not enrolled — nothing to withdraw`);
-      // Nothing to do — the operation is complete.
+      const existing = this.deps.store.getAttendee(state.coordinate, pubkey);
+      if (!existing) {
+        log(`[withdraw] ${short(pubkey)} not enrolled — nothing to withdraw`);
+        // Nothing to do — the operation is complete.
+        this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
+        return;
+      }
+      log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
+      // The public effect chain is identical to an organizer revoke (idempotent, and
+      // its ECK rotation resumes idempotently via the same operation progress).
+      await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      if (content.delete_data) {
+        // Ownership token recheck (audit R1, belt to the mutex): don't purge if a
+        // newer membership command superseded this withdrawal mid-flight.
+        if (!this.stillOwnsSubject(state.coordinate, subject, order.rumorId)) return;
+        // Full deletion: purge the coordinator's stored derived artifacts for this
+        // attendee. The public directory/roster/match records were already removed
+        // by revokeAttendee; this removes the private DB copies too. If this throws,
+        // the operation stays 'pending' (not completed below) so the withdrawal is
+        // retried and re-purged — never acknowledged with data still present.
+        this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
+        log(`[withdraw] purged stored artifacts for ${short(pubkey)}`);
+      }
+      // The full withdrawal (revoke + optional purge) completed — mark it durably done.
       this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
-      return;
-    }
-    log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
-    // The public effect chain is identical to an organizer revoke (idempotent, and
-    // its ECK rotation resumes idempotently via the same operation progress).
-    await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
-    if (content.delete_data) {
-      // Full deletion: purge the coordinator's stored derived artifacts for this
-      // attendee. The public directory/roster/match records were already removed
-      // by revokeAttendee; this removes the private DB copies too. If this throws,
-      // the operation stays 'pending' (not completed below) so the withdrawal is
-      // retried and re-purged — never acknowledged with data still present.
-      this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
-      log(`[withdraw] purged stored artifacts for ${short(pubkey)}`);
-    }
-    // The full withdrawal (revoke + optional purge) completed — mark it durably done.
-    this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
+    });
   }
 
   /**
@@ -1950,6 +2116,15 @@ export class Coordinator {
       { pubkey, profile, media: cappedMedia, introText, extraTranscripts },
     );
 
+    // Lifecycle recheck before any durable write (audit R3): if the event detached or
+    // its retention window expired while STT/LLM ran, do not recreate the ai_profile /
+    // transcripts a purge just removed, and do not publish a directory entry for a
+    // now-terminal event.
+    signal?.throwIfAborted();
+    if (!this.eventStillLive(coordinate, state.gen)) {
+      log(`[pipeline] ${short(pubkey)}: event no longer live (detached/expired) — discarding result`);
+      return false;
+    }
     // Conditional commit (audit C2): write the ai_profile ONLY if the attendee's
     // source_revision is still the one this run derived from. A newer submission
     // that landed while STT/LLM ran has already advanced source_revision, so this
@@ -2011,7 +2186,7 @@ export class Coordinator {
    * ai_profile via a reprocess so the talk feeds matching (§9.2). If the talk is
    * already published, re-publish it with the fresh transcript.
    */
-  private async processTalkJob(coordinate: string, pubkey: string, talkD: string): Promise<void> {
+  private async processTalkJob(coordinate: string, pubkey: string, talkD: string, signal?: AbortSignal): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state) return;
     // Re-check config at execution time (audit COORD-28, mirroring the matching-off
@@ -2036,7 +2211,7 @@ export class Coordinator {
     }
     const transcribe =
       this.deps.transcribe ??
-      ((d: MediaDescriptor) =>
+      ((d: MediaDescriptor, _sig?: AbortSignal) =>
         transcribeMedia(
           {
             store: this.deps.store,
@@ -2049,6 +2224,8 @@ export class Coordinator {
             maxDurationSec: state.maxTalkSec,
             onUsage: ({ bytes, durationSec }) =>
               this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
+            // Shutdown / per-event teardown (audit R13): unwind blocked STT/ffmpeg.
+            signal,
             now: this.now,
           },
           d,
@@ -2058,7 +2235,7 @@ export class Coordinator {
     // talk's media (no transcript) without poisoning the whole talk job (H-3).
     let r: string | import("./pipeline/transcribe.js").TranscriptResult;
     try {
-      r = await transcribe(media);
+      r = await transcribe(media, signal);
     } catch (e) {
       if (e instanceof MediaPolicyError) {
         log(`[talk] media rejected for "${talk.title}" (${short(pubkey)}): ${e.message}`);
@@ -2068,6 +2245,13 @@ export class Coordinator {
     }
     const text = typeof r === "string" ? r : r.text;
     const detected = typeof r === "string" ? undefined : r.lang;
+    // Lifecycle recheck before writing the transcript / publishing (audit R3): if the
+    // event detached or expired during STT, don't recreate a transcript a purge removed.
+    signal?.throwIfAborted();
+    if (!this.eventStillLive(coordinate, state.gen)) {
+      log(`[talk] event no longer live (detached/expired) — discarding transcript for ${short(pubkey)}`);
+      return;
+    }
     if (text) {
       transcript = {
         x: media.x,
@@ -2203,12 +2387,12 @@ export class Coordinator {
       .map((a) => ({ pubkey: a.pubkey, profileHash: a.profile_hash! }));
   }
 
-  private async selectPairs(coordinate: string, pubkey: string) {
+  private async selectPairs(coordinate: string, pubkey: string, signal?: AbortSignal) {
     const roster = this.buildMatchingRoster(coordinate);
     const target = roster.find((a) => a.pubkey === pubkey);
     if (!target) return [];
     if (roster.length > this.prefilter.threshold && this.roles.embed.llm.embed) {
-      await this.attachEmbeddings(coordinate, roster);
+      await this.attachEmbeddings(coordinate, roster, signal);
     }
     return selectPairsToScore(this.deps.store, coordinate, target, roster, this.prefilter);
   }
@@ -2219,7 +2403,7 @@ export class Coordinator {
    * profile_hash + the embedding model id in the artifact table, so a recompute
    * only embeds attendees whose profile CHANGED — not the full roster every time.
    */
-  private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[]): Promise<void> {
+  private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[], signal?: AbortSignal): Promise<void> {
     const provider = this.roles.embed.llm;
     if (!provider.embed) return;
     const modelKey = `${this.roles.embed.provider}:${this.roles.embed.model}`;
@@ -2237,7 +2421,11 @@ export class Coordinator {
       else missing.push({ index, pubkey: a.pubkey, hash, text: textFor(a.pubkey) });
     });
     if (missing.length === 0) return;
-    const embeddings = await provider.embed(missing.map((m) => m.text), this.roles.embed.model);
+    const embeddings = await provider.embed(missing.map((m) => m.text), this.roles.embed.model, signal);
+    // Lifecycle recheck before persisting derived artifacts (audit R3): the event may
+    // have detached/expired during the embed call; don't recreate ownership refs +
+    // roster_embedding rows a purge just removed.
+    if (!this.eventStillLive(coordinate)) return;
     missing.forEach((m, i) => {
       const embedding = embeddings[i]!;
       roster[m.index]!.embedding = embedding;
@@ -2265,6 +2453,7 @@ export class Coordinator {
   private async scoreBatchJob(
     coordinate: string,
     pairs: CandidatePair[],
+    signal?: AbortSignal,
   ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off" || pairs.length === 0) return { scored: [], missing: 0 };
@@ -2296,7 +2485,12 @@ export class Coordinator {
       candidates,
       this.matchRng,
       this.loadDisplayName(coordinate, target),
+      signal,
     );
+    // Lifecycle recheck before any directed write (audit R3): the event may have
+    // detached/expired during the scoring call; don't recreate pair rows a purge
+    // just removed.
+    if (!this.eventStillLive(coordinate)) return { scored: [], missing: 0 };
     const scored: CandidatePair[] = [];
     for (const [candId, ds] of scores) {
       const p = pairById.get(candId)!;
@@ -2329,6 +2523,7 @@ export class Coordinator {
   private async scoreReverseBatchJob(
     coordinate: string,
     pairs: CandidatePair[],
+    signal?: AbortSignal,
   ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off" || pairs.length === 0) return { scored: [], missing: 0 };
@@ -2360,7 +2555,10 @@ export class Coordinator {
       targets,
       this.matchRng,
       this.loadDisplayName(coordinate, shared),
+      signal,
     );
+    // Lifecycle recheck before any directed write (audit R3), as in scoreBatchJob.
+    if (!this.eventStillLive(coordinate)) return { scored: [], missing: 0 };
     const scored: CandidatePair[] = [];
     for (const [targetId, ds] of scores) {
       const p = pairByTarget.get(targetId)!;
@@ -2427,6 +2625,9 @@ export class Coordinator {
   private async publishMatchesJob(coordinate: string, pubkey: string): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off") return; // never publish lists when matching is off (H4)
+    // Lifecycle recheck before publication (audit R3): a detached/expired event must
+    // not publish a match list using captured state after custody was deleted.
+    if (!this.eventStillLive(coordinate, state.gen)) return;
     const list = buildMatchList(this.deps.store, coordinate, pubkey, this.topK, Math.floor(this.now() / 1000));
     if (list.matches.length === 0) return;
     const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, sanitizeMatchList(list), this.nextCreatedAt);
@@ -2488,7 +2689,11 @@ export class Coordinator {
       case "approve":
       case "reprocess":
       case "revoke":
-        return `pubkey:${String(args.pubkey ?? "")}`;
+        // Unified membership subject (audit R2): organizer approve/revoke AND attendee
+        // withdrawal all use `member:<pk>` so every membership transition orders
+        // against the others under one watermark, instead of approve/revoke
+        // (`pubkey:`) and withdrawal (`withdraw:`) never comparing.
+        return `member:${String(args.pubkey ?? "")}`;
       case "talk_publish":
       case "talk_reject":
         return `talk:${String(args.pubkey ?? "")}:${String(args.talk_d ?? "")}`;
@@ -2527,6 +2732,11 @@ export class Coordinator {
     // and falsely acknowledged. Approve vs revoke interleavings still resolve
     // deterministically by (created_at, id); different subjects are independent.
     const subject = this.commandSubject(coordinate, cmd, args);
+    // Serialize the WHOLE ordered operation for this subject (audit R1): the watermark
+    // read/upsert AND the async effect chain that follows run under a per-subject
+    // mutex, so two distinct same-subject commands (e.g. an older revoke and a newer
+    // approve) can't interleave and let the older one finish last and win.
+    await this.withSubjectLock(coordinate, subject, async () => {
     if (order && this.beginOrderedOperation(coordinate, subject, order) === "skip") {
       log(`[admin] skipped "${cmd}" for ${subject}: stale distinct command or already fully applied`);
       return;
@@ -2540,6 +2750,9 @@ export class Coordinator {
       // publishes the directory/roster (attendees discover those under the
       // coordinator's key).
       const pubkey = String(args.pubkey ?? "");
+      // Ownership token recheck (audit R1, belt to the mutex): a superseded handler
+      // that somehow got past the mutex must not apply its decision.
+      if (order && !this.stillOwnsSubject(coordinate, subject, order.rumorId)) return;
       const attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
       if (attendee) {
         if (attendee.status !== "approved") {
@@ -2597,6 +2810,7 @@ export class Coordinator {
     // duplicate is rejected, while a redelivery of THIS rumor before this point (a
     // crash mid-effect left it 'pending') is allowed to resume rather than suppressed.
     if (order) this.deps.store.completeCommandOp(coordinate, subject, order.rumorId);
+    });
   }
 
   /**
@@ -2655,6 +2869,14 @@ export class Coordinator {
     // produced duplicate rotations and stranded grants. `prevBytes` is the
     // pre-rotation ECK, recovered from `prevId` so a resume (where state.eck already
     // holds the new key) still deletes the removed entry at the OLD blinded d.
+    // Ownership token recheck (audit R1, belt to the per-subject mutex): if a NEWER
+    // distinct membership command has taken this subject over, this revoke was
+    // superseded — stop before ANY mutation/publication so a stale older revoke can't
+    // undo a newer approval or rotate the ECK behind it.
+    if (opCtx && !this.stillOwnsSubject(state.coordinate, opCtx.subject, opCtx.rumorId)) {
+      log(`[revoke] ${short(removedPubkey)}: superseded by a newer membership command — skipping side effects`);
+      return;
+    }
     const progress = opCtx ? this.deps.store.getCommandOpProgress(state.coordinate, opCtx.subject) : {};
     const rot = progress.eckRotation as { newId: number; newKey: string; prevId: number } | undefined;
     let newId: number;
@@ -2783,7 +3005,11 @@ export class Coordinator {
       map.get(coordinate)?.close();
       map.delete(coordinate);
     }
-    // Cancel pending/running paid work for the event.
+    // Abort and AWAIT every in-flight job handler for this event BEFORE deleting its
+    // custody (audit R3): otherwise a running STT/LLM/scoring/publish handler could
+    // recreate derived data or publish using the captured event state after the
+    // custody row is gone. THEN cancel the queued jobs.
+    await this.stopAndAwaitEventHandlers(coordinate);
     const cancelled = this.deps.store.cancelJobsForEvent(coordinate);
     // Capture chat state + notify context BEFORE dropping live state, so the
     // chat-orphaned notice below can still be sent.
@@ -2841,12 +3067,23 @@ export class Coordinator {
   async retentionSweep(): Promise<void> {
     const nowSec = Math.floor(this.now() / 1000);
     for (const state of [...this.events.values()]) {
-      if (state.retentionExpired) continue;
+      // Skip only when DURABLY expired (audit R3): the in-memory flag is set at the
+      // START of expiry, but the sweep must be able to RESUME an expiry that failed
+      // before its durable `markRetentionExpired` (e.g. a crash mid-purge) — so the
+      // resume decision keys off the persisted flag, not the in-memory one.
+      if (this.deps.store.isRetentionExpired(state.coordinate)) continue;
       const deadline = this.retentionDeadline(state);
       if (deadline === null || nowSec <= deadline) continue;
-      await this.expireRetention(state).catch((e) =>
-        log(`[retention] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e}`),
-      );
+      // Guard against the boot + hourly sweeps double-running one event's expiry.
+      if (this.retentionInProgress.has(state.coordinate)) continue;
+      this.retentionInProgress.add(state.coordinate);
+      try {
+        await this.expireRetention(state);
+      } catch (e) {
+        log(`[retention] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e} — will retry next sweep`);
+      } finally {
+        this.retentionInProgress.delete(state.coordinate);
+      }
     }
   }
 
@@ -2860,6 +3097,16 @@ export class Coordinator {
   private async expireRetention(state: EventState): Promise<void> {
     log(`[retention] ${state.coordinate}: window elapsed — deleting member records + parking processing`);
     const nowSec = Math.floor(this.now() / 1000);
+    // Park new work + gate late inbox rumors IMMEDIATELY (audit R3): the in-memory
+    // flag stops fresh handlers before we abort the running ones. It is NOT the
+    // durable terminal flag — that is set LAST, after the local purge, so a crash
+    // between here and there resumes the deletion on the next sweep/restart.
+    state.retentionExpired = true;
+    // Stop and AWAIT every in-flight job handler for this event (audit R3), THEN drop
+    // its queued jobs — so no running STT/LLM/scoring can recreate the derived data /
+    // relay records we are about to purge, and no queued job runs after.
+    await this.stopAndAwaitEventHandlers(state.coordinate);
+    this.deps.store.cancelJobsForEvent(state.coordinate);
     const deletions: string[][] = [];
     const seenAddr = new Set<string>();
     const pushAddr = (a: string, k: string) => {
@@ -2903,17 +3150,21 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // Stop paid processing: terminal park (durable) + cancel in-flight jobs.
-    this.deps.store.markRetentionExpired(state.coordinate);
-    state.retentionExpired = true;
-    const cancelled = this.deps.store.cancelJobsForEvent(state.coordinate);
-
     // Full local purge (audit C5): "delete member data after the event" must delete
     // the coordinator's OWN copies too, not just the relay records. Reference-counted,
     // so a transcript/summary/artifact another event still references survives. Note:
     // backups taken BEFORE this sweep still contain the data — the operator must rotate
     // them (disclosed in the operator guide); the coordinator can't reach external files.
+    // Purge runs BEFORE the durable terminal mark (audit R3): the mark is what makes
+    // future sweeps SKIP the event, so recording it before the purge (as the pre-fix
+    // code did) meant a crash in between left data present forever while the event was
+    // durably recorded as swept. Ordered this way, a crash resumes the purge instead.
     this.deps.store.purgeEventArtifacts(state.coordinate);
+
+    // Terminal park, DURABLE and LAST (audit R3): only now is the event recorded as
+    // fully expired, so a sweep/restart before this point re-runs the (idempotent)
+    // purge to completion.
+    this.deps.store.markRetentionExpired(state.coordinate);
 
     // Notify organizers via 21606 (billing block untouched — this is a lifecycle
     // stage). error_category is a sanitized class, never attendee text.
@@ -2928,7 +3179,7 @@ export class Coordinator {
       at: nowSec,
     });
     await this.deps.transport.publish(status, state.configRelays);
-    log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), cancelled ${cancelled} job(s), notified organizer`);
+    log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), purged local data, notified organizer`);
   }
 
   // ── context fetch ───────────────────────────────────────────────────────────

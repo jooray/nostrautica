@@ -273,6 +273,7 @@ export async function scoreBatch(
   candidates: readonly BatchCandidate[],
   rng: () => number = Math.random,
   targetName?: string,
+  signal?: AbortSignal,
 ): Promise<BatchScoreResult> {
   const scores = new Map<string, DirectedScore>();
   if (candidates.length === 0) return { scores, missing: [] };
@@ -303,6 +304,7 @@ export async function scoreBatch(
     model,
     temperature: 0.3,
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
+    signal,
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
@@ -393,6 +395,7 @@ export async function scoreReverseBatch(
   targets: readonly BatchCandidate[],
   rng: () => number = Math.random,
   sharedName?: string,
+  signal?: AbortSignal,
 ): Promise<BatchScoreResult> {
   const scores = new Map<string, DirectedScore>();
   if (targets.length === 0) return { scores, missing: [] };
@@ -422,6 +425,7 @@ export async function scoreReverseBatch(
     model,
     temperature: 0.3,
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
+    signal,
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];

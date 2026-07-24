@@ -116,6 +116,7 @@ export async function buildAiProfile(
   llm: LlmProvider,
   matchModel: ModelRef,
   inputs: ProfileInputs,
+  signal?: AbortSignal,
 ): Promise<AiProfile> {
   const user = [
     inputs.transcripts.length ? `INTRO/TALK TRANSCRIPT:\n${inputs.transcripts.join("\n---\n")}` : "",
@@ -133,6 +134,7 @@ export async function buildAiProfile(
     model: matchModel.model,
     temperature: 0.2,
     validate: (raw) => aiProfileResponseSchema.parse(raw),
+    signal,
   });
   return value;
 }
@@ -193,6 +195,7 @@ export async function translateProfileFields(
   translateModel: ModelRef,
   targetLang: string,
   fields: TranslationInput,
+  signal?: AbortSignal,
 ): Promise<AiProfile["translations"] | undefined> {
   const base = (targetLang || "en").toLowerCase();
   const hasContent =
@@ -220,6 +223,7 @@ export async function translateProfileFields(
     model: translateModel.model,
     temperature: 0.1,
     validate: (raw): RawTranslation => translationResponseSchema.parse(raw),
+    signal,
   });
 
   if (!value?.needs_translation) return undefined;
@@ -285,6 +289,7 @@ export async function summarizeNostr(
   pubkey: string,
   posts: NostrPost[],
   lang = "en",
+  signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (posts.length === 0) return undefined;
   const lines = posts.slice(0, 100).flatMap((p) => {
@@ -311,6 +316,7 @@ export async function summarizeNostr(
     model: summaryModel.model,
     temperature: 0.3,
     validate: (raw) => nostrSummaryResponseSchema.parse(raw),
+    signal,
   });
   return value.summary;
 }

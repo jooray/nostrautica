@@ -60,6 +60,7 @@ export class RoutstrLlm implements LlmProvider {
     temperature?: number;
     maxTokens?: number;
     validate?: (raw: unknown) => T;
+    signal?: AbortSignal;
   }): Promise<{ value: T; usage: TokenUsage }> {
     const headers = {
       "Content-Type": "application/json",
@@ -97,6 +98,7 @@ export class RoutstrLlm implements LlmProvider {
           await this.opts.payment.settle(res.headers);
           return parsed;
         },
+        req.signal,
       );
     } catch (e) {
       // Network failure / non-2xx / TIMEOUT after prepare(): the reserved proofs

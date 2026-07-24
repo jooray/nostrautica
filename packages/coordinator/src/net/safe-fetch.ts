@@ -31,6 +31,9 @@ export interface SafeFetchOptions {
   maxRedirects?: number;
   /** Injectable DNS resolver (tests); defaults to node:dns lookup. */
   lookupFn?: typeof lookup;
+  /** Caller cancellation (audit R13): shutdown / per-event teardown, combined with
+   *  the per-hop wall-clock timeout so a blocked blob download unwinds promptly. */
+  signal?: AbortSignal;
 }
 
 export class SafeFetchError extends Error {
@@ -192,6 +195,8 @@ export function pinnedDispatcher(addresses: { address: string; family: 4 | 6 }[]
 export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Uint8Array> {
   const maxRedirects = opts.maxRedirects ?? 3;
   const timeoutMs = opts.timeoutMs ?? 30_000;
+  // Fail fast if the caller was already cancelled (audit R13).
+  if (opts.signal?.aborted) throw new SafeFetchError(`download cancelled`, true);
   let current = raw;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
@@ -202,11 +207,16 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
     const dispatcher = pinnedDispatcher(addresses);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Combine the per-hop deadline with the caller's cancellation (audit R13): a
+    // shutdown/teardown aborts the in-flight body read, not just the timeout.
+    const hopSignal = opts.signal
+      ? AbortSignal.any([opts.signal, controller.signal])
+      : controller.signal;
     let res: Response;
     try {
       res = await fetch(url, {
         redirect: "manual",
-        signal: controller.signal,
+        signal: hopSignal,
         // The installed undici@7 Dispatcher is structurally compatible with the
         // global fetch's dispatcher option but typed against a different
         // undici-types version — cast through unknown.

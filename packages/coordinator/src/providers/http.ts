@@ -44,20 +44,33 @@ export const PROVIDER_TIMEOUTS = {
  * caller MUST forward to `fetch()` (and which aborts any in-progress body read).
  * If the deadline fires the underlying operation is aborted and a
  * {@link ProviderTimeoutError} is thrown; any other error propagates unchanged.
+ *
+ * A `callerSignal` (audit R13: shutdown / per-event cancellation) is COMBINED with
+ * the per-operation deadline via `AbortSignal.any()`, so a coordinator shutdown or a
+ * retention/detach teardown unwinds a blocked provider call promptly instead of
+ * waiting out the (up to 3-minute STT) deadline or the cgroup stop timeout. A
+ * caller-signal abort propagates as its own reason (NOT reclassified as a timeout);
+ * only the internal deadline firing yields a {@link ProviderTimeoutError}.
  */
 export async function withProviderTimeout<T>(
   label: string,
   timeoutMs: number,
   fn: (signal: AbortSignal) => Promise<T>,
+  callerSignal?: AbortSignal,
 ): Promise<T> {
+  // Fail fast if the caller was already cancelled before we opened a socket.
+  callerSignal?.throwIfAborted();
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, ac.signal]) : ac.signal;
   try {
-    return await fn(ac.signal);
+    return await fn(signal);
   } catch (e) {
-    // The abort is what makes fetch()/body-read reject; distinguish "we timed
-    // out" from an unrelated failure that happened to occur in the same window.
-    if (ac.signal.aborted) throw new ProviderTimeoutError(label, timeoutMs);
+    // The internal deadline is what makes fetch()/body-read reject on TIMEOUT;
+    // distinguish it from a caller-signal cancellation (which must surface as the
+    // caller's own abort reason so the runner treats it as a teardown, not a
+    // retryable provider failure) and from an unrelated same-window error.
+    if (ac.signal.aborted && !callerSignal?.aborted) throw new ProviderTimeoutError(label, timeoutMs);
     throw e;
   } finally {
     clearTimeout(timer);

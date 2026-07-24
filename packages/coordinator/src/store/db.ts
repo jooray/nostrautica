@@ -37,7 +37,7 @@ const ENC_PREFIX = "nip44:";
  * boundary advances `user_version` through an ordered, transactional migration, and
  * an open refuses a database whose `user_version` exceeds this constant.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
@@ -228,10 +228,66 @@ function applyRemediationDDL(db: DatabaseSync): void {
   `);
 }
 
+/**
+ * Unify the membership command-watermark subject (audit R2, version 3). Organizer
+ * approve/revoke used subject `pubkey:<pk>` while attendee withdrawals used
+ * `withdraw:<pk>` — two INDEPENDENT watermarks for the same attendee's membership, so
+ * a delayed old withdrawal ordered only against other withdrawals and could undo a
+ * newer reapproval (and purge data). From v3 both flows use one `member:<pk>` subject
+ * so every membership transition orders against the others.
+ *
+ * This migration rewrites existing rows onto the unified subject. Where an attendee
+ * has BOTH a `pubkey:<pk>` and a `withdraw:<pk>` row (which would collide on the
+ * unified PRIMARY KEY), it keeps the one that WINS the §3.1 comparator — higher
+ * `created_at`, then the lexically-LOWER `rumor_id` on a tie — i.e. the effective
+ * last membership decision, carrying its `state`/`progress_json` so an in-progress
+ * ECK rotation still resumes. Downgrade-incompatible: an older binary would read the
+ * old subjects and lose the unification, so it advances `user_version`.
+ */
+function applyMembershipSubjectMerge(db: DatabaseSync): void {
+  const rows = db
+    .prepare(
+      "SELECT coordinate, subject, created_at, rumor_id, state, progress_json FROM command_watermarks WHERE subject LIKE 'pubkey:%' OR subject LIKE 'withdraw:%'",
+    )
+    .all() as {
+    coordinate: string;
+    subject: string;
+    created_at: number;
+    rumor_id: string;
+    state: string | null;
+    progress_json: string | null;
+  }[];
+  const winners = new Map<
+    string,
+    { coordinate: string; subject: string; created_at: number; rumor_id: string; state: string | null; progress_json: string | null }
+  >();
+  for (const r of rows) {
+    const pk = r.subject.slice(r.subject.indexOf(":") + 1);
+    const newSubject = `member:${pk}`;
+    const key = `${r.coordinate} ${newSubject}`;
+    const cur = winners.get(key);
+    const wins =
+      !cur ||
+      r.created_at > cur.created_at ||
+      (r.created_at === cur.created_at && r.rumor_id < cur.rumor_id);
+    if (wins) winners.set(key, { ...r, subject: newSubject });
+  }
+  db.prepare("DELETE FROM command_watermarks WHERE subject LIKE 'pubkey:%' OR subject LIKE 'withdraw:%'").run();
+  const ins = db.prepare(
+    "INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  for (const w of winners.values()) {
+    ins.run(w.coordinate, w.subject, w.created_at, w.rumor_id, w.state ?? "complete", w.progress_json ?? null);
+  }
+}
+
 /** The ordered numbered migrations (audit O3). Version 1 is the historical baseline
  *  (applied unconditionally by {@link applyBaselineDDL}); version 2 is the audit
- *  remediation batch. */
-const MIGRATIONS: Migration[] = [{ version: 2, up: applyRemediationDDL }];
+ *  remediation batch; version 3 unifies the membership command subject (audit R2). */
+const MIGRATIONS: Migration[] = [
+  { version: 2, up: applyRemediationDDL },
+  { version: 3, up: applyMembershipSubjectMerge },
+];
 
 /**
  * Bring a database up to {@link SCHEMA_VERSION} (audit O3). Refuses a database
@@ -753,10 +809,14 @@ CREATE TABLE IF NOT EXISTS marmot_consumed_kps (
   created_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (coordinate, kp_event_id)
 );
--- Per-subject admin-command watermark (NIP §3.4): the (created_at, rumor_id) of the
--- last applied 21604 command per (coordinate, subject). A command strictly older
--- than the watermark under the §3.1 comparator is rejected, so approve/revoke
--- interleavings resolve deterministically per subject instead of by arrival order.
+-- Per-subject command watermark (NIP §3.4): the (created_at, rumor_id) of the last
+-- FULLY applied command per (coordinate, subject), plus a pending/complete state and
+-- resume progress_json (audit C1). A command strictly older than the watermark under
+-- the §3.1 comparator is rejected, so transitions resolve deterministically per
+-- subject instead of by arrival order. Membership transitions — organizer
+-- approve/revoke AND attendee withdrawal — share ONE subject member:<pk> (audit R2,
+-- schema v3) so a delayed old withdrawal orders against a newer reapproval instead of
+-- against an independent watermark.
 CREATE TABLE IF NOT EXISTS command_watermarks (
   coordinate TEXT NOT NULL,
   subject TEXT NOT NULL,
@@ -1834,6 +1894,11 @@ export class Store {
     try {
       this.purgeSubjectInTxn(coordinate, pubkey, blobHashes);
       this.db.prepare("DELETE FROM attendees WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      // The withdrawing attendee's chat-device bindings are their PII (audit R12):
+      // remove them too. The command_watermark for `member:<pk>` is deliberately KEPT
+      // — it is the replay bar that stops a re-delivered old withdrawal from undoing a
+      // later reapproval (audit R2); the event is still live, so it is security state.
+      this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");
@@ -1842,13 +1907,53 @@ export class Store {
   }
 
   /**
-   * Full event-wide local purge (audit C5): remove EVERY coordinator-held derived
-   * copy for an event — all attendees' profiles/ai_profiles/transcripts/corrections,
-   * their submissions, talks, per-account summaries, content-addressed pipeline
-   * artifacts and transcripts (reference-counted so another event's shared cache
-   * survives), cached pair scores, job status, usage, rate accounting, and command
-   * watermarks. Used by the retention sweep so "delete member data after the event"
-   * actually deletes the local plaintext, not just the relay records. Idempotent.
+   * Full event-wide local purge (audit C5 + R12): remove EVERY coordinator-held
+   * derived copy AND every event-scoped personal identifier for an event. Used by the
+   * retention sweep (NIP §6.2) so "delete member data after the event" actually
+   * deletes the local plaintext, not just the relay records. Idempotent.
+   *
+   * Explicit, TESTED retention table inventory (audit R12 — every event-scoped table
+   * has a documented disposition; a new table MUST be classified here):
+   *
+   *   DELETED (attendee-derived data or personal identifiers):
+   *     - attendees                          profiles / ai_profiles / corrections
+   *     - submissions, talks                 per-subject (via purgeSubjectInTxn)
+   *     - transcripts / pipeline_artifacts / nostr_summaries   reference-counted:
+   *                                          a payload another event still references
+   *                                          SURVIVES; this event's refs are dropped
+   *     - transcript_refs / artifact_refs / summary_refs       ownership rows
+   *     - pairs, job_status, usage, inbox_rate, invite_usage   derived/accounting
+   *     - command_watermarks                 subjects carry attendee pubkeys + rumor
+   *                                          ids (R12). Safe post-expiry: the event is
+   *                                          terminal and retention_expired gates every
+   *                                          future inbox rumor, so replay protection
+   *                                          no longer depends on these rows.
+   *     - jobs (ALL states incl. terminal/waiting)   payloads carry attendee pubkeys
+   *                                          (R12); cancelJobsForEvent only drops
+   *                                          pending/running, so poison/waiting rows
+   *                                          would otherwise leak identities.
+   *     - marmot_chat_keys                   attendee account/chat pubkeys + device
+   *                                          bindings (R12)
+   *     - marmot_consumed_kps                consumed key-package event ids (R12)
+   *     - marmot_groups                      the event's MLS group row (coordinate-keyed)
+   *
+   *   RETAINED (minimal security / replay state, justified — audit R12):
+   *     - install_state                      detach tombstone + install generation
+   *                                          high-water mark: a security replay bar
+   *                                          (a replayed historical grant must never
+   *                                          re-install). Carries no attendee data.
+   *     - billing_state                      the event-identity billing principal + its
+   *                                          verdict — an operator/billing decision,
+   *                                          not attendee data.
+   *     - seen_rumors                        the durable dedupe/replay ledger (global,
+   *                                          not coordinate-scoped); pruning it would
+   *                                          re-open replay windows. Holds rumor IDS
+   *                                          only, no attendee content.
+   *     - marmot_kv                          the coordinator's OWN MLS key material /
+   *                                          group secrets, namespaced by group handle
+   *                                          not by coordinate. Not attendee PII; a
+   *                                          clean coordinate-scoped delete isn't
+   *                                          available here (see handoff).
    */
   purgeEventArtifacts(coordinate: string): void {
     const pubkeys = (
@@ -1884,14 +1989,24 @@ export class Store {
         }
         this.purgeSubjectInTxn(coordinate, pubkey, blobHashes);
       }
-      // Event-scoped derived + accounting tables. Billing/install-generation state is
-      // deliberately retained (a detach/re-install decision, not attendee data).
+      // Event-scoped derived + accounting tables (see the inventory above). Billing/
+      // install-generation state is deliberately retained (a detach/re-install
+      // decision, not attendee data).
       this.db.prepare("DELETE FROM attendees WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM job_status WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM usage WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM inbox_rate WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM invite_usage WHERE coordinate = ?").run(coordinate);
+      // Personal identifiers the pre-R12 purge missed:
+      this.db.prepare("DELETE FROM command_watermarks WHERE coordinate = ?").run(coordinate);
+      // ALL job states (terminal/waiting too) — payloads carry attendee pubkeys.
+      this.db
+        .prepare("DELETE FROM jobs WHERE json_extract(payload, '$.coordinate') = ?")
+        .run(coordinate);
+      this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM marmot_consumed_kps WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM marmot_groups WHERE coordinate = ?").run(coordinate);
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");

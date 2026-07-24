@@ -37,9 +37,10 @@ export interface ProcessDeps {
   /**
    * Override the transcription stage (tests inject to skip real Blossom/ffmpeg).
    * May return a bare string (text only) or a {@link TranscriptResult} carrying the
-   * STT-detected language.
+   * STT-detected language. Receives the caller cancellation signal (audit R13) so an
+   * injected/alternative implementation can honor shutdown / per-event teardown too.
    */
-  transcribe?: (descriptor: MediaDescriptor) => Promise<string | TranscriptResult>;
+  transcribe?: (descriptor: MediaDescriptor, signal?: AbortSignal) => Promise<string | TranscriptResult>;
   /** Blossom origins media may be fetched from (audit C3 allowlist). */
   blossomOrigins?: string[];
   /** Max media bytes per blob download (audit C3). */
@@ -105,7 +106,7 @@ export async function processAttendee(
   //    blob, so they never reach this loop — the authored text is appended below.
   const transcribe =
     deps.transcribe ??
-    ((descriptor: MediaDescriptor) =>
+    ((descriptor: MediaDescriptor, _sig?: AbortSignal) =>
       transcribeMedia(
         {
           store: deps.store,
@@ -125,7 +126,7 @@ export async function processAttendee(
   const transcripts: string[] = []; // text fed into buildAiProfile
   const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
-    deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
+    deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11/R13)
     // Ownership reference for the content-addressed transcript (audit C5): record it
     // for THIS subject regardless of the transcription outcome (the payload — full or
     // empty-on-policy-rejection — is content-addressed by `x`), so a purge can
@@ -136,7 +137,7 @@ export async function processAttendee(
     // other media/attendee continue — rather than poisoning the whole attendee.
     let r: string | TranscriptResult;
     try {
-      r = await transcribe(descriptor);
+      r = await transcribe(descriptor, deps.signal);
     } catch (e) {
       if (e instanceof MediaPolicyError) continue;
       throw e;
@@ -188,6 +189,7 @@ export async function processAttendee(
           input.pubkey,
           posts,
           deps.lang,
+          deps.signal,
         );
         if (nostrSummary)
           deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now(), owner ? { coordinate: owner.coordinate } : undefined);
@@ -217,7 +219,7 @@ export async function processAttendee(
     aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
     if (!aiProfile) {
       deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
-      aiProfile = await buildAiProfile(deps.match.llm, deps.match, profileInputs);
+      aiProfile = await buildAiProfile(deps.match.llm, deps.match, profileInputs, deps.signal);
       deps.store.putArtifact({
         stage: "ai_profile",
         inputsHash: profileKey,
@@ -243,7 +245,8 @@ export async function processAttendee(
   const trKey = translationInputsHash(trFields, deps.lang, trModelKey);
   let translations = deps.store.getArtifact("translation", trKey) as AiProfileType["translations"] | null | undefined;
   if (translations === undefined) {
-    translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields)) ?? null;
+    deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11/R13)
+    translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields, deps.signal)) ?? null;
     deps.store.putArtifact({
       stage: "translation",
       inputsHash: trKey,

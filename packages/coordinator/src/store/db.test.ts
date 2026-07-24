@@ -470,6 +470,46 @@ describe("schema migrations (audit O3)", () => {
     raw.close();
     expect(() => new Store(path)).toThrow(/newer coordinator/i);
   });
+
+  it("migrates v2 membership watermarks onto the unified member: subject (audit R2)", async () => {
+    const path = tmpDb();
+    // A version-2 database (baseline shape) with the OLD split membership subjects:
+    // organizer approve/revoke under `pubkey:<pk>`, withdrawals under `withdraw:<pk>`.
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      `CREATE TABLE command_watermarks (coordinate TEXT NOT NULL, subject TEXT NOT NULL,
+         created_at INTEGER NOT NULL, rumor_id TEXT NOT NULL,
+         state TEXT NOT NULL DEFAULT 'complete', progress_json TEXT,
+         PRIMARY KEY (coordinate, subject))`,
+    );
+    const ins = raw.prepare(
+      "INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, ?, ?)",
+    );
+    // Attendee ALICE: an approve@100 and a LATER withdrawal@200 collide onto member:alice;
+    // the newer withdrawal (created_at 200) must WIN and carry its progress.
+    ins.run("31923:e:x", "pubkey:alice", 100, "r-approve", "complete", null);
+    ins.run("31923:e:x", "withdraw:alice", 200, "r-withdraw", "pending", '{"eckRotation":1}');
+    // Attendee BOB: only an approve — renamed, unchanged.
+    ins.run("31923:e:x", "pubkey:bob", 50, "r-bob", "complete", null);
+    // A non-membership subject (talk:) is left untouched.
+    ins.run("31923:e:x", "talk:carol:t1", 10, "r-talk", "complete", null);
+    raw.exec("PRAGMA user_version = 2");
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    // ALICE: the two split rows merged to member:alice, the NEWER withdrawal winning.
+    const alice = store.getCommandWatermark("31923:e:x", "member:alice");
+    expect(alice).toMatchObject({ created_at: 200, rumor_id: "r-withdraw", state: "pending", progress_json: '{"eckRotation":1}' });
+    expect(store.getCommandWatermark("31923:e:x", "pubkey:alice")).toBeUndefined();
+    expect(store.getCommandWatermark("31923:e:x", "withdraw:alice")).toBeUndefined();
+    // BOB: renamed onto member:bob.
+    expect(store.getCommandWatermark("31923:e:x", "member:bob")).toMatchObject({ created_at: 50, rumor_id: "r-bob" });
+    // The talk: subject is untouched.
+    expect(store.getCommandWatermark("31923:e:x", "talk:carol:t1")).toMatchObject({ rumor_id: "r-talk" });
+    store.close();
+  });
 });
 
 // ── O2: doctor's read-only inspection leaves the file byte-identical ──────────

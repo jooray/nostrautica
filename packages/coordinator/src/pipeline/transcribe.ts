@@ -32,6 +32,8 @@ export interface BlobFetchOptions {
   /** Blossom origins the coordinator may fetch from (empty = any public https host). */
   allowedOrigins?: string[];
   maxBytes?: number;
+  /** Caller cancellation (audit R13): shutdown / per-event teardown. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -50,7 +52,7 @@ export async function fetchBlob(
   let lastErr: unknown;
   for (const url of urls) {
     try {
-      const bytes = await safeFetch(url, { allowedOrigins: opts.allowedOrigins, maxBytes });
+      const bytes = await safeFetch(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal });
       if (sha256Hex(bytes) !== expectedSha256) {
         lastErr = new Error(`hash mismatch from ${url}`);
         continue;
@@ -94,6 +96,10 @@ export interface TranscribeDeps {
    * when the media is rejected (bytes were still spent downloading).
    */
   onUsage?: (usage: { bytes: number; durationSec: number }) => void;
+  /** Caller cancellation (audit R13): threaded into the blob download, ffprobe/ffmpeg
+   *  child processes, and the STT provider call so a shutdown/teardown unwinds a
+   *  long transcription promptly instead of running to its provider deadline. */
+  signal?: AbortSignal;
   now?: () => number;
 }
 
@@ -116,10 +122,11 @@ export async function transcribeMedia(
   const cached = deps.store.getTranscriptRow(descriptor.x);
   if (cached !== undefined) return { text: cached.text, lang: cached.lang ?? undefined };
 
+  deps.signal?.throwIfAborted();
   const download =
     deps.fetchBlob ??
     ((urls: string[], sha: string) =>
-      fetchBlob(urls, sha, { allowedOrigins: deps.blossomOrigins, maxBytes: deps.maxMediaBytes }));
+      fetchBlob(urls, sha, { allowedOrigins: deps.blossomOrigins, maxBytes: deps.maxMediaBytes, signal: deps.signal }));
   const ciphertext = await download(descriptor.url, descriptor.x);
 
   // H-3: the actual downloaded ciphertext length MUST equal the declared `size`.
@@ -138,7 +145,7 @@ export async function transcribeMedia(
 
   // H-3: probe the REAL decoded duration and reject over-limit media BEFORE STT,
   // regardless of the declared `duration`. Account the actual bytes + duration.
-  const probe = deps.probeDuration ?? probeDurationFromBytes;
+  const probe = deps.probeDuration ?? ((m, mime) => probeDurationFromBytes(m, mime, deps.signal));
   const realDurationSec = await probe(plaintext, descriptor.m);
   deps.onUsage?.({ bytes: ciphertext.length, durationSec: realDurationSec });
   if (deps.maxDurationSec && realDurationSec > deps.maxDurationSec) {
@@ -149,15 +156,17 @@ export async function transcribeMedia(
   }
 
   const caps = await deps.stt.capabilities();
-  const extract = deps.extractAudio ?? extractAudioSegments;
+  const extract =
+    deps.extractAudio ?? ((m, mime, maxBytes) => extractAudioSegments(m, mime, maxBytes, deps.signal));
   const segments = await extract(plaintext, descriptor.m, caps.maxUploadBytes);
 
   const parts: string[] = [];
   let lang: string | undefined;
   for (const seg of segments) {
+    deps.signal?.throwIfAborted();
     const { text, language } = await deps.stt.transcribe(
       { data: seg.data, mime: seg.mime },
-      { model: deps.sttModel },
+      { model: deps.sttModel, signal: deps.signal },
     );
     parts.push(text);
     if (!lang && language) lang = language; // first segment that reports a language

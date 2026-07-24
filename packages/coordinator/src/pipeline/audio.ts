@@ -51,11 +51,16 @@ export async function sweepStaleTempDirs(maxAgeMs = STALE_TEMP_DIR_AGE_MS, now =
 function run(
   cmd: string,
   args: string[],
-  opts: { input?: Uint8Array; timeoutMs?: number; maxOutputBytes?: number } = {},
+  opts: { input?: Uint8Array; timeoutMs?: number; maxOutputBytes?: number; signal?: AbortSignal } = {},
 ): Promise<{ stdout: Buffer }> {
   const timeoutMs = opts.timeoutMs ?? FFMPEG_TIMEOUT_MS;
   const maxOutputBytes = opts.maxOutputBytes ?? 64 * 1024 * 1024;
   return new Promise((resolve, reject) => {
+    // Caller already cancelled (audit R13): never spawn.
+    if (opts.signal?.aborted) {
+      reject(opts.signal.reason ?? new Error(`${cmd} aborted before spawn`));
+      return;
+    }
     // detached → child becomes a group leader; killing -pid kills the whole group.
     const child = spawn(cmd, args, { detached: true, stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
@@ -77,9 +82,23 @@ function run(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      cleanupAbort();
       kill();
       reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
+    // Caller cancellation (audit R13): kill the whole process group so a hung/slow
+    // ffmpeg child can't outlive a coordinator shutdown or a retention/detach
+    // teardown (systemd would otherwise wait out the cgroup stop timeout).
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanupAbort();
+      kill();
+      reject(opts.signal?.reason ?? new Error(`${cmd} aborted`));
+    };
+    const cleanupAbort = () => opts.signal?.removeEventListener("abort", onAbort);
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
 
     child.stdout.on("data", (d: Buffer) => {
       outLen += d.length;
@@ -87,6 +106,7 @@ function run(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        cleanupAbort();
         kill();
         reject(new Error(`${cmd} output exceeded ${maxOutputBytes} bytes`));
         return;
@@ -109,12 +129,14 @@ function run(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cleanupAbort();
       reject(e);
     });
     child.on("close", (code) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      cleanupAbort();
       if (code === 0) resolve({ stdout: Buffer.concat(out) });
       else reject(new Error(`${cmd} exited ${code}: ${Buffer.concat(err).toString().slice(-500)}`));
     });
@@ -138,6 +160,7 @@ export async function extractAudioSegments(
   media: Uint8Array,
   mime: string,
   maxBytes: number,
+  signal?: AbortSignal,
 ): Promise<AudioSegment[]> {
   const dir = await mkdtemp(join(tmpdir(), "nostrautica-"));
   try {
@@ -153,14 +176,14 @@ export async function extractAudioSegments(
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       wholePath,
-    ]);
+    ], { signal });
     const whole = await readFile(wholePath);
     if (whole.length <= maxBytes) {
       return [{ data: new Uint8Array(whole), mime: "audio/ogg" }];
     }
 
     // Too big: segment. Aim each segment well under the limit by duration.
-    const durationSec = await probeDurationSec(inPath);
+    const durationSec = await probeDurationSec(inPath, signal);
     // ~16 kbit/s → ~2 KB/s; leave headroom.
     const secPerSegment = Math.max(30, Math.floor((maxBytes * 0.8) / 2048));
     const segPattern = join(dir, "seg-%03d.ogg");
@@ -170,7 +193,7 @@ export async function extractAudioSegments(
       "-c:a", "libopus", "-b:a", "16k",
       "-f", "segment", "-segment_time", String(secPerSegment),
       segPattern,
-    ]);
+    ], { signal });
     void durationSec;
     const files = (await readdir(dir)).filter((f) => f.startsWith("seg-")).sort();
     const segments: AudioSegment[] = [];
@@ -184,12 +207,12 @@ export async function extractAudioSegments(
   }
 }
 
-async function probeDurationSec(path: string): Promise<number> {
+async function probeDurationSec(path: string, signal?: AbortSignal): Promise<number> {
   try {
     const { stdout } = await run("ffprobe", [
       "-v", "error", "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1", path,
-    ]);
+    ], { signal });
     return Math.ceil(parseFloat(stdout.toString()) || 0);
   } catch {
     return 0;
@@ -203,13 +226,13 @@ async function probeDurationSec(path: string): Promise<number> {
  * can't parse the container (treated as "unknown" by the caller). Writes to a
  * temp file (ffprobe needs a seekable input) and always cleans it up.
  */
-export async function probeDurationFromBytes(media: Uint8Array, mime: string): Promise<number> {
+export async function probeDurationFromBytes(media: Uint8Array, mime: string, signal?: AbortSignal): Promise<number> {
   const dir = await mkdtemp(join(tmpdir(), "nostrautica-probe-"));
   try {
     const ext = mime.includes("mp4") ? "mp4" : mime.includes("webm") ? "webm" : "bin";
     const inPath = join(dir, `probe.${ext}`);
     await writeFile(inPath, media);
-    return await probeDurationSec(inPath);
+    return await probeDurationSec(inPath, signal);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
