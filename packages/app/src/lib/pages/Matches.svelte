@@ -150,7 +150,7 @@
 {#if error}
   <ErrorState {error} />
 {:else if noCoordinator}
-  <!-- Quiet unavailable state (NOT ErrorState — it's role="alert"). -->
+  <!-- Coordinator-unavailable: quiet state (NOT ErrorState — it's role="alert"). -->
   <div class="card">
     <p class="muted">
       {t("matches.noCoordinator")}
@@ -158,6 +158,28 @@
     <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>
       {t("matches.seeWhosHere")}
     </button>
+  </div>
+{:else if !session.loggedIn}
+  <!-- Logged-out deep link (audit U8): matches are per-member, so prompt sign-in
+       instead of the ambiguous "No matches yet". -->
+  <div class="card">
+    <p class="muted">{t("matches.role.loggedOut")}</p>
+    <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("matches.role.login")}</button>
+  </div>
+{:else if access === "visitor"}
+  <!-- Signed in but not a member: join before matches exist. -->
+  <div class="card">
+    <p class="muted">{t("matches.role.visitor")}</p>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn primary" onclick={() => router.go({ name: "join", naddr })}>{t("matches.role.join")}</button>
+      <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>{t("matches.seeWhosHere")}</button>
+    </div>
+  </div>
+{:else if access === "pending"}
+  <!-- Join request sent, awaiting the organizer's approval. -->
+  <div class="card" role="status">
+    <p class="muted">{t("matches.role.pending")}</p>
+    <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>{t("matches.seeWhosHere")}</button>
   </div>
 {:else if loading}
   <p class="muted">{t("matches.fetching")}</p>

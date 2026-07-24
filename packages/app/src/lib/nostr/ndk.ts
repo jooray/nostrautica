@@ -197,17 +197,76 @@ export function isAcceptedRelayUrl(url: string): boolean {
   }
 }
 
+/**
+ * Bounded event-relay growth (audit U16). Every visited event calls `addRelays`
+ * with its 31600/10002 relays; before this, nothing ever removed them, so a
+ * long-lived client accumulated one socket per event it had ever opened and kept
+ * leaking its future activity (subscriptions, publishes to the whole pool) to
+ * relays of unrelated past events. We now cap the dynamically-added relays with a
+ * least-recently-used eviction, so the pool converges instead of growing without
+ * bound. The app's PERMANENT relays (defaults + read defaults) are never tracked
+ * or evicted; only event-discovered relays are. Reads that need a specific
+ * relay set still pass explicit URLs (see `relaySet`), which re-adds on demand,
+ * so eviction never breaks the monotonic publisher's relay-only reads.
+ */
+const MAX_DYNAMIC_RELAYS = 20;
+
+/** Normalize a relay URL for stable identity across add/remove (trailing slash). */
+function normalizeRelay(url: string): string {
+  try {
+    return new URL(url).href;
+  } catch {
+    return url;
+  }
+}
+
+const PERMANENT_RELAYS = new Set(
+  unionRelays(DEFAULT_RELAYS, DEFAULT_READ_RELAYS).map(normalizeRelay),
+);
+
+/** Event-discovered relays in LRU order (oldest first). Value is a monotonic seq. */
+const dynamicRelays = new Map<string, number>();
+let relaySeq = 0;
+
 /** Add relay URLs to the pool at runtime (event 31600 relays, user 10002). */
 export function addRelays(urls: string[]): void {
   const instance = getNdk();
   for (const url of urls) {
     if (!isAcceptedRelayUrl(url)) continue;
+    let addedUrl: string;
     try {
-      instance.addExplicitRelay(url);
+      // Prefer NDK's own normalized url for the relay it actually pooled, so a
+      // later removeRelay targets exactly the same key it stored.
+      const relay = instance.addExplicitRelay(url);
+      addedUrl = relay?.url ?? normalizeRelay(url);
     } catch {
-      /* ignore malformed URLs */
+      continue; // malformed URL — never tracked
+    }
+    if (PERMANENT_RELAYS.has(addedUrl) || PERMANENT_RELAYS.has(normalizeRelay(url))) continue;
+    // Refresh recency: delete + re-insert moves this relay to the newest end.
+    dynamicRelays.delete(addedUrl);
+    dynamicRelays.set(addedUrl, ++relaySeq);
+    while (dynamicRelays.size > MAX_DYNAMIC_RELAYS) {
+      const oldest = dynamicRelays.keys().next().value as string;
+      dynamicRelays.delete(oldest);
+      try {
+        instance.pool?.removeRelay(oldest);
+      } catch {
+        /* relay already gone / pool unavailable — nothing to evict */
+      }
     }
   }
+}
+
+/** Test-only: how many event-discovered relays are currently tracked. */
+export function __dynamicRelayCount(): number {
+  return dynamicRelays.size;
+}
+
+/** Test-only: reset the dynamic-relay LRU between cases. */
+export function __resetDynamicRelaysForTests(): void {
+  dynamicRelays.clear();
+  relaySeq = 0;
 }
 
 /** Build an NDKRelaySet from explicit URLs (or undefined for the whole pool). */

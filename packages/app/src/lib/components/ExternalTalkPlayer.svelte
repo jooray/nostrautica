@@ -5,7 +5,7 @@
   // as the encrypted player). The URL was decrypted from the ECK-encrypted talk
   // content, so this only renders for members.
   import type { TalkExternalKind } from "@nostrautica/protocol";
-  import { youTubeId, youTubeEmbedUrl } from "$lib/media/external.js";
+  import { youTubeId, youTubeEmbedUrl, talkUrlHost } from "$lib/media/external.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { url, kind }: { url: string; kind: TalkExternalKind } = $props();
@@ -14,6 +14,30 @@
   function ytEmbed(u: string): string | null {
     const id = youTubeId(u);
     return id ? youTubeEmbedUrl(id) : null;
+  }
+
+  // Third-party load gate (audit U10): nothing off-origin loads until the viewer
+  // makes an explicit gesture. Opening a talk otherwise silently discloses IP /
+  // timing / referrer to a speaker-controlled host (YouTube embed OR a direct
+  // <video src>) — which could be a tracking endpoint, not a video. We show the
+  // host and a plain-language note that playback contacts it, then load on click.
+  const host = $derived(talkUrlHost(url));
+  let loaded = $state(false);
+
+  // Set referrerPolicy BEFORE assigning src so the very first media request to the
+  // external host carries no referrer (audit U10). Doing this in markup isn't
+  // possible — `referrerpolicy` isn't typed on <video> — and setting it after a
+  // declarative `src` would be too late (the fetch already started).
+  function directVideo(node: HTMLVideoElement, u: string) {
+    // `referrerPolicy` isn't in the DOM typing for media elements, but the
+    // attribute is honored by browsers — set it before src so it applies.
+    node.setAttribute("referrerpolicy", "no-referrer");
+    node.src = u;
+    return {
+      update(next: string) {
+        node.src = next;
+      },
+    };
   }
 
   // Shared speed selector (matches MediaPlayer) for the direct-mp4 case only.
@@ -37,7 +61,21 @@
   }
 </script>
 
-{#if kind === "youtube"}
+{#if !loaded}
+  <!-- Pre-load privacy gate (audit U10): no off-origin request until this click. -->
+  <div class="load-gate">
+    <p class="gate-title">{t("talks.external.gate.title")}</p>
+    <p class="gate-host">
+      {t("talks.external.gate.host")}
+      <strong>{host ?? url}</strong>
+    </p>
+    <p class="gate-note muted">{t("talks.external.gate.note")}</p>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn primary" onclick={() => (loaded = true)}>{t("talks.external.gate.load")}</button>
+      <a class="btn" href={url} target="_blank" rel="noopener noreferrer nofollow">{t("talks.external.open")}</a>
+    </div>
+  </div>
+{:else if kind === "youtube"}
   {#if embedUrl}
     <div class="yt-wrap">
       <iframe
@@ -46,17 +84,17 @@
         loading="lazy"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
         allowfullscreen
-        referrerpolicy="strict-origin-when-cross-origin"
+        referrerpolicy="no-referrer"
       ></iframe>
     </div>
   {:else}
-    <a class="btn" href={url} target="_blank" rel="noopener noreferrer">{t("talks.external.open")}</a>
+    <a class="btn" href={url} target="_blank" rel="noopener noreferrer nofollow">{t("talks.external.open")}</a>
   {/if}
 {:else}
   <!-- svelte-ignore a11y_media_has_caption -->
   <video
     bind:this={videoEl}
-    src={url}
+    use:directVideo={url}
     controls
     playsinline
     style="max-width:100%;border-radius:12px"
@@ -78,6 +116,28 @@
 {/if}
 
 <style>
+  .load-gate {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem;
+    background: var(--bg-elev2);
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .gate-title {
+    margin: 0;
+    font-weight: 650;
+  }
+  .gate-host {
+    margin: 0;
+    font-size: 0.9rem;
+    word-break: break-all;
+  }
+  .gate-note {
+    margin: 0 0 0.4rem;
+    font-size: 0.85rem;
+  }
   /* Responsive 16:9 embed that never overflows the card. */
   .yt-wrap {
     position: relative;

@@ -21,11 +21,18 @@ const YOUTUBE_HOSTS = new Set([
   "www.youtube-nocookie.com",
 ]);
 
-/** Parse a URL, returning it only if it's a well-formed https URL. */
+/**
+ * Parse a URL, returning it only if it's a well-formed https URL. Rejects
+ * embedded credentials (audit U10: a `https://user:pass@host/…` talk URL is never
+ * a legitimate video and is a phishing/credential-leak shape) — https-only stays
+ * consistent with the media descriptor's C3 SSRF hardening.
+ */
 function httpsUrl(raw: string): URL | null {
   try {
     const u = new URL(raw.trim());
-    return u.protocol === "https:" ? u : null;
+    if (u.protocol !== "https:") return null;
+    if (u.username || u.password) return null;
+    return u;
   } catch {
     return null;
   }
@@ -65,6 +72,15 @@ export function youTubeId(raw: string): string | null {
 /** The privacy-friendly embed URL for a YouTube video id (no-cookie host). */
 export function youTubeEmbedUrl(id: string): string {
   return `https://www.youtube-nocookie.com/embed/${id}`;
+}
+
+/**
+ * The host a talk URL will contact, for the pre-load privacy gate (audit U10) —
+ * so the viewer sees WHO playback reaches before any third-party request fires.
+ * Returns null for an unusable URL.
+ */
+export function talkUrlHost(raw: string): string | null {
+  return httpsUrl(raw)?.host ?? null;
 }
 
 /**

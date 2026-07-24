@@ -76,7 +76,16 @@ export async function loadLoginMethod(): Promise<string | undefined> {
   return get<string>(METHOD_KEY);
 }
 
-/** Persist a NIP-46 (Amber) session so it survives a refresh (spec §5.3). */
+/**
+ * Persist a NIP-46 (Amber) session so it survives a refresh (spec §5.3).
+ *
+ * SECURITY (audit U17): the stored session is a BEARER CAPABILITY for the remote
+ * signer connection (client key + bunker secret), NOT the account private key,
+ * and IndexedDB is not treated as secret storage against same-origin compromise.
+ * See the `Nip46Session` doc in signer/nip46.ts for the full rationale. It is
+ * cleared predictably by `clearKeystore()` (called on every logout path) and on
+ * a detected bunker identity swap.
+ */
 export async function saveNip46Session(session: unknown): Promise<void> {
   await put(NIP46_KEY, session);
   await put(METHOD_KEY, "nip46");
@@ -86,6 +95,11 @@ export async function loadNip46Session<T>(): Promise<T | undefined> {
   return get<T>(NIP46_KEY);
 }
 
+/**
+ * Wipe all persisted login material: the local secret key, the login method, and
+ * the NIP-46 bearer capability (audit U17 — predictable clearing). Called on
+ * every logout path (session.logout) and on a NIP-46 identity mismatch.
+ */
 export async function clearKeystore(): Promise<void> {
   await del(SK_KEY);
   await del(METHOD_KEY);

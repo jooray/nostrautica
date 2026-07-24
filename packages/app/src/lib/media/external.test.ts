@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isYouTubeUrl, youTubeId, youTubeEmbedUrl, classifyTalkUrl } from "./external.js";
+import { isYouTubeUrl, youTubeId, youTubeEmbedUrl, classifyTalkUrl, talkUrlHost } from "./external.js";
 
 describe("external talk URL helpers", () => {
   it("recognizes YouTube URLs across shapes", () => {
@@ -50,5 +50,21 @@ describe("external talk URL helpers", () => {
 
   it("rejects a YouTube host without a resolvable video id", () => {
     expect(classifyTalkUrl("https://www.youtube.com/feed/trending")).toBeNull();
+  });
+
+  it("rejects https URLs carrying embedded credentials (audit U10)", () => {
+    expect(classifyTalkUrl("https://user:pass@cdn.example/talk.mp4")).toBeNull();
+    expect(classifyTalkUrl("https://user@cdn.example/talk.mp4")).toBeNull();
+  });
+});
+
+describe("talkUrlHost (audit U10 load gate)", () => {
+  it("returns the host a talk URL will contact", () => {
+    expect(talkUrlHost("https://cdn.example/talk.mp4")).toBe("cdn.example");
+    expect(talkUrlHost("https://youtu.be/dQw4w9WgXcQ")).toBe("youtu.be");
+  });
+  it("returns null for an unusable URL", () => {
+    expect(talkUrlHost("http://cdn.example/talk.mp4")).toBeNull();
+    expect(talkUrlHost("not a url")).toBeNull();
   });
 });
