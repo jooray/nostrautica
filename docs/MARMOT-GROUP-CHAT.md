@@ -7,8 +7,8 @@ what the implementation does today; the deep design docs are linked below.
 - **Normative wire spec:** [`PROTOCOL-NIP.md`](PROTOCOL-NIP.md) §10 (chat device
   keys, the kind-21607 attestation, proof of possession, per-account device cap).
 - **Multi-device design + rationale:** [`MULTIDEVICE-CHAT.md`](MULTIDEVICE-CHAT.md).
-- **Historical phased plan:** [`archive/MARMOT-GROUP-CHAT.md`](archive/MARMOT-GROUP-CHAT.md)
-  (the original §-numbered build plan that code comments still cite by section).
+- **Historical phased plan:** the original §-numbered build plan (that code comments
+  still cite by section) has been retired from the published docs.
 
 ## Per-device identity model
 
@@ -20,12 +20,18 @@ members, so the same npub can participate from mobile and desktop at once. Synce
 history across devices is a non-goal: MLS state is per-leaf and each device reads
 from its own join epoch forward.
 
-- **Local-nsec accounts** can sign the MLS identity proof directly, so the account
-  key may itself act as a chat device key.
-- **NIP-46 / NIP-07 accounts** cannot raw-sign the proof, so they mint an
-  app-generated chat device key and bind it with a 21607 attestation whose
-  `op:"add"` carries a proof of possession signed by the device key (§10.2). The
-  per-account active-device count is capped (§10.1).
+**Only attested device keys are chat members** — for *every* account type. The raw
+account pubkey is never itself an implicit chat identity; it participates only through
+a device key it has attested.
+
+- **All account types** (local-nsec, NIP-46, NIP-07) mint a fresh app-generated
+  chat device key per device and bind it with a 21607 attestation whose `op:"add"`
+  carries a proof of possession signed by the device key (§10.2). The per-account
+  active-device count is capped (§10.1).
+- A local-nsec account is no exception: it too mints and attests a distinct per-device
+  chat key rather than reusing the account key as the member. (The MLS identity proof
+  requires raw BIP-340 signing, which the app-held device key always provides;
+  NIP-46/NIP-07 signers cannot raw-sign it at all.)
 
 ## What the coordinator does (admin bot)
 

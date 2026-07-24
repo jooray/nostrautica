@@ -32,7 +32,14 @@ The public reference instance is an operator-managed conventional static host pl
 ## Release Verification
 
 1. Run `pnpm check`.
-2. Build the PWA and perform a clean coordinator Docker build once the Docker build context is fixed.
+2. Build the PWA and run a **clean-context coordinator Docker build** — it must succeed from a checkout with no working-tree state:
+
+   ```sh
+   git archive HEAD | tar -x -C /tmp/cc && cd /tmp/cc
+   docker build -f docker/coordinator.Dockerfile .
+   ```
+
+   The image's dependency layer now copies the lockfile, `patches/`, and the vendored Marmot/MLS workspace packages before `pnpm install --frozen-lockfile`, and pins the base image by digest, so this build is reproducible from a clean checkout. Keep it in the release gate.
 3. Verify app and landing HTTP status, CSP/header policy for the chosen host, and service-worker update behavior.
 4. Exercise an event flow appropriate to the release: join, approval, media where applicable, and coordinator health.
 5. Record the Git revision and deployed app/coordinator versions.

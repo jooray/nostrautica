@@ -11,9 +11,13 @@ system protects, what it deliberately leaks, and who must be trusted.
 - **Event content from non-attendees.** Intro videos, talks, directory entries,
   roster, and match matrix are encrypted under the Event Content Key (ECK), which
   only approved attendees receive (via a `21602` grant).
-- **Match reasoning from everyone but the pair** (default `match_visibility:pair`).
-  Each attendee's match list (`31605`) is NIP-44-encrypted coordinator→recipient,
-  so a pair's score/reasoning is visible only to its two members.
+- **Match reasoning from everyone but the pair and the coordinator** (default
+  `match_visibility:pair`). Each attendee's match list (`31605`) is NIP-44-encrypted
+  coordinator→recipient, so on the relays a pair's score/reasoning is readable only by
+  its two members — not other attendees, not the organizer, not the public. The
+  coordinator that *computes* the reasoning necessarily knows it (see "Trusted
+  parties"); "visible only to the pair" describes on-relay readership, not concealment
+  from the coordinator.
 - **User-private data** (favorites, want-to-meet, met, notes) — NIP-44
   self-encrypted `30078`, unreadable by everyone, including the coordinator.
 - **Event impersonation.** Only `E_id` signs the public event/config/invite lists.
@@ -46,9 +50,17 @@ system protects, what it deliberately leaks, and who must be trusted.
 ## Trusted parties
 
 - **Coordinator** — reads all event-encrypted content (it must, to transcribe
-  videos). It is organizer-chosen infrastructure and is surfaced as such in the UI
-  ("operated by `<npub>`"). It **cannot** impersonate the event or alter the public
-  event/config/invites.
+  videos) and, because it computes matches, knows all pairwise match reasoning. It is
+  organizer-chosen infrastructure and is surfaced as such in the UI ("operated by
+  `<npub>`"). It **cannot** impersonate the event or alter the public
+  event/config/invites. **Attendee-derived data is mostly plaintext at rest in the
+  coordinator's SQLite** (profiles, AI profiles, transcripts, corrections, pair
+  reasoning, talk data): only key material (`E_inbox` nsec, ECKs), Cashu proofs, and
+  selected MLS/pipeline values are NIP-44-encrypted under the coordinator identity.
+  File mode `0600` is access control, **not** encryption — a read-only database or
+  unencrypted-backup disclosure reveals attendee bios, transcripts, inferred
+  interests, and pairwise reasoning without the coordinator identity key. Operators
+  must protect the database file and encrypt backups at rest accordingly.
 - **LLM / STT provider** — sees plaintext transcripts and summaries. Mitigations:
   v1 prefers Venice private/TEE-tier models (`require_private`); v2 uses
   operator-chosen Routstr nodes.
@@ -58,24 +70,31 @@ system protects, what it deliberately leaks, and who must be trusted.
 
 - **Coordinator authority.** The coordinator is an MLS group member/admin and can
   read group chat. It adds/removes members and therefore needs durable MLS state.
-- **Chat identity.** Local-key accounts use their account key as their chat
-  identity. NIP-07/NIP-46 accounts use an app-held chat device key, authorized to
-  the coordinator by an account-sealed `21607`. That attestation proves account
-  authorization, not possession of the attested chat private key.
-- **Relay backup.** A remote-signer device key is self-encrypted to the account and
-  published in a blinded replaceable `31602` entry. It contains only the raw
-  32-byte identity key, not MLS group/epoch state, membership state, or history.
-  Relays still observe the author and timing. Compromise of the account signer can
-  recover this stable chat identity key.
-- **Devices and history.** A restored identity may be used on another device, but
-  each device has its own MLS leaf and sees only from its own join epoch. Browser
-  eviction requires a fresh key package, coordinator re-add, and Welcome; history
-  during the gap is lost to that client.
-- **Recovery limits.** Backup fetch failure is not equivalent to confirmed absence;
-  competing replaceable backups and multi-tab state can fork identity/state. Normal
-  logout encrypts chat state, but best-effort encryption failure can leave local
-  plaintext. Coordinator database loss can orphan MLS administration; verified
-  backups and a second administrator are operational requirements.
+- **Chat identity is per device — attested devices only.** Every browser/device
+  mints its own chat device keypair on first chat use, for *every* account type
+  (local key, NIP-07, NIP-46 alike), and attests it to the account with an
+  account-sealed `21607` carrying a proof of possession signed by the device key.
+  Only attested device keys are group members; the raw account pubkey is **never**
+  itself an implicit chat identity — a local-key account attests its own per-device
+  key like any other. The attestation proves the account authorized this device key
+  *and* (via the possession proof) that the attester controls it.
+- **No backup, no restore.** There is no relay backup of a chat device key and no
+  cross-device restore of chat identity (wire v1's self-encrypted `31602`
+  chat-device-key backup is retired, and existing ones are best-effort deleted on the
+  first v2 chat session). A device is *added* by attestation and *removed* by
+  revocation; a lost, evicted, or logged-out device is revoked from another
+  still-logged-in device, not recovered. This removes v1's forkable
+  competing-backup and account-signer-recovers-chat-key exposures entirely.
+- **Devices and history.** Each device has its own MLS leaf and sees group history
+  only from its own join epoch forward — history never syncs between devices (MLS
+  semantics, by design). Browser eviction requires a fresh key package, coordinator
+  re-add, and Welcome; history during the gap is lost to that client.
+- **Recovery limits.** Normal logout self-encrypts local chat state, but a
+  best-effort encryption failure can leave local plaintext. Coordinator database loss
+  can orphan MLS administration; verified coordinator backups plus a second
+  administrator are operational requirements — every approved organizer's attested
+  chat devices are automatically promoted to MLS co-admins as the backstop when a
+  backup is unavailable.
 
 ## Revocation honesty
 

@@ -74,7 +74,8 @@ docker compose -f docker/docker-compose.yml up
 - **PWA** → nsite (`nsyte deploy`, kinds 15128/35128 + Blossom) and/or any static
   host. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and
   [`packages/app/README-deploy.md`](packages/app/README-deploy.md).
-- **Coordinator** → `docker/coordinator.Dockerfile` (node + ffmpeg), configured by
+- **Coordinator** → `docker/coordinator.Dockerfile` (node + ffmpeg; builds from a clean
+  checkout, base image pinned by digest), configured by
   [`packages/coordinator/coordinator.example.toml`](packages/coordinator/coordinator.example.toml)
   + env secrets. Installed per-event by a `21603` grant — no per-event server config.
   See [`docs/COORDINATOR-OPERATOR-GUIDE.md`](docs/COORDINATOR-OPERATOR-GUIDE.md).

@@ -14,12 +14,38 @@ single product release.
 | `@nostrautica/protocol` | `packages/protocol/package.json` | The shared protocol **package API** (types/schemas/helpers) changes. |
 | `@nostrautica/coordinator` | `packages/coordinator/package.json` | The coordinator **package API/behavior** changes. |
 | Wire protocol `v` | `PROTOCOL_VERSION` in `packages/protocol/src/schemas.ts` | The **on-the-wire payload contract** changes. This is deliberately separate: package versions can move without a wire change, and a wire change is a compatibility event for every peer. Currently `2`. |
-| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the backup/restore downgrade guard). Currently `1`. |
+| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `2`. |
 
 Do **not** infer compatibility from equal or unequal package versions. Compatibility
 is defined by the wire protocol version (and the protocol registry,
 `docs/PROTOCOL-REGISTRY.md`) and by the specific tested release commit — never by a
 package number.
+
+## Store schema migrations (`SCHEMA_VERSION`)
+
+The coordinator's SQLite schema uses a **numbered, ordered migration model** (audit
+O3). It has two parts:
+
+- **Baseline DDL** runs unconditionally on every read-write open. Every statement is
+  idempotent (`CREATE TABLE IF NOT EXISTS`, `ALTER … ADD COLUMN` guarded against
+  "column exists"), so it brings *any* historical database up to full column
+  completeness regardless of exactly which columns a past binary had added — this
+  matters because many pre-v2 databases were all stamped `user_version = 1` with
+  differing column sets.
+- **Numbered migrations** carry the downgrade-incompatible boundaries. Each runs in a
+  single transaction and advances `PRAGMA user_version` at its boundary. Version `2`
+  is the first such boundary (it adds the audit C3/C5 tables — inbound rate accounting
+  and the reference-count tables for retention deletion).
+
+The open path **refuses** a database whose `user_version` is greater than the binary's
+`SCHEMA_VERSION` (a database written by a newer coordinator), with a clear operator
+message to upgrade the coordinator first. From v2 onward the same refusal applies at
+`Store` open **and** at backup verify/restore (`schemaTooNew`) — an older binary can no
+longer silently open or restore a database a newer binary has migrated. The residual
+risk that a *pre-remediation* (pre-v2) binary rewrites the marker back to `1` is
+inherent to those old binaries and unfixable from here; the operational rule is simply
+**do not run superseded binaries against a migrated database** — take the pre-upgrade
+backup (operator guide §7) so a rollback restores a schema the old binary accepts.
 
 ## The release manifest
 

@@ -10,7 +10,7 @@ Päť minút nastavenia, celé na telefóne.
 
 Klepnite na odkaz, ktorý ste dostali. Zobrazí sa vám **Prehľad** podujatia — čo to je, kedy a kde — a tlačidlo na pripojenie. Ak organizátor zverejnil nejaké oznámenia, aj tie sa objavia hneď tu.
 
-Keď ste vnútri podujatia, spodná lišta sa celá týka *tohto* podujatia: **Prehľad** (kde ste teraz), **Ľudia**, **Spojenia**, **Novinky** a **Viac** (váš účet, nastavenia, ostatné podujatia). Malá hlavička navrchu vám vždy hovorí, v ktorom podujatí ste a či ste návštevník, čakáte, alebo ste vnútri.
+Keď ste vnútri podujatia, spodná lišta sa celá týka *tohto* podujatia: **Prehľad** (kde ste teraz), **Ľudia**, **Spojenia**, **Novinky** a **Viac** (váš účet, nastavenia, ostatné podujatia). Ďalšie dve karty sa objavia len vtedy, keď organizátor tie funkcie zapne: **Prednášky** (§4.5) a **Chat** (§6.5) — ak ich nevidíte, toto podujatie ich jednoducho nepoužíva. Malá hlavička navrchu vám vždy hovorí, v ktorom podujatí ste a či ste návštevník, čakáte, alebo ste vnútri.
 
 ![Prehľad podujatia](images/participant-sk/02-event-overview-light.png)
 
@@ -52,11 +52,16 @@ Späť na **Prehľade** vás krátky kontrolný zoznam **„Pripravujeme vás"**
 
 Nižšie na tej istej stránke Prehľad, keď ste už schválení, nájdete kartu
 **Stiahnuť na offline použitie**. Klepnutím na ňu si aplikácia vopred stiahne
-ľudí, spojenia a prednášky, takže sa dajú prezerať aj bez signálu — hodí sa
-to v preplnenej miestnosti, kde si všetky telefóny súperia o rovnaké slabé
-pripojenie. Samotné video a zvuk sa vopred nesťahujú (len všetko ostatné, čo
-potrebujete), a kedykoľvek môžete klepnúť na **Aktualizovať offline kópiu**,
-aby ste si ju obnovili.
+ľudí, spojenia a prednášky *a zároveň načíta aj samotné obrazovky*, ktoré ich
+zobrazujú (Ľudia, Spojenia, Prednášky, stránka prednášky, Nahrávanie, Môj profil,
+Novinky), takže sa všetko dá prezerať aj bez signálu — hodí sa to v preplnenej
+miestnosti, kde si všetky telefóny súperia o rovnaké slabé pripojenie. Staršie verzie
+síce stiahli údaje, ale niektorú obrazovku (napríklad Prednášky) sa offline aj tak
+nemuselo podariť *otvoriť*; teraz sa obrazovky sťahujú spolu s nimi. Samotné video a
+zvuk sa vopred stále nesťahujú (len všetko ostatné, čo potrebujete), a kedykoľvek
+môžete klepnúť na **Aktualizovať offline kópiu**, aby ste si ju obnovili. Ak sa
+niečo nepodarilo stiahnuť, karta to povie namiesto toho, aby predstierala, že je
+kompletná.
 
 ### Uložte si kľúč (30 sekúnd — naozaj to urobte)
 
@@ -79,10 +84,13 @@ Skôr než sa čokoľvek nahrá, aplikácia vám jasne povie, kto to spracúva �
 ![Nahrávanie predstavenia — video, zvuk a textový režim](images/participant-sk/09-record-light.png)
 
 Aplikácia si na pozadí kontroluje nové verzie a automaticky sa aktualizuje —
-nikdy však uprostred nahrávania alebo keď máte rozpísané a neodoslané
-predstavenie. Počká, kým neskončíte a pole nie je prázdne alebo odoslané, až
-potom sa prípadne znova načíta, takže aktualizácia v nesprávnej chvíli vás
-nemôže pripraviť o záber.
+nikdy však vo chvíli, ktorá by vás pripravila o prácu. Aktualizáciu podrží, kým
+nahrávate, kým máte hotový záber, ktorý ste ešte neodoslali, kým je neodoslaný súbor,
+ktorý ste vybrali, alebo odkaz na prednášku, ktorý ste vložili, a kým máte rozpísané
+predstavenie. Počká, kým to odošlete alebo zahodíte, až potom sa znova načíta, takže
+aktualizácia v nesprávnej chvíli vás nemôže pripraviť o záber. (Robí to tak, že
+znovunačítanie *odloží* — váš záber sa neukladá na disk, takže hotový, no neodoslaný
+záber tam nenechávajte celé dni; odošlite ho.)
 
 **Už ste niečo nahrali na inom podujatí?** Ak áno, na tejto obrazovke sa nad
 nahrávaním zobrazí **galéria na opätovné použitie** — každé video, zvuk alebo
@@ -248,11 +256,15 @@ Ešte jedna vec: **Viac → Nastavenia** má tmavý režim a prepínač jazyka (
 
 Pripojili ste sa k nesprávnemu podujatiu, alebo ste si to jednoducho
 rozmysleli? Otvorte podujatie, prejdite na koniec stránky a klepnite na
-**Opustiť podujatie**. Potvrďte, a váš záznam v zozname účastníkov, vaše
-spojenia aj predstavovacie médiá sa odstránia — rovnako čisto, ako keby vás
-odobral organizátor, len ste to urobili sami a nikto to nemusí schvaľovať.
-Neskôr sa môžete znova pripojiť; berie sa to ako úplne nová žiadosť o
-pripojenie, nie obnovenie tej starej.
+**Opustiť podujatie**. Po potvrdení aplikácia **odošle žiadosť o odchod** — netvrdí,
+že ste okamžite zmizli, lebo to nedokáže. Odstránenie vášho záznamu zo zoznamu
+účastníkov, výmena kľúča podujatia aj zmazanie vašich predstavovacích médií prebehnú
+na strane koordinátora (alebo organizátora) až po prijatí žiadosti, takže obrazovka
+ukáže stav „čaká sa" namiesto toho, aby predstierala, že je hotovo. Ak ste pri
+klepnutí offline, žiadosť sa zaradí do fronty a aplikácia vám jasne povie, že ste
+ešte neodišli — odošle sa, keď budete znova online. Keď je potvrdená, ste vonku;
+neskôr sa môžete znova pripojiť, berie sa to ako úplne nová žiadosť o pripojenie, nie
+obnovenie tej starej.
 
 ## Súkromie v jednom odseku
 

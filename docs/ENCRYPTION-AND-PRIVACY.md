@@ -58,7 +58,7 @@ concrete code issues (F1–F3) have since been fixed.
 | **Coordinator identity** | secp256k1 | operator-provided | env `NOSTRAUTICA_COORDINATOR_NSEC` or `ncryptsec_file` + passphrase | coordinator operator | public key referenced in `31600` `coordinator` tag |
 | **Media key** (AES-256-GCM) | 32 bytes + 12-byte IV | fresh per blob, `aesGcmEncrypt()` | only inside encrypted media descriptors | anyone who can read the descriptor | rides inside `21601`/`31602`/`31603` payloads, never its own event |
 | **Blinding key** | derived / 32-byte seed | self-conversation-key (local) or random seed in `30078` `nostrautica:blindseed` (remote signer) | derived, or self-encrypted `30078` | the user | never (it's a self-secret) |
-| **Remote-signer chat device key** | 32-byte secp256k1 secret | generated locally when a NIP-07/NIP-46 account first opens chat | local Marmot IndexedDB state; self-encrypted blinded `31602` relay backup | the account's chat client | never directly; the coordinator receives only its public key through account-sealed `21607` |
+| **Chat device key** | 32-byte secp256k1 secret | generated locally the first time **any** account type (local key, NIP-07, NIP-46) opens event chat on a device | this device's IndexedDB only — **no relay backup, no cross-device restore** (v1's `31602` chat-device-key backup is retired) | that device's chat client | never directly; the coordinator receives only its public key through an account-sealed `21607` attestation with a device-key proof of possession |
 
 ---
 
@@ -81,20 +81,23 @@ project-wide; the ladder passes `'nip44'` explicitly). Source: `crypto.ts`.
 
 ### Marmot state and recovery
 
-The remote-signer chat backup contains only the 32-byte chat identity key. It does
-not transfer MLS group/epoch state, key-package material, membership state, or
-history. A second device restores the identity but joins with its own client slot
-and MLS leaf, so its readable history starts at its own join epoch.
+Chat identity is **per device** and is not backed up or restored (wire v2). Every
+device — for every account type — mints its own chat device key, held only in that
+device's IndexedDB, and attests it to the account via a `21607`. There is no relay
+backup of a chat device key and no cross-device restore: a lost, evicted, or
+logged-out device is *revoked* from another still-logged-in device, not recovered.
+Each device joins with its own MLS leaf, so its readable history starts at its own
+join epoch. (This retires v1's self-encrypted `31602` chat-device-key backup, and
+with it the forkable competing-backup and "account-signer compromise recovers the
+chat key" exposures the old design carried; existing `31602` backups are best-effort
+NIP-09-deleted on the first v2 chat session.)
 
 Coordinator Marmot state in SQLite is non-reconstructible operational state. Back
 up the database with the coordinator identity key, restore-test it, and keep a
-second administrator for chat-enabled events. Browser logout normally self-encrypts
-chat state; if that best-effort step fails, plaintext local state can remain.
-
-The relay backup is self-encrypted, but relays observe its author/timing. Account
-signer compromise can decrypt it. Backup retrieval failure and confirmed absence
-are not equivalent, and concurrent backup creation can fork identities; these are
-known implementation limitations, not guarantees supplied by the backup format.
+second administrator for chat-enabled events (every approved organizer's attested
+chat devices are automatically MLS co-admins, the backstop for coordinator DB loss).
+Browser logout normally self-encrypts chat state; if that best-effort step fails,
+plaintext local state can remain.
 
 **Assessment: primitives are used correctly.** Using the ECK directly as a
 NIP-44 conversation key is unusual but sound — NIP-44's construction takes a
@@ -341,6 +344,42 @@ already holds the plaintext/keys. "Delete" is cosmetic, not a security boundary.
 claims invites in its own SQLite (`InviteChecker`), so a wiped DB or a race can
 let a code appear reusable; the failure mode is benign (falls back to manual
 queue), as the spec states. Not a vulnerability, just a caveat.
+
+**F9 — Attendee-derived data is mostly plaintext at rest in the coordinator DB.**
+Only key material (`E_inbox` nsec, ECKs — F1), Cashu proofs, and selected
+MLS/pipeline artifact values are NIP-44-encrypted under the coordinator identity.
+The materialized copies of everything the coordinator derives — attendee profiles,
+AI profiles, transcripts, corrections, Nostr summaries, pair reasoning, and talk
+transcripts/metadata — are **plaintext SQLite fields**. File mode `0600` is access
+control, not encryption. A read-only database read or an unencrypted-backup
+disclosure therefore reveals attendee bios, voice transcripts, inferred interests,
+and pairwise reasoning *without* needing the coordinator identity key. This is a
+disclosed limitation, not a fixed gap: operators must protect the database file and
+encrypt backups at rest (operator guide §5). Prefer full-database encryption with
+separate key custody if the deployment's data sensitivity warrants it.
+
+**F10 — "Delete member data" is now real, but reference-counted and backup-bounded.**
+Withdrawal (21610) and retention now perform an event-wide local purge of the
+coordinator's own copies (profiles, AI profiles, transcripts, pair reasoning, talks,
+summaries) in addition to deleting relay records across *all* historical ECK
+versions — not just the current relay entries. Two honest caveats: (1) content-
+addressed payloads (e.g. a shared transcript-cache or pipeline artifact) are
+**reference-counted** — a deduplicated payload still referenced by another event
+**survives** this event's purge, and is deleted only when its last reference is
+gone; (2) a backup taken *before* a purge still contains the purged data — the
+coordinator cannot reach external backup files, so operators must rotate/expire old
+backups themselves (operator guide §5). NIP-09 relay deletion remains advisory.
+
+**F11 — A remote signer (NIP-46) leaves a bearer capability in the browser.** When a
+user signs in with Amber/bunker (NIP-46), the app stores a *connection capability*
+(a client key plus the bunker secret) in IndexedDB so the session survives refreshes.
+This is **not** the account private key (the external signer keeps that) and it is
+**not** encrypted at rest beyond the browser's own storage isolation — treat it like
+a logged-in session on a shared device. It is cleared on logout and when the signer
+answers for a different account; full revocation is done by disconnecting the app in
+the signer. Wrapping it under a WebCrypto credential was considered and deliberately
+declined (it would defend only an offline IndexedDB dump, not the dominant
+same-origin-script threat, while complicating boot-time session restore).
 
 **Things that are correct and worth crediting:** two-key `E_id`/`E_inbox` split;
 pubkey-bound invite proofs; hash-hidden invite lists; NIP-44 everywhere with no

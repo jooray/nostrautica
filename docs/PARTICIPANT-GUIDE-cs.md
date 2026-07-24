@@ -10,7 +10,7 @@ Pět minut nastavení, celé na telefonu.
 
 Klepněte na odkaz, který jste dostali. Zobrazí se vám **Přehled** akce — co to je, kdy a kde — a tlačítko pro připojení. Pokud organizátor zveřejnil nějaká oznámení, i ta se objeví hned tady.
 
-Jakmile jste uvnitř akce, spodní lišta se celá týká *této* akce: **Přehled** (kde jste teď), **Lidé**, **Spojení**, **Novinky** a **Více** (váš účet, nastavení, ostatní akce). Malá hlavička nahoře vám vždycky říká, ve které akci jste a jestli jste návštěvník, čekáte, nebo jste uvnitř.
+Jakmile jste uvnitř akce, spodní lišta se celá týká *této* akce: **Přehled** (kde jste teď), **Lidé**, **Spojení**, **Novinky** a **Více** (váš účet, nastavení, ostatní akce). Další dvě karty se objeví jen tehdy, když organizátor tyto funkce zapne: **Přednášky** (§4.5) a **Chat** (§6.5) — pokud je nevidíte, tato akce je prostě nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a jestli jste návštěvník, čekáte, nebo jste uvnitř.
 
 ![Přehled akce](images/participant-cs/02-event-overview-light.png)
 
@@ -52,11 +52,15 @@ Zpátky na **Přehledu** vás krátký kontrolní seznam **„Připravujeme vás
 
 Níž na téže stránce Přehled, jakmile jste schváleni, najdete kartu
 **Stáhnout pro offline použití**. Klepnutím na ni si aplikace předem stáhne
-lidi, spojení a přednášky, takže se dají procházet i bez signálu — hodí se
-to v přeplněné místnosti, kde si všechny telefony soupeří o stejné slabé
-připojení. Samotné video a zvuk se předem nestahují (jen všechno ostatní, co
-potřebujete), a kdykoli můžete klepnout na **Aktualizovat offline kopii**,
-abyste si ji obnovili.
+lidi, spojení a přednášky *a zároveň načte i samotné obrazovky*, které je
+zobrazují (Lidé, Spojení, Přednášky, stránka přednášky, Nahrávání, Můj profil,
+Novinky), takže se všechno dá procházet i bez signálu — hodí se to v přeplněné
+místnosti, kde si všechny telefony soupeří o stejné slabé připojení. Starší verze
+sice stáhly data, ale některou obrazovku (třeba Přednášky) se offline stejně nemuselo
+podařit *otevřít*; teď se obrazovky stahují spolu s nimi. Samotné video a zvuk se
+předem stále nestahují (jen všechno ostatní, co potřebujete), a kdykoli můžete
+klepnout na **Aktualizovat offline kopii**, abyste si ji obnovili. Pokud se něco
+nepodařilo stáhnout, karta to řekne, místo aby předstírala, že je kompletní.
 
 ### Uložte si klíč (30 vteřin — opravdu to udělejte)
 
@@ -79,10 +83,13 @@ Než se cokoli nahraje, aplikace vám jasně řekne, kdo to zpracovává — ú�
 ![Nahrávání představení — video, zvuk a textový režim](images/participant-cs/09-record-light.png)
 
 Aplikace na pozadí kontroluje nové verze sebe sama a automaticky se
-aktualizuje — nikdy ale uprostřed nahrávání nebo když máte rozepsané a
-neodeslané představení. Počká, až budete hotovi a pole je prázdné nebo
-odeslané, teprve pak se případně znovu načte, takže aktualizace ve
-špatnou chvíli vás nemůže připravit o záběr.
+aktualizuje — nikdy ale ve chvíli, která by vás připravila o práci. Aktualizaci
+podrží, dokud nahráváte, dokud máte hotový záběr, který jste ještě neodeslali, dokud
+je neodeslaný soubor, který jste vybrali, nebo odkaz na přednášku, který jste vložili,
+a dokud máte rozepsané představení. Počká, až to odešlete nebo zahodíte, teprve pak
+se znovu načte, takže aktualizace ve špatnou chvíli vás nemůže připravit o záběr.
+(Dělá to tak, že znovunačtení *odloží* — váš záběr se neukládá na disk, takže hotový,
+ale neodeslaný záběr tam nenechávejte celé dny; odešlete ho.)
 
 **Už jste něco nahráli na jiné akci?** Pokud ano, na této obrazovce se nad
 nahráváním zobrazí **galerie pro opětovné použití** — každé video, zvuk nebo
@@ -246,11 +253,14 @@ Ještě jedna věc: **Více → Nastavení** má tmavý režim a přepínač jaz
 
 Připojili jste se ke špatné akci, nebo jste si to prostě rozmysleli?
 Otevřete akci, sjeďte na konec stránky a klepněte na **Opustit akci**.
-Potvrďte, a váš záznam v seznamu účastníků, vaše spojení i představovací
-média se odstraní — stejně čistě, jako kdyby vás odebral organizátor, jen
-jste to udělali sami a nikdo to nemusí schvalovat. Později se můžete znovu
-připojit; bere se to jako úplně nová žádost o připojení, ne obnovení té
-staré.
+Po potvrzení aplikace **odešle žádost o odchod** — netvrdí, že jste okamžitě zmizeli,
+protože to nedokáže. Odstranění vašeho záznamu ze seznamu účastníků, výměna klíče
+akce i smazání vašich představovacích médií proběhnou na straně koordinátora (nebo
+organizátora) až po přijetí žádosti, takže obrazovka ukáže stav „čeká se" místo toho,
+aby předstírala, že je hotovo. Pokud jste při klepnutí offline, žádost se zařadí do
+fronty a aplikace vám jasně řekne, že jste ještě neodešli — odešle se, až budete znovu
+online. Jakmile je potvrzená, jste venku; později se můžete znovu připojit, bere se to
+jako úplně nová žádost o připojení, ne obnovení té staré.
 
 ## Soukromí v jednom odstavci
 

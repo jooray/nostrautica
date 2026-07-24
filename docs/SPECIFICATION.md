@@ -164,7 +164,7 @@ Privacy note: reusing the identical blob means the ciphertext hash publicly link
 
 Pairwise reasoning ("you should meet her because your startup lacks exactly her skill") is the most sensitive derived data in the system, so:
 
-- **Default `match_visibility: "pair"`** — the coordinator publishes one **match list per attendee** (kind 31605), NIP-44-encrypted coordinator→attendee. A pair's score/reasoning is visible only to its two members (each via their own list). N events, not N².
+- **Default `match_visibility: "pair"`** — the coordinator publishes one **match list per attendee** (kind 31605), NIP-44-encrypted coordinator→attendee. On the wire a pair's score/reasoning is readable only by its two members (each via their own list) — not other attendees, not the organizer, not the public. N events, not N². The coordinator itself is the exception: it *computes* the reasoning, so it necessarily knows it (as it does all event-tier content). "Visible only to the pair" is about who can read it off the relays, never a claim that it is hidden from the coordinator that generated it.
 - **Reasoning is directional.** Pair scoring emits two reasonings — one addressed to each member ("why *you* should meet them", grounded in that recipient's own goals) — stored per-direction; each attendee's list surfaces the reasoning written *for them*. It answers "why should I meet him/her?" from the reader's perspective, not a symmetric blurb. Scores (score/similarity/complementarity) are decimals in [0,1]; the coordinator defensively clamps/rescales provider output that ignores the range.
 - **Opt-in `match_visibility: "event"`** — additionally a full score matrix (kind 31606) under ECK, for facilitated events that project a "best matches" board.
 
@@ -209,7 +209,7 @@ Gift-wrap mechanics per NIP-59: rumor (unsigned) → seal kind 13 (NIP-44, signe
 
 ### 7.1 Public events (author `E_id`)
 
-**kind 31923 — the event itself (NIP-52, unmodified)** — `d`, `title`, `start`/`end` (unix), `start_tzid`, `summary`, `image`, `location`(s), `g` geohash, `t` hashtags, `p` participants with roles. Interoperates with Flockstr/Meetstr/any NIP-52 client. Optionally referenced from a kind 31924 calendar.
+**kind 31923 — the event itself (NIP-52)** — `d`, `title`, `start`/`end` (unix), `start_tzid`, `summary`, `image`, `location`(s), `g` geohash, `t` hashtags, `p` participants with roles, plus current NIP-52 uppercase **`D` day-index tags**: one `["D", "YYYY-MM-DD"]` (UTC) tag for each calendar day the event's `start`..`end` range spans, so date-indexed calendar clients can discover the event on every day it runs. The count is bounded at `MAX_DAY_TAGS = 60` days; an event with no `end` (or an `end` before `start`) emits the single start-day tag. Interoperates with Flockstr/Meetstr/any NIP-52 client. Optionally referenced from a kind 31924 calendar.
 
 **kind 31600 — Event Networking Config**
 ```
@@ -281,13 +281,25 @@ Replaceable — organizer republishes to add/void codes (voiding = removing the 
 
 The complete rumor registry, including 21606–21610, is maintained in [PROTOCOL-REGISTRY.md](PROTOCOL-REGISTRY.md). The entries below explain the primary flows.
 
-**rumor kind 14 — Direct Message (NIP-17, unmodified)** (→ recipient pubkey, and a
-second wrap → the sender's own pubkey so sent messages are recoverable on any
-device). Standard NIP-17 private direct messages between attendees — plaintext in
-`content`, `["p", <recipient>]` tag, optional `["subject", …]`. Because this is
-plain NIP-17, conversations started in Nostrautica continue seamlessly in 0xchat,
-Amethyst, or any other NIP-17 client — before, during, and after the event. The
-app's DM inbox unwraps incoming 1059s and keeps only kind-14 rumors; wrap
+**rumor kind 14 — Direct Message (NIP-17 with a deliberate relay-selection extension)**
+(→ recipient pubkey, and a second wrap → the sender's own pubkey so sent messages are
+recoverable on any device). Standard NIP-17 private direct messages between attendees —
+plaintext in `content`, `["p", <recipient>]` tag, optional `["subject", …]`. The message
+shape is unmodified NIP-17, so conversations started in Nostrautica continue seamlessly in
+0xchat, Amethyst, or any other NIP-17 client — before, during, and after the event.
+
+**Relay selection is a product extension, not unmodified NIP-17.** Rather than publishing
+the recipient copy strictly to the recipient's kind-10050 DM-relay list (and declining
+when none exists, as NIP-17 prescribes), the app **unions** the recipient's declared
+kind-10050 relays with the app-default DM relays, and sends to the defaults alone when the
+recipient has published no list. This is a deliberate reliability choice for the event
+setting — an app-created attendee may not have a 10050 yet, and venue networks are flaky —
+at the cost of exposing recipient metadata to relays the recipient did not choose. To keep
+new attendees reachable, the app **also publishes a kind-10050** for every app-generated
+account identity during onboarding (check-before-publish: it never overwrites a list the
+user already has). Do not describe DMs here as "NIP-17, unmodified".
+
+The app's DM inbox unwraps incoming 1059s and keeps only kind-14 rumors; wrap
 timestamps are randomized per NIP-59 so ordering uses the rumor's `created_at`.
 No event coupling: DMs are between pubkeys; the event UI is just the entry point
 (Message button on an attendee's profile).

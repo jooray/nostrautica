@@ -94,10 +94,15 @@ Clients maintain `rev` monotonically per (coordinate, kind) in their own storage
 - `expires` (unix seconds): the command is void after this time. Clients **SHOULD** set
   `created_at + 172800` (48 h) by default.
 - Per-subject ordering: the coordinator keeps, per (coordinate, command subject), the
-  watermark `(created_at, rumor_id)` of the last applied command. A command that does not
-  supersede the watermark under the §3.1 ordering rule **MUST** be rejected. The *subject*
-  is `args.pubkey` for `approve`/`revoke`/`reprocess`, `(args.pubkey, args.talk_d)` for
-  talk commands, and the coordinate itself for `recompute` and `detach`.
+  watermark `(created_at, rumor_id)` of the last **fully applied** command. A distinct
+  command that does not supersede the watermark under the §3.1 ordering rule **MUST** be
+  rejected. The watermark advances only once the command's entire effect chain (grants,
+  roster, deletions, MLS actions, purge) has durably completed: a command interrupted by
+  a publication, MLS, or database failure leaves the watermark unadvanced (recorded
+  `pending` with per-publication progress), so redelivery of the *same* rumor resumes it
+  to completion rather than being suppressed as stale. The *subject* is `args.pubkey` for
+  `approve`/`revoke`/`reprocess`, `(args.pubkey, args.talk_d)` for talk commands, and the
+  coordinate itself for `recompute` and `detach`.
 
 On backfill/restore, an expired command is skipped — an old `revoke` or `recompute` can
 never re-execute after a database loss. Approve/revoke interleavings resolve
@@ -206,9 +211,17 @@ randomized up to 2 days into the past).
 
 - `RUMOR_KINDS` = {14, 21600–21610}. Nothing else may appear in a wrap; a leaked rumor
   kind is in the ephemeral range so relays won't store it.
-- Unwrap validation (every consumer): wrap kind 1059; seal kind 13; structural rumor
-  shape; **`rumor.pubkey == seal.pubkey`**; rumor id recomputed and matched; `created_at`
-  clamped to ≤ now + 900 s.
+- Unwrap validation (every consumer): the outer wrap **MUST** be a valid signed
+  kind-1059 event (id recomputed, Schnorr signature verified). The seal **MUST** be a
+  complete **signed** kind-13 event with **empty tags** whose id recomputes and whose
+  Schnorr signature verifies. NIP-44 decryption does **not** authenticate the seal
+  author — ECDH yields the same conversation key for both parties, so a holder of the
+  recipient secret can encrypt a seal claiming any sender pubkey and it decrypts
+  cleanly. The kind-13 signature is therefore the sole proof of seal authorship, and
+  every consumer **MUST** verify it before trusting `rumor.pubkey` (authorization
+  throughout this protocol treats the seal author as an authenticated identity). Then:
+  structural rumor shape; **`rumor.pubkey == seal.pubkey`**; rumor id recomputed and
+  matched; `created_at` clamped to ≤ now + 900 s.
 - Subscription window: `since = now − 259200` (3 days). Consumers dedupe by rumor id.
 - Coordinator dedupe: durable `seen_rumors` ledger keyed by wrap id and rumor id, retained
   indefinitely (§3.4); atomic in-process claim before dispatch; a durable cross-process
@@ -280,7 +293,14 @@ silently drop them.
   - `["matching", "on"|"off"]` — default `"off"` (only the literal `"on"` enables it).
   - `["match_visibility", "pair"|"event"]` — default `"pair"`.
   - `["approval", "manual"|"invite"|"manual+invite"]` — default `"manual"`.
-  - `["eck", <int>]` — the current ECK version; default/floor 1.
+  - `["eck", <int>]` — **bootstrap only**: the ECK version in force when this config
+    was last signed by `E_id` (default/floor 1). It is **NOT** the authority for the
+    *current* ECK version. Because a coordinator cannot sign the `E_id`-authored 31600,
+    coordinator-driven rotation (on revoke/withdraw) never updates this tag, so it goes
+    stale after the first rotation. First-party readers **MUST** derive the current ECK
+    from the coordinator-signed grants (21602/21605) and the roster (31604 `eck_current`),
+    never from this tag. An organizer client that re-signs the config (attach/detach) MAY
+    refresh the tag to the rotated version, but nothing may depend on it being current.
   - `["nostr_context", <int>]` — how many public Nostr events per attendee the
     coordinator summarizes as matching context; default 0 (off).
   - `["lang", <iso639-1>]` — event language; omitted when `"en"` (the implicit default).
@@ -923,8 +943,13 @@ sha256( utf8( JSON.stringify(
 ```
 
 The coordinator **MUST** verify the proof before binding a device to an account — an
-account cannot attest a key it does not control. `op:"revoke"` needs no proof (the account
-is evicting a key it already named; possession is irrelevant to that decision). Bindings
+account cannot attest a key it does not control. **Only attested device keys are chat
+members**: the coordinator authorizes exactly the active attested device keys and nothing
+else — the attendee/organizer **account pubkey is never an implicit chat identity**. A
+local-key account is no exception; it mints and attests its own per-device chat key like
+any other account type (§10.1), and that attested device — not the raw account key — is
+what participates. `op:"revoke"` needs no proof (the account is evicting a key it already
+named; possession is irrelevant to that decision). Bindings
 are per (coordinate, account); a chat pubkey **MUST NOT** be bindable to two different
 accounts; rebinding it to the same account (e.g. re-add after revoke) mints a fresh
 binding. On account revocation from the event, **all** of that account's device leaves are
