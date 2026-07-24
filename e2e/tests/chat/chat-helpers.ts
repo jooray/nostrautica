@@ -61,29 +61,10 @@ export async function createChatEvent(page: Page, coordNpub: string, title: stri
   await page.getByRole("button", { name: /attach coordinator/i }).first().click();
   await expect(page.getByText(/coordinator attached/i)).toBeVisible({ timeout: 20_000 });
 
-  // CRITICAL install-race workaround (coordinator installEvent):
-  // The event ALWAYS has a first config with NO coordinator (create is
-  // coordinator-less), then attach publishes config2-with-coordinator + the grant
-  // CONCURRENTLY. When the coordinator processes that first grant, it fetches the
-  // newest 31600 — and if config2 hasn't propagated yet it reads config1 (no
-  // coordinator) and HARD-rejects the install (no retry), so it never subscribes to
-  // the E_inbox and every later approve is a silent no-op (no ECK grant, no member).
-  // installEvent only RETRIES when the fetched config already names this coordinator
-  // (gen-lag path). So: wait until config2 is durably READABLE (reload the settings
-  // page until it reads the coordinator back off the relay — the "Re-send grant"
-  // control only renders when ctx.config.coordinator is set), THEN re-send the grant.
-  // That second grant authorizes against the durable coordinator-bearing config and
-  // installs (self-healing via the gen-lag retry), so the inbox watch starts.
-  // A real page.reload() (NOT goto to the same hash URL — that's a same-document
-  // nav and keeps the optimistic post-attach state): loadEventContext refetches the
-  // durable config2 off the relay, and the lifecycle view (with "Re-send grant")
-  // only renders once ctx.config.coordinator is set from that fetch.
-  const resend = page.getByRole("button", { name: /re-send grant/i });
-  await expect(async () => {
-    await page.reload();
-    await expect(resend).toBeVisible({ timeout: 12_000 });
-  }).toPass({ timeout: 60_000, intervals: [2_000] });
-  await resend.click();
+  // The attach config + grant race is handled by the coordinator itself now: a
+  // fetched config that names NO coordinator yet is a retryable condition (bounded
+  // backoff, ~35s window), so the single grant sent by attach installs once the
+  // coordinator-bearing config propagates. No harness re-send needed.
   return naddr;
 }
 

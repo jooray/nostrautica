@@ -1,6 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
-import { nip19 } from "nostr-tools";
-import { newUser, pollRelayForEvent } from "../helpers.js";
+import { newUser } from "../helpers.js";
 import {
   createChatEvent,
   sendJoinRequest,
@@ -61,18 +60,9 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
     bob = await newUser(bobCtx, "Bob Attendee");
     bobPk8 = (await ownPubkeyHex(bob)).slice(0, 8);
 
-    // Wait for the coordinator to finish installing BEFORE anyone joins. On install
-    // it subscribes to the E_inbox and, as the final step, republishes the roster
-    // (31604) under ITS OWN key (with a coordinator, roster/directory/grants are
-    // discovered under the coordinator's key, not E_id). Attendees who join before
-    // that subscription is live have their join dropped by the historical backfill
-    // ("no enrollment row (never joined)") and never become members. A roster
-    // authored by the coordinator is the signal that the inbox watch is up, so the
-    // joins below are seen LIVE and enroll cleanly.
-    const coordHex = nip19.decode(COORD_NPUB!).data as string;
-    const sinceInstall = Math.floor(Date.now() / 1000) - 2;
-    await pollRelayForEvent({ kinds: [31604], authors: [coordHex], since: sinceInstall }, { timeoutMs: 90_000 });
-
+    // Joins may be published before the coordinator's E_inbox subscription is live:
+    // installEvent's backfillEventInbox now fetches inbox history (joins first) after
+    // subscribing, so pre-subscription joins enroll cleanly. No install wait needed.
     await sendJoinRequest(alice, naddr);
     await sendJoinRequest(bob, naddr);
     await approveAll(organizer, naddr, 2);
