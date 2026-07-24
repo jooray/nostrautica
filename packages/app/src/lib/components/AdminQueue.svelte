@@ -87,7 +87,7 @@
       {#if req.message}<p class="muted">{req.message}</p>{/if}
       {#if req.profile?.skills?.length}
         <div class="row" style="flex-wrap:wrap">
-          {#each req.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+          {#each [...new Set(req.profile.skills)] as s (s)}<span class="badge">{s}</span>{/each}
         </div>
       {/if}
       {#if req.media?.length}<span class="badge">{tp("admin.requests.video", req.media.length)}</span>{/if}

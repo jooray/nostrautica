@@ -965,7 +965,7 @@
             {:else if section.type === "pinned"}
               {#if section.refs.length}
                 <div class="stack" style="margin:0.25rem 0">
-                  {#each section.refs as ref, r (ref)}
+                  {#each section.refs as ref, r (r)}
                     <div class="row" style="justify-content:space-between">
                       <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7rem">{ref.slice(0, 40)}…</span>
                       <button

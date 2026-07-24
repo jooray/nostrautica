@@ -119,6 +119,49 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
     expect(withoutIb!.icebreakers).toBeUndefined();
   });
 
+  it("icebreakers: duplicates dropped before the cap, not after", async () => {
+    // Clients key their {#each} on the icebreaker string, and a duplicate key is
+    // a hard throw in Svelte 5 that kills the whole route — so a model repeating
+    // itself (common when asked for three openers on one shared interest) must
+    // not reach them. Deduping BEFORE the cap also means a repeat costs a slot
+    // instead of the third distinct starter.
+    const long = "x".repeat(400);
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          index: 1,
+          similarity: 0.5,
+          complementarity: 0.5,
+          score: 0.7,
+          reasoning_for_target: "You should meet.",
+          // "one" twice; the two long strings differ only past the 280-char clip
+          // and so collide only AFTER truncation.
+          icebreakers: ["one", "one", long + "A", long + "B", "two"],
+        },
+      ],
+    }));
+    const { scores } = await scoreBatch(llm, "m", EVENT, profile("t"), candidates(1), () => 0);
+    const ib = [...scores.values()][0]!.icebreakers!;
+    expect(new Set(ib).size).toBe(ib.length); // no duplicate keys reach the client
+    expect(ib).toEqual(["one", long.slice(0, 280), "two"]);
+  });
+
+  it("both prompts pin the icebreaker speaker/listener and forbid swapping attribution", () => {
+    // The two text fields invert the pronoun: in reasoning_for_target "you" is
+    // the reader, in an icebreaker "you" is the person they are messaging (the
+    // app pastes icebreakers[0] straight into a DM to them). Prod 2026-07-24: the
+    // model credited the reader's own novel, app and code to the OTHER person
+    // ("your novel Tamers of Entropy" sent to someone who did not write it), and
+    // wrote third-party briefings ("You're a cypherpunk — she studies X") that
+    // cannot be sent as a message at all. Both prompts must state the binding.
+    for (const p of [BATCH_SYSTEM_PROMPT, REVERSE_BATCH_SYSTEM_PROMPT]) {
+      expect(p).toContain("WHO IS WHO");
+      expect(p).toContain('"I"/"my"'); // the reader speaks in the first person
+      expect(p).toContain("Never hand one person's work to the other");
+      expect(p).toContain("Write a message, not a briefing");
+    }
+  });
+
   it("the scoring schema + prompt include icebreakers (NIP §6.2)", () => {
     expect("icebreakers" in BATCH_SCORE_SCHEMA.properties.matches.items.properties).toBe(true);
     expect(BATCH_SYSTEM_PROMPT).toContain("icebreakers");

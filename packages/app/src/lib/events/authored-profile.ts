@@ -34,10 +34,18 @@ export function fieldsFromProfile(
 }
 
 function parseList(s: string, sep: RegExp): string[] {
-  return s
-    .split(sep)
-    .map((x) => x.trim())
-    .filter((x) => x.length > 0);
+  // Deduped: skills/links are rendered in {#each} blocks keyed on the string
+  // itself (Attendee, MyProfile, AdminQueue), and in Svelte 5 a duplicate key is
+  // a hard throw that takes the whole route down. Someone typing "rust, rust" in
+  // the join form must not be able to break the organizer's queue.
+  return [
+    ...new Set(
+      s
+        .split(sep)
+        .map((x) => x.trim())
+        .filter((x) => x.length > 0),
+    ),
+  ];
 }
 
 /**

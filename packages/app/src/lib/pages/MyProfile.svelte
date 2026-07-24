@@ -262,7 +262,7 @@
       {#if entry?.profile.about}<p>{entry.profile.about}</p>{/if}
       {#if entry?.profile.skills?.length}
         <div class="row" style="flex-wrap:wrap">
-          {#each entry.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+          {#each [...new Set(entry.profile.skills)] as s (s)}<span class="badge">{s}</span>{/each}
         </div>
       {/if}
       {#if entry?.profile.looking_for}

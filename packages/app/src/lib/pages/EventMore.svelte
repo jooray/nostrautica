@@ -89,7 +89,7 @@
 {/if}
 
 <div class="card list">
-  {#each rows as r (r.label)}
+  {#each rows as r (r.go.name)}
     <button class="rowlink" onclick={() => router.go(r.go)}>
       <span class="ico-wrap"><Icon name={r.icon} size={22} /></span>
       <span class="rlabel">{r.label}</span>

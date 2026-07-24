@@ -512,7 +512,7 @@
       </button>
     {/if}
     {#if page}
-      {#each page.menu as item (item.label + item.target)}
+      {#each page.menu as item, i (i)}
         {#if !(previewing && item.membersOnly)}
           <button class="btn menu-btn" onclick={() => openMenuTarget(item.target)}>
             {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
