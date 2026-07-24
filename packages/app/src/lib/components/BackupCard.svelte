@@ -9,6 +9,7 @@
   import { markKeyBackedUp } from "$lib/events/key-backup.js";
   import { advanceStage, isSecured, type BackupStage } from "$lib/stores/backup-stages.js";
   import { enterSecretSurface } from "$lib/stores/secret-surface.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   // §13.3: this card reveals key material (nsec copy, ncryptsec, a mailto with
@@ -49,25 +50,35 @@
   let pw = $state("");
   let ncryptsec = $state<string | null>(null);
   let copied = $state<string | null>(null);
+  // U15: reveal/select fallback for a failed copy of a SECRET. A user whose
+  // browser blocks the clipboard (embedded webview, restrictive policy, http)
+  // must still be able to SEE and select their key, or they'd be locked out of
+  // ever backing it up. This surface already suppresses the event theme.
+  let revealed = $state<string | null>(null);
 
   // App-10: never keep secret material at rest longer than needed. Clear the
   // passphrase and the encrypted blob when the card unmounts.
   function wipeSecrets() {
     pw = "";
     ncryptsec = null;
+    revealed = null;
   }
   onDestroy(wipeSecrets);
 
   async function copy(text: string, label: string) {
-    try {
-      await navigator.clipboard.writeText(text);
+    if ((await copyText(text)) === "copied") {
       copied = label;
+      revealed = null;
       // Copying is "copied", NOT "secured" (UX-O7) — securing is the explicit
       // confirmation below.
       stage = advanceStage(stage, "copied");
       setTimeout(() => (copied = null), 2000);
-    } catch {
+    } else {
+      // Couldn't copy — reveal the value so it can be selected by hand. Still
+      // counts as "copied" stage progress so the user can confirm they saved it.
       copied = null;
+      revealed = text;
+      stage = advanceStage(stage, "copied");
     }
   }
 
@@ -108,6 +119,12 @@
   <button class="btn primary" aria-live="polite" onclick={() => copy(toNsec(sk), "key")}>
     {copied === "key" ? t("backup.copied") : t("backup.copyKey")}
   </button>
+  {#if revealed}
+    <!-- U15 reveal/select fallback: the clipboard was unavailable — select this. -->
+    <p class="muted" role="status" style="margin:0.5rem 0 0.25rem">{t("common.copyFailed")}</p>
+    <textarea class="mono" readonly rows="2" style="width:100%" onfocus={(e) => e.currentTarget.select()}
+      >{revealed}</textarea>
+  {/if}
   <p class="muted" style="margin-top:0.5rem">
     {t("backup.warning.a")} <strong>{t("backup.warning.keepSecret")}</strong>{t("backup.warning.b")}
   </p>

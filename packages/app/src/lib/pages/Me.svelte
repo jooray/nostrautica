@@ -10,6 +10,7 @@
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
   import { countQueuedForOwner } from "$lib/nostr/publish-queue.js";
 
   const clients = [
@@ -25,9 +26,11 @@
   let copied = $state(false);
   async function copyNpub() {
     if (!session.npub) return;
-    await navigator.clipboard.writeText(session.npub);
-    copied = true;
-    setTimeout(() => (copied = false), 1500);
+    // U15: centralized copy with fallback; npub is public + shown on screen.
+    if ((await copyText(session.npub)) === "copied") {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    }
   }
 
   // Logout with an unsent-actions guard (audit U1). Logging out DISCARDS this

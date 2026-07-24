@@ -22,6 +22,7 @@
   import EventHeader from "$lib/components/EventHeader.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -149,9 +150,11 @@
   }
   let copied = $state(false);
   async function copyNpubs() {
-    await navigator.clipboard.writeText(npubList());
-    copied = true;
-    setTimeout(() => (copied = false), 1500);
+    // U15: centralized copy with fallback; the npub list is shown on screen.
+    if ((await copyText(npubList())) === "copied") {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    }
   }
   function downloadNpubs() {
     const url = URL.createObjectURL(new Blob([npubList()], { type: "text/plain" }));

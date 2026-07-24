@@ -6,6 +6,7 @@
   // it's shown, exactly like the invite links in Admin.
   import { onMount } from "svelte";
   import QrCode from "$lib/components/QrCode.svelte";
+  import { focusTrap } from "./focus-trap.js";
   import { enterSecretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { invitesForSheet } from "$lib/events/invite-sheet.js";
   import type { GeneratedInvite } from "$lib/events/organizer.js";
@@ -28,9 +29,25 @@
   }
 </script>
 
-<div class="invite-sheet-overlay" role="dialog" aria-modal="true" aria-label={t("admin.inviteSheet.title")}>
+<!-- Keyboard-modal dialog (audit U14): initial focus + focus trap + focus restore
+     via the shared focusTrap action, Escape closes, and the heading is associated
+     as the accessible name (aria-labelledby), matching AdminPersonDrawer. -->
+<div
+  class="invite-sheet-overlay"
+  role="dialog"
+  aria-modal="true"
+  aria-labelledby="invite-sheet-title"
+  tabindex="-1"
+  use:focusTrap
+  onkeydown={(e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onClose();
+    }
+  }}
+>
   <div class="sheet-toolbar no-print">
-    <strong>{t("admin.inviteSheet.title")}</strong>
+    <strong id="invite-sheet-title">{t("admin.inviteSheet.title")}</strong>
     <div class="row" style="gap:0.5rem">
       <button class="btn inline primary" onclick={print}>{t("admin.inviteSheet.print")}</button>
       <button class="btn inline" onclick={onClose}>{t("admin.inviteSheet.close")}</button>

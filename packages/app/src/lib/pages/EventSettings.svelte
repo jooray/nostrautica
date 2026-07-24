@@ -51,6 +51,7 @@
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
@@ -258,9 +259,11 @@
 
   async function copyMyNpub() {
     if (!session.npub) return;
-    await navigator.clipboard.writeText(session.npub);
-    copiedNpub = true;
-    setTimeout(() => (copiedNpub = false), 1500);
+    // U15: centralized copy with fallback; npub is public + shown on screen.
+    if ((await copyText(session.npub)) === "copied") {
+      copiedNpub = true;
+      setTimeout(() => (copiedNpub = false), 1500);
+    }
   }
 
   let coordinatorInput = $state("");

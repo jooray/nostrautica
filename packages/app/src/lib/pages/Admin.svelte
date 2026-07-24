@@ -22,6 +22,9 @@
     loadReview,
     setReview,
     pubkeysInState,
+    loadDismissedStatuses,
+    saveDismissedStatuses,
+    purgeLegacyGlobalReviewState,
     type ReviewMap,
     type ReviewState,
   } from "$lib/stores/review-state.js";
@@ -57,6 +60,7 @@
   import AdminPeople from "$lib/components/AdminPeople.svelte";
   import AdminQueue from "$lib/components/AdminQueue.svelte";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -228,15 +232,32 @@
     document.getElementById("join-requests")?.scrollIntoView({ behavior: "smooth" });
   }
 
+  // Centralized copy (audit U15): truthful success/failure with a select-manually
+  // fallback. Invite links (secrets) are already rendered on-screen (the .mono
+  // rows below), so a failed copy still leaves the value visible to select.
+  let copyFailed = $state(false);
+  async function doCopy(text: string, onOk: () => void): Promise<void> {
+    if ((await copyText(text)) === "copied") {
+      copyFailed = false;
+      onOk();
+    } else {
+      copyFailed = true;
+      setTimeout(() => (copyFailed = false), 4000);
+    }
+  }
+
   async function copyInviteLink() {
     const link = `${window.location.origin}${window.location.pathname}#/e/${naddr}/join`;
-    await navigator.clipboard.writeText(link);
-    copiedLink = true;
-    setTimeout(() => (copiedLink = false), 1500);
+    await doCopy(link, () => {
+      copiedLink = true;
+      setTimeout(() => (copiedLink = false), 1500);
+    });
   }
 
   onMount(async () => {
     try {
+      // U11: drop pre-U11 device-global review/dismissed entries (never migrated).
+      purgeLegacyGlobalReviewState();
       await connectNdk();
       ctx = await loadEventContext(naddr);
       keys = (await loadEventKeys(ctx.coordinate)) ?? null;
@@ -296,7 +317,8 @@
     pending = mergePending(pending, cachedPending(coord) ?? []);
     roster = cachedRoster(coord) ?? roster;
     directory = cachedDirectory(coord) ?? directory;
-    reviewMap = loadReview(coord); // UX-A7: persisted reject/defer state
+    reviewMap = loadReview(coord); // UX-A7 / U11: owner-scoped reject/defer state
+    dismissedStatuses = new Set(loadDismissedStatuses(coord)); // U11: owner-scoped
     rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? [...rosterApproved]);
     pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
     coordStatuses = cachedCoordinatorStatuses(coord) ?? coordStatuses;
@@ -366,31 +388,18 @@
       statuses: coordStatuses,
     }),
   );
-  let dismissedStatuses = $state<Set<string>>(new Set(loadDismissed()));
+  // Owner-scoped (audit U11): seeded from the owner+coordinate cache in
+  // paintFromCache once the coordinate is known, not a device-global list.
+  let dismissedStatuses = $state<Set<string>>(new Set());
   let retryingStatus = $state<string | null>(null);
 
   function statusId(s: CoordinatorStatusContent): string {
     return `${s.a}${s.stage}${s.pubkey ?? ""}`;
   }
 
-  function loadDismissed(): string[] {
-    try {
-      const raw = localStorage.getItem("nostrautica-coord-status-dismissed");
-      return raw ? (JSON.parse(raw) as string[]) : [];
-    } catch {
-      return [];
-    }
-  }
-
   function persistDismissed() {
-    try {
-      localStorage.setItem(
-        "nostrautica-coord-status-dismissed",
-        JSON.stringify([...dismissedStatuses]),
-      );
-    } catch {
-      /* storage unavailable — dismissal stays in-memory only */
-    }
+    if (!ctx) return;
+    saveDismissedStatuses(ctx.coordinate, [...dismissedStatuses]);
   }
 
   // Only unresolved poison items the organizer hasn't dismissed.
@@ -526,9 +535,10 @@
 
   async function copyMyNpub() {
     if (!session.npub) return;
-    await navigator.clipboard.writeText(session.npub);
-    copiedNpub = true;
-    setTimeout(() => (copiedNpub = false), 1500);
+    await doCopy(session.npub, () => {
+      copiedNpub = true;
+      setTimeout(() => (copiedNpub = false), 1500);
+    });
   }
 
   let inviteCount = $state(5);
@@ -551,7 +561,7 @@
   }
 
   async function copyLink(link: string) {
-    await navigator.clipboard.writeText(link);
+    await doCopy(link, () => {});
   }
 
   // Bulk export (user feedback 2026-07-22): mailing 200 invite links one at a
@@ -559,9 +569,10 @@
   // tool, or the same as a downloadable file.
   let copiedAllLinks = $state(false);
   async function copyAllLinks() {
-    await navigator.clipboard.writeText(invites.map((inv) => inv.link).join("\n"));
-    copiedAllLinks = true;
-    setTimeout(() => (copiedAllLinks = false), 1500);
+    await doCopy(invites.map((inv) => inv.link).join("\n"), () => {
+      copiedAllLinks = true;
+      setTimeout(() => (copiedAllLinks = false), 1500);
+    });
   }
   function downloadLinksFile() {
     const text = invites.map((inv) => inv.link).join("\n");
@@ -994,6 +1005,9 @@
             {t("admin.invites.printSheet")}
           </button>
         </div>
+        {#if copyFailed}
+          <p class="muted" role="status" style="margin:0.4rem 0 0;font-size:0.82rem">{t("common.copyFailed")}</p>
+        {/if}
         {#each invites as inv (inv.nsec)}
           <div class="card" style="background:var(--bg-elev2)">
             <div class="row" style="justify-content:space-between">

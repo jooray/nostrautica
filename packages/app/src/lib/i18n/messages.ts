@@ -337,6 +337,7 @@ export const messages = {
     "event.offline.stored": "Using {size} of storage",
     "event.offline.persisted": "kept on this device",
     "event.offline.mediaNote": "audio/video isn’t pre-downloaded",
+    "event.offline.routesReady": "screens ready offline",
     "eventheader.link": "Event ›",
 
     // Posts (spec §7.4)
@@ -635,6 +636,11 @@ export const messages = {
     "matches.similar": "similar {pct}%",
     "matches.complementary": "complementary {pct}%",
     "matches.name": "Attendee",
+    "matches.role.loggedOut": "Log in to see who you should meet — your matches are personal to your account.",
+    "matches.role.login": "Log in",
+    "matches.role.visitor": "Matches are for members. Join this event to get your personal list of who to meet.",
+    "matches.role.join": "Join this event",
+    "matches.role.pending": "Your request to join is awaiting the organizer's approval. Your matches appear here once you're in.",
 
     // Me
     "me.notLoggedIn": "You're not logged in.",
@@ -896,6 +902,7 @@ export const messages = {
     "admin.approvedTag": "Approved ✓",
     "admin.reprocess": "Re-process",
     "common.close": "Close",
+    "common.copyFailed": "Couldn't copy automatically — select the text and copy it manually.",
     "admin.person.details": "Details",
     "admin.person.title": "{name} — details",
     "admin.person.profile": "Submitted profile",
@@ -1148,6 +1155,11 @@ export const messages = {
     "talks.mod.externalLabel": "External video",
     "talks.external.videoTitle": "Talk video",
     "talks.external.open": "Open video ↗",
+    "talks.external.gate.title": "This talk plays from another site",
+    "talks.external.gate.host": "Playback will contact:",
+    "talks.external.gate.note":
+      "The event link itself is encrypted, but loading the video connects your device directly to that host — sharing your IP address and browser details with it. Load only if you trust it.",
+    "talks.external.gate.load": "Load video",
     "talks.field.title": "Talk title",
     "talks.field.title.placeholder": "e.g. Zero-knowledge proofs for beginners",
     "talks.field.description": "Description",
@@ -1642,6 +1654,7 @@ export const messages = {
     "event.offline.stored": "Využíva {size} úložiska",
     "event.offline.persisted": "ponechané v tomto zariadení",
     "event.offline.mediaNote": "zvuk/video sa nesťahuje vopred",
+    "event.offline.routesReady": "obrazovky pripravené offline",
     "eventheader.link": "Podujatie ›",
 
     // Posts (spec §7.4)
@@ -1943,6 +1956,11 @@ export const messages = {
     "matches.similar": "podobnosť {pct}%",
     "matches.complementary": "doplnkovosť {pct}%",
     "matches.name": "Účastník",
+    "matches.role.loggedOut": "Prihláste sa, aby ste videli, s kým sa stretnúť — vaše zhody sú viazané na váš účet.",
+    "matches.role.login": "Prihlásiť sa",
+    "matches.role.visitor": "Zhody sú pre členov. Pripojte sa k podujatiu a získajte osobný zoznam ľudí, s ktorými sa oplatí stretnúť.",
+    "matches.role.join": "Pripojiť sa k podujatiu",
+    "matches.role.pending": "Vaša žiadosť o pripojenie čaká na schválenie organizátorom. Vaše zhody sa tu zobrazia, keď budete schválení.",
 
     // Me
     "me.notLoggedIn": "Nie ste prihlásený(á).",
@@ -2208,6 +2226,7 @@ export const messages = {
     "admin.approvedTag": "Schválený ✓",
     "admin.reprocess": "Spracovať znova",
     "common.close": "Zavrieť",
+    "common.copyFailed": "Nepodarilo sa skopírovať automaticky — označte text a skopírujte ho ručne.",
     "admin.person.details": "Podrobnosti",
     "admin.person.title": "{name} — podrobnosti",
     "admin.person.profile": "Odoslaný profil",
@@ -2461,6 +2480,11 @@ export const messages = {
     "talks.mod.externalLabel": "Externé video",
     "talks.external.videoTitle": "Video prednášky",
     "talks.external.open": "Otvoriť video ↗",
+    "talks.external.gate.title": "Táto prednáška sa prehráva z inej stránky",
+    "talks.external.gate.host": "Prehrávanie sa spojí s:",
+    "talks.external.gate.note":
+      "Samotný odkaz na podujatie je šifrovaný, ale načítanie videa pripojí vaše zariadenie priamo k tomuto hostiteľovi — zdieľate s ním svoju IP adresu a údaje prehliadača. Načítajte len ak mu dôverujete.",
+    "talks.external.gate.load": "Načítať video",
     "talks.field.title": "Názov prednášky",
     "talks.field.title.placeholder": "napr. Dôkazy s nulovou znalosťou pre začiatočníkov",
     "talks.field.description": "Popis",
@@ -2959,6 +2983,7 @@ export const messages = {
     "event.offline.stored": "Využívá {size} úložiště",
     "event.offline.persisted": "ponecháno v tomto zařízení",
     "event.offline.mediaNote": "zvuk/video se nestahuje předem",
+    "event.offline.routesReady": "obrazovky připravené offline",
     "eventheader.link": "Akce ›",
 
     // Příspěvky (spec §7.4)
@@ -3259,6 +3284,11 @@ export const messages = {
     "matches.similar": "podobnost {pct}%",
     "matches.complementary": "doplňkovost {pct}%",
     "matches.name": "Účastník",
+    "matches.role.loggedOut": "Přihlaste se, abyste viděli, s kým se setkat — vaše shody jsou vázané na váš účet.",
+    "matches.role.login": "Přihlásit se",
+    "matches.role.visitor": "Shody jsou pro členy. Připojte se k akci a získejte osobní seznam lidí, se kterými se vyplatí setkat.",
+    "matches.role.join": "Připojit se k akci",
+    "matches.role.pending": "Vaše žádost o připojení čeká na schválení organizátorem. Vaše shody se zde zobrazí, jakmile budete schváleni.",
 
     // Já
     "me.notLoggedIn": "Nejste přihlášen(a).",
@@ -3523,6 +3553,7 @@ export const messages = {
     "admin.approvedTag": "Schváleno ✓",
     "admin.reprocess": "Zpracovat znovu",
     "common.close": "Zavřít",
+    "common.copyFailed": "Nepodařilo se zkopírovat automaticky — označte text a zkopírujte jej ručně.",
     "admin.person.details": "Podrobnosti",
     "admin.person.title": "{name} — podrobnosti",
     "admin.person.profile": "Odeslaný profil",
@@ -3779,6 +3810,11 @@ export const messages = {
     "talks.mod.externalLabel": "Externí video",
     "talks.external.videoTitle": "Video přednášky",
     "talks.external.open": "Otevřít video ↗",
+    "talks.external.gate.title": "Tato přednáška se přehrává z jiné stránky",
+    "talks.external.gate.host": "Přehrávání se spojí s:",
+    "talks.external.gate.note":
+      "Samotný odkaz na akci je šifrovaný, ale načtení videa připojí vaše zařízení přímo k tomuto hostiteli — sdílíte s ním svou IP adresu a údaje prohlížeče. Načtěte jen pokud mu důvěřujete.",
+    "talks.external.gate.load": "Načíst video",
     "talks.field.title": "Název přednášky",
     "talks.field.title.placeholder": "např. Důkazy s nulovou znalostí pro začátečníky",
     "talks.field.description": "Popis",
