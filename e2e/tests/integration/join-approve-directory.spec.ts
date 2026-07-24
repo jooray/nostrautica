@@ -84,7 +84,8 @@ test.describe(RELAY_UP ? "join-approve-directory" : "join-approve-directory (nee
     const marker = `directory-loop-marker-${Date.now()}`;
     await alice.locator("textarea").last().fill(`Hi, I'm Alice. ${marker}`);
     await alice.getByRole("button", { name: /use this intro/i }).click();
-    await expect(alice.getByText(/uploaded/i)).toBeVisible({ timeout: 30_000 });
+    // U2: no-coordinator intro that reached the relay now reads "Published ✓".
+    await expect(alice.getByText(/published ✓/i)).toBeVisible({ timeout: 30_000 });
 
     // A submitted intro is a 21601 rumor to E_inbox, not a direct directory-entry
     // write (only the organizer/E_id, or a coordinator, publishes 31603) — in

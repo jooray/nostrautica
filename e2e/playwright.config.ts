@@ -91,5 +91,28 @@ export default defineConfig({
     cwd: "..",
     timeout: 120_000,
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // Chromium runs every tier. Firefox + WebKit are SMOKE-ONLY (audit U18): the
+  // engines differ materially in service-worker timing, storage, image decoding, and
+  // Web Locks, so the preview-only smoke set (identity creation, backup card, hash
+  // routing, no-relay idle) is verified on all three. They are `testDir`-scoped to
+  // tests/smoke AND selected by the orchestrator's `--project` flags only on the
+  // smoke tier, so a bare `playwright test tests/integration` can't pull them in.
+  //
+  // The top-level `use` carries Chromium-only launch flags (fake camera, the
+  // local-network-access bypass) and camera/mic permissions that Firefox/WebKit
+  // reject; each non-Chromium project therefore RESETS launchOptions.args and
+  // permissions. Smoke never records or opens a websocket, so neither is needed there.
+  projects: [
+    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "firefox",
+      testDir: "./tests/smoke",
+      use: { ...devices["Desktop Firefox"], permissions: [], launchOptions: { args: [] } },
+    },
+    {
+      name: "webkit",
+      testDir: "./tests/smoke",
+      use: { ...devices["Desktop Safari"], permissions: [], launchOptions: { args: [] } },
+    },
+  ],
 });

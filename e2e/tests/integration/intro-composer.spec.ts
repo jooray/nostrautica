@@ -68,7 +68,9 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
 
     // This assertion is the one G1 broke: a real Blossom round-trip must
     // finish and the descriptor must revalidate (https-only) before "Uploaded".
-    await expect(attendee.getByText(/uploaded/i)).toBeVisible({ timeout: 30_000 });
+    // U2: the flat "uploaded" claim was replaced by truthful per-outcome states.
+    // A no-coordinator intro that reached the relay reads "Published ✓".
+    await expect(attendee.getByText(/published ✓/i)).toBeVisible({ timeout: 30_000 });
   });
 
   test("audio intro: audio-only mode records and submits", async ({ browser }) => {
@@ -86,7 +88,9 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
     await attendee.waitForTimeout(1500);
     await attendee.getByRole("button", { name: /stop/i }).click();
     await attendee.getByRole("button", { name: /use this/i }).click();
-    await expect(attendee.getByText(/uploaded/i)).toBeVisible({ timeout: 30_000 });
+    // U2: the flat "uploaded" claim was replaced by truthful per-outcome states.
+    // A no-coordinator intro that reached the relay reads "Published ✓".
+    await expect(attendee.getByText(/published ✓/i)).toBeVisible({ timeout: 30_000 });
   });
 
   test("text intro: skips capture entirely and submits the typed text", async ({ browser }) => {
@@ -105,6 +109,8 @@ test.describe(RELAY_UP ? "intro composer" : "intro composer (needs relay — ski
       "Hi, I'm here to meet people building open protocols.",
     );
     await attendee.getByRole("button", { name: /use this intro/i }).click();
-    await expect(attendee.getByText(/uploaded/i)).toBeVisible({ timeout: 30_000 });
+    // U2: the flat "uploaded" claim was replaced by truthful per-outcome states.
+    // A no-coordinator intro that reached the relay reads "Published ✓".
+    await expect(attendee.getByText(/published ✓/i)).toBeVisible({ timeout: 30_000 });
   });
 });

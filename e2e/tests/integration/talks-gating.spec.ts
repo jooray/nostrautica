@@ -78,12 +78,20 @@ test.describe(RELAY_UP ? "talks gating" : "talks gating (needs relay — skipped
     await attendee.getByRole("button", { name: /submit a talk/i }).click();
     await attendee.getByLabel(/title/i).fill("A Talk About Nostr");
     await attendee.getByLabel(/description/i).fill("Why relays matter.");
-    await attendee.locator('input[type=checkbox]').first().check();
+    // The talk composer now leads with a "Process this talk for matching?" checkbox
+    // (matching opt-in), so `.first()` is no longer the disclosure. Target the
+    // required disclosure ack by its stable id instead.
+    await attendee.locator("#disclosure-ack").check();
     await attendee.getByRole("button", { name: /^enable camera$/i }).click();
-    await attendee.getByRole("button", { name: /record/i }).click();
+    // The talk composer now has a "Record / Upload / paste URL" source selector
+    // (its default "Record" toggle button also matches /record/i), so target the
+    // capture button specifically by its "● Record" label to avoid a strict-mode
+    // clash with the source toggle.
+    await attendee.getByRole("button", { name: /●\s*record/i }).click();
     await attendee.waitForTimeout(1500);
     await attendee.getByRole("button", { name: /stop/i }).click();
     await attendee.getByRole("button", { name: /use this/i }).click();
-    await expect(attendee.getByText(/uploaded/i)).toBeVisible({ timeout: 30_000 });
+    // U2: a submitted talk now reports awaiting-moderation, not a flat "uploaded".
+    await expect(attendee.getByText(/organizer approves it/i)).toBeVisible({ timeout: 30_000 });
   });
 });

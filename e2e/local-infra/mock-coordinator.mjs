@@ -15,6 +15,17 @@ const { Store } = await import(new URL("store/db.js", DIST));
 const { NostrClient } = await import(new URL("nostr/client.js", DIST));
 const { Coordinator } = await import(new URL("coordinator.js", DIST));
 const { MockStt, MockLlm } = await import(new URL("providers/mock.js", DIST));
+const { setRelayConnectPolicy } = await import(new URL("net/relay-guard.js", DIST));
+
+// C4 (audit): the coordinator now refuses ws:// and loopback/private relay hosts
+// unless the operator opts in — the connect-time SSRF guard (relay-guard) refuses
+// the socket, and sanitizeRelayUrls drops the URL from config-derived relay lists.
+// The local e2e stack IS a ws://localhost relay, so BOTH knobs must be flipped for
+// this dev double: setRelayConnectPolicy for the guard, and relayPolicy below for
+// the sanitizer. This is the mock's equivalent of `security.allow_insecure_urls =
+// true` in a real coordinator.toml (main.ts wires the same two from that flag).
+setRelayConnectPolicy({ allowInsecure: true });
+const RELAY_POLICY = { allowInsecure: true };
 
 const RELAY = process.env.MOCK_RELAY ?? "ws://localhost:7777";
 const DB = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "/tmp/mock-coord.sqlite";
@@ -137,6 +148,7 @@ const coordinator = new Coordinator({
   embedModel: { provider: "mock", model: "mock-embed" },
   translateModel: { provider: "mock", model: "mock-translate" },
   defaultRelays: [RELAY],
+  relayPolicy: RELAY_POLICY,
   // Skip Blossom download + ffmpeg entirely — feed a canned transcript per media.
   transcribe: async () =>
     "Hi, I'm here to meet people building privacy technology. I'm looking for collaborators who complement my skills.",
