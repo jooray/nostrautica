@@ -53,6 +53,7 @@
   import { t } from "$lib/i18n/i18n.svelte.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -613,6 +614,13 @@
   let themePreviewing = $state(false);
   const themeBytes = $derived(utf8ByteLength(themeCss));
   const themeOver = $derived(themeBytes > MAX_THEME_CSS_BYTES);
+  // Durable draft of UNSENT theme CSS (audit U9). The network only carries the
+  // PUBLISHED theme, so hand-written CSS an organizer hasn't published yet would
+  // be lost to a crash/eviction/reload. Persist owner-scoped; restore visibly.
+  let themeDraftId = $state("");
+  let themeDraftRestored = $state(false);
+  let themeLoaded = $state(false);
+  let publishedTheme = $state("");
 
   // Draft-safe auto-refresh (App-2): hold the pending reload while the organizer
   // has unsaved metadata edits (title/summary differ from the loaded event) or a
@@ -623,13 +631,32 @@
     const dirty =
       (!!ctx && (metadataTitle !== ctx.title || metadataSummary !== ctx.summary)) ||
       coordinatorInput.trim().length > 0 ||
-      coOrgInput.trim().length > 0;
+      coOrgInput.trim().length > 0 ||
+      // Unsaved theme CSS is real unsaved work now that it's drafted (U9).
+      (themeLoaded && themeCss !== publishedTheme);
     if (dirty) return refreshGuard.hold("settings");
+  });
+
+  // Persist unsent theme CSS as it's edited (U9); clear it once it matches the
+  // published theme so a later visit doesn't restore already-published CSS.
+  $effect(() => {
+    if (!themeLoaded || !themeDraftId) return;
+    if (themeCss === publishedTheme) clearDraft(themeDraftId);
+    else saveDraft(themeDraftId, themeCss);
   });
 
   async function loadTheme() {
     if (!ctx) return;
     themeCss = (await fetchEventTheme(ctx).catch(() => undefined)) ?? "";
+    // U9: restore an unsent draft that differs from the published theme.
+    themeDraftId = `theme:${ctx.coordinate}`;
+    publishedTheme = themeCss;
+    const draft = loadDraft(themeDraftId);
+    if (draft !== undefined && draft !== publishedTheme) {
+      themeCss = draft;
+      themeDraftRestored = true;
+    }
+    themeLoaded = true;
   }
 
   function previewTheme() {
@@ -651,6 +678,10 @@
       previewEventTheme(naddr, themeCss); // published = what you see
       themePreviewing = false;
       themePublished = true;
+      // U9: published — retire the unsent draft.
+      publishedTheme = themeCss;
+      if (themeDraftId) clearDraft(themeDraftId);
+      themeDraftRestored = false;
       setTimeout(() => (themePublished = false), 2000);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -974,6 +1005,20 @@
   <div class="card">
     <div class="field-label">{t("admin.theme.title")}</div>
     <p class="muted">{t("admin.theme.body")}</p>
+    {#if themeDraftRestored}
+      <!-- Visible restore of unsent theme CSS (U9). -->
+      <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
+        <span class="muted" role="status">{t("draft.restored")}</span>
+        <button
+          class="btn inline"
+          style="flex:none"
+          onclick={() => {
+            themeCss = publishedTheme;
+            themeDraftRestored = false;
+            if (themeDraftId) clearDraft(themeDraftId);
+          }}>{t("draft.discard")}</button>
+      </div>
+    {/if}
     <textarea
       rows="8"
       class="mono"

@@ -11,7 +11,7 @@ import {
   type CacheEntry,
   type PersistBackend,
 } from "$lib/cache/persist.js";
-import { saveDraft, loadDraft, clearDraft } from "./drafts.js";
+import { saveDraft, loadDraft, clearDraft, saveFormDraft, loadFormDraft } from "./drafts.js";
 
 function memBackend(): PersistBackend {
   const store = new Map<string, CacheEntry>();
@@ -74,5 +74,28 @@ describe("drafts (App-2)", () => {
     setActiveCacheOwner(null);
     saveDraft("dm:peer", "nowhere to store");
     expect(loadDraft("dm:peer")).toBeUndefined();
+  });
+
+  it("round-trips a multi-field form draft (U9)", () => {
+    setActiveCacheOwner(A);
+    saveFormDraft("post:31923:x:e", { title: "Hi", body: "world", image: "" });
+    expect(loadFormDraft("post:31923:x:e")).toEqual({ title: "Hi", body: "world", image: "" });
+  });
+
+  it("a form draft with no non-empty text field clears (U9)", () => {
+    setActiveCacheOwner(A);
+    saveFormDraft("post:x", { title: "Hi", body: "" });
+    saveFormDraft("post:x", { title: "   ", body: "" });
+    expect(loadFormDraft("post:x")).toBeUndefined();
+  });
+
+  it("form drafts are owner-scoped and wiped on logout (U9)", () => {
+    setActiveCacheOwner(A);
+    saveFormDraft("prof:e", { about: "A wrote this" });
+    setActiveCacheOwner(B);
+    expect(loadFormDraft("prof:e")).toBeUndefined();
+    setActiveCacheOwner(A);
+    clearOwnerCache(A);
+    expect(loadFormDraft("prof:e")).toBeUndefined();
   });
 });

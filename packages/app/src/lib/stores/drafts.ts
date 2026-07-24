@@ -37,3 +37,31 @@ export function loadDraft(id: string): string | undefined {
 export function clearDraft(id: string): void {
   cacheDelete(PREFIX + id);
 }
+
+/**
+ * Multi-field form draft (audit U9): a small bag of TEXT fields (post title +
+ * body, authored profile fields, …) persisted as one owner-scoped JSON entry.
+ * Same guarantees as `saveDraft`: owner-scoped, survives reload, wiped on logout.
+ * Keep it to short text — never raw secrets or large media (that contract is why
+ * the generic draft store exists). A form with no non-empty text field clears.
+ */
+export function saveFormDraft(id: string, form: Record<string, string>): void {
+  const hasText = Object.values(form).some((v) => typeof v === "string" && v.trim().length > 0);
+  if (!hasText) {
+    cacheDelete(PREFIX + id);
+    return;
+  }
+  cacheSet(PREFIX + id, JSON.stringify(form));
+}
+
+/** Read back a persisted form draft for `id`, or undefined if none/corrupt. */
+export function loadFormDraft<T>(id: string): T | undefined {
+  const raw = cacheGet<string>(PREFIX + id)?.data;
+  if (!raw) return undefined;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as T) : undefined;
+  } catch {
+    return undefined;
+  }
+}

@@ -36,7 +36,7 @@ import { loadEventKeys, currentEck } from "./keystore.js";
 import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
 import { onlyByAuthors } from "$lib/nostr/verify.js";
 import { signerWrap } from "./giftwrap.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 async function eckBytes(coordinate: string): Promise<Uint8Array | undefined> {
@@ -273,7 +273,7 @@ export async function submitTalk(
     /** Opt this talk into coordinator STT + matching. Default off. */
     processForMatching?: boolean;
   },
-): Promise<void> {
+): Promise<PublishOutcome> {
   const content: TalkSubmissionContent = {
     v: 2,
     a: ctx.coordinate,
@@ -293,7 +293,9 @@ export async function submitTalk(
     content,
     tags: [["a", ctx.coordinate]],
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  // U2: surface whether the 21609 actually reached a relay (awaiting moderation)
+  // or is only queued locally, rather than claiming submission unconditionally.
+  return toOutcome(await publishOrQueue(wrap as any, ctx.config.relays));
 }
 
 // ── talk edit handoff (F2.4) ─────────────────────────────────────────────────

@@ -18,6 +18,7 @@
   } from "$lib/events/posts.js";
   import { publishEventUpdate } from "$lib/events/updates.js";
   import PostEditor from "./PostEditor.svelte";
+  import { saveFormDraft, loadFormDraft, clearDraft } from "$lib/stores/drafts.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -39,12 +40,47 @@
   let postVisibility = $state<PostVisibility>("public");
   let postEditing = $state<EventPost | null>(null); // null = new post
   let postBusy = $state(false);
+  // Durable draft for an UNSENT new post (audit U9): survives a reload/crash, not
+  // just a deferred SW refresh. Owner-scoped + per-event; wiped on logout.
+  const draftId = $derived(`post:${ctx.coordinate}`);
+  let restoredDraft = $state(false);
 
   async function loadUpdates() {
     posts = await fetchEventPosts(ctx).catch(() => posts);
   }
 
-  onMount(loadUpdates);
+  onMount(() => {
+    // Restore an unsent new-post draft before loading the published list.
+    const d = loadFormDraft<{ title: string; summary: string; image: string; content: string }>(
+      draftId,
+    );
+    if (d && (d.title?.trim() || d.content?.trim())) {
+      postTitle = d.title ?? "";
+      postSummary = d.summary ?? "";
+      postImage = d.image ?? "";
+      postContent = d.content ?? "";
+      restoredDraft = true;
+    }
+    void loadUpdates();
+  });
+
+  // Persist the new-post composer as the organizer types (U9). Only for a NEW
+  // post — editing a published post loads from that post, not the draft store.
+  $effect(() => {
+    if (postEditing !== null) return;
+    saveFormDraft(draftId, {
+      title: postTitle,
+      summary: postSummary,
+      image: postImage,
+      content: postContent,
+    });
+  });
+
+  function discardDraft() {
+    resetEditor();
+    clearDraft(draftId);
+    restoredDraft = false;
+  }
 
   function startEdit(p: EventPost) {
     postEditing = p;
@@ -87,6 +123,9 @@
         await publishEventUpdate(ctx, base);
       }
       resetEditor();
+      // Published — the durable draft is no longer needed (U9).
+      clearDraft(draftId);
+      restoredDraft = false;
       await loadUpdates();
     } catch (e) {
       onError(e instanceof Error ? e.message : String(e));
@@ -103,6 +142,13 @@
   <p class="muted">
     {t("admin.posts.body")}
   </p>
+  {#if restoredDraft && postEditing === null}
+    <!-- Visible restore of an unsent draft (U9). -->
+    <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
+      <span class="muted" role="status">{t("draft.restored")}</span>
+      <button class="btn inline" style="flex:none" onclick={discardDraft}>{t("draft.discard")}</button>
+    </div>
+  {/if}
   <PostEditor
     bind:title={postTitle}
     bind:summary={postSummary}

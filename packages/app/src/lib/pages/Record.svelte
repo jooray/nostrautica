@@ -6,10 +6,15 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
+  import { receiveGrants } from "$lib/events/attendee.js";
+  import { loadEventKeys, currentEck } from "$lib/events/keystore.js";
+  import { recoverEventKeys } from "$lib/events/recover.js";
+  import { joinSentAt } from "$lib/stores/join-sent.svelte.js";
   import { VideoCapture } from "$lib/media/capture.js";
   import {
     uploadMedia,
     submitProfileAndMedia,
+    aggregateOutcome,
     loadSelfCopy,
     loadLibraryFull,
     cachedLibrary,
@@ -17,8 +22,10 @@
     cachedSelfCopy,
     prepareReuse,
   } from "$lib/media/submit.js";
+  import type { PublishOutcome } from "$lib/nostr/publish-queue.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import { classifyTalkUrl } from "$lib/media/external.js";
+  import { checkMediaLimits, MAX_UPLOAD_BYTES } from "$lib/media/precheck.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import { validate, hasError, describedBy, type FieldError } from "$lib/stores/form-validation.js";
@@ -27,8 +34,8 @@
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
-  import { online } from "$lib/stores/online.svelte.js";
   import { classifyDeviceError, deviceErrorMessageKey } from "$lib/media/device-error.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
 
@@ -70,6 +77,15 @@
   type Mode = "video" | "audio" | "text";
   let mode = $state<Mode>("video");
 
+  // Role gate (audit U5): capture, file selection, URL submission and Blossom
+  // upload must not be reachable until we KNOW this account is an approved member
+  // with ECK custody. A visitor or pending applicant deep-linking here would
+  // otherwise be able to grant camera access and upload to Blossom before the
+  // coordinator ever rejects (or ignores) the event rumor. Resolve the role first,
+  // render an explicit state, and only then expose the composer.
+  type RecordRole = "loading" | "visitor" | "pending" | "revoked" | "approved";
+  let role = $state<RecordRole>("loading");
+
   // Cache-first (§2.7): the composer opens instantly with the last library/intro
   // from cache while the fresh copies refresh in the background.
   const cachedCtx = cachedEventContext(naddr);
@@ -86,6 +102,11 @@
   let recorded = $state<{ blob: Blob; url: string; durationSec: number } | null>(null);
   let busy = $state(false);
   let done = $state(false);
+  // Truthful completion state (audit U2): what actually happened to the relay
+  // event — published, awaiting moderation, or only queued locally — never a flat
+  // "uploaded". Set by finish(); rendered in the done card.
+  let doneMessageKey = $state<MessageKey>("record.done.introPublished");
+  let doneQueued = $state(false);
   // Cross-event reuse library (spec §6.2): recorded intros + authored text intros
   // the user made at ANY previous event, offered here so they needn't redo one.
   let library = $state<MediaDescriptor[]>(cachedLibrary() ?? []);
@@ -95,6 +116,13 @@
   let textIntro = $state(
     cachedCtx ? (cachedSelfCopy(cachedCtx.coordinate)?.introText ?? "") : "",
   );
+  // Durable draft of an UNSENT text intro (audit U9): the cached self-copy only
+  // holds the last PUBLISHED intro, so a half-written new one would be lost to a
+  // crash/eviction. Persist owner-scoped, restore visibly, clear on submit.
+  let introDraftId = $state("");
+  let introDraftRestored = $state(false);
+  let introLoaded = $state(false);
+  let publishedIntro = $state("");
 
   // Live mic level (0..1) for the audio meter; driven by a Web Audio analyser.
   let micLevel = $state(0);
@@ -113,18 +141,25 @@
 
   if (cachedCtx && (library.length || textLibrary.length || textIntro)) perfMark("Record", "cache-paint");
 
-  // Draft-safe auto-refresh (App-2): an automatic deploy reload must never
-  // interrupt a live recording or discard an unsaved intro/talk the user is
-  // typing. Hold the pending reload while any of that is in flight; it applies
-  // automatically once recording stops and the fields are clear/submitted. (The
-  // intro text itself is already round-tripped through `cachedSelfCopy`, so no
-  // extra draft store is needed here — this only gates the reload.)
+  // Draft-safe auto-refresh (App-2, audit U4): an automatic service-worker
+  // takeover must never reload the tab while there is unsaved capture work — and
+  // that includes a COMPLETED in-memory recording or a picked file (`recorded`),
+  // whose object URL a reload would revoke, destroying the only copy before the
+  // user submits it. The earlier guard only covered a live recording and the text
+  // fields, so a finished take, a picked file, a pasted talk URL, the chosen
+  // source, or the matching toggle all fell through. Treat every one of them as
+  // dirty; the deferred reload applies automatically once the take is submitted or
+  // discarded (finish()/reRecord/switchMode clear `recorded`). No hold once done.
   $effect(() => {
+    if (done) return;
     const dirty =
       recording ||
+      recorded !== null ||
       textIntro.trim().length > 0 ||
       talkTitle.trim().length > 0 ||
-      talkDescription.trim().length > 0;
+      talkDescription.trim().length > 0 ||
+      talkUrl.trim().length > 0 ||
+      (talk && (talkSource !== "record" || processForMatching));
     if (dirty) return refreshGuard.hold("record");
   });
 
@@ -135,6 +170,15 @@
     void talkTitle;
     void talkDescription;
     opStatus.clearOnEdit();
+  });
+
+  // Persist the unsent text intro as it's typed (U9). Store only a genuine unsent
+  // edit — when it matches the published intro, drop the draft so the store stays
+  // clean and a later visit doesn't "restore" the already-published text.
+  $effect(() => {
+    if (!introLoaded || !introDraftId || done) return;
+    if (textIntro === publishedIntro) clearDraft(introDraftId);
+    else saveDraft(introDraftId, textIntro);
   });
 
   onMount(async () => {
@@ -154,13 +198,29 @@
           talkId = newTalkId();
         }
       }
-      if (session.signer) {
+      // Resolve the role BEFORE any capture/upload affordance renders (U5).
+      role = await resolveRole(ctx);
+      // Only load the member-scoped composer data (reuse library, self-copy) once
+      // we know the account is actually approved — don't do member work for a
+      // visitor/pending/revoked deep-link.
+      if (session.signer && role === "approved") {
         const bk = await deriveBlindingKey(session.signer);
         const lib = await loadLibraryFull(session.signer, bk);
         library = lib.media;
         textLibrary = lib.texts;
         const self = await loadSelfCopy(session.signer, ctx, bk);
         if (self?.introText) textIntro = self.introText;
+        // U9: restore an unsent draft that differs from the published intro.
+        if (!talk) {
+          introDraftId = `intro:${ctx.coordinate}`;
+          publishedIntro = textIntro;
+          const draft = loadDraft(introDraftId);
+          if (draft && draft.trim() && draft !== publishedIntro) {
+            textIntro = draft;
+            introDraftRestored = true;
+          }
+          introLoaded = true;
+        }
       }
     } catch (e) {
       error = e;
@@ -168,6 +228,28 @@
       perfMark("Record", "network-settled");
     }
   });
+
+  /**
+   * Resolve the viewer's membership role for this event (U5). Approved requires
+   * actual ECK custody — the same test `isApproved` uses — because only a member
+   * holds the key the intro/talk is encrypted under. A held-but-keyless membership
+   * record means the account was rotated out (revoked); a sent-but-unapproved join
+   * is pending; anything else is a visitor.
+   */
+  async function resolveRole(ctx: EventContext): Promise<RecordRole> {
+    if (!session.signer) return "visitor";
+    // A grant approved elsewhere may not be in local custody yet — scan once.
+    await receiveGrants(session.signer).catch(() => {});
+    let keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+    // Fresh-device deep-link: recover this identity's own event-keys backup once.
+    if (!keys) {
+      await recoverEventKeys(session.signer).catch(() => {});
+      keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+    }
+    if (currentEck(keys)) return "approved";
+    if (keys?.role === "attendee" || keys?.role === "organizer") return "revoked";
+    return joinSentAt(ctx.coordinate) !== undefined ? "pending" : "visitor";
+  }
 
   onDestroy(() => teardown());
 
@@ -308,6 +390,18 @@
     } catch {
       /* duration is optional */
     }
+    // U13: reject a predictably-invalid file before the encrypt/upload round-trip.
+    // The server checks stay authoritative; this just spares a doomed upload.
+    const violation = checkMediaLimits({ sizeBytes: file.size, durationSec, maxSec });
+    if (violation) {
+      URL.revokeObjectURL(url);
+      error = new Error(
+        violation.kind === "duration"
+          ? t("record.error.tooLong", { limit: violation.limit, actual: violation.actual })
+          : t("record.error.tooLarge", { limitMb: Math.round(MAX_UPLOAD_BYTES / (1024 * 1024)) }),
+      );
+      return;
+    }
     recorded = { blob: file, url, durationSec };
   }
 
@@ -331,7 +425,7 @@
     busy = true;
     error = null;
     try {
-      await submitTalk(session.signer, ctx, {
+      const outcome = await submitTalk(session.signer, ctx, {
         talkId,
         title: talkTitle.trim(),
         description: talkDescription.trim(),
@@ -343,7 +437,7 @@
         processForMatching: false,
         revision: talkRevision,
       });
-      finish();
+      finish(outcome);
     } catch (e) {
       error = e;
     } finally {
@@ -383,13 +477,17 @@
       const self = await loadSelfCopy(signer, ctx, bk);
       // A text intro replaces any recorded intro of this kind (drops its media).
       const media = (self?.media ?? []).filter((m) => m.kind !== kind);
-      await submitProfileAndMedia(signer, ctx, {
+      const outcome = await submitProfileAndMedia(signer, ctx, {
         profile: self?.profile ?? { about: "", skills: [], looking_for: "", links: [] },
         media,
         blindingKey: bk,
         introText: textIntro.trim(),
       });
-      finish();
+      // U9: the intro is submitted (or durably queued) — retire its unsent draft.
+      publishedIntro = textIntro;
+      if (introDraftId) clearDraft(introDraftId);
+      introDraftRestored = false;
+      finish(aggregateOutcome(outcome));
     } catch (e) {
       error = e;
     } finally {
@@ -427,7 +525,7 @@
     // A talk goes to the coordinator via a dedicated 21609 rumor (spec F2), NOT the
     // 21601 intro path — it carries title/description and is moderated separately.
     if (talk) {
-      await submitTalk(session.signer!, ctx!, {
+      const outcome = await submitTalk(session.signer!, ctx!, {
         talkId,
         title: talkTitle.trim(),
         description: talkDescription.trim(),
@@ -437,7 +535,7 @@
         processForMatching,
         revision: talkRevision,
       });
-      finish();
+      finish(outcome);
       return;
     }
     const signer = session.signer!;
@@ -446,23 +544,45 @@
     // Replace the existing intro of the same kind; keep other kinds (e.g. talks).
     // A recording supersedes any prior text intro (introText omitted below).
     const existingMedia = (self?.media ?? []).filter((m) => m.kind !== descriptor.kind);
-    await submitProfileAndMedia(signer, ctx!, {
+    const outcome = await submitProfileAndMedia(signer, ctx!, {
       profile: self?.profile ?? { about: "", skills: [], looking_for: "", links: [] },
       media: [...existingMedia, descriptor],
       blindingKey: bk,
     });
-    finish();
+    finish(aggregateOutcome(outcome));
   }
 
-  function finish() {
+  /**
+   * Resolve the completion state from the real publication outcome (audit U2).
+   * The media (if any) was already uploaded to Blossom over HTTPS; what varies is
+   * whether the RELAY event went out. Venue Wi-Fi often blocks WSS while allowing
+   * HTTPS, so a queued outcome must NOT read as "shared with attendees":
+   *  - queued → saved locally, will send when reconnected;
+   *  - published talk → sent, awaiting the organizer's moderation (not "done");
+   *  - published intro with a coordinator → submitted, being processed;
+   *  - published intro without a coordinator → visible to the organizer now.
+   */
+  function finish(outcome: PublishOutcome) {
     stopStream();
+    // Release the in-memory blob (and its refresh-guard hold, U4) — it's uploaded
+    // or durably queued now, so it is no longer unsaved work.
+    if (recorded) URL.revokeObjectURL(recorded.url);
+    recorded = null;
     done = true;
-    // Announce the outcome in the shared live region (audit §7.3.9). Offline →
-    // the durable outbox holds it; a talk is coordinator-moderated; an intro is
-    // published to relays. Truthful about what actually happened.
-    if (!online.isOnline) opStatus.queued(t("op.queued", { what: kindLabel }));
-    else if (talk) opStatus.acknowledged(t("op.talkSubmitted"));
-    else opStatus.published(t("op.introPublished"));
+    doneQueued = outcome === "queued";
+    if (outcome === "queued") {
+      doneMessageKey = "record.done.queued";
+      opStatus.queued(t("op.queued", { what: kindLabel }));
+    } else if (talk) {
+      doneMessageKey = "record.done.talkModeration";
+      opStatus.published(t("op.talkAwaitingModeration"));
+    } else if (hasCoordinator) {
+      doneMessageKey = "record.done.introProcessing";
+      opStatus.published(t("op.introSubmittedProcessing"));
+    } else {
+      doneMessageKey = "record.done.introPublished";
+      opStatus.published(t("op.introPublished"));
+    }
   }
 
   const talksOff = $derived(talk && !!ctx && ctx.config.talks === "off");
@@ -503,15 +623,38 @@
 {#if error}<ErrorState {error} />{/if}
 
 {#if done}
-  <div class="card" role="status">
-    <p>{t("record.uploaded", { kind: kindLabel })}</p>
+  <div class="card" class:warn={doneQueued} role="status">
+    <p>{t(doneMessageKey, { kind: kindLabel })}</p>
     <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
       {t("record.backToEvent")}
     </button>
   </div>
 {:else if !session.loggedIn}
   <div class="card">
+    <p>{t("record.role.loggedOut")}</p>
     <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("record.loginFirst")}</button>
+  </div>
+{:else if role === "loading"}
+  <!-- Resolve membership before exposing any capture/upload affordance (U5). -->
+  <div class="card" role="status"><p class="muted">{t("record.role.resolving")}</p></div>
+{:else if role === "pending"}
+  <div class="card" role="status">
+    <p>{t("record.role.pending")}</p>
+    <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>{t("record.backToEvent")}</button>
+  </div>
+{:else if role === "revoked"}
+  <div class="card" role="status">
+    <p>{t("record.role.revoked")}</p>
+    <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>{t("record.backToEvent")}</button>
+  </div>
+{:else if role !== "approved"}
+  <!-- Visitor: not a member — must join before recording (no capture/upload). -->
+  <div class="card">
+    <p>{t("record.role.visitor")}</p>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn primary" onclick={() => router.go({ name: "join", naddr })}>{t("record.role.join")}</button>
+      <button class="btn" onclick={() => router.go({ name: "event", naddr })}>{t("record.backToEvent")}</button>
+    </div>
   </div>
 {:else if talksOff}
   <!-- Deep-link guard: talks are off for this event, so there's no talk step. -->
@@ -687,6 +830,19 @@
     <div class="card">
       <h2>{t("record.text.title")}</h2>
       <p class="muted">{t("record.text.hint")}</p>
+      {#if introDraftRestored}
+        <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
+          <span class="muted" role="status">{t("draft.restored")}</span>
+          <button
+            class="btn inline"
+            style="flex:none"
+            onclick={() => {
+              textIntro = publishedIntro;
+              introDraftRestored = false;
+              if (introDraftId) clearDraft(introDraftId);
+            }}>{t("draft.discard")}</button>
+        </div>
+      {/if}
       <textarea
         id="record-text"
         rows="6"
