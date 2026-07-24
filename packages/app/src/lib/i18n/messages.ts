@@ -1952,7 +1952,7 @@ export const messages = {
     "lang.noResults": "Žiadny jazyk sa nenašiel",
 
     // Matches
-    "matches.title": "Ľudia na stretnutie",
+    "matches.title": "Ľudia, ktorých sa oplatí stretnúť",
     "matches.none.noIntro":
       "Zatiaľ žiadne spojenia — koordinátor začína z vášho Nostr profilu a príspevkov, skúste o pár minút. Nahraté predstavenie vaše spojenia výrazne zlepší.",
     "matches.live": "vaše predstavenie je odoslané, takže tieto sú aktuálne",
@@ -3291,7 +3291,7 @@ export const messages = {
     "lang.noResults": "Žádný jazyk nenalezen",
 
     // Spojení
-    "matches.title": "Lidé k setkání",
+    "matches.title": "Lidé, které stojí za to potkat",
     "matches.noCoordinator":
       "K této akci není připojen žádný AI koordinátor, takže nejsou žádná spojení. Místo toho si prohlédněte seznam účastníků.",
     "matches.seeWhosHere": "Podívejte se, kdo tu je",
