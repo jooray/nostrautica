@@ -18,6 +18,7 @@
     prepareReuse,
   } from "$lib/media/submit.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
+  import { classifyTalkUrl } from "$lib/media/external.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import { validate, hasError, describedBy, type FieldError } from "$lib/stores/form-validation.js";
@@ -43,6 +44,25 @@
   let talkId = $state("");
   let talkRevision = $state(0);
   let editingTalk = $state(false);
+
+  // Talk video source (user request 2026-07-24). Three ways to provide a talk:
+  //  - "record": record in-browser (existing recorder)
+  //  - "upload": pick a local file (existing FileButton path)  → both encrypt + Blossom
+  //  - "url":    paste an unlisted YouTube link or a direct mp4 URL — encrypted to
+  //              the event but NOT uploaded, for clips too large for Blossom.
+  // Intros keep the plain video/audio/text composer (no source selector).
+  type TalkSource = "record" | "upload" | "url";
+  let talkSource = $state<TalkSource>("record");
+  let talkUrl = $state("");
+  // Off by default (user: "we don't have to use talks for matching by default").
+  // Only meaningful for Blossom talks — external URLs are never coordinator-processed.
+  let processForMatching = $state(false);
+  const classifiedUrl = $derived(talkSource === "url" ? classifyTalkUrl(talkUrl) : null);
+  // Which composer surfaces show: record shows the recorder, upload the file
+  // picker, url the URL field. Intros always show both recorder + file picker.
+  const showRecorder = $derived(!talk || talkSource === "record");
+  const showUploadBtn = $derived(!talk || talkSource === "upload");
+  const urlSource = $derived(talk && talkSource === "url");
 
   // Intro composer mode (spec F1.4). One recording engine (`VideoCapture`) serves
   // both video and audio; text bypasses capture/upload entirely. Feature 2 reuses
@@ -301,6 +321,36 @@
     });
   }
 
+  /** Submit a talk whose video is an external URL (YouTube / direct mp4). No
+      Blossom upload: the URL is carried inside the encrypted 21609 submission. */
+  async function submitUrl() {
+    if (!ctx || !session.signer) return;
+    if (!checkSubmit(false)) return;
+    const cls = classifiedUrl;
+    if (!cls) return; // checkSubmit already flagged talk-url
+    busy = true;
+    error = null;
+    try {
+      await submitTalk(session.signer, ctx, {
+        talkId,
+        title: talkTitle.trim(),
+        description: talkDescription.trim(),
+        externalUrl: cls.url,
+        externalKind: cls.kind,
+        sourceType: "external",
+        // External talks are never coordinator-processed (SSRF allowlist), so
+        // there's nothing to opt into — keep the flag off.
+        processForMatching: false,
+        revision: talkRevision,
+      });
+      finish();
+    } catch (e) {
+      error = e;
+    } finally {
+      busy = false;
+    }
+  }
+
   async function submitRecorded() {
     if (!ctx || !session.signer || !recorded) return;
     if (!checkSubmit(false)) return;
@@ -382,6 +432,9 @@
         title: talkTitle.trim(),
         description: talkDescription.trim(),
         media: descriptor,
+        // "record" or "upload" — a reused-library clip counts as a recording.
+        sourceType: talkSource === "upload" ? "upload" : "recording",
+        processForMatching,
         revision: talkRevision,
       });
       finish();
@@ -429,6 +482,10 @@
         id: "record-text",
         message: needText && !textIntro.trim() ? t("record.error.textRequired") : null,
       },
+      {
+        id: "talk-url",
+        message: urlSource && !classifiedUrl ? t("talks.url.invalid") : null,
+      },
     ]);
     fieldErrors = result.errors;
     showErrors = !result.ok;
@@ -438,6 +495,7 @@
   const errTalkTitle = $derived(showErrors && hasError(fieldErrors, "talk-title"));
   const errDisclosure = $derived(showErrors && hasError(fieldErrors, "disclosure-ack"));
   const errText = $derived(showErrors && hasError(fieldErrors, "record-text"));
+  const errUrl = $derived(showErrors && hasError(fieldErrors, "talk-url"));
 </script>
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
@@ -484,6 +542,34 @@
         <label for="talk-desc">{t("talks.field.description")}</label>
         <textarea id="talk-desc" rows="3" maxlength="2000" bind:value={talkDescription}></textarea>
       </div>
+      <!-- Matching opt-in (default off). External talks can't be processed. -->
+      {#if urlSource}
+        <p class="muted" style="margin:0;font-size:0.85rem">{t("talks.process.externalNote")}</p>
+      {:else}
+        <div>
+          <label class="row" style="align-items:flex-start;gap:0.5rem;font-weight:400">
+            <input
+              type="checkbox"
+              bind:checked={processForMatching}
+              style="width:auto;min-height:0;flex:none;margin-top:0.2rem"
+            />
+            <span>
+              <strong style="font-weight:600">{t("talks.process.label")}</strong><br />
+              <span class="muted" style="font-size:0.85rem">{t("talks.process.hint")}</span>
+            </span>
+          </label>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Talk video source: record · upload · paste URL (user request 2026-07-24). -->
+    <div class="card">
+      <div class="field-label" id="talk-source-label">{t("talks.source.label")}</div>
+      <div class="row" role="group" aria-labelledby="talk-source-label" style="flex-wrap:wrap">
+        <button type="button" class="btn inline" aria-pressed={talkSource === "record"} class:primary={talkSource === "record"} onclick={() => (talkSource = "record")}>{t("talks.source.record")}</button>
+        <button type="button" class="btn inline" aria-pressed={talkSource === "upload"} class:primary={talkSource === "upload"} onclick={() => (talkSource = "upload")}>{t("talks.source.upload")}</button>
+        <button type="button" class="btn inline" aria-pressed={talkSource === "url"} class:primary={talkSource === "url"} onclick={() => (talkSource = "url")}>{t("talks.source.url")}</button>
+      </div>
     </div>
   {/if}
 
@@ -492,16 +578,18 @@
        three panels below are ordinary page content (not focus-managed tabpanels),
        so `aria-pressed` toggle buttons in a labelled group is the honest, fully
        implemented pattern — no half-built roving-focus tablist. -->
-  <div class="card">
-    <div class="field-label" id="mode-label">{t("record.mode.label")}</div>
-    <div class="row" role="group" aria-labelledby="mode-label" style="flex-wrap:wrap">
-      <button type="button" class="btn inline" aria-pressed={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
-      <button type="button" class="btn inline" aria-pressed={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
-      {#if !talk}
-        <button type="button" class="btn inline" aria-pressed={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
-      {/if}
+  {#if !urlSource}
+    <div class="card">
+      <div class="field-label" id="mode-label">{t("record.mode.label")}</div>
+      <div class="row" role="group" aria-labelledby="mode-label" style="flex-wrap:wrap">
+        <button type="button" class="btn inline" aria-pressed={mode === "video"} class:primary={mode === "video"} onclick={() => switchMode("video")}>{t("record.mode.video")}</button>
+        <button type="button" class="btn inline" aria-pressed={mode === "audio"} class:primary={mode === "audio"} onclick={() => switchMode("audio")}>{t("record.mode.audio")}</button>
+        {#if !talk}
+          <button type="button" class="btn inline" aria-pressed={mode === "text"} class:primary={mode === "text"} onclick={() => switchMode("text")}>{t("record.mode.text")}</button>
+        {/if}
+      </div>
     </div>
-  </div>
+  {/if}
 
   <!-- What is shared, and with whom, before anything leaves the device (H10).
        The text mode drops the audio/transcription bullet: nothing is recorded. -->
@@ -570,7 +658,32 @@
     </div>
   {/if}
 
-  {#if mode === "text"}
+  {#if urlSource}
+    <div class="card stack">
+      <div>
+        <label for="talk-url">{t("talks.url.label")}</label>
+        <input
+          id="talk-url"
+          type="url"
+          inputmode="url"
+          bind:value={talkUrl}
+          placeholder={t("talks.url.placeholder")}
+          aria-invalid={errUrl}
+          aria-describedby={describedBy("talk-url", errUrl)}
+        />
+        {#if errUrl}<p id="talk-url-error" class="field-error">{t("talks.url.invalid")}</p>{/if}
+        <p class="muted" style="font-size:0.85rem;margin:0.4rem 0 0">{t("talks.url.hint")}</p>
+        {#if classifiedUrl}
+          <p class="badge ok" style="margin-top:0.4rem">
+            {classifiedUrl.kind === "youtube" ? t("talks.url.detectedYoutube") : t("talks.url.detectedVideo")}
+          </p>
+        {/if}
+      </div>
+      <button class="btn primary" onclick={submitUrl} disabled={busy || !classifiedUrl}>
+        {busy ? t("record.uploading") : t("talks.url.submit")}
+      </button>
+    </div>
+  {:else if mode === "text"}
     <div class="card">
       <h2>{t("record.text.title")}</h2>
       <p class="muted">{t("record.text.hint")}</p>
@@ -608,7 +721,7 @@
             {busy ? t("record.uploading") : t("record.useThis")}
           </button>
         </div>
-      {:else}
+      {:else if showRecorder}
         {#if mode === "audio"}
           <p class="muted">{t("record.audio.hint")}</p>
           <!-- Live mic meter (audit P2.8): shows the microphone is working. -->
@@ -649,16 +762,31 @@
             {:else}
               <button class="btn primary" onclick={startRecording}>{t("record.record")}</button>
             {/if}
-            <FileButton
-              class="btn"
-              accept={mode === "audio" ? "audio/*" : "video/*"}
-              onchange={chooseFile}
-              label={mode === "audio" ? t("record.chooseAudioFile") : t("record.chooseVideoFile")}
-            >
-              {t("record.chooseFile")}
-            </FileButton>
+            {#if showUploadBtn}
+              <FileButton
+                class="btn"
+                accept={mode === "audio" ? "audio/*" : "video/*"}
+                onchange={chooseFile}
+                label={mode === "audio" ? t("record.chooseAudioFile") : t("record.chooseVideoFile")}
+              >
+                {t("record.chooseFile")}
+              </FileButton>
+            {/if}
           </div>
         {/if}
+      {:else}
+        <!-- Talk "upload file" source: just the file picker (no camera/mic). -->
+        <p class="muted">{mode === "audio" ? t("record.audio.hint") : t("record.chooseVideoFile")}</p>
+        <div class="row" style="flex-wrap:wrap">
+          <FileButton
+            class="btn primary"
+            accept={mode === "audio" ? "audio/*" : "video/*"}
+            onchange={chooseFile}
+            label={mode === "audio" ? t("record.chooseAudioFile") : t("record.chooseVideoFile")}
+          >
+            {t("record.chooseFile")}
+          </FileButton>
+        </div>
       {/if}
     </div>
   {/if}

@@ -22,6 +22,8 @@ import {
   bytesToHex,
   type TalkContent,
   type TalkSubmissionContent,
+  type TalkExternalKind,
+  type TalkSourceType,
   type MediaDescriptor,
   type GiftWrap,
 } from "@nostrautica/protocol";
@@ -123,7 +125,13 @@ export interface PendingTalk {
   title: string;
   description: string;
   speakers: string[];
-  media: MediaDescriptor;
+  // Exactly one of `media` (recorded/uploaded to Blossom) or `externalUrl`
+  // (YouTube/mp4 hosted elsewhere) is set, mirroring the wire schema.
+  media?: MediaDescriptor;
+  externalUrl?: string;
+  externalKind?: TalkExternalKind;
+  sourceType?: TalkSourceType;
+  processForMatching: boolean;
   revision: number;
   rumorCreatedAt: number;
 }
@@ -172,6 +180,10 @@ export function dedupePendingTalks(
         description: s.content.description,
         speakers: s.content.speakers,
         media: s.content.media,
+        externalUrl: s.content.external_url,
+        externalKind: s.content.external_kind,
+        sourceType: s.content.source_type,
+        processForMatching: s.content.process_for_matching,
         revision: s.content.revision,
         rumorCreatedAt: s.rumorCreatedAt,
       });
@@ -251,22 +263,34 @@ export async function submitTalk(
     talkId: string;
     title: string;
     description: string;
-    media: MediaDescriptor;
     revision: number;
+    // Exactly one source: a Blossom `media` descriptor (recording/upload) OR an
+    // `externalUrl` (+ `externalKind`) the speaker hosts elsewhere.
+    media?: MediaDescriptor;
+    externalUrl?: string;
+    externalKind?: TalkExternalKind;
+    sourceType?: TalkSourceType;
+    /** Opt this talk into coordinator STT + matching. Default off. */
+    processForMatching?: boolean;
   },
 ): Promise<void> {
+  const content: TalkSubmissionContent = {
+    v: 2,
+    a: ctx.coordinate,
+    talk_d: args.talkId,
+    title: args.title,
+    description: args.description,
+    speakers: [],
+    source_type: args.sourceType,
+    process_for_matching: args.processForMatching ?? false,
+    revision: args.revision,
+    ...(args.media
+      ? { media: args.media }
+      : { external_url: args.externalUrl, external_kind: args.externalKind }),
+  };
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_TALK_SUBMISSION,
-    content: {
-      v: 2,
-      a: ctx.coordinate,
-      talk_d: args.talkId,
-      title: args.title,
-      description: args.description,
-      speakers: [],
-      media: args.media,
-      revision: args.revision,
-    },
+    content,
     tags: [["a", ctx.coordinate]],
   });
   await publishOrQueue(wrap as any, ctx.config.relays);

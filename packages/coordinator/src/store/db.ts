@@ -167,7 +167,16 @@ export interface TalkRow {
   title: string;
   description: string;
   speakers_json: string;
+  /** kind:"talk" media descriptor as JSON, or the JSON literal 'null' for external talks. */
   media_json: string;
+  /** External (off-Blossom) talk video URL — YouTube or direct mp4 — or null. */
+  external_url: string | null;
+  /** "youtube" | "video" for an external talk, else null. */
+  external_kind: string | null;
+  /** "recording" | "upload" | "external" (null on legacy rows). */
+  source_type: string | null;
+  /** 1 if the speaker opted this talk into coordinator STT + matching, else 0. */
+  process_for_matching: number;
   transcript_json: string | null;
   lang: string;
   revision: number;
@@ -354,9 +363,13 @@ CREATE TABLE IF NOT EXISTS pipeline_artifacts (
   PRIMARY KEY (stage, inputs_hash)
 );
 -- Prerecorded talks (spec F2, audit U11). One row per (coordinate, speaker, talk_d).
--- media_json is the kind:"talk" descriptor; transcript_json is filled by process_talk;
--- status drives organizer moderation (pending → published/rejected); revision supports
--- editing (a bumped revision replaces the previous 31610 at publish time).
+-- media_json is the kind:"talk" descriptor (the JSON literal 'null' for external
+-- talks); transcript_json is filled by process_talk (only when process_for_matching
+-- is set and the media is on Blossom); status drives organizer moderation (pending →
+-- published/rejected); revision supports editing (a bumped revision replaces the
+-- previous 31610 at publish time). external_url/external_kind (2026-07-24) carry a
+-- YouTube/mp4 talk hosted off-Blossom — the coordinator never fetches these (SSRF),
+-- so they are view-only and never transcribed/matched.
 CREATE TABLE IF NOT EXISTS talks (
   coordinate TEXT NOT NULL,
   pubkey TEXT NOT NULL,
@@ -365,6 +378,10 @@ CREATE TABLE IF NOT EXISTS talks (
   description TEXT NOT NULL DEFAULT '',
   speakers_json TEXT NOT NULL DEFAULT '[]',
   media_json TEXT NOT NULL,
+  external_url TEXT,
+  external_kind TEXT,
+  source_type TEXT,
+  process_for_matching INTEGER NOT NULL DEFAULT 0,
   transcript_json TEXT,
   lang TEXT NOT NULL DEFAULT 'en',
   revision INTEGER NOT NULL DEFAULT 0,
@@ -553,6 +570,23 @@ export class Store {
       this.db.exec("ALTER TABLE talks ADD COLUMN content_hash TEXT");
     } catch {
       /* column already exists */
+    }
+    // Migration (2026-07-24): external talk sources (YouTube / direct-mp4 URL held
+    // off-Blossom) + the per-talk matching opt-in. Older rows are all Blossom
+    // recordings with process_for_matching implicitly on, so the flag backfills
+    // to 1 to preserve their existing transcribe-and-match behavior; new rows
+    // default the flag off at the schema level.
+    for (const col of [
+      "external_url TEXT",
+      "external_kind TEXT",
+      "source_type TEXT",
+      "process_for_matching INTEGER NOT NULL DEFAULT 1",
+    ]) {
+      try {
+        this.db.exec(`ALTER TABLE talks ADD COLUMN ${col}`);
+      } catch {
+        /* column already exists */
+      }
     }
     // Migration (COORD-24): consumption timestamps for TTL pruning. Existing rows
     // backfill to 0, so the first prune after upgrade sweeps them (they're all
@@ -1039,10 +1073,16 @@ export class Store {
     title: string;
     description: string;
     speakersJson: string;
+    /** kind:"talk" descriptor JSON, or the JSON literal 'null' for external talks. */
     mediaJson: string;
+    externalUrl?: string | null;
+    externalKind?: string | null;
+    sourceType?: string | null;
+    processForMatching?: boolean;
     lang: string;
     revision: number;
-    /** New media sha256 (x); when it differs from the stored one the transcript is dropped. */
+    /** Content fingerprint (media sha256 x, or the external URL); when it differs from
+     *  the stored one the transcript is dropped (a re-recorded/replaced talk). */
     mediaX: string;
     now: number;
   }): boolean {
@@ -1078,13 +1118,17 @@ export class Store {
     }
     this.db
       .prepare(
-        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, content_hash, status, published_at, updated_at)
-         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, :contentHash, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
+        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, external_url, external_kind, source_type, process_for_matching, transcript_json, lang, revision, content_hash, status, published_at, updated_at)
+         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :externalUrl, :externalKind, :sourceType, :processForMatching, :transcriptJson, :lang, :revision, :contentHash, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
          ON CONFLICT(coordinate, pubkey, talk_d) DO UPDATE SET
            title = excluded.title,
            description = excluded.description,
            speakers_json = excluded.speakers_json,
            media_json = excluded.media_json,
+           external_url = excluded.external_url,
+           external_kind = excluded.external_kind,
+           source_type = excluded.source_type,
+           process_for_matching = excluded.process_for_matching,
            transcript_json = excluded.transcript_json,
            lang = excluded.lang,
            revision = excluded.revision,
@@ -1100,6 +1144,10 @@ export class Store {
         description: row.description,
         speakersJson: row.speakersJson,
         mediaJson: row.mediaJson,
+        externalUrl: row.externalUrl ?? null,
+        externalKind: row.externalKind ?? null,
+        sourceType: row.sourceType ?? null,
+        processForMatching: row.processForMatching ? 1 : 0,
         transcriptJson: keepTranscript,
         lang: row.lang,
         revision: row.revision,

@@ -77,7 +77,11 @@
                 </p>
               {/if}
               <div class="row" style="flex-wrap:wrap;margin-top:0.35rem">
-                <span class="badge">{it.talk.media.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")}{it.talk.media.duration ? ` · ${it.talk.media.duration}s` : ""}</span>
+                {#if it.talk.media}
+                  <span class="badge">{it.talk.media.kind === "talk" ? t("record.kind.talk") : t("record.kind.intro")}{it.talk.media.duration ? ` · ${it.talk.media.duration}s` : ""}</span>
+                {:else if it.talk.external_url}
+                  <span class="badge">{t("talks.mod.externalLabel")}</span>
+                {/if}
                 {#if it.talk.transcript}<span class="badge">{t("talks.hasTranscript")}</span>{/if}
               </div>
             </div>

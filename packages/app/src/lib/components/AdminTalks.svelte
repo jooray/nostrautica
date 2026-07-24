@@ -11,6 +11,7 @@
   import type { PendingTalk } from "$lib/events/talks.js";
   import { sendAdminCommand } from "$lib/events/organizer.js";
   import MediaPlayer from "./MediaPlayer.svelte";
+  import ExternalTalkPlayer from "./ExternalTalkPlayer.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -71,12 +72,24 @@
             <span class="badge">{t("admin.talks.mod.revision", { n: tk.revision })}</span>
           {/if}
           {#if tk.description}<p class="muted">{tk.description}</p>{/if}
-          {#if previewingTalk === tkKey(tk)}
-            <MediaPlayer descriptor={tk.media} />
-          {:else}
-            <button class="btn inline" onclick={() => (previewingTalk = tkKey(tk))}>
-              {t("admin.talks.mod.preview")}
-            </button>
+          {#if tk.externalUrl && tk.externalKind}
+            <!-- External (YouTube/mp4) talk: show the link + player, not Blossom. -->
+            <span class="badge">{t("talks.mod.externalLabel")}</span>
+            {#if previewingTalk === tkKey(tk)}
+              <ExternalTalkPlayer url={tk.externalUrl} kind={tk.externalKind} />
+            {:else}
+              <button class="btn inline" onclick={() => (previewingTalk = tkKey(tk))}>
+                {t("admin.talks.mod.preview")}
+              </button>
+            {/if}
+          {:else if tk.media}
+            {#if previewingTalk === tkKey(tk)}
+              <MediaPlayer descriptor={tk.media} />
+            {:else}
+              <button class="btn inline" onclick={() => (previewingTalk = tkKey(tk))}>
+                {t("admin.talks.mod.preview")}
+              </button>
+            {/if}
           {/if}
           <div class="row">
             <button

@@ -17,6 +17,7 @@
   } from "$lib/events/talks.js";
   import { cachedProfiles } from "$lib/events/social.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
+  import ExternalTalkPlayer from "$lib/components/ExternalTalkPlayer.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -59,7 +60,9 @@
       if (!talk) talk = cachedTalk(ctx.coordinate, d) ?? null;
       talk = (await fetchTalk(ctx, d)) ?? talk;
       if (talk) {
-        resumeAt = loadWatchProgress(ctx.coordinate, talk.media.x);
+        // Watch-progress is keyed by the Blossom ciphertext hash; external
+        // (YouTube/mp4) talks have no `media`, so there's nothing to resume.
+        resumeAt = talk.media ? loadWatchProgress(ctx.coordinate, talk.media.x) : 0;
         const profiles = await fetchEvents({ kinds: [KIND_PROFILE], authors: [talk.pubkey] });
         const latest = profiles.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
         if (latest) {
@@ -79,7 +82,7 @@
   });
 
   function onProgress(seconds: number) {
-    if (ctx && talk) saveWatchProgress(ctx.coordinate, talk.media.x, seconds);
+    if (ctx && talk?.media) saveWatchProgress(ctx.coordinate, talk.media.x, seconds);
   }
 
   function editTalk() {
@@ -131,7 +134,11 @@
     {/if}
 
     <div style="margin:0.75rem 0">
-      <MediaPlayer descriptor={talk.media} transcript={talk.transcript} {resumeAt} {onProgress} />
+      {#if talk.media}
+        <MediaPlayer descriptor={talk.media} transcript={talk.transcript} {resumeAt} {onProgress} />
+      {:else if talk.external_url && talk.external_kind}
+        <ExternalTalkPlayer url={talk.external_url} kind={talk.external_kind} />
+      {/if}
     </div>
 
     {#if talk.description}

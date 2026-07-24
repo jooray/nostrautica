@@ -1368,13 +1368,25 @@ function talkMedia(size: number, x: string) {
   };
 }
 
-/** Submit (or edit) a talk via a 21609 rumor to E_inbox. */
+/** Submit (or edit) a talk via a 21609 rumor to E_inbox. A talk carries EITHER
+ *  `media` (Blossom) or `externalUrl` (+ `externalKind`). `processForMatching`
+ *  opts a Blossom talk into STT + matching (default off, as on the wire). */
 async function submitTalk(
   h: Harness,
   speakerSk: Uint8Array,
-  args: { talkD: string; title: string; description?: string; media: any; revision?: number },
+  args: {
+    talkD: string;
+    title: string;
+    description?: string;
+    media?: any;
+    externalUrl?: string;
+    externalKind?: "youtube" | "video";
+    processForMatching?: boolean;
+    revision?: number;
+  },
 ): Promise<void> {
   const inboxPk = getPublicKey(h.einboxSk);
+  const isExternal = args.externalUrl !== undefined;
   const wrap = wrapRumor(speakerSk, inboxPk, {
     kind: KIND_TALK_SUBMISSION,
     content: {
@@ -1384,8 +1396,12 @@ async function submitTalk(
       title: args.title,
       description: args.description ?? "",
       speakers: [],
-      media: args.media,
+      source_type: isExternal ? "external" : "recording",
+      process_for_matching: args.processForMatching ?? false,
       revision: args.revision ?? 0,
+      ...(isExternal
+        ? { external_url: args.externalUrl, external_kind: args.externalKind }
+        : { media: args.media }),
     },
     tags: [["a", h.coordinate]],
   });
@@ -1443,7 +1459,8 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     await h.coordinator.jobs.drain();
     const x = "bb".repeat(32);
     h.stt.setTranscript("700", "In this talk I explain zk-SNARKs from first principles.");
-    await submitTalk(h, speakerSk, { talkD: "t1", title: "Zero-knowledge proofs", description: "A gentle intro", media: talkMedia(700, x) });
+    // process_for_matching opts this talk into STT (default off).
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Zero-knowledge proofs", description: "A gentle intro", media: talkMedia(700, x), processForMatching: true });
     await h.coordinator.jobs.drain();
     // Stored, transcribed, but NOT published (pending moderation).
     const row = h.store.getTalk(h.coordinate, pk, "t1")!;
@@ -1459,6 +1476,54 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     expect(talks[0]!.media.kind).toBe("talk");
     expect(talks[0]!.transcript?.text).toContain("zk-SNARKs");
     expect(h.store.getTalk(h.coordinate, pk, "t1")!.status).toBe("published");
+  });
+
+  it("talks are NOT transcribed/matched by default (process_for_matching off)", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    h.stt.setTranscript("700", "should never be requested");
+    // No processForMatching → coordinator stores but skips paid STT entirely.
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Unprocessed talk", media: talkMedia(700, "b1".repeat(32)) });
+    await h.coordinator.jobs.drain();
+    const row = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row.status).toBe("pending");
+    expect(row.transcript_json).toBeNull(); // never transcribed
+    expect(row.process_for_matching).toBe(0);
+    // Still fully publishable — moderation is independent of processing.
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    const talks = publishedTalks(h);
+    expect(talks).toHaveLength(1);
+    expect(talks[0]!.title).toBe("Unprocessed talk");
+    expect(talks[0]!.transcript).toBeUndefined();
+  });
+
+  it("an external (YouTube) talk is stored + published without any Blossom fetch", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, {
+      talkD: "t1",
+      title: "My big talk",
+      externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      externalKind: "youtube",
+    });
+    await h.coordinator.jobs.drain();
+    const row = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row.status).toBe("pending");
+    expect(row.external_url).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(row.external_kind).toBe("youtube");
+    expect(row.media_json).toBe("null"); // no Blossom descriptor
+    expect(row.transcript_json).toBeNull(); // never fetched/transcribed
+    // Publishes a 31610 that carries the external URL (members can play it).
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    const talks = publishedTalks(h);
+    expect(talks).toHaveLength(1);
+    expect(talks[0]!.external_url).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(talks[0]!.external_kind).toBe("youtube");
+    expect(talks[0]!.media).toBeUndefined();
   });
 
   it("only an approved attendee may submit a talk", async () => {

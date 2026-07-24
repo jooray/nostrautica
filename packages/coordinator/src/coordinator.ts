@@ -67,6 +67,8 @@ import {
   type ProfileCorrectionContent,
   type TalkSubmissionContent,
   type TalkContent,
+  type TalkExternalKind,
+  type TalkSourceType,
   type AiProfile,
   type RosterContent,
   type MatchMatrixContent,
@@ -1152,6 +1154,11 @@ export class Coordinator {
       );
       return;
     }
+    // A talk's video is EITHER a Blossom `media` descriptor (recording/upload) or
+    // an `external_url` (YouTube/mp4 the speaker hosts elsewhere). External talks
+    // store the JSON literal 'null' for media and fingerprint on the URL.
+    const isExternal = content.external_url !== undefined;
+    const fingerprint = isExternal ? content.external_url! : content.media!.x;
     const applied = this.deps.store.upsertTalk({
       coordinate: state.coordinate,
       pubkey,
@@ -1159,10 +1166,14 @@ export class Coordinator {
       title: content.title,
       description: content.description,
       speakersJson: JSON.stringify(content.speakers),
-      mediaJson: JSON.stringify(content.media),
+      mediaJson: isExternal ? "null" : JSON.stringify(content.media),
+      externalUrl: content.external_url ?? null,
+      externalKind: content.external_kind ?? null,
+      sourceType: content.source_type ?? null,
+      processForMatching: content.process_for_matching,
       lang: state.lang,
       revision: content.revision,
-      mediaX: content.media.x,
+      mediaX: fingerprint,
       now: this.now(),
     });
     if (!applied) {
@@ -1171,12 +1182,22 @@ export class Coordinator {
       return;
     }
     log(`[talk] "${content.title}" from ${short(pubkey)} (rev ${content.revision}) → pending moderation`);
-    // Transcribe in the background (keyed by media x so a re-delivery dedupes).
-    this.jobs.enqueue(
-      "process_talk",
-      `talk:${state.coordinate}:${pubkey}:${content.talk_d}:${content.media.x}`,
-      { coordinate: state.coordinate, pubkey, talkD: content.talk_d },
-    );
+    // Transcribe + fold into matching ONLY a Blossom talk the speaker opted in
+    // (process_for_matching). External (YouTube/mp4) talks are never fetched — the
+    // C3 SSRF allowlist covers Blossom origins only — so they are view-only. An
+    // un-opted talk skips paid STT entirely (talks aren't matched by default).
+    if (!isExternal && content.process_for_matching) {
+      this.jobs.enqueue(
+        "process_talk",
+        `talk:${state.coordinate}:${pubkey}:${content.talk_d}:${content.media!.x}`,
+        { coordinate: state.coordinate, pubkey, talkD: content.talk_d },
+      );
+    } else {
+      log(
+        `[talk] "${content.title}" not processed for matching ` +
+          `(${isExternal ? `external ${content.external_kind} URL` : "process_for_matching off"})`,
+      );
+    }
   }
 
   /**
@@ -1754,6 +1775,9 @@ export class Coordinator {
     await this.assertSpendAllowed(coordinate, pubkey);
     const talk = this.deps.store.getTalk(coordinate, pubkey, talkD);
     if (!talk) return;
+    // External talks are never processed (no Blossom blob to fetch — SSRF
+    // allowlist); defensive guard in case a stale job reaches here.
+    if (talk.external_url != null) return;
     const media = JSON.parse(talk.media_json) as MediaDescriptor;
     // Duration cap (audit COORD-4): never transcribe over-length talk media.
     if (typeof media.duration === "number" && media.duration > state.maxMediaSec) {
@@ -1842,7 +1866,9 @@ export class Coordinator {
   private async publishTalk(state: EventState, pubkey: string, talkD: string): Promise<void> {
     const talk = this.deps.store.getTalk(state.coordinate, pubkey, talkD);
     if (!talk) return;
-    const media = JSON.parse(talk.media_json) as MediaDescriptor;
+    // External talks carry the JSON literal 'null' for media and a URL instead.
+    const isExternal = talk.external_url != null;
+    const media = isExternal ? undefined : (JSON.parse(talk.media_json) as MediaDescriptor);
     const transcript = talk.transcript_json
       ? (JSON.parse(talk.transcript_json) as MediaTranscript)
       : undefined;
@@ -1862,7 +1888,13 @@ export class Coordinator {
       title: talk.title,
       description: talk.description,
       speakers,
-      media,
+      ...(media
+        ? { media }
+        : {
+            external_url: talk.external_url!,
+            external_kind: talk.external_kind as TalkExternalKind,
+          }),
+      ...(talk.source_type ? { source_type: talk.source_type as TalkSourceType } : {}),
       ...(transcript ? { transcript } : {}),
       lang: talk.lang,
       revision: talk.revision,

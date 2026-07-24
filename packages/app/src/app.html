@@ -161,6 +161,11 @@
       (APPR-11/UX-5); object-src/base-uri/form-action are belt-and-braces for a
       client-side app with no plugins, no <base>, and no form posts.
 
+      frame-src is pinned to youtube-nocookie.com ONLY: a talk's video can be an
+      unlisted YouTube link (external talk source, 2026-07-24), embedded via the
+      privacy no-cookie host. No other origin may be framed — direct-mp4 external
+      talks render as a same-origin <video src=https:…> under media-src, not a frame.
+
       WARNING: PUBLIC_CSP_EXTRA_CONNECT must NEVER be set in production builds
       (APPR-11). Local e2e builds (VITE_NOSTRAUTICA_* overrides) set
       PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" because plain-scheme localhost infra
@@ -169,7 +174,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob: https:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src https://www.youtube-nocookie.com; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob: https:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
     />
     %sveltekit.head%
   </head>
