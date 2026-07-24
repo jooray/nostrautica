@@ -61,7 +61,7 @@
 
       "organizers.eyebrow": "For organizers",
       "organizers.title": "Run the whole thing from your phone.",
-      "organizers.intro": "Create an event, open the door, and let the coordinator handle the matching. There's no server to babysit: the app publishes to Nostr relays and Blossom, and that's the entire backend.",
+      "organizers.intro": "Create an event, open the door, and let the coordinator handle the matching. There's no application server to babysit — the app talks straight to Nostr relays and Blossom. AI matching and group chat run on an optional headless coordinator daemon you spin up only when you want them.",
       "organizers.f1": "Manual approval, invite codes, or both — your call",
       "organizers.f2": "Attach an AI coordinator for matchmaking, or run without one",
       "organizers.f3": "Public updates or members-only posts, encrypted to your attendees alone",
@@ -194,7 +194,7 @@
 
       "organizers.eyebrow": "Pre organizátorov",
       "organizers.title": "Celé podujatie riadite z telefónu.",
-      "organizers.intro": "Vytvorte podujatie, otvorte dvere a zhody nechajte na koordinátora. Žiadny server, o ktorý by ste sa museli starať: appka publikuje na Nostr relaye a Blossom, a to je celý backend.",
+      "organizers.intro": "Vytvorte podujatie, otvorte dvere a zhody nechajte na koordinátora. Žiadny aplikačný server, o ktorý by ste sa museli starať — appka hovorí priamo s Nostr relaymi a Blossomom. AI zhody a skupinový chat beží na voliteľnom bezobslužnom koordinátorskom démone, ktorý spustíte, len keď ich chcete.",
       "organizers.f1": "Ručné schvaľovanie, pozývacie kódy, alebo oboje — podľa vás",
       "organizers.f2": "Pripojte AI koordinátora na párovanie, alebo bežte bez neho",
       "organizers.f3": "Verejné novinky alebo príspevky len pre členov, šifrované výhradne pre vašich účastníkov",
@@ -327,7 +327,7 @@
 
       "organizers.eyebrow": "Pro organizátory",
       "organizers.title": "Celou akci řídíte z telefonu.",
-      "organizers.intro": "Vytvořte akci, otevřete dveře a shody nechte na koordinátorovi. Žádný server, o který byste se museli starat: appka publikuje na Nostr relaye a Blossom, a to je celý backend.",
+      "organizers.intro": "Vytvořte akci, otevřete dveře a shody nechte na koordinátorovi. Žádný aplikační server, o který byste se museli starat — appka mluví přímo s Nostr relayi a Blossomem. AI shody a skupinový chat běží na volitelném bezobslužném koordinátorském démonu, který spustíte, jen když je chcete.",
       "organizers.f1": "Ruční schvalování, zvací kódy, nebo obojí — podle vás",
       "organizers.f2": "Připojte AI koordinátora na párování, nebo běžte bez něj",
       "organizers.f3": "Veřejné novinky nebo příspěvky jen pro členy, šifrované výhradně pro vaše účastníky",

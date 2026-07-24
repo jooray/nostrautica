@@ -30,7 +30,10 @@ See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative), the
   Blossom servers (AES-GCM ciphertext). Browser/coordinator MLS state, payment
   journals, queues/outboxes, watch progress, and decrypted caches are intentionally
   local operational state. The PWA and coordinator communicate **only through
-  relays** (encrypted events) — there is no app server.
+  relays** (encrypted events) — there is no application API server between them.
+  AI matching and chat administration are the job of the optional headless
+  coordinator daemon (Nostr-only interface, no HTTP surface), which an organizer
+  runs only when those features are wanted.
 - **Privacy tiers** (spec §4.1): public (NIP-52 event, profiles), event-encrypted
   (videos, directory, roster — under the Event Content Key), pair-encrypted (match
   lists, coordinator→recipient), user-private (favorites/notes, self-encrypted).
