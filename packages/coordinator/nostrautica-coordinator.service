@@ -1,24 +1,114 @@
-# systemd unit for a durable coordinator (spec §9, §11). Install to
-# /etc/systemd/system/, then: systemctl enable --now nostrautica-coordinator
+# Canonical hardened systemd unit for the Nostrautica coordinator (audit O5, §11).
 #
-# Put secrets in /etc/nostrautica/coordinator.env:
-#   VENICE_API_KEY=...
-#   NOSTRAUTICA_COORDINATOR_NSEC=nsec1...      (or use identity.ncryptsec_file + passphrase)
-#   NOSTRAUTICA_COORDINATOR_DB=/var/lib/nostrautica/coordinator.sqlite
+# This is the ONE unit the operator guide references — it resolves the guide's
+# old contradiction (WorkingDirectory under /home together with ProtectHome=true,
+# which hid the code from the daemon) by moving everything onto an /opt + /var/lib
+# + /etc layout that the sandbox can express cleanly:
+#
+#   code   → /opt/nostrautica            (read-only under ProtectSystem=strict)
+#   state  → /var/lib/nostrautica        (the ONLY writable path; StateDirectory=)
+#   config → /etc/nostrautica            (coordinator.toml + coordinator.env, read-only)
+#
+# Install:
+#   sudo install -Dm644 packages/coordinator/nostrautica-coordinator.service \
+#     /etc/systemd/system/nostrautica-coordinator.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now nostrautica-coordinator
+#
+# Provision once (not managed by any deploy):
+#   /etc/nostrautica/coordinator.env   — 0600, root:root. Holds secrets, e.g.:
+#       VENICE_API_KEY=...
+#       NOSTRAUTICA_COORDINATOR_NSEC=nsec1...   (or identity.ncryptsec_file + passphrase)
+#   /etc/nostrautica/coordinator.toml  — daemon config. Set providers.routstr.wallet_db
+#       (if used) to an ABSOLUTE path under /var/lib/nostrautica — the working
+#       directory is read-only, so a relative wallet_db would fail to write.
+#
+# Validate before trusting it (see the operator guide):
+#   systemd-analyze verify nostrautica-coordinator.service
+#   systemd-analyze security nostrautica-coordinator.service
+
 [Unit]
 Description=Nostrautica coordinator
+Documentation=https://nostrautica.cypherpunk.today/docs/COORDINATOR-OPERATOR-GUIDE.html
 After=network-online.target
 Wants=network-online.target
+# Don't crash-loop forever: at most 5 starts per 5 minutes, then stop and alert.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
 User=nostrautica
+Group=nostrautica
 WorkingDirectory=/opt/nostrautica/packages/coordinator
+
+# systemd creates/owns /var/lib/nostrautica (0700) and adds it to ReadWritePaths.
+StateDirectory=nostrautica
+StateDirectoryMode=0700
+Environment=NOSTRAUTICA_COORDINATOR_DB=/var/lib/nostrautica/coordinator.sqlite
 EnvironmentFile=/etc/nostrautica/coordinator.env
-ExecStart=/usr/bin/node dist/main.js coordinator.toml
+
+# Preflight: refuse to start on an unhealthy environment. NOTE (audit O2): this
+# must be the genuinely read-only `doctor`; until that lands, doctor can run DB
+# migrations, so keep a backup before first start after an upgrade.
+ExecStartPre=/usr/bin/node dist/main.js doctor --config /etc/nostrautica/coordinator.toml
+ExecStart=/usr/bin/node dist/main.js /etc/nostrautica/coordinator.toml
+
+# ── Crash supervision ────────────────────────────────────────────────────────
 Restart=on-failure
 RestartSec=5
-# ffmpeg must be on PATH (audio extraction).
+
+# ── Graceful stop matching the daemon's drain ────────────────────────────────
+# main.ts drains the in-flight job on the first SIGTERM (bounded, DRAIN_TIMEOUT_MS
+# = 30s) and force-exits on a second signal. KillMode=mixed sends SIGTERM to the
+# main process only (letting it orchestrate its own ffmpeg-child teardown), then
+# SIGKILLs the whole cgroup if it overruns the timeout. 45s > the 30s drain.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+# Clean SIGTERM shutdown exits 0; the forced second-signal path exits 1. Neither
+# should be treated as a crash by systemd during a stop.
+
+# ── Sandboxing (audit §6 item 4 / O5) ────────────────────────────────────────
+# The daemon runs attacker-controlled media through ffmpeg, so it is confined.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+UMask=0077
+# Drop every capability — the daemon only makes outbound connections, binds no
+# privileged port, and needs no elevated privilege.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Networking: outbound TCP (relays/providers/Blossom over IPv4/IPv6) + local unix.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# System-call allowlist: the service baseline covers node + spawning ffmpeg.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# MemoryDenyWriteExecute is intentionally NOT set: V8's JIT maps writable-then-
+# executable pages and the daemon crashes under it (would require node --jitless,
+# which is far too slow for STT/LLM orchestration). Left off deliberately.
+
+# ── Resource controls ────────────────────────────────────────────────────────
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=256
+LimitNOFILE=8192
 
 [Install]
 WantedBy=multi-user.target
