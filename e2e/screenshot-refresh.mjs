@@ -60,6 +60,9 @@ const appDir = LOCALE === "en" ? "app" : `app-${LOCALE}`;
 // these are real rendered text, not internal-only fixture data.
 const COPY = {
   en: {
+    eventSummary:
+      "A relaxed evening for Nostr builders and curious newcomers — short intros, good conversations, and a few lightning talks by the water.",
+    eventLocation: "Bratislava",
     ninaIntro: "Rust developer working on privacy tooling. Looking for a co-founder who cares about usability.",
     nadiaIntro: "Product designer who loves making cryptography approachable. Looking for engineers to collaborate with.",
     dm: "Hey! Looking forward to the event.",
@@ -68,6 +71,9 @@ const COPY = {
     chatProof: /organizing|looking forward/i,
   },
   sk: {
+    eventSummary:
+      "Uvoľnený večer pre Nostr nadšencov a zvedavých nováčikov — krátke predstavenia, dobré rozhovory a pár bleskových prednášok pri vode.",
+    eventLocation: "Bratislava",
     ninaIntro: "Rust vývojárka, pracujem na nástrojoch pre súkromie. Hľadám spoluzakladateľa, ktorému záleží na použiteľnosti.",
     nadiaIntro: "Produktová dizajnérka, ktorá rada robí kryptografiu zrozumiteľnou. Hľadám vývojárov na spoluprácu.",
     dm: "Ahoj! Teším sa na podujatie.",
@@ -76,6 +82,9 @@ const COPY = {
     chatProof: /organizáci|teším sa/i,
   },
   cs: {
+    eventSummary:
+      "Uvolněný večer pro Nostr nadšence a zvědavé nováčky — krátká představení, dobré rozhovory a pár bleskových přednášek u vody.",
+    eventLocation: "Bratislava",
     ninaIntro: "Rust vývojářka, pracuji na nástrojích pro soukromí. Hledám spoluzakladatele, kterému záleží na použitelnosti.",
     nadiaIntro: "Produktová designérka, která ráda dělá kryptografii srozumitelnou. Hledám vývojáře ke spolupráci.",
     dm: "Ahoj! Těším se na akci.",
@@ -311,8 +320,17 @@ async function main() {
   }
 
   // ---- organizer/01-create-form + create the event ----
-  await olga.locator("#t").fill("Nostrautica Screenshot Assembly");
-  await olga.locator("#st").fill("2026-09-15T10:00");
+  // The docs' running example: "Nostrautica meetup", an evening on 1 Aug 2026.
+  // Fill summary/end/location too so the event pages and the post-event report
+  // render with a real description, date range and place (not just a bare title).
+  await olga.locator("#t").fill("Nostrautica meetup");
+  const summaryField = olga.locator("#s");
+  if (await summaryField.count()) await summaryField.fill(COPY.eventSummary);
+  await olga.locator("#st").fill("2026-08-01T18:00");
+  const endField = olga.locator("#en");
+  if (await endField.count()) await endField.fill("2026-08-01T22:00");
+  const locField = olga.locator("#loc");
+  if (await locField.count()) await locField.fill(COPY.eventLocation);
   const talksSelect = olga.locator("#talks");
   if (await talksSelect.count()) await talksSelect.selectOption("on");
   // Group chat defaults OFF (chatEnabled = $state(false) in Create.svelte) —
