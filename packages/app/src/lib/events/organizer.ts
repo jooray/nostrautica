@@ -58,7 +58,10 @@ import {
   type MediaDescriptor,
   type EckVersion,
   type RosterContent,
+  type RevisionKey,
   pickLatest,
+  revisionSupersedes,
+  supersedes,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -68,6 +71,7 @@ import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
@@ -143,9 +147,13 @@ export async function fetchPending(
   )) as unknown as GiftWrap[];
 
   const byAttendee = new Map<string, PendingRequest>();
+  // The winning join rumor's id per attendee, so equal-created_at siblings apply
+  // the global §3.1 tie-break (lowest id) rather than non-deterministic arrival
+  // order (audit P4).
+  const joinRumorId = new Map<string, string>();
   const submissions = new Map<
     string,
-    { at: number; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
+    { key: RevisionKey; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
   >();
 
   /** Unwrap a wrap with whichever inbox secret it was sealed to (current or prior). */
@@ -172,7 +180,17 @@ export async function fetchPending(
       }
       const invite = parseInviteTag(rumor.tags);
       const prev = byAttendee.get(rumor.pubkey);
-      if (!prev || rumor.created_at > prev.rumorCreatedAt) {
+      // Join requests carry no `rev`; order them by the global event tie-break —
+      // higher created_at, then lowest id on a tie (audit P4). Arrival order is
+      // non-deterministic, so first-arrival-wins let two organizers disagree.
+      const prevJoinId = joinRumorId.get(rumor.pubkey);
+      if (
+        !prev ||
+        supersedes(
+          { id: rumor.id, created_at: rumor.created_at },
+          { id: prevJoinId ?? "", created_at: prev.rumorCreatedAt },
+        )
+      ) {
         byAttendee.set(rumor.pubkey, {
           attendeePubkey: rumor.pubkey,
           name: content.name,
@@ -181,14 +199,24 @@ export async function fetchPending(
           invite,
           rumorCreatedAt: rumor.created_at,
         });
+        joinRumorId.set(rumor.pubkey, rumor.id);
       }
     } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
       try {
         const parsed = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
+        // Select by (rev, created_at, lowest id) via the shared revision
+        // comparator — mirrors the coordinator-backed path (audit P4). The `rev`
+        // was previously parsed and discarded, so a delayed revision 1 with a
+        // newer clock could replace revision 2 and re-approve removed text/media.
+        const candidate: RevisionKey = {
+          rev: parsed.rev,
+          created_at: rumor.created_at,
+          id: rumor.id,
+        };
         const prev = submissions.get(rumor.pubkey);
-        if (!prev || rumor.created_at > prev.at) {
+        if (!prev || revisionSupersedes(candidate, prev.key)) {
           submissions.set(rumor.pubkey, {
-            at: rumor.created_at,
+            key: candidate,
             profile: parsed.profile,
             media: parsed.media,
             introText: parsed.intro_text,
@@ -537,16 +565,25 @@ export async function generateInvites(
   }
 
   const identifier = splitCoordinate(ctx.coordinate).identifier;
-  const event = finalizeEvent(
-    {
-      kind: KIND_INVITE_LIST,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "2"]],
-      content: JSON.stringify({ v: 2, invites }),
-    },
-    eidSk,
-  );
-  await publishOrQueue(event, ctx.config.relays);
+  // Monotonic republish (audit P3): the invite list is addressable, and a
+  // same-second regeneration must not lose the §3.1 tie-break and silently drop
+  // the codes just added/revoked.
+  await publishMonotonic({
+    kind: KIND_INVITE_LIST,
+    author: ctx.config.eidPubkey,
+    identifier,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        {
+          kind: KIND_INVITE_LIST,
+          created_at,
+          tags: [["d", identifier], ["a", ctx.coordinate], ["v", "2"]],
+          content: JSON.stringify({ v: 2, invites }),
+        },
+        eidSk,
+      ),
+  });
   return generated;
 }
 
@@ -768,16 +805,20 @@ export async function updateEventConfig(
   const relays =
     changes.chat?.length ? unionRelays(ctx.config.relays, WHITENOISE_RELAYS) : ctx.config.relays;
   const built = buildEventConfig({ ...ctx.config, ...changes, relays });
-  const configEvent = finalizeEvent(
-    {
-      kind: built.kind,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: built.tags,
-      content: built.content,
-    },
-    eidSk,
-  );
-  await publishOrQueue(configEvent, ctx.config.relays);
+  // Monotonic republish (audit P3): a config change made in the same second as
+  // the previous 31600 must win the §3.1 tie-break, or the stale config stays
+  // authoritative and the setting silently doesn't take.
+  await publishMonotonic({
+    kind: built.kind,
+    author: ctx.config.eidPubkey,
+    identifier: ctx.config.d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        { kind: built.kind, created_at, tags: built.tags, content: built.content },
+        eidSk,
+      ),
+  });
 }
 
 export async function attachCoordinator(
@@ -822,18 +863,20 @@ export async function attachCoordinator(
   }
 
   // 1. Republish 31600 with the three-element coordinator tag (signed by E_id),
-  //    advertising the (possibly rotated) inbox.
-  const cfg = { ...ctx.config, inbox: einboxPubkey, coordinator: coordinatorPubkey, coordinatorGen: gen };
+  //    advertising the (possibly rotated) inbox. The `eck` tag is bootstrap-only
+  //    and grants/roster are the current-ECK authority (audit P5) — but on a
+  //    replace we DID just rotate the ECK, so write the fresh version onto the
+  //    config we sign rather than leaving a stale bootstrap value. Nothing reads
+  //    this as "current"; it just keeps the signed config from actively lying.
+  const currentEckId = eck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
+  const cfg = {
+    ...ctx.config,
+    inbox: einboxPubkey,
+    coordinator: coordinatorPubkey,
+    coordinatorGen: gen,
+    eck: currentEckId,
+  };
   const built = buildEventConfig(cfg);
-  const configEvent = finalizeEvent(
-    {
-      kind: built.kind,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: built.tags,
-      content: built.content,
-    },
-    eidSk,
-  );
 
   // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
   //    E_id so the coordinator can authenticate the install against the coordinate.
@@ -850,8 +893,21 @@ export async function attachCoordinator(
     },
   });
 
+  // Monotonic config republish (audit P3): an attach in the same second as the
+  // prior config must win the §3.1 tie-break, or the grant can be published while
+  // the coordinator-bearing config never becomes current.
   await Promise.all([
-    publishOrQueue(configEvent, ctx.config.relays),
+    publishMonotonic({
+      kind: built.kind,
+      author: ctx.config.eidPubkey,
+      identifier: ctx.config.d,
+      relays: ctx.config.relays,
+      sign: (created_at) =>
+        finalizeEvent(
+          { kind: built.kind, created_at, tags: built.tags, content: built.content },
+          eidSk,
+        ),
+    }),
     publishOrQueue(grantWrap as any, ctx.config.relays),
   ]);
 
@@ -884,13 +940,22 @@ async function writeEventKeysBackup(
   const ownPubkey = await organizer.getPublicKey();
   const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
   const d = `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
-  const event = await organizer.signEvent({
+  // Monotonic republish (audit P3): the 30078 backup is rewritten on every
+  // attach/detach/rotation. Two rotations in the same second must not let the
+  // §3.1 tie-break resurrect the older backup (stale coordinator gen / ECK set).
+  await publishMonotonic({
     kind: KIND_APP_DATA,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["d", d]],
-    content,
+    author: ownPubkey,
+    identifier: d,
+    owner: ownPubkey,
+    sign: (created_at) =>
+      organizer.signEvent({
+        kind: KIND_APP_DATA,
+        created_at,
+        tags: [["d", d]],
+        content,
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
 }
 
 /**
@@ -926,17 +991,30 @@ export async function detachCoordinator(
   //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to
   //    all attendees) to protect future content. Reads the CURRENT (still
   //    coordinator-authored) records, so it must run before the new config publishes.
-  const { newInboxPubkey } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
+  const { newInboxPubkey, eck: rotatedEck } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
 
   // 3. Republish 31600 without the coordinator tag, advertising the NEW inbox so
   //    senders encrypt future submissions to the rotated inbox the organizer holds.
+  //    Advance the bootstrap-only `eck` tag to the freshly rotated version (audit
+  //    P5: grants/roster remain the authority, this just keeps the signed config
+  //    from carrying a stale version).
   const { coordinator: _c, coordinatorGen: _g, ...rest } = ctx.config;
   void _c;
   void _g;
-  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey });
-  const configEvent = finalizeEvent(
-    { kind: built.kind, created_at: Math.floor(Date.now() / 1000), tags: built.tags, content: built.content },
-    eidSk,
-  );
-  await publishOrQueue(configEvent, ctx.config.relays);
+  const currentEckId = rotatedEck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
+  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey, eck: currentEckId });
+  // Monotonic republish (audit P3): a detach in the same second as the previous
+  // config must win the §3.1 tie-break, or the coordinator-bearing config can
+  // stay authoritative and the detach silently doesn't take.
+  await publishMonotonic({
+    kind: built.kind,
+    author: ctx.config.eidPubkey,
+    identifier: ctx.config.d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        { kind: built.kind, created_at, tags: built.tags, content: built.content },
+        eidSk,
+      ),
+  });
 }

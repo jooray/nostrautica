@@ -10,9 +10,11 @@ import {
   KIND_DM_RELAY_LIST,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
+import type { VerifiedEvent } from "nostr-tools/pure";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { ONBOARDING_RELAY_LIST, DM_RELAY_LIST } from "$lib/nostr/relays.js";
 import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
@@ -79,13 +81,22 @@ export async function ensureDmRelayList(signer: AppSigner): Promise<boolean> {
   const pubkey = await signer.getPublicKey();
   const existing = await latest(KIND_DM_RELAY_LIST, pubkey);
   if (existing) return false; // never override a user's existing DM relay list
-  const event = await signer.signEvent({
+  // Publish through the monotonic publisher (audit P3/P7) so the account
+  // identity's 10050 follows the same §3.1 created_at rule as every other
+  // replaceable publisher — belt-and-suspenders with the check-before-publish
+  // above, which already guarantees we only publish when none exists.
+  await publishMonotonic({
     kind: KIND_DM_RELAY_LIST,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: dmRelayListTags(DM_RELAY_LIST),
-    content: "",
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_DM_RELAY_LIST,
+        created_at,
+        tags: dmRelayListTags(DM_RELAY_LIST),
+        content: "",
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
   return true;
 }
 

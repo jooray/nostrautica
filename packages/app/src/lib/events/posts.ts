@@ -28,7 +28,7 @@ import {
   supersedes,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import { fetchRoster } from "./attendee.js";
 import type { EventContext } from "./event-context.js";
@@ -298,21 +298,30 @@ export async function publishMembersPost(
     author: input.author,
     content: input.content,
   });
-  const event = finalizeEvent(
-    {
-      kind: KIND_MEMBERS_POST,
-      created_at: now,
-      // No `a` tag and no cleartext metadata (spec §7.4).
-      tags: [
-        ["d", d],
-        ["v", "2"],
-        ["eck", String(eck.id)],
-      ],
-      content: ciphertext,
-    },
-    hexToBytes(keys.eidNsecHex),
-  );
-  await publishOrQueue(event, ctx.config.relays);
+  // Monotonic republish (audit P3): an edit at the same second as the prior
+  // revision of this `d` must win the §3.1 tie-break, or the edit silently
+  // doesn't take (the post is addressable across 30023/31607 by its `d`).
+  const { createdAt } = await publishMonotonic({
+    kind: KIND_MEMBERS_POST,
+    author: ctx.config.eidPubkey,
+    identifier: d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        {
+          kind: KIND_MEMBERS_POST,
+          created_at,
+          // No `a` tag and no cleartext metadata (spec §7.4).
+          tags: [
+            ["d", d],
+            ["v", "2"],
+            ["eck", String(eck.id)],
+          ],
+          content: ciphertext,
+        },
+        hexToBytes(keys.eidNsecHex!),
+      ),
+  });
   return {
     d,
     kind: KIND_MEMBERS_POST,
@@ -323,7 +332,7 @@ export async function publishMembersPost(
     image: input.image,
     content: input.content,
     publishedAt,
-    editedAt: now,
+    editedAt: createdAt,
     source: "event",
     authorPubkey: ctx.config.eidPubkey,
     author: input.author,
