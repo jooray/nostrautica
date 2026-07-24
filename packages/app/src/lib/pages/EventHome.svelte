@@ -422,14 +422,20 @@
   let leaving = $state(false);
   let confirmingLeave = $state(false);
   let leftMessage = $state<string | null>(null);
+  // Withdrawal is a *request* to the coordinator, not an instant local removal
+  // (audit U3): the 21610 either went to a relay ("sent") or is only in the
+  // durable outbox ("queued"). Either way directory removal / key rotation / data
+  // deletion happen coordinator-side and are NOT yet acknowledged, so the member
+  // UI stays as-is and we show an honest pending state rather than "you've left".
+  let withdrawState = $state<"none" | "sent" | "queued">("none");
   async function doLeave() {
     if (!session.signer || !ctx) return;
     leaving = true;
+    leftMessage = null;
     try {
       const { withdrawFromEvent } = await import("$lib/events/withdraw.js");
-      await withdrawFromEvent(session.signer, ctx);
-      leftMessage = t("event.leave.done");
-      approved = false;
+      const res = await withdrawFromEvent(session.signer, ctx);
+      withdrawState = res.sent ? "sent" : "queued";
       confirmingLeave = false;
     } catch {
       leftMessage = t("event.leave.failed");
@@ -657,7 +663,13 @@
   <!-- Leave event (NIP §6.3 21610): enrolled attendees only, confirm-guarded. -->
   {#if effApproved && !effOrganizer}
     <div class="leave-zone">
-      {#if leftMessage}
+      {#if withdrawState !== "none"}
+        <!-- Pending withdrawal (U3): a request was sent/queued, not completed.
+             Removal + data deletion await the coordinator; don't claim they're done. -->
+        <p class="muted" role="status">
+          {withdrawState === "queued" ? t("event.leave.queued") : t("event.leave.requested")}
+        </p>
+      {:else if leftMessage}
         <p class="muted" role="status">{leftMessage}</p>
       {:else if confirmingLeave}
         <p class="muted">{t("event.leave.confirm")}</p>
