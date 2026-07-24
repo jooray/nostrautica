@@ -38,3 +38,48 @@ describe("sanitizeRelayUrls (audit COORD-16)", () => {
     expect(sanitizeRelayUrls(many, 5)).toHaveLength(5);
   });
 });
+
+describe("sanitizeRelayUrls SSRF policy (audit C4)", () => {
+  it("rejects credential-bearing and fragment URLs", () => {
+    expect(
+      sanitizeRelayUrls([
+        "wss://user:pass@relay.example",
+        "wss://relay.example/#frag",
+        "wss://ok.example",
+      ]),
+    ).toEqual(["wss://ok.example"]);
+  });
+
+  it("rejects loopback / private / link-local host literals by default", () => {
+    expect(
+      sanitizeRelayUrls([
+        "wss://127.0.0.1",
+        "wss://10.0.0.5",
+        "wss://192.168.1.1",
+        "wss://169.254.1.1",
+        "wss://[::1]",
+        "wss://localhost",
+        "wss://sub.localhost",
+        "wss://public.example",
+      ]),
+    ).toEqual(["wss://public.example"]);
+  });
+
+  it("permits ws:// and private hosts only behind the dev flag", () => {
+    expect(
+      sanitizeRelayUrls(["ws://127.0.0.1:7777", "wss://public.example"], { allowInsecure: true }),
+    ).toEqual(["ws://127.0.0.1:7777", "wss://public.example"]);
+    // Without the flag both the ws scheme and the loopback host are dropped.
+    expect(sanitizeRelayUrls(["ws://127.0.0.1:7777"])).toEqual([]);
+  });
+
+  it("enforces an operator host allowlist (URL or bare host entries)", () => {
+    const policy = { allowlist: ["wss://good.example", "also-good.example"] };
+    expect(
+      sanitizeRelayUrls(
+        ["wss://good.example", "wss://also-good.example/path", "wss://evil.example"],
+        policy,
+      ),
+    ).toEqual(["wss://good.example", "wss://also-good.example/path"]);
+  });
+});

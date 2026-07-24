@@ -55,6 +55,13 @@ export interface ProcessDeps {
   nostrContextN: number;
   /** Event language (ISO 639-1). AI output is written in it; user fields translated into it. */
   lang: string;
+  /** The event coordinate — records ownership references for the derived artifacts so
+   *  a reference-counted deletion (audit C5) can drop this subject's data without
+   *  harming another event that shares a deduplicated transcript/artifact/summary. */
+  coordinate?: string;
+  /** Shutdown cancellation (audit C11): checked at each stage boundary so a long
+   *  STT/LLM run unwinds promptly when the coordinator is shutting down. */
+  signal?: AbortSignal;
   now?: () => number;
 }
 
@@ -114,9 +121,16 @@ export async function processAttendee(
         },
         descriptor,
       ));
+  const owner = deps.coordinate ? { coordinate: deps.coordinate, pubkey: input.pubkey } : undefined;
   const transcripts: string[] = []; // text fed into buildAiProfile
   const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
+    deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
+    // Ownership reference for the content-addressed transcript (audit C5): record it
+    // for THIS subject regardless of the transcription outcome (the payload — full or
+    // empty-on-policy-rejection — is content-addressed by `x`), so a purge can
+    // reference-count it.
+    if (owner) deps.store.recordTranscriptRef(descriptor.x, owner.coordinate, owner.pubkey, now());
     // A media-policy rejection (declared-size mismatch / over-duration, audit H-3)
     // rejects THAT media only — an empty transcript is cached, no STT, and the
     // other media/attendee continue — rather than poisoning the whole attendee.
@@ -155,6 +169,7 @@ export async function processAttendee(
 
   // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash
   //    (the hash includes the output language, so a lang change re-summarizes).
+  deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
   let nostrSummary: string | undefined;
   if (deps.nostrContextN > 0) {
     const posts = await deps.fetchNostrContext(input.pubkey, deps.nostrContextN);
@@ -174,7 +189,8 @@ export async function processAttendee(
           posts,
           deps.lang,
         );
-        if (nostrSummary) deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now());
+        if (nostrSummary)
+          deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now(), owner ? { coordinate: owner.coordinate } : undefined);
       }
     }
   }
@@ -200,6 +216,7 @@ export async function processAttendee(
     const profileKey = profileInputsHash(profileInputs, profileModelKey);
     aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
     if (!aiProfile) {
+      deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
       aiProfile = await buildAiProfile(deps.match.llm, deps.match, profileInputs);
       deps.store.putArtifact({
         stage: "ai_profile",
@@ -208,6 +225,7 @@ export async function processAttendee(
         model: deps.match.model,
         output: aiProfile,
         now: now(),
+        owner,
       });
     }
   }
@@ -233,6 +251,7 @@ export async function processAttendee(
       model: deps.translate.model,
       output: translations,
       now: now(),
+      owner,
     });
   }
   if (translations) aiProfile.translations = translations;

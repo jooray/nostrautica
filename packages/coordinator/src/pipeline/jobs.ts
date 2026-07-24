@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { Store, JobRow } from "../store/db.js";
 
-export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn }) => Promise<void>;
+export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn; signal: AbortSignal }) => Promise<void>;
 export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => void;
 
 /**
@@ -114,11 +114,32 @@ export class JobRunner {
    *  still finishes) so a graceful stop can await active work and then close. */
   private stopping = false;
 
+  /**
+   * Cancellation token for in-flight handlers (audit C11). Its signal is passed to
+   * every handler (and, in turn, to provider/media calls), so after the graceful
+   * drain window expires, {@link abort} can tell a blocked handler to unwind — the
+   * shutdown then AWAITS the drain promise so resources are never closed under a
+   * handler still writing/publishing against them.
+   */
+  private abortController = new AbortController();
+
   /** Stop claiming new jobs (reliability tail: graceful shutdown drain). The job
    *  currently executing inside `runOne` is awaited by the caller; no new job is
    *  claimed after this. Idempotent. */
   stopClaiming(): void {
     this.stopping = true;
+  }
+
+  /** The cancellation signal handed to handlers (audit C11). */
+  get signal(): AbortSignal {
+    return this.abortController.signal;
+  }
+
+  /** Abort the in-flight handler (audit C11): fired after the graceful-drain window
+   *  expires so a blocked provider/media call unwinds. The caller MUST then await the
+   *  outstanding drain promise before closing transport/store/lock. Idempotent. */
+  abort(reason = "coordinator shutting down"): void {
+    if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
   }
 
   /** Run one claimable job under a fresh lease. Returns true if a job was processed. */
@@ -161,11 +182,20 @@ export class JobRunner {
     try {
       await handler(JSON.parse(job.payload), {
         enqueue: (t, k, p) => this.enqueue(t, k, p),
+        signal: this.abortController.signal,
       });
       // If our lease expired and another worker took over, completeJob affects 0
       // rows — we discard our result rather than clobber the new owner's state.
       this.store.completeJob(job.id, token);
     } catch (err) {
+      // A shutdown abort (audit C11) is not a real failure: leave the job `running`
+      // with its lease so it is neither retried-toward-poison nor lost — the next
+      // start's stranded-lease recovery reclaims it. Consumes no retry.
+      if (this.abortController.signal.aborted) {
+        const t = new Date().toISOString().slice(11, 19);
+        console.log(`[${t}] [job] ${job.type} aborted for shutdown — left claimable for restart`);
+        return;
+      }
       // A billing/budget PARK is not a failure: move to `waiting` (coalesced, no
       // retry consumed, never poisons) — resumed when the block clears (H-2).
       if (err instanceof ParkJobError) {

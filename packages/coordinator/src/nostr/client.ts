@@ -8,10 +8,12 @@
 import { SimplePool } from "nostr-tools/pool";
 import { useWebSocketImplementation } from "nostr-tools/relay";
 import type { Event as NostrEvent } from "nostr-tools/core";
-import WebSocket from "ws";
+import { GuardedWebSocket } from "../net/relay-guard.js";
 
-// nostr-tools uses a global WebSocket; provide one for Node.
-useWebSocketImplementation(WebSocket as unknown as typeof globalThis.WebSocket);
+// nostr-tools uses a global WebSocket; provide the SSRF-guarded one for Node (audit
+// C4): every relay connection is pinned to a public-address-only lookup, so a relay
+// host that resolves to a private/loopback address (or rebinds) is refused at connect.
+useWebSocketImplementation(GuardedWebSocket as unknown as typeof globalThis.WebSocket);
 
 export interface Filter {
   ids?: string[];
@@ -24,6 +26,11 @@ export interface Filter {
   "#d"?: string[];
   "#a"?: string[];
 }
+
+/** Hard cap on events accumulated by one `fetch()` (audit C3): a hostile relay can
+ *  otherwise return an arbitrarily large historical result set that piles up in
+ *  memory. Once reached, collection stops and the subscription is closed. */
+export const MAX_FETCH_EVENTS = 5000;
 
 export class NostrClient {
   private pool = new SimplePool();
@@ -47,11 +54,15 @@ export class NostrClient {
     filter: Filter,
     relays: string[] = this.defaultRelays,
     timeoutMs = 5000,
+    maxEvents = MAX_FETCH_EVENTS,
   ): Promise<NostrEvent[]> {
     return new Promise((resolve) => {
       const events: NostrEvent[] = [];
       const seen = new Set<string>();
+      let finished = false;
       const done = () => {
+        if (finished) return;
+        finished = true;
         clearTimeout(timer);
         try {
           sub.close();
@@ -65,6 +76,9 @@ export class NostrClient {
           if (!seen.has(e.id)) {
             seen.add(e.id);
             events.push(e);
+            // Bounded accumulation (audit C3): stop once the cap is hit so a relay
+            // flooding history can't grow this array without limit.
+            if (events.length >= maxEvents) done();
           }
         },
         oneose: () => done(),

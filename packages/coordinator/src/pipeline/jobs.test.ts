@@ -236,3 +236,49 @@ describe("job leases and crash recovery (audit H1)", () => {
     expect(store.pendingJobCount()).toBe(0); // completed by the original owner
   });
 });
+
+describe("shutdown abort (audit C11)", () => {
+  it("a blocked handler observes the abort; drain resolves only after it does", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store);
+    let observed = false;
+    let handlerStarted = false;
+    runner.register("block", (_p, { signal }) =>
+      new Promise<void>((resolve) => {
+        handlerStarted = true;
+        signal.addEventListener("abort", () => {
+          observed = true;
+          resolve();
+        });
+      }),
+    );
+    runner.enqueue("block", "k", {});
+    const drainP = runner.drain();
+    // Let the handler start and block.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(handlerStarted).toBe(true);
+    expect(observed).toBe(false);
+    // The graceful window "expired": abort, then AWAIT confirmed cancellation. Only
+    // after this resolves may a real shutdown close transport/store/lock.
+    runner.abort();
+    await drainP;
+    expect(observed).toBe(true);
+  });
+
+  it("a handler that throws on abort leaves the job claimable (no retry consumed)", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store);
+    runner.register("throwy", async (_p, { signal }) => {
+      await new Promise((r) => setTimeout(r, 5));
+      signal.throwIfAborted();
+    });
+    runner.enqueue("throwy", "k", {});
+    const drainP = runner.drain();
+    runner.abort();
+    await drainP;
+    // The aborted job was neither poisoned nor retried — it is still claimable
+    // (left 'running' with its lease for the next start's stranded-lease recovery).
+    expect(store.poisonJobs()).toHaveLength(0);
+    expect(store.pendingJobCount()).toBe(1);
+  });
+});

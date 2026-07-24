@@ -14,6 +14,7 @@ import {
 } from "./config.js";
 import { Store, acquireDaemonLock } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
+import { setRelayConnectPolicy } from "./net/relay-guard.js";
 import { buildCoordinatorAnnounce } from "./nostr/publisher.js";
 import { Coordinator, type Transport } from "./coordinator.js";
 import { verifyFfmpeg, sweepStaleTempDirs } from "./pipeline/audio.js";
@@ -128,6 +129,14 @@ async function runDaemon(): Promise<void> {
           throw new Error("local-whisper STT not built in this daemon (set stt.provider = venice-stt)");
         })();
 
+  // Relay SSRF policy (audit C4): pin every relay connection to a public-address
+  // lookup, and (dev-only) allow insecure/private relays when explicitly configured.
+  setRelayConnectPolicy({ allowInsecure: config.security.allow_insecure_urls });
+  const relayPolicy = {
+    allowlist: config.security.relay_allowlist,
+    allowInsecure: config.security.allow_insecure_urls,
+  };
+
   const client = new NostrClient(config.relays.default);
 
   // Marmot group-chat admin bot (§4): a MarmotClient run off coordSk with its MLS
@@ -159,6 +168,8 @@ async function runDaemon(): Promise<void> {
     // Install authorization + unsolicited-install caps (audit COORD-3).
     maxEvents: config.security.max_events,
     allowedEidPubkeys: config.security.allowed_eid_pubkeys,
+    // Untrusted-relay SSRF policy (audit C4).
+    relayPolicy,
     // Billing state machine (spec §9, D5): the coordinator maps this verdict onto
     // the persisted evaluating→ok|grace|blocked machine and enforces it.
     evaluateBilling: (eid, attendeeCount) => evaluateBilling(config, eid, attendeeCount),
@@ -217,10 +228,27 @@ async function runDaemon(): Promise<void> {
     stopped = true;
     console.log("[coordinator] draining in-flight work…");
     coordinator.jobs.stopClaiming(); // no new claims; the active job still finishes
+    // Bounded graceful drain: give the in-flight handler up to DRAIN_TIMEOUT to
+    // finish on its own.
+    let drained = false;
     await Promise.race([
-      drainPromise.catch(() => {}),
+      drainPromise.then(() => {
+        drained = true;
+      }).catch(() => {
+        drained = true;
+      }),
       new Promise((r) => setTimeout(r, DRAIN_TIMEOUT_MS)),
     ]);
+    if (!drained) {
+      // The drain window expired with a handler still running (audit C11). Signal it
+      // to abort, then AWAIT confirmed cancellation before closing the transport,
+      // store, and daemon lock — so the handler can never write/publish against a
+      // closed/replaced resource. A handler that ignores the abort would block here;
+      // a SECOND SIGINT/SIGTERM forces the immediate exit above.
+      console.log("[coordinator] drain timed out — aborting the in-flight handler and awaiting cancellation…");
+      coordinator.jobs.abort();
+      await drainPromise.catch(() => {});
+    }
     coordinator.stop();
     client.close();
     store.close();

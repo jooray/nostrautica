@@ -119,7 +119,7 @@ import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
-import { sanitizeRelayUrls } from "./net/relay-urls.js";
+import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
 import {
   sanitizeLlmText,
   sanitizeAiProfile,
@@ -141,6 +141,27 @@ const MAX_SUBMISSION_MEDIA_BYTES = 500 * 1024 * 1024;
  *  unbounded talk submissions each triggered their own paid STT job). Editing
  *  an already-submitted talk_d is never capped — only new ones. */
 const MAX_TALKS_PER_SPEAKER = 10;
+
+/**
+ * Event-wide attendee-population cap (audit C3). The 31604 roster protocol cap is
+ * 2,000, so the coordinator must never grow its attendee set (pending + approved +
+ * revoked) past it and then FAIL to publish the roster. A join that would create a
+ * NEW attendee beyond this is refused.
+ */
+const MAX_ATTENDEES_PER_EVENT = 2000;
+
+/** Durable inbox rate accounting (audit C3): fixed 60s window. */
+const INBOX_RATE_WINDOW_MS = 60_000;
+/** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
+const MAX_RUMORS_PER_SENDER_WINDOW = 30;
+/** Max inbound rumors accepted for ONE event per window across all senders. */
+const MAX_RUMORS_PER_EVENT_WINDOW = 600;
+
+/** Bounded inbound work queue (audit C3): global concurrent handlers + queue depth.
+ *  Subscription callbacks are dispatched through this so a burst of gift wraps can't
+ *  spawn unbounded concurrent handlers or pile unbounded closures in memory. */
+const INBOX_MAX_CONCURRENCY = 8;
+const INBOX_MAX_QUEUE = 2000;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
 function effectiveMaxMediaSec(configured: number): number {
@@ -291,6 +312,13 @@ export interface CoordinatorDeps {
    */
   allowedEidPubkeys?: string[];
   /**
+   * Policy applied to untrusted relay URLs (audit C4): an operator host allowlist and
+   * the dev-only insecure/private-relay allowance. Applied to every relay-source path
+   * (grant config_relays, live 31600 relays, NIP-65 discovery). Omitted ⇒ any public
+   * wss:// relay is accepted (still SSRF-guarded at connect).
+   */
+  relayPolicy?: RelayPolicy;
+  /**
    * Billing policy evaluation (spec §9, D5). Given the billing principal (event
    * identity) and the current approved-attendee count, returns the wire billing
    * verdict. The coordinator maps it onto a persisted `evaluating→ok|grace|blocked`
@@ -382,6 +410,8 @@ export class Coordinator {
   private readonly wrapRetryDelaysMs: number[];
   private readonly maxEvents: number;
   private readonly allowedEidPubkeys: Set<string>;
+  /** Untrusted-relay policy (audit C4): host allowlist + dev-only insecure allowance. */
+  private readonly relayPolicy: RelayPolicy;
   private readonly prefilter: PrefilterConfig;
   private readonly topK: number;
   private readonly batchSize: number;
@@ -414,6 +444,12 @@ export class Coordinator {
   /** Coordinates for which a 21606 budget_exceeded was already emitted (H-2): emit
    *  once per block, cleared on resume so a later re-exceed re-notifies. */
   private readonly budgetNotified = new Set<string>();
+  /** Bounded inbound work queue (audit C3): pending handler closures + the number of
+   *  handlers currently running, enforcing a global concurrency limit and a queue
+   *  depth cap so a gift-wrap burst can't spawn unbounded concurrent work. */
+  private readonly inboundQueue: Array<() => Promise<void>> = [];
+  private inboundRunning = 0;
+  private inboundDropped = 0;
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -421,6 +457,7 @@ export class Coordinator {
     this.wrapRetryDelaysMs = deps.wrapRetryDelaysMs ?? [5_000, 30_000];
     this.maxEvents = deps.maxEvents ?? DEFAULT_MAX_EVENTS;
     this.allowedEidPubkeys = new Set(deps.allowedEidPubkeys ?? []);
+    this.relayPolicy = deps.relayPolicy ?? {};
     this.coordPubkey = getPublicKey(deps.coordSk);
     this.prefilter = deps.prefilter ?? DEFAULT_PREFILTER;
     this.topK = deps.topK ?? 20;
@@ -454,8 +491,8 @@ export class Coordinator {
 
   // ── job handlers (the pipeline, spec §9.2) ─────────────────────────────────
   private registerJobHandlers(): void {
-    this.jobs.register("process_attendee", async (p, { enqueue }) => {
-      const committed = await this.processAttendeeJob(p.coordinate, p.pubkey);
+    this.jobs.register("process_attendee", async (p, { enqueue, signal }) => {
+      const committed = await this.processAttendeeJob(p.coordinate, p.pubkey, signal);
       // Enqueue matching ONLY when the ai_profile was actually committed (audit C2):
       // a stale run whose result was discarded (a newer submission superseded it
       // mid-flight) must not enqueue a recompute off data that was never written —
@@ -619,8 +656,9 @@ export class Coordinator {
   }): Promise<void> {
     const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
-    // wss-only, well-formed, deduped, capped (audit COORD-16).
-    const grantRelays = sanitizeRelayUrls(grant.configRelays);
+    // wss-only, no credentials/fragments, public host, allowlist, deduped, capped
+    // (audit COORD-16 + C4).
+    const grantRelays = sanitizeRelayUrls(grant.configRelays, this.relayPolicy);
     const relays = grantRelays.length ? grantRelays : this.deps.defaultRelays;
 
     // Load public config + event details for scoring context.
@@ -1020,6 +1058,51 @@ export class Coordinator {
     }
   }
 
+  /**
+   * Enqueue an inbound handler on the bounded work queue (audit C3). Enforces a
+   * global concurrency limit and a queue-depth cap: past the cap the task is DROPPED
+   * (the rumor stays unseen, so a later backfill rescan recovers a legitimately
+   * dropped one), keeping memory and concurrent handler count bounded under a burst.
+   */
+  private scheduleInbound(task: () => Promise<void>): void {
+    if (this.inboundQueue.length >= INBOX_MAX_QUEUE) {
+      this.inboundDropped++;
+      if (this.inboundDropped % 100 === 1) {
+        log(`[inbox] work queue full (${INBOX_MAX_QUEUE}) — dropping inbound wrap (total dropped: ${this.inboundDropped}); left unseen for rescan`);
+      }
+      return;
+    }
+    this.inboundQueue.push(task);
+    this.pumpInbound();
+  }
+
+  /** Drain the inbound queue up to the global concurrency limit (audit C3). */
+  private pumpInbound(): void {
+    while (this.inboundRunning < INBOX_MAX_CONCURRENCY && this.inboundQueue.length > 0) {
+      const task = this.inboundQueue.shift()!;
+      this.inboundRunning++;
+      void task()
+        .catch(() => {})
+        .finally(() => {
+          this.inboundRunning--;
+          this.pumpInbound();
+        });
+    }
+  }
+
+  /**
+   * Durable inbox rate gate (audit C3): accept at most MAX_RUMORS_PER_SENDER_WINDOW
+   * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
+   * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
+   */
+  private inboxRateAllows(coordinate: string, senderPubkey: string): boolean {
+    const now = this.now();
+    const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
+    if (eventCount > MAX_RUMORS_PER_EVENT_WINDOW) return false;
+    const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
+    return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+  }
+
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
   async handleCoordinatorWrap(wrap: GiftWrap): Promise<void> {
     const rumor = this.unwrapFresh(wrap, this.deps.coordSk);
@@ -1086,6 +1169,30 @@ export class Coordinator {
     if (!state) return;
     const rumor = this.unwrapFresh(wrap, state.inboxSk);
     if (!rumor) return;
+    // Durable per-sender / per-event rate accounting (audit C3): a sender or event
+    // flooding the inbox is dropped (rumor + wrap marked seen so the flood dedupes).
+    // The in-flight claim taken by unwrapFresh is released here since we bypass
+    // processRumorWithRetry (which would otherwise release it).
+    if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
+      log(`[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate}`);
+      this.deps.store.markRumorSeen(rumor.id, this.now());
+      this.deps.store.markRumorSeen(wrap.id, this.now());
+      this.inFlightRumors.delete(rumor.id);
+      return;
+    }
+    // Enrollment gate (audit C3): a profile submission from an identity with NO
+    // attendee row (never sent a join request) is dropped — an unknown sender must
+    // not be able to create a pending attendee row by submitting a profile. Left
+    // UNSEEN (not marked) so a legitimate submission that merely raced ahead of its
+    // own join request is recovered by the next backfill rescan once the join lands.
+    if (
+      rumor.kind === KIND_PROFILE_SUBMISSION &&
+      !this.deps.store.getAttendee(coordinate, rumor.pubkey)
+    ) {
+      log(`[submission] dropped from ${short(rumor.pubkey)}: no enrollment row (never joined) for ${coordinate}`);
+      this.inFlightRumors.delete(rumor.id);
+      return;
+    }
     await this.processRumorWithRetry(wrap.id, rumor, async () => {
       // Retention expiry is terminal for attendee-authored event data. Consume
       // late/replayed inbox rumors without mutating private state or recreating
@@ -1328,6 +1435,15 @@ export class Coordinator {
     const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     if (existing?.status === "approved") {
       await this.grantAndPublish(state, attendeePubkey);
+      return;
+    }
+
+    // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
+    // is refused — the coordinator must never grow its attendee set past what the
+    // 31604 roster can carry and then fail to publish it. Existing rows (re-delivered
+    // joins) are unaffected.
+    if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+      log(`[join] REJECTED ${short(attendeePubkey)}: event ${state.coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
       return;
     }
 
@@ -1744,7 +1860,7 @@ export class Coordinator {
    * A stale run (a newer submission landed mid-STT/LLM) returns false so the caller
    * skips enqueuing matching off a result that was discarded.
    */
-  private async processAttendeeJob(coordinate: string, pubkey: string): Promise<boolean> {
+  private async processAttendeeJob(coordinate: string, pubkey: string, signal?: AbortSignal): Promise<boolean> {
     const state = this.events.get(coordinate);
     if (!state) return false;
     // Re-check config at execution time (audit H4): a job queued while matching was
@@ -1787,6 +1903,12 @@ export class Coordinator {
         fetchNostrContext: (pk, n) => this.fetchNostrContext(state, pk, n),
         nostrContextN: state.nostrContextN,
         lang: state.lang,
+        // Record ownership refs for the derived artifacts (audit C5).
+        coordinate,
+        // Shutdown cancellation (audit C11): the pipeline checks this at stage
+        // boundaries so an in-flight STT/LLM run unwinds instead of writing against
+        // a store the shutdown is about to close.
+        signal,
         now: this.now,
       },
       { pubkey, profile, media: cappedMedia, introText, extraTranscripts },
@@ -2090,6 +2212,7 @@ export class Coordinator {
         model: this.roles.embed.model,
         output: embedding,
         now: this.now(),
+        owner: { coordinate, pubkey: m.pubkey },
       });
     });
   }
@@ -2700,24 +2823,37 @@ export class Coordinator {
    */
   private async expireRetention(state: EventState): Promise<void> {
     log(`[retention] ${state.coordinate}: window elapsed — deleting member records + parking processing`);
-    const prev = this.currentEck(state);
     const nowSec = Math.floor(this.now() / 1000);
     const deletions: string[][] = [];
-    // 31603 directory entry per (currently-approved) attendee, blinded under the
-    // current ECK; 31605 match list shares the same blinded d, different kind.
+    const seenAddr = new Set<string>();
+    const pushAddr = (a: string, k: string) => {
+      if (seenAddr.has(a)) return;
+      seenAddr.add(a);
+      deletions.push([a, k]);
+    };
+    // 31603 directory entry per (currently-approved) attendee + 31605 match list
+    // (same blinded d, different kind). Blinded `d` derives from the ECK, so an
+    // attendee has an entry under EACH ECK version this event ever granted (a
+    // rotation republishes under the new blinded d without deleting the old one on
+    // every relay). Delete across ALL historical ECK versions (audit C5) so a
+    // pre-rotation directory/match record is not left readable after retention.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
-      const d = blindedD(prev.bytes, state.coordinate, a.pubkey);
-      deletions.push([`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY)]);
-      deletions.push([`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST)]);
+      for (const ver of state.eck) {
+        const d = blindedD(base64ToBytes(ver.key), state.coordinate, a.pubkey);
+        pushAddr(`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY));
+        pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
+      }
     }
     // 31604 roster + 31606 matrix keyed on the event `d` (not blinded).
-    deletions.push([`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER)]);
-    deletions.push([`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX)]);
-    // Published 31610 talks, at the ECK version each was published under.
+    pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER));
+    pushAddr(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX));
+    // Published 31610 talks: delete under every historical ECK version (audit C5),
+    // not only the one recorded on the row, so a rotated-away talk address is cleaned.
     for (const talk of this.deps.store.publishedTalksForEvent(state.coordinate)) {
-      const eckBytes = this.eckById(state, talk.published_eck_id ?? prev.id);
-      const d = talkBlindedD(eckBytes, state.coordinate, talk.pubkey, talk.talk_d);
-      deletions.push([`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK)]);
+      for (const ver of state.eck) {
+        const d = talkBlindedD(base64ToBytes(ver.key), state.coordinate, talk.pubkey, talk.talk_d);
+        pushAddr(`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK));
+      }
     }
     // One NIP-09 kind-5 carrying every address (a-tag + k-tag pairs).
     const tags: string[][] = [];
@@ -2735,6 +2871,13 @@ export class Coordinator {
     this.deps.store.markRetentionExpired(state.coordinate);
     state.retentionExpired = true;
     const cancelled = this.deps.store.cancelJobsForEvent(state.coordinate);
+
+    // Full local purge (audit C5): "delete member data after the event" must delete
+    // the coordinator's OWN copies too, not just the relay records. Reference-counted,
+    // so a transcript/summary/artifact another event still references survives. Note:
+    // backups taken BEFORE this sweep still contain the data — the operator must rotate
+    // them (disclosed in the operator guide); the coordinator can't reach external files.
+    this.deps.store.purgeEventArtifacts(state.coordinate);
 
     // Notify organizers via 21606 (billing block untouched — this is a lifecycle
     // stage). error_category is a sanitized class, never attendee text.
@@ -2821,7 +2964,7 @@ export class Coordinator {
   private async fetchKeyPackages(coordinate: string, authors: string[]): Promise<NostrEvent[]> {
     const state = this.events.get(coordinate);
     if (!state || authors.length === 0) return [];
-    return discoverKeyPackages(this.deps.transport, authors, state.configRelays, this.deps.defaultRelays);
+    return discoverKeyPackages(this.deps.transport, authors, state.configRelays, this.deps.defaultRelays, this.relayPolicy);
   }
 
   /**
@@ -3148,7 +3291,9 @@ export class Coordinator {
   private subscribeCoordInbox(): () => void {
     return (this.deps.transport as any).subscribe?.(
       { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: giftwrapSince() },
-      (e: NostrEvent) => void this.handleCoordinatorWrap(e as unknown as GiftWrap).catch(() => {}),
+      // Bounded inbound queue (audit C3): dispatch through the global-concurrency
+      // scheduler instead of fire-and-forget.
+      (e: NostrEvent) => this.scheduleInbound(() => this.handleCoordinatorWrap(e as unknown as GiftWrap)),
       this.deps.defaultRelays,
     ) ?? (() => {});
   }
@@ -3160,7 +3305,8 @@ export class Coordinator {
     this.replaceSubscription(this.inboxSubs, state.coordinate, key, () =>
       (this.deps.transport as any).subscribe?.(
         { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
-        (e: NostrEvent) => void this.handleInboxWrap(state.coordinate, e as unknown as GiftWrap).catch(() => {}),
+        // Bounded inbound queue (audit C3): global-concurrency scheduler.
+        (e: NostrEvent) => this.scheduleInbound(() => this.handleInboxWrap(state.coordinate, e as unknown as GiftWrap)),
         state.configRelays,
       ),
     );
@@ -3301,8 +3447,8 @@ export class Coordinator {
     };
 
     // Apply to persisted config + in-memory state. Relay tags are untrusted
-    // input — validated (wss-only, deduped, capped, audit COORD-16).
-    const configRelays = sanitizeRelayUrls(config.relays);
+    // input — validated (wss-only, no creds, public host, allowlist, audit COORD-16 + C4).
+    const configRelays = sanitizeRelayUrls(config.relays, this.relayPolicy);
     const candidateRelays = configRelays.length ? configRelays : state.configRelays;
     // Make-before-break relay handover (audit C9): a relay CHANGE does NOT
     // immediately repoint subscriptions or persist as last-known-good. We keep

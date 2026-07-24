@@ -181,4 +181,66 @@ describe("coordinator backup/restore (§13.2)", () => {
     ).toThrow(/overwrite/);
     store.close();
   });
+
+  // ── C10: authenticated (HMAC-signed) backups ────────────────────────────────
+  describe("backup authentication (audit C10)", () => {
+    it("signs the manifest and verifies the tag under the identity", () => {
+      const { dest, sk, pubkey, meta } = backupFixture(2);
+      expect(meta.authAlg).toBe("hmac-sha256");
+      expect(typeof meta.authTag).toBe("string");
+      const v = verifyBackup({ filePath: dest, identitySk: sk, expectedPubkey: pubkey });
+      expect(v.authPresent).toBe(true);
+      expect(v.authOk).toBe(true);
+      expect(verifyPassed(v)).toBe(true);
+    });
+
+    it("rejects a swapped snapshot even when checksum is recomputed (auth covers the digest)", () => {
+      const { dest, sk, pubkey } = backupFixture(1);
+      // Attacker rewrites the snapshot AND recomputes checksumSha256 in the manifest
+      // — but cannot forge the HMAC without the identity key.
+      const bytes = readFileSync(dest);
+      bytes[bytes.length - 1] ^= 0xff;
+      writeFileSync(dest, bytes);
+      const meta = JSON.parse(readFileSync(metaPathFor(dest), "utf8")) as BackupMetadata;
+      meta.checksumSha256 = fileChecksum(dest); // defeat the plain corruption check
+      writeFileSync(metaPathFor(dest), JSON.stringify(meta));
+      const v = verifyBackup({ filePath: dest, identitySk: sk, expectedPubkey: pubkey });
+      expect(v.checksumOk).toBe(true); // corruption check passes…
+      expect(v.authOk).toBe(false); // …but authentication fails
+      expect(verifyPassed(v)).toBe(false);
+      expect(() =>
+        restoreBackup({ filePath: dest, targetPath: join(tmp(), "t.sqlite"), identitySk: sk, expectedPubkey: pubkey }),
+      ).toThrow(/authentication tag is INVALID/);
+    });
+
+    it("a legacy UNSIGNED backup fails closed unless --allow-unsigned", () => {
+      const { dest, sk, pubkey } = backupFixture(1);
+      const meta = JSON.parse(readFileSync(metaPathFor(dest), "utf8")) as BackupMetadata;
+      delete meta.authAlg;
+      delete meta.authTag;
+      writeFileSync(metaPathFor(dest), JSON.stringify(meta));
+      const v = verifyBackup({ filePath: dest, identitySk: sk, expectedPubkey: pubkey });
+      expect(v.authPresent).toBe(false);
+      expect(v.authOk).toBe(false);
+      expect(verifyPassed(v)).toBe(false); // fail closed
+      expect(verifyPassed(v, { allowUnsigned: true })).toBe(true);
+      // restore refuses without the override, accepts with it.
+      expect(() =>
+        restoreBackup({ filePath: dest, targetPath: join(tmp(), "u.sqlite"), identitySk: sk, expectedPubkey: pubkey }),
+      ).toThrow(/unauthenticated backup/);
+      const target = join(tmp(), "u2.sqlite");
+      const r = restoreBackup({ filePath: dest, targetPath: target, identitySk: sk, expectedPubkey: pubkey, allowUnsigned: true });
+      expect(existsSync(target)).toBe(true);
+      expect(r.installedEventCount).toBe(1);
+    });
+
+    it("a tampered manifest field breaks the tag", () => {
+      const { dest, sk, pubkey } = backupFixture(1);
+      const meta = JSON.parse(readFileSync(metaPathFor(dest), "utf8")) as BackupMetadata;
+      meta.installedEventCount = 999; // covered by the tag
+      writeFileSync(metaPathFor(dest), JSON.stringify(meta));
+      const v = verifyBackup({ filePath: dest, identitySk: sk, expectedPubkey: pubkey });
+      expect(v.authOk).toBe(false);
+    });
+  });
 });

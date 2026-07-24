@@ -17,7 +17,7 @@
  * These functions never publish, never call a provider, and never touch the
  * network — they are pure filesystem + SQLite + local-crypto operations.
  */
-import { createHash } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { selfDecrypt } from "@nostrautica/protocol";
@@ -43,6 +43,57 @@ export interface BackupMetadata {
   quiesced: boolean;
   /** ISO-8601 timestamp the backup was taken. */
   createdAt: string;
+  /**
+   * Authentication over the canonical manifest + snapshot digest (audit C10). The
+   * plain SHA-256 above only detects CORRUPTION — an attacker who rewrites the
+   * snapshot can recompute it. `authTag` is an HMAC-SHA256 over the canonical
+   * metadata (which includes `checksumSha256`) keyed by a value derived from the
+   * coordinator identity secret, so a swap can't be silently re-signed without the
+   * key. Absent (undefined) on legacy backups taken before this field existed —
+   * verification treats those as UNAUTHENTICATED and fails closed unless explicitly
+   * overridden.
+   */
+  authAlg?: "hmac-sha256";
+  authTag?: string;
+}
+
+/** Domain-separation label for the backup-authentication key (audit C10). */
+const BACKUP_AUTH_CONTEXT = "nostrautica-coordinator-backup-auth-v1";
+
+/**
+ * The metadata fields the authentication tag covers, in a fixed key order (audit
+ * C10). Excludes `authAlg`/`authTag` themselves. Because `checksumSha256` is a
+ * member, authenticating this canonical string authenticates the snapshot digest.
+ */
+function canonicalManifest(m: BackupMetadata): string {
+  return JSON.stringify([
+    m.format,
+    m.schemaVersion,
+    m.coordinatorPubkey,
+    m.releaseId,
+    m.packageVersion,
+    m.installedEventCount,
+    m.checksumSha256,
+    m.quiesced,
+    m.createdAt,
+  ]);
+}
+
+/** HMAC-SHA256 tag over the canonical manifest, keyed by a value derived from the
+ *  coordinator identity secret (audit C10). Deterministic; verified on restore. */
+function computeAuthTag(meta: BackupMetadata, identitySk: Uint8Array): string {
+  const key = createHmac("sha256", Buffer.from(identitySk)).update(BACKUP_AUTH_CONTEXT).digest();
+  return createHmac("sha256", key).update(canonicalManifest(meta)).digest("hex");
+}
+
+/** Constant-time compare of two hex tags (audit C10). */
+function tagsEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a, "hex"), Buffer.from(b, "hex"));
+  } catch {
+    return false;
+  }
 }
 
 /** The metadata sidecar path for a snapshot file. */
@@ -164,6 +215,9 @@ export function createBackup(opts: CreateBackupOpts): BackupMetadata {
     quiesced: opts.quiesced,
     createdAt: new Date(opts.now?.() ?? Date.now()).toISOString(),
   };
+  // Authenticate the canonical manifest + snapshot digest (audit C10).
+  meta.authAlg = "hmac-sha256";
+  meta.authTag = computeAuthTag(meta, opts.identitySk);
   writeFileSync(metaPathFor(opts.destPath), JSON.stringify(meta, null, 2) + "\n");
   return meta;
 }
@@ -179,6 +233,12 @@ export interface VerifyResult {
   schemaTooNew: boolean;
   /** True if `expectedPubkey` was supplied and matches the metadata. */
   pubkeyOk: boolean | null;
+  /** True if the manifest carries an authentication tag (audit C10). Legacy backups
+   *  taken before signing are `false` — unauthenticated. */
+  authPresent: boolean;
+  /** True if the authentication tag verifies under the identity key (audit C10).
+   *  `false` for a forged/tampered manifest AND for an unauthenticated legacy backup. */
+  authOk: boolean;
 }
 
 export interface VerifyOpts {
@@ -207,6 +267,11 @@ export function verifyBackup(opts: VerifyOpts): VerifyResult {
   const snap = inspectSnapshot(opts.filePath);
   const checksumOk = fileChecksum(opts.filePath) === meta.checksumSha256;
   const decryptedRows = proveDecrypts(opts.filePath, opts.identitySk);
+  // Authentication (audit C10): recompute the HMAC over the canonical manifest and
+  // compare in constant time. A tampered snapshot changes `checksumSha256`, which is
+  // covered by the tag, so a re-signed swap fails without the identity key.
+  const authPresent = meta.authAlg === "hmac-sha256" && typeof meta.authTag === "string";
+  const authOk = authPresent && tagsEqual(meta.authTag!, computeAuthTag(meta, opts.identitySk));
   return {
     meta,
     integrity: snap.integrity,
@@ -216,17 +281,30 @@ export function verifyBackup(opts: VerifyOpts): VerifyResult {
     decryptedRows,
     schemaTooNew: snap.schemaVersion > SCHEMA_VERSION,
     pubkeyOk: opts.expectedPubkey === undefined ? null : opts.expectedPubkey === meta.coordinatorPubkey,
+    authPresent,
+    authOk,
   };
 }
 
-/** True if a verify result passed every safety gate (safe to restore/rely on). */
-export function verifyPassed(v: VerifyResult): boolean {
+/**
+ * True if a verify result passed every safety gate (safe to restore/rely on).
+ *
+ * Authentication (audit C10): a valid HMAC is REQUIRED by default — the backup must
+ * be authenticated, not merely un-corrupted. A legacy backup with NO tag
+ * (`authPresent === false`) fails closed unless `allowUnsigned` is set (the operator
+ * consciously accepting a pre-signing backup). A backup whose tag is PRESENT but
+ * INVALID (`authPresent && !authOk`) is tampering and is ALWAYS rejected, even with
+ * `allowUnsigned`.
+ */
+export function verifyPassed(v: VerifyResult, opts: { allowUnsigned?: boolean } = {}): boolean {
+  const authAcceptable = v.authOk || (!!opts.allowUnsigned && !v.authPresent);
   return (
     v.integrity === "ok" &&
     v.checksumOk &&
     !v.schemaTooNew &&
     v.decryptedRows === v.installedEventCount &&
-    v.pubkeyOk !== false
+    v.pubkeyOk !== false &&
+    authAcceptable
   );
 }
 
@@ -239,6 +317,9 @@ export interface RestoreOpts {
   expectedPubkey?: string;
   /** Overwrite an existing target database. */
   force?: boolean;
+  /** Accept a legacy UNAUTHENTICATED backup (no HMAC tag), audit C10. A present-but-
+   *  invalid tag is still rejected — this only waives the "missing tag" gate. */
+  allowUnsigned?: boolean;
 }
 
 /**
@@ -259,12 +340,19 @@ export function restoreBackup(opts: RestoreOpts): VerifyResult {
       `refusing restore: snapshot schema v${v.schemaVersion} is newer than this binary (v${SCHEMA_VERSION}) — upgrade the coordinator first`,
     );
   }
-  if (!verifyPassed(v)) {
+  if (v.authPresent && !v.authOk) {
+    // A present-but-invalid tag is tampering — never overridable (audit C10).
+    throw new Error(
+      "refusing restore: backup authentication tag is INVALID — the snapshot or manifest was tampered with (or signed by a different identity)",
+    );
+  }
+  if (!verifyPassed(v, { allowUnsigned: opts.allowUnsigned })) {
     const why = [
       v.integrity !== "ok" ? `integrity=${v.integrity}` : null,
       !v.checksumOk ? "checksum mismatch" : null,
       v.decryptedRows !== v.installedEventCount ? "decryption proof incomplete" : null,
       v.pubkeyOk === false ? "coordinator pubkey mismatch" : null,
+      !v.authPresent ? "unauthenticated backup (no HMAC tag) — pass --allow-unsigned to accept a pre-signing backup" : null,
     ]
       .filter(Boolean)
       .join(", ");

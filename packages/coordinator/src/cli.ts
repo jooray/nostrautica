@@ -13,7 +13,7 @@ import { WebSocket } from "ws";
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
 import { loadConfig, resolveIdentity, veniceApiKey } from "./config.js";
-import { Store, acquireDaemonLock, SCHEMA_VERSION, type DaemonLock } from "./store/db.js";
+import { Store, acquireDaemonLock, inspectDatabaseReadOnly, SCHEMA_VERSION, type DaemonLock } from "./store/db.js";
 import { createBackup, verifyBackup, restoreBackup, metaPathFor, verifyPassed } from "./store/backup.js";
 import { verifyFfmpeg } from "./pipeline/audio.js";
 import { VeniceLlm } from "./providers/venice.js";
@@ -123,10 +123,11 @@ function cmdVerifyBackup(args: string[]): number {
     console.log(`  taken         ${v.meta.createdAt} (quiesced=${v.meta.quiesced})`);
     console.log(`  integrity     ${v.integrity}`);
     console.log(`  schema        v${v.schemaVersion}${v.schemaTooNew ? ` (NEWER than this binary v${SCHEMA_VERSION})` : ""}`);
-    console.log(`  checksum      ${v.checksumOk ? "match" : "MISMATCH"}`);
+    console.log(`  checksum      ${v.checksumOk ? "match (corruption check)" : "MISMATCH"}`);
+    console.log(`  authenticity  ${v.authOk ? "verified (HMAC)" : v.authPresent ? "INVALID (tampered/wrong identity)" : "UNSIGNED (legacy backup)"}`);
     console.log(`  decryption    ${v.decryptedRows}/${v.installedEventCount} event rows`);
     console.log(`  pubkey        ${v.pubkeyOk === null ? "n/a" : v.pubkeyOk ? "match" : "MISMATCH"}`);
-    const ok = verifyPassed(v);
+    const ok = verifyPassed(v, { allowUnsigned: args.includes("--allow-unsigned") });
     console.log(ok ? "[verify] OK" : "[verify] FAILED");
     return ok ? 0 : 1;
   } catch (e) {
@@ -139,9 +140,10 @@ function cmdVerifyBackup(args: string[]): number {
 function cmdRestore(args: string[]): number {
   const configPath = configPathFromArgs(args);
   const force = args.includes("--force");
+  const allowUnsigned = args.includes("--allow-unsigned");
   const file = args.find((a) => !a.startsWith("--") && a !== configPath);
   if (!file) {
-    console.error("usage: nostrautica-coordinator restore <file.sqlite> [--force] [--config coordinator.toml]");
+    console.error("usage: nostrautica-coordinator restore <file.sqlite> [--force] [--allow-unsigned] [--config coordinator.toml]");
     return 1;
   }
   const { sk, pubkey } = loadIdentity(configPath);
@@ -162,6 +164,7 @@ function cmdRestore(args: string[]): number {
       identitySk: sk,
       expectedPubkey: pubkey,
       force,
+      allowUnsigned,
     });
     console.log(`[restore] installed ${file} → ${db}`);
     console.log(`  release       ${v.meta.releaseId}`);
@@ -231,22 +234,25 @@ async function cmdDoctor(args: string[]): Promise<number> {
     fail("identity load", e instanceof Error ? e.message : String(e));
   }
 
-  // 3. database integrity (read-only)
+  // 3. database integrity — genuinely READ-ONLY (audit O2). `doctor` must never
+  // migrate/encrypt/upgrade the database (it can run as an ExecStartPre before a
+  // rollback decision), so it opens a read-only SQLite connection and inspects the
+  // schema/user_version/decryptability WITHOUT constructing the migrating Store.
   const db = dbPath();
   if (!existsSync(db)) {
     warn("database", `${db} does not exist yet (first run?)`);
   } else if (identity) {
     try {
-      const store = new Store(db, identity.sk);
-      try {
-        const ic = store.integrityCheck();
-        if (ic === "ok") pass("database integrity", `${store.installedEventCount()} event(s), schema v${store.schemaVersion()}`);
-        else fail("database integrity", ic);
-        const proven = store.verifyProtectedRowsDecrypt();
-        pass("protected-row decryption", `${proven} event row(s) decrypt under the identity`);
-      } finally {
-        store.close();
+      const info = inspectDatabaseReadOnly(db, identity.sk);
+      if (info.integrity === "ok") {
+        pass("database integrity", `${info.installedEventCount} event(s), schema v${info.userVersion}`);
+      } else {
+        fail("database integrity", info.integrity);
       }
+      if (info.schemaTooNew) {
+        fail("schema version", `on-disk v${info.userVersion} is NEWER than this binary (v${SCHEMA_VERSION}) — upgrade the coordinator`);
+      }
+      pass("protected-row decryption", `${info.decryptedRows ?? 0} event row(s) decrypt under the identity`);
     } catch (e) {
       fail("database", e instanceof Error ? e.message : String(e));
     }

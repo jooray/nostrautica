@@ -4,8 +4,10 @@
  * server config here — only the daemon's identity, providers, and matching knobs.
  */
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
+import { isBlockedAddress } from "./net/safe-fetch.js";
 import { decode } from "nostr-tools/nip19";
 import { decrypt as nip49Decrypt } from "nostr-tools/nip49";
 import {
@@ -149,15 +151,119 @@ export const configSchema = z.object({
        * has require_private (fail closed). Set true to boot anyway (warn only).
        */
       allow_unverified_model_privacy: z.boolean().default(false),
+      /**
+       * Operator relay allowlist (audit C4). When non-empty, ANY relay URL taken
+       * from untrusted event input (config `relays`, grant `config_relays`, inbox
+       * NIP-65 lists, key-package discovery) is dropped unless its host is listed.
+       * Empty (default) = accept any PUBLIC wss:// relay (still SSRF-guarded).
+       */
+      relay_allowlist: z.array(z.string()).default([]),
+      /**
+       * DEV-ONLY escape hatch (audit C4 + O4). Permits insecure/local endpoints that
+       * are otherwise rejected: `http://`/`ws://` schemes, and loopback/private/
+       * link-local hosts — for provider URLs AND for relay WebSockets. NEVER set this
+       * on a public coordinator; it exists so a local test stack (a self-signed
+       * Blossom proxy, a `nak serve` on localhost) can run. Default false.
+       */
+      allow_insecure_urls: z.boolean().default(false),
     })
     .default({}),
 });
 
 export type CoordinatorConfig = z.infer<typeof configSchema>;
 
+/** True for a hostname literal that is loopback/private/link-local/unspecified — the
+ *  set the SSRF guard rejects (audit O4). Hostnames that must be resolved (DNS names)
+ *  are NOT flagged here: operator-authored provider/relay config is trusted enough to
+ *  resolve at connect time (relay connections are additionally pinned, audit C4). */
+function isLocalOrPrivateHost(hostname: string): boolean {
+  const h = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (h === "localhost" || h.endsWith(".localhost")) return true;
+  if (isIP(h) !== 0) return isBlockedAddress(h);
+  return false;
+}
+
+/**
+ * Validate + normalize a configured URL (audit O4). Requires the expected secure
+ * scheme (`https:` for HTTP endpoints, `wss:` for relays), rejects embedded
+ * credentials and URL fragments, and rejects loopback/private hosts — unless the
+ * operator set `security.allow_insecure_urls` (dev only), which also permits the
+ * plaintext `http:`/`ws:` scheme. Returns the normalized URL string. Throws a
+ * clear, labelled error the operator sees at startup / in `doctor`.
+ */
+export function validateConfiguredUrl(
+  raw: string,
+  opts: { kind: "http" | "ws"; allowInsecure: boolean; label: string },
+): string {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`${opts.label}: not a valid URL: ${JSON.stringify(raw)}`);
+  }
+  if (u.username || u.password) {
+    throw new Error(`${opts.label}: URL must not embed credentials (${u.protocol}//user:pass@…)`);
+  }
+  if (u.hash) {
+    throw new Error(`${opts.label}: URL must not contain a fragment (#…)`);
+  }
+  const secure = opts.kind === "http" ? "https:" : "wss:";
+  const insecure = opts.kind === "http" ? "http:" : "ws:";
+  if (u.protocol === secure) {
+    // ok
+  } else if (u.protocol === insecure && opts.allowInsecure) {
+    // ok — dev-only insecure scheme
+  } else {
+    throw new Error(
+      `${opts.label}: must be ${secure} (got ${u.protocol})${u.protocol === insecure ? " — set security.allow_insecure_urls for local dev only" : ""}`,
+    );
+  }
+  if (!opts.allowInsecure && isLocalOrPrivateHost(u.hostname)) {
+    throw new Error(
+      `${opts.label}: refuses loopback/private host ${u.hostname} — set security.allow_insecure_urls for local dev only`,
+    );
+  }
+  return u.toString();
+}
+
+/**
+ * Validate every operator-configured public URL at load (audit O4): provider base
+ * URLs, Routstr node/mint, terms/checkout links, and the default relays. Fails
+ * fast with a labelled error rather than letting a Venice bearer key or attendee
+ * prompt flow to a cleartext or unintended endpoint. Mutates `config` in place with
+ * the normalized values.
+ */
+function validateConfigUrls(config: CoordinatorConfig): void {
+  const allowInsecure = config.security.allow_insecure_urls;
+  const http = (raw: string, label: string) => validateConfiguredUrl(raw, { kind: "http", allowInsecure, label });
+  const ws = (raw: string, label: string) => validateConfiguredUrl(raw, { kind: "ws", allowInsecure, label });
+
+  if (config.providers.venice?.base_url) {
+    config.providers.venice.base_url = http(config.providers.venice.base_url, "providers.venice.base_url");
+  }
+  if (config.providers.routstr?.node_url) {
+    config.providers.routstr.node_url = http(config.providers.routstr.node_url, "providers.routstr.node_url");
+  }
+  if (config.providers.routstr?.mint) {
+    config.providers.routstr.mint = http(config.providers.routstr.mint, "providers.routstr.mint");
+  }
+  if (config.coordinator.terms_url) {
+    config.coordinator.terms_url = http(config.coordinator.terms_url, "coordinator.terms_url");
+  }
+  if (config.coordinator.picture) {
+    config.coordinator.picture = http(config.coordinator.picture, "coordinator.picture");
+  }
+  if (config.pricing.checkout_url) {
+    config.pricing.checkout_url = http(config.pricing.checkout_url, "pricing.checkout_url");
+  }
+  config.relays.default = config.relays.default.map((r, i) => ws(r, `relays.default[${i}]`));
+}
+
 export function loadConfig(path: string): CoordinatorConfig {
   const raw = parseToml(readFileSync(path, "utf8"));
-  return configSchema.parse(raw);
+  const config = configSchema.parse(raw);
+  validateConfigUrls(config);
+  return config;
 }
 
 /**

@@ -4,12 +4,12 @@
  * legacy plaintext rows, and idempotency of that migration.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
 import { bytesToHex } from "@nostrautica/protocol";
-import { Store, acquireDaemonLock } from "./db.js";
+import { Store, acquireDaemonLock, inspectDatabaseReadOnly, SCHEMA_VERSION } from "./db.js";
 
 const ENC_PREFIX = "nip44:";
 
@@ -415,5 +415,158 @@ describe("single-daemon lock (reliability tail)", () => {
     const b = acquireDaemonLock(":memory:");
     a.release();
     b.release();
+  });
+});
+
+// ── O3: numbered, transactional schema migrations ─────────────────────────────
+describe("schema migrations (audit O3)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-mig-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("a fresh database is stamped at SCHEMA_VERSION with the remediation tables", () => {
+    const path = tmpDb();
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    const info = inspectDatabaseReadOnly(path);
+    expect(info.userVersion).toBe(SCHEMA_VERSION);
+    expect(info.schemaTooNew).toBe(false);
+    store.close();
+  });
+
+  it("upgrades a version-1 fixture and adds the version-2 tables", async () => {
+    const path = tmpDb();
+    // A pre-versioning database: only the events table, stamped user_version = 1
+    // (the historical single-version marker).
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("CREATE TABLE events (coordinate TEXT PRIMARY KEY, config_json TEXT, inbox_nsec TEXT, eck_json TEXT, config_relays TEXT, updated_at INTEGER)");
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+
+    // Opening with the current binary migrates it up to SCHEMA_VERSION.
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    // The version-2 remediation tables now exist and are usable.
+    expect(store.attendeeCount("31923:x:e")).toBe(0);
+    store.bumpInboxRate("31923:x:e", "", 0, 60_000); // inbox_rate exists
+    store.recordTranscriptRef("blob", "31923:x:e", "pk", 0); // transcript_refs exists
+    store.close();
+  });
+
+  it("REFUSES to open a database written by a newer binary", async () => {
+    const path = tmpDb();
+    const store = new Store(path);
+    store.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 5}`);
+    raw.close();
+    expect(() => new Store(path)).toThrow(/newer coordinator/i);
+  });
+});
+
+// ── O2: doctor's read-only inspection leaves the file byte-identical ──────────
+describe("read-only inspection (audit O2)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("inspecting an OLD-schema database does not mutate it (byte-identical)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-doctor-"));
+    dirs.push(dir);
+    const path = join(dir, "old.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("CREATE TABLE events (coordinate TEXT PRIMARY KEY, inbox_nsec TEXT, eck_json TEXT)");
+    raw.exec("PRAGMA user_version = 1");
+    raw.close();
+    const before = readFileSync(path);
+    const info = inspectDatabaseReadOnly(path);
+    expect(info.userVersion).toBe(1); // reported, NOT upgraded
+    expect(info.integrity).toBe("ok");
+    const after = readFileSync(path);
+    expect(after.equals(before)).toBe(true); // no migration ran
+  });
+});
+
+// ── C3: inbox rate accounting + population caps ───────────────────────────────
+describe("inbox rate accounting + population caps (audit C3)", () => {
+  it("counts per-sender rumors within a window and resets across windows", () => {
+    const store = new Store();
+    const c = "31923:x:e";
+    expect(store.bumpInboxRate(c, "alice", 1000, 60_000)).toBe(1);
+    expect(store.bumpInboxRate(c, "alice", 1500, 60_000)).toBe(2);
+    expect(store.bumpInboxRate(c, "alice", 2000, 60_000)).toBe(3);
+    // A later window (past the 60s boundary) resets to 1.
+    expect(store.bumpInboxRate(c, "alice", 120_000, 60_000)).toBe(1);
+    // Distinct sender has its own bucket.
+    expect(store.bumpInboxRate(c, "bob", 120_000, 60_000)).toBe(1);
+  });
+
+  it("reports attendee population counts", () => {
+    const store = new Store();
+    const c = "31923:x:e";
+    store.upsertAttendee({ coordinate: c, pubkey: "a", status: "pending", now: 1 });
+    store.upsertAttendee({ coordinate: c, pubkey: "b", status: "approved", now: 1 });
+    store.upsertAttendee({ coordinate: c, pubkey: "d", status: "pending", now: 1 });
+    expect(store.attendeeCount(c)).toBe(3);
+    expect(store.pendingAttendeeCount(c)).toBe(2);
+  });
+});
+
+// ── C5: reference-counted deletion of shared derived artifacts ────────────────
+describe("reference-counted purge (audit C5)", () => {
+  it("keeps a shared transcript/summary/artifact alive for another event", () => {
+    const store = new Store();
+    const A = "31923:x:eventA";
+    const B = "31923:x:eventB";
+    // Same attendee 'pk' shares a deduplicated transcript + summary + artifact
+    // across two events.
+    store.putTranscript("blobX", "hello", 1, "en", { coordinate: A, pubkey: "pk" });
+    store.putTranscript("blobX", "hello", 1, "en", { coordinate: B, pubkey: "pk" });
+    store.putSummary("pk", "ih", "sum", 1, { coordinate: A });
+    store.putSummary("pk", "ih", "sum", 1, { coordinate: B });
+    store.putArtifact({ stage: "ai_profile", inputsHash: "ph", provider: "p", model: "m", output: { a: 1 }, now: 1, owner: { coordinate: A, pubkey: "pk" } });
+    store.putArtifact({ stage: "ai_profile", inputsHash: "ph", provider: "p", model: "m", output: { a: 1 }, now: 1, owner: { coordinate: B, pubkey: "pk" } });
+    // Give each event an attendee row referencing the profile media blob.
+    store.upsertAttendee({ coordinate: A, pubkey: "pk", status: "approved", profileJson: JSON.stringify({ __media: [{ x: "blobX" }] }), now: 1 });
+    store.upsertAttendee({ coordinate: B, pubkey: "pk", status: "approved", profileJson: JSON.stringify({ __media: [{ x: "blobX" }] }), now: 1 });
+
+    // Purge the attendee from event A only.
+    store.purgeAttendeeArtifacts(A, "pk");
+    expect(store.getAttendee(A, "pk")).toBeUndefined();
+    // Event B's copies survive (still referenced by B).
+    expect(store.getTranscript("blobX")).toBe("hello");
+    expect(store.getSummary("pk", "ih")).toBe("sum");
+    expect(store.getArtifact("ai_profile", "ph")).toEqual({ a: 1 });
+
+    // Now purge B: the last reference is gone, so the payloads are deleted.
+    store.purgeAttendeeArtifacts(B, "pk");
+    expect(store.getTranscript("blobX")).toBeUndefined();
+    expect(store.getSummary("pk", "ih")).toBeUndefined();
+    expect(store.getArtifact("ai_profile", "ph")).toBeUndefined();
+  });
+
+  it("purgeEventArtifacts removes all local rows for an event", () => {
+    const store = new Store();
+    const c = "31923:x:e";
+    store.upsertAttendee({ coordinate: c, pubkey: "pk", status: "approved", profileJson: JSON.stringify({ __media: [{ x: "b1" }] }), now: 1 });
+    store.putTranscript("b1", "t", 1, "en", { coordinate: c, pubkey: "pk" });
+    store.putSummary("pk", "ih", "s", 1, { coordinate: c });
+    store.addUsage(c, "pk", { bytes: 10, calls: 1 }, 1);
+    store.bumpInboxRate(c, "pk", 1, 60_000);
+    store.purgeEventArtifacts(c);
+    expect(store.getAttendee(c, "pk")).toBeUndefined();
+    expect(store.getTranscript("b1")).toBeUndefined();
+    expect(store.getSummary("pk", "ih")).toBeUndefined();
+    expect(store.getEventUsage(c)).toEqual({ bytes: 0, durationSec: 0, calls: 0 });
   });
 });

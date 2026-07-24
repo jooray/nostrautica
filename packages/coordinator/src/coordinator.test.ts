@@ -3608,12 +3608,14 @@ describe("NIP §6.2 — retention sweep", () => {
     // Processing is terminally parked: durable flag set, and a fresh submission's
     // paid pipeline does not resume.
     expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+    // Local data is PURGED too (audit C5): "delete member data after the event" must
+    // delete the coordinator's own copies, not only the relay records.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
 
     // Expiry is terminal at the inbox boundary: a late join cannot recreate a
     // roster/grant, and a fresh profile revision cannot recreate a directory
     // entry or enqueue provider work after the deletion sweep.
     const lateSk = generateSecretKey();
-    const profileBefore = h.store.getAttendee(h.coordinate, pk)?.profile_json;
     const beforeLate = h.transport.published.length;
     await join(h, lateSk, "crypto");
     await resubmitIntro(h, attendeeSk, "crypto");
@@ -3623,11 +3625,11 @@ describe("NIP §6.2 — retention sweep", () => {
       [KIND_KEY_GRANT, KIND_DIRECTORY_ENTRY, KIND_ROSTER].includes(e.kind)
     )).toBe(false);
 
-    // Idempotent: a second sweep issues no further deletions.
+    // Idempotent: a second sweep issues no further deletions, and the data stays gone.
     const before2 = h.transport.published.length;
     await h.coordinator.retentionSweep();
     expect(h.transport.published.slice(before2).some((e) => e.kind === KIND_DELETION)).toBe(false);
-    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBe(profileBefore);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
   });
 });
 
@@ -3902,5 +3904,73 @@ describe("audit C1 — commands resume to full completion after a partial failur
     // allowed to RESUME (pre-fix: rejected as stale), so the group was finally created.
     expect(h.store.getEvent(h.coordinate)).toBeDefined();
     expect(h.store.getMarmotGroup(h.coordinate)).toBeDefined();
+  });
+});
+
+// ── audit C3 — public inbox population / rate / concurrency bounds ────────────
+describe("audit C3 — public inbox is population-bounded", () => {
+  it("drops profile submissions from identities with no enrollment row (no DB growth)", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    // Burst: many unique keypairs each send a profile submission WITHOUT joining.
+    for (let i = 0; i < 40; i++) {
+      const sk = generateSecretKey();
+      const wrap = wrapRumor(sk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 2, rev: 0, profile: { about: "x", skills: ["a"], looking_for: "", links: [] }, media: [] },
+        tags: [["a", h.coordinate]],
+      });
+      await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    }
+    // No attendee rows were created — the population attack is bounded.
+    expect(h.store.attendeeCount(h.coordinate)).toBe(0);
+    // Legitimate traffic still processes end-to-end.
+    const legitSk = generateSecretKey();
+    const pk = await join(h, legitSk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(h.store.attendeeCount(h.coordinate)).toBe(1);
+  });
+
+  it("refuses a new attendee beyond the 2,000 roster population cap", async () => {
+    const h = await setup();
+    for (let i = 0; i < 2000; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "pending", now: 1 });
+    }
+    expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
+    // A fresh join (even with a valid invite) is refused — the roster never grows
+    // past what a 31604 can carry and then fail to publish.
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, getPublicKey(sk))).toBeUndefined();
+    expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
+  });
+
+  it("durably rate-drops a flooding sender past the per-window cap", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const floodSk = generateSecretKey();
+    // Enroll the flooder so its submissions clear the enrollment gate; the rate gate
+    // is what must bound them.
+    await join(h, floodSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const seenBefore = (h.store as any).db.prepare("SELECT COUNT(*) AS n FROM seen_rumors").get().n as number;
+    // Burst well past the per-sender window cap (30). The excess is rate-dropped
+    // (marked seen) rather than processed.
+    let dropped = 0;
+    for (let i = 0; i < 60; i++) {
+      const wrap = wrapRumor(floodSk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 2, rev: 100 + i, profile: { about: "y" + i, skills: ["a"], looking_for: "", links: [] }, media: [] },
+        tags: [["a", h.coordinate]],
+      });
+      const before = (h.store as any).db.prepare("SELECT COUNT(*) AS n FROM seen_rumors").get().n as number;
+      await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+      const after = (h.store as any).db.prepare("SELECT COUNT(*) AS n FROM seen_rumors").get().n as number;
+      // A rate-dropped rumor marks itself seen without a normal handler cycle.
+      if (after > before) dropped++;
+    }
+    void seenBefore;
+    // Some of the 60 were rate-dropped (the sender cap is 30/window).
+    expect(dropped).toBeGreaterThan(0);
   });
 });
