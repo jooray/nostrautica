@@ -229,3 +229,48 @@ describe("NIP-44 plaintext ceiling (65,535 bytes, PROTO-3)", () => {
     expect(eckDecrypt(eck, eckEncrypt(eck, atCeiling))).toBe(atCeiling);
   });
 });
+
+describe("NIP-44 decrypt ciphertext ceiling (P10)", () => {
+  // The base64 envelope of a 65,535-byte plaintext (the encrypt ceiling) is
+  // exactly 87,472 chars: ceil((1 + 32 + (2 + 65536) + 32) / 3) * 4. Longer input
+  // cannot be a valid within-ceiling NIP-44 v2 payload, so decrypt must reject it
+  // before base64-decoding/allocating.
+  const MAX_B64 = 87_472;
+
+  it("the max-plaintext ciphertext is exactly at the boundary and round-trips", () => {
+    const eck = generateEck();
+    const ct = eckEncrypt(eck, "x".repeat(65_535));
+    expect(ct.length).toBe(MAX_B64);
+    expect(eckDecrypt(eck, ct)).toBe("x".repeat(65_535));
+  });
+
+  it("eckDecrypt rejects ciphertext one char over the ceiling before decoding", () => {
+    const eck = generateEck();
+    const overCeiling = "A".repeat(MAX_B64 + 1);
+    expect(() => eckDecrypt(eck, overCeiling)).toThrow(/ciphertext .* ceiling/);
+  });
+
+  it("nip44Decrypt rejects an over-ceiling ciphertext", () => {
+    const recipient = generateSecretKey();
+    const senderPk = getPublicKey(generateSecretKey());
+    expect(() =>
+      nip44Decrypt(recipient, senderPk, "A".repeat(MAX_B64 + 1)),
+    ).toThrow(/ciphertext .* ceiling/);
+  });
+
+  it("selfDecrypt rejects an over-ceiling ciphertext", () => {
+    expect(() =>
+      selfDecrypt(generateSecretKey(), "A".repeat(MAX_B64 + 1)),
+    ).toThrow(/ciphertext .* ceiling/);
+  });
+
+  it("a normal short ciphertext still round-trips on every decrypt path", () => {
+    const eck = generateEck();
+    expect(eckDecrypt(eck, eckEncrypt(eck, "hi"))).toBe("hi");
+    const sk = generateSecretKey();
+    const to = generateSecretKey();
+    const ct = nip44Encrypt(sk, getPublicKey(to), "yo");
+    expect(nip44Decrypt(to, getPublicKey(sk), ct)).toBe("yo");
+    expect(selfDecrypt(sk, selfEncrypt(sk, "me"))).toBe("me");
+  });
+});

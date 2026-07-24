@@ -63,6 +63,29 @@ function assertNip44Ceiling(plaintext: string): void {
   }
 }
 
+// Decrypt-side ceiling (audit P10). Encryption caps plaintext at 65,535 bytes,
+// but decrypt handed the base64 payload straight to the dependency, which
+// base64-decodes and allocates before deciding it's too large. Reject an
+// over-length ciphertext BEFORE that, derived precisely from the NIP-44 v2
+// payload layout for the largest legal plaintext:
+//   padded region = 2-byte length prefix + calcPaddedLen(65535) padding bytes
+//   raw payload   = 1 version byte + 32-byte nonce + padded region + 32-byte MAC
+//   base64        = ceil(raw / 3) * 4   (no wasted padding at this length)
+// which is 87,472 chars. Anything longer cannot be a valid classic NIP-44 v2
+// payload of a within-ceiling plaintext, so it is rejected without decoding.
+const NIP44_MAX_CIPHERTEXT_B64 =
+  Math.ceil(
+    (1 + 32 + (2 + nip44v2.utils.calcPaddedLen(NIP44_MAX_PLAINTEXT_BYTES)) + 32) / 3,
+  ) * 4;
+
+function assertNip44CiphertextCeiling(ciphertext: string): void {
+  if (ciphertext.length > NIP44_MAX_CIPHERTEXT_B64) {
+    throw new Error(
+      `NIP-44 ciphertext is ${ciphertext.length} base64 chars — the ceiling is ${NIP44_MAX_CIPHERTEXT_B64}`,
+    );
+  }
+}
+
 export function eckEncrypt(eck: Uint8Array, plaintext: string): string {
   if (eck.length !== 32) throw new Error("ECK must be 32 bytes");
   assertNip44Ceiling(plaintext);
@@ -71,6 +94,7 @@ export function eckEncrypt(eck: Uint8Array, plaintext: string): string {
 
 export function eckDecrypt(eck: Uint8Array, ciphertext: string): string {
   if (eck.length !== 32) throw new Error("ECK must be 32 bytes");
+  assertNip44CiphertextCeiling(ciphertext);
   return nip44v2.decrypt(ciphertext, eck);
 }
 
@@ -92,6 +116,7 @@ export function nip44Decrypt(
   senderPubkey: string,
   ciphertext: string,
 ): string {
+  assertNip44CiphertextCeiling(ciphertext);
   const convKey = getConversationKey(recipientSk, senderPubkey);
   return nip44v2.decrypt(ciphertext, convKey);
 }
@@ -109,6 +134,7 @@ export function selfEncrypt(sk: Uint8Array, plaintext: string): string {
 }
 
 export function selfDecrypt(sk: Uint8Array, ciphertext: string): string {
+  assertNip44CiphertextCeiling(ciphertext);
   return nip44v2.decrypt(ciphertext, selfConversationKey(sk));
 }
 
