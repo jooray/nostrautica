@@ -1,10 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { TalkContent } from "@nostrautica/protocol";
-  import { KIND_PROFILE } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
-  import { connectNdk, fetchEvents } from "$lib/nostr/ndk.js";
+  import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import {
     fetchTalk,
@@ -15,7 +14,7 @@
     isFavoriteTalk,
     toggleFavoriteTalk,
   } from "$lib/events/talks.js";
-  import { cachedProfiles } from "$lib/events/social.js";
+  import { cachedProfiles, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import ExternalTalkPlayer from "$lib/components/ExternalTalkPlayer.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -35,10 +34,14 @@
   let talk = $state<TalkContent | null>(
     cachedCtx ? (cachedTalk(cachedCtx.coordinate, d) ?? null) : null,
   );
+  // Author profile (name + picture), resolved the same way the People list does —
+  // cache-first with a background kind-0 refresh — so the detail header shows the
+  // speaker's real avatar rather than an initials fallback when they have a kind-0.
   // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
-  let speakerName = $state(
-    talk ? (cachedProfiles([talk.pubkey]).get(talk.pubkey)?.name ?? "") : "",
+  let speaker = $state<ProfileMeta | undefined>(
+    talk ? cachedProfiles([talk.pubkey]).get(talk.pubkey) : undefined,
   );
+  const speakerName = $derived(speaker?.name ?? "");
   let resumeAt = $state(0);
   // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let loading = $state(talk === null);
@@ -69,15 +72,10 @@
         // Watch-progress is keyed by the Blossom ciphertext hash; external
         // (YouTube/mp4) talks have no `media`, so there's nothing to resume.
         resumeAt = talk.media ? loadWatchProgress(ctx.coordinate, talk.media.x) : 0;
-        const profiles = await fetchEvents({ kinds: [KIND_PROFILE], authors: [talk.pubkey] });
-        const latest = profiles.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-        if (latest) {
-          try {
-            speakerName = JSON.parse(latest.content).name ?? "";
-          } catch {
-            /* no name */
-          }
-        }
+        // Resolve the author's kind-0 (name + picture) via the shared profile
+        // cache so a photo shows and the fetch is deduped/persisted app-wide.
+        const profiles = await fetchProfiles([talk.pubkey]);
+        speaker = profiles.get(talk.pubkey) ?? speaker;
       }
     } catch (e) {
       error = e;
@@ -129,7 +127,7 @@
       </button>
     </div>
     <div class="row" style="align-items:center;gap:0.5rem">
-      <Avatar pubkey={talk.pubkey} name={speakerName} size={32} />
+      <Avatar pubkey={talk.pubkey} name={speakerName} picture={speaker?.picture} size={32} />
       <span class="muted">{speakerName || t("talks.speaker")}</span>
     </div>
 

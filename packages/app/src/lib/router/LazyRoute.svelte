@@ -25,10 +25,14 @@
 
   let Resolved = $state<Component<any> | null>(null);
   let failed = $state(false);
+  // Bumped by the Retry button to re-run the import effect (the loader identity is
+  // stable, so nothing else would re-trigger it after a failure).
+  let attempt = $state(0);
 
-  // Depends only on `loader` (stable) — not on `props` — so a prop change never
-  // re-triggers the import.
+  // Depends on `loader` (stable) and `attempt` — not on `props` — so a prop change
+  // never re-triggers the import, but a manual retry does.
   $effect(() => {
+    void attempt;
     const l = loader;
     let alive = true;
     Resolved = null;
@@ -53,7 +57,12 @@
   {@const Comp = Resolved}
   <Comp {...props} />
 {:else if failed}
-  <p class="muted" role="alert" style="margin-top:2rem">{t("route.loadFailed")}</p>
+  <div class="card warn" role="alert" style="margin-top:2rem">
+    <p style="margin:0">{t("route.loadFailed")}</p>
+    <div class="row" style="margin-top:0.6rem">
+      <button class="btn inline" onclick={() => attempt++}>{t("error.state.retry")}</button>
+    </div>
+  </div>
 {:else}
   <p class="muted" role="status" style="margin-top:2rem">{t("app.loading")}</p>
 {/if}
