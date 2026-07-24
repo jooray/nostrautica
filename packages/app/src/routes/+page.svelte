@@ -20,21 +20,23 @@
   import EventMore from "$lib/pages/EventMore.svelte";
   import NotFound from "$lib/pages/NotFound.svelte";
 
-  // Lazy: rarer / heavier routes. Stable loaders (module scope).
-  const loadCreate = () => import("$lib/pages/Create.svelte");
-  const loadSettings = () => import("$lib/pages/Settings.svelte");
-  const loadRecord = () => import("$lib/pages/Record.svelte");
-  const loadEventChat = () => import("$lib/pages/EventChat.svelte");
-  const loadTalks = () => import("$lib/pages/Talks.svelte");
-  const loadTalkDetail = () => import("$lib/pages/TalkDetail.svelte");
-  const loadMyProfile = () => import("$lib/pages/MyProfile.svelte");
-  const loadAdmin = () => import("$lib/pages/Admin.svelte");
-  const loadEventSettings = () => import("$lib/pages/EventSettings.svelte");
-  const loadPosts = () => import("$lib/pages/Posts.svelte");
-  const loadReport = () => import("$lib/pages/Report.svelte");
-  const loadPost = () => import("$lib/pages/Post.svelte");
-  const loadDm = () => import("$lib/pages/Dm.svelte");
-  const loadDmChat = () => import("$lib/pages/DmChat.svelte");
+  // Lazy: rarer / heavier routes. Loaders come from the SHARED registry
+  // (audit U7) so the offline pack warms the exact same chunks these routes load.
+  import { lazyRouteLoaders } from "$lib/router/route-modules.js";
+  const loadCreate = lazyRouteLoaders.create;
+  const loadSettings = lazyRouteLoaders.settings;
+  const loadRecord = lazyRouteLoaders.record;
+  const loadEventChat = lazyRouteLoaders.chat;
+  const loadTalks = lazyRouteLoaders.talks;
+  const loadTalkDetail = lazyRouteLoaders.talk;
+  const loadMyProfile = lazyRouteLoaders.myProfile;
+  const loadAdmin = lazyRouteLoaders.admin;
+  const loadEventSettings = lazyRouteLoaders.eventSettings;
+  const loadPosts = lazyRouteLoaders.posts;
+  const loadReport = lazyRouteLoaders.report;
+  const loadPost = lazyRouteLoaders.post;
+  const loadDm = lazyRouteLoaders.dm;
+  const loadDmChat = lazyRouteLoaders.dmPeer;
 
   const route = $derived(router.route);
 </script>

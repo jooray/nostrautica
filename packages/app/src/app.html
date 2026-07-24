@@ -6,6 +6,16 @@
     <meta name="theme-color" content="#0e0e15" />
     <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
     <!--
+      PWA manifest link (audit U6). @vite-pwa generates manifest.webmanifest into
+      the build output but does NOT inject this link, so Chromium never saw the
+      app as installable — `beforeinstallprompt` never fired and the Android
+      install path stayed hidden. `%sveltekit.assets%` resolves to the base path
+      (empty locally, "/app" in production, matching the favicon above), so this
+      is correct for both `vite preview` and the BASE_PATH=/app production build.
+      CSP already allows it (manifest-src 'self').
+    -->
+    <link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />
+    <!--
       Anti-FOUC theme resolution (item 3 / UX-40). This runs SYNCHRONOUSLY before
       the body paints, so the very first frame already carries the user's real
       theme — a light-preferring visitor never gets the hardcoded-dark flash the

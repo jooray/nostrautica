@@ -565,7 +565,7 @@
       <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
         {#if packUsage}{t("event.offline.stored", { size: packUsage })}{/if}
         {#if packPersisted}· {t("event.offline.persisted")}{/if}
-        {#if packDone}· {t("event.offline.mediaNote")}{/if}
+        {#if packDone}· {t("event.offline.routesReady")} · {t("event.offline.mediaNote")}{/if}
       </p>
     </div>
   {/if}

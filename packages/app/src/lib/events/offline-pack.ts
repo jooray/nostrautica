@@ -17,6 +17,7 @@ import { fetchProfiles } from "./social.js";
 import { fetchEventPage } from "./event-page.js";
 import { fetchEventPosts } from "./posts.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { warmRouteModules, PARTICIPANT_OFFLINE_ROUTES } from "$lib/router/route-modules.js";
 
 export type PackStepKey =
   | "roster"
@@ -24,7 +25,8 @@ export type PackStepKey =
   | "matches"
   | "talks"
   | "profiles"
-  | "page";
+  | "page"
+  | "modules";
 
 export interface PackStep {
   key: PackStepKey;
@@ -139,6 +141,19 @@ export async function buildOfflinePack(
   await run("page", false, async () => {
     await Promise.all([fetchEventPage(ctx), fetchEventPosts(ctx)]);
     return 1;
+  });
+  // Route MODULES (audit U7): fetching the data isn't enough — the lazy route
+  // chunks (Talks, Talk Detail, Record, My Profile, Posts/Post) are absent
+  // offline until visited online, so the pack imports each one it promises,
+  // landing them in the SW runtime cache. `ok:false` if any chunk couldn't be
+  // warmed (offline mid-pack), so `packComplete` reports the pack as partial and
+  // the UI can say some screens may need a reconnect.
+  await run("modules", false, async () => {
+    const warmed = await warmRouteModules(PARTICIPANT_OFFLINE_ROUTES);
+    if (warmed < PARTICIPANT_OFFLINE_ROUTES.length) {
+      throw new Error("some route modules could not be warmed");
+    }
+    return warmed;
   });
 
   const pack: OfflinePack = { at: Math.floor(Date.now() / 1000), steps, mediaSkipped: true };
