@@ -35,6 +35,34 @@ RUN pnpm install --frozen-lockfile --filter @nostrautica/coordinator... \
   && pnpm --filter @nostrautica/protocol build \
   && pnpm --filter @nostrautica/coordinator build
 
+# Release provenance (audit R23). A clean/archived build has no `.git`, so the
+# coordinator's git describe/rev-parse fall back to `v<pkg>` and `gitSha: unknown`.
+# Pass these ARGs to bake the real release identity into the image ENV — the
+# coordinator reads NOSTRAUTICA_RELEASE_ID / NOSTRAUTICA_BUILD_TIMESTAMP at startup
+# (packages/coordinator/src/release.ts); NOSTRAUTICA_GIT_SHA is read there too so a
+# clean container no longer reports `gitSha: unknown`. Unset ARGs default to empty,
+# which the source treats as "fall through", so a plain `docker build` is unchanged.
+#
+# Build with real provenance (from a git checkout of the release commit):
+#   docker build -f docker/coordinator.Dockerfile \
+#     --build-arg RELEASE_ID="$(git describe --tags --always --dirty)" \
+#     --build-arg GIT_SHA="$(git rev-parse HEAD)" \
+#     --build-arg BUILD_TIMESTAMP="$(git show -s --format=%cI HEAD)" \
+#     -t nostrautica-coordinator .
+ARG RELEASE_ID=
+ARG GIT_SHA=
+ARG BUILD_TIMESTAMP=
+ENV NOSTRAUTICA_RELEASE_ID=${RELEASE_ID} \
+    NOSTRAUTICA_GIT_SHA=${GIT_SHA} \
+    NOSTRAUTICA_BUILD_TIMESTAMP=${BUILD_TIMESTAMP}
+LABEL org.opencontainers.image.title="nostrautica-coordinator" \
+      org.opencontainers.image.description="Nostrautica coordinator daemon (headless Nostr client: STT, AI profiles, matchmaking)." \
+      org.opencontainers.image.source="https://github.com/jooray/nostrautica" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${RELEASE_ID}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_TIMESTAMP}"
+
 # Run as a dedicated non-root user (audit COORD-19). /data is chowned so the
 # SQLite volume is writable; a named volume initialized from the image keeps
 # this ownership (for a bind mount, chown the host dir to uid 10001).
