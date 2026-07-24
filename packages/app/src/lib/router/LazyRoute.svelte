@@ -55,7 +55,24 @@
 
 {#if Resolved}
   {@const Comp = Resolved}
-  <Comp {...props} />
+  <!-- A throw while the route component is being CREATED is otherwise
+       unrecoverable and, worse, invisible: Svelte builds the new branch
+       offscreen, so the throw leaves the `{:else}` placeholder below mounted and
+       the pane sits on "Loading…" forever with only a minified error in the
+       console. That is how a single duplicate `{#each}` key made the Chat tab
+       permanently unreachable in prod (2026-07-24). One bad screen should cost
+       the user that screen, not the app — show it, log it, offer a retry. -->
+  <svelte:boundary onerror={(e) => console.error("[route] render failed", e)}>
+    <Comp {...props} />
+    {#snippet failed(_error, reset)}
+      <div class="card warn" role="alert" style="margin-top:2rem">
+        <p style="margin:0">{t("route.renderFailed")}</p>
+        <div class="row" style="margin-top:0.6rem">
+          <button class="btn inline" onclick={reset}>{t("error.state.retry")}</button>
+        </div>
+      </div>
+    {/snippet}
+  </svelte:boundary>
 {:else if failed}
   <div class="card warn" role="alert" style="margin-top:2rem">
     <p style="margin:0">{t("route.loadFailed")}</p>
