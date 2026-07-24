@@ -552,6 +552,10 @@
               {t("event.offline.downloading", { n: packSteps.length })}
             {:else if packDone}
               {t("event.offline.ready")}
+            {:else if offlinePack && offlinePack.swControlled === false}
+              <!-- R7: data cached but no controlling SW, so the app SCREENS aren't
+                   cached — be honest that this won't cold-launch offline yet. -->
+              {t("event.offline.noSw")}
             {:else if offlinePack}
               {t("event.offline.partial")}
             {:else}

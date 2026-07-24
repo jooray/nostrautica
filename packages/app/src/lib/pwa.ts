@@ -27,6 +27,7 @@ import { install } from "$lib/stores/install.svelte.js";
 import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 import { ControllerLatch } from "$lib/pwa-latch.js";
 import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route-modules.js";
+import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 /**
@@ -43,7 +44,14 @@ function warmCriticalRoutesWhenControlled(): void {
   if (warmedRoutes || typeof navigator === "undefined") return;
   if (!navigator.serviceWorker?.controller) return; // no controller → fetch wouldn't cache
   warmedRoutes = true;
-  const run = () => void warmRouteModules(CRITICAL_PARTICIPANT_ROUTES);
+  const run = () => {
+    // R7: warm the SHELL's entry JS/CSS first — these ride the entry chunk (not a
+    // lazy route) and are NOT precached, so without this a first-visit-then-cold-
+    // offline-launch serves the precached index.html and 404s its own scripts.
+    // Then warm the critical lazy participant routes.
+    void ensureEntryShellCached();
+    void warmRouteModules(CRITICAL_PARTICIPANT_ROUTES);
+  };
   const ric = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
   if (typeof ric === "function") ric(run);
   else setTimeout(run, 3000);

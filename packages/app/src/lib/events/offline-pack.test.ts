@@ -44,6 +44,34 @@ describe("packComplete", () => {
       ),
     ).toBe(false);
   });
+
+  it("is incomplete when no service worker controlled the build (R7)", () => {
+    // Every data step succeeded, but without a controller the app SCREENS can't
+    // have cached — the pack must not claim offline-readiness.
+    expect(
+      packComplete({
+        at: 1,
+        mediaSkipped: true,
+        swControlled: false,
+        steps: [{ key: "roster", ok: true, count: 3 }],
+      }),
+    ).toBe(false);
+  });
+
+  it("is complete when a controller was present and every step succeeded (R7)", () => {
+    expect(
+      packComplete({
+        at: 1,
+        mediaSkipped: true,
+        swControlled: true,
+        steps: [
+          { key: "shell", ok: true, count: 5 },
+          { key: "modules", ok: true, count: 6 },
+          { key: "roster", ok: true, count: 3 },
+        ],
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("formatBytes", () => {
