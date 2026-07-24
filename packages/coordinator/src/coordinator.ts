@@ -708,20 +708,14 @@ export class Coordinator {
       // highest ever installed OR detached for this coordinate (a replayed
       // historical grant can never re-install), and a grant inbox key that derives
       // the config's declared inbox.
-      if (!config) {
-        // Not an authorization decision — the authoritative 31600 isn't fetchable
-        // right now (relay gap, or not yet propagated after a just-created event).
-        // Throw so processRumorWithRetry retries instead of installing blind.
-        throw new Error(
-          `install ${grant.coordinate}: no fetchable 31600 to authorize the grant yet — retryable`,
-        );
-      }
-      if (config.coordinator !== this.coordPubkey) {
-        log(
-          `[install] REJECTED ${grant.coordinate}: 31600 ${config.coordinator ? `names ${short(config.coordinator)}` : "names no coordinator"}, not this daemon (${short(this.coordPubkey)})`,
-        );
-        return;
-      }
+      //
+      // Replay / tombstone guards run FIRST (audit COORD-3, C1, NIP §3.5): they do
+      // not depend on the fetched config, they are the security-critical TERMINAL
+      // checks, and putting them ahead of the config-propagation checks means a
+      // replayed historical grant is rejected outright even while the config it once
+      // authorized against is momentarily unfetchable or stale — the retryable
+      // propagation paths below must never keep re-attempting a genuine replay.
+      //
       // A gen BELOW the highest ever installed/detached is a hard reject — a replayed
       // historical grant can never re-install. A gen EQUAL to it is normally a replay
       // of an already-consumed grant, EXCEPT when it is a RESUME of a partially
@@ -749,6 +743,36 @@ export class Coordinator {
           return;
         }
         log(`[install] ${grant.coordinate}: resuming a partially-completed install at gen ${gen}`);
+      }
+      if (!config) {
+        // Not an authorization decision — the authoritative 31600 isn't fetchable
+        // right now (relay gap, or not yet propagated after a just-created event).
+        // Throw so processRumorWithRetry retries instead of installing blind.
+        throw new Error(
+          `install ${grant.coordinate}: no fetchable 31600 to authorize the grant yet — retryable`,
+        );
+      }
+      if (config.coordinator !== this.coordPubkey) {
+        if (!config.coordinator) {
+          // The newest 31600 we can fetch names NO coordinator. A brand-new event is
+          // created coordinator-LESS, and an organizer's attach publishes the
+          // coordinator-naming config and the 21603 grant nearly simultaneously — so
+          // an install fetch that races ahead of relay propagation reads the prior
+          // coordinator-less config. This is propagation lag, NOT authorization
+          // failure (the replay/tombstone guards above already caught a genuine
+          // replay): throw so the grant retries with backoff until the attach's
+          // config lands. If it never does, processRumorWithRetry gives up and logs
+          // clearly, leaving the wrap unseen for the boot rescan — exactly the
+          // !config path's contract. (A config naming a DIFFERENT, real coordinator
+          // is terminal below: that grant is genuinely not for this daemon.)
+          throw new Error(
+            `install ${grant.coordinate}: newest 31600 names no coordinator yet — config propagation lag, retryable`,
+          );
+        }
+        log(
+          `[install] REJECTED ${grant.coordinate}: 31600 names ${short(config.coordinator)}, not this daemon (${short(this.coordPubkey)})`,
+        );
+        return;
       }
       // Gen mismatch with the newest fetchable config (NIP §3.7). Two cases:
       //  • grant gen > config gen — the 31600 we fetched is OLDER than the grant (the
@@ -868,6 +892,18 @@ export class Coordinator {
     // (audit H2); a restart of a known event keeps the 3-day overlap.
     const since = grant.backfill === "full" ? 0 : giftwrapSince(Math.floor(this.now() / 1000));
     this.subscribeEventInbox(state, since);
+    // Explicitly BACKFILL the E_inbox history from before this subscription's epoch
+    // (audit H2, C3). The live subscription alone is not enough: a relay delivers a
+    // subscription's stored events in arbitrary (often newest-first) order, so a
+    // 21601 profile submission can arrive AHEAD of its own 21600 join request — the
+    // C3 enrollment gate then drops the submission as "never joined" and, because a
+    // live subscription never resends an already-delivered stored event, it is lost
+    // until a restart. Worse, an attendee who joined BEFORE the daemon subscribed
+    // could be missed entirely. This one-shot ordered fetch (join requests first, so
+    // an enrollment row exists before any same-identity submission is evaluated)
+    // closes both; the seen_rumors ledger dedupes it against the live stream, and
+    // transport.fetch is capped (C3) so the backfill stays bounded.
+    await this.backfillEventInbox(state, since);
     // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
     this.subscribeEventConfig(state);
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
@@ -3313,6 +3349,54 @@ export class Coordinator {
     log(
       `[sub] ${wasSubscribed ? "re-subscribed (relay/inbox change)" : "listening"} on E_inbox for ${state.scoringCtx.title} (since=${since})`,
     );
+  }
+
+  /**
+   * One-shot backfill of an event's E_inbox history from `since` (audit H2, C3).
+   * Mirrors the boot-time coordinator-inbox backfill (COORD-11) for the per-event
+   * inbox, and additionally ORDERS the fetched wraps so that 21600 join requests are
+   * dispatched before any other rumor kind. That ordering is load-bearing: the C3
+   * enrollment gate drops a 21601 profile submission from an identity with no
+   * attendee row, so a submission that a relay happens to return ahead of its own
+   * join (stored events come back in arbitrary, often newest-first, order) would be
+   * dropped and — since the live subscription never re-delivers an already-sent
+   * stored event — permanently lost. Processing every join first guarantees the
+   * enrollment row exists before any same-identity submission is evaluated.
+   *
+   * Dedupe against the live subscription is handled by the durable seen_rumors
+   * ledger (a wrap seen here is skipped there and vice versa); `transport.fetch` is
+   * capped (C3) so the backfill stays bounded, and each wrap runs through the same
+   * `handleInboxWrap` path (rate accounting, retention, ordered ops) as live traffic.
+   */
+  private async backfillEventInbox(state: EventState, since: number): Promise<void> {
+    const inboxPk = getPublicKey(state.inboxSk);
+    let wraps: NostrEvent[];
+    try {
+      wraps = (await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
+        state.configRelays,
+      )) as unknown as NostrEvent[];
+    } catch (e) {
+      log(`[boot] E_inbox backfill for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    if (!wraps.length) return;
+    // Peek at each wrap's kind (read-only decrypt, no seen/in-flight side effects) so
+    // joins can be dispatched first. A wrap we cannot decrypt (addressed elsewhere, or
+    // ours to publish, not consume) sorts last and is dropped by handleInboxWrap.
+    const ordered = wraps
+      .map((w) => {
+        let joinFirst = 1;
+        try {
+          if (unwrapRumor(w as unknown as GiftWrap, state.inboxSk).kind === KIND_JOIN_REQUEST) joinFirst = 0;
+        } catch {
+          /* undecryptable — leave last; handleInboxWrap marks it seen and drops it */
+        }
+        return { w, joinFirst };
+      })
+      .sort((a, b) => a.joinFirst - b.joinFirst);
+    log(`[boot] E_inbox backfill for ${state.scoringCtx.title}: ${wraps.length} historical wrap(s)`);
+    for (const { w } of ordered) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
   }
 
   /**

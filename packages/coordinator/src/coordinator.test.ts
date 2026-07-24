@@ -77,8 +77,13 @@ class FakeTransport implements Transport {
     this.published.push(event);
     return undefined;
   }
+  /** Test hook (Bug 1 config-propagation race): invoked at the START of every fetch,
+   *  so a test can mutate `seed` to model a 31600 that only names the coordinator
+   *  after propagation (i.e. the value differs between the 1st and a later fetch). */
+  beforeFetch?: (filter: any) => void;
   async fetch(filter: any): Promise<NostrEvent[]> {
     this.fetches.push(filter);
+    this.beforeFetch?.(filter);
     if (this.blockConfig && filter.kinds?.includes(31600)) return [];
     return [...this.seed, ...this.published].filter((e) => {
       if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
@@ -303,7 +308,7 @@ async function setup(
     /** A different coordinator tag for the seeded 31600 (COORD-3). */
     foreignCoordinator?: string;
     /** Extra seed events, built with the harness keys (COORD-14: a second 31600). */
-    extraSeed?: (keys: { eidPubkey: string; d: string }) => NostrEvent[];
+    extraSeed?: (keys: { eidPubkey: string; d: string; coordPubkey: string; inboxPubkey: string }) => NostrEvent[];
     /** Prefilter override (COORD-13). */
     prefilter?: PrefilterConfig;
     /** Per-role provider routing (H-1): route summary+translate to one instance
@@ -355,7 +360,7 @@ async function setup(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
     { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
-    ...(opts.extraSeed?.({ eidPubkey, d }) ?? []),
+    ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
   );
 
   const counters: Counters = { nostrSummary: 0, batchCalls: [], reverseCalls: [], translateCalls: 0 };
@@ -2110,6 +2115,76 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
     await h.coordinator.handleCoordinatorWrap(grantWrap as any);
     expect(h.store.getEvent(coord2)).toBeDefined();
   });
+
+  // ── config-propagation race (attach) ──────────────────────────────────────
+  // An organizer's attach publishes the coordinator-naming 31600 and the 21603 grant
+  // nearly simultaneously; a fresh event is created coordinator-LESS. If the install
+  // fetch races ahead of relay propagation it reads the prior coordinator-less config.
+  // That must be RETRYABLE (the attach's config will land), not a hard reject — the
+  // pre-fix code returned outright, so a legitimate attach that lost this race never
+  // installed and the coordinator never watched the E_inbox.
+  it("a 31600 that names this coordinator only AFTER propagation installs via retry (config-less race is retryable, not a hard reject)", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "race");
+    // The only config fetchable right now is coordinator-LESS (the pre-attach create).
+    seedConfig(h, eid2, "race", [["inbox", getPublicKey(inbox2)]]);
+    // On the SECOND config fetch (the inline retry), the attach's coordinator-naming
+    // config has propagated.
+    let cfgFetches = 0;
+    h.transport.beforeFetch = (filter) => {
+      if (filter.kinds?.includes(31600) && filter["#d"]?.includes("race")) {
+        cfgFetches++;
+        if (cfgFetches === 2) {
+          h.transport.seed = h.transport.seed.filter((e) => e.id !== "cfg-race");
+          seedConfig(h, eid2, "race", [
+            ["inbox", getPublicKey(inbox2)],
+            ["coordinator", getPublicKey(h.coordSk), "1"],
+          ]);
+        }
+      }
+    };
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    // Installed via the retry — not lost. (Pre-fix: hard reject on fetch #1, no retry.)
+    expect(h.store.getEvent(coord2)).toBeDefined();
+    expect(cfgFetches).toBeGreaterThanOrEqual(2);
+    // A retryable failure never marks the grant seen prematurely; success does.
+    expect(h.store.isRumorSeen(grantWrap.id)).toBe(true);
+  });
+
+  it("the security guards stay TERMINAL under retry: a config naming a DIFFERENT coordinator, and a replay below the high-water mark, never install", async () => {
+    const h = await setup();
+    // (a) A config that permanently names a DIFFERENT, real coordinator is terminal —
+    // that grant is genuinely not for this daemon; retrying can never resolve it, so
+    // it is rejected immediately and marked seen (no retry loop rescues it).
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const foreign = getPublicKey(generateSecretKey());
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "foreign");
+    seedConfig(h, eid2, "foreign", [["inbox", getPublicKey(inbox2)], ["coordinator", foreign, "1"]]);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+    expect(h.store.isRumorSeen(grantWrap.id)).toBe(true); // terminal → seen, not retried
+
+    // (b) A replay whose gen is at/below the high-water mark after a detach stays
+    // rejected — the reordered replay guard runs before any config check.
+    expect(h.store.installHighGen(h.coordinate)).toBe(1);
+    const now = Math.floor(h.clock.t / 1000);
+    const detachWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "detach", args: {}, expires: now + 172_800 },
+      created_at: now,
+    });
+    await h.coordinator.handleCoordinatorWrap(detachWrap as any);
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+    const replay = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"] },
+    });
+    await h.coordinator.handleCoordinatorWrap(replay as any);
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+  });
 });
 
 describe("NIP §3.5 — install generation + durable detach + startup revalidation", () => {
@@ -3033,8 +3108,11 @@ describe("H-2 — superseded revisions coalesce pending jobs (no pay for stale r
 describe("audit COORD-14 — install picks the newest 31600", () => {
   it("a newer 31600 wins over an older one regardless of fetch order", async () => {
     const h = await setup(0, {
-      // A NEWER config (created_at 2 > the default seed's 1) with matching OFF.
-      extraSeed: ({ eidPubkey, d }) => [
+      // A NEWER config (created_at 2 > the default seed's 1) with matching OFF. It
+      // still names THIS coordinator at gen 1 (like the default seed) — otherwise the
+      // install has no authority to run at all; the point under test is that the
+      // NEWEST revision's matching=off is what takes effect, not the older seed's on.
+      extraSeed: ({ eidPubkey, d, coordPubkey, inboxPubkey }) => [
         {
           kind: 31600,
           pubkey: eidPubkey,
@@ -3042,7 +3120,7 @@ describe("audit COORD-14 — install picks the newest 31600", () => {
           id: "e2-newer",
           sig: "",
           content: "",
-          tags: [["d", d], ["v", "2"], ["inbox", "f".repeat(64)], ["matching", "off"]],
+          tags: [["d", d], ["v", "2"], ["inbox", inboxPubkey], ["matching", "off"], ["coordinator", coordPubkey, "1"]],
         } as any,
       ],
     });
@@ -3929,6 +4007,47 @@ describe("audit C3 — public inbox is population-bounded", () => {
     const pk = await join(h, legitSk, "crypto");
     expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
     expect(h.store.attendeeCount(h.coordinate)).toBe(1);
+  });
+
+  it("enrolls a join published BEFORE the coordinator subscribed so a later submission clears the gate (H2 backfill + join-before-submission ordering)", async () => {
+    const h = await setup(0, { skipAutoInstall: true });
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    // The attendee JOINS and SUBMITS a profile BEFORE the coordinator installs and
+    // subscribes — both wraps already sit on the relay, unseen by any live sub. A relay
+    // returns stored events in arbitrary (often newest-first) order, so the SUBMISSION
+    // can precede its own JOIN — pushed in that order here to model the hostile case.
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: 0, profile: { about: "early", skills: ["a"], looking_for: "", links: [] }, media: [] },
+      tags: [["a", h.coordinate]],
+    });
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "early bird", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    h.transport.published.push(subWrap as any, joinWrap as any); // relay order: submission, THEN join
+
+    // Fresh grant install → full E_inbox backfill. It must FETCH the pre-subscription
+    // history AND dispatch the join before the submission. Pre-fix there was no explicit
+    // inbox backfill (the live sub was the only reader — and it never replays stored
+    // wraps), so the join was never enrolled and the submission was dropped as "never
+    // joined", leaving the attendee permanently unable to enroll.
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "grant", backfill: "full",
+    });
+
+    // Enrolled from the backfilled join…
+    expect(h.store.getAttendee(h.coordinate, attendeePk)?.status).toBe("approved");
+    // …and the submission that raced ahead of it was NOT dropped — profile recorded.
+    expect(h.store.getAttendee(h.coordinate, attendeePk)?.profile_rev).toBe(0);
   });
 
   it("refuses a new attendee beyond the 2,000 roster population cap", async () => {
