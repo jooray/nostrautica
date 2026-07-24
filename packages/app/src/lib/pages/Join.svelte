@@ -380,7 +380,10 @@
       // stashed code so it can't be reused or leak past this join (UX-O2).
       clearInvite(ctx.coordinate);
       markJoinSent(ctx.coordinate); // survives reload → waiting state, not pristine form (P2)
-      recentEvents.record({ coordinate: ctx.coordinate, naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
+      // Both identity fields from `ctx` — see the note in EventHome.svelte: the
+      // `naddr` prop is a live getter into the parent's route and can already
+      // point at a different event by the time this async body resumes.
+      recentEvents.record({ coordinate: ctx.coordinate, naddr: ctx.naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
       // Fire-and-forget (audit UX-2): awaiting the poll here would hold
       // `busy = true` for the whole approval wait, so the "send again" escape

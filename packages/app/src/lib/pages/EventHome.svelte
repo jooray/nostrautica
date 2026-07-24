@@ -200,10 +200,20 @@
       const keys = await loadEventKeys(ctx.coordinate);
       organizer = keys?.role === "organizer";
       roleResolved = true;
-      // Remember this event so it shows up under "My events" on Home.
+      // Remember this event so it shows up under "My events" on Home. Both
+      // identity fields come from `ctx` — NEVER one from `ctx` and one from the
+      // `naddr` prop. Props are live getters into the PARENT's scope
+      // (`get naddr() { return route.naddr }`), and destroying this component
+      // does not freeze them: if the user navigates to another event while the
+      // awaits above are in flight, this line still runs and `naddr` reads the
+      // event they moved TO. That recorded {this event's coordinate, that
+      // event's naddr} in prod (2026-07-24) — the card then opened the wrong
+      // event, and the bad naddr collided with the real owner's, crashing the
+      // Chat + Home lists on a duplicate {#each} key. `ctx` is loaded from one
+      // naddr and internally consistent, so it cannot disagree with itself.
       recentEvents.record({
         coordinate: ctx.coordinate,
-        naddr,
+        naddr: ctx.naddr,
         title: ctx.title,
         icon: ctx.icon,
         role: organizer ? "organizer" : approved ? "attendee" : "visitor",

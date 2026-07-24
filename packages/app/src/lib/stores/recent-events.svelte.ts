@@ -27,6 +27,15 @@ function coordOf(e: RecentEvent): string {
   }
 }
 
+/** The coordinate an naddr actually encodes (`fallback` if it won't decode). */
+function canonicalCoordinate(naddr: string, fallback: string): string {
+  try {
+    return naddrToCoordinate(naddr).coordinate;
+  } catch {
+    return fallback;
+  }
+}
+
 /** A usable naddr for an entry, reconstructed from the coordinate if missing. */
 function naddrOf(e: RecentEvent): string | undefined {
   if (e.naddr) return e.naddr;
@@ -37,7 +46,20 @@ function naddrOf(e: RecentEvent): string | undefined {
   }
 }
 
-/** Collapse entries that refer to the same event (by coordinate). */
+/** Merge two entries that turned out to be the same event: highest role,
+ *  most-recent timestamp, prefer a real title/icon. */
+function merge(prior: RecentEvent, e: RecentEvent): RecentEvent {
+  return {
+    coordinate: e.coordinate || prior.coordinate,
+    naddr: e.at >= prior.at ? e.naddr : prior.naddr,
+    title: (e.at >= prior.at ? e.title : prior.title) || prior.title || e.title,
+    role: RANK[e.role] >= RANK[prior.role] ? e.role : prior.role,
+    icon: e.icon ?? prior.icon,
+    at: Math.max(e.at, prior.at),
+  };
+}
+
+/** Collapse entries that refer to the same event (by coordinate, then by naddr). */
 function dedupe(list: RecentEvent[]): RecentEvent[] {
   const byCoord = new Map<string, RecentEvent>();
   for (const raw of list) {
@@ -48,21 +70,41 @@ function dedupe(list: RecentEvent[]): RecentEvent[] {
     const coordinate = coordOf(raw);
     const e = { ...raw, naddr, coordinate };
     const prior = byCoord.get(coordinate);
-    if (!prior) {
-      byCoord.set(coordinate, e);
-      continue;
-    }
-    // Merge: highest role, most-recent timestamp, prefer a real title/icon.
-    byCoord.set(coordinate, {
-      coordinate,
-      naddr: e.at >= prior.at ? e.naddr : prior.naddr,
-      title: (e.at >= prior.at ? e.title : prior.title) || prior.title || e.title,
-      role: RANK[e.role] >= RANK[prior.role] ? e.role : prior.role,
-      icon: e.icon ?? prior.icon,
-      at: Math.max(e.at, prior.at),
-    });
+    byCoord.set(coordinate, prior ? merge(prior, e) : e);
   }
-  return [...byCoord.values()].sort((a, b) => b.at - a.at).slice(0, MAX);
+  // Second pass — REPAIR, not merge. `coordinate` is the authoritative identity;
+  // `naddr` is a navigable encoding of it, and the two must describe the same
+  // event. A caller can still pair them wrongly (prod, 2026-07-24: a destroyed
+  // EventHome's in-flight onMount recorded its OWN ctx.coordinate against the
+  // LIVE route's naddr — a prop read after destroy returns the route you moved
+  // TO), which does two kinds of damage: the entry navigates to the wrong event,
+  // and it collides on `naddr` with the entry that legitimately owns it. That
+  // collision is a duplicate {#each} key — a HARD THROW in Svelte 5, not a
+  // warning — which kills the route mid-creation and leaves the pane on
+  // "Loading…" forever (the Chat tab was unreachable until localStorage was
+  // cleared). Re-derive the naddr from the coordinate so BOTH events survive
+  // with correct links; merging them here would silently delete one.
+  //
+  // A consistent naddr is left untouched, relay hints and all — only a
+  // disagreeing one is rebuilt (bare, hints re-learned on the next context load).
+  const repaired = [...byCoord.values()].map((e) => {
+    if (canonicalCoordinate(e.naddr, e.coordinate) === e.coordinate) return e;
+    console.warn("[recent-events] naddr/coordinate mismatch, re-deriving:", e.coordinate);
+    try {
+      return { ...e, naddr: coordinateToNaddr(e.coordinate) };
+    } catch {
+      return e; // unparseable coordinate — the naddr pass below still guards
+    }
+  });
+  // Backstop: whatever happens above, the render key must come out unique. Two
+  // coordinate STRINGS can still encode to one naddr (hex case, say), and that
+  // genuinely IS one event — so merging is right here, unlike the case above.
+  const byNaddr = new Map<string, RecentEvent>();
+  for (const e of repaired) {
+    const prior = byNaddr.get(e.naddr);
+    byNaddr.set(e.naddr, prior ? merge(prior, e) : e);
+  }
+  return [...byNaddr.values()].sort((a, b) => b.at - a.at).slice(0, MAX);
 }
 
 function load(): RecentEvent[] {
@@ -105,9 +147,12 @@ class RecentEvents {
     const title = evt.title || prior?.title || "Event";
     const icon = evt.icon ?? prior?.icon;
     const at = evt.at ?? Date.now();
-    const next = [{ ...evt, title, icon, role, at }, ...existing]
-      .sort((a, b) => b.at - a.at)
-      .slice(0, MAX);
+    // Through dedupe(), not a raw sort+slice: `existing` only drops entries that
+    // match on the coordinate STRING, so an entry whose stored coordinate is
+    // stale/empty/differently-cased survives alongside the incoming one and the
+    // two collide on `naddr` — the render key. Every assignment to `list` must
+    // leave it unique on both identity fields, or the next render throws.
+    const next = dedupe([{ ...evt, title, icon, role, at }, ...existing]);
     localStorage.setItem(KEY, JSON.stringify(next));
     this.list = next;
   }
