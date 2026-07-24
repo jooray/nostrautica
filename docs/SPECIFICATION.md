@@ -209,7 +209,7 @@ Gift-wrap mechanics per NIP-59: rumor (unsigned) → seal kind 13 (NIP-44, signe
 
 ### 7.1 Public events (author `E_id`)
 
-**kind 31923 — the event itself (NIP-52)** — `d`, `title`, `start`/`end` (unix), `start_tzid`, `summary`, `image`, `location`(s), `g` geohash, `t` hashtags, `p` participants with roles, plus current NIP-52 uppercase **`D` day-index tags**: one `["D", "YYYY-MM-DD"]` (UTC) tag for each calendar day the event's `start`..`end` range spans, so date-indexed calendar clients can discover the event on every day it runs. The count is bounded at `MAX_DAY_TAGS = 60` days; an event with no `end` (or an `end` before `start`) emits the single start-day tag. Interoperates with Flockstr/Meetstr/any NIP-52 client. Optionally referenced from a kind 31924 calendar.
+**kind 31923 — the event itself (NIP-52)** — `d`, `title`, `start`/`end` (unix), `start_tzid`, `summary`, `image`, `location`(s), `g` geohash, `t` hashtags, `p` participants with roles, plus current NIP-52 uppercase **`D` day-index tags**: one `["D", "<decimal day index>"]` tag — `String(Math.floor(unixSeconds / 86400))`, e.g. `"82549"` — for each UTC calendar day the event's `start`..`end` range spans (`end` is exclusive: an event ending exactly at midnight does not emit a tag for the new day), so date-indexed calendar clients can discover the event on every day it runs. Editing `start`/`end` rebuilds the full `D` set. The count is bounded at `MAX_DAY_TAGS = 60` days; an event with no `end` (or an `end` before `start`) emits the single start-day tag. Interoperates with Flockstr/Meetstr/any NIP-52 client. Optionally referenced from a kind 31924 calendar.
 
 **kind 31600 — Event Networking Config**
 ```
