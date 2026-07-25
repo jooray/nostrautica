@@ -159,7 +159,42 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
       expect(p).toContain('"I"/"my"'); // the reader speaks in the first person
       expect(p).toContain("Never hand one person's work to the other");
       expect(p).toContain("Write a message, not a briefing");
+      // Named ROLES, not just pronouns. Prod 2026-07-25 (Slovak) swapped the two
+      // people wholesale — the reader was written as the candidate's profession
+      // and handed their own app — so the binding must survive translation into a
+      // language whose possessives are nothing like "my"/"your".
+      expect(p).toContain("SENDER");
+      expect(p).toContain("RECIPIENT");
+      expect(p).toContain("they never swap");
+      expect(p).toContain("It holds in whatever language you");
+      // A shared artifact (the candidate's bio led with the target's book, whose
+      // cover they drew) is ambiguous from the text alone, so provenance is
+      // asserted from the BLOCK a thing appears in, not from the wording.
+      expect(p).toContain("WHOSE IS IT, when both profiles name the same thing");
+      expect(p).toContain("A mention does NOT transfer authorship");
+      // "INVERTS the field above" was itself a hazard: read as licence to swap the
+      // people, not just the pronouns. It must not come back.
+      expect(p).not.toContain("INVERTS the field above");
     }
+  });
+
+  it("the user block asserts provenance and labels the two roles (prod 2026-07-25)", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreBatch(llm, "m", EVENT, profile("t"), candidates(2));
+    // A mention in the candidate's own profile must not read as authorship.
+    expect(seen!.user).toContain("may mention something the TARGET made");
+    expect(seen!.user).toContain("never makes it theirs");
+    // Roles labelled next to the data they bind.
+    expect(seen!.user).toContain("is the SENDER of every icebreaker below");
+    expect(seen!.user).toContain("is the RECIPIENT of the icebreakers in their own entry");
+    // Delimiters unchanged: scoring.test.ts's echo mock, matcher.ts and the
+    // benchmark harness all parse them.
+    expect(seen!.user).toContain("TARGET ATTENDEE:\nSummary: t summary");
+    expect(seen!.user).toContain("--- CANDIDATE 1 ---\nSummary: ");
   });
 
   it("the scoring schema + prompt include icebreakers (NIP §6.2)", () => {
@@ -251,8 +286,23 @@ describe("per-event output language (spec §7.1/§9.3)", () => {
     expect(seen!.system).toContain("may be written in any language");
   });
 
+  it("the language block covers icebreakers and re-binds the roles in that language", () => {
+    // Prod 2026-07-25: a Slovak event got the ownership RIGHT in
+    // reasoning_for_target and inverted it in the icebreakers of the same entry.
+    // WHO IS WHO can only name English pronouns; this block is the one place that
+    // knows the output language, and it lands last in the system prompt.
+    const sk = languageInstruction("sk");
+    expect(sk).toContain("every icebreaker in Slovak (sk)");
+    expect(sk).toContain("Translating moves no ownership");
+    expect(sk).toContain("Slovak's FIRST-person possessive forms");
+    expect(sk).toContain("still mean the SENDER");
+    expect(sk).toContain("Slovak's SECOND-person possessive forms still mean the RECIPIENT");
+    expect(sk).toContain("never attach a second-person");
+  });
+
   it("names the language from its ISO code (e.g. cs → Czech)", () => {
     expect(languageInstruction("cs")).toContain("Czech (cs)");
+    expect(languageInstruction("cs")).toContain("Czech's FIRST-person possessive forms");
   });
 });
 
@@ -308,6 +358,12 @@ describe("reverse batched scoring (spec §16.2 reverse variant)", () => {
     expect(seen!.user).toContain("Summary: shared summary");
     expect(seen!.user).toContain("--- TARGET 1 ---");
     expect(seen!.system).toContain("Slovak (sk)");
+    // Same provenance + role labelling as the forward shape, roles mirrored: here
+    // the shared person is the RECIPIENT and each target a SENDER.
+    expect(seen!.user).toContain("may mention something a TARGET made");
+    expect(seen!.user).toContain("never makes it theirs");
+    expect(seen!.user).toContain("is the RECIPIENT of every icebreaker below");
+    expect(seen!.user).toContain("is the SENDER of the icebreakers in their own entry");
   });
 
   it("empty target list short-circuits without an LLM call", async () => {
