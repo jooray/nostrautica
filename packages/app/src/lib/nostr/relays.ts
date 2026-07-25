@@ -56,23 +56,46 @@ export const WHITENOISE_RELAYS = ENV_RELAYS
   : ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
 
 /**
- * Relays advertised in the `nostrconnect://` URI (NIP-46). Dedicated signer
- * relays handle the ephemeral kind-24133 traffic without the rate limits
- * general-purpose relays impose; `relay.nsec.app` is the de-facto signer relay
- * (nsec.app / Amber / nostrconnect.org). Two widely-reachable general relays
- * add redundancy (relay.nsec.app has had EU flakiness) — but note redundancy
- * only helps while our sockets are open; the pool's reconnect + foreground
- * recovery in signer/nip46.ts is what covers backgrounded-tab drops.
- * Honors VITE_NOSTRAUTICA_RELAYS so local e2e keeps working.
+ * Relays advertised in the `nostrconnect://` URI (NIP-46). Subscribed in
+ * parallel (SimplePool) — the signer publishes its reply to all of them, so any
+ * one working relay is enough. Redundancy only helps while our sockets are open;
+ * the pool's reconnect + foreground recovery in signer/nip46.ts is what covers
+ * backgrounded-tab drops. Honors VITE_NOSTRAUTICA_RELAYS so local e2e works.
+ *
+ * `relay.nsec.app` — the de-facto signer relay, and what nsec.app puts in its
+ * own `bunker://` URIs — was REMOVED 2026-07-25: its Caddy answers the
+ * WebSocket upgrade with HTTP 502 on every probe (3/3 tries), i.e. the relay
+ * process behind it is not running at all. Naming a dead relay in the QR we
+ * hand a signer only makes the signer burn a socket on it. It is still tolerated
+ * on the inbound side — `signerRelays()` unions whatever a bunker pointer names
+ * with this list, so a pointer that knows only relay.nsec.app is degraded rather
+ * than instantly fatal.
  */
-export const NIP46_RELAYS = ENV_RELAYS ?? [
-  // Subscribed in parallel (SimplePool) — the signer publishes its reply to all
-  // of them, so any one working relay is enough; a failed socket (e.g. the
-  // often-flaky relay.nsec.app, kept for signers that default to it) is harmless.
-  "wss://relay.primal.net",
-  "wss://nos.lol",
-  "wss://relay.nsec.app",
-];
+export const NIP46_RELAYS = ENV_RELAYS ?? ["wss://relay.primal.net", "wss://nos.lol"];
+
+/**
+ * Relay set used to TALK to a signer we already have a pointer for (a pasted
+ * `bunker://` URI, or a restored session), as opposed to the set we advertise in
+ * a `nostrconnect://` QR.
+ *
+ * The pointer's own relays come first — that's where the signer said it listens,
+ * and per NIP-46 it answers on the relay the request arrived on. Our own signer
+ * defaults are unioned in behind them so a single dead relay in the pointer
+ * isn't fatal: before this, `fromBunkerUri`/`fromPersisted` used ONLY the
+ * pointer's relays, so a bunker URI naming just the (currently 502-ing)
+ * relay.nsec.app could neither connect nor be restored, and the failure looked
+ * like a bare "signer didn't respond".
+ *
+ * This is redundancy, not resurrection: it helps when the signer is reachable on
+ * any relay we also speak to (many signers subscribe on more relays than they
+ * advertise, and both nos.lol and relay.primal.net are common defaults). A
+ * signer that listens *only* on a dead relay is unreachable no matter what we
+ * do — the point is that the surviving cases now work instead of all of them
+ * failing together.
+ */
+export function signerRelays(pointerRelays: string[]): string[] {
+  return unionRelays(pointerRelays, NIP46_RELAYS);
+}
 
 /**
  * Fallback Blossom servers when an event/user configures none (spec §11).

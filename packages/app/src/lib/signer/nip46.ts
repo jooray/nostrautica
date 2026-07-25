@@ -22,6 +22,7 @@ import {
 } from "nostr-tools/nip46";
 import { SimplePool } from "nostr-tools/pool";
 import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
+import { signerRelays } from "$lib/nostr/relays.js";
 import type { AppSigner } from "./types.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -119,10 +120,83 @@ const LOGOUT_TIMEOUT_MS = 3_000;
  */
 const makePool = () => new SimplePool({ enableReconnect: true, enablePing: true });
 
-const timeoutMessage = () => t("error.signerTimeout");
+/**
+ * Names the signer relays we could not open a socket to, so a failed connect can
+ * say *which* relay is down instead of only "your signer didn't respond".
+ * Without this, a relay outage (measured 2026-07-25: `wss://relay.nsec.app`
+ * answering the upgrade with HTTP 502, 3/3 probes) is indistinguishable from a
+ * signer app that is simply closed — and the user has no way to tell which of
+ * the two they should go fix.
+ *
+ * Assigned onto the pool rather than passed to the constructor: these hooks are
+ * plain public fields on AbstractSimplePool, but `SimplePool`'s constructor type
+ * only accepts `enablePing`/`enableReconnect`. They fire from both the subscribe
+ * and the publish path, so inbound and outbound failures are both covered.
+ * A relay that failed once and then came up is not the user's problem — the
+ * success hook removes it again.
+ */
+function trackRelayHealth(pool: SimplePool): () => string[] {
+  const failed = new Set<string>();
+  pool.onRelayConnectionFailure = (url) => failed.add(url);
+  pool.onRelayConnectionSuccess = (url) => failed.delete(url);
+  // Hostnames, not URLs: "relay.nsec.app" is what a user can recognise and
+  // repeat back to us; "wss://relay.nsec.app/" is noise in an error banner.
+  return () => [...failed].map((u) => u.replace(/^wss?:\/\//i, "").replace(/\/+$/, ""));
+}
+
+/**
+ * The message for a signer wait that ran out of time. Evaluated LAZILY at the
+ * moment of failure (see `withTimeout`) — relay health is unknown when the wait
+ * starts and only becomes known as sockets fail, so building the string up front
+ * would always report "no relays failed".
+ */
+const timeoutMessage = (unreachable?: () => string[]) => {
+  const down = unreachable?.() ?? [];
+  return down.length
+    ? t("error.signerRelaysUnreachable", { relays: down.join(", ") })
+    : t("error.signerTimeout");
+};
+
+/**
+ * True when the input is *meant* to be a `bunker://` URI, regardless of whether
+ * it is well-formed yet. This is the routing question ("is the user pasting a
+ * bunker link or a private key?"), deliberately looser than
+ * `looksLikeBunkerUri` — a half-typed `bunker://<pubkey>` with no `?relay=` yet
+ * must still route to the bunker path so the user gets "that doesn't look like a
+ * valid bunker link" rather than a bech32 decode error from the key importer.
+ *
+ * Case-insensitive because iOS auto-capitalises the first character of a typed
+ * field, so a hand-typed link arrives as `Bunker://…`. The sign-in UI used to do
+ * its own case-SENSITIVE `startsWith("bunker://")`, which sent exactly that
+ * input to "Import key" and failed with an unrelated bech32 error. Both the UI
+ * and the connect path now call into this file so they cannot drift again.
+ */
+export function isBunkerScheme(input: string): boolean {
+  return /^bunker:\/\//i.test(input.trim());
+}
+
+/**
+ * Fold a user-supplied bunker link into the exact shape nostr-tools will accept.
+ *
+ * nostr-tools' `BUNKER_REGEX` is `/^bunker:\/\/([0-9a-f]{64})…/` — case
+ * SENSITIVE on both the scheme and the pubkey — and `parseBunkerInput` silently
+ * falls through to a NIP-05 lookup (then returns null) when it doesn't match. So
+ * `Bunker://…` (iOS auto-capitalisation) and an uppercase-hex pubkey (some QR
+ * encoders uppercase payloads to reach QR's compact alphanumeric mode) both got
+ * rejected as "not a valid bunker link" even though they name a perfectly good
+ * signer. Only the scheme and the pubkey are lowered: the query string carries
+ * relay URLs and the connect secret, which are case-significant.
+ */
+export function normalizeBunkerUri(input: string): string {
+  return input
+    .trim()
+    .replace(/^bunker:\/\/([0-9a-fA-F]{64})/i, (_m, pk: string) =>
+      `bunker://${pk.toLowerCase()}`,
+    );
+}
 
 /** A syntactically valid `bunker://` URI: 64-hex pubkey + at least one relay. */
-function looksLikeBunkerUri(input: string): boolean {
+export function looksLikeBunkerUri(input: string): boolean {
   const m = input.match(/^bunker:\/\/([0-9a-f]{64})\b/i);
   if (!m) return false;
   try {
@@ -132,15 +206,22 @@ function looksLikeBunkerUri(input: string): boolean {
   }
 }
 
-/** Reject if a connect/wait doesn't finish within `ms`; `abort` also rejects it. */
+/**
+ * Reject if a connect/wait doesn't finish within `ms`; `abort` also rejects it.
+ * `message` may be a thunk so the text can describe the state at failure time
+ * (which relays were unreachable) rather than at call time.
+ */
 function withTimeout<T>(
   promise: Promise<T>,
   ms: number,
   abort: AbortSignal | undefined,
-  message: string,
+  message: string | (() => string),
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(message)), ms);
+    const timer = setTimeout(
+      () => reject(new Error(typeof message === "function" ? message() : message)),
+      ms,
+    );
     const onAbort = () => reject(new Error("Cancelled"));
     if (abort) {
       if (abort.aborted) return onAbort();
@@ -295,8 +376,16 @@ export class Nip46Signer implements AppSigner {
       relays: session.bunker.relays,
       secret: session.bunker.secret ?? null,
     };
+    // `pointer` stays the faithful record of what the signer advertised (it is
+    // what `serialize()` writes back), while the TRANSPORT also gets our own
+    // signer relays unioned in — restore used to use the stored relays alone, so
+    // a session established against a since-dead relay could never come back.
+    // Keeping the two apart means the union is re-derived from the current
+    // NIP46_RELAYS on every restore instead of being frozen into storage.
+    const transport: BunkerPointer = { ...pointer, relays: signerRelays(pointer.relays) };
     const pool = makePool();
-    const bunker = BunkerSigner.fromBunker(clientSk, pointer, {
+    const unreachable = trackRelayHealth(pool);
+    const bunker = BunkerSigner.fromBunker(clientSk, transport, {
       onauth: onAuth,
       pool,
     });
@@ -304,11 +393,8 @@ export class Nip46Signer implements AppSigner {
     // connectWithRecovery: a PWA resuming from background hits the same
     // lost-ack gap on restore as on first connect.
     try {
-      await withTimeout(
-        connectWithRecovery(bunker),
-        RESTORE_TIMEOUT_MS,
-        undefined,
-        timeoutMessage(),
+      await withTimeout(connectWithRecovery(bunker), RESTORE_TIMEOUT_MS, undefined, () =>
+        timeoutMessage(unreachable),
       );
       // Identity check: never trust that the reconnected bunker still answers
       // for the same user. A session without `userPubkey` is pre-upgrade —
@@ -317,7 +403,7 @@ export class Nip46Signer implements AppSigner {
         bunker.getPublicKey(),
         RESTORE_TIMEOUT_MS,
         undefined,
-        timeoutMessage(),
+        () => timeoutMessage(unreachable),
       );
       if (session.userPubkey && pk !== session.userPubkey) {
         throw new Nip46IdentityMismatchError();
@@ -352,10 +438,8 @@ export class Nip46Signer implements AppSigner {
       url: CLIENT_METADATA.url,
     });
     const controller = new AbortController();
-    // Both the timeout and the user's Cancel abort the same wait; this flag lets
-    // us map the resulting rejection to the right message.
-    let userCancelled = false;
     const pool = makePool();
+    const unreachable = trackRelayHealth(pool);
     // On return to foreground, force an immediate reconnect of any dropped
     // socket instead of waiting out the pool's backoff — the signer may be
     // about to publish (or re-publish) its ephemeral reply.
@@ -367,36 +451,120 @@ export class Nip46Signer implements AppSigner {
             for (const url of relays) void pool.ensureRelay(url).catch(() => {});
           };
     if (onVisible) document.addEventListener("visibilitychange", onVisible);
-    const connected = BunkerSigner.fromURI(
+
+    /*
+     * WHY THIS DOESN'T LEAN ON nostr-tools' AbortSignal.
+     *
+     * `fromURI` forwards our signal into the pool, which wires it by ASSIGNING
+     * `onabort` — `opts.abort.onabort = reject` in AbstractRelay.connect and
+     * `params.abort.onabort = () => sub.close(…)` in AbstractRelay.subscribe
+     * (nostr-tools 2.23.9). One signal, N relays: each assignment overwrites the
+     * previous one, so only the LAST relay ever sees the abort. Its subscription
+     * closes, but `subscribeMap`'s `handleClose` only fires `params.onclose` once
+     * ALL N relays have closed — so `fromURI`'s promise stays pending forever.
+     *
+     * Reproduced against a real SimplePool + real BunkerSigner.fromURI over a
+     * fake WebSocket: with 2 or 3 relays the promise is still pending after
+     * abort; only with exactly 1 relay does it reject. Which means, before this
+     * change: Cancel did nothing, the 120s timeout did nothing, `await
+     * handle.connected` never settled (the QR and "waiting for the signer…" sat
+     * there forever with no error), and because `.finally()` never ran, every
+     * Retry tap left behind another live SimplePool with `enableReconnect` and a
+     * 29s ping on three sockets. Navigating away leaked the same way.
+     *
+     * So the outcome is decided HERE: a deferred we can reject ourselves, raced
+     * against `fromURI`. The signal is still passed along — dropping it would
+     * change the library's own timeout maths (with no signal `maxWait` defaults
+     * to 5 min, which stretches each relay's connect timeout from 3s to ~299s and
+     * would stop `trackRelayHealth` from ever naming a dead relay inside our
+     * 120s budget) — but nothing depends on it working.
+     */
+    let outcome: "pending" | "connected" | "abandoned" = "pending";
+    let giveUp: (reason: Error) => void = () => {};
+    const abandoned = new Promise<never>((_, reject) => {
+      giveUp = reject;
+    });
+    // Forward-declared: `release` has to clear this timer, but the timer's own
+    // callback is one of the paths that calls `release`.
+    let timer: ReturnType<typeof setTimeout> | undefined = undefined;
+    /**
+     * The single teardown path. `destroyPool` is false only on success, where the
+     * pool is handed to the returned signer (which destroys it in `close()`);
+     * every other exit destroys it here, exactly once, because `outcome` gates
+     * every caller.
+     */
+    const release = (destroyPool: boolean) => {
+      clearTimeout(timer);
+      if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+      if (destroyPool) {
+        // Courtesy only — see above, this reaches at most one relay. The
+        // destroy() below is what actually closes the sockets and stops
+        // `enableReconnect` from re-opening them.
+        controller.abort();
+        try {
+          pool.destroy();
+        } catch {
+          /* already destroyed */
+        }
+      }
+    };
+    /** Settle `connected` on our terms (timeout or Cancel) and tear everything down. */
+    const abandon = (reason: Error) => {
+      // Once a signer has connected, the pool belongs to it: Cancel must not
+      // close its transport. This matters in practice — SignInOptions' onMount
+      // teardown calls cancel() on unmount, which is exactly what a successful
+      // sign-in triggers as it navigates away.
+      if (outcome !== "pending") return;
+      outcome = "abandoned";
+      release(true);
+      giveUp(reason);
+    };
+
+    const connecting = BunkerSigner.fromURI(
       clientSk,
       uri,
       { onauth: onAuth, pool },
       controller.signal,
-    ).then((bunker) => {
-      // Capture the pointer into our own field NOW. The remote-signer pubkey
-      // is only known from the signer's connect reply, so it can't be built
-      // ahead of time — but `bp` is typed public API here, so a nostr-tools
-      // rename is a compile error, not a silent persistence break.
-      const pointer: BunkerPointer = { pubkey: bunker.bp.pubkey, relays, secret };
-      return new Nip46Signer(bunker, clientSk, pointer, pool);
-    });
+    );
+    // `connecting` may settle long after we've stopped waiting on it (destroying
+    // the pool closes every subscription, which is what finally makes it reject).
+    // Attach terminal handlers now: an unobserved rejection would surface as an
+    // unhandled promise rejection, and a late SUCCESS would leave a live
+    // BunkerSigner holding listeners nobody owns.
+    void connecting.then(
+      (bunker) => {
+        if (outcome === "abandoned") void bunker.close().catch(() => {});
+      },
+      () => {},
+    );
+
     // Independent timeout: fromURI's own budget is 5 min; fail sooner + friendly.
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const guarded = connected
-      .finally(() => {
-        clearTimeout(timer);
-        if (onVisible) document.removeEventListener("visibilitychange", onVisible);
-      })
-      .catch((e) => {
-        pool.destroy();
-        if (userCancelled) throw new Error("Cancelled");
-        throw controller.signal.aborted ? new Error(timeoutMessage()) : e;
-      });
-    const cancel = () => {
-      userCancelled = true;
-      controller.abort();
-    };
-    return { uri, connected: guarded, cancel };
+    // The message is composed inside the callback, so it can name the relays that
+    // turned out to be unreachable during the wait.
+    timer = setTimeout(() => abandon(new Error(timeoutMessage(unreachable))), timeoutMs);
+    const cancel = () => abandon(new Error("Cancelled"));
+
+    const connected = Promise.race([connecting, abandoned]).then(
+      (bunker) => {
+        outcome = "connected";
+        release(false);
+        // Capture the pointer into our own field NOW. The remote-signer pubkey
+        // is only known from the signer's connect reply, so it can't be built
+        // ahead of time — but `bp` is typed public API here, so a nostr-tools
+        // rename is a compile error, not a silent persistence break.
+        const pointer: BunkerPointer = { pubkey: bunker.bp.pubkey, relays, secret };
+        return new Nip46Signer(bunker, clientSk, pointer, pool);
+      },
+      (e: unknown) => {
+        // fromURI failed on its own (e.g. every relay closed) — same teardown.
+        if (outcome === "pending") {
+          outcome = "abandoned";
+          release(true);
+        }
+        throw e instanceof Error ? e : new Error(String(e));
+      },
+    );
+    return { uri, connected, cancel };
   }
 
   /**
@@ -408,29 +576,36 @@ export class Nip46Signer implements AppSigner {
     bunkerUri: string,
     abort?: AbortSignal,
   ): Promise<Nip46Signer> {
-    if (!looksLikeBunkerUri(bunkerUri)) {
+    // Normalize BEFORE validating: a typed link arrives from iOS as `Bunker://…`
+    // and some QR encoders uppercase the hex pubkey, neither of which
+    // nostr-tools' case-sensitive BUNKER_REGEX accepts.
+    const normalized = normalizeBunkerUri(bunkerUri);
+    if (!looksLikeBunkerUri(normalized)) {
       throw new Error(t("error.badBunkerLink"));
     }
     const clientSk = generateSecretKey();
-    const pointer = await parseBunkerInput(bunkerUri);
+    const pointer = await parseBunkerInput(normalized);
     if (!pointer || !pointer.relays.length) {
       throw new Error(t("error.badBunkerLink"));
     }
+    // Talk to the signer on its own relays PLUS ours (see signerRelays): a link
+    // whose single advertised relay is down used to fail outright. `pointer` is
+    // what gets persisted, so the union is policy re-applied per connect, not
+    // state baked into the session.
+    const transport: BunkerPointer = { ...pointer, relays: signerRelays(pointer.relays) };
     const pool = makePool();
+    const unreachable = trackRelayHealth(pool);
     let bunker: BunkerSigner;
     try {
       // Throws "bad point: is not on curve" for a valid-hex but off-curve pubkey.
-      bunker = BunkerSigner.fromBunker(clientSk, pointer, { onauth: onAuth, pool });
+      bunker = BunkerSigner.fromBunker(clientSk, transport, { onauth: onAuth, pool });
     } catch {
       pool.destroy();
       throw new Error(t("error.badBunkerLink"));
     }
     try {
-      await withTimeout(
-        connectWithRecovery(bunker),
-        CONNECT_TIMEOUT_MS,
-        abort,
-        timeoutMessage(),
+      await withTimeout(connectWithRecovery(bunker), CONNECT_TIMEOUT_MS, abort, () =>
+        timeoutMessage(unreachable),
       );
     } catch (e) {
       await bunker.close().catch(() => {});

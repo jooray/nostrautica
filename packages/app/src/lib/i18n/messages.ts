@@ -119,8 +119,13 @@ export const messages = {
     "signin.extension": "Browser extension",
     "signin.extension.button": "Log in with extension (Alby, nos2x…)",
     "signin.remote": "Remote signer",
-    "signin.remote.scan": "Scan this with Amber, or open it directly on this device:",
-    "signin.remote.openAmber": "Open in Amber",
+    "signin.remote.scan":
+      "Scan this with your signer app — on this device or on another phone — or open it directly here:",
+    // Names several signers across platforms instead of "Open in Amber": Amber is
+    // Android-only, so on an iPhone or a desktop the old label promised an app
+    // the user could not have. Whether the link opens anything depends on a
+    // signer being installed, which is equally true everywhere.
+    "signin.remote.openSigner": "Open in your signer app (Amber, Clave, Primal, Amethyst, …)",
     "signin.remote.copy": "Copy",
     "signin.remote.copied": "Copied ✓",
     "signin.remote.waiting": "Waiting for the signer to approve…",
@@ -128,7 +133,7 @@ export const messages = {
       "Didn't get the approval? Keep this tab open while approving, or retry with a fresh code.",
     "signin.remote.retry": "Retry",
     "signin.remote.cancel": "Cancel",
-    "signin.remote.hint": "such as Amber on Android, or Clave",
+    "signin.remote.hint": "such as Amber, Amethyst, Clave or Primal",
     "signin.remote.connect": "Connect with Remote Signer",
     "signin.remote.authRequired":
       "Your signer asks you to approve this request on its website:",
@@ -1029,6 +1034,11 @@ export const messages = {
     "error.followListGuard":
       "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
     "error.signerTimeout": "Your signer didn't respond — check it's online and try again.",
+    // Same failure, but we know a signer relay refused the connection — say which
+    // one. A relay outage and a closed signer app produce the identical symptom
+    // otherwise, and only one of the two is something the user can act on.
+    "error.signerRelaysUnreachable":
+      "Your signer didn't respond — couldn't reach {relays}. Check your signer is online and try again.",
     "error.badBunkerLink": "That doesn't look like a valid bunker link.",
     "error.badEventLink":
       "This event link looks invalid. Please reopen it from your invite or events list.",
@@ -1350,6 +1360,36 @@ export const messages = {
     "admin.inviteSheet.print": "Print",
     "admin.inviteSheet.close": "Close",
     "admin.inviteSheet.scanHint": "Scan to join",
+
+    // Invite exports (organizer sold tickets off-platform and knows buyers only
+    // by email; `label` is the join key between this app and their spreadsheet).
+    "admin.invites.exports": "Exports",
+    "admin.invites.exports.intro":
+      "Two exports, with two very different lifetimes. The codes themselves only exist while this page is open — they are never saved, on your device or on a relay — so they can only be exported now. Who has joined is worked out from the invite list published for this event, so that one keeps working months later.",
+    "admin.invites.exportCodes.title": "Codes for mailing",
+    "admin.invites.exportCodes.body":
+      "One row per code you just generated, each with its label. Match the label to the buyer in your own list — the app never sees email addresses.",
+    "admin.invites.exportCodes.unavailable":
+      "Nothing to export right now. Invite codes are single-use secrets that are never stored anywhere, so they can only be exported in the same session that created them. Generate a new batch above for anyone you still need to mail.",
+    "admin.invites.exportCodes.warning":
+      "The file contains live invite codes — anyone who gets a copy can join. Handle it like a list of passwords.",
+    "admin.invites.format": "Format",
+    "admin.invites.format.csv": "CSV — label, code and link",
+    "admin.invites.format.txt": "Text — links only, one per line",
+    "admin.invites.downloadCsv": "Download as CSV",
+    "admin.invites.exportUsed.title": "Who has joined",
+    "admin.invites.exportUsed.body":
+      "One row per code ever issued for this event, and whether it has been used. Needs no codes, so it works at any time: match it to your own list by label to see who still needs a reminder.",
+    "admin.invites.exportUsed.empty":
+      "No invite codes have been published for this event yet.",
+    "admin.invites.exportUsed.download": "Download report",
+    "admin.invites.scope": "Include",
+    "admin.invites.scope.all": "All codes",
+    "admin.invites.scope.unused": "Unused codes only",
+    "admin.invites.usedCount": "{used} of {total} codes used",
+    "admin.invites.usedNote":
+      "Once a code is seen used it stays used. Old join requests eventually disappear from relays, so this can only ever count up — it will never wrongly tell you a code is still free.",
+    "admin.invites.exportBusy": "Checking for new sign-ups…",
   },
   sk: {
     // App shell / nav
@@ -1463,8 +1503,10 @@ export const messages = {
     "signin.extension": "Rozšírenie prehliadača",
     "signin.extension.button": "Prihlásiť sa rozšírením (Alby, nos2x…)",
     "signin.remote": "Vzdialený podpisovač",
-    "signin.remote.scan": "Naskenujte to Amberom, alebo to otvorte priamo na tomto zariadení:",
-    "signin.remote.openAmber": "Otvoriť v Amberi",
+    "signin.remote.scan":
+      "Naskenujte to svojou podpisovacou aplikáciou — na tomto zariadení alebo na inom telefóne — alebo to otvorte priamo tu:",
+    "signin.remote.openSigner":
+      "Otvoriť v podpisovacej aplikácii (Amber, Clave, Primal, Amethyst, …)",
     "signin.remote.copy": "Kopírovať",
     "signin.remote.copied": "Skopírované ✓",
     "signin.remote.waiting": "Čaká sa na schválenie podpisovačom…",
@@ -1472,7 +1514,7 @@ export const messages = {
       "Neprišlo schválenie? Nechajte túto kartu otvorenú počas schvaľovania, alebo to skúste znova s novým kódom.",
     "signin.remote.retry": "Skúsiť znova",
     "signin.remote.cancel": "Zrušiť",
-    "signin.remote.hint": "napríklad Amber na Androide, alebo Clave",
+    "signin.remote.hint": "napríklad Amber, Amethyst, Clave alebo Primal",
     "signin.remote.connect": "Pripojiť vzdialený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žiada o schválenie tejto požiadavky na svojej stránke:",
@@ -2383,6 +2425,8 @@ export const messages = {
     "error.followListGuard":
       "Nepodarilo sa načítať váš zoznam sledovaných z relayov, preto je sledovanie pozastavené, aby sa neprepísal. Skúste to o chvíľu znova.",
     "error.signerTimeout": "Váš podpisovač neodpovedal — skontrolujte, či je online, a skúste znova.",
+    "error.signerRelaysUnreachable":
+      "Váš podpisovač neodpovedal — nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
     "error.badBunkerLink": "Toto nevyzerá ako platný bunker odkaz.",
     "error.badEventLink":
       "Tento odkaz na podujatie vyzerá neplatne. Otvorte ho, prosím, znova z pozvánky alebo zo zoznamu podujatí.",
@@ -2707,6 +2751,36 @@ export const messages = {
     "admin.inviteSheet.print": "Tlačiť",
     "admin.inviteSheet.close": "Zavrieť",
     "admin.inviteSheet.scanHint": "Naskenujte a pripojte sa",
+
+    // Exporty pozvánok (organizátor predal vstupenky mimo aplikácie a kupujúcich
+    // pozná len podľa e-mailu; „označenie“ je spojka medzi appkou a jeho tabuľkou).
+    "admin.invites.exports": "Exporty",
+    "admin.invites.exports.intro":
+      "Dva exporty s veľmi rozdielnou životnosťou. Samotné kódy existujú len počas toho, ako je táto stránka otvorená — nikde sa neukladajú, ani v zariadení, ani na relayi — takže sa dajú exportovať iba teraz. To, kto sa už pripojil, sa dá zistiť zo zoznamu pozvánok zverejneného pre toto podujatie, takže tento export funguje aj po mesiacoch.",
+    "admin.invites.exportCodes.title": "Kódy na rozposlanie",
+    "admin.invites.exportCodes.body":
+      "Jeden riadok na každý práve vygenerovaný kód, spolu s jeho označením. Označenie si spárujte s kupujúcim vo vlastnom zozname — aplikácia e-mailové adresy nikdy nevidí.",
+    "admin.invites.exportCodes.unavailable":
+      "Momentálne nie je čo exportovať. Pozývacie kódy sú jednorazové tajomstvá, ktoré sa nikde neukladajú, takže sa dajú exportovať len v tej istej session, v ktorej vznikli. Pre ľudí, ktorým ešte musíte napísať, vygenerujte novú dávku vyššie.",
+    "admin.invites.exportCodes.warning":
+      "Súbor obsahuje živé pozývacie kódy — kto ho získa, môže sa pripojiť. Zaobchádzajte s ním ako so zoznamom hesiel.",
+    "admin.invites.format": "Formát",
+    "admin.invites.format.csv": "CSV — označenie, kód a odkaz",
+    "admin.invites.format.txt": "Text — len odkazy, jeden na riadok",
+    "admin.invites.downloadCsv": "Stiahnuť ako CSV",
+    "admin.invites.exportUsed.title": "Kto sa už pripojil",
+    "admin.invites.exportUsed.body":
+      "Jeden riadok na každý kód, ktorý bol pre toto podujatie vydaný, a či už bol použitý. Nepotrebuje kódy, takže funguje kedykoľvek: spárujte ho s vlastným zoznamom podľa označenia a uvidíte, komu treba pripomenúť.",
+    "admin.invites.exportUsed.empty":
+      "Pre toto podujatie zatiaľ neboli zverejnené žiadne pozývacie kódy.",
+    "admin.invites.exportUsed.download": "Stiahnuť prehľad",
+    "admin.invites.scope": "Zahrnúť",
+    "admin.invites.scope.all": "Všetky kódy",
+    "admin.invites.scope.unused": "Len nepoužité kódy",
+    "admin.invites.usedCount": "Použitých {used} zo {total} kódov",
+    "admin.invites.usedNote":
+      "Keď sa kód raz zobrazí ako použitý, zostane použitý. Staré žiadosti o pripojenie z relayov postupne mizia, takže tento počet môže len rásť — nikdy vám nesprávne nepovie, že kód je ešte voľný.",
+    "admin.invites.exportBusy": "Kontrolujeme nové registrácie…",
   },
   cs: {
     // Kostra aplikace / navigace
@@ -2820,8 +2894,10 @@ export const messages = {
     "signin.extension": "Rozšíření prohlížeče",
     "signin.extension.button": "Přihlásit se rozšířením (Alby, nos2x…)",
     "signin.remote": "Vzdálený podpisovač",
-    "signin.remote.scan": "Naskenujte to Amberem, nebo to otevřete přímo na tomto zařízení:",
-    "signin.remote.openAmber": "Otevřít v Amberu",
+    "signin.remote.scan":
+      "Naskenujte to svojí podepisovací aplikací — na tomto zařízení nebo na jiném telefonu — nebo to otevřete přímo tady:",
+    "signin.remote.openSigner":
+      "Otevřít v podepisovací aplikaci (Amber, Clave, Primal, Amethyst, …)",
     "signin.remote.copy": "Kopírovat",
     "signin.remote.copied": "Zkopírováno ✓",
     "signin.remote.waiting": "Čeká se na schválení podpisovačem…",
@@ -2829,7 +2905,7 @@ export const messages = {
       "Nepřišlo schválení? Nechte tuto kartu otevřenou během schvalování, nebo to zkuste znovu s novým kódem.",
     "signin.remote.retry": "Zkusit znovu",
     "signin.remote.cancel": "Zrušit",
-    "signin.remote.hint": "například Amber na Androidu, nebo Clave",
+    "signin.remote.hint": "například Amber, Amethyst, Clave nebo Primal",
     "signin.remote.connect": "Připojit vzdálený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žádá o schválení tohoto požadavku na svém webu:",
@@ -3738,6 +3814,8 @@ export const messages = {
     "error.followListGuard":
       "Nepodařilo se načíst váš seznam sledovaných z relayů, proto je sledování pozastaveno, aby se nepřepsal. Zkuste to za chvíli znovu.",
     "error.signerTimeout": "Váš podpisovač neodpověděl — zkontrolujte, že je online, a zkuste to znovu.",
+    "error.signerRelaysUnreachable":
+      "Váš podpisovač neodpověděl — nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
     "error.badBunkerLink": "Tohle nevypadá jako platný bunker odkaz.",
     "error.badEventLink":
       "Tento odkaz na akci vypadá neplatně. Otevřete ho prosím znovu z pozvánky nebo ze seznamu akcí.",
@@ -4068,6 +4146,36 @@ export const messages = {
     "admin.inviteSheet.print": "Tisk",
     "admin.inviteSheet.close": "Zavřít",
     "admin.inviteSheet.scanHint": "Naskenujte a připojte se",
+
+    // Exporty pozvánek (organizátor prodal vstupenky mimo aplikaci a kupující zná
+    // jen podle e-mailu; „označení“ je spojka mezi aplikací a jeho tabulkou).
+    "admin.invites.exports": "Exporty",
+    "admin.invites.exports.intro":
+      "Dva exporty s velmi odlišnou životností. Samotné kódy existují jen po dobu, kdy je tato stránka otevřená — nikde se neukládají, ani v zařízení, ani na relayi — takže je lze exportovat pouze nyní. To, kdo se už připojil, se dá zjistit ze seznamu pozvánek zveřejněného pro tuto akci, takže tento export funguje i po měsících.",
+    "admin.invites.exportCodes.title": "Kódy k rozeslání",
+    "admin.invites.exportCodes.body":
+      "Jeden řádek na každý právě vygenerovaný kód, včetně jeho označení. Označení si spárujte s kupujícím ve vlastním seznamu — aplikace e-mailové adresy nikdy nevidí.",
+    "admin.invites.exportCodes.unavailable":
+      "Momentálně není co exportovat. Pozvánkové kódy jsou jednorázová tajemství, která se nikde neukládají, takže je lze exportovat jen ve stejné session, ve které vznikly. Pro lidi, kterým ještě musíte napsat, vygenerujte novou dávku výše.",
+    "admin.invites.exportCodes.warning":
+      "Soubor obsahuje živé pozvánkové kódy — kdo ho získá, může se připojit. Zacházejte s ním jako se seznamem hesel.",
+    "admin.invites.format": "Formát",
+    "admin.invites.format.csv": "CSV — označení, kód a odkaz",
+    "admin.invites.format.txt": "Text — jen odkazy, jeden na řádek",
+    "admin.invites.downloadCsv": "Stáhnout jako CSV",
+    "admin.invites.exportUsed.title": "Kdo se už připojil",
+    "admin.invites.exportUsed.body":
+      "Jeden řádek na každý kód, který byl pro tuto akci vydán, a zda už byl použit. Nepotřebuje kódy, takže funguje kdykoli: spárujte ho s vlastním seznamem podle označení a uvidíte, komu je třeba připomenout.",
+    "admin.invites.exportUsed.empty":
+      "Pro tuto akci zatím nebyly zveřejněny žádné pozvánkové kódy.",
+    "admin.invites.exportUsed.download": "Stáhnout přehled",
+    "admin.invites.scope": "Zahrnout",
+    "admin.invites.scope.all": "Všechny kódy",
+    "admin.invites.scope.unused": "Jen nepoužité kódy",
+    "admin.invites.usedCount": "Použito {used} z {total} kódů",
+    "admin.invites.usedNote":
+      "Když se kód jednou zobrazí jako použitý, zůstane použitý. Staré žádosti o připojení z relayů postupně mizí, takže tento počet může jen růst — nikdy vám mylně neřekne, že je kód ještě volný.",
+    "admin.invites.exportBusy": "Kontrolujeme nové registrace…",
   },
 } as const;
 
