@@ -49,6 +49,7 @@
   // memory and strip it from the URL + history immediately, mirroring the
   // login-nsec handling in consumeNsecFromHash (spec §5.2, §14). A reload
   // mid-join simply lands on the normal join screen — the code is gone by design.
+  // svelte-ignore state_referenced_locally -- codeParam seeds once; the $effect below keeps `code` in sync on change
   let code = $state(codeParam);
   $effect(() => {
     if (codeParam) {
@@ -75,6 +76,7 @@
   }
 
   // Render instantly from cache (e.g. arriving from the event page), refresh after.
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let error = $state<string | null>(null);
   let busy = $state(false);
@@ -378,7 +380,10 @@
       // stashed code so it can't be reused or leak past this join (UX-O2).
       clearInvite(ctx.coordinate);
       markJoinSent(ctx.coordinate); // survives reload → waiting state, not pristine form (P2)
-      recentEvents.record({ coordinate: ctx.coordinate, naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
+      // Both identity fields from `ctx` — see the note in EventHome.svelte: the
+      // `naddr` prop is a live getter into the parent's route and can already
+      // point at a different event by the time this async body resumes.
+      recentEvents.record({ coordinate: ctx.coordinate, naddr: ctx.naddr, title: ctx.title, icon: ctx.icon, role: "attendee" });
 
       // Fire-and-forget (audit UX-2): awaiting the poll here would hold
       // `busy = true` for the whole approval wait, so the "send again" escape

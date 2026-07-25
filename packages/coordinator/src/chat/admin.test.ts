@@ -174,12 +174,15 @@ describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
   // clients re-route to it via the roster's new nostr_group_id and rejoin. (The
   // same-coordinator reuse/re-activate path is the "freeze re-activates" test above.)
   it("a re-attaching coordinator creates a fresh group, invites the eligible set, and advertises a new routing id", async () => {
+    // P6: only ATTESTED DEVICE keys are chat identities — each approved account
+    // brings its own attested device (CHATKEY, CHATKEY2). Account keys are never
+    // eligible on their own.
     const ACCOUNT2 = "b".repeat(64);
-    const kps = [kpEvent(ACCOUNT, "kpA"), kpEvent(CHATKEY, "kpChat"), kpEvent(ACCOUNT2, "kpB")];
-    const eligible = [ACCOUNT, ACCOUNT2, CHATKEY].sort();
+    const kps = [kpEvent(CHATKEY, "kpChat"), kpEvent(CHATKEY2, "kpChat2")];
+    const eligible = [CHATKEY, CHATKEY2].sort();
 
-    // ── Coordinator A: chat live, the full eligible set (both account keys + an
-    //    attested device key) added to group ng-1. ──
+    // ── Coordinator A: chat live, the full eligible set (each account's attested
+    //    device key) added to group ng-1. ──
     const storeA = freshStore();
     const mlsA = new FakeMls();
     const adminA = makeAdmin(storeA, mlsA, kps);
@@ -187,6 +190,7 @@ describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
     storeA.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     storeA.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 1 });
     storeA.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    storeA.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT2, chatPubkey: CHATKEY2, now: 1 });
     await adminA.backfillApproved(COORD);
     expect(mlsA.invited.sort()).toEqual(eligible);
     const idA = storeA.getMarmotGroup(COORD)!.nostr_group_id;
@@ -205,6 +209,7 @@ describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
     storeB.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 2 });
     storeB.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 2 });
     storeB.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 2 });
+    storeB.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT2, chatPubkey: CHATKEY2, now: 2 });
 
     const idsB = await adminB.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     await adminB.backfillApproved(COORD);
@@ -217,61 +222,86 @@ describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
     expect(rowB.nostr_group_id).toBe("ng-11");
     expect(rowB.nostr_group_id).not.toBe(idA);
     expect(idsB.nostrGroupIdHex).toBe("ng-11");
-    // The full eligible set (account keys + attested chat key) is invited into it.
+    // The full eligible set (each account's attested device key) is invited into it.
     expect(mlsB.invited.sort()).toEqual(eligible);
   });
 });
 
 describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
-  it("adds an approved attendee's local key from their 30443, deduped by event id", async () => {
+  it("adds an approved attendee's attested device key from their 30443, deduped by event id", async () => {
+    // P6: the account attests a device key (CHATKEY); the DEVICE key is the chat
+    // identity added to the group, never the account key itself.
     const store = freshStore();
     const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1")]);
-    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
-    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
-
-    await admin.syncMember(COORD, ACCOUNT);
-    expect(mls.invited).toEqual([ACCOUNT]);
-    expect(store.isKpConsumed(COORD, "kp1")).toBe(true);
-
-    // Re-sync: already a member + consumed → no second invite.
-    await admin.syncMember(COORD, ACCOUNT);
-    expect(mls.invited).toEqual([ACCOUNT]);
-  });
-
-  it("multi-device: an account's attested chat key is added alongside the account key", async () => {
-    const store = freshStore();
-    const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1"), kpEvent(CHATKEY, "kp2")]);
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
 
     await admin.syncMember(COORD, ACCOUNT);
-    expect(mls.invited.sort()).toEqual([ACCOUNT, CHATKEY].sort());
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(store.isKpConsumed(COORD, "kp1")).toBe(true);
+
+    // Re-sync: already a member + consumed → no second invite.
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+  });
+
+  it("an approved account with no attested device brings NO chat identity (P6)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    // The 30443 is signed by the ACCOUNT key, but the account key is not a chat
+    // identity and no device is attested → nothing is added.
+    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([]);
+    // The account key's own 30443 is likewise ignored by the watcher.
+    await admin.handleKeyPackageEvent(COORD, kpEvent(ACCOUNT, "kpAcct"));
+    expect(mls.invited).toEqual([]);
+  });
+
+  it("multi-device: two attested device keys of one account are both added", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1"), kpEvent(CHATKEY2, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY2, now: 1 });
+
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited.sort()).toEqual([CHATKEY, CHATKEY2].sort());
   });
 
   it("a key package that fails to invite (e.g. unsupported proof version) is logged, not thrown, and doesn't block other members or leave it wrongly marked ineligible", async () => {
+    // Two accounts, each with its own attested device (CHATKEY / CHATKEY2). One
+    // device's invite throws deep inside marmot-ts; the other still gets in.
+    const ACCOUNT2 = "b".repeat(64);
     const store = freshStore();
     const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp-good"), kpEvent(CHATKEY, "kp-bad")]);
-    mls.throwOnInvite.add(CHATKEY);
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp-good"), kpEvent(CHATKEY2, "kp-bad")]);
+    mls.throwOnInvite.add(CHATKEY2);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
-    store.upsertAttendee({ coordinate: COORD, pubkey: CHATKEY, status: "approved", now: 1 });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT2, chatPubkey: CHATKEY2, now: 1 });
 
     // Neither backfillApproved nor syncMember should throw even though one
     // member's invite fails deep inside the (real) marmot-ts engine.
     await expect(admin.backfillApproved(COORD)).resolves.toBeUndefined();
 
-    expect(mls.invited).toEqual([ACCOUNT]); // the good one still got in
+    expect(mls.invited).toEqual([CHATKEY]); // the good one still got in
     expect(store.isKpConsumed(COORD, "kp-good")).toBe(true);
     expect(store.isKpConsumed(COORD, "kp-bad")).toBe(false); // not blackholed — eligible for retry
 
     // A later retry (e.g. next coordinator restart) tries again rather than
     // silently skipping it forever.
-    await admin.syncMember(COORD, CHATKEY);
-    expect(mls.invited).toEqual([ACCOUNT]);
+    await admin.syncMember(COORD, ACCOUNT2);
+    expect(mls.invited).toEqual([CHATKEY]);
   });
 
   it("the 30443 watcher adds an authorized author and ignores an unauthorized one", async () => {
@@ -280,23 +310,25 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
     const admin = makeAdmin(store, mls);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
 
-    // Authorized: the approved account's own key.
-    await admin.handleKeyPackageEvent(COORD, kpEvent(ACCOUNT, "kpA"));
-    expect(mls.invited).toEqual([ACCOUNT]);
+    // Authorized: the approved account's attested device key.
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kpA"));
+    expect(mls.invited).toEqual([CHATKEY]);
 
     // Unauthorized: a stranger's key package is ignored (not an authorized identity).
     const stranger = "f".repeat(64);
     await admin.handleKeyPackageEvent(COORD, kpEvent(stranger, "kpS"));
-    expect(mls.invited).toEqual([ACCOUNT]);
+    expect(mls.invited).toEqual([CHATKEY]);
   });
 
   it("does not add a pending (unapproved) attendee", async () => {
     const store = freshStore();
     const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1")]);
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
     await admin.syncMember(COORD, ACCOUNT);
     expect(mls.invited).toEqual([]);
   });
@@ -372,7 +404,8 @@ describe("MarmotAdmin — attestation authentication (§3.3)", () => {
     store.upsertChatKey({ coordinate: COORD, accountPubkey: pending, chatPubkey: pendingChat, now: 1 });
 
     const authors = admin.eligibleChatAuthors(COORD).sort();
-    expect(authors).toEqual([ACCOUNT, CHATKEY].sort());
+    expect(authors).toEqual([CHATKEY]); // P6: only the active attested device, not the account key
+    expect(authors).not.toContain(ACCOUNT); // account key is never a chat identity
     expect(authors).not.toContain(CHATKEY2); // revoked
     expect(authors).not.toContain(pending); // not approved
   });
@@ -398,21 +431,6 @@ describe("MarmotAdmin — attestation authorization (audit COORD-1/COORD-10)", (
     // The owner CAN still revoke it.
     expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT)).toBe(true);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
-  });
-
-  it("an account may revoke its own account key (no binding row needed)", async () => {
-    const store = freshStore();
-    const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1")]);
-    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
-    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
-    await admin.syncMember(COORD, ACCOUNT);
-    expect(mls.members.get("mls-1")?.has(ACCOUNT)).toBe(true);
-
-    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("revoke", ACCOUNT), CREATED_AT);
-    expect(ok).toBe(true);
-    expect(mls.removed.at(-1)).toEqual([ACCOUNT]);
-    expect(mls.members.get("mls-1")?.has(ACCOUNT)).toBe(false);
   });
 
   it("a pending account's revoke is rejected outright (add is recorded-only)", async () => {
@@ -555,37 +573,38 @@ describe("MarmotAdmin — watcher fast-path gate (audit COORD-17)", () => {
     const admin = makeAdmin(store, mls);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
 
-    // Prime the cache (ACCOUNT eligible), then approve a NEW attendee — without
-    // invalidation the stale cache still drops them (fail-closed direction).
-    await admin.handleKeyPackageEvent(COORD, kpEvent(ACCOUNT, "kpA"));
-    expect(mls.invited).toEqual([ACCOUNT]);
+    // Prime the cache (CHATKEY eligible), then approve a NEW attendee with its own
+    // device — without invalidation the stale cache still drops it (fail-closed).
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kpA"));
+    expect(mls.invited).toEqual([CHATKEY]);
     const newcomer = "b".repeat(64);
     store.upsertAttendee({ coordinate: COORD, pubkey: newcomer, status: "approved", now: 2 });
-    await admin.handleKeyPackageEvent(COORD, kpEvent(newcomer, "kpB"));
-    expect(mls.invited).toEqual([ACCOUNT]); // dropped by the stale cache
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: newcomer, chatPubkey: CHATKEY2, now: 2 });
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY2, "kpB"));
+    expect(mls.invited).toEqual([CHATKEY]); // dropped by the stale cache
 
     // After invalidation (what approve/attest/revoke do), the new author is eligible.
     admin.invalidateEligibility(COORD);
-    await admin.handleKeyPackageEvent(COORD, kpEvent(newcomer, "kpB2"));
-    expect(mls.invited).toEqual([ACCOUNT, newcomer]);
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY2, "kpB2"));
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY2]);
   });
 
 describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
-  it("handleRevoke MLS-removes the account key AND every attested chat key", async () => {
+  it("handleRevoke MLS-removes every attested chat key (and defensively the account key)", async () => {
     const store = freshStore();
     const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [
-      kpEvent(ACCOUNT, "kp1"),
-      kpEvent(CHATKEY, "kp2"),
-    ]);
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
     await admin.syncMember(COORD, ACCOUNT);
-    expect(mls.members.get("mls-1")?.size).toBe(2);
+    // P6: only the attested device is a member — the account key was never added.
+    expect(mls.members.get("mls-1")?.size).toBe(1);
 
     await admin.handleRevoke(COORD, ACCOUNT);
+    // Removal still targets the account key defensively plus every attested device.
     expect(mls.removed.at(-1)!.sort()).toEqual([ACCOUNT, CHATKEY].sort());
     expect(mls.members.get("mls-1")?.size).toBe(0);
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
@@ -614,20 +633,21 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
     expect(mls.admins.get("mls-1")).toEqual([COORDINATOR]);
   });
 
-  it("promotes an approved organizer's account key and attested device to co-admin", async () => {
+  it("promotes an approved organizer's attested device to co-admin", async () => {
     const store = freshStore();
     const mls = new FakeMls();
     const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
-    // ACCOUNT is an approved ORGANIZER; its account key is an authorized identity.
+    // ACCOUNT is an approved ORGANIZER, but under P6 the account key is not a chat
+    // identity — only its attested device becomes a co-admin.
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 1 });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
-    // At creation, the coordinator + the organizer's account key are admins.
-    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+    // At creation the organizer has no attested device yet → coordinator sole admin.
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR]);
 
-    // Attesting the organizer's chat device promotes THAT device to admin too.
+    // Attesting the organizer's chat device promotes THAT device to admin.
     const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     expect(ok).toBe(true);
-    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT, CHATKEY].sort());
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, CHATKEY].sort());
   });
 
   it("does NOT promote a non-organizer attendee's device", async () => {
@@ -649,21 +669,22 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 1 });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
-    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT, CHATKEY].sort());
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, CHATKEY].sort());
 
     // Revoking that device removes it from the admin set (its key is no longer active).
     await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
-    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR]);
   });
 
   it("drops a removed organizer entirely from the admin set", async () => {
     const store = freshStore();
     const mls = new FakeMls();
-    const admin = makeAdmin(store, mls, [kpEvent(ACCOUNT, "kp1")]);
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     await admin.syncMember(COORD, ACCOUNT);
-    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, CHATKEY].sort());
 
     // The revoke effect chain marks the attendee non-approved, then removes them;
     // desiredAdminPubkeys keys off approved organizers, so they drop out.
@@ -679,10 +700,12 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     expect(mls.admins.get("mls-1")).toEqual([COORDINATOR]);
 
-    // An organizer is approved AFTER the group already existed; re-ensuring the
-    // group (e.g. on the next install/config reload) promotes them.
+    // An organizer (with an attested device) is approved AFTER the group already
+    // existed; re-ensuring the group (e.g. next install/config reload) promotes the
+    // organizer's DEVICE (P6: never the account key).
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, role: "organizer", status: "approved", now: 3 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 3 });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
-    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, ACCOUNT].sort());
+    expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, CHATKEY].sort());
   });
 });

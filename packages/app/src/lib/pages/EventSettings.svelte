@@ -13,6 +13,8 @@
     addCoOrganizer,
     updateEventConfig,
     fetchCoordinatorLastSeen,
+    checkForOrganizerGrant,
+    pollForOrganizerGrant,
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { updateEventMetadata } from "$lib/events/event-metadata.js";
@@ -51,11 +53,15 @@
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let keys = $state<EventKeys | null>(null);
   let loading = $state(true);
@@ -153,7 +159,7 @@
     metadataSaved = false;
     error = null;
     try {
-      ctx = await updateEventMetadata(ctx, {
+      const { ctx: updated, outcome } = await updateEventMetadata(ctx, {
         title: metadataTitle.trim(),
         summary: metadataSummary.trim(),
         start: Math.floor(new Date(metadataStart).getTime() / 1000),
@@ -162,6 +168,7 @@
         icon: metadataIcon.trim() || undefined,
         banner: metadataBanner.trim() || undefined,
       });
+      ctx = updated;
       recentEvents.record({
         coordinate: ctx.coordinate,
         naddr: ctx.naddr,
@@ -169,8 +176,16 @@
         icon: ctx.icon,
         role: "organizer",
       });
-      metadataSaved = true;
-      setTimeout(() => (metadataSaved = false), 1500);
+      // R9: distinguish a relay-confirmed publish from a WSS-blocked queue. The
+      // inline "Saved ✓" tick shows only on a real publish; either way the honest
+      // status line tells the organizer whether attendees can see the change yet.
+      if (outcome === "queued") {
+        opStatus.queued(t("op.eventUpdateQueued"));
+      } else {
+        opStatus.published(t("op.eventUpdated"));
+        metadataSaved = true;
+        setTimeout(() => (metadataSaved = false), 1500);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -196,7 +211,11 @@
         // The organizer keys may arrive as a 21605 grant (co-organizer / hand-off
         // to another device) — poll while the page is open so it unlocks without a
         // manual reload (P2 recovery path). Same receiveGrants channel the app uses.
-        void pollForOrganizerGrant();
+        // Note this can also fire on a device that DOES hold the keys: with a
+        // NIP-46 session still restoring there is no active keystore owner yet, so
+        // the loadEventKeys above returns undefined regardless of what is stored.
+        // The poll re-reads the keystore every pass, which repairs that too.
+        void startGrantWait();
         return;
       }
       // Organizer role but still no E_id after recovery: writes will fail, so
@@ -233,33 +252,91 @@
     if (ctx.config.coordinator) await loadCoordinatorLifecycle();
   }
 
-  async function pollForOrganizerGrant() {
-    if (!ctx || !session.signer) return;
-    while (notOrganizer && !destroyed) {
-      await new Promise((r) => setTimeout(r, 4000));
-      if (destroyed) return;
-      await receiveGrants(session.signer).catch(() => {});
-      const k = await loadEventKeys(ctx.coordinate);
-      if (k && k.role === "organizer") {
-        keys = k;
-        missingEidKey = !k.eidNsecHex;
-        notOrganizer = false;
-        loading = true;
-        try {
-          await loadSettings();
-        } finally {
-          loading = false;
-        }
-        return;
-      }
+  // ── Waiting for organizer custody (P2 recovery path) ───────────────────────
+  // Mirrors Admin.svelte: the wait's real state is renderable and manually
+  // forceable, because the old version could silently not be running at all —
+  // see pollForOrganizerGrant in events/organizer.ts for the failure it fixes.
+  let grantWaiting = $state(false); // a poll loop is actually running
+  let grantChecking = $state(false); // a manual "Check now" is in flight
+  let grantCheckedAt = $state<number | undefined>(undefined); // ms, last completed pass
+  let grantCheckError = $state<string | null>(null);
+
+  async function startGrantWait() {
+    if (!ctx || grantWaiting) return; // never two loops for one page
+    const coordinate = ctx.coordinate;
+    grantWaiting = true;
+    try {
+      await pollForOrganizerGrant({
+        coordinate,
+        // Read per pass, not captured: with NIP-46 the signer lands seconds after
+        // mount (routes/+layout.svelte doesn't await the restore), and the old
+        // poll's up-front `if (!session.signer) return` meant it never ran at all.
+        signer: () => session.signer,
+        receiveGrants,
+        stopped: () => destroyed || !notOrganizer,
+        onChecked: () => (grantCheckedAt = Date.now()),
+        onGranted: adoptOrganizerKeys,
+      });
+    } finally {
+      grantWaiting = false;
     }
   }
 
+  /** Manual "Check now": the same pass the poll runs, on demand. */
+  async function checkGrantNow() {
+    if (!ctx || grantChecking) return;
+    grantChecking = true;
+    grantCheckError = null;
+    try {
+      const k = await checkForOrganizerGrant(ctx.coordinate, session.signer, receiveGrants);
+      grantCheckedAt = Date.now();
+      if (k) await adoptOrganizerKeys(k);
+    } catch (e) {
+      // Unlike the poll, a manual check reports its failure — the user asked.
+      grantCheckError = e instanceof Error ? e.message : String(e);
+    } finally {
+      grantChecking = false;
+    }
+  }
+
+  /** Unlock the page with organizer keys that arrived after mount. */
+  async function adoptOrganizerKeys(k: EventKeys) {
+    keys = k;
+    missingEidKey = !k.eidNsecHex;
+    notOrganizer = false;
+    loading = true;
+    try {
+      await loadSettings();
+    } finally {
+      loading = false;
+    }
+  }
+
+  // The keystore is owner-scoped and resolves against the ACTIVE owner, which the
+  // session only sets once its restore completes. A page that mounted before that
+  // (the NIP-46 window above) read an empty keystore, so a device that DOES hold
+  // the organizer keys shows the "not the organizer" card. Re-read the moment the
+  // signer lands rather than making the user wait for the next poll pass — it's a
+  // local IndexedDB read, and receiveGrants is deliberately left to the poll so
+  // the two paths can't both scan relays at once.
+  $effect(() => {
+    const signer = session.signer;
+    if (!signer || !notOrganizer || !ctx) return;
+    const coordinate = ctx.coordinate;
+    void loadEventKeys(coordinate)
+      .then((k) => {
+        if (k?.role === "organizer" && !destroyed && notOrganizer) void adoptOrganizerKeys(k);
+      })
+      .catch(() => {});
+  });
+
   async function copyMyNpub() {
     if (!session.npub) return;
-    await navigator.clipboard.writeText(session.npub);
-    copiedNpub = true;
-    setTimeout(() => (copiedNpub = false), 1500);
+    // U15: centralized copy with fallback; npub is public + shown on screen.
+    if ((await copyText(session.npub)) === "copied") {
+      copiedNpub = true;
+      setTimeout(() => (copiedNpub = false), 1500);
+    }
   }
 
   let coordinatorInput = $state("");
@@ -514,8 +591,18 @@
         pubkey = decoded.data;
       }
       if (!/^[0-9a-f]{64}$/i.test(pubkey)) throw new Error(t("admin.error.enterNpub"));
-      await addCoOrganizer(session.signer, ctx, pubkey);
-      coOrgAdded = true;
+      const outcome = await addCoOrganizer(session.signer, ctx, pubkey);
+      // R9: the grant wrap is queued to the durable outbox when WSS is blocked or
+      // every publish retry fails, and this printed "Sent ✓" either way — so one
+      // organizer saw the hand-off succeed while the other device sat on the
+      // grant-wait card forever, with the wrap still on this phone. Same
+      // queued-vs-published split the metadata save above uses.
+      if (outcome === "queued") {
+        opStatus.queued(t("op.coOrgQueued"));
+      } else {
+        opStatus.published(t("op.coOrgSent"));
+        coOrgAdded = true;
+      }
       coOrgInput = "";
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
@@ -596,9 +683,16 @@
     pageSaved = false;
     error = null;
     try {
-      await publishEventPage(ctx, { menu: pageMenu, sections: pageSections });
-      pageSaved = true;
-      setTimeout(() => (pageSaved = false), 2000);
+      const outcome = await publishEventPage(ctx, { menu: pageMenu, sections: pageSections });
+      // R9: only claim "saved ✓" / published on a real relay publish; a queued
+      // save is honest about attendees still seeing the old page.
+      if (outcome === "queued") {
+        opStatus.queued(t("op.pageQueued"));
+      } else {
+        opStatus.published(t("op.pagePublished"));
+        pageSaved = true;
+        setTimeout(() => (pageSaved = false), 2000);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -613,6 +707,13 @@
   let themePreviewing = $state(false);
   const themeBytes = $derived(utf8ByteLength(themeCss));
   const themeOver = $derived(themeBytes > MAX_THEME_CSS_BYTES);
+  // Durable draft of UNSENT theme CSS (audit U9). The network only carries the
+  // PUBLISHED theme, so hand-written CSS an organizer hasn't published yet would
+  // be lost to a crash/eviction/reload. Persist owner-scoped; restore visibly.
+  let themeDraftId = $state("");
+  let themeDraftRestored = $state(false);
+  let themeLoaded = $state(false);
+  let publishedTheme = $state("");
 
   // Draft-safe auto-refresh (App-2): hold the pending reload while the organizer
   // has unsaved metadata edits (title/summary differ from the loaded event) or a
@@ -623,13 +724,32 @@
     const dirty =
       (!!ctx && (metadataTitle !== ctx.title || metadataSummary !== ctx.summary)) ||
       coordinatorInput.trim().length > 0 ||
-      coOrgInput.trim().length > 0;
+      coOrgInput.trim().length > 0 ||
+      // Unsaved theme CSS is real unsaved work now that it's drafted (U9).
+      (themeLoaded && themeCss !== publishedTheme);
     if (dirty) return refreshGuard.hold("settings");
+  });
+
+  // Persist unsent theme CSS as it's edited (U9); clear it once it matches the
+  // published theme so a later visit doesn't restore already-published CSS.
+  $effect(() => {
+    if (!themeLoaded || !themeDraftId) return;
+    if (themeCss === publishedTheme) clearDraft(themeDraftId);
+    else saveDraft(themeDraftId, themeCss);
   });
 
   async function loadTheme() {
     if (!ctx) return;
     themeCss = (await fetchEventTheme(ctx).catch(() => undefined)) ?? "";
+    // U9: restore an unsent draft that differs from the published theme.
+    themeDraftId = `theme:${ctx.coordinate}`;
+    publishedTheme = themeCss;
+    const draft = loadDraft(themeDraftId);
+    if (draft !== undefined && draft !== publishedTheme) {
+      themeCss = draft;
+      themeDraftRestored = true;
+    }
+    themeLoaded = true;
   }
 
   function previewTheme() {
@@ -647,11 +767,23 @@
     themeBusy = true;
     error = null;
     try {
-      await publishEventTheme(ctx, themeCss);
-      previewEventTheme(naddr, themeCss); // published = what you see
+      const outcome = await publishEventTheme(ctx, themeCss);
+      previewEventTheme(naddr, themeCss); // published = what you see (locally)
       themePreviewing = false;
-      themePublished = true;
-      setTimeout(() => (themePublished = false), 2000);
+      if (outcome === "queued") {
+        // R9 + U9: a WSS-blocked save only queued the theme — it is NOT live for
+        // attendees, so KEEP the durable draft (clearing it here would lose the
+        // unsent CSS if the queued publish never lands) and say so honestly.
+        opStatus.queued(t("op.themeQueued"));
+      } else {
+        themePublished = true;
+        // U9: really published — retire the unsent draft.
+        publishedTheme = themeCss;
+        if (themeDraftId) clearDraft(themeDraftId);
+        themeDraftRestored = false;
+        opStatus.published(t("op.themePublished"));
+        setTimeout(() => (themePublished = false), 2000);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -689,7 +821,30 @@
       <li>{t("admin.grant.step2")}</li>
       <li>{t("admin.grant.step3")}</li>
     </ol>
-    <p class="muted" style="margin-top:0.5rem">{t("admin.grant.waiting")}</p>
+    <!-- Truthful wait state: this line used to read "Waiting for the grant…"
+         unconditionally, with nothing behind it once the poll had bailed out. It
+         now says which of the three real states the page is in, and the button
+         gives a way out that doesn't require knowing to navigate away and back. -->
+    <p class="muted" role="status" aria-live="polite" style="margin-top:0.5rem">
+      {#if !session.signer}
+        {t("admin.grant.waitingSigner")}
+      {:else if grantWaiting}
+        {t("admin.grant.waiting")}
+      {:else}
+        {t("admin.grant.notChecking")}
+      {/if}
+      {#if grantCheckedAt !== undefined}
+        {t("admin.grant.lastChecked", {
+          time: new Date(grantCheckedAt).toLocaleTimeString(),
+        })}
+      {/if}
+    </p>
+    <button class="btn inline" onclick={() => void checkGrantNow()} disabled={grantChecking}>
+      {grantChecking ? t("admin.grant.checkingNow") : t("admin.grant.checkNow")}
+    </button>
+    {#if grantCheckError}
+      <p class="muted" style="color:var(--danger);margin:0.5rem 0 0">{grantCheckError}</p>
+    {/if}
   </div>
 {:else if loading}
   <p class="muted">{t("admin.settings.loading")}</p>
@@ -905,7 +1060,7 @@
             {:else if section.type === "pinned"}
               {#if section.refs.length}
                 <div class="stack" style="margin:0.25rem 0">
-                  {#each section.refs as ref, r (ref)}
+                  {#each section.refs as ref, r (r)}
                     <div class="row" style="justify-content:space-between">
                       <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.7rem">{ref.slice(0, 40)}…</span>
                       <button
@@ -974,6 +1129,20 @@
   <div class="card">
     <div class="field-label">{t("admin.theme.title")}</div>
     <p class="muted">{t("admin.theme.body")}</p>
+    {#if themeDraftRestored}
+      <!-- Visible restore of unsent theme CSS (U9). -->
+      <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
+        <span class="muted" role="status">{t("draft.restored")}</span>
+        <button
+          class="btn inline"
+          style="flex:none"
+          onclick={() => {
+            themeCss = publishedTheme;
+            themeDraftRestored = false;
+            if (themeDraftId) clearDraft(themeDraftId);
+          }}>{t("draft.discard")}</button>
+      </div>
+    {/if}
     <textarea
       rows="8"
       class="mono"

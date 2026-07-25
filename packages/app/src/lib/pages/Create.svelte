@@ -27,13 +27,14 @@
   import { buildReceipt, type CreationReceipt } from "$lib/events/creation-outcomes.js";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
   import { takeDuplicateDraft } from "$lib/stores/duplicate-draft.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
 
   let title = $state("");
   let summary = $state("");
@@ -120,11 +121,31 @@
   let organizerName = $state("");
   let copiedShare = $state(false);
 
-  // Live previews: uploaded image, else a generated default (both optional).
-  const previewIcon = $derived(iconUrl.trim() || defaultEventIcon(title, title));
-  const previewBanner = $derived(bannerUrl.trim() || defaultEventBanner(title));
+  // Held-but-not-yet-uploaded branding (audit U12): a first-time organizer is
+  // logged out until submit, so selecting an icon/banner used to error
+  // immediately ("log in to upload"), contradicting the form's promise of inline
+  // identity creation. Instead we crop and HOLD the blob locally (with an
+  // object-URL preview); the identity is generated on submit and the held blobs
+  // are uploaded then. A logged-in organizer still uploads immediately.
+  let pendingIcon = $state<{ blob: Blob; url: string } | null>(null);
+  let pendingBanner = $state<{ blob: Blob; url: string } | null>(null);
+  function clearPending(which: "icon" | "banner") {
+    const held = which === "icon" ? pendingIcon : pendingBanner;
+    if (held) URL.revokeObjectURL(held.url);
+    if (which === "icon") pendingIcon = null;
+    else pendingBanner = null;
+  }
+  onDestroy(() => {
+    if (pendingIcon) URL.revokeObjectURL(pendingIcon.url);
+    if (pendingBanner) URL.revokeObjectURL(pendingBanner.url);
+  });
 
-  // The chosen file opens the crop/zoom picker; upload happens on confirm.
+  // Live previews: uploaded image, else the held-but-not-uploaded local crop,
+  // else a generated default (all optional).
+  const previewIcon = $derived(iconUrl.trim() || pendingIcon?.url || defaultEventIcon(title, title));
+  const previewBanner = $derived(bannerUrl.trim() || pendingBanner?.url || defaultEventBanner(title));
+
+  // The chosen file opens the crop/zoom picker; upload (or hold) happens on confirm.
   let cropFile = $state<File | null>(null);
   let cropWhich = $state<"icon" | "banner">("icon");
 
@@ -133,10 +154,7 @@
     const file = input.files?.[0];
     input.value = ""; // allow re-picking the same file after a cancel
     if (!file) return;
-    if (!session.signer) {
-      error = t("create.error.loginToUpload");
-      return;
-    }
+    // No login gate here anymore (U12) — a logged-out organizer can still crop.
     cropWhich = which;
     cropFile = file;
   }
@@ -144,18 +162,44 @@
   async function onCropConfirm(blob: Blob) {
     const which = cropWhich;
     cropFile = null;
-    if (!session.signer) return;
-    uploading = which;
     error = null;
+    // Logged out: hold the cropped blob locally; it's uploaded on submit once the
+    // identity exists. Clear any uploaded URL for this slot so the held crop shows.
+    if (!session.signer) {
+      clearPending(which);
+      const url = URL.createObjectURL(blob);
+      if (which === "icon") {
+        iconUrl = "";
+        pendingIcon = { blob, url };
+      } else {
+        bannerUrl = "";
+        pendingBanner = { blob, url };
+      }
+      return;
+    }
+    uploading = which;
     try {
       await connectNdk();
       const url = await uploadPublicImage(session.signer, blob);
+      clearPending(which);
       if (which === "icon") iconUrl = url;
       else bannerUrl = url;
     } catch (err) {
       error = t("create.error.uploadFailed", { reason: err instanceof Error ? err.message : String(err) });
     } finally {
       uploading = null;
+    }
+  }
+
+  /** Upload any held (logged-out-cropped) branding now that a signer exists (U12). */
+  async function uploadHeldBranding(signer: NonNullable<typeof session.signer>): Promise<void> {
+    if (pendingIcon) {
+      iconUrl = await uploadPublicImage(signer, pendingIcon.blob);
+      clearPending("icon");
+    }
+    if (pendingBanner) {
+      bannerUrl = await uploadPublicImage(signer, pendingBanner.blob);
+      clearPending("banner");
     }
   }
 
@@ -189,6 +233,15 @@
       }
       const signer = session.signer;
       if (!signer) throw new Error(t("create.error.identityFailed"));
+      // U12: upload any branding the organizer cropped while logged out. On
+      // failure, bail BEFORE createEvent (identity already exists, so a retry
+      // re-uploads without recreating a duplicate key/event).
+      try {
+        await uploadHeldBranding(signer);
+      } catch (err) {
+        error = t("create.error.uploadFailed", { reason: err instanceof Error ? err.message : String(err) });
+        return;
+      }
       const blindingKey = await deriveBlindingKey(signer);
       const createInput: CreateEventInput = {
         title: title.trim(),
@@ -265,10 +318,17 @@
         );
       }
       created = result;
-      opStatus.published(t("op.eventCreated"));
-      // Event published — the compose drafts are spent (App-2).
-      clearDraft("create:title");
-      clearDraft("create:summary");
+      // R9: report honestly. On venue Wi-Fi that allows HTTPS but blocks WSS the
+      // create events are safely queued but NOT yet visible — say so, and KEEP the
+      // compose drafts so nothing is lost if the queued publish never lands.
+      if (result.outcome === "queued") {
+        opStatus.queued(t("op.eventCreateQueued"));
+      } else {
+        opStatus.published(t("op.eventCreated"));
+        // Event published for real — the compose drafts are spent (App-2).
+        clearDraft("create:title");
+        clearDraft("create:summary");
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -323,10 +383,17 @@
     }),
   );
 
+  let copyFailed = $state(false);
   async function copyShare() {
-    await navigator.clipboard.writeText(shareLink);
-    copiedShare = true;
-    setTimeout(() => (copiedShare = false), 1500);
+    // U15: truthful copy — the share link stays visible above to select on failure.
+    if ((await copyText(shareLink)) === "copied") {
+      copyFailed = false;
+      copiedShare = true;
+      setTimeout(() => (copiedShare = false), 1500);
+    } else {
+      copyFailed = true;
+      setTimeout(() => (copyFailed = false), 4000);
+    }
   }
   const canShare = typeof navigator !== "undefined" && !!navigator.share;
   function shareNative() {
@@ -425,6 +492,9 @@
             <button class="btn inline" onclick={shareNative}>{t("create.share")}</button>
           {/if}
         </div>
+        {#if copyFailed}
+          <p class="muted" role="status" style="margin:0.25rem 0 0">{t("common.copyFailed")}</p>
+        {/if}
       </li>
       {#if !coordinatorPubkey}
         <li style="margin-top:0.75rem">
@@ -568,8 +638,8 @@
             >
               {uploading === "banner" ? "…" : t("create.banner")}
             </FileButton>
-            {#if iconUrl || bannerUrl}
-              <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; }}>{t("create.reset")}</button>
+            {#if iconUrl || bannerUrl || pendingIcon || pendingBanner}
+              <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; clearPending("icon"); clearPending("banner"); }}>{t("create.reset")}</button>
             {/if}
           </div>
         </div>

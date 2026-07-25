@@ -70,6 +70,48 @@ describe("signer-based gift wrap ↔ protocol raw-key gift wrap", () => {
     await expect(signerUnwrap(wrongSigner, wrap)).rejects.toBeDefined();
   });
 
+  it("rejects a forged seal that decrypts but has no valid signature (P1)", async () => {
+    // The recipient's own key is enough to encrypt a seal claiming any author —
+    // ECDH(recipientSk, victimPk) == ECDH(victimSk, recipientPk) — but not to sign
+    // a kind-13 as the victim. signerUnwrap must reject it, matching unwrapRumor.
+    const recipient = LocalSigner.generate();
+    const recipientPk = await recipient.getPublicKey();
+    const victimPk = getPublicKey(generateSecretKey()); // no victim secret
+
+    const rumorBase = {
+      pubkey: victimPk,
+      created_at: 1,
+      kind: KIND_JOIN_REQUEST,
+      tags: [] as string[][],
+      content: JSON.stringify({ v: 2, name: "mallory" }),
+    };
+    const rumor = { ...rumorBase, id: getEventHash(rumorBase) };
+    // Encrypt the seal content to the recipient using the recipient signer itself
+    // (stands in for "attacker holds recipientSk"), then attach a bogus signature.
+    const sealContent = await recipient.nip44Encrypt(victimPk, JSON.stringify(rumor));
+    const sealBase = {
+      pubkey: victimPk,
+      created_at: 1,
+      kind: KIND_SEAL,
+      tags: [] as string[][],
+      content: sealContent,
+    };
+    const forgedSeal = { ...sealBase, id: getEventHash(sealBase), sig: "0".repeat(128) };
+    const otSk = generateSecretKey();
+    const wrap = finalizeEvent(
+      {
+        kind: KIND_GIFT_WRAP,
+        created_at: 1,
+        tags: [["p", recipientPk]],
+        content: nip44Encrypt(otSk, recipientPk, JSON.stringify(forgedSeal)),
+      },
+      otSk,
+    );
+    await expect(signerUnwrap(recipient, wrap as never)).rejects.toThrow(
+      /seal signature is invalid/,
+    );
+  });
+
   it("clamps a future-dated rumor's created_at (PROTO-8)", async () => {
     const sender = LocalSigner.generate();
     const recipient = LocalSigner.generate();

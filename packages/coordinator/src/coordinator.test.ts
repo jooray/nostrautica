@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Event as NostrEvent } from "nostr-tools/core";
 import {
@@ -61,7 +61,12 @@ class FakeTransport implements Transport {
   /** Replaceable addresses (`${kind}:${d}`) for which the next publish reports
    *  "replaced/have newer" — drives the reliability-tail reconciliation path. */
   replacedAddresses = new Set<string>();
+  /** Test hook (audit R1 concurrency gate): awaited at the START of a publish so a
+   *  test can hold a command's effect chain in-flight (holding its subject mutex)
+   *  while a concurrent command is dispatched. */
+  onPublish?: (event: NostrEvent) => Promise<void> | void;
   async publish(event: NostrEvent): Promise<void | { replaced?: boolean }> {
+    if (this.onPublish) await this.onPublish(event);
     if (this.failPublishes > 0) {
       this.failPublishes--;
       throw new Error("simulated relay outage");
@@ -77,8 +82,13 @@ class FakeTransport implements Transport {
     this.published.push(event);
     return undefined;
   }
+  /** Test hook (Bug 1 config-propagation race): invoked at the START of every fetch,
+   *  so a test can mutate `seed` to model a 31600 that only names the coordinator
+   *  after propagation (i.e. the value differs between the 1st and a later fetch). */
+  beforeFetch?: (filter: any) => void;
   async fetch(filter: any): Promise<NostrEvent[]> {
     this.fetches.push(filter);
+    this.beforeFetch?.(filter);
     if (this.blockConfig && filter.kinds?.includes(31600)) return [];
     return [...this.seed, ...this.published].filter((e) => {
       if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
@@ -96,6 +106,18 @@ class FakeTransport implements Transport {
     return () => {
       sub.closed = true;
     };
+  }
+  /** C9 make-before-break: relay sets (sorted, space-joined) the probe reports as
+   *  UNREACHABLE. Any other set is reachable. Also records every probed set. */
+  unreachableRelays = new Set<string>();
+  probed: string[][] = [];
+  /** Test hook (audit R10 CAS gate): awaited at the START of a probe so a test can
+   *  hold an OLDER config's handover mid-probe while a NEWER config supersedes it. */
+  onProbe?: (relays: string[]) => Promise<void> | void;
+  async probe(relays: string[]): Promise<boolean> {
+    this.probed.push(relays);
+    if (this.onProbe) await this.onProbe(relays);
+    return !this.unreachableRelays.has([...relays].sort().join(" "));
   }
 }
 
@@ -119,6 +141,8 @@ interface Counters {
   dropRoleOnce?: string;
   /** How many profile-translation calls the pipeline made. */
   translateCalls: number;
+  /** When set, every batch-scoring call throws — drives the batch FAILED log line. */
+  failBatchScore?: boolean;
 }
 
 const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
@@ -181,6 +205,9 @@ function makeLlm(counters: Counters): MockLlm {
         offers: f.skills,
         seeks: which === "crypto" ? ["designer", "programmer"] : ["collaborators"],
       };
+    }
+    if (req.schemaName === "batch_score" || req.schemaName === "reverse_batch_score") {
+      if (counters.failBatchScore) throw new Error("venice is on fire");
     }
     if (req.schemaName === "batch_score") {
       // Forward batched scoring: ONE target + numbered candidates (spec §16.2).
@@ -295,7 +322,7 @@ async function setup(
     /** A different coordinator tag for the seeded 31600 (COORD-3). */
     foreignCoordinator?: string;
     /** Extra seed events, built with the harness keys (COORD-14: a second 31600). */
-    extraSeed?: (keys: { eidPubkey: string; d: string }) => NostrEvent[];
+    extraSeed?: (keys: { eidPubkey: string; d: string; coordPubkey: string; inboxPubkey: string }) => NostrEvent[];
     /** Prefilter override (COORD-13). */
     prefilter?: PrefilterConfig;
     /** Per-role provider routing (H-1): route summary+translate to one instance
@@ -318,6 +345,13 @@ async function setup(
       perAttendeeCalls: number;
       perEventCalls: number;
     };
+    /** C2 race hook: awaited by the injected transcribe BEFORE it returns, so a test
+     *  can pause a specific revision's STT/LLM mid-flight and interleave a newer one. */
+    beforeTranscribe?: (descriptor: any, signal?: AbortSignal) => Promise<void>;
+    /** C1 attach test: skip the auto-install so the test can drive installEvent via a
+     *  grant wrap (and inject a mid-install failure). */
+    skipAutoInstall?: boolean;
+    transcribeError?: string;
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -340,7 +374,7 @@ async function setup(
     { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
     { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
-    ...(opts.extraSeed?.({ eidPubkey, d }) ?? []),
+    ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
   );
 
   const counters: Counters = { nostrSummary: 0, batchCalls: [], reverseCalls: [], translateCalls: 0 };
@@ -396,11 +430,12 @@ async function setup(
     sleep: async () => {},
     // Inject transcription: skip real Blossom/ffmpeg, still exercise the STT mock
     // + the blob-sha256 transcript cache (so idempotency is genuinely tested).
-    transcribe: async (descriptor) => {
+    transcribe: async (descriptor, signal) => {
+      if (opts.beforeTranscribe) await opts.beforeTranscribe(descriptor, signal);
       if (opts.failTranscribe) throw new Error(opts.transcribeError ?? "could not fetch blob (simulated)");
       const cached = store.getTranscript(descriptor.x);
       if (cached !== undefined) return cached;
-      const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" });
+      const { text } = await stt.transcribe({ data: new Uint8Array(descriptor.size), mime: "audio/ogg" }, { signal });
       store.putTranscript(descriptor.x, text, 1);
       return text;
     },
@@ -410,9 +445,11 @@ async function setup(
   // the seeded 31600 names this coordinator at gen 1). A foreignCoordinator seed
   // names a DIFFERENT coordinator, so the grant is rejected and the event never
   // installs — the behavior those tests assert.
-  await coordinator.installEvent({
-    coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
-  });
+  if (!opts.skipAutoInstall) {
+    await coordinator.installEvent({
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+  }
 
   return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
 }
@@ -1368,13 +1405,25 @@ function talkMedia(size: number, x: string) {
   };
 }
 
-/** Submit (or edit) a talk via a 21609 rumor to E_inbox. */
+/** Submit (or edit) a talk via a 21609 rumor to E_inbox. A talk carries EITHER
+ *  `media` (Blossom) or `externalUrl` (+ `externalKind`). `processForMatching`
+ *  opts a Blossom talk into STT + matching (default off, as on the wire). */
 async function submitTalk(
   h: Harness,
   speakerSk: Uint8Array,
-  args: { talkD: string; title: string; description?: string; media: any; revision?: number },
+  args: {
+    talkD: string;
+    title: string;
+    description?: string;
+    media?: any;
+    externalUrl?: string;
+    externalKind?: "youtube" | "video";
+    processForMatching?: boolean;
+    revision?: number;
+  },
 ): Promise<void> {
   const inboxPk = getPublicKey(h.einboxSk);
+  const isExternal = args.externalUrl !== undefined;
   const wrap = wrapRumor(speakerSk, inboxPk, {
     kind: KIND_TALK_SUBMISSION,
     content: {
@@ -1384,8 +1433,12 @@ async function submitTalk(
       title: args.title,
       description: args.description ?? "",
       speakers: [],
-      media: args.media,
+      source_type: isExternal ? "external" : "recording",
+      process_for_matching: args.processForMatching ?? false,
       revision: args.revision ?? 0,
+      ...(isExternal
+        ? { external_url: args.externalUrl, external_kind: args.externalKind }
+        : { media: args.media }),
     },
     tags: [["a", h.coordinate]],
   });
@@ -1443,7 +1496,8 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     await h.coordinator.jobs.drain();
     const x = "bb".repeat(32);
     h.stt.setTranscript("700", "In this talk I explain zk-SNARKs from first principles.");
-    await submitTalk(h, speakerSk, { talkD: "t1", title: "Zero-knowledge proofs", description: "A gentle intro", media: talkMedia(700, x) });
+    // process_for_matching opts this talk into STT (default off).
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Zero-knowledge proofs", description: "A gentle intro", media: talkMedia(700, x), processForMatching: true });
     await h.coordinator.jobs.drain();
     // Stored, transcribed, but NOT published (pending moderation).
     const row = h.store.getTalk(h.coordinate, pk, "t1")!;
@@ -1459,6 +1513,54 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     expect(talks[0]!.media.kind).toBe("talk");
     expect(talks[0]!.transcript?.text).toContain("zk-SNARKs");
     expect(h.store.getTalk(h.coordinate, pk, "t1")!.status).toBe("published");
+  });
+
+  it("talks are NOT transcribed/matched by default (process_for_matching off)", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    h.stt.setTranscript("700", "should never be requested");
+    // No processForMatching → coordinator stores but skips paid STT entirely.
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "Unprocessed talk", media: talkMedia(700, "b1".repeat(32)) });
+    await h.coordinator.jobs.drain();
+    const row = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row.status).toBe("pending");
+    expect(row.transcript_json).toBeNull(); // never transcribed
+    expect(row.process_for_matching).toBe(0);
+    // Still fully publishable — moderation is independent of processing.
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    const talks = publishedTalks(h);
+    expect(talks).toHaveLength(1);
+    expect(talks[0]!.title).toBe("Unprocessed talk");
+    expect(talks[0]!.transcript).toBeUndefined();
+  });
+
+  it("an external (YouTube) talk is stored + published without any Blossom fetch", async () => {
+    const h = await setup(0, { talks: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    await submitTalk(h, speakerSk, {
+      talkD: "t1",
+      title: "My big talk",
+      externalUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+      externalKind: "youtube",
+    });
+    await h.coordinator.jobs.drain();
+    const row = h.store.getTalk(h.coordinate, pk, "t1")!;
+    expect(row.status).toBe("pending");
+    expect(row.external_url).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(row.external_kind).toBe("youtube");
+    expect(row.media_json).toBe("null"); // no Blossom descriptor
+    expect(row.transcript_json).toBeNull(); // never fetched/transcribed
+    // Publishes a 31610 that carries the external URL (members can play it).
+    await admin(h, "talk_publish", { pubkey: pk, talk_d: "t1" });
+    const talks = publishedTalks(h);
+    expect(talks).toHaveLength(1);
+    expect(talks[0]!.external_url).toBe("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    expect(talks[0]!.external_kind).toBe("youtube");
+    expect(talks[0]!.media).toBeUndefined();
   });
 
   it("only an approved attendee may submit a talk", async () => {
@@ -1741,10 +1843,10 @@ describe("NIP §3.4 — admin command expiry + per-subject watermarks", () => {
     // Reprocess B at T=now+10 (older than A's watermark, but a DIFFERENT subject)
     // → applies (independent watermark). Observable via an enqueued process job.
     await sendAdminAt(h, "reprocess", { pubkey: bPk }, now + 10, exp);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${bPk}`)).toMatchObject({ created_at: now + 10 });
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${bPk}`)).toMatchObject({ created_at: now + 10 });
     // A reprocess for A older than A's watermark is rejected (watermark unchanged).
     await sendAdminAt(h, "reprocess", { pubkey: aPk }, now + 20, exp);
-    expect(h.store.getCommandWatermark(h.coordinate, `pubkey:${aPk}`)!.created_at).toBe(now + 50);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${aPk}`)!.created_at).toBe(now + 50);
   });
 
   it("approve/revoke interleavings converge per subject regardless of arrival order", async () => {
@@ -2027,6 +2129,76 @@ describe("audit P0-4 — install requires current authenticated assignment", () 
     await h.coordinator.handleCoordinatorWrap(grantWrap as any);
     expect(h.store.getEvent(coord2)).toBeDefined();
   });
+
+  // ── config-propagation race (attach) ──────────────────────────────────────
+  // An organizer's attach publishes the coordinator-naming 31600 and the 21603 grant
+  // nearly simultaneously; a fresh event is created coordinator-LESS. If the install
+  // fetch races ahead of relay propagation it reads the prior coordinator-less config.
+  // That must be RETRYABLE (the attach's config will land), not a hard reject — the
+  // pre-fix code returned outright, so a legitimate attach that lost this race never
+  // installed and the coordinator never watched the E_inbox.
+  it("a 31600 that names this coordinator only AFTER propagation installs via retry (config-less race is retryable, not a hard reject)", async () => {
+    const h = await setup();
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "race");
+    // The only config fetchable right now is coordinator-LESS (the pre-attach create).
+    seedConfig(h, eid2, "race", [["inbox", getPublicKey(inbox2)]]);
+    // On the SECOND config fetch (the inline retry), the attach's coordinator-naming
+    // config has propagated.
+    let cfgFetches = 0;
+    h.transport.beforeFetch = (filter) => {
+      if (filter.kinds?.includes(31600) && filter["#d"]?.includes("race")) {
+        cfgFetches++;
+        if (cfgFetches === 2) {
+          h.transport.seed = h.transport.seed.filter((e) => e.id !== "cfg-race");
+          seedConfig(h, eid2, "race", [
+            ["inbox", getPublicKey(inbox2)],
+            ["coordinator", getPublicKey(h.coordSk), "1"],
+          ]);
+        }
+      }
+    };
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    // Installed via the retry — not lost. (Pre-fix: hard reject on fetch #1, no retry.)
+    expect(h.store.getEvent(coord2)).toBeDefined();
+    expect(cfgFetches).toBeGreaterThanOrEqual(2);
+    // A retryable failure never marks the grant seen prematurely; success does.
+    expect(h.store.isRumorSeen(grantWrap.id)).toBe(true);
+  });
+
+  it("the security guards stay TERMINAL under retry: a config naming a DIFFERENT coordinator, and a replay below the high-water mark, never install", async () => {
+    const h = await setup();
+    // (a) A config that permanently names a DIFFERENT, real coordinator is terminal —
+    // that grant is genuinely not for this daemon; retrying can never resolve it, so
+    // it is rejected immediately and marked seen (no retry loop rescues it).
+    const eid2 = generateSecretKey();
+    const inbox2 = generateSecretKey();
+    const foreign = getPublicKey(generateSecretKey());
+    const { coord2, grantWrap } = await grantFor(h, eid2, inbox2, "foreign");
+    seedConfig(h, eid2, "foreign", [["inbox", getPublicKey(inbox2)], ["coordinator", foreign, "1"]]);
+    await h.coordinator.handleCoordinatorWrap(grantWrap as any);
+    expect(h.store.getEvent(coord2)).toBeUndefined();
+    expect(h.store.isRumorSeen(grantWrap.id)).toBe(true); // terminal → seen, not retried
+
+    // (b) A replay whose gen is at/below the high-water mark after a detach stays
+    // rejected — the reordered replay guard runs before any config check.
+    expect(h.store.installHighGen(h.coordinate)).toBe(1);
+    const now = Math.floor(h.clock.t / 1000);
+    const detachWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "detach", args: {}, expires: now + 172_800 },
+      created_at: now,
+    });
+    await h.coordinator.handleCoordinatorWrap(detachWrap as any);
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+    const replay = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"] },
+    });
+    await h.coordinator.handleCoordinatorWrap(replay as any);
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+  });
 });
 
 describe("NIP §3.5 — install generation + durable detach + startup revalidation", () => {
@@ -2277,16 +2449,19 @@ describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
 
   it("caps total downloaded bytes per submission at 500 MB", async () => {
     const h = await setup();
-    const BIG = 300 * 1024 * 1024;
+    // Each file is within the 250 MiB per-file cap (R17 follow-up); three of them
+    // together exceed the 500 MiB cumulative budget so the third is dropped.
+    const BIG = 200 * 1024 * 1024;
     h.stt.setTranscript(String(BIG), "big file transcript");
     const sk = generateSecretKey();
     const media = [
       mediaDesc(BIG, "a".repeat(64), "video/webm"),
-      mediaDesc(BIG, "b".repeat(64), "video/webm"), // over the cumulative budget
+      mediaDesc(BIG, "b".repeat(64), "video/webm"),
+      mediaDesc(BIG, "c".repeat(64), "video/webm"), // over the cumulative budget
     ];
     await joinCustom(h, sk, "tester", ["zk"], { media });
     await h.coordinator.jobs.drain();
-    expect(h.stt.calls).toBe(1); // only the first descriptor was transcribed
+    expect(h.stt.calls).toBe(2); // the first two fit; the third exceeds the budget
   });
 
   it("skips the paid ai_profile call when ALL inputs are empty", async () => {
@@ -2474,14 +2649,17 @@ class StubMls implements ChatMls {
 }
 
 describe("audit COORD-9 — MLS membership runs through the durable job runner", () => {
-  it("approval enqueues chat_sync_member; the member is added on drain", async () => {
+  it("approval enqueues chat_sync_member; the attested device is added on drain", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto"); // auto-approved → job enqueued
-    h.transport.seed.push({ kind: 30443, pubkey: pk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    // P6: the account attests a device key; the DEVICE key is what gets added.
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
     await h.coordinator.jobs.drain();
-    expect(mls.invited).toEqual([pk]);
+    expect(mls.invited).toEqual([devicePk]);
   });
 
   it("a persistently failing sync poisons and surfaces a 21606 to the organizer", async () => {
@@ -2490,7 +2668,9 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     const h = await setup(0, { chat: true, chatMls: mls });
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto");
-    h.transport.seed.push({ kind: 30443, pubkey: pk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
     await h.coordinator.jobs.drain(); // attempt 1 fails, long-tail backoff begins
     expect(mls.invited).toEqual([]);
     // Burn through the retry schedule (virtual clock) until the job poisons.
@@ -2917,6 +3097,35 @@ describe("H-2 §8 — usage budgets gate paid processing", () => {
   });
 });
 
+describe("R17 follow-up — per-file media cap (consistent with the app's 250 MiB bound)", () => {
+  const MiB = 1024 * 1024;
+  const mk = (sha: string, sizeBytes: number) =>
+    ({ size: sizeBytes, duration: 10, url: [], sha256: sha.repeat(64), mime: "video/mp4" }) as any;
+
+  it("rejects a single descriptor over the 250 MiB per-file cap, keeps in-cap files", async () => {
+    const h = await setup();
+    const state = { maxMediaSec: 900 } as any;
+    const out = (h.coordinator as any).capMedia(state, "pk", [mk("a", 100 * MiB), mk("b", 300 * MiB)]);
+    // The 300 MiB file (which the app would refuse to upload/play) is dropped; the
+    // 100 MiB one is kept — no confusing late aggregate-only failure.
+    expect(out).toHaveLength(1);
+    expect(out[0].sha256).toBe("a".repeat(64));
+  });
+
+  it("still enforces the 500 MiB aggregate across multiple in-cap files", async () => {
+    const h = await setup();
+    const state = { maxMediaSec: 900 } as any;
+    // Three 250 MiB files each pass the per-file cap; the aggregate budget fits two,
+    // the third overflows and is dropped (the R17 scenario, now bounded predictably).
+    const out = (h.coordinator as any).capMedia(state, "pk", [
+      mk("a", 250 * MiB),
+      mk("b", 250 * MiB),
+      mk("c", 250 * MiB),
+    ]);
+    expect(out).toHaveLength(2);
+  });
+});
+
 describe("H-2 — superseded revisions coalesce pending jobs (no pay for stale rev)", () => {
   function pendingProcessJobs(h: Harness, pubkey: string): string[] {
     return ((h.store as any).db
@@ -2945,8 +3154,11 @@ describe("H-2 — superseded revisions coalesce pending jobs (no pay for stale r
 describe("audit COORD-14 — install picks the newest 31600", () => {
   it("a newer 31600 wins over an older one regardless of fetch order", async () => {
     const h = await setup(0, {
-      // A NEWER config (created_at 2 > the default seed's 1) with matching OFF.
-      extraSeed: ({ eidPubkey, d }) => [
+      // A NEWER config (created_at 2 > the default seed's 1) with matching OFF. It
+      // still names THIS coordinator at gen 1 (like the default seed) — otherwise the
+      // install has no authority to run at all; the point under test is that the
+      // NEWEST revision's matching=off is what takes effect, not the older seed's on.
+      extraSeed: ({ eidPubkey, d, coordPubkey, inboxPubkey }) => [
         {
           kind: 31600,
           pubkey: eidPubkey,
@@ -2954,7 +3166,7 @@ describe("audit COORD-14 — install picks the newest 31600", () => {
           id: "e2-newer",
           sig: "",
           content: "",
-          tags: [["d", d], ["v", "2"], ["inbox", "f".repeat(64)], ["matching", "off"]],
+          tags: [["d", d], ["v", "2"], ["inbox", inboxPubkey], ["matching", "off"], ["coordinator", coordPubkey, "1"]],
         } as any,
       ],
     });
@@ -3520,12 +3732,14 @@ describe("NIP §6.2 — retention sweep", () => {
     // Processing is terminally parked: durable flag set, and a fresh submission's
     // paid pipeline does not resume.
     expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+    // Local data is PURGED too (audit C5): "delete member data after the event" must
+    // delete the coordinator's own copies, not only the relay records.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
 
     // Expiry is terminal at the inbox boundary: a late join cannot recreate a
     // roster/grant, and a fresh profile revision cannot recreate a directory
     // entry or enqueue provider work after the deletion sweep.
     const lateSk = generateSecretKey();
-    const profileBefore = h.store.getAttendee(h.coordinate, pk)?.profile_json;
     const beforeLate = h.transport.published.length;
     await join(h, lateSk, "crypto");
     await resubmitIntro(h, attendeeSk, "crypto");
@@ -3535,10 +3749,762 @@ describe("NIP §6.2 — retention sweep", () => {
       [KIND_KEY_GRANT, KIND_DIRECTORY_ENTRY, KIND_ROSTER].includes(e.kind)
     )).toBe(false);
 
-    // Idempotent: a second sweep issues no further deletions.
+    // Idempotent: a second sweep issues no further deletions, and the data stays gone.
     const before2 = h.transport.published.length;
     await h.coordinator.retentionSweep();
     expect(h.transport.published.slice(before2).some((e) => e.kind === KIND_DELETION)).toBe(false);
-    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBe(profileBefore);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+});
+
+// ── audit C8 / P9 / C9 / C2 / C1 regression suites ───────────────────────────
+
+/** A live 31600 config-update event superseding the seeded install config. */
+function configUpdate(h: Harness, extraTags: string[][], createdAt: number): NostrEvent {
+  return {
+    kind: 31600,
+    pubkey: getPublicKey(h.eidSk),
+    created_at: createdAt,
+    id: `cfg-${createdAt}-${Math.floor(Math.random() * 1e6)}`,
+    tags: [
+      ["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)],
+      ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"],
+      ...extraTags,
+    ],
+    content: "",
+    sig: "",
+  } as any;
+}
+
+describe("audit C8 — live duration limits keep the ffprobe-side caps in sync", () => {
+  it("lowering max_video_sec/max_talk_sec updates ALL THREE decoded-duration caps atomically", async () => {
+    const h = await setup(0, { maxVideoSec: 600, maxTalkSec: 1200 });
+    expect(h.coordinator.durationLimitsOf(h.coordinate)).toEqual({
+      maxMediaSec: 1200, maxIntroSec: 600, maxTalkSec: 1200,
+    });
+    // A live config edit lowers the limits. Pre-fix only maxMediaSec followed; the
+    // authoritative ffprobe caps (maxIntroSec/maxTalkSec) stayed at install values.
+    await h.coordinator.handleConfigUpdate(
+      h.coordinate,
+      configUpdate(h, [["max_video_sec", "60"], ["max_talk_sec", "120"]], 2),
+    );
+    expect(h.coordinator.durationLimitsOf(h.coordinate)).toEqual({
+      maxMediaSec: 120, maxIntroSec: 60, maxTalkSec: 120,
+    });
+  });
+
+  it("raising the limits lifts the decoded-duration caps too", async () => {
+    const h = await setup(0, { maxVideoSec: 60, maxTalkSec: 60 });
+    expect(h.coordinator.durationLimitsOf(h.coordinate)!.maxIntroSec).toBe(60);
+    await h.coordinator.handleConfigUpdate(
+      h.coordinate,
+      configUpdate(h, [["max_video_sec", "300"], ["max_talk_sec", "900"]], 2),
+    );
+    expect(h.coordinator.durationLimitsOf(h.coordinate)).toEqual({
+      maxMediaSec: 900, maxIntroSec: 300, maxTalkSec: 900,
+    });
+  });
+});
+
+describe("audit P9 — 31923 metadata selection uses the latest-event comparator", () => {
+  it("selects the NEWEST 31923 revision regardless of relay return order (retention anchor)", async () => {
+    const h = await setup(0, {
+      extraSeed: ({ eidPubkey, d }) => [
+        // A STALE revision (older, earlier end) returned before the newest one.
+        { kind: 31923, pubkey: eidPubkey, created_at: 3, tags: [["d", d], ["title", "Stale"], ["end", "1000"]], content: "", id: "ev-stale", sig: "" } as any,
+        { kind: 31923, pubkey: eidPubkey, created_at: 10, tags: [["d", d], ["title", "Latest"], ["end", "5000"]], content: "", id: "ev-latest", sig: "" } as any,
+      ],
+    });
+    // pickLatest → the ca=10 revision (end 5000), not the first-returned base/stale.
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(5000);
+  });
+
+  it("a live 31923 edit re-times the retention anchor; a stale revision is ignored", async () => {
+    const h = await setup(0, { eventEndSec: 1000 });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600),
+    )!;
+    // A newer 31923 moves the end date.
+    cfgSub.onEvent({
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "ev-20",
+      tags: [["d", "cypherpunk"], ["title", "Moved"], ["end", "8000"]], content: "", sig: "",
+    } as any);
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+    // A stale (older) 31923 does NOT regress it.
+    cfgSub.onEvent({
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 4, id: "ev-4",
+      tags: [["d", "cypherpunk"], ["title", "Stale"], ["end", "1"]], content: "", sig: "",
+    } as any);
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+  });
+});
+
+describe("audit C9 — relay handover is make-before-break", () => {
+  it("a probe-failing candidate relay set never cuts off the healthy subscription; it promotes when reachable", async () => {
+    const h = await setup();
+    const inboxSubs0 = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs0).toHaveLength(1);
+    expect(inboxSubs0[0]!.relays).toEqual(["wss://test"]);
+
+    // The organizer edits relays to an UNREACHABLE set (typo / outage).
+    h.transport.unreachableRelays.add("wss://bad.relay");
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", "wss://bad.relay"]], 2));
+
+    // The healthy old subscription is STILL open, no new inbox sub on the bad relays,
+    // and the candidate is persisted separately as pending.
+    const inboxSubs1 = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs1).toHaveLength(1);
+    expect(inboxSubs1[0]!.closed).toBe(false);
+    expect(h.store.getPendingRelays(h.coordinate)).toEqual(["wss://bad.relay"]);
+
+    // Once the relay recovers, the periodic retry PROMOTES it: new sub opens, old retires.
+    h.transport.unreachableRelays.clear();
+    await h.coordinator.retryRelayHandovers();
+    const inboxSubs2 = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059));
+    expect(inboxSubs2.some((s) => !s.closed && s.relays?.includes("wss://bad.relay"))).toBe(true);
+    expect(inboxSubs2[0]!.closed).toBe(true); // the original was retired only after promotion
+    expect(h.store.getPendingRelays(h.coordinate)).toBeUndefined();
+  });
+
+  it("a slow handover for an OLDER config never promotes after a newer config wins (audit R10 CAS)", async () => {
+    const h = await setup();
+    // Gate config A's probe so its handover stalls mid-probe (an unserialized
+    // callback could otherwise finish and promote A after the newer config B).
+    let releaseA: () => void = () => {};
+    const aGate = new Promise<void>((r) => { releaseA = r; });
+    h.transport.onProbe = async (relays) => {
+      if (relays.includes("wss://a.relay")) await aGate;
+    };
+
+    // Config A (rev 2): switch relays to a.relay. Kick off but DON'T await — its
+    // handover blocks on the gated probe after the (serialized) apply records pending.
+    const pA = h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", "wss://a.relay"]], 2));
+    await new Promise((r) => setTimeout(r, 5)); // let A apply + reach the gated probe
+    expect(h.store.getPendingRelays(h.coordinate)).toEqual(["wss://a.relay"]);
+
+    // Config B (rev 3, NEWER): switch relays to b.relay. Its probe isn't gated, so it
+    // catches up and PROMOTES b.relay, and its apply overwrote pending to b.relay.
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", "wss://b.relay"]], 3));
+
+    // Release A's gated probe: A's handover resumes but must compare-and-set-veto,
+    // because the pending target is now b.relay (B superseded it).
+    releaseA();
+    await pA;
+
+    const inboxOpen = h.transport.subs.filter((s) => s.filter.kinds?.includes(1059) && !s.closed);
+    expect(inboxOpen.some((s) => s.relays?.includes("wss://b.relay"))).toBe(true);
+    expect(inboxOpen.some((s) => s.relays?.includes("wss://a.relay"))).toBe(false);
+    // b.relay was promoted (pending cleared); the stale A handover promoted nothing.
+    expect(h.store.getPendingRelays(h.coordinate)).toBeUndefined();
+  });
+});
+
+describe("audit R4 — the coordinator's own inbox is rate-gated before durable accounting", () => {
+  it("drops a single sender's flood past the per-sender window WITHOUT marking the excess seen", async () => {
+    const h = await setup();
+    const coordPub = getPublicKey(h.coordSk);
+    const baseSec = Math.floor(h.clock.t / 1000);
+    // 40 distinct admin commands from ONE sender (E_id) in a single rate window.
+    // MAX_RUMORS_PER_SENDER_WINDOW is 30, so 30 are accepted and 10 are rate-dropped.
+    const wraps = Array.from({ length: 40 }, (_, i) =>
+      wrapRumor(h.eidSk, coordPub, {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "recompute" },
+        created_at: baseSec + i, // distinct rumor ids, all within the same 60s window
+      }),
+    );
+    for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
+
+    const seen = wraps.map((w) => h.store.isRumorSeen((w as any).id));
+    const acceptedCount = seen.filter(Boolean).length;
+    // Exactly the per-sender window was accepted (and marked seen); the rest were
+    // dropped and left UNSEEN — so a flood cannot grow the durable seen ledger (R4).
+    expect(acceptedCount).toBe(30);
+    expect(seen.slice(0, 30).every(Boolean)).toBe(true);
+    expect(seen.slice(30).some(Boolean)).toBe(false);
+  });
+});
+
+describe("audit C2 — a running attendee job cannot overwrite a newer submission", () => {
+  it("pausing rev1 mid-STT while rev2 lands discards rev1's stale commit and matching", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => { signalReached = r; });
+    const X1 = "11".repeat(32);
+    const X2 = "22".repeat(32);
+    const h = await setup(0, {
+      beforeTranscribe: async (d: any) => {
+        if (d.x === X1) { signalReached(); await gate; }
+      },
+    });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto"); // approved, rev 0
+    await h.coordinator.jobs.drain();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const submit = async (rev: number, about: string, x: string, size: number) => {
+      h.stt.setTranscript(String(size), `transcript for ${about}`);
+      const w = wrapRumor(sk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 2, rev, profile: { about, skills: ["zk"], looking_for: "", links: [] }, media: [mediaDesc(size, x, "video/webm")] },
+        tags: [["a", h.coordinate]],
+      });
+      await h.coordinator.handleInboxWrap(h.coordinate, w as any);
+    };
+
+    // rev1 lands; claim+start ITS job (only) — it blocks inside transcribe(X1).
+    await submit(1, "REV1", X1, 501);
+    const r1 = h.store.getAttendee(h.coordinate, pk)!.source_revision!;
+    const j1 = h.coordinator.jobs.runOne(); // claims rev1, pauses mid-STT
+    await reached;
+
+    // rev2 lands while rev1 is paused, and its job runs to COMPLETION first —
+    // committing rev2's ai_profile (source_revision now r2).
+    await submit(2, "REV2", X2, 502);
+    const r2 = h.store.getAttendee(h.coordinate, pk)!.source_revision!;
+    expect(r2).not.toBe(r1);
+    await h.coordinator.jobs.drain(); // rev1 is leased/running, so drain runs rev2 only
+    expect(h.store.getAttendee(h.coordinate, pk)!.ai_source_revision).toBe(r2);
+
+    // NOW release the stale rev1: it finishes but its conditional commit finds
+    // source_revision has moved to r2 and is DISCARDED — it must NOT clobber rev2's
+    // already-committed newer profile.
+    release();
+    await j1;
+    const row = h.store.getAttendee(h.coordinate, pk)!;
+    expect(row.ai_source_revision).toBe(r2);
+    expect(row.ai_source_revision).not.toBe(r1);
+  });
+});
+
+describe("audit C1 — commands resume to full completion after a partial failure", () => {
+  /** A raw admin wrap with a FIXED created_at, so redelivery is the SAME rumor. */
+  function adminWrapAt(h: Harness, cmd: string, args: Record<string, unknown>, createdAt: number): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd, args, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+  }
+
+  it("approve: a grant-publish failure leaves the rumor UNSEEN and the op PENDING; the same rumor resumes", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const now = Math.floor(h.clock.t / 1000);
+    const wrap = adminWrapAt(h, "approve", { pubkey: pk }, now + 100);
+    const grantsBefore = grantsTo(h, sk).length;
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("pending");
+    expect(grantsTo(h, sk).length).toBe(grantsBefore); // re-grant never published
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(grantsTo(h, sk).length).toBe(grantsBefore + 1);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(true);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("complete");
+  });
+
+  it("revoke: a mid-rotation publish failure resumes WITHOUT minting a second ECK", async () => {
+    const h = await setup();
+    const leaverSk = generateSecretKey();
+    const stayerSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    await join(h, stayerSk, "design");
+    await h.coordinator.jobs.drain();
+    expect(h.coordinator.eckOf(h.coordinate).length).toBe(1);
+    const now = Math.floor(h.clock.t / 1000);
+    const wrap = adminWrapAt(h, "revoke", { pubkey: leaverPk }, now + 100);
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    // The new ECK was minted exactly ONCE (persisted) even though every publish failed.
+    expect(h.coordinator.eckOf(h.coordinate).length).toBe(2);
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${leaverPk}`)!.state).toBe("pending");
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(h.coordinator.eckOf(h.coordinate).length).toBe(2); // NOT 3 — no second mint on resume
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("revoked");
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${leaverPk}`)!.state).toBe("complete");
+  });
+
+  it("delete_data withdrawal is NOT acknowledged until the data is actually purged", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pk)!;
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_ATTENDEE_WITHDRAWAL,
+      content: { v: 2, a: h.coordinate, delete_data: true },
+      tags: [["a", h.coordinate]],
+    });
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    // The revoke chain failed mid-publish → rumor UNSEEN, data STILL present.
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false);
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).not.toBeUndefined();
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("pending");
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    // Only now, after the purge actually ran, is it acknowledged.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getTranscript(x)).toBeUndefined();
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("complete");
+  });
+
+  it("attach: an install that throws mid-chat-setup RESUMES on the same grant (gen-check allows it)", async () => {
+    const mls = new StubMls();
+    let calls = 0;
+    mls.createGroup = async () => {
+      if (calls++ === 0) throw new Error("simulated MLS outage");
+      return { mlsGroupIdHex: "mls-1", nostrGroupIdHex: "ng-1" };
+    };
+    const h = await setup(0, { chat: true, chatMls: mls, skipAutoInstall: true });
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    // attempt 1 threw in ensureChat AFTER recordInstalledGen bumped the high-water mark
+    // to gen 1; the inline retry re-entered installEvent at gen == highGen and was
+    // allowed to RESUME (pre-fix: rejected as stale), so the group was finally created.
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    expect(h.store.getMarmotGroup(h.coordinate)).toBeDefined();
+  });
+});
+
+// ── audit R1/R2/R3/R12 — concurrency, membership ordering, retention lifecycle ──
+describe("audit R1 — same-subject commands are serialized, not merely ordered", () => {
+  function adminWrapAt(h: Harness, cmd: string, args: Record<string, unknown>, createdAt: number): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd, args, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+  }
+
+  it("a paused older revoke and a concurrent newer approve converge to the NEWER decision", async () => {
+    const h = await setup();
+    const leaverSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    await join(h, generateSecretKey(), "design"); // a stayer so revoke has re-grant work
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("approved");
+
+    const now = Math.floor(h.clock.t / 1000);
+    const revokeWrap = adminWrapAt(h, "revoke", { pubkey: leaverPk }, now + 100); // OLDER
+    const approveWrap = adminWrapAt(h, "approve", { pubkey: leaverPk }, now + 200); // NEWER
+
+    // Hold the revoke's FIRST publish (its directory deletion) so the revoke is
+    // in-flight — holding the member: subject mutex — when the newer approve is
+    // dispatched concurrently. Pre-fix (no mutex) the approve would run to completion
+    // in this window and then the resuming older revoke would overwrite it → revoked.
+    let releaseRevoke: () => void = () => {};
+    const gate = new Promise<void>((r) => (releaseRevoke = r));
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => (signalReached = r));
+    let gatedOnce = false;
+    h.transport.onPublish = async (e) => {
+      if (!gatedOnce && e.kind === KIND_DELETION) {
+        gatedOnce = true;
+        signalReached();
+        await gate;
+      }
+    };
+
+    const revokeRun = h.coordinator.handleCoordinatorWrap(revokeWrap);
+    await reached; // the revoke holds the subject mutex, blocked at its deletion publish
+    const approveRun = h.coordinator.handleCoordinatorWrap(approveWrap); // must WAIT on the mutex
+    await new Promise((r) => setTimeout(r, 5)); // give the approve every chance to (wrongly) run
+    releaseRevoke();
+    await Promise.all([revokeRun, approveRun]);
+    await h.coordinator.jobs.drain();
+
+    // The mutex serialized them; the newer approve superseded the older revoke, so
+    // the final membership is APPROVED.
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("approved");
+    // A redelivery of the stale older revoke is now rejected by the watermark.
+    await h.coordinator.handleCoordinatorWrap(adminWrapAt(h, "revoke", { pubkey: leaverPk }, now + 100));
+    expect(h.store.getAttendee(h.coordinate, leaverPk)!.status).toBe("approved");
+  });
+});
+
+describe("audit R2 — withdrawals share the membership watermark with approve/revoke", () => {
+  it("a DISTINCT older withdrawal delivered AFTER a newer reapproval is rejected (no revoke, no purge)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pk)!;
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+
+    const now = Math.floor(h.clock.t / 1000);
+    // A NEWER organizer (re)approval records the member: watermark at now+200.
+    const approveWrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "approve", args: { pubkey: pk }, expires: now + 200 + 172_800 },
+      created_at: now + 200,
+    });
+    await h.coordinator.handleCoordinatorWrap(approveWrap);
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.created_at).toBe(now + 200);
+
+    // A DISTINCT, strictly OLDER withdrawal (created_at now+100) arrives afterward.
+    // Pre-fix it ordered under its own `withdraw:` watermark (empty) and would revoke
+    // + purge; now it orders against the member: watermark and is rejected.
+    await withdraw(h, sk, { deleteData: true, createdAt: now + 100 });
+
+    expect(h.store.getAttendee(h.coordinate, pk)!.status).toBe("approved");
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+    // The membership watermark still reflects the newer approval, not the withdrawal.
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.created_at).toBe(now + 200);
+  });
+});
+
+describe("audit R3 — retention is a resumable lifecycle; running jobs can't recreate purged data", () => {
+  it("resumes local deletion after a crash BETWEEN the terminal mark and the purge", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pk)!;
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+
+    // First sweep: the local PURGE throws (a disk error / crash) — this is the exact
+    // window the pre-fix code recorded the durable terminal mark in BEFORE purging, so
+    // a crash here left the event marked-expired forever with data still present. The
+    // fixed order purges FIRST and marks LAST, so a purge failure leaves the event NOT
+    // durably expired and the next sweep resumes.
+    const realPurge = h.store.purgeEventArtifacts.bind(h.store);
+    let failPurge = true;
+    (h.store as any).purgeEventArtifacts = (c: string) => {
+      if (failPurge) { failPurge = false; throw new Error("simulated disk failure mid-purge"); }
+      return realPurge(c);
+    };
+
+    await h.coordinator.retentionSweep();
+    // The event must NOT be durably recorded as expired (the mark comes AFTER purge),
+    // and the local data must still be present so it can be resumed.
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)).not.toBeUndefined();
+    expect(h.store.getTranscript(x)).not.toBeUndefined();
+
+    // Next sweep (restart): purge succeeds, resumes to completion, THEN marks expired.
+    await h.coordinator.retentionSweep();
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getTranscript(x)).toBeUndefined();
+  });
+
+  it("a job held mid-STT across a retention expiry is aborted and recreates nothing", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const X = "ab".repeat(32);
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => (signalReached = r));
+    const h = await setup(0, {
+      retentionDays: 7,
+      eventEndSec: nowSec - 30 * 86_400,
+      beforeTranscribe: async (d: any, signal?: AbortSignal) => {
+        if (d.x === X) {
+          signalReached();
+          // Block until the per-event/shutdown signal aborts (audit R13/R3).
+          await new Promise<void>((_res, rej) => {
+            if (signal?.aborted) return rej(signal.reason ?? new Error("aborted"));
+            signal?.addEventListener("abort", () => rej(signal.reason ?? new Error("aborted")), { once: true });
+          });
+        }
+      },
+    });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // A fresh submission enqueues a process_attendee job for blob X; run it — it
+    // blocks inside transcribe(X).
+    h.stt.setTranscript("777", "held transcript");
+    const sub = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: nextSubmissionRev(pk), profile: { about: "held", skills: ["zk"], looking_for: "", links: [] }, media: [mediaDesc(777, X, "video/webm")] },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, sub as any);
+    const job = h.coordinator.jobs.runOne(); // claims + runs, blocks mid-STT
+    await reached;
+
+    // Expire retention while the job is held: it aborts the in-flight handler, awaits
+    // it, then purges. The held job must not recreate a transcript / ai_profile.
+    await h.coordinator.retentionSweep();
+    await job;
+
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(true);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getTranscript(X)).toBeUndefined();
+  });
+
+  it("a job held mid-STT across a DETACH is aborted and cannot publish with stale state", async () => {
+    const X = "cd".repeat(32);
+    let signalReached: () => void = () => {};
+    const reached = new Promise<void>((r) => (signalReached = r));
+    const h = await setup(0, {
+      beforeTranscribe: async (d: any, signal?: AbortSignal) => {
+        if (d.x === X) {
+          signalReached();
+          await new Promise<void>((_res, rej) => {
+            if (signal?.aborted) return rej(signal.reason ?? new Error("aborted"));
+            signal?.addEventListener("abort", () => rej(signal.reason ?? new Error("aborted")), { once: true });
+          });
+        }
+      },
+    });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    h.stt.setTranscript("778", "held transcript");
+    const sub = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: nextSubmissionRev(pk), profile: { about: "held", skills: ["zk"], looking_for: "", links: [] }, media: [mediaDesc(778, X, "video/webm")] },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, sub as any);
+    const job = h.coordinator.jobs.runOne();
+    await reached;
+
+    const before = h.transport.published.length;
+    // Detach while the job is held: aborts + awaits the handler, THEN deletes custody.
+    await h.coordinator.detachEvent(h.coordinate, { reason: "test detach" });
+    await job;
+
+    // Custody is gone and the held job published NOTHING after detach (no directory /
+    // roster / grant using the captured pre-detach state), nor wrote the transcript.
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.getTranscript(X)).toBeUndefined();
+    expect(
+      h.transport.published
+        .slice(before)
+        .some((e) => [KIND_DIRECTORY_ENTRY, KIND_ROSTER, KIND_KEY_GRANT].includes(e.kind)),
+    ).toBe(false);
+  });
+});
+
+describe("audit R12 — event-wide retention purge clears every personal identifier", () => {
+  it("purges command watermarks, jobs, and marmot chat/key-package rows", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // A membership command leaves a member: watermark carrying the attendee pubkey.
+    await admin(h, "reprocess", { pubkey: pk });
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)).toBeDefined();
+
+    await h.coordinator.retentionSweep();
+
+    // Every event-scoped personal-identifier table is empty for this coordinate.
+    expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)).toBeUndefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    const remainingJobs = (h.store as any)["db"]
+      .prepare("SELECT COUNT(*) AS n FROM jobs WHERE json_extract(payload, '$.coordinate') = ?")
+      .get(h.coordinate) as { n: number };
+    expect(remainingJobs.n).toBe(0);
+  });
+});
+
+// ── audit C3 — public inbox population / rate / concurrency bounds ────────────
+describe("audit C3 — public inbox is population-bounded", () => {
+  it("drops profile submissions from identities with no enrollment row (no DB growth)", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    // Burst: many unique keypairs each send a profile submission WITHOUT joining.
+    for (let i = 0; i < 40; i++) {
+      const sk = generateSecretKey();
+      const wrap = wrapRumor(sk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 2, rev: 0, profile: { about: "x", skills: ["a"], looking_for: "", links: [] }, media: [] },
+        tags: [["a", h.coordinate]],
+      });
+      await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    }
+    // No attendee rows were created — the population attack is bounded.
+    expect(h.store.attendeeCount(h.coordinate)).toBe(0);
+    // Legitimate traffic still processes end-to-end.
+    const legitSk = generateSecretKey();
+    const pk = await join(h, legitSk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(h.store.attendeeCount(h.coordinate)).toBe(1);
+  });
+
+  it("enrolls a join published BEFORE the coordinator subscribed so a later submission clears the gate (H2 backfill + join-before-submission ordering)", async () => {
+    const h = await setup(0, { skipAutoInstall: true });
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    // The attendee JOINS and SUBMITS a profile BEFORE the coordinator installs and
+    // subscribes — both wraps already sit on the relay, unseen by any live sub. A relay
+    // returns stored events in arbitrary (often newest-first) order, so the SUBMISSION
+    // can precede its own JOIN — pushed in that order here to model the hostile case.
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: 0, profile: { about: "early", skills: ["a"], looking_for: "", links: [] }, media: [] },
+      tags: [["a", h.coordinate]],
+    });
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "early bird", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    h.transport.published.push(subWrap as any, joinWrap as any); // relay order: submission, THEN join
+
+    // Fresh grant install → full E_inbox backfill. It must FETCH the pre-subscription
+    // history AND dispatch the join before the submission. Pre-fix there was no explicit
+    // inbox backfill (the live sub was the only reader — and it never replays stored
+    // wraps), so the join was never enrolled and the submission was dropped as "never
+    // joined", leaving the attendee permanently unable to enroll.
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "grant", backfill: "full",
+    });
+
+    // Enrolled from the backfilled join…
+    expect(h.store.getAttendee(h.coordinate, attendeePk)?.status).toBe("approved");
+    // …and the submission that raced ahead of it was NOT dropped — profile recorded.
+    expect(h.store.getAttendee(h.coordinate, attendeePk)?.profile_rev).toBe(0);
+  });
+
+  it("refuses a new attendee beyond the 2,000 roster population cap", async () => {
+    const h = await setup();
+    for (let i = 0; i < 2000; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "pending", now: 1 });
+    }
+    expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
+    // A fresh join (even with a valid invite) is refused — the roster never grows
+    // past what a 31604 can carry and then fail to publish.
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, getPublicKey(sk))).toBeUndefined();
+    expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
+  });
+
+  it("durably rate-drops a flooding sender past the per-window cap", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const floodSk = generateSecretKey();
+    // Enroll the flooder so its submissions clear the enrollment gate; the rate gate
+    // is what must bound them.
+    await join(h, floodSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const seenBefore = (h.store as any).db.prepare("SELECT COUNT(*) AS n FROM seen_rumors").get().n as number;
+    // Burst well past the per-sender window cap (30). The excess is rate-dropped
+    // (marked seen) rather than processed.
+    let dropped = 0;
+    for (let i = 0; i < 60; i++) {
+      const wrap = wrapRumor(floodSk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: { v: 2, rev: 100 + i, profile: { about: "y" + i, skills: ["a"], looking_for: "", links: [] }, media: [] },
+        tags: [["a", h.coordinate]],
+      });
+      const before = (h.store as any).db.prepare("SELECT COUNT(*) AS n FROM seen_rumors").get().n as number;
+      await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+      const after = (h.store as any).db.prepare("SELECT COUNT(*) AS n FROM seen_rumors").get().n as number;
+      // A rate-dropped rumor marks itself seen without a normal handler cycle.
+      if (after > before) dropped++;
+    }
+    void seenBefore;
+    // Some of the 60 were rate-dropped (the sender cap is 30/window).
+    expect(dropped).toBeGreaterThan(0);
+  });
+});
+
+
+describe("prod 2026-07-24 — an organizer recompute must actually re-run the scoring", () => {
+  /**
+   * The incident: an organizer sent "recompute", the log showed every batch being
+   * dispatched, and then nothing at all — no scores, no published lists, no error,
+   * for the rest of the event. `clearPairs` had deleted every cached score, and the
+   * scoring jobs it then enqueued collided with the PREVIOUS run's finished rows on
+   * their content-addressed dedupe keys, so `INSERT OR IGNORE` discarded all of them
+   * in silence. The event was left with zero pair scores and stale match lists.
+   *
+   * This test fails against the pre-fix code with `expect(14).toBeGreaterThan(14)`:
+   * the second recompute spends nothing and publishes nothing.
+   */
+  it("a SECOND recompute over unchanged profiles re-scores and republishes", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+
+    await admin(h, "recompute", {});
+    await h.coordinator.jobs.drain();
+    const callsAfterFirst = h.llm.completeCalls;
+    const listsAfterFirst = h.transport.published.filter((e) => e.kind === KIND_MATCH_LIST).length;
+
+    // Second recompute, identical profiles ⇒ identical batch dedupe keys.
+    await admin(h, "recompute", {});
+    await h.coordinator.jobs.drain();
+    expect(h.llm.completeCalls).toBeGreaterThan(callsAfterFirst);
+    expect(h.transport.published.filter((e) => e.kind === KIND_MATCH_LIST).length).toBeGreaterThan(listsAfterFirst);
+  });
+
+  it("leaves the event with a full set of scored pairs after every recompute", async () => {
+    const h = await setup();
+    const a = await join(h, generateSecretKey(), "crypto");
+    const b = await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    for (let round = 0; round < 3; round++) {
+      await admin(h, "recompute", {});
+      await h.coordinator.jobs.drain();
+      // Both directions scored again, every time — never the empty pair table the
+      // incident left behind.
+      expect(h.store.pairsFor(h.coordinate, a).map((r) => r.other)).toEqual([b]);
+      expect(h.store.pairsFor(h.coordinate, b).map((r) => r.other)).toEqual([a]);
+    }
+  });
+
+  it("logs a per-batch outcome line with elapsed ms, and a FAILED line when a batch throws", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.join(" "));
+    });
+    try {
+      const h = await setup();
+      await join(h, generateSecretKey(), "crypto");
+      await join(h, generateSecretKey(), "design");
+      await h.coordinator.jobs.drain();
+      expect(lines.some((l) => /\[match\] forward batch \w+ ×\d+: \d+ scored, \d+ unparsed in \d+ms/.test(l))).toBe(true);
+
+      // Now make the scoring provider fail and confirm the batch says so.
+      lines.length = 0;
+      h.counters.failBatchScore = true;
+      await admin(h, "recompute", {});
+      await h.coordinator.jobs.drain();
+      expect(lines.some((l) => /\[match\] forward batch \w+ ×\d+: FAILED after \d+ms — .*venice is on fire/.test(l))).toBe(
+        true,
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

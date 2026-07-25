@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { encryptMedia } from "./media.js";
 import {
+  talkSubmissionContentSchema,
+  talkContentSchema,
   mediaDescriptorSchema,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
@@ -140,6 +143,27 @@ describe("every §7 payload round-trips through JSON", () => {
         v: 2, a: "31923:" + hex + ":ev", gen: 0, inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
       }),
     ).toThrow();
+  });
+
+  it("21603/21602 grants reject a non-31923 coordinate `a` (audit R18)", () => {
+    // An alias kind against the same author/identifier would open a divergent
+    // capacity/accounting namespace — the schema now rejects it at the boundary.
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "1:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
+      }),
+    ).toThrow();
+    expect(() =>
+      keyGrantContentSchema.parse({
+        v: 2, a: "31600:" + hex + ":ev", role: "attendee", eck: [{ id: 1, key: b64_32 }], granted_by: hex,
+      }),
+    ).toThrow();
+    // The canonical 31923 coordinate is still accepted.
+    expect(() =>
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [{ id: 1, key: b64_32 }], config_relays: [],
+      }),
+    ).not.toThrow();
   });
 
   it("21604 admin command", () =>
@@ -1156,5 +1180,96 @@ describe("21608 correction overrides are bounded (NIP §8, v2)", () => {
       },
     });
     expect(ok.overrides?.skills).toHaveLength(MAX_SKILLS);
+  });
+});
+
+describe("talk sources: recording/upload (Blossom) vs external URL (NIP §8/§11, v2)", () => {
+  async function talkMedia() {
+    const { descriptor } = await encryptMedia({
+      kind: "talk",
+      data: crypto.getRandomValues(new Uint8Array(4096)),
+      mime: "video/webm",
+      duration: 120,
+      urls: ["https://blossom.example/talk.bin"],
+    });
+    return descriptor;
+  }
+  const base = { v: 2 as const, a: "31600:abcd:my-event", talk_d: "keynote", title: "Keynote" };
+
+  it("accepts a Blossom-media talk and defaults process_for_matching to false", async () => {
+    const parsed = talkSubmissionContentSchema.parse({ ...base, media: await talkMedia() });
+    expect(parsed.process_for_matching).toBe(false);
+    expect(parsed.external_url).toBeUndefined();
+  });
+
+  it("accepts an external YouTube talk with no media", () => {
+    const parsed = talkSubmissionContentSchema.parse({
+      ...base,
+      external_url: "https://www.youtube.com/watch?v=abc123",
+      external_kind: "youtube",
+      source_type: "external",
+    });
+    expect(parsed.external_kind).toBe("youtube");
+    expect(parsed.media).toBeUndefined();
+  });
+
+  it("accepts an external direct-mp4 talk", () => {
+    const parsed = talkSubmissionContentSchema.parse({
+      ...base,
+      external_url: "https://cdn.example/talk.mp4",
+      external_kind: "video",
+      source_type: "external",
+    });
+    expect(parsed.external_kind).toBe("video");
+  });
+
+  it("rejects a talk with NEITHER media nor external_url", () => {
+    expect(() => talkSubmissionContentSchema.parse({ ...base })).toThrow();
+  });
+
+  it("rejects a talk with BOTH media and external_url", async () => {
+    const media = await talkMedia();
+    expect(() =>
+      talkSubmissionContentSchema.parse({
+        ...base,
+        media,
+        external_url: "https://cdn.example/talk.mp4",
+        external_kind: "video",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects an external_url without external_kind", () => {
+    expect(() =>
+      talkSubmissionContentSchema.parse({ ...base, external_url: "https://cdn.example/talk.mp4" }),
+    ).toThrow();
+  });
+
+  it("rejects a non-https external_url", () => {
+    expect(() =>
+      talkSubmissionContentSchema.parse({
+        ...base,
+        external_url: "http://cdn.example/talk.mp4",
+        external_kind: "video",
+      }),
+    ).toThrow();
+  });
+
+  it("published talk content (31610) accepts an external URL too", () => {
+    const parsed = talkContentSchema.parse({
+      v: 2,
+      pubkey: "a".repeat(64),
+      talk_d: "keynote",
+      title: "Keynote",
+      external_url: "https://www.youtube.com/watch?v=abc123",
+      external_kind: "youtube",
+      source_type: "external",
+      lang: "en",
+      revision: 0,
+      status: "published",
+      published_at: 1_800_000_000,
+    });
+    expect(parsed.media).toBeUndefined();
+    expect(parsed.external_url).toContain("youtube");
   });
 });

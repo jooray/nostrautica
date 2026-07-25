@@ -1,0 +1,119 @@
+name: Release gate
+
+# The single supported release gate (audit R15). Runs the machine-checkable
+# guardrails, the unit suite, the SUPPORTED e2e path (the orchestrator, not a
+# bespoke Playwright invocation), the docs build + link tests, and a clean-context
+# coordinator Docker build — the same things docs/DEPLOYMENT.md's release
+# verification requires, enforced in CI so they can't silently rot.
+#
+# Reusable so both push/PR CI (.github/workflows/ci.yml) and tagged deploy
+# (.github/workflows/deploy.yml) run the IDENTICAL gate. Every third-party action
+# is pinned to a commit SHA (audit R15): a moving major tag can't swap the code
+# under us. The trailing `# vX.Y.Z` comment records which release each SHA is.
+on:
+  workflow_call:
+
+jobs:
+  # Guardrail (audit Q14): fail on inconsistent Node majors or mutable infra tags,
+  # so runtime/image declarations can't silently drift apart again.
+  pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Assert one Node major and no mutable infrastructure tags
+        run: node .github/scripts/check-pins.mjs
+
+  build:
+    runs-on: ubuntu-latest
+    needs: pins
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @nostrautica/protocol build
+      - run: pnpm check
+      - run: pnpm --filter @nostrautica/app build
+      # High-severity dependency advisories fail the gate (audit R16 keeps this in CI).
+      - run: pnpm audit --audit-level high
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The orchestrator builds the app/coordinator itself, but it imports from the
+      # protocol package's dist — build that first.
+      - run: pnpm --filter @nostrautica/protocol build
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: playwright-${{ runner.os }}-
+      # All three engines: the smoke tier runs chromium+firefox+webkit (audit U18),
+      # the relay/chat tiers run chromium. `--with-deps` installs the system libs.
+      - run: pnpm --filter @nostrautica/e2e exec playwright install --with-deps chromium firefox webkit
+      # The SUPPORTED path (audit R15). The orchestrator stands up relay + Blossom +
+      # HTTPS/WSS proxies + the real Marmot coordinator double, sets every env marker
+      # the specs gate on (NOSTRAUTICA_E2E_RELAY, ..._COORDINATOR_NPUB), and FAILS
+      # LOUDLY if any piece is unhealthy — chat scenarios can't silently skip.
+      #   smoke : chromium+firefox+webkit, static-load smoke specs (engine coverage).
+      #   full  : chromium, smoke+integration+chat specs (the real relay/media/chat loop).
+      - run: pnpm e2e:smoke
+      - run: pnpm e2e:full
+
+  docs:
+    runs-on: ubuntu-latest
+    needs: pins
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Docs generator path handling + internal link/anchor checks (audit O6/O7).
+      - run: node --test scripts/build-docs.test.mjs
+      # Full site build: emits every page and fails on a broken internal link/anchor.
+      - run: node scripts/build-docs.mjs
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: pins
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Clean-context coordinator image build (audit O1). `git archive` strips the
+      # working tree AND `.git`, proving the Dockerfile resolves everything it needs
+      # from committed sources alone — the exact release-verification build in
+      # docs/DEPLOYMENT.md. Provenance args are passed from git so the image carries
+      # a real release id/SHA (audit R23) rather than `gitSha: unknown`.
+      - name: Clean-context coordinator Docker build
+        run: |
+          set -euo pipefail
+          rel="$(git describe --tags --always --dirty)"
+          sha="$(git rev-parse HEAD)"
+          ts="$(git show -s --format=%cI HEAD)"
+          rm -rf /tmp/cc && mkdir -p /tmp/cc
+          git archive HEAD | tar -x -C /tmp/cc
+          docker build -f docker/coordinator.Dockerfile \
+            --build-arg RELEASE_ID="$rel" \
+            --build-arg GIT_SHA="$sha" \
+            --build-arg BUILD_TIMESTAMP="$ts" \
+            -t nostrautica-coordinator:ci /tmp/cc

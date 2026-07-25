@@ -17,8 +17,10 @@ announcements, the latest show up here too.
 
 Once you're in an event, the bar along the bottom is all about *this* event:
 **Overview** (where you are now), **People**, **Matches**, **Updates**, and
-**More** (your account, settings, other events). A small header at the top always
-tells you which event you're in and whether you're a visitor, waiting, or in.
+**More** (your account, settings, other events). Two more tabs appear only when the
+organizer has switched those features on: **Talks** (§4.5) and **Chat** (§6.5) — if
+you don't see them, this event simply doesn't use them. A small header at the top
+always tells you which event you're in and whether you're a visitor, waiting, or in.
 
 ![Event overview](images/participant/02-event-overview-light.png)
 
@@ -77,10 +79,14 @@ guessing why matches haven't appeared yet: the list tells you.
 
 Further down the same Overview page, once you're approved, there's a
 **Download for offline** card. Tap it and the app pre-fetches people, matches,
-and talks so they're browsable even with no signal — handy in a packed room
-where everyone's phone is fighting over the same weak connection. It doesn't
+and talks *and* loads the screens that show them (People, Matches, Talks, a talk's
+page, Record, My profile, Updates) so they're all browsable even with no signal —
+handy in a packed room where everyone's phone is fighting over the same weak
+connection. Earlier versions fetched the data but could still fail to *open* a
+screen like Talks offline; now the screens come down with it. It still doesn't
 pre-download the videos and audio themselves (just everything else), and you
-can tap **Update offline copy** any time to refresh it.
+can tap **Update offline copy** any time to refresh it. If a piece couldn't be
+fetched, the card says so rather than pretending it's complete.
 
 ### Save your key (30 seconds — actually do it)
 
@@ -127,10 +133,13 @@ outside this event's attendees can ever see the intro itself.
 ![Recording your intro — video, audio, and text modes](images/participant/09-record-light.png)
 
 The app checks for new versions of itself in the background and updates
-automatically — but never mid-recording or while you've got a draft intro
-typed and unsent. It waits until you're done and the field is empty or
-submitted before it ever reloads, so an update landing at the wrong moment
-can't cost you a take.
+automatically — but never at a moment that would cost you work. It holds the
+update back while you're recording, while you have a finished take you haven't
+submitted yet, while a file you picked or a talk URL you pasted is still unsent,
+and while you've got a draft intro typed. It waits until you've submitted or
+discarded before it reloads, so an update landing at the wrong moment can't lose a
+take. (It does this by *deferring* the reload — your recording isn't written to
+disk, so don't leave a finished-but-unsent take sitting for days; submit it.)
 
 **Already recorded one for a different event?** If you have, this screen
 shows a **reuse gallery** above the recorder — every video, audio, or text
@@ -211,15 +220,33 @@ Nostr mute, so it carries to other Nostr apps too):
 Some events let attendees submit short prerecorded talks instead of — or ahead
 of — meeting in person. If it's on for your event, a **Talks** tab appears in
 the bottom bar. Tap **Submit a talk**, give it a title and a short description,
-then record or write it exactly like your intro (§3). It goes to the organizer
-to publish before it's visible to anyone, so don't expect it to show up
-instantly.
+then choose how to provide the video:
+
+- **Record** it in the browser (like your intro, §3),
+- **Upload a file** you already have, or
+- **Paste a URL** — an unlisted **YouTube** link or a direct **.mp4** link. This
+  is the way to go for a talk too large to upload; the video stays wherever you
+  host it and only the *link* is encrypted to the event.
+
+![Submitting a talk — pick a video source and, optionally, opt in to matching](images/participant/27-talks-submit-light.png)
+
+There's also a **"Process this talk for matching?"** checkbox, off by default:
+leave it off and your talk is simply published for people to watch; tick it and
+the coordinator will also transcribe it and use it to sharpen your matches.
+(Pasted-URL talks are never processed — they're watch-only.) Either way the talk
+goes to the organizer to publish before it's visible to anyone, so don't expect
+it to show up instantly.
+
+Pasting a link shows a quick confirmation once the app recognizes it:
+
+![The video-URL field, with "Detected: YouTube video"](images/participant/27b-talks-url-light.png)
 
 ![The Talks list](images/participant/26-talks-empty-light.png)
 
-Watching a talk remembers where you left off, so you can close the app and
-pick it up later, and — like your own intro — a transcript is available if the
-speaker recorded rather than wrote it.
+Watching a talk remembers where you left off, so you can close the app and pick
+it up later, and the player has a **speed control** (1×/1.5×/2×) for getting
+through a long talk faster. A transcript is available when the speaker opted
+their talk into processing.
 
 ## 5. Your matches
 
@@ -352,11 +379,15 @@ One more thing: **More → Settings** has a dark mode and a language switch
 ## If you need to leave
 
 Joined the wrong event, or just changed your mind? Open the event, scroll to
-the bottom, and tap **Leave event**. Confirm, and your directory entry,
-matches, and intro media are all removed — the same clean break as an
-organizer revoking you, except you did it yourself and nobody has to approve
-it. You can rejoin later; it's treated as a brand-new join request, not a
-resurrection of the old one.
+the bottom, and tap **Leave event**. Confirm, and the app **sends a withdrawal
+request** — it doesn't claim you've instantly vanished, because it can't. Removing
+your directory entry, rotating the event key, and deleting your intro media all
+happen on the coordinator's (or organizer's) side once they receive the request, so
+the screen shows a pending state rather than pretending it's already done. If you're
+offline when you tap it, the request is queued and the app tells you plainly you
+haven't left yet — it'll send when you reconnect. Once it's acknowledged you're out;
+you can rejoin later, treated as a brand-new join request, not a resurrection of the
+old one.
 
 ## Privacy, in one paragraph
 

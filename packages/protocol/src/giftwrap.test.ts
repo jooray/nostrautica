@@ -4,6 +4,8 @@ import { nip44Encrypt } from "./crypto.js";
 import {
   wrapRumor,
   unwrapRumor,
+  unwrapRumorEnvelope,
+  rumorEffectiveCreatedAt,
   rumorPayload,
   giftwrapSince,
   RUMOR_MAX_CLOCK_SKEW_SEC,
@@ -198,6 +200,172 @@ describe("unwrap boundary validation (PROTO-2)", () => {
   });
 });
 
+/** Wrap an arbitrary (possibly unsigned/forged) seal object to `recipientPk`. */
+function wrapSealObject(recipientPk: string, sealObj: unknown) {
+  const otSk = generateSecretKey();
+  return finalizeEvent(
+    {
+      kind: KIND_GIFT_WRAP,
+      created_at: 1,
+      tags: [["p", recipientPk]],
+      content: nip44Encrypt(otSk, recipientPk, JSON.stringify(sealObj)),
+    },
+    otSk,
+  );
+}
+
+describe("seal signature verification (P1)", () => {
+  // The core forgery (audit "missing test #1"): the attacker holds ONLY the
+  // recipient secret and a victim's PUBLIC key. Because ECDH(recipientSk, victimPk)
+  // == ECDH(victimSk, recipientPk), they can produce a seal.content that decrypts
+  // cleanly under the recipient key while claiming the victim as author — but they
+  // cannot sign a kind-13 as the victim. Every unwrap path must reject it.
+  it("rejects a validly-encrypted seal that lacks a valid signature (forged author)", () => {
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    const victimPk = getPublicKey(generateSecretKey()); // no victim secret used
+
+    const forgedRumorBase = {
+      pubkey: victimPk, // lie: attributes the action to the victim
+      created_at: 1,
+      kind: KIND_JOIN_REQUEST,
+      tags: [] as string[][],
+      content: JSON.stringify({ v: 2, name: "mallory" }),
+    };
+    const forgedRumor = { ...forgedRumorBase, id: getEventHash(forgedRumorBase) };
+    // Encrypt the seal content with the RECIPIENT secret under the victim pubkey —
+    // the whole point: NIP-44 decryption succeeds, only the signature check saves us.
+    const sealContent = nip44Encrypt(recipientSk, victimPk, JSON.stringify(forgedRumor));
+
+    // (a) signature absent entirely (valid id, so the sig check is the one to fire)
+    const unsigned = {
+      pubkey: victimPk,
+      created_at: 1,
+      kind: KIND_SEAL,
+      tags: [] as string[][],
+      content: sealContent,
+    };
+    expect(() =>
+      unwrapRumor(
+        wrapSealObject(recipientPk, {
+          ...unsigned,
+          id: getEventHash(unsigned as any),
+        }) as any,
+        recipientSk,
+      ),
+    ).toThrow(/seal sig is not/);
+
+    // (b) signature present but bogus (well-formed hex, does not verify)
+    const bogus = {
+      pubkey: victimPk,
+      created_at: 1,
+      kind: KIND_SEAL,
+      tags: [] as string[][],
+      content: sealContent,
+    };
+    const bogusSealed = {
+      ...bogus,
+      id: getEventHash(bogus as any),
+      sig: "0".repeat(128),
+    };
+    expect(() =>
+      unwrapRumor(wrapSealObject(recipientPk, bogusSealed) as any, recipientSk),
+    ).toThrow(/seal signature is invalid/);
+  });
+
+  it("rejects a seal whose id was tampered after signing", () => {
+    const attackerSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    const rumorBase = {
+      pubkey: getPublicKey(attackerSk),
+      created_at: 1,
+      kind: KIND_JOIN_REQUEST,
+      tags: [] as string[][],
+      content: JSON.stringify({ v: 2, name: "x" }),
+    };
+    const rumor = { ...rumorBase, id: getEventHash(rumorBase) };
+    const seal = finalizeEvent(
+      {
+        kind: KIND_SEAL,
+        created_at: 1,
+        tags: [],
+        content: nip44Encrypt(attackerSk, recipientPk, JSON.stringify(rumor)),
+      },
+      attackerSk,
+    );
+    const tampered = { ...seal, id: "f".repeat(64) }; // still hex, no longer the hash
+    expect(() =>
+      unwrapRumor(wrapSealObject(recipientPk, tampered) as any, recipientSk),
+    ).toThrow(/seal signature is invalid/);
+  });
+
+  it("rejects a seal with non-empty tags (NIP-59 requires empty)", () => {
+    const attackerSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    // A fully valid signature over a seal that carries tags — the empty-tags rule
+    // must reject it before the (valid) signature is honored.
+    const seal = finalizeEvent(
+      {
+        kind: KIND_SEAL,
+        created_at: 1,
+        tags: [["p", recipientPk]],
+        content: nip44Encrypt(attackerSk, recipientPk, JSON.stringify({ x: 1 })),
+      },
+      attackerSk,
+    );
+    expect(() =>
+      unwrapRumor(wrapSealObject(recipientPk, seal) as any, recipientSk),
+    ).toThrow(/tags must be empty/);
+  });
+
+  it("rejects an inner event whose kind is not 13", () => {
+    const attackerSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    const notSeal = finalizeEvent(
+      {
+        kind: KIND_SEAL + 1,
+        created_at: 1,
+        tags: [],
+        content: nip44Encrypt(attackerSk, recipientPk, JSON.stringify({ x: 1 })),
+      },
+      attackerSk,
+    );
+    expect(() =>
+      unwrapRumor(wrapSealObject(recipientPk, notSeal) as any, recipientSk),
+    ).toThrow(/not a seal/);
+  });
+
+  it("rejects a gift wrap whose outer signature is invalid", () => {
+    const sender = generateSecretKey();
+    const inboxSk = generateSecretKey();
+    const inboxPk = getPublicKey(inboxSk);
+    const wrap = wrapRumor(sender, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "x" },
+    });
+    const tampered = { ...wrap, sig: "0".repeat(128) };
+    expect(() => unwrapRumor(tampered as any, inboxSk)).toThrow(
+      /gift wrap signature is invalid/,
+    );
+  });
+
+  it("still round-trips a legitimately signed seal", () => {
+    const sender = generateSecretKey();
+    const inboxSk = generateSecretKey();
+    const inboxPk = getPublicKey(inboxSk);
+    const wrap = wrapRumor(sender, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "legit" },
+    });
+    const rumor = unwrapRumor(wrap, inboxSk);
+    expect(rumor.pubkey).toBe(getPublicKey(sender));
+    expect(joinRequestContentSchema.parse(rumorPayload(rumor)).name).toBe("legit");
+  });
+});
+
 describe("rumor created_at clamping (PROTO-8)", () => {
   it("clamps a future-dated rumor to now + RUMOR_MAX_CLOCK_SKEW_SEC", () => {
     const inboxSk = generateSecretKey();
@@ -226,5 +394,50 @@ describe("rumor created_at clamping (PROTO-8)", () => {
       });
       expect(unwrapRumor(wrap, inboxSk).created_at).toBe(ts);
     }
+  });
+});
+
+describe("unwrap envelope preserves authenticated fields (audit R19)", () => {
+  it("returns the untouched rumor (created_at hashes to id) + a separate effectiveCreatedAt", () => {
+    const inboxSk = generateSecretKey();
+    const sender = generateSecretKey();
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 2 * 86400; // 2 days ahead
+    const wrap = wrapRumor(sender, getPublicKey(inboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "time traveler" },
+      created_at: future,
+    });
+    const { rumor, effectiveCreatedAt } = unwrapRumorEnvelope(wrap, inboxSk);
+    // The rumor is AUTHENTICATED and UNMUTATED: created_at is exactly what was
+    // signed, so recomputing its id over its own fields still matches (the R19 fix:
+    // the clamp no longer breaks id integrity).
+    expect(rumor.created_at).toBe(future);
+    expect(rumor.id).toBe(
+      getEventHash({
+        pubkey: rumor.pubkey,
+        created_at: rumor.created_at,
+        kind: rumor.kind,
+        tags: rumor.tags,
+        content: rumor.content,
+      }),
+    );
+    // effectiveCreatedAt is the clamped ordering value, separate from the rumor.
+    expect(effectiveCreatedAt).toBeLessThanOrEqual(
+      Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC,
+    );
+    expect(effectiveCreatedAt).toBeLessThan(future);
+    // The backward-compat unwrapRumor still returns the clamped created_at (app path).
+    expect(unwrapRumor(wrap, inboxSk).created_at).toBe(effectiveCreatedAt);
+  });
+
+  it("rumorEffectiveCreatedAt clamps only future timestamps", () => {
+    const now = 1_000_000;
+    expect(rumorEffectiveCreatedAt(now - 100, now)).toBe(now - 100);
+    expect(rumorEffectiveCreatedAt(now, now)).toBe(now);
+    expect(rumorEffectiveCreatedAt(now + RUMOR_MAX_CLOCK_SKEW_SEC - 1, now)).toBe(
+      now + RUMOR_MAX_CLOCK_SKEW_SEC - 1,
+    );
+    expect(rumorEffectiveCreatedAt(now + 10 * 86400, now)).toBe(now + RUMOR_MAX_CLOCK_SKEW_SEC);
   });
 });

@@ -25,7 +25,26 @@ import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
 import type { AppSigner } from "./types.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
-/** Serializable NIP-46 session for persistence across refreshes. */
+/**
+ * Serializable NIP-46 session for persistence across refreshes.
+ *
+ * SECURITY (audit U17): this is a BEARER CAPABILITY, not a secret vault. The
+ * `clientSkHex` (our client key) plus the bunker `secret` together let anyone
+ * holding this blob speak to the remote signer AS this app connection until the
+ * user disconnects it in their signer — so it is not meaningfully protected from
+ * a same-origin script compromise (an XSS that runs in this origin can read
+ * IndexedDB directly, and could equally proxy the live signer). We therefore do
+ * NOT pretend IndexedDB is secret storage; instead we (1) label it plainly here,
+ * (2) never expose the account's actual private key (the remote signer holds
+ * that — this app can only ask it to sign), and (3) clear this capability
+ * predictably: `clearKeystore()` on every logout path (see session.logout) and
+ * on a detected bunker identity swap (Nip46IdentityMismatchError). We did not
+ * wrap it under a WebCrypto non-extractable key: it would only defend against an
+ * offline IndexedDB dump (not the dominant same-origin-script threat) while
+ * adding a decrypt round-trip to the delicate boot-time session restore — a poor
+ * trade for the marginal gain. Users who want the capability gone can disconnect
+ * in the signer or log out. See docs/ENCRYPTION-AND-PRIVACY.md for the disclosure.
+ */
 export interface Nip46Session {
   clientSkHex: string;
   bunker: { pubkey: string; relays: string[]; secret?: string };

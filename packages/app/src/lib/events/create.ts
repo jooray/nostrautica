@@ -27,7 +27,7 @@ import {
   type EventKeysBackup,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { saveEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
@@ -66,6 +66,49 @@ export interface CreatedEvent {
   /** The parsed config as published — lets callers act on the event (e.g.
    *  organizer self-enrollment) without a relay round-trip. */
   config: EventConfig;
+  /** Aggregate publication outcome across the four create events (R9): `queued`
+   *  if any only reached the durable outbox (venue Wi-Fi with WSS blocked), so
+   *  the UI never tells the organizer the event is live when it isn't. */
+  outcome: PublishOutcome;
+}
+
+/** Cap on the number of NIP-52 `D` day tags emitted (audit P8). 60 days is a
+ *  defensible ceiling for a single meetup/conference and bounds the tag count on
+ *  an absurd or misconfigured start..end range. Documented for the spec agent. */
+export const MAX_DAY_TAGS = 60;
+
+/**
+ * NIP-52 uppercase `D` day-index tags (audit P8 / R5): one tag per UTC calendar
+ * day the event spans, so strict or date-indexed calendar clients can discover
+ * the event on each of its days.
+ *
+ * The value is the DECIMAL day-granularity Unix timestamp — `String(Math.floor(
+ * unixSeconds / 86400))`, e.g. `"20658"` — as current NIP-52 requires, NOT an
+ * ISO `YYYY-MM-DD` string (the earlier P8 remediation emitted ISO, which strict
+ * clients reject / can't index; R5).
+ *
+ * The event covers the half-open instant range `[start, end)`, so `end` is
+ * EXCLUSIVE: an event ending exactly at a UTC midnight does not "occur" on the
+ * following day and gets no tag for it. The covered days are therefore
+ * `floor(start/86400) .. floor((end - 1)/86400)`. `end` absent or at/before
+ * `start` yields a single tag for the start day. The count is capped at
+ * {@link MAX_DAY_TAGS}. Times are unix SECONDS.
+ */
+export function dayIndexTags(start: number, end?: number): string[][] {
+  const SEC_PER_DAY = 86400;
+  const startDay = Math.floor(start / SEC_PER_DAY);
+  // Half-open [start, end): the last covered day is the one containing the last
+  // instant strictly before `end`. An `end` on a day boundary (midnight) thus
+  // excludes that boundary day. `end <= start` (or absent) → single start day.
+  const endDay =
+    end !== undefined && end > start
+      ? Math.max(startDay, Math.floor((end - 1) / SEC_PER_DAY))
+      : startDay;
+  const tags: string[][] = [];
+  for (let day = startDay; day <= endDay && tags.length < MAX_DAY_TAGS; day++) {
+    tags.push(["D", String(day)]);
+  }
+  return tags;
 }
 
 function slug(title: string): string {
@@ -116,6 +159,8 @@ export async function createEvent(
     ["start", String(input.start)],
   ];
   if (input.end) eventTags.push(["end", String(input.end)]);
+  // NIP-52 `D` day-index tags — one per UTC day the event covers (audit P8).
+  for (const t of dayIndexTags(input.start, input.end)) eventTags.push(t);
   if (input.summary) eventTags.push(["summary", input.summary]);
   if (input.banner) eventTags.push(["image", input.banner]);
   if (input.location) eventTags.push(["location", input.location]);
@@ -178,12 +223,16 @@ export async function createEvent(
   });
 
   // Publish public events to the event relays; backup to the user's relays.
-  await Promise.all([
+  // These are brand-new keys/coordinate with no prior event to supersede, so
+  // created_at = now is correct (no monotonic read needed); we still aggregate
+  // each result honestly so the UI can distinguish published from queued (R9).
+  const results = await Promise.all([
     publishOrQueue(kind0, relays),
     publishOrQueue(event31923, relays),
     publishOrQueue(event31600, relays),
     publishOrQueue(event30078),
   ]);
+  const outcome = toOutcome(results.every(Boolean));
 
   // Persist keys locally (organizer role) for immediate admin use + offline.
   await saveEventKeys({
@@ -200,6 +249,7 @@ export async function createEvent(
     eidPubkey,
     inboxPubkey,
     config,
+    outcome,
   };
 }
 

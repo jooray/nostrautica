@@ -288,7 +288,7 @@
 
   {#if skillList.length}
     <div class="row" style="flex-wrap:wrap">
-      {#each skillList as s (s)}<span class="badge">{s}</span>{/each}
+      {#each [...new Set(skillList)] as s (s)}<span class="badge">{s}</span>{/each}
     </div>
   {/if}
 
@@ -308,7 +308,7 @@
           <div class="airow">
             <span class="muted small">{t(`profile.field.${key}`)}</span>
             <div class="row" style="flex-wrap:wrap">
-              {#each items as it (it)}<span class="badge">{it}</span>{/each}
+              {#each [...new Set(items)] as it (it)}<span class="badge">{it}</span>{/each}
             </div>
           </div>
         {/if}

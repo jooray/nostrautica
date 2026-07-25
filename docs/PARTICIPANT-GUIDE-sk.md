@@ -10,7 +10,7 @@ Päť minút nastavenia, celé na telefóne.
 
 Klepnite na odkaz, ktorý ste dostali. Zobrazí sa vám **Prehľad** podujatia — čo to je, kedy a kde — a tlačidlo na pripojenie. Ak organizátor zverejnil nejaké oznámenia, aj tie sa objavia hneď tu.
 
-Keď ste vnútri podujatia, spodná lišta sa celá týka *tohto* podujatia: **Prehľad** (kde ste teraz), **Ľudia**, **Spojenia**, **Novinky** a **Viac** (váš účet, nastavenia, ostatné podujatia). Malá hlavička navrchu vám vždy hovorí, v ktorom podujatí ste a či ste návštevník, čakáte, alebo ste vnútri.
+Keď ste vnútri podujatia, spodná lišta sa celá týka *tohto* podujatia: **Prehľad** (kde ste teraz), **Ľudia**, **Spojenia**, **Novinky** a **Viac** (váš účet, nastavenia, ostatné podujatia). Ďalšie dve karty sa objavia len vtedy, keď organizátor tie funkcie zapne: **Prednášky** (§4.5) a **Chat** (§6.5) — ak ich nevidíte, toto podujatie ich jednoducho nepoužíva. Malá hlavička navrchu vám vždy hovorí, v ktorom podujatí ste a či ste návštevník, čakáte, alebo ste vnútri.
 
 ![Prehľad podujatia](images/participant-sk/02-event-overview-light.png)
 
@@ -52,11 +52,16 @@ Späť na **Prehľade** vás krátky kontrolný zoznam **„Pripravujeme vás"**
 
 Nižšie na tej istej stránke Prehľad, keď ste už schválení, nájdete kartu
 **Stiahnuť na offline použitie**. Klepnutím na ňu si aplikácia vopred stiahne
-ľudí, spojenia a prednášky, takže sa dajú prezerať aj bez signálu — hodí sa
-to v preplnenej miestnosti, kde si všetky telefóny súperia o rovnaké slabé
-pripojenie. Samotné video a zvuk sa vopred nesťahujú (len všetko ostatné, čo
-potrebujete), a kedykoľvek môžete klepnúť na **Aktualizovať offline kópiu**,
-aby ste si ju obnovili.
+ľudí, spojenia a prednášky *a zároveň načíta aj samotné obrazovky*, ktoré ich
+zobrazujú (Ľudia, Spojenia, Prednášky, stránka prednášky, Nahrávanie, Môj profil,
+Novinky), takže sa všetko dá prezerať aj bez signálu — hodí sa to v preplnenej
+miestnosti, kde si všetky telefóny súperia o rovnaké slabé pripojenie. Staršie verzie
+síce stiahli údaje, ale niektorú obrazovku (napríklad Prednášky) sa offline aj tak
+nemuselo podariť *otvoriť*; teraz sa obrazovky sťahujú spolu s nimi. Samotné video a
+zvuk sa vopred stále nesťahujú (len všetko ostatné, čo potrebujete), a kedykoľvek
+môžete klepnúť na **Aktualizovať offline kópiu**, aby ste si ju obnovili. Ak sa
+niečo nepodarilo stiahnuť, karta to povie namiesto toho, aby predstierala, že je
+kompletná.
 
 ### Uložte si kľúč (30 sekúnd — naozaj to urobte)
 
@@ -79,10 +84,13 @@ Skôr než sa čokoľvek nahrá, aplikácia vám jasne povie, kto to spracúva �
 ![Nahrávanie predstavenia — video, zvuk a textový režim](images/participant-sk/09-record-light.png)
 
 Aplikácia si na pozadí kontroluje nové verzie a automaticky sa aktualizuje —
-nikdy však uprostred nahrávania alebo keď máte rozpísané a neodoslané
-predstavenie. Počká, kým neskončíte a pole nie je prázdne alebo odoslané, až
-potom sa prípadne znova načíta, takže aktualizácia v nesprávnej chvíli vás
-nemôže pripraviť o záber.
+nikdy však vo chvíli, ktorá by vás pripravila o prácu. Aktualizáciu podrží, kým
+nahrávate, kým máte hotový záber, ktorý ste ešte neodoslali, kým je neodoslaný súbor,
+ktorý ste vybrali, alebo odkaz na prednášku, ktorý ste vložili, a kým máte rozpísané
+predstavenie. Počká, kým to odošlete alebo zahodíte, až potom sa znova načíta, takže
+aktualizácia v nesprávnej chvíli vás nemôže pripraviť o záber. (Robí to tak, že
+znovunačítanie *odloží* — váš záber sa neukladá na disk, takže hotový, no neodoslaný
+záber tam nenechávajte celé dni; odošlite ho.)
 
 **Už ste niečo nahrali na inom podujatí?** Ak áno, na tejto obrazovke sa nad
 nahrávaním zobrazí **galéria na opätovné použitie** — každé video, zvuk alebo
@@ -138,11 +146,23 @@ Na stránke niekoho iného ho môžete **Sledovať**, klepnutím na **Napísať 
 
 ## 4.5 Prednášky (ak ich organizátor zapol)
 
-Niektoré podujatia umožňujú účastníkom posielať krátke prednahraté prednášky namiesto stretnutia naživo — alebo ešte pred ním. Ak je to pre vaše podujatie zapnuté, v spodnej lište sa objaví záložka **Prednášky**. Klepnite na **Pridať prednášku**, dajte jej titulok a krátky popis, potom ju nahrajte alebo napíšte úplne rovnako ako predstavenie (§3). Ide to k organizátorovi na zverejnenie, kým to nie je vidieť pre nikoho, takže nečakajte, že sa to objaví okamžite.
+Niektoré podujatia umožňujú účastníkom posielať krátke prednahraté prednášky namiesto stretnutia naživo — alebo ešte pred ním. Ak je to pre vaše podujatie zapnuté, v spodnej lište sa objaví záložka **Prednášky**. Klepnite na **Pridať prednášku**, dajte jej titulok a krátky popis a potom zvoľte, ako video poskytnete:
+
+- **Nahrať** priamo v prehliadači (ako predstavenie, §3),
+- **Nahrať súbor**, ktorý už máte, alebo
+- **Vložiť URL** — neverejný **YouTube** odkaz alebo priamy **.mp4** odkaz. Toto je najlepšia voľba pre prednášku, ktorá je príliš veľká na nahranie; video zostáva tam, kde ho hostujete, a šifrovaný je pre podujatie len *odkaz*.
+
+![Odosielanie prednášky — výber zdroja videa a voliteľné zapnutie spájania](images/participant-sk/27-talks-submit-light.png)
+
+Je tu aj políčko **„Spracovať túto prednášku pre spájanie?"**, štandardne vypnuté: nechajte ho vypnuté a prednáška sa jednoducho zverejní na sledovanie; zapnite ho a koordinátor ju aj prepíše a použije na zlepšenie vašich spojení. (Prednášky s vloženou URL sa nikdy nespracúvajú — sú len na sledovanie.) Tak či onak ide prednáška k organizátorovi na zverejnenie, kým to nie je vidieť pre nikoho, takže nečakajte, že sa to objaví okamžite.
+
+Po vložení odkazu appka hneď potvrdí, že ho rozpoznala:
+
+![Pole s URL videa a rozpoznaným YouTube odkazom](images/participant-sk/27b-talks-url-light.png)
 
 ![Zoznam prednášok](images/participant-sk/26-talks-empty-light.png)
 
-Sledovanie prednášky si pamätá, kde ste skončili, takže môžete zatvoriť aplikáciu a pokračovať neskôr, a — rovnako ako pri vašom vlastnom predstavení — je dostupný prepis, ak ju rečník nahral namiesto napísania.
+Sledovanie prednášky si pamätá, kde ste skončili, takže môžete zatvoriť aplikáciu a pokračovať neskôr, a prehrávač má **ovládanie rýchlosti** (1×/1,5×/2×) na rýchlejšie zvládnutie dlhej prednášky. Prepis je dostupný, keď rečník prednášku zapol na spracovanie.
 
 ## 5. Vaše spojenia
 
@@ -242,11 +262,15 @@ Ešte jedna vec: **Viac → Nastavenia** má tmavý režim a prepínač jazyka (
 
 Pripojili ste sa k nesprávnemu podujatiu, alebo ste si to jednoducho
 rozmysleli? Otvorte podujatie, prejdite na koniec stránky a klepnite na
-**Opustiť podujatie**. Potvrďte, a váš záznam v zozname účastníkov, vaše
-spojenia aj predstavovacie médiá sa odstránia — rovnako čisto, ako keby vás
-odobral organizátor, len ste to urobili sami a nikto to nemusí schvaľovať.
-Neskôr sa môžete znova pripojiť; berie sa to ako úplne nová žiadosť o
-pripojenie, nie obnovenie tej starej.
+**Opustiť podujatie**. Po potvrdení aplikácia **odošle žiadosť o odchod** — netvrdí,
+že ste okamžite zmizli, lebo to nedokáže. Odstránenie vášho záznamu zo zoznamu
+účastníkov, výmena kľúča podujatia aj zmazanie vašich predstavovacích médií prebehnú
+na strane koordinátora (alebo organizátora) až po prijatí žiadosti, takže obrazovka
+ukáže stav „čaká sa" namiesto toho, aby predstierala, že je hotovo. Ak ste pri
+klepnutí offline, žiadosť sa zaradí do fronty a aplikácia vám jasne povie, že ste
+ešte neodišli — odošle sa, keď budete znova online. Keď je potvrdená, ste vonku;
+neskôr sa môžete znova pripojiť, berie sa to ako úplne nová žiadosť o pripojenie, nie
+obnovenie tej starej.
 
 ## Súkromie v jednom odseku
 

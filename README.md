@@ -30,7 +30,10 @@ See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative), the
   Blossom servers (AES-GCM ciphertext). Browser/coordinator MLS state, payment
   journals, queues/outboxes, watch progress, and decrypted caches are intentionally
   local operational state. The PWA and coordinator communicate **only through
-  relays** (encrypted events) — there is no app server.
+  relays** (encrypted events) — there is no application API server between them.
+  AI matching and chat administration are the job of the optional headless
+  coordinator daemon (Nostr-only interface, no HTTP surface), which an organizer
+  runs only when those features are wanted.
 - **Privacy tiers** (spec §4.1): public (NIP-52 event, profiles), event-encrypted
   (videos, directory, roster — under the Event Content Key), pair-encrypted (match
   lists, coordinator→recipient), user-private (favorites/notes, self-encrypted).
@@ -74,7 +77,8 @@ docker compose -f docker/docker-compose.yml up
 - **PWA** → nsite (`nsyte deploy`, kinds 15128/35128 + Blossom) and/or any static
   host. See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) and
   [`packages/app/README-deploy.md`](packages/app/README-deploy.md).
-- **Coordinator** → `docker/coordinator.Dockerfile` (node + ffmpeg), configured by
+- **Coordinator** → `docker/coordinator.Dockerfile` (node + ffmpeg; builds from a clean
+  checkout, base image pinned by digest), configured by
   [`packages/coordinator/coordinator.example.toml`](packages/coordinator/coordinator.example.toml)
   + env secrets. Installed per-event by a `21603` grant — no per-event server config.
   See [`docs/COORDINATOR-OPERATOR-GUIDE.md`](docs/COORDINATOR-OPERATOR-GUIDE.md).

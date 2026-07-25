@@ -94,10 +94,15 @@ Clients maintain `rev` monotonically per (coordinate, kind) in their own storage
 - `expires` (unix seconds): the command is void after this time. Clients **SHOULD** set
   `created_at + 172800` (48 h) by default.
 - Per-subject ordering: the coordinator keeps, per (coordinate, command subject), the
-  watermark `(created_at, rumor_id)` of the last applied command. A command that does not
-  supersede the watermark under the §3.1 ordering rule **MUST** be rejected. The *subject*
-  is `args.pubkey` for `approve`/`revoke`/`reprocess`, `(args.pubkey, args.talk_d)` for
-  talk commands, and the coordinate itself for `recompute` and `detach`.
+  watermark `(created_at, rumor_id)` of the last **fully applied** command. A distinct
+  command that does not supersede the watermark under the §3.1 ordering rule **MUST** be
+  rejected. The watermark advances only once the command's entire effect chain (grants,
+  roster, deletions, MLS actions, purge) has durably completed: a command interrupted by
+  a publication, MLS, or database failure leaves the watermark unadvanced (recorded
+  `pending` with per-publication progress), so redelivery of the *same* rumor resumes it
+  to completion rather than being suppressed as stale. The *subject* is `args.pubkey` for
+  `approve`/`revoke`/`reprocess`, `(args.pubkey, args.talk_d)` for talk commands, and the
+  coordinate itself for `recompute` and `detach`.
 
 On backfill/restore, an expired command is skipped — an old `revoke` or `recompute` can
 never re-execute after a database loss. Approve/revoke interleavings resolve
@@ -206,9 +211,17 @@ randomized up to 2 days into the past).
 
 - `RUMOR_KINDS` = {14, 21600–21610}. Nothing else may appear in a wrap; a leaked rumor
   kind is in the ephemeral range so relays won't store it.
-- Unwrap validation (every consumer): wrap kind 1059; seal kind 13; structural rumor
-  shape; **`rumor.pubkey == seal.pubkey`**; rumor id recomputed and matched; `created_at`
-  clamped to ≤ now + 900 s.
+- Unwrap validation (every consumer): the outer wrap **MUST** be a valid signed
+  kind-1059 event (id recomputed, Schnorr signature verified). The seal **MUST** be a
+  complete **signed** kind-13 event with **empty tags** whose id recomputes and whose
+  Schnorr signature verifies. NIP-44 decryption does **not** authenticate the seal
+  author — ECDH yields the same conversation key for both parties, so a holder of the
+  recipient secret can encrypt a seal claiming any sender pubkey and it decrypts
+  cleanly. The kind-13 signature is therefore the sole proof of seal authorship, and
+  every consumer **MUST** verify it before trusting `rumor.pubkey` (authorization
+  throughout this protocol treats the seal author as an authenticated identity). Then:
+  structural rumor shape; **`rumor.pubkey == seal.pubkey`**; rumor id recomputed and
+  matched; `created_at` clamped to ≤ now + 900 s.
 - Subscription window: `since = now − 259200` (3 days). Consumers dedupe by rumor id.
 - Coordinator dedupe: durable `seen_rumors` ledger keyed by wrap id and rumor id, retained
   indefinitely (§3.4); atomic in-process claim before dispatch; a durable cross-process
@@ -280,7 +293,14 @@ silently drop them.
   - `["matching", "on"|"off"]` — default `"off"` (only the literal `"on"` enables it).
   - `["match_visibility", "pair"|"event"]` — default `"pair"`.
   - `["approval", "manual"|"invite"|"manual+invite"]` — default `"manual"`.
-  - `["eck", <int>]` — the current ECK version; default/floor 1.
+  - `["eck", <int>]` — **bootstrap only**: the ECK version in force when this config
+    was last signed by `E_id` (default/floor 1). It is **NOT** the authority for the
+    *current* ECK version. Because a coordinator cannot sign the `E_id`-authored 31600,
+    coordinator-driven rotation (on revoke/withdraw) never updates this tag, so it goes
+    stale after the first rotation. First-party readers **MUST** derive the current ECK
+    from the coordinator-signed grants (21602/21605) and the roster (31604 `eck_current`),
+    never from this tag. An organizer client that re-signs the config (attach/detach) MAY
+    refresh the tag to the rotated version, but nothing may depend on it being current.
   - `["nostr_context", <int>]` — how many public Nostr events per attendee the
     coordinator summarizes as matching context; default 0 (off).
   - `["lang", <iso639-1>]` — event language; omitted when `"en"` (the implicit default).
@@ -529,7 +549,10 @@ silently drop them.
     title: string 1..200,
     description: string ≤2000 (default ""),
     speakers: hex32[] (default []),   // co-speakers; the submitter is implicit
-    media: MediaDescriptor,           // kind MUST be "talk"
+    media?: MediaDescriptor,          // kind MUST be "talk"; present for recording/upload
+    external_url?: https URL ≤2048,   // XOR with media: a YouTube or direct-mp4 URL
+    external_kind?: "youtube" | "video",  // required when external_url is set
+    source_type?: "recording" | "upload" | "external",
     transcript?: MediaTranscript,
     lang: string,
     revision: int ≥0,
@@ -537,8 +560,14 @@ silently drop them.
     published_at: int
   }
   ```
-  Only `status: "published"` talks are ever put on the wire in practice; `"pending"`/
-  `"rejected"` describe the moderation queue the coordinator keeps privately.
+  Additive fields (2026-07-24, no `v` bump): a talk carries **exactly one** of `media`
+  (a Blossom recording/upload) or `external_url` (+ `external_kind`) — an unlisted YouTube
+  link or a direct `.mp4` the speaker hosts off-Blossom, for clips too large to upload.
+  The URL is inside the ECK ciphertext (members-only); the coordinator never fetches an
+  `external_url` (the §8 media-fetch allowlist is Blossom-origin-only), so external talks
+  are view-only — never transcribed or matched. Only `status: "published"` talks are ever
+  put on the wire in practice; `"pending"`/`"rejected"` describe the moderation queue the
+  coordinator keeps privately.
 
 #### `31611` — Coordinator Announcement
 
@@ -762,7 +791,7 @@ relay-visible event on its own.
 
 - **Seal author → recipient:** the speaker (attendee account) → `E_inbox`.
 - **Tags:** `["a", <coordinate>]`.
-- **Content** (`.strict()`, and `media.kind` **MUST** be `"talk"`):
+- **Content** (`.strict()`; a present `media.kind` **MUST** be `"talk"`):
   ```
   {
     v: 2,
@@ -771,12 +800,22 @@ relay-visible event on its own.
     title: string 1..200,
     description: string ≤2000 (default ""),
     speakers: hex32[] (default []),  // co-speakers; the submitter is implicit
-    media: MediaDescriptor,
+    media?: MediaDescriptor,         // XOR external_url (exactly one required)
+    external_url?: https URL ≤2048,  // YouTube or direct-mp4 URL hosted off-Blossom
+    external_kind?: "youtube" | "video",   // required when external_url is set
+    source_type?: "recording" | "upload" | "external",
+    process_for_matching: bool (default false),  // opt-in to STT + matching
     revision: int ≥0 (default 0)
   }
   ```
-  Ordering per §3.3. Normative caps: at most 10 distinct `talk_d` per speaker per event
-  (edits to an existing `talk_d` are uncapped).
+  Ordering per §3.3. A talk carries **exactly one** of `media` (Blossom recording/upload)
+  or `external_url` (+ `external_kind`); this is a shared schema refinement with `31610`.
+  `process_for_matching` (default **false**, additive 2026-07-24) is the only thing that
+  opts a Blossom talk into coordinator transcription + matching — un-opted talks are stored
+  and publishable but never transcribed, and external talks are never fetched at all. Since
+  the content is `.strict()`, the app and coordinator ship these additive fields in lockstep.
+  Normative caps: at most 10 distinct `talk_d` per speaker per event (edits to an existing
+  `talk_d` are uncapped).
 
 #### `21610` — Attendee Withdrawal
 
@@ -904,8 +943,13 @@ sha256( utf8( JSON.stringify(
 ```
 
 The coordinator **MUST** verify the proof before binding a device to an account — an
-account cannot attest a key it does not control. `op:"revoke"` needs no proof (the account
-is evicting a key it already named; possession is irrelevant to that decision). Bindings
+account cannot attest a key it does not control. **Only attested device keys are chat
+members**: the coordinator authorizes exactly the active attested device keys and nothing
+else — the attendee/organizer **account pubkey is never an implicit chat identity**. A
+local-key account is no exception; it mints and attests its own per-device chat key like
+any other account type (§10.1), and that attested device — not the raw account key — is
+what participates. `op:"revoke"` needs no proof (the account is evicting a key it already
+named; possession is irrelevant to that decision). Bindings
 are per (coordinate, account); a chat pubkey **MUST NOT** be bindable to two different
 accounts; rebinding it to the same account (e.g. re-add after revoke) mints a fresh
 binding. On account revocation from the event, **all** of that account's device leaves are
@@ -944,9 +988,15 @@ relays):
 
 ## 11. Talks
 
-Normative caps: at most 10 distinct `talk_d` per speaker per event; a talk media
-descriptor's `kind` must be `"talk"`; a published `31610` is republished under a new ECK
-on rotation, with the old-address copy NIP-09-deleted.
+Normative caps: at most 10 distinct `talk_d` per speaker per event; a talk carries
+**exactly one** of a `media` descriptor (whose `kind` must be `"talk"`) or an `external_url`
+(+ `external_kind:"youtube"|"video"`); a published `31610` is republished under a new ECK
+on rotation, with the old-address copy NIP-09-deleted. External-URL talks (a YouTube link
+or a direct `.mp4` hosted off-Blossom, for clips too large to upload) live inside the
+ECK-encrypted content — members-only — but are **never fetched by the coordinator** (the §8
+media-fetch allowlist is Blossom-origin-only), so they are view-only: never transcribed,
+never fed into matching. `process_for_matching` (default false) gates whether a Blossom talk
+is transcribed and folded into matching at all; talks are not matched by default.
 
 ## 12. Deletions
 

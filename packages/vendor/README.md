@@ -23,6 +23,26 @@ Both are pure TypeScript (no WASM). All *other* dependencies (`@noble/*`, `@hpke
 `@scure/base`, `applesauce-*`, `@noble/post-quantum`, …) are ordinary published packages
 resolved normally; only these two are vendored.
 
+## Carried patches (re-apply after every regeneration)
+
+The committed `lib/` output differs from a clean upstream build in these places —
+grep for `NOSTRAUTICA PATCH` to find them:
+
+- **`ts-mls/lib/crypto/implementation/default/makeNobleSignatureImpl.js`** — the Ed25519
+  WebCrypto path is gated on a real capability probe, not on `crypto.subtle` existing.
+  Upstream chooses WebCrypto whenever `subtle` is defined, but Chromium/WebView < 137
+  (Firefox < 129, Safari < 17) has WebCrypto without Ed25519 and throws
+  `Algorithm: Unrecognized name`, making MLS key-package creation impossible on those
+  browsers. The patch probes (`importKey` of a raw public key) and falls through to
+  the existing pure-JS `@noble/curves` branch when unsupported.
+- **`ts-mls/lib/crypto/implementation/default/makeDhKem.js`** — same class of fix for
+  the X25519 KEM (WebCrypto-only upstream; unsupported in Chromium/WebView < 133):
+  probe, then fall back to upstream's pure-JS `@hpke/dhkem-x25519` (added to
+  `ts-mls/package.json` dependencies for this).
+
+Regression coverage: `packages/app/src/lib/chat/mls-crypto-fallback.test.ts` (stubs
+`crypto.subtle` to reject both algorithm names; fails if either fallback is lost).
+
 ## Layout conventions
 
 - Built JS + `.d.ts` live under **`lib/`**, not `dist/` — the repo `.gitignore` excludes

@@ -36,7 +36,11 @@ import {
   relayHealth,
   __setNdkForTests,
   __resetRelayHealthForTests,
+  addRelays,
+  __dynamicRelayCount,
+  __resetDynamicRelaysForTests,
 } from "./ndk.js";
+import { DEFAULT_RELAYS } from "./relays.js";
 import type NDK from "@nostr-dev-kit/ndk";
 
 describe("isAcceptedRelayUrl (APPR-8)", () => {
@@ -61,6 +65,70 @@ describe("isAcceptedRelayUrl (APPR-8)", () => {
     expect(isAcceptedRelayUrl("javascript:alert(1)")).toBe(false);
     expect(isAcceptedRelayUrl("not a url")).toBe(false);
     expect(isAcceptedRelayUrl("")).toBe(false);
+  });
+});
+
+describe("addRelays: bounded event-relay growth (audit U16)", () => {
+  function poolNdk() {
+    const removed: string[] = [];
+    const added: string[] = [];
+    const ndk = {
+      addExplicitRelay: (url: string) => {
+        added.push(url);
+        return { url: new URL(url).href };
+      },
+      pool: {
+        connectedRelays: () => [],
+        removeRelay: (url: string) => {
+          removed.push(url);
+          return true;
+        },
+      },
+    } as unknown as NDK;
+    return { ndk, removed, added };
+  }
+
+  beforeEach(() => {
+    __resetDynamicRelaysForTests();
+  });
+  afterEach(() => {
+    __setNdkForTests(null);
+    __resetDynamicRelaysForTests();
+  });
+
+  it("caps the dynamic pool and evicts the least-recently-added relay", () => {
+    const { ndk, removed } = poolNdk();
+    __setNdkForTests(ndk);
+    const urls = Array.from({ length: 25 }, (_, i) => `wss://r${i}.example`);
+    for (const u of urls) addRelays([u]);
+    // Never grows past the cap, and the overflow evicted the OLDEST relays first.
+    expect(__dynamicRelayCount()).toBe(20);
+    expect(removed).toHaveLength(5);
+    expect(removed).toEqual(urls.slice(0, 5).map((u) => new URL(u).href));
+  });
+
+  it("re-visiting a relay refreshes its recency so it isn't evicted next", () => {
+    const { ndk, removed } = poolNdk();
+    __setNdkForTests(ndk);
+    for (let i = 0; i < 20; i++) addRelays([`wss://r${i}.example`]);
+    // Touch the oldest (r0) again → it becomes newest.
+    addRelays(["wss://r0.example"]);
+    // One more distinct relay overflows: r1 (now the oldest) is evicted, not r0.
+    addRelays(["wss://r20.example"]);
+    expect(removed).toEqual([new URL("wss://r1.example").href]);
+    expect(__dynamicRelayCount()).toBe(20);
+  });
+
+  it("never tracks or evicts the app's permanent default relays", () => {
+    const { ndk, removed } = poolNdk();
+    __setNdkForTests(ndk);
+    // The first default relay is permanent — adding it must not consume a slot.
+    addRelays([DEFAULT_RELAYS[0]!]);
+    expect(__dynamicRelayCount()).toBe(0);
+    for (let i = 0; i < 25; i++) addRelays([`wss://d${i}.example`]);
+    expect(__dynamicRelayCount()).toBe(20);
+    // The default relay was never a removeRelay target.
+    expect(removed).not.toContain(new URL(DEFAULT_RELAYS[0]!).href);
   });
 });
 

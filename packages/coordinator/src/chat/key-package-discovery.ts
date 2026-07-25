@@ -22,7 +22,7 @@
  */
 import type { Event as NostrEvent } from "nostr-tools/core";
 import { KIND_RELAY_LIST } from "@nostrautica/protocol";
-import { sanitizeRelayUrls } from "../net/relay-urls.js";
+import { sanitizeRelayUrls, type RelayPolicy } from "../net/relay-urls.js";
 
 /** Addressable MLS key-package event (Marmot / NIP-104). */
 const KIND_KEY_PACKAGE = 30443;
@@ -48,6 +48,7 @@ export async function discoverKeyPackages(
   authors: string[],
   primaryRelays: string[],
   fallbackRelays: string[],
+  relayPolicy: RelayPolicy = {},
 ): Promise<NostrEvent[]> {
   if (authors.length === 0) return [];
   const onPrimary = await transport.fetch({ kinds: [KIND_KEY_PACKAGE], authors }, primaryRelays);
@@ -76,7 +77,7 @@ export async function discoverKeyPackages(
           .filter((t) => t[0] === "r")
           .map((t) => t[1])
           .filter((u): u is string => !!u),
-        MAX_NIP65_RELAYS_PER_AUTHOR,
+        { ...relayPolicy, cap: MAX_NIP65_RELAYS_PER_AUTHOR },
       );
       if (relays.length === 0) return Promise.resolve<NostrEvent[]>([]);
       return transport.fetch({ kinds: [KIND_KEY_PACKAGE], authors: [e.pubkey] }, relays);

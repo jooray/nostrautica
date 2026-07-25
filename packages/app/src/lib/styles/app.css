@@ -438,4 +438,11 @@ h2 {
   main {
     padding-bottom: 0 !important;
   }
+  /* Force event graphics (banner image, colour washes, avatar gradients) onto
+     the page — browsers drop backgrounds when printing by default, which is why
+     the old report PDF came out with a blank event box (user report 2026-07-23). */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
 }

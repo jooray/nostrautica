@@ -32,7 +32,17 @@ The public reference instance is an operator-managed conventional static host pl
 ## Release Verification
 
 1. Run `pnpm check`.
-2. Build the PWA and perform a clean coordinator Docker build once the Docker build context is fixed.
+2. Build the PWA and run a **clean-context coordinator Docker build** — it must succeed from a checkout with no working-tree state:
+
+   ```sh
+   rel="$(git describe --tags --always --dirty)"; sha="$(git rev-parse HEAD)"; ts="$(git show -s --format=%cI HEAD)"
+   git archive HEAD | (mkdir -p /tmp/cc && tar -x -C /tmp/cc)
+   docker build -f docker/coordinator.Dockerfile \
+     --build-arg RELEASE_ID="$rel" --build-arg GIT_SHA="$sha" --build-arg BUILD_TIMESTAMP="$ts" \
+     /tmp/cc
+   ```
+
+   The image's dependency layer copies the lockfile, `patches/`, and the vendored Marmot/MLS workspace packages before `pnpm install --frozen-lockfile`, and pins the base image by digest, so this build is reproducible from a clean checkout. Keep it in the release gate. A `git archive` checkout has no `.git`, so the coordinator's own git-describe provenance is unavailable inside the container — pass the `RELEASE_ID`/`GIT_SHA`/`BUILD_TIMESTAMP` build args (as above) so the running daemon reports the real release instead of `v<pkg>` / `gitSha: unknown`. OCI image labels (`org.opencontainers.image.*`) are set from the same args.
 3. Verify app and landing HTTP status, CSP/header policy for the chosen host, and service-worker update behavior.
 4. Exercise an event flow appropriate to the release: join, approval, media where applicable, and coordinator health.
 5. Record the Git revision and deployed app/coordinator versions.

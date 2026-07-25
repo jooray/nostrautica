@@ -1,6 +1,6 @@
 {
   "name": "@nostrautica/protocol",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shared Nostrautica protocol: kinds, zod schemas, crypto. Zero UI/server deps.",
   "license": "MIT",
   "type": "module",

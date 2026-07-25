@@ -19,27 +19,56 @@
   import { assembleReport, followTargets, type EventReport, type ReportPerson } from "$lib/events/report.js";
   import { followAll, type FollowAllResult } from "$lib/events/nostr-actions.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import EventHeader from "$lib/components/EventHeader.svelte";
+  import Avatar from "$lib/components/Avatar.svelte";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let settings = $state<PerEventSettings | null>(
     cachedCtx ? (cachedPerEventSettings(cachedCtx.coordinate) ?? null) : null,
   );
   let entries = $state<DirectoryEntryContent[]>(cachedCtx ? (cachedDirectory(cachedCtx.coordinate) ?? []) : []);
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let profiles = $state<Map<string, ProfileMeta>>(
     cachedProfiles(entries.map((e) => e.pubkey)),
   );
   let favTalks = $state<{ d: string; title: string }[]>(
     cachedCtx ? favoriteTalkItems(cachedCtx.coordinate) : [],
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   let loading = $state(ctx === null);
   let error = $state<unknown>(null);
   let blindingKey: Uint8Array | null = null;
 
   const entryByPubkey = $derived(new Map(entries.map((e) => [e.pubkey, e])));
+  /** The attendee's avatar picture, when a kind-0 profile resolved one. */
+  function pictureOf(pubkey: string): string | undefined {
+    return profiles.get(pubkey)?.picture;
+  }
+
+  /** A friendly, full date (range) for the event — "1 August 2026", or a span. */
+  function fmtDay(unixSec: number, opts: Intl.DateTimeFormatOptions): string {
+    return new Date(unixSec * 1000).toLocaleDateString(undefined, opts);
+  }
+  const dateLine = $derived.by(() => {
+    if (!ctx?.start) return "";
+    const full: Intl.DateTimeFormatOptions = { year: "numeric", month: "long", day: "numeric" };
+    if (!ctx.end) return fmtDay(ctx.start, full);
+    const sameDay = new Date(ctx.start * 1000).toDateString() === new Date(ctx.end * 1000).toDateString();
+    if (sameDay) return fmtDay(ctx.start, full);
+    return `${fmtDay(ctx.start, { month: "long", day: "numeric" })} – ${fmtDay(ctx.end, full)}`;
+  });
+  const generatedLine = $derived(
+    t("report.generatedOn", {
+      date: new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }),
+    }),
+  );
+
   function nameOf(pubkey: string): string {
     return (
       profiles.get(pubkey)?.name ||
@@ -124,9 +153,11 @@
   }
   let copied = $state(false);
   async function copyNpubs() {
-    await navigator.clipboard.writeText(npubList());
-    copied = true;
-    setTimeout(() => (copied = false), 1500);
+    // U15: centralized copy with fallback; the npub list is shown on screen.
+    if ((await copyText(npubList())) === "copied") {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    }
   }
   function downloadNpubs() {
     const url = URL.createObjectURL(new Blob([npubList()], { type: "text/plain" }));
@@ -183,14 +214,24 @@
     <ErrorState {error} onRetry={load} retrying={loading} />
   {:else}
     <header class="report-head">
-      <div>
-        <p class="kicker">{t("report.kicker")}</p>
-        <h1 class="disp">{ctx?.title ?? t("report.title")}</h1>
-      </div>
+      <p class="kicker">{t("report.kicker")}</p>
       <div class="actions no-print">
         <button class="btn inline" onclick={print}>{t("report.print")}</button>
       </div>
     </header>
+
+    {#if ctx}
+      <EventHeader {ctx} />
+    {:else}
+      <h1 class="disp">{t("report.title")}</h1>
+    {/if}
+
+    {#if ctx && (dateLine || ctx.summary)}
+      <div class="event-about">
+        {#if dateLine}<p class="whenwhere">{dateLine}</p>{/if}
+        {#if ctx.summary}<p class="summary">{ctx.summary}</p>{/if}
+      </div>
+    {/if}
 
     {#if loading && isEmpty}
       <p class="muted">{t("report.loading")}</p>
@@ -264,12 +305,13 @@
           <h2>{t("report.met")}</h2>
           <ul class="people">
             {#each report.met as p (p.pubkey)}
-              <li>
-                <div class="name-row">
-                  <strong>{p.name}</strong>
-                  <span class="mono dim">{p.npub}</span>
+              <li class="person">
+                <Avatar pubkey={p.pubkey} name={p.name} picture={pictureOf(p.pubkey)} size={44} />
+                <div class="pmeta">
+                  <strong class="pname">{p.name}</strong>
+                  <span class="mono dim npub">{p.npub}</span>
+                  {#if p.note}<p class="note">{p.note}</p>{/if}
                 </div>
-                {#if p.note}<p class="note">{p.note}</p>{/if}
               </li>
             {/each}
           </ul>
@@ -281,12 +323,13 @@
           <h2>{t("report.wantedNotMet")}</h2>
           <ul class="people">
             {#each report.wantedNotMet as p (p.pubkey)}
-              <li>
-                <div class="name-row">
-                  <strong>{p.name}</strong>
-                  <span class="mono dim">{p.npub}</span>
+              <li class="person">
+                <Avatar pubkey={p.pubkey} name={p.name} picture={pictureOf(p.pubkey)} size={44} />
+                <div class="pmeta">
+                  <strong class="pname">{p.name}</strong>
+                  <span class="mono dim npub">{p.npub}</span>
+                  {#if p.note}<p class="note">{p.note}</p>{/if}
                 </div>
-                {#if p.note}<p class="note">{p.note}</p>{/if}
               </li>
             {/each}
           </ul>
@@ -309,17 +352,21 @@
           <h2>{t("report.notes")}</h2>
           <ul class="people">
             {#each report.notes as p (p.pubkey)}
-              <li>
-                <div class="name-row">
-                  <strong>{p.name}</strong>
-                  <span class="mono dim">{p.npub}</span>
+              <li class="person">
+                <Avatar pubkey={p.pubkey} name={p.name} picture={pictureOf(p.pubkey)} size={44} />
+                <div class="pmeta">
+                  <strong class="pname">{p.name}</strong>
+                  <span class="mono dim npub">{p.npub}</span>
+                  <p class="note">{p.note}</p>
                 </div>
-                <p class="note">{p.note}</p>
               </li>
             {/each}
           </ul>
         </section>
       {/if}
+
+      <!-- Print footer: a dated provenance line so a saved PDF is self-describing. -->
+      <p class="generated">{generatedLine}</p>
 
       {#if isLocalKey}
         <!-- App-generated identity: the payoff ends in the "switch to Nostr"
@@ -343,7 +390,7 @@
   }
   .report-head {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: space-between;
     gap: 1rem;
     flex-wrap: wrap;
@@ -361,6 +408,28 @@
     font-weight: 650;
     color: var(--text-dim);
     margin: 0;
+  }
+  .event-about {
+    margin: -0.5rem 0 0.25rem;
+  }
+  .whenwhere {
+    margin: 0;
+    color: var(--text-dim);
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .summary {
+    margin: 0.4rem 0 0;
+    color: var(--text);
+    white-space: pre-wrap;
+    line-height: 1.5;
+  }
+  .generated {
+    margin: 2rem 0 0;
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 0.78rem;
   }
   .payoff {
     display: flex;
@@ -400,15 +469,28 @@
     left: 0;
     color: var(--accent);
   }
-  .name-row {
+  .person {
     display: flex;
-    align-items: baseline;
-    gap: 0.6rem;
-    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.7rem;
+  }
+  .pmeta {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+  }
+  .pname {
+    font-size: 1rem;
+    line-height: 1.25;
+  }
+  .npub {
+    color: var(--text-dim);
   }
   .mono {
     font-family: var(--font-mono, monospace);
-    font-size: 0.78rem;
+    font-size: 0.72rem;
     overflow-wrap: anywhere;
   }
   .dim {

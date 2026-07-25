@@ -28,7 +28,8 @@ import {
   supersedes,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import { fetchRoster } from "./attendee.js";
 import type { EventContext } from "./event-context.js";
@@ -269,6 +270,10 @@ export function randomPostD(): string {
  * signed by E_id. Edits re-encrypt under the CURRENT ECK version (named by the
  * `eck` tag) while preserving `published_at` inside the ciphertext.
  * Organizer-only; the 60,000-byte markdown cap is enforced (readable error).
+ *
+ * Returns the resulting post AND the publication outcome (R9) so the composer
+ * can keep the draft when the 31607 only reached the durable outbox (WSS blocked
+ * on venue Wi-Fi) instead of claiming it went live.
  */
 export async function publishMembersPost(
   ctx: EventContext,
@@ -281,7 +286,7 @@ export async function publishMembersPost(
     publishedAt?: number;
     author?: string; // optional organizer attribution (pubkey hex)
   },
-): Promise<EventPost> {
+): Promise<{ post: EventPost; outcome: PublishOutcome }> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eck = currentEck(keys);
@@ -298,35 +303,47 @@ export async function publishMembersPost(
     author: input.author,
     content: input.content,
   });
-  const event = finalizeEvent(
-    {
-      kind: KIND_MEMBERS_POST,
-      created_at: now,
-      // No `a` tag and no cleartext metadata (spec §7.4).
-      tags: [
-        ["d", d],
-        ["v", "2"],
-        ["eck", String(eck.id)],
-      ],
-      content: ciphertext,
-    },
-    hexToBytes(keys.eidNsecHex),
-  );
-  await publishOrQueue(event, ctx.config.relays);
-  return {
-    d,
+  // Monotonic republish (audit P3): an edit at the same second as the prior
+  // revision of this `d` must win the §3.1 tie-break, or the edit silently
+  // doesn't take (the post is addressable across 30023/31607 by its `d`).
+  const { createdAt, published } = await publishMonotonic({
     kind: KIND_MEMBERS_POST,
-    membersOnly: true,
-    locked: false,
-    title: input.title,
-    summary: input.summary,
-    image: input.image,
-    content: input.content,
-    publishedAt,
-    editedAt: now,
-    source: "event",
-    authorPubkey: ctx.config.eidPubkey,
-    author: input.author,
-    eckVersion: eck.id,
+    author: ctx.config.eidPubkey,
+    identifier: d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        {
+          kind: KIND_MEMBERS_POST,
+          created_at,
+          // No `a` tag and no cleartext metadata (spec §7.4).
+          tags: [
+            ["d", d],
+            ["v", "2"],
+            ["eck", String(eck.id)],
+          ],
+          content: ciphertext,
+        },
+        hexToBytes(keys.eidNsecHex!),
+      ),
+  });
+  return {
+    post: {
+      d,
+      kind: KIND_MEMBERS_POST,
+      membersOnly: true,
+      locked: false,
+      title: input.title,
+      summary: input.summary,
+      image: input.image,
+      content: input.content,
+      publishedAt,
+      editedAt: createdAt,
+      source: "event",
+      authorPubkey: ctx.config.eidPubkey,
+      author: input.author,
+      eckVersion: eck.id,
+    },
+    outcome: toOutcome(published),
   };
 }

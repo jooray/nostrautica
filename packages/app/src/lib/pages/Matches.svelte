@@ -19,10 +19,11 @@
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, i18n } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   // Cache-first paint (§2.3): matches/names/profiles from the persistent cache so
   // the page shows the ranked list instantly on revisit, then refreshes.
@@ -37,6 +38,7 @@
   let profiles = $state<Map<string, ProfileMeta>>(
     cachedList ? cachedProfiles(cachedList.matches.map((m) => m.pubkey)) : new Map(),
   );
+  // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
   let loading = $state(matches.length === 0);
   let error = $state<unknown>(null);
   let noCoordinator = $state(false);
@@ -45,6 +47,7 @@
   // empty list. "visitor" = signed in, no ECK and no pending join marker.
   let access = $state<"unknown" | "visitor" | "pending" | "member">("unknown");
 
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (matches.length) perfMark("Matches", "cache-paint");
 
   // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
@@ -143,6 +146,21 @@
     if (!about) return "";
     return about.length > 60 ? about.slice(0, 60) + "…" : about;
   }
+  /**
+   * Scores are 0–1 on the wire and stay that way everywhere else — this is a
+   * display concern only. "85 %" reads as a score; "0.85" reads as a debug dump.
+   * Intl gets the per-locale typography right on its own (sk/cs want the space
+   * before the sign, en does not). Clamped because the 31605 schema types these
+   * as a plain z.number() with no range bound (schemas.ts), so a future or
+   * misbehaving coordinator must not be able to render "8500 %".
+   */
+  function pct(v: number): string {
+    const clamped = Math.min(1, Math.max(0, Number.isFinite(v) ? v : 0));
+    return new Intl.NumberFormat(i18n.locale, {
+      style: "percent",
+      maximumFractionDigits: 0,
+    }).format(clamped);
+  }
 </script>
 
 <h1 class="disp">{t("matches.title")}</h1>
@@ -150,7 +168,7 @@
 {#if error}
   <ErrorState {error} />
 {:else if noCoordinator}
-  <!-- Quiet unavailable state (NOT ErrorState — it's role="alert"). -->
+  <!-- Coordinator-unavailable: quiet state (NOT ErrorState — it's role="alert"). -->
   <div class="card">
     <p class="muted">
       {t("matches.noCoordinator")}
@@ -158,6 +176,28 @@
     <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>
       {t("matches.seeWhosHere")}
     </button>
+  </div>
+{:else if !session.loggedIn}
+  <!-- Logged-out deep link (audit U8): matches are per-member, so prompt sign-in
+       instead of the ambiguous "No matches yet". -->
+  <div class="card">
+    <p class="muted">{t("matches.role.loggedOut")}</p>
+    <button class="btn primary" onclick={() => router.go({ name: "login" })}>{t("matches.role.login")}</button>
+  </div>
+{:else if access === "visitor"}
+  <!-- Signed in but not a member: join before matches exist. -->
+  <div class="card">
+    <p class="muted">{t("matches.role.visitor")}</p>
+    <div class="row" style="flex-wrap:wrap">
+      <button class="btn primary" onclick={() => router.go({ name: "join", naddr })}>{t("matches.role.join")}</button>
+      <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>{t("matches.seeWhosHere")}</button>
+    </div>
+  </div>
+{:else if access === "pending"}
+  <!-- Join request sent, awaiting the organizer's approval. -->
+  <div class="card" role="status">
+    <p class="muted">{t("matches.role.pending")}</p>
+    <button class="btn" onclick={() => router.go({ name: "attendees", naddr })}>{t("matches.seeWhosHere")}</button>
   </div>
 {:else if loading}
   <p class="muted">{t("matches.fetching")}</p>
@@ -198,7 +238,7 @@
           <div class="icebreakers">
             <div class="ib-label">{t("matches.icebreakers")}</div>
             <ul class="ib-list">
-              {#each m.icebreakers as ib (ib)}
+              {#each [...new Set(m.icebreakers)] as ib (ib)}
                 <li>{ib}</li>
               {/each}
             </ul>
@@ -225,9 +265,9 @@
             <span class="chev"><Icon name="chevronDown" size={16} /></span>
           </summary>
           <div class="dims">
-            <div class="d"><span>{t("matches.dim.similarity")}</span><b>{m.similarity.toFixed(2)}</b></div>
-            <div class="d"><span>{t("matches.dim.complementarity")}</span><b>{m.complementarity.toFixed(2)}</b></div>
-            <div class="d"><span>{t("matches.dim.overall")}</span><b>{m.score.toFixed(2)}</b></div>
+            <div class="d"><span>{t("matches.dim.similarity")}</span><b>{pct(m.similarity)}</b></div>
+            <div class="d"><span>{t("matches.dim.complementarity")}</span><b>{pct(m.complementarity)}</b></div>
+            <div class="d"><span>{t("matches.dim.overall")}</span><b>{pct(m.score)}</b></div>
           </div>
         </details>
       </div>

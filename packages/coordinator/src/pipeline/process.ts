@@ -37,9 +37,10 @@ export interface ProcessDeps {
   /**
    * Override the transcription stage (tests inject to skip real Blossom/ffmpeg).
    * May return a bare string (text only) or a {@link TranscriptResult} carrying the
-   * STT-detected language.
+   * STT-detected language. Receives the caller cancellation signal (audit R13) so an
+   * injected/alternative implementation can honor shutdown / per-event teardown too.
    */
-  transcribe?: (descriptor: MediaDescriptor) => Promise<string | TranscriptResult>;
+  transcribe?: (descriptor: MediaDescriptor, signal?: AbortSignal) => Promise<string | TranscriptResult>;
   /** Blossom origins media may be fetched from (audit C3 allowlist). */
   blossomOrigins?: string[];
   /** Max media bytes per blob download (audit C3). */
@@ -55,6 +56,13 @@ export interface ProcessDeps {
   nostrContextN: number;
   /** Event language (ISO 639-1). AI output is written in it; user fields translated into it. */
   lang: string;
+  /** The event coordinate — records ownership references for the derived artifacts so
+   *  a reference-counted deletion (audit C5) can drop this subject's data without
+   *  harming another event that shares a deduplicated transcript/artifact/summary. */
+  coordinate?: string;
+  /** Shutdown cancellation (audit C11): checked at each stage boundary so a long
+   *  STT/LLM run unwinds promptly when the coordinator is shutting down. */
+  signal?: AbortSignal;
   now?: () => number;
 }
 
@@ -98,7 +106,7 @@ export async function processAttendee(
   //    blob, so they never reach this loop — the authored text is appended below.
   const transcribe =
     deps.transcribe ??
-    ((descriptor: MediaDescriptor) =>
+    ((descriptor: MediaDescriptor, _sig?: AbortSignal) =>
       transcribeMedia(
         {
           store: deps.store,
@@ -114,15 +122,22 @@ export async function processAttendee(
         },
         descriptor,
       ));
+  const owner = deps.coordinate ? { coordinate: deps.coordinate, pubkey: input.pubkey } : undefined;
   const transcripts: string[] = []; // text fed into buildAiProfile
   const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
+    deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11/R13)
+    // Ownership reference for the content-addressed transcript (audit C5): record it
+    // for THIS subject regardless of the transcription outcome (the payload — full or
+    // empty-on-policy-rejection — is content-addressed by `x`), so a purge can
+    // reference-count it.
+    if (owner) deps.store.recordTranscriptRef(descriptor.x, owner.coordinate, owner.pubkey, now());
     // A media-policy rejection (declared-size mismatch / over-duration, audit H-3)
     // rejects THAT media only — an empty transcript is cached, no STT, and the
     // other media/attendee continue — rather than poisoning the whole attendee.
     let r: string | TranscriptResult;
     try {
-      r = await transcribe(descriptor);
+      r = await transcribe(descriptor, deps.signal);
     } catch (e) {
       if (e instanceof MediaPolicyError) continue;
       throw e;
@@ -155,6 +170,7 @@ export async function processAttendee(
 
   // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash
   //    (the hash includes the output language, so a lang change re-summarizes).
+  deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
   let nostrSummary: string | undefined;
   if (deps.nostrContextN > 0) {
     const posts = await deps.fetchNostrContext(input.pubkey, deps.nostrContextN);
@@ -166,6 +182,9 @@ export async function processAttendee(
       const cached = deps.store.getSummary(input.pubkey, inputsHash);
       if (cached !== undefined) {
         nostrSummary = cached;
+        // Cache hit (audit R11): record this event's ownership of the shared
+        // per-account summary so a purge reference-counts it correctly.
+        if (owner) deps.store.recordSummaryRef(input.pubkey, inputsHash, owner.coordinate, now());
       } else {
         nostrSummary = await summarizeNostr(
           deps.summary.llm,
@@ -173,8 +192,10 @@ export async function processAttendee(
           input.pubkey,
           posts,
           deps.lang,
+          deps.signal,
         );
-        if (nostrSummary) deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now());
+        if (nostrSummary)
+          deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now(), owner ? { coordinate: owner.coordinate } : undefined);
       }
     }
   }
@@ -200,7 +221,8 @@ export async function processAttendee(
     const profileKey = profileInputsHash(profileInputs, profileModelKey);
     aiProfile = deps.store.getArtifact("ai_profile", profileKey) as AiProfileType | undefined;
     if (!aiProfile) {
-      aiProfile = await buildAiProfile(deps.match.llm, deps.match, profileInputs);
+      deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11)
+      aiProfile = await buildAiProfile(deps.match.llm, deps.match, profileInputs, deps.signal);
       deps.store.putArtifact({
         stage: "ai_profile",
         inputsHash: profileKey,
@@ -208,7 +230,13 @@ export async function processAttendee(
         model: deps.match.model,
         output: aiProfile,
         now: now(),
+        owner,
       });
+    } else if (owner) {
+      // Cache hit (audit R11): this event is now an owner of the shared artifact —
+      // record the ref so a purge reference-counts it (and clear any legacy
+      // quarantine) instead of the second event freeloading without attribution.
+      deps.store.recordArtifactRef("ai_profile", profileKey, owner, now());
     }
   }
 
@@ -225,7 +253,8 @@ export async function processAttendee(
   const trKey = translationInputsHash(trFields, deps.lang, trModelKey);
   let translations = deps.store.getArtifact("translation", trKey) as AiProfileType["translations"] | null | undefined;
   if (translations === undefined) {
-    translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields)) ?? null;
+    deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11/R13)
+    translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields, deps.signal)) ?? null;
     deps.store.putArtifact({
       stage: "translation",
       inputsHash: trKey,
@@ -233,7 +262,12 @@ export async function processAttendee(
       model: deps.translate.model,
       output: translations,
       now: now(),
+      owner,
     });
+  } else if (owner) {
+    // Cache hit — a cached `null` (nothing to translate) is still a hit; record this
+    // event's ownership ref (audit R11) so purge reference-counts the translation.
+    deps.store.recordArtifactRef("translation", trKey, owner, now());
   }
   if (translations) aiProfile.translations = translations;
   return { aiProfile, transcripts: published };

@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
+  import type { AppSigner } from "$lib/signer/types.js";
+  import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
-  import { loadEventKeys, currentEck } from "$lib/events/keystore.js";
+  import { loadEventKeys, currentEck, type EventKeys } from "$lib/events/keystore.js";
+  import { recoverEventKeys } from "$lib/events/recover.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { joinSentAt, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
   import { install } from "$lib/stores/install.svelte.js";
@@ -49,8 +52,16 @@
 
   let { naddr }: { naddr: string } = $props();
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
+  // The readiness store is a module singleton and nothing dropped the previous
+  // event's answer, so navigating A → B painted A's card on B's page — with A's
+  // naddr baked into its primary CTA next to buttons carrying B's, i.e. two
+  // different events in one card. Drop it here and re-derive for this event; the
+  // render below additionally refuses to show a card belonging to another
+  // coordinate, so neither a slow load nor a future caller can reintroduce it.
+  if (readinessStore.coordinate !== cachedCtx?.coordinate) readinessStore.reset();
   let error = $state<string | null>(null);
   let approved = $state(false);
   let organizer = $state(false);
@@ -58,6 +69,16 @@
   // No status badge until the role is actually known — a fresh device briefly
   // resolving grants/keys must not flash "Visitor" at the organizer.
   let roleResolved = $state(false);
+  // A NIP-46/Amber session is restored in the BACKGROUND by the layout (audit
+  // UX-19: a dead signer relay must not hold up first paint), so this page can
+  // mount with `session.signer === null` for a user who is very much logged in —
+  // this event's organizer included. Every owner-scoped read then answers "no":
+  // no custody, not approved, not an organizer. Concluding anything from that is
+  // what showed an organizer "1 of 5 · Join this event" on their own event and
+  // filed it under "My events" as a visitor. A persisted login method with no
+  // live signer means WAIT — the $effect below re-runs the whole pass when the
+  // identity lands.
+  let identityPending = $state(false);
   // Customized layout (31608) or the default feed when none is published.
   // Cache-first (§2.4): paint the last-seen custom layout before the network.
   let page = $state<EventPageModel | undefined>(
@@ -68,6 +89,7 @@
   let attendeePosts = $state<EventPost[]>((cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? []);
   // The body below the header is still fetching — show a skeleton only on a cold
   // open (no cached posts/page to paint).
+  // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
   let bodyLoading = $state(eventPosts.length === 0 && !page);
   let pinnedPosts = $state<Map<string, EventPost>>(new Map());
   // Seed the attendees-section count from the cached roster (§2.4) so the widget
@@ -88,6 +110,7 @@
   function dismissApproved() {
     showApprovedBanner = false;
   }
+  // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted values
   if (cachedCtx && (page || eventPosts.length)) perfMark("EventHome", "cache-paint");
 
   // Cache-paint after background hydration (§7.4.5). Boot no longer blocks on the
@@ -148,6 +171,134 @@
     }, 20_000);
   }
 
+  /**
+   * Local custody → role → the FIRST readiness paint. No network at all: the
+   * keystore read answers the role (§2.4) and readiness derives from that same
+   * read plus the owner-scoped self-copy cache. Returns whether an ECK was
+   * already held, so the caller knows whether the keyless public-content pass
+   * has to be re-run once one lands.
+   *
+   * Readiness is primed HERE rather than after the grant scan, where it used to
+   * live: that scan is a full gift-wrap relay sweep, so the one widget telling
+   * the user what to do next was the last thing on the page to appear.
+   */
+  async function primeFromLocalCustody(c: EventContext, signer: AppSigner | null): Promise<boolean> {
+    const keys = await loadEventKeys(c.coordinate);
+    // If we already hold keys, resolve approved/organizer immediately so a
+    // reload never flashes "Visitor" at a member while the grant scan is in
+    // flight. That scan still runs and reconciles (must-not-miss, constraint 1).
+    if (keys) {
+      approved = !!currentEck(keys);
+      organizer = keys.role === "organizer";
+      roleResolved = true;
+    }
+    // `keys === undefined` here means the read SUCCEEDED and this identity holds
+    // nothing — the store requires that distinction, so a throw must propagate
+    // rather than be flattened into "not a member".
+    readinessStore.primeLocal(c, signer, keys, { anonymous: !signer && !identityPending });
+    return !!currentEck(keys);
+  }
+
+  /**
+   * The owner-scoped pass: grant scan → custody → role → "My events" → readiness
+   * → warmers. Extracted from onMount because it must be able to run a SECOND
+   * time — a NIP-46/Amber signer can land after this page mounted (see the
+   * $effect below), and every conclusion here is wrong until it does. `grants` is
+   * the grant scan to settle first, possibly already in flight.
+   */
+  async function syncIdentity(
+    c: EventContext,
+    signer: AppSigner | null,
+    grants: Promise<unknown>,
+  ): Promise<EventKeys | undefined> {
+    await grants;
+    approved = await isApproved(c.coordinate);
+    // The join-sent marker outlives a reload; approval supersedes it (P2).
+    if (approved) {
+      clearJoinSent(c.coordinate);
+      checkApprovalBanner(c.coordinate);
+    }
+    else {
+      requestPending = joinSentAt(c.coordinate) !== undefined;
+      // Keep watching for the approval while the page stays open (UX-9).
+      if (requestPending) startGrantPolling();
+    }
+    const keys = await loadEventKeys(c.coordinate);
+    organizer = keys?.role === "organizer";
+    roleResolved = true;
+    // Remember this event so it shows up under "My events" on Home. Both
+    // identity fields come from `c` — NEVER one from `c` and one from the
+    // `naddr` prop. Props are live getters into the PARENT's scope
+    // (`get naddr() { return route.naddr }`), and destroying this component
+    // does not freeze them: if the user navigates to another event while the
+    // awaits above are in flight, this line still runs and `naddr` reads the
+    // event they moved TO. That recorded {this event's coordinate, that
+    // event's naddr} in prod (2026-07-24) — the card then opened the wrong
+    // event, and the bad naddr collided with the real owner's, crashing the
+    // Chat + Home lists on a duplicate {#each} key. `c` is loaded from one
+    // naddr and internally consistent, so it cannot disagree with itself.
+    // The role recorded here is only trustworthy once an identity exists, which
+    // is why this whole function is gated on that — an organizer's own event was
+    // being filed as "visitor" while their signer was still reconnecting.
+    recentEvents.record({
+      coordinate: c.coordinate,
+      naddr: c.naddr,
+      title: c.title,
+      icon: c.icon,
+      role: organizer ? "organizer" : approved ? "attendee" : "visitor",
+    });
+    if (approved) {
+      installHint = install.shouldShow(installHintId);
+    }
+    // Readiness journey (§4.1): derived from real state, one primary CTA. This
+    // refines the local paint above with the network-only steps.
+    void readinessStore.load(c, signer, { anonymous: !signer });
+    // Background-warm what the user opens next: the Attendees tab (directory
+    // decrypt is signer-free), the attendee-posts feed (so Updates opens warm),
+    // and — for a local key with no custody record yet — the organizer key
+    // recovery. Detached: must not delay first paint.
+    if (approved) prefetchAttendeesTab(c, signer);
+    // Joining/opening an event precaches the People tab + posts + talks +
+    // matches + theme (§2.15) so those tabs open instantly.
+    if (approved) prefetchEventContent(c, signer);
+    // Organizers: precache the whole Admin surface so it opens without the
+    // serial pending→roster→talks→statuses wait (§2.15).
+    if (organizer) prefetchAdmin(c, keys ?? undefined);
+    void fetchAttendeePosts(c).catch(() => {});
+    // Silent (local-key) signers get organizer recovery for free here; a remote
+    // signer can't be prompted from a background warmer, so it is offered as an
+    // explicit action instead — see `restoreOrganizerKeys` below.
+    if (!keys) prefetchOrganizerRecovery(signer);
+    return keys;
+  }
+
+  /**
+   * Bounded wait for a background session restore. Holding out for an identity
+   * is right (see `identityPending`) but it cannot be unconditional: a NIP-46
+   * signer that never answers — phone locked, Amber not running, dead signer
+   * relay — would leave this page permanently undecided, with no badge, no
+   * readiness card and no way to join. The layout's restore is capped at roughly
+   * two 12 s signer-relay timeouts, so past that nothing is coming and treating
+   * the viewer as a visitor is the honest answer. The $effect below still
+   * corrects everything if the signer turns up afterwards.
+   */
+  let identityTimer: ReturnType<typeof setTimeout> | undefined;
+  onDestroy(() => clearTimeout(identityTimer));
+  function waitForIdentity(c: EventContext) {
+    identityTimer = setTimeout(() => {
+      if (session.signer || !identityPending) return; // the $effect got there first
+      identityPending = false;
+      void syncIdentity(c, null, Promise.resolve()).catch(() => {});
+    }, 30_000);
+  }
+
+  /** Members-only sections/posts couldn't decrypt until the ECK landed — re-fetch. */
+  async function refetchAfterEck(c: EventContext) {
+    const [pageRes, postsRes] = await Promise.allSettled([fetchEventPage(c), fetchEventPosts(c)]);
+    if (pageRes.status === "fulfilled") page = pageRes.value;
+    if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
+  }
+
   onMount(async () => {
     try {
       await connectNdk();
@@ -155,22 +306,19 @@
       const grantsScan = session.signer
         ? receiveGrants(session.signer).catch(() => {})
         : Promise.resolve();
+      // Neither does "is an identity still on its way?" (see `identityPending`):
+      // a persisted login method with no live signer means a background NIP-46
+      // restore is running and nothing owner-scoped may be concluded yet.
+      const loginPending = session.signer
+        ? Promise.resolve(false)
+        : loadLoginMethod().then((m) => !!m).catch(() => false);
       ctx = await loadEventContext(naddr);
       perfMark("EventHome", "cache-paint"); // first meaningful data (ctx) is set
+      identityPending = await loginPending;
       // Whether the ECK was already in the keystore BEFORE this visit's fetches:
       // if not (fresh device), the public-content pass below can't decrypt
       // members-only additions and is re-run once the grant scan lands them.
-      const preKeys = await loadEventKeys(ctx.coordinate);
-      const hadEck = !!currentEck(preKeys);
-      // Local custody answers the role WITHOUT the network (§2.4): if we already
-      // hold keys, resolve approved/organizer immediately so a reload never
-      // flashes "Visitor" at a member while the grant scan is in flight. The
-      // grant scan below still runs and reconciles (must-not-miss, constraint 1).
-      if (preKeys) {
-        approved = hadEck;
-        organizer = preKeys.role === "organizer";
-        roleResolved = true;
-      }
+      const hadEck = await primeFromLocalCustody(ctx, session.signer);
       // Public content (custom layout 31608 + official feed) needs no keys and
       // no grant scan — start immediately so the page fills while grants resolve.
       const publicLoad = (async () => {
@@ -182,66 +330,54 @@
         eventPosts = postsRes.status === "fulfilled" ? postsRes.value : [];
         bodyLoading = false;
       })();
-      await grantsScan;
-      approved = await isApproved(ctx.coordinate);
-      // The join-sent marker outlives a reload; approval supersedes it (P2).
-      if (approved) {
-        clearJoinSent(ctx.coordinate);
-        checkApprovalBanner(ctx.coordinate);
-      }
-      else {
-        requestPending = joinSentAt(ctx.coordinate) !== undefined;
-        // Keep watching for the approval while the page stays open (UX-9).
-        if (requestPending) startGrantPolling();
-      }
-      const keys = await loadEventKeys(ctx.coordinate);
-      organizer = keys?.role === "organizer";
-      roleResolved = true;
-      // Remember this event so it shows up under "My events" on Home.
-      recentEvents.record({
-        coordinate: ctx.coordinate,
-        naddr,
-        title: ctx.title,
-        icon: ctx.icon,
-        role: organizer ? "organizer" : approved ? "attendee" : "visitor",
-      });
-      if (approved) {
-        installHint = install.shouldShow(installHintId);
-      }
-      // Readiness journey (§4.1): derived from real state, one primary CTA.
-      void readinessStore.load(ctx, session.signer);
-      // Background-warm what the user opens next: the Attendees tab (directory
-      // decrypt is signer-free), the attendee-posts feed (so Updates opens warm),
-      // and — for a local key with no custody record yet — the organizer key
-      // recovery. Detached: must not delay first paint.
-      if (approved) prefetchAttendeesTab(ctx, session.signer);
-      // Joining/opening an event precaches the People tab + posts + talks +
-      // matches + theme (§2.15) so those tabs open instantly.
-      if (approved) prefetchEventContent(ctx, session.signer);
-      // Organizers: precache the whole Admin surface so it opens without the
-      // serial pending→roster→talks→statuses wait (§2.15).
-      if (organizer) prefetchAdmin(ctx, keys ?? undefined);
-      void fetchAttendeePosts(ctx).catch(() => {});
-      if (!keys) prefetchOrganizerRecovery(session.signer);
+      if (identityPending) waitForIdentity(ctx);
+      else await syncIdentity(ctx, session.signer, grantsScan);
       await publicLoad;
       // Fresh device whose ECK arrived during this visit: the public pass ran
       // keyless — re-fetch so members-only page sections and posts decrypt.
-      if (approved && !hadEck) {
-        const [pageRes, postsRes] = await Promise.allSettled([
-          fetchEventPage(ctx),
-          fetchEventPosts(ctx),
-        ]);
-        if (pageRes.status === "fulfilled") page = pageRes.value;
-        if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
-      }
+      if (approved && !hadEck) await refetchAfterEck(ctx);
       if (page) await loadSectionData(page.sections);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       bodyLoading = false;
-      roleResolved = true;
+      // Only claim the role is resolved when it actually was. While an identity
+      // is still arriving nothing owner-scoped has been decided, and forcing this
+      // true is what put a "Visitor" badge on an organizer's own event.
+      if (!identityPending) roleResolved = true;
       perfMark("EventHome", "network-settled");
     }
+  });
+
+  // The identity can arrive AFTER this page mounted, and nothing recomputed the
+  // page when it did: the only other caller of `readinessStore.load` is the
+  // pending-approval poller, which an organizer never starts (they have no
+  // join-sent marker). So an Amber organizer who opened their own event during
+  // the background session restore stayed a "visitor" — wrong badge, wrong
+  // "My events" role, wrong readiness card — for the entire visit, and a reload
+  // just raced the same restore again.
+  // svelte-ignore state_referenced_locally -- an identity present at mount is onMount's job; this effect covers only a LATER arrival or a switch
+  let identitySynced: string | null = session.pubkey;
+  $effect(() => {
+    const pubkey = session.pubkey;
+    const signer = session.signer;
+    const c = ctx;
+    if (!c || !pubkey || !signer || identitySynced === pubkey) return;
+    identitySynced = pubkey;
+    untrack(() => {
+      void (async () => {
+        identityPending = false;
+        try {
+          const hadEck = await primeFromLocalCustody(c, signer);
+          await syncIdentity(c, signer, receiveGrants(signer).catch(() => {}));
+          if (approved && !hadEck) await refetchAfterEck(c);
+        } catch {
+          /* the page keeps whatever onMount resolved; the badge stays honest */
+        } finally {
+          roleResolved = true;
+        }
+      })();
+    });
   });
 
   async function loadSectionData(sections: MergedSection[]) {
@@ -361,6 +497,50 @@
     if (ctx) visitorPreview.toggle(ctx.coordinate);
   }
 
+  // Fresh device / cleared storage, remote signer: the event's keys have a
+  // durable self-encrypted 30078 backup on relays (events/recover.ts), but the
+  // only caller of it on this page was `prefetchOrganizerRecovery` — a
+  // deliberate no-op for nip07/nip46, because decrypting the backup needs a
+  // signer round-trip and a background warmer must never pop an unprompted Amber
+  // dialog (prefetch.ts HARD CONSTRAINT 2). So an Amber organizer opening their
+  // own event on a wiped device was never even OFFERED recovery: they got "Join
+  // this event" and were pushed at the co-organizer flow for keys they already
+  // own. A prompt is fine when the USER asks for it, so this is a button rather
+  // than an automatic attempt.
+  let recovering = $state(false);
+  let recoverResult = $state<"idle" | "restored" | "empty" | "failed">("idle");
+  const canRecoverKeys = $derived(
+    !!ctx &&
+      !!session.signer &&
+      roleResolved &&
+      !identityPending &&
+      !organizer &&
+      !approved &&
+      !previewing,
+  );
+  async function restoreOrganizerKeys() {
+    if (!ctx || !session.signer || recovering) return;
+    const c = ctx;
+    const signer = session.signer;
+    recovering = true;
+    recoverResult = "idle";
+    try {
+      // `force` skips recover.ts's once-per-session guard: the user explicitly
+      // asked, and a silent warmer may already have spent the guard on a pass
+      // that couldn't decrypt anything.
+      const restored = await recoverEventKeys(signer, { force: true });
+      // Re-derive the role from the REAL keystore, never from "recovery said it
+      // worked" — the admin surface stays gated on custody (`organizer`), which
+      // syncIdentity sets from its own `loadEventKeys` read.
+      await syncIdentity(c, signer, Promise.resolve());
+      recoverResult = restored.includes(c.coordinate) && organizer ? "restored" : "empty";
+    } catch {
+      recoverResult = "failed";
+    } finally {
+      recovering = false;
+    }
+  }
+
   async function duplicateEvent() {
     if (!ctx) return;
     const { buildDuplicatePrefill } = await import("$lib/events/duplicate.js");
@@ -422,14 +602,20 @@
   let leaving = $state(false);
   let confirmingLeave = $state(false);
   let leftMessage = $state<string | null>(null);
+  // Withdrawal is a *request* to the coordinator, not an instant local removal
+  // (audit U3): the 21610 either went to a relay ("sent") or is only in the
+  // durable outbox ("queued"). Either way directory removal / key rotation / data
+  // deletion happen coordinator-side and are NOT yet acknowledged, so the member
+  // UI stays as-is and we show an honest pending state rather than "you've left".
+  let withdrawState = $state<"none" | "sent" | "queued">("none");
   async function doLeave() {
     if (!session.signer || !ctx) return;
     leaving = true;
+    leftMessage = null;
     try {
       const { withdrawFromEvent } = await import("$lib/events/withdraw.js");
-      await withdrawFromEvent(session.signer, ctx);
-      leftMessage = t("event.leave.done");
-      approved = false;
+      const res = await withdrawFromEvent(session.signer, ctx);
+      withdrawState = res.sent ? "sent" : "queued";
       confirmingLeave = false;
     } catch {
       leftMessage = t("event.leave.failed");
@@ -493,7 +679,7 @@
       </button>
     {/if}
     {#if page}
-      {#each page.menu as item (item.label + item.target)}
+      {#each page.menu as item, i (i)}
         {#if !(previewing && item.membersOnly)}
           <button class="btn menu-btn" onclick={() => openMenuTarget(item.target)}>
             {item.label}{#if item.membersOnly}&nbsp;<Icon name="lock" size={15} />{/if}
@@ -527,9 +713,35 @@
   </nav>
 
   <!-- Readiness journey (§4.1): one honest next action, derived from real state.
-       Visitors see the Join CTA as step 1; approved members see intro/matches. -->
-  {#if readinessStore.readiness && !previewing}
+       Visitors see the Join CTA as step 1; approved members see intro/matches.
+       The coordinate check is load-bearing, not defensive tidiness: the store is
+       a module singleton, so without it a card derived for the PREVIOUS event
+       renders here, CTA and all. -->
+  {#if readinessStore.readiness && readinessStore.coordinate === ctx.coordinate && !previewing}
     <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
+  {/if}
+
+  {#if recoverResult === "restored"}
+    <p class="muted" role="status">{t("event.recoverKeys.restored")}</p>
+  {:else if canRecoverKeys}
+    <!-- This account may already OWN this event and just not have the keys on
+         this device. Recovery is one signer prompt away, and offering it beats
+         sending an organizer through the co-organizer invite flow for keys they
+         already have a relay backup of. -->
+    <div class="card recover-keys">
+      <strong>{t("event.recoverKeys.title")}</strong>
+      <p class="muted" style="margin:0.25rem 0 0.5rem">{t("event.recoverKeys.body")}</p>
+      <button class="btn inline" disabled={recovering} onclick={restoreOrganizerKeys}>
+        {recovering ? t("event.recoverKeys.working") : t("event.recoverKeys.action")}
+      </button>
+      {#if recoverResult !== "idle"}
+        <p class="muted" role="status" style="margin:0.5rem 0 0">
+          {recoverResult === "empty"
+            ? t("event.recoverKeys.empty")
+            : t("event.recoverKeys.failed")}
+        </p>
+      {/if}
+    </div>
   {/if}
 
   {#if effApproved}
@@ -543,6 +755,10 @@
               {t("event.offline.downloading", { n: packSteps.length })}
             {:else if packDone}
               {t("event.offline.ready")}
+            {:else if offlinePack && offlinePack.swControlled === false}
+              <!-- R7: data cached but no controlling SW, so the app SCREENS aren't
+                   cached — be honest that this won't cold-launch offline yet. -->
+              {t("event.offline.noSw")}
             {:else if offlinePack}
               {t("event.offline.partial")}
             {:else}
@@ -559,7 +775,7 @@
       <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
         {#if packUsage}{t("event.offline.stored", { size: packUsage })}{/if}
         {#if packPersisted}· {t("event.offline.persisted")}{/if}
-        {#if packDone}· {t("event.offline.mediaNote")}{/if}
+        {#if packDone}· {t("event.offline.routesReady")} · {t("event.offline.mediaNote")}{/if}
       </p>
     </div>
   {/if}
@@ -657,7 +873,13 @@
   <!-- Leave event (NIP §6.3 21610): enrolled attendees only, confirm-guarded. -->
   {#if effApproved && !effOrganizer}
     <div class="leave-zone">
-      {#if leftMessage}
+      {#if withdrawState !== "none"}
+        <!-- Pending withdrawal (U3): a request was sent/queued, not completed.
+             Removal + data deletion await the coordinator; don't claim they're done. -->
+        <p class="muted" role="status">
+          {withdrawState === "queued" ? t("event.leave.queued") : t("event.leave.requested")}
+        </p>
+      {:else if leftMessage}
         <p class="muted" role="status">{leftMessage}</p>
       {:else if confirmingLeave}
         <p class="muted">{t("event.leave.confirm")}</p>

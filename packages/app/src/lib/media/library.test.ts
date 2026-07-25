@@ -16,7 +16,9 @@ vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn()
 vi.mock("$lib/nostr/publish-queue.js", () => ({
   publishOrQueue: vi.fn(async (ev: { kind: number; tags: string[][]; content: string; created_at: number }) => {
     published.push(ev);
+    return true;
   }),
+  toOutcome: (published: boolean) => (published ? "published" : "queued"),
 }));
 
 import { addToLibrary, loadLibraryFull, loadLibrary } from "./submit.js";

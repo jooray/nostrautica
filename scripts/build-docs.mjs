@@ -1,7 +1,22 @@
 /**
  * Static docs-site generator: docs/*.md → docs-site-build/ (HTML).
  *
- * - Index page groups the docs into sections (user guides first).
+ * - EVERY public top-level `docs/*.md` file is built to a page so that
+ *   `.md`→`.html` link rewriting never points at a page that was never emitted
+ *   (audit O6). `docs/internal/**` and `docs/archive/**` are intentionally NOT
+ *   published; they live in subdirectories and are skipped because we only scan
+ *   the top level of `docs/`.
+ * - `SECTIONS` controls INDEX visibility and order only — a doc absent from
+ *   SECTIONS is still built (so inbound links resolve), it just isn't featured
+ *   on the index page.
+ * - A post-build link + anchor checker (audit O6) fails the build if any
+ *   rewritten internal link points at a page that wasn't built or an anchor
+ *   that doesn't exist. Links into the deliberately-unpublished `archive/` and
+ *   `internal/` areas are reported as warnings, not hard failures (whether to
+ *   publish that content is a docs-content decision, not a build-integrity bug).
+ * - Heading `id`s are generated with a GitHub-compatible slugger so in-page and
+ *   cross-page `#anchor` links resolve (marked v18 emits no heading ids on its
+ *   own), and so the anchor checker has real ids to validate against.
  * - Dark/light toggle (persisted, defaults to prefers-color-scheme) using the
  *   same design tokens as the app.
  * - Theme-aware screenshots: an image reference ending in `-light.png` with an
@@ -11,15 +26,26 @@
  *   works from any base path (deployed under /docs/, same origin as /app).
  *
  * Usage: node scripts/build-docs.mjs [outDir]   (default docs-site-build)
+ * `outDir` may be relative (resolved against the repo root) or absolute
+ * (used as-is — audit O7).
  */
 import { marked } from "marked";
 import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join, dirname, resolve, isAbsolute } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOCS = join(ROOT, "docs");
-const OUT = join(ROOT, process.argv[2] ?? "docs-site-build");
+
+/**
+ * Resolve the output directory (audit O7). A relative argument is resolved
+ * against the repo root (preserving the historical `join(ROOT, arg)` behaviour);
+ * an absolute argument is honoured verbatim instead of being nailed under ROOT.
+ */
+export function resolveOutDir(root, arg) {
+  const target = arg ?? "docs-site-build";
+  return isAbsolute(target) ? target : resolve(root, target);
+}
 
 /** Site structure: sections + the docs in them (order = display order). */
 const SECTIONS = [
@@ -48,8 +74,22 @@ const SECTIONS = [
     blurb: "For the technically curious: protocol, architecture, security.",
     docs: [
       { file: "SPECIFICATION.md", title: "Specification" },
-      { file: "THREAT-MODEL.md", title: "Threat Model" },
+      { file: "PROTOCOL-NIP.md", title: "Protocol (NIP)" },
       { file: "PROTOCOL-REGISTRY.md", title: "Protocol Registry" },
+      { file: "THREAT-MODEL.md", title: "Threat Model" },
+      { file: "ENCRYPTION-AND-PRIVACY.md", title: "Encryption & Privacy" },
+      { file: "VERSIONING.md", title: "Versioning" },
+      { file: "MULTIDEVICE-CHAT.md", title: "Multi-device Chat" },
+      { file: "MARMOT-GROUP-CHAT.md", title: "Marmot Group Chat" },
+    ],
+  },
+  {
+    title: "Operations & deployment",
+    blurb: "Running a coordinator and deploying the site.",
+    docs: [
+      { file: "DEPLOYMENT.md", title: "Deployment" },
+      { file: "COORDINATOR-OPERATOR-GUIDE.md", title: "Coordinator Operator Guide" },
+      { file: "COORDINATOR-DISCOVERY-PLAN.md", title: "Coordinator Discovery Plan" },
     ],
   },
   {
@@ -149,6 +189,43 @@ ${body}
 </html>`;
 }
 
+/**
+ * GitHub-compatible heading slugger. marked v18 emits no heading ids, so in-page
+ * table-of-contents links and cross-doc `#anchor` links would all 404 without
+ * this — and the anchor checker needs real ids to validate against. Reset per
+ * document via `mdToHtml` so duplicate-heading disambiguation is document-local.
+ */
+let slugCounts = new Map();
+function slugify(text) {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[^\p{L}\p{N}\s_-]/gu, "") // drop punctuation, keep unicode letters/digits
+    .replace(/\s+/g, "-");
+}
+function uniqueSlug(text) {
+  const base = slugify(text) || "section";
+  const seen = slugCounts.get(base) ?? 0;
+  slugCounts.set(base, seen + 1);
+  return seen === 0 ? base : `${base}-${seen}`;
+}
+
+marked.use({
+  renderer: {
+    heading({ tokens, text, depth }) {
+      const id = uniqueSlug(text);
+      const inner = this.parser.parseInline(tokens);
+      return `<h${depth} id="${id}">${inner}</h${depth}>\n`;
+    },
+  },
+});
+
+/** Parse markdown → HTML with a fresh, document-local slug namespace. */
+function mdToHtml(md) {
+  slugCounts = new Map();
+  return marked.parse(md, { gfm: true });
+}
+
 /** Turn image refs into theme-aware pairs when a -dark sibling exists. */
 function themeAwareImages(html) {
   return html.replace(/<img src="(images\/[^"]+)-light\.png"([^>]*)>/g, (m, stem, rest) => {
@@ -165,58 +242,148 @@ function themeAwareImages(html) {
 function render(mdFile) {
   let md = readFileSync(join(DOCS, mdFile), "utf8");
   md = md.replace(/<!--[\s\S]*?-->/g, ""); // strip build/TODO comments
-  let html = marked.parse(md, { gfm: true });
+  let html = mdToHtml(md);
   html = html.replace(/href="(?:\.\/)?([A-Za-z0-9_-]+)\.md(#[^"]*)?"/g, 'href="$1.html$2"');
   html = themeAwareImages(html);
   return html;
 }
 
-mkdirSync(OUT, { recursive: true });
-if (existsSync(join(DOCS, "images"))) cpSync(join(DOCS, "images"), join(OUT, "images"), { recursive: true });
-
-const built = [];
-for (const section of SECTIONS) {
-  for (const doc of section.docs) {
-    if (!existsSync(join(DOCS, doc.file))) continue;
-    const out = doc.file.replace(/\.md$/, ".html");
-    writeFileSync(join(OUT, out), page(doc.title, render(doc.file)));
-    built.push(out);
+/**
+ * Post-build link + anchor checker (audit O6). `pages` is a Map of built
+ * filename → HTML string. Returns `{ errors, warnings }`:
+ *   - errors:   a rewritten internal link points at a page that was never built,
+ *               or at an anchor that does not exist. These fail the build.
+ *   - warnings: a link still ends in `.md` — i.e. it points into the
+ *               deliberately-unpublished `archive/`/`internal/` areas (or any
+ *               source doc that isn't published). Reported, not fatal.
+ */
+export function checkInternalLinks(pages) {
+  const idsByPage = new Map();
+  for (const [name, html] of pages) {
+    const set = new Set();
+    for (const m of html.matchAll(/\b(?:id|name)="([^"]+)"/g)) set.add(m[1]);
+    idsByPage.set(name, set);
   }
-}
-// Any testing reports get built too (linked from the testing section dynamically).
-const reports = existsSync(join(DOCS, "testing"))
-  ? readdirSync(join(DOCS, "testing")).filter((f) => f.endsWith(".md"))
-  : [];
-for (const r of reports) {
-  const out = `testing-${r.replace(/\.md$/, ".html")}`;
-  let md = readFileSync(join(DOCS, "testing", r), "utf8").replace(/<!--[\s\S]*?-->/g, "");
-  writeFileSync(join(OUT, out), page(r.replace(/\.md$/, ""), marked.parse(md, { gfm: true })));
-  built.push(out);
+  const errors = [];
+  const warnings = [];
+  for (const [name, html] of pages) {
+    for (const m of html.matchAll(/href="([^"#][^"]*)"|href="(#[^"]*)"/g)) {
+      const href = m[1] ?? m[2];
+      if (/^(https?:|mailto:|tel:|\/\/)/i.test(href)) continue; // external
+      if (href.startsWith("/")) continue; // site-absolute (e.g. /app)
+      if (href === "#") continue;
+      const hashAt = href.indexOf("#");
+      const path = hashAt === -1 ? href : href.slice(0, hashAt);
+      const anchor = hashAt === -1 ? "" : href.slice(hashAt + 1);
+      if (path === "") {
+        // same-page anchor
+        if (anchor && !idsByPage.get(name).has(anchor))
+          errors.push(`${name}: same-page anchor "#${anchor}" has no matching id`);
+        continue;
+      }
+      if (path.endsWith(".md")) {
+        // Not rewritten → points at a source doc we don't publish (archive/…, internal/…).
+        warnings.push(`${name}: link to unpublished doc "${href}"`);
+        continue;
+      }
+      if (path.endsWith(".html")) {
+        if (!pages.has(path)) {
+          errors.push(`${name}: link to page "${path}" that was not built ("${href}")`);
+          continue;
+        }
+        if (anchor && !idsByPage.get(path).has(anchor))
+          errors.push(`${name}: link "${href}" → anchor "#${anchor}" missing in ${path}`);
+      }
+      // other relative targets (e.g. images/) are not link-checked here
+    }
+  }
+  return { errors, warnings };
 }
 
-const indexBody = [
-  `<h1>Nostrautica documentation</h1>`,
-  `<p class="section-blurb">Meet the right people at events — intro videos, AI matchmaking, and a portable identity you keep. <a href="/app">Open the app →</a></p>`,
-  ...SECTIONS.map((s) => {
-    const cards = s.docs
-      .filter((d) => existsSync(join(DOCS, d.file)))
-      .map(
-        (d) =>
-          `<div class="card"><a class="doc" href="${d.file.replace(/\.md$/, ".html")}">${d.title}</a></div>`,
-      )
-      .join("\n");
-    const reportCards =
-      s.title === "Testing & quality"
-        ? reports
-            .map(
-              (r) =>
-                `<div class="card"><a class="doc" href="testing-${r.replace(/\.md$/, ".html")}">Test report: ${r.replace(/^TEST-REPORT-|\.md$/g, "")}</a></div>`,
-            )
-            .join("\n")
-        : "";
-    return `<h2>${s.title}</h2>${s.blurb ? `<p class="section-blurb">${s.blurb}</p>` : ""}\n${cards}\n${reportCards}`;
-  }),
-].join("\n");
-writeFileSync(join(OUT, "index.html"), page("Documentation", indexBody, { home: true }));
+/** Build the whole docs site into `outDir`. Exits non-zero on broken links. */
+export function build(outDir) {
+  mkdirSync(outDir, { recursive: true });
+  if (existsSync(join(DOCS, "images"))) cpSync(join(DOCS, "images"), join(outDir, "images"), { recursive: true });
 
-console.log(`[docs] built ${built.length + 1} pages → ${OUT}`);
+  // Titles for index cards come from SECTIONS; docs not in SECTIONS are still
+  // built (so inbound links resolve) but not featured on the index.
+  const titleByFile = new Map();
+  for (const s of SECTIONS) for (const d of s.docs) titleByFile.set(d.file, d.title);
+
+  const pages = new Map(); // filename.html -> html string (for the link checker)
+
+  // Build EVERY public top-level doc. readdirSync is non-recursive, so the
+  // internal/ and archive/ subdirectories are excluded automatically.
+  const topLevelDocs = readdirSync(DOCS, { withFileTypes: true })
+    .filter((e) => e.isFile() && e.name.endsWith(".md"))
+    .map((e) => e.name)
+    .sort();
+
+  for (const file of topLevelDocs) {
+    const out = file.replace(/\.md$/, ".html");
+    const title = titleByFile.get(file) ?? file.replace(/\.md$/, "");
+    const html = page(title, render(file));
+    writeFileSync(join(outDir, out), html);
+    pages.set(out, html);
+  }
+
+  // Any testing reports get built too (linked from the testing section dynamically).
+  const reports = existsSync(join(DOCS, "testing"))
+    ? readdirSync(join(DOCS, "testing")).filter((f) => f.endsWith(".md"))
+    : [];
+  for (const r of reports) {
+    const out = `testing-${r.replace(/\.md$/, ".html")}`;
+    const md = readFileSync(join(DOCS, "testing", r), "utf8").replace(/<!--[\s\S]*?-->/g, "");
+    const html = page(r.replace(/\.md$/, ""), mdToHtml(md));
+    writeFileSync(join(outDir, out), html);
+    pages.set(out, html);
+  }
+
+  const indexBody = [
+    `<h1>Nostrautica documentation</h1>`,
+    `<p class="section-blurb">Meet the right people at events — intro videos, AI matchmaking, and a portable identity you keep. <a href="/app">Open the app →</a></p>`,
+    ...SECTIONS.map((s) => {
+      const cards = s.docs
+        .filter((d) => existsSync(join(DOCS, d.file)))
+        .map(
+          (d) =>
+            `<div class="card"><a class="doc" href="${d.file.replace(/\.md$/, ".html")}">${d.title}</a></div>`,
+        )
+        .join("\n");
+      const reportCards =
+        s.title === "Testing & quality"
+          ? reports
+              .map(
+                (r) =>
+                  `<div class="card"><a class="doc" href="testing-${r.replace(/\.md$/, ".html")}">Test report: ${r.replace(/^TEST-REPORT-|\.md$/g, "")}</a></div>`,
+              )
+              .join("\n")
+          : "";
+      return `<h2>${s.title}</h2>${s.blurb ? `<p class="section-blurb">${s.blurb}</p>` : ""}\n${cards}\n${reportCards}`;
+    }),
+  ].join("\n");
+  const indexHtml = page("Documentation", indexBody, { home: true });
+  writeFileSync(join(outDir, "index.html"), indexHtml);
+  pages.set("index.html", indexHtml);
+
+  const { errors, warnings } = checkInternalLinks(pages);
+  for (const w of warnings) console.warn(`[docs] warning: ${w}`);
+  if (errors.length) {
+    console.error(`[docs] link check FAILED — ${errors.length} broken internal link(s):`);
+    for (const e of errors) console.error(`  ✗ ${e}`);
+    process.exitCode = 1;
+    throw new Error(`docs link check failed: ${errors.length} broken internal link(s)`);
+  }
+
+  console.log(
+    `[docs] built ${pages.size} pages → ${outDir}` +
+      (warnings.length ? ` (${warnings.length} link warning(s))` : "") +
+      `; link check passed`,
+  );
+  return { pages, errors, warnings };
+}
+
+// Only build when invoked directly (so tests can import the helpers above).
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  build(resolveOutDir(ROOT, process.argv[2]));
+}

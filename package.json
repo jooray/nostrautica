@@ -1,6 +1,6 @@
 {
   "name": "nostrautica",
-  "version": "0.6.5",
+  "version": "0.7.0",
   "private": true,
   "description": "Nostr-native event organizer built around networking and AI matchmaking",
   "license": "MIT",

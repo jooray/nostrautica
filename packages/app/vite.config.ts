@@ -83,7 +83,12 @@ export default defineConfig({
         theme_color: "#0b0b12",
         background_color: "#0b0b12",
         display: "standalone",
+        // Relative start_url + scope (audit U6): "./" resolves against the
+        // manifest's own location, so the same manifest is install-correct at any
+        // base — "/" locally and "/app/" in production — with no BASE_PATH baked in.
         start_url: "./",
+        scope: "./",
+        id: "./",
         icons: [
           { src: "icon-192.png", sizes: "192x192", type: "image/png" },
           { src: "icon-512.png", sizes: "512x512", type: "image/png" },

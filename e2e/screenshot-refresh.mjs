@@ -60,28 +60,46 @@ const appDir = LOCALE === "en" ? "app" : `app-${LOCALE}`;
 // these are real rendered text, not internal-only fixture data.
 const COPY = {
   en: {
+    eventSummary:
+      "A relaxed evening for Nostr builders and curious newcomers — short intros, good conversations, and a few lightning talks by the water.",
+    eventLocation: "Bratislava",
     ninaIntro: "Rust developer working on privacy tooling. Looking for a co-founder who cares about usability.",
     nadiaIntro: "Product designer who loves making cryptography approachable. Looking for engineers to collaborate with.",
     dm: "Hey! Looking forward to the event.",
     chatWelcome: "Welcome everyone! Excited to see you all here.",
     chatReply: "Thanks for organizing this, looking forward to it!",
     chatProof: /organizing|looking forward/i,
+    postTitle: "Welcome to the assembly",
+    postBody: "Looking forward to seeing everyone — schedule and details inside.",
+    talkTitle: "Lightning talk: Nostr for newcomers",
   },
   sk: {
+    eventSummary:
+      "Uvoľnený večer pre Nostr nadšencov a zvedavých nováčikov — krátke predstavenia, dobré rozhovory a pár bleskových prednášok pri vode.",
+    eventLocation: "Bratislava",
     ninaIntro: "Rust vývojárka, pracujem na nástrojoch pre súkromie. Hľadám spoluzakladateľa, ktorému záleží na použiteľnosti.",
     nadiaIntro: "Produktová dizajnérka, ktorá rada robí kryptografiu zrozumiteľnou. Hľadám vývojárov na spoluprácu.",
     dm: "Ahoj! Teším sa na podujatie.",
     chatWelcome: "Vitajte všetci! Teším sa, že vás tu vidím.",
     chatReply: "Ďakujem za organizáciu, teším sa na to!",
     chatProof: /organizáci|teším sa/i,
+    postTitle: "Vitajte na zraze",
+    postBody: "Tešíme sa na všetkých — program a podrobnosti nájdete vnútri.",
+    talkTitle: "Bleskovka: Nostr pre nováčikov",
   },
   cs: {
+    eventSummary:
+      "Uvolněný večer pro Nostr nadšence a zvědavé nováčky — krátká představení, dobré rozhovory a pár bleskových přednášek u vody.",
+    eventLocation: "Bratislava",
     ninaIntro: "Rust vývojářka, pracuji na nástrojích pro soukromí. Hledám spoluzakladatele, kterému záleží na použitelnosti.",
     nadiaIntro: "Produktová designérka, která ráda dělá kryptografii srozumitelnou. Hledám vývojáře ke spolupráci.",
     dm: "Ahoj! Těším se na akci.",
     chatWelcome: "Vítejte všichni! Těším se, že vás tu vidím.",
     chatReply: "Děkuji za organizaci, těším se na to!",
     chatProof: /organizac|těším se/i,
+    postTitle: "Vítejte na srazu",
+    postBody: "Těšíme se na všechny — program a podrobnosti uvnitř.",
+    talkTitle: "Bleskovka: Nostr pro nováčky",
   },
 }[LOCALE];
 
@@ -123,6 +141,27 @@ async function setTheme(page, mode) {
   await page.waitForTimeout(400);
 }
 
+/**
+ * Theme flip WITHOUT a reload — for stems with unsaved, ephemeral component
+ * state (a filled-in title, a picked talk-source tab, a pasted URL) that a
+ * `page.reload()` would wipe, since none of that is route-derived or drafted
+ * to storage. `data-theme` on <html> is the ONLY thing app.css keys its colors
+ * off (packages/app/src/lib/stores/theme.svelte.ts) — the CSS custom
+ * properties recompute the instant the attribute changes, no reload or even a
+ * Svelte re-render required, so this is safe to use mid-form.
+ */
+async function setThemeNoReload(page, mode) {
+  await page.evaluate((m) => {
+    try {
+      localStorage.setItem("nostrautica:theme", m);
+    } catch {
+      /* private mode */
+    }
+    document.documentElement.setAttribute("data-theme", m);
+  }, mode);
+  await page.waitForTimeout(200);
+}
+
 async function waitForWithReload(page, locator, timeout = 20000) {
   try {
     await locator.waitFor({ timeout });
@@ -157,13 +196,23 @@ async function newUser(page, name) {
 
 /** Submit a TEXT intro (fast, deterministic, no transcription needed). */
 async function submitTextIntro(page, text) {
-  await page.waitForTimeout(400);
   // Tab order is [video, audio, text?] — text tab only renders when a
-  // coordinator is attached (hasCoordinator). It's the LAST tab.
-  const tabs = page.locator('button[role="tab"]');
+  // coordinator is attached (hasCoordinator). It's the LAST tab. The mode
+  // switcher dropped the ARIA tabs widget for plain aria-pressed buttons
+  // (audit §7.3.3, 2026-07-24) — `button[role="tab"]` no longer matches
+  // anything, so scope by the labelled group instead (Record.svelte:729,
+  // `role="group" aria-labelledby="mode-label"`), which is structural, not
+  // translated text, so this holds across locales too.
+  //
+  // Record.svelte now resolves membership role BEFORE rendering the composer
+  // at all (audit U5, 2026-07-24) — an extra relay round-trip that a flat
+  // 400ms sleep doesn't reliably outlast under concurrent-context load, so
+  // wait for the group itself (generously) rather than guess a fixed delay.
+  const tabs = page.locator('[role="group"][aria-labelledby="mode-label"] button');
+  await tabs.first().waitFor({ timeout: 15000 }).catch(() => {});
   const tabCount = await tabs.count();
   if (tabCount < 3) {
-    skip("text-intro", `only ${tabCount} record tabs — no coordinator attached yet?`);
+    skip("text-intro", `only ${tabCount} record mode buttons — no coordinator attached yet?`);
     return false;
   }
   await tabs.nth(tabCount - 1).click();
@@ -172,17 +221,17 @@ async function submitTextIntro(page, text) {
   await textarea.fill(text);
   const ack = page.locator('input[type="checkbox"]');
   if (await ack.count()) await ack.first().check();
-  const submitBtn = page.locator('button.primary:not([role="tab"])').last();
+  const submitBtn = page.locator("button.primary").last();
   await submitBtn.click();
   await page.waitForTimeout(1500);
   return true;
 }
 
 async function recordAudioIntro(page) {
-  await page.waitForTimeout(400);
-  const tabs = page.locator('button[role="tab"]');
+  const tabs = page.locator('[role="group"][aria-labelledby="mode-label"] button');
+  await tabs.first().waitFor({ timeout: 15000 }).catch(() => {});
   if ((await tabs.count()) < 2) {
-    skip("audio-intro", "audio tab not found");
+    skip("audio-intro", "audio mode button not found");
     return false;
   }
   await tabs.nth(1).click(); // [video, audio, text] — audio is index 1
@@ -194,7 +243,6 @@ async function recordAudioIntro(page) {
   }
   const ack = page.locator('input[type="checkbox"]');
   if (await ack.count()) await ack.first().check();
-  const recordBtn = page.locator('button.primary:not([role="tab"])').filter({ hasNotText: "" });
   const btns = page.getByRole("button", { name: /record/i });
   if (!(await btns.count())) {
     skip("audio-intro", "no record button found");
@@ -311,8 +359,17 @@ async function main() {
   }
 
   // ---- organizer/01-create-form + create the event ----
-  await olga.locator("#t").fill("Nostrautica Screenshot Assembly");
-  await olga.locator("#st").fill("2026-09-15T10:00");
+  // The docs' running example: "Nostrautica meetup", an evening on 1 Aug 2026.
+  // Fill summary/end/location too so the event pages and the post-event report
+  // render with a real description, date range and place (not just a bare title).
+  await olga.locator("#t").fill("Nostrautica meetup");
+  const summaryField = olga.locator("#s");
+  if (await summaryField.count()) await summaryField.fill(COPY.eventSummary);
+  await olga.locator("#st").fill("2026-08-01T18:00");
+  const endField = olga.locator("#en");
+  if (await endField.count()) await endField.fill("2026-08-01T22:00");
+  const locField = olga.locator("#loc");
+  if (await locField.count()) await locField.fill(COPY.eventLocation);
   const talksSelect = olga.locator("#talks");
   if (await talksSelect.count()) await talksSelect.selectOption("on");
   // Group chat defaults OFF (chatEnabled = $state(false) in Create.svelte) —
@@ -543,6 +600,85 @@ async function main() {
   copyIfExists(`${DOCS}/${partDir}/08-attendees-dark.png`, `${WEB}/08-attendees-dark.png`);
   await setTheme(nina, "light");
 
+  // ---- participant/09-record (item 5, optional): mid-recording UI. All
+  // structural selectors (class/attribute, never translated button text) so
+  // this actually works across locales — the sk/cs guides previously pointed
+  // at a byte-identical COPY of the English screenshot for this stem, which is
+  // exactly the locale-mismatch bug this generator exists to avoid. Discards
+  // the take (re-record) rather than submitting, so it doesn't collide with
+  // Nina's text intro submitted later in the INCLUDE_FLAKY pass.
+  try {
+    await nina.goto(`/#/e/${naddr}/record`);
+    // enableCamera's button is plain "btn" (not "btn inline", not "btn primary")
+    // — the mode-switcher and reuse-gallery buttons are ".btn.inline", so this
+    // class combination is unambiguous. Fake camera/mic (E2E-TESTING-GUIDE §1.3)
+    // means clicking it never hits an OS permission prompt.
+    const enableCamBtn = nina.locator(".btn:not(.inline):not(.primary):not(.danger)").first();
+    await enableCamBtn.waitFor({ timeout: 15000 });
+    await enableCamBtn.click();
+    await nina.waitForTimeout(600);
+    // The Record button has no aria-pressed (unlike the mode-toggle buttons,
+    // which reuse .primary for their active state) — this is the only
+    // button.primary on the page that isn't a toggle.
+    const recordBtn = nina.locator("button.primary:not([aria-pressed])").first();
+    await recordBtn.waitFor({ timeout: 5000 });
+    await recordBtn.click();
+    await nina.waitForTimeout(1200); // a moment into the recording, not the first frame
+    await shoot(nina, partDir, "09-record", "light");
+    const stopBtn = nina.locator("button.danger").first();
+    if (await stopBtn.count()) await stopBtn.click();
+    await nina.waitForTimeout(500);
+    // Discard: click "re-record" (plain .btn, not .primary) rather than "use
+    // this" — this capture is a UI screenshot, not a real intro submission.
+    const reRecordBtn = nina.locator(".card button.btn:not(.inline):not(.primary)").first();
+    if (await reRecordBtn.count()) await reRecordBtn.click().catch(() => {});
+  } catch (e) {
+    skip("09-record", String(e).slice(0, 150));
+  }
+
+  // ---- Seed report data (item 1): Nina marks two attendees "want to meet" so
+  // the post-event report below isn't empty. Each row's action pair is
+  // [want-to-meet star, message] (Attendees.svelte:323, toggleWantToMeet), icon
+  // buttons only, so the stars sit at even indices (0, 2, …) — no translated
+  // text involved, safe across locales. Olga + Nadia are both approved and
+  // visible in Nina's roster by this point, so this is exactly "~2 attendees".
+  try {
+    await nina.goto(`/#/e/${naddr}/attendees`);
+    await nina.waitForTimeout(1200);
+    await pollReload(nina, async () => (await nina.locator("button.icon-btn").count()) > 0, {
+      maxMs: 30000,
+      stepMs: 3000,
+    });
+    const iconBtns = nina.locator("button.icon-btn");
+    const total = await iconBtns.count();
+    let starred = 0;
+    for (let i = 0; i < total && starred < 2; i += 2) {
+      await iconBtns.nth(i).click();
+      await nina.waitForTimeout(300);
+      starred++;
+    }
+    if (starred === 0) skip("34-report seed", "no attendee rows with a want-to-meet star found");
+  } catch (e) {
+    skip("34-report seed", String(e).slice(0, 150));
+  }
+
+  // ---- participant/34-report (redesigned hero + avatar list) ----
+  try {
+    await nina.goto(`/#/e/${naddr}/report`);
+    await nina.waitForTimeout(1200);
+    await pollReload(nina, async () => (await nina.locator(".report .person").count()) > 0, {
+      maxMs: 30000,
+      stepMs: 3000,
+    });
+    await nina.waitForTimeout(400);
+    await shoot(nina, partDir, "34-report", "light");
+    await setTheme(nina, "dark");
+    await shoot(nina, partDir, "34-report", "dark");
+    await setTheme(nina, "light");
+  } catch (e) {
+    skip("34-report", String(e).slice(0, 150));
+  }
+
   // ---- Text + audio intros: only useful as setup for the flaky coordinator
   //      stems (matches/my-profile-edited/transcript) — skip entirely otherwise. ----
   let transcriptOk = false;
@@ -574,14 +710,19 @@ async function main() {
     const postCard = olga.locator(".card:has(textarea):has(input)").first();
     const titleField = postCard.locator("input").first();
     if (await titleField.count()) {
-      await titleField.fill("Welcome to the assembly");
-      await postCard.locator("textarea").first().fill("Looking forward to seeing everyone — schedule and details inside.");
+      await titleField.fill(COPY.postTitle);
+      await postCard.locator("textarea").first().fill(COPY.postBody);
+      // The caption says "members-only selected" (ORGANIZER-GUIDE.md) — actually
+      // select it, rather than leave the default "public" radio checked. `value`
+      // is a plain HTML attribute, not translated text, so this is locale-safe.
+      const membersRadio = postCard.locator('input[type="radio"][value="members"]');
+      if (await membersRadio.count()) await membersRadio.check();
       await olga.waitForTimeout(300);
       await shoot(olga, orgDir, "09-posts-editor", "light");
       const publishBtn = postCard.locator("button.primary").first();
       if (await publishBtn.count()) {
         await publishBtn.click();
-        await postCard.getByText("Welcome to the assembly", { exact: false }).first().waitFor({ timeout: 15000 }).catch(() => {});
+        await postCard.getByText(COPY.postTitle, { exact: false }).first().waitFor({ timeout: 15000 }).catch(() => {});
       }
     } else {
       skip("09-posts-editor", "title field not found");
@@ -673,12 +814,27 @@ async function main() {
       if (await recomputeBtn.count()) await recomputeBtn.first().click();
       await nina.goto(`/#/e/${naddr}/matches`);
       await nina.waitForTimeout(1500);
-      const gotMatches = await pollReload(nina, async () => (await nina.locator(".card.match").count()) > 0);
-      if (!gotMatches) skip("11-matches", "no match rows appeared within the poll budget — showing empty state anyway");
-      await shoot(nina, partDir, "11-matches", "light");
-      await setTheme(nina, "dark");
-      await shoot(nina, partDir, "11-matches", "dark");
-      await setTheme(nina, "light");
+      // Bigger budget (the mock coordinator's stall makes 40s too tight) — and,
+      // critically, GATE the shot on gotMatches. The old code logged a skip() on
+      // timeout but then shot anyway, which is exactly how a past run ended up
+      // shipping "Fetching your matches…" as the 11-matches screenshot: a real
+      // .card.match never renders while loading is true (Matches.svelte:187-188),
+      // so requiring it before ever pressing the shutter is sufficient to rule
+      // out the loading state — no separate text-based wait needed.
+      const gotMatches = await pollReload(
+        nina,
+        async () => (await nina.locator(".card.match").count()) > 0,
+        { maxMs: 90000, stepMs: 5000 },
+      );
+      if (gotMatches) {
+        await nina.waitForTimeout(400);
+        await shoot(nina, partDir, "11-matches", "light");
+        await setTheme(nina, "dark");
+        await shoot(nina, partDir, "11-matches", "dark");
+        await setTheme(nina, "light");
+      } else {
+        skip("11-matches", "no match rows appeared within the poll budget — skipping rather than shoot a loading/empty state");
+      }
     } catch (e) {
       skip("11-matches", String(e).slice(0, 150));
     }
@@ -786,6 +942,56 @@ async function main() {
   await shoot(olga, partDir, "26-talks-empty", "dark");
   copyIfExists(`${DOCS}/${partDir}/26-talks-empty-dark.png`, `${WEB}/26-talks-empty-dark.png`);
   await setTheme(olga, "light");
+
+  // ---- participant/27-talks-submit + 27b-talks-url (item 2): the talk-source
+  // selector (Record / Upload / Paste-URL) and the matching opt-in checkbox. ----
+  try {
+    await olga.goto(`/#/e/${naddr}/talks`);
+    await olga.waitForTimeout(800);
+    // items.length === 0 at this point (no talks submitted yet), so the empty
+    // state's card has no button — this is the only button.primary on the page.
+    const submitBtn = olga.locator("button.primary").first();
+    await submitBtn.waitFor({ timeout: 10000 });
+    await submitBtn.click();
+    await olga.locator("#talk-title").waitFor({ timeout: 15000 });
+    await olga.locator("#talk-title").fill(COPY.talkTitle);
+    await olga.waitForTimeout(300);
+    // Default source is "record" (Record.svelte:62) — the source-selector row
+    // and the "Process this talk for matching?" checkbox both render above it,
+    // in view without scrolling.
+    await shoot(olga, partDir, "27-talks-submit", "light");
+    // Ephemeral, unsaved composer state (title, source tab) — a page.reload()
+    // for the dark shot would wipe it and there's no draft for talk fields, so
+    // flip data-theme in place instead of reloading (see setThemeNoReload).
+    await setThemeNoReload(olga, "dark");
+    await shoot(olga, partDir, "27-talks-submit", "dark");
+    await setThemeNoReload(olga, "light");
+
+    // Switch to "Paste a URL" — the 3rd button in the labelled source group
+    // (Record.svelte:712-717); `value`/`aria-labelledby` are structural, not
+    // translated text, so this selector holds across locales.
+    const sourceBtns = olga.locator('[role="group"][aria-labelledby="talk-source-label"] button');
+    await sourceBtns.nth(2).click();
+    const talkUrlField = olga.locator("#talk-url");
+    await talkUrlField.waitFor({ timeout: 10000 });
+    await talkUrlField.fill("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    await olga.waitForTimeout(400);
+    // Wait for the "Detected: YouTube video" badge (talks.url.detectedYoutube)
+    // before shooting — never capture the field mid-classification.
+    await olga.locator(".badge.ok").first().waitFor({ timeout: 5000 });
+    // The URL card renders AFTER the (tall) disclosure card (Record.svelte:806),
+    // below the fold on the 390x844 viewport — explicitly scroll it (and its
+    // badge) into view rather than trust fill()'s scroll, which a previous
+    // capture showed landing on the disclosure card instead of the field.
+    await olga.locator(".badge.ok").first().scrollIntoViewIfNeeded();
+    await olga.waitForTimeout(200);
+    await shoot(olga, partDir, "27b-talks-url", "light");
+    await setThemeNoReload(olga, "dark");
+    await shoot(olga, partDir, "27b-talks-url", "dark");
+    await setThemeNoReload(olga, "light");
+  } catch (e) {
+    skip("27-talks-submit / 27b-talks-url", String(e).slice(0, 150));
+  }
 
   // ---- Otto (outsider) ----
   await newUser(otto, "Otto Outsider");

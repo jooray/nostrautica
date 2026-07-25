@@ -17,6 +17,8 @@ import { fetchProfiles } from "./social.js";
 import { fetchEventPage } from "./event-page.js";
 import { fetchEventPosts } from "./posts.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { warmRouteModules, PARTICIPANT_OFFLINE_ROUTES } from "$lib/router/route-modules.js";
+import { ensureEntryShellCached, hasServiceWorkerControl } from "$lib/pwa/offline-shell.js";
 
 export type PackStepKey =
   | "roster"
@@ -24,7 +26,9 @@ export type PackStepKey =
   | "matches"
   | "talks"
   | "profiles"
-  | "page";
+  | "page"
+  | "shell"
+  | "modules";
 
 export interface PackStep {
   key: PackStepKey;
@@ -41,6 +45,13 @@ export interface OfflinePack {
   steps: PackStep[];
   /** Media blobs were not downloaded (descriptors/thumbnails only). */
   mediaSkipped: boolean;
+  /**
+   * True when a service worker controlled the page while the pack was built
+   * (audit R7). Without a controller the app-code (shell + route chunks) can't be
+   * durably cached, so the pack is NOT a real offline pack — the UI must say the
+   * screens themselves may not open offline even though the data was cached.
+   */
+  swControlled?: boolean;
 }
 
 export interface PackOutcome {
@@ -59,8 +70,13 @@ export function cachedOfflinePack(coordinate: string): OfflinePack | undefined {
   return cacheGet<OfflinePack>(packKey(coordinate))?.data;
 }
 
-/** True when every applicable (non-skipped) step of the pack succeeded. */
+/**
+ * True when every applicable (non-skipped) step of the pack succeeded AND a
+ * service worker controlled the build (audit R7): without a controller the
+ * app-code steps can't have durably cached, so the pack is never "complete".
+ */
 export function packComplete(pack: OfflinePack): boolean {
+  if (pack.swControlled === false) return false;
   return pack.steps.filter((s) => !s.skipped).every((s) => s.ok);
 }
 
@@ -140,8 +156,48 @@ export async function buildOfflinePack(
     await Promise.all([fetchEventPage(ctx), fetchEventPosts(ctx)]);
     return 1;
   });
+  // Entry SHELL (audit R7): the app's own entry JS/CSS aren't precached, so a
+  // cold offline launch would serve the precached index.html and then 404 its
+  // scripts. Warm them under the controller and VERIFY they're actually in Cache
+  // Storage — this step fails (ok:false) when no SW controls the page or an asset
+  // is missing, so the pack never claims offline-readiness it can't back up.
+  const controlled = hasServiceWorkerControl();
+  await run("shell", false, async () => {
+    const readiness = await ensureEntryShellCached();
+    if (!readiness.ok) {
+      throw new Error(
+        readiness.controlled
+          ? "entry shell assets are not all in Cache Storage yet"
+          : "no service worker controls the page — app code can't be cached offline",
+      );
+    }
+    return readiness.cached;
+  });
+  // Route MODULES (audit U7/R7): fetching the data isn't enough — the lazy route
+  // chunks (Talks, Talk Detail, Record, My Profile, Posts/Post) are absent
+  // offline until visited online, so the pack imports each one it promises,
+  // landing them in the SW runtime cache. Requires a controller first (an import
+  // that resolves off the network/HTTP cache without a controlling SW is NOT
+  // durably cached — the false readiness R7 flags). `ok:false` otherwise, so
+  // `packComplete` reports the pack as partial and the UI says screens may need a
+  // reconnect.
+  await run("modules", false, async () => {
+    if (!controlled) {
+      throw new Error("no service worker control — route chunks can't be cached offline");
+    }
+    const warmed = await warmRouteModules(PARTICIPANT_OFFLINE_ROUTES);
+    if (warmed < PARTICIPANT_OFFLINE_ROUTES.length) {
+      throw new Error("some route modules could not be warmed");
+    }
+    return warmed;
+  });
 
-  const pack: OfflinePack = { at: Math.floor(Date.now() / 1000), steps, mediaSkipped: true };
+  const pack: OfflinePack = {
+    at: Math.floor(Date.now() / 1000),
+    steps,
+    mediaSkipped: true,
+    swControlled: controlled,
+  };
   cacheSet(packKey(ctx.coordinate), pack, pack.at);
 
   const persisted = await requestPersistentStorage();

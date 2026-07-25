@@ -12,7 +12,7 @@ Nostrautica je aplikace pro akce postavená na jedné myšlence: **na vaší akc
 
 Všechno běží ve vašem prohlížeči. Nic se nenastavuje na serveru — aplikace ukládá data akce zašifrovaná na otevřené síti Nostr. Klíče akce drží váš prohlížeč, proto **používejte jeden prohlížeč, který si necháte** (a jakmile vás k tomu aplikace vyzve, zazálohujte si identitu).
 
-> **Poznámka k uspořádání aplikace.** Jakmile jste uvnitř akce, spodní lišta je *vázaná na danou akci* — **Přehled**, **Lidé**, **Spojení**, **Novinky** a **Více** se týkají akce, ve které právě jste, a kompaktní hlavička nad nimi ukazuje její název a váš status. Vaše globální věci (všechny vaše akce, zprávy, nastavení, vaše identita) jsou v nabídce **Více**. Jako organizátor tam navíc najdete **Správa akce**, která otevře administraci popsanou v §3.
+> **Poznámka k uspořádání aplikace.** Jakmile jste uvnitř akce, spodní lišta je *vázaná na danou akci* — **Přehled**, **Lidé**, **Spojení**, **Novinky** a **Více** se týkají akce, ve které právě jste, a kompaktní hlavička nad nimi ukazuje její název a váš status. Další dvě karty, **Přednášky** a **Chat**, se objeví jen tehdy, když tyto funkce zapnete (§6.5) — pro vás i pro účastníky. Vaše globální věci (všechny vaše akce, zprávy, nastavení, vaše identita) jsou v nabídce **Více**. Jako organizátor tam navíc najdete **Správa akce**, která otevře administraci popsanou v §3.
 
 ## 1. Vytvoření identity
 
@@ -41,7 +41,7 @@ Zvolte **Vytvořit akci** a vyplňte formulář:
 
   ![Výběr koordinátora přímo při vytváření akce](images/organizer-cs/01b-create-coordinator-light.png)
 - **Přidat se mezi účastníky** — ve výchozím stavu zaškrtnuto: jste zapsáni jako kterýkoli jiný účastník, takže první člověk, který se připojí, uvidí v seznamu **Lidé** aspoň vás místo prázdného seznamu (a jakmile nahrajete představení, může být spárován i s vámi). Vaše jméno a bio vidí jen schválení účastníci; zrušte zaškrtnutí, pokud chcete akci organizovat, aniž byste se objevili v seznamu.
-- **Pokročilé** (sbalené) — nahrání ikony a banneru akce (jinak se vygenerují z názvu) a nastavení limitu délky videa s představením.
+- **Pokročilé** (sbalené) — nahrání ikony a banneru akce (jinak se vygenerují z názvu) a nastavení limitu délky videa s představením. Ikonu a banner můžete vybrat a oříznout **ještě dřív, než máte identitu** — pokud akci vytváříte nepřihlášeni, aplikace oříznuté obrázky podrží lokálně a nahraje je za vás hned poté, co při odeslání vytvoří vaši identitu, takže se nemusíte zastavovat a přihlašovat.
 
 ### Jazyk akce
 
@@ -57,8 +57,18 @@ Všimněte si poznámky pod formulářem: **rotace klíčů funguje jen dopředu
 
 **Retenční období** nastavíte v **Administrace → Nastavení → Smazat data
 účastníků po akci**. Zadejte kladný počet dní nebo nechte pole prázdné pro
-neomezené uchování. Účastníci období vidí při připojení i na stránce akce;
-smazání není zaručené, pokud relay žádost ignoruje.
+neomezené uchování. Účastníci období vidí při připojení i na stránce akce. Když
+období uplyne (a stejně tak když někdo akci opustí), koordinátor teď smaže **i své
+vlastní kopie** — profily, AI profily, přepisy, zdůvodnění párů, přednášky a shrnutí,
+které má u sebe, nejen zveřejněné záznamy — a odstraní záznamy z relayů napříč všemi
+verzemi klíče, které akce kdy použila, nejen ty aktuální. Dvě poctivá omezení
+zůstávají: smazání na relayích (NIP-09) je jen nejlepší snaha a relay si kopii může
+ponechat; a obsahově adresovaná položka, kterou stále sdílí *jiná* akce, přežije,
+dokud ji neopustí i ta poslední. Zálohy jsou samostatná věc — záloha, kterou
+provozovatel koordinátoru pořídil před smazáním, data drží, dokud ji nevymění
+([příručka provozovatele](COORDINATOR-OPERATOR-GUIDE.md) to popisuje). Jde tedy o
+skutečný úklid, jen ne o kryptografickou záruku, že každá poslední kopie je všude
+pryč.
 
 Po vytvoření dostanete **odkaz ke sdílení**, kontrolní seznam dalších kroků
 a **potvrzenku** — každý zveřejňovací krok se hlásí samostatně, takže
@@ -238,7 +248,7 @@ Veřejné příspěvky se zobrazují na **stránce akce** pro každého; přísp
 V **Administrace → Nastavení** jsou ještě dva ovládací prvky:
 
 - **Stránka akce** (kind 31608) — místo výchozího rozložení si sestavíte vlastní menu a uspořádáte sekce (které příspěvky se kde zobrazují) na veřejné stránce akce. Pořadí měníte tlačítky ↑/↓.
-- **Vzhled** (kind 31609) — vložíte vlastní CSS a naladíte vzhled stránek *této akce*. Před **Zveřejněním vzhledu** máte živý **Náhled**; opuštění administrace bez zveřejnění obnoví poslední uložený vzhled. Vrství se nad vestavěným barevným nádechem aplikace pro danou akci, takže stačí málo. (Vkládejte jen CSS, které jste napsali sami nebo kterému důvěřujete — stylizuje stránku každému účastníkovi. Poznámka: váš vzhled platí napříč stránkami akce *kromě* pár tras, které zobrazují citlivé údaje — předání zařízení chatu a obrazovky pozvánek/koordinátora v administraci se záměrně vykreslují bez něj, takže nepřátelský vzhled se na těchto konkrétních obrazovkách nedá zneužít k vylákání klíčů nebo pozvánkových kódů.)
+- **Vzhled** (kind 31609) — vložíte vlastní CSS a naladíte vzhled stránek *této akce*. Před **Zveřejněním vzhledu** máte živý **Náhled**; opuštění administrace bez zveřejnění obnoví všem poslední *zveřejněný* vzhled, ale vaše neodeslané CSS se uloží jako koncept a po návratu se v editoru obnoví (s tlačítkem Zahodit, kterým ho zrušíte), takže odchod z obrazovky už nepřijde o rozpracovanou práci — totéž platí pro neodeslaný příspěvek akce a neuložené úpravy profilu. Vrství se nad vestavěným barevným nádechem aplikace pro danou akci, takže stačí málo. (Vkládejte jen CSS, které jste napsali sami nebo kterému důvěřujete — stylizuje stránku každému účastníkovi. Poznámka: váš vzhled platí napříč stránkami akce *kromě* pár tras, které zobrazují citlivé údaje — předání zařízení chatu a obrazovky pozvánek/koordinátora v administraci se záměrně vykreslují bez něj, takže nepřátelský vzhled se na těchto konkrétních obrazovkách nedá zneužít k vylákání klíčů nebo pozvánkových kódů.)
 
 ![Vzhled — CSS motivu akce se živým náhledem](images/organizer-cs/10-theme-editor-light.png)
 
@@ -253,7 +263,13 @@ pro návštěvníka.
 
 ## 6.5 Přednášky a skupinový chat (obojí novinka, obojí volitelné)
 
-**Přednatočené přednášky.** V **Administrace → Nastavení → Přednatočené přednášky** to přepněte na *Zapnuto* (nebo *Nejprve nahrávka*, což v navigaci účastníků posune Přednášky před Lidi — vhodné pro formát „podívejte se předem, setkejte se na místě") a **Uložte**. Schválení účastníci pak mohou přidávat krátké přednášky ze stejného editoru jako u představení.
+**Přednatočené přednášky.** V **Administrace → Nastavení → Přednatočené přednášky** to přepněte na *Zapnuto* (nebo *Nejprve nahrávka*, což v navigaci účastníků posune Přednášky před Lidi — vhodné pro formát „podívejte se předem, setkejte se na místě") a **Uložte**. Schválení účastníci pak mohou přidávat krátké přednášky — nahrané v prohlížeči, nahrané jako soubor, nebo zadané jako neveřejná **YouTube / .mp4 URL** (vhodné pro přednášky příliš velké na nahrání; koordinátor tyto nikdy nestahuje, takže URL přednášky jsou jen ke sledování).
+
+![Odesílání přednášky — výběr zdroje videa a volitelné zapnutí párování](images/participant/27-talks-submit-light.png)
+
+Všimněte si, že **přednášky už ve výchozím stavu nevstupují do párování**: řečník u každé přednášky zvolí, zda zaškrtne *„Zpracovat tuto přednášku pro párování?"*. Mějte to na paměti, pokud se odeslaná přednáška neobjeví ve zdůvodnění něčích spojení — to je očekávané, pokud se řečník nepřihlásil (a u URL přednášek se to nestane nikdy). Šetří to náklady na přepis přednášek, které nikdo nechtěl párovat.
+
+![Pole s URL videa a rozpoznaným YouTube odkazem](images/participant/27b-talks-url-light.png)
 
 Odeslané přednášky se samy nezveřejní. Karta **Moderování přednášek** níž v **Administraci** zobrazuje všechno, co čeká na kontrolu — u každé klepněte na **Ukázka**, pak ji buď **Zveřejněte**, aby si ji účastníci mohli pustit, nebo **Zamítněte**. Dokud to tady neuděláte, nikdo kromě vás nic, co účastník pošle, neuvidí (zveřejnění navíc potřebuje připojeného koordinátora, stejně jako zbytek administrace). Vyhledávání/filtr v Lidech (§3) má filtr **Poslaná přednáška**, takže se na rušné akci můžete přesunout rovnou k těm, co na vás čekají, bez rolování celým seznamem.
 
@@ -299,7 +315,7 @@ záchranná síť pro případ, že tento plán selže.
 
   ![Přehled administrace organizátora na celou šířku](images/organizer/13-admin-overview-desktop-light.png)
 
-- **Můžu akci po vytvoření upravit?** Novinky můžete zveřejňovat a upravovat volně. Spravovat akci mohou i spoluorganizátoři. Základní pole (název, data) se v aktuální verzi z této obrazovky upravit nedají — změny oznamte přes příspěvek.
+- **Můžu akci po vytvoření upravit?** Ano. V **Administrace → Nastavení → Podrobnosti akce** upravíte základní pole — název, shrnutí, začátek/konec, místo i ikonu/banner — a znovu je zveřejníte. (Opětovné zveřejnění se řídí monotónním pravidlem pořadí protokolu, takže úprava nikdy neprohraje souběh ve stejné sekundě.) Novinky můžete zveřejňovat a upravovat volně a akci mohou spravovat i spoluorganizátoři. Při změně programu nebo místa se stejně vyplatí zveřejnit novinku, aby účastníci dostali upozornění, ne jen tiše změněné pole.
 
 - **Kolik mě to bude stát?** Ve výchozím stavu nic — referenční koordinátor
   je zdarma a všechno, co koordinátora nepotřebuje (seznam účastníků,

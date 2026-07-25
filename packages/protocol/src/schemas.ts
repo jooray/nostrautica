@@ -11,6 +11,7 @@
  * below).
  */
 import { z } from "zod";
+import { isEventCoordinate } from "./coordinate.js";
 
 export const PROTOCOL_VERSION = 2;
 
@@ -100,6 +101,18 @@ export function parsePayloadSafe<T>(schema: z.ZodType<T>, raw: unknown): ParseRe
 // so an uppercase-A-F pubkey that validated could never match anything.
 const hex32 = z.string().regex(/^[0-9a-f]{64}$/, "expected 32-byte hex");
 const base64 = z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, "expected base64");
+
+/**
+ * A canonical Nostrautica EVENT coordinate `31923:<E_id pubkey>:<d>` (audit R18):
+ * a `kind:pubkey:d` whose kind is exactly 31923. Used for the `a` of grants that
+ * INSTALL/AUTHORIZE an event identity, so an alias kind (e.g. `1:<E_id>:d`) can't
+ * open a divergent capacity/accounting namespace against the same author. Other
+ * `a` fields (corrections, per-event self-copies, library `a:null`) stay generic
+ * strings — only the install/key grant establishes the event's server-side identity.
+ */
+const eventCoordinate = z
+  .string()
+  .refine(isEventCoordinate, "expected a 31923 event coordinate (kind:pubkey:d)");
 
 /**
  * Byte length a canonical base64 string decodes to, or -1 if the string is not a
@@ -386,7 +399,7 @@ const secretKeyHex = hex32;
 
 export const keyGrantContentSchema = z.object({
   v: version,
-  a: z.string(), // coordinate
+  a: eventCoordinate, // 31923 event coordinate (audit R18)
   role: z.enum(["attendee", "organizer"]),
   eck: z.array(eckVersionSchema),
   granted_by: hex32,
@@ -396,7 +409,7 @@ export type KeyGrantContent = z.infer<typeof keyGrantContentSchema>;
 // ── 21603 Coordinator Grant rumor content ────────────────────────────────────
 export const coordinatorGrantContentSchema = z.object({
   v: version,
-  a: z.string(),
+  a: eventCoordinate, // 31923 event coordinate (audit R18) — the installed event's identity
   // Install generation (NIP §3.5, required): must match the newest 31600's gen for
   // a fresh install, and be strictly greater than the highest gen ever installed or
   // detached for the coordinate — a replayed historical grant can never re-install.
@@ -437,10 +450,58 @@ export const talkStatusSchema = z.enum(["pending", "published", "rejected"]);
 export type TalkStatus = z.infer<typeof talkStatusSchema>;
 
 // ── 21609 Talk Submission rumor content (attendee → E_inbox) ─────────────────
+// v2 (additive, §8/§11): a talk's video can come from three sources —
+//  - "recording": recorded in-browser, encrypted, uploaded to Blossom (`media`)
+//  - "upload":    a local file, same encrypted-Blossom pipeline (`media`)
+//  - "external":  a URL the speaker hosts elsewhere (`external_url`) — an
+//                 unlisted YouTube link or a direct mp4 — for clips too large
+//                 for Blossom (>~1 GB). The URL is carried INSIDE the already
+//                 ECK/gift-wrap-encrypted content, so it is members-only even
+//                 though the file it points at is not on Blossom. External talks
+//                 are NEVER fetched by the coordinator (preserves the C3 SSRF
+//                 allowlist), so they are view-only and never matched.
+export const talkExternalKindSchema = z.enum(["youtube", "video"]);
+export type TalkExternalKind = z.infer<typeof talkExternalKindSchema>;
+export const talkSourceTypeSchema = z.enum(["recording", "upload", "external"]);
+export type TalkSourceType = z.infer<typeof talkSourceTypeSchema>;
+
+/**
+ * A talk carries EITHER a Blossom `media` descriptor (recording/upload) or an
+ * `external_url` (+ `external_kind`), never both and never neither. Shared by
+ * the submission (21609) and published (31610) schemas.
+ */
+function refineTalkMediaSource(
+  v: { media?: unknown; external_url?: string; external_kind?: string },
+  ctx: z.RefinementCtx,
+): void {
+  const hasMedia = v.media !== undefined;
+  const hasExternal = v.external_url !== undefined;
+  if (hasMedia === hasExternal) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "a talk needs exactly one of `media` (recorded/uploaded) or `external_url` (YouTube/mp4)",
+    });
+    return;
+  }
+  if (hasMedia && (v.media as { kind?: string }).kind !== "talk") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["media"], message: "talk media must be kind:'talk'" });
+  }
+  if (hasExternal && v.external_kind === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["external_kind"],
+      message: "external_kind (youtube|video) is required when external_url is set",
+    });
+  }
+}
+
 // A speaker submits (or edits) a prerecorded talk. `talk_d` is a stable id the
 // speaker chooses once; editing resubmits with the SAME talk_d and a bumped
-// `revision`, so the coordinator replaces the previous talk in place. The media is
-// a normal kind:"talk" descriptor (longer clip, max_talk_sec + pipeline segmentation).
+// `revision`, so the coordinator replaces the previous talk in place. `media` is a
+// normal kind:"talk" descriptor (longer clip, max_talk_sec + pipeline segmentation),
+// OR `external_url` points at a self-hosted/YouTube video. `process_for_matching`
+// (default off) is the ONLY thing that opts a Blossom talk into coordinator STT +
+// matching — talks are not fed into matching by default.
 export const talkSubmissionContentSchema = z
   .object({
     v: version,
@@ -449,11 +510,15 @@ export const talkSubmissionContentSchema = z
     title: z.string().min(1).max(MAX_TALK_TITLE),
     description: z.string().max(MAX_TALK_DESC).default(""),
     speakers: z.array(hex32).default([]), // co-speakers; the submitter is implicit
-    media: mediaDescriptorSchema,
+    media: mediaDescriptorSchema.optional(),
+    external_url: httpsUrl(2048).optional(),
+    external_kind: talkExternalKindSchema.optional(),
+    source_type: talkSourceTypeSchema.optional(),
+    process_for_matching: z.boolean().default(false),
     revision: z.number().int().nonnegative().default(0),
   })
   .strict()
-  .refine((v) => v.media.kind === "talk", "talk submission media must be kind:'talk'");
+  .superRefine(refineTalkMediaSource);
 export type TalkSubmissionContent = z.infer<typeof talkSubmissionContentSchema>;
 
 // ── 31610 Talk content (ECK) ─────────────────────────────────────────────────
@@ -470,15 +535,21 @@ export const talkContentSchema = z
     title: z.string().min(1).max(MAX_TALK_TITLE),
     description: z.string().max(MAX_TALK_DESC).default(""),
     speakers: z.array(hex32).default([]),
-    media: mediaDescriptorSchema,
+    // Recording/upload → a Blossom `media` descriptor; external → `external_url`
+    // (+ `external_kind`). Exactly one, as on the submission (§8/§11).
+    media: mediaDescriptorSchema.optional(),
+    external_url: httpsUrl(2048).optional(),
+    external_kind: talkExternalKindSchema.optional(),
+    source_type: talkSourceTypeSchema.optional(),
     // Reuses F1's transcript sub-schema: the nonvisual consumption path for talks.
+    // Absent for external talks and for talks the speaker didn't opt into matching.
     transcript: mediaTranscriptSchema.optional(),
     lang: z.string(),
     revision: z.number().int().nonnegative(),
     status: talkStatusSchema,
     published_at: z.number().int(),
   })
-  .refine((v) => v.media.kind === "talk", "talk media must be kind:'talk'");
+  .superRefine(refineTalkMediaSource);
 export type TalkContent = z.infer<typeof talkContentSchema>;
 
 // ── 21610 Attendee Withdrawal rumor content (attendee → E_inbox) ─────────────

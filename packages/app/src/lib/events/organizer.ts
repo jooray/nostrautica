@@ -58,7 +58,10 @@ import {
   type MediaDescriptor,
   type EckVersion,
   type RosterContent,
+  type RevisionKey,
   pickLatest,
+  revisionSupersedes,
+  supersedes,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -67,8 +70,9 @@ import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -143,9 +147,13 @@ export async function fetchPending(
   )) as unknown as GiftWrap[];
 
   const byAttendee = new Map<string, PendingRequest>();
+  // The winning join rumor's id per attendee, so equal-created_at siblings apply
+  // the global §3.1 tie-break (lowest id) rather than non-deterministic arrival
+  // order (audit P4).
+  const joinRumorId = new Map<string, string>();
   const submissions = new Map<
     string,
-    { at: number; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
+    { key: RevisionKey; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
   >();
 
   /** Unwrap a wrap with whichever inbox secret it was sealed to (current or prior). */
@@ -172,7 +180,17 @@ export async function fetchPending(
       }
       const invite = parseInviteTag(rumor.tags);
       const prev = byAttendee.get(rumor.pubkey);
-      if (!prev || rumor.created_at > prev.rumorCreatedAt) {
+      // Join requests carry no `rev`; order them by the global event tie-break —
+      // higher created_at, then lowest id on a tie (audit P4). Arrival order is
+      // non-deterministic, so first-arrival-wins let two organizers disagree.
+      const prevJoinId = joinRumorId.get(rumor.pubkey);
+      if (
+        !prev ||
+        supersedes(
+          { id: rumor.id, created_at: rumor.created_at },
+          { id: prevJoinId ?? "", created_at: prev.rumorCreatedAt },
+        )
+      ) {
         byAttendee.set(rumor.pubkey, {
           attendeePubkey: rumor.pubkey,
           name: content.name,
@@ -181,14 +199,24 @@ export async function fetchPending(
           invite,
           rumorCreatedAt: rumor.created_at,
         });
+        joinRumorId.set(rumor.pubkey, rumor.id);
       }
     } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
       try {
         const parsed = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
+        // Select by (rev, created_at, lowest id) via the shared revision
+        // comparator — mirrors the coordinator-backed path (audit P4). The `rev`
+        // was previously parsed and discarded, so a delayed revision 1 with a
+        // newer clock could replace revision 2 and re-approve removed text/media.
+        const candidate: RevisionKey = {
+          rev: parsed.rev,
+          created_at: rumor.created_at,
+          id: rumor.id,
+        };
         const prev = submissions.get(rumor.pubkey);
-        if (!prev || rumor.created_at > prev.at) {
+        if (!prev || revisionSupersedes(candidate, prev.key)) {
           submissions.set(rumor.pubkey, {
-            at: rumor.created_at,
+            key: candidate,
             profile: parsed.profile,
             media: parsed.media,
             introText: parsed.intro_text,
@@ -418,12 +446,19 @@ export async function sendAdminCommand(
  * ECK) to the co-organizer's pubkey so they get full organizer custody — they can
  * edit the event, approve attendees, and manage the coordinator. Their client
  * picks it up via the normal grant-receiving path.
+ *
+ * Returns the publication outcome. The caller MUST NOT report this as done on a
+ * bare resolve: `publishOrQueue` persists to the durable outbox when WSS is
+ * blocked or every retry fails, and the settings page used to paint a flat
+ * "Sent ✓" either way — telling one organizer the hand-off had happened while
+ * the wrap was still sitting in this device's IndexedDB and the other device
+ * waited forever.
  */
 export async function addCoOrganizer(
   organizer: AppSigner,
   ctx: EventContext,
   coOrganizerPubkey: string,
-): Promise<void> {
+): Promise<PublishOutcome> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
     throw new Error("organizer keys not available on this device");
@@ -443,7 +478,109 @@ export async function addCoOrganizer(
       granted_by: getPublicKey(eidSk),
     },
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  // Publish to the event's own relays UNIONED with the app defaults, because the
+  // two halves of this hand-off disagreed about where to look: this wrap went to
+  // `ctx.config.relays`, while the receiving side (attendee.receiveGrants) scans
+  // DEFAULT_RELAYS only. For an event created with a custom relay set the grant
+  // therefore landed exactly where the co-organizer's client never reads, and
+  // their Admin page waited on a grant that was published and unreachable. The
+  // union keeps the event's relays authoritative and guarantees the overlap the
+  // reader needs.
+  return toOutcome(
+    await publishOrQueue(wrap as any, unionRelays(ctx.config.relays, DEFAULT_RELAYS)),
+  );
+}
+
+/** How often the organizer-grant wait re-checks while the page stays open. */
+export const ORGANIZER_GRANT_POLL_MS = 4000;
+
+/**
+ * One pass of the "do I hold the organizer keys yet?" check behind the Admin /
+ * Event-settings grant-wait card: pull any newly-arrived gift wraps into local
+ * custody, then re-read this device's keys for the coordinate. Resolves to the
+ * organizer keys once this device holds them, undefined while it doesn't.
+ *
+ * `signer` is nullable ON PURPOSE, and a null one skips ONLY the grant scan. Two
+ * different things are missing during a session restore and both used to read as
+ * "you are not the organizer": there is no signer to unwrap inbound 21605 grants
+ * with, AND there is no active keystore owner yet (the session sets it in
+ * `adopt()`), so `loadEventKeys` returns undefined even on a device that already
+ * holds the keys. With a NIP-46 signer the layout deliberately does not await the
+ * restore — it is a bunker connect plus a getPublicKey round-trip — so a page can
+ * mount squarely inside that window. Re-reading the keystore on every pass, with
+ * or without a signer, is what lets both resolve on a later pass instead of
+ * needing a navigation away and back.
+ *
+ * `receiveGrants` is injected rather than imported: it lives in attendee.ts,
+ * which already imports this module, and an import cycle is not worth saving the
+ * caller one argument.
+ */
+export async function checkForOrganizerGrant(
+  coordinate: string,
+  signer: AppSigner | null,
+  receiveGrants: (signer: AppSigner) => Promise<unknown>,
+): Promise<EventKeys | undefined> {
+  if (signer) await receiveGrants(signer);
+  const keys = await loadEventKeys(coordinate);
+  return keys?.role === "organizer" ? keys : undefined;
+}
+
+export interface OrganizerGrantPollOptions {
+  coordinate: string;
+  /** Read FRESH on every tick — never captured once (see below). */
+  signer: () => AppSigner | null;
+  receiveGrants: (signer: AppSigner) => Promise<unknown>;
+  /** Stop the wait: the page was destroyed, or the keys arrived another way. */
+  stopped: () => boolean;
+  /** Called once, with the keys, as soon as this device holds organizer custody. */
+  onGranted: (keys: EventKeys) => void | Promise<void>;
+  /** After every completed pass, with whether a signer was available for it. */
+  onChecked?: (signerReady: boolean) => void;
+  intervalMs?: number;
+}
+
+/**
+ * Poll {@link checkForOrganizerGrant} until this device is granted organizer
+ * custody — the receiving half of {@link addCoOrganizer} (spec §6.1 co-organizer
+ * hand-off, and the same path a second device of the same organizer takes).
+ *
+ * The loop starts UNCONDITIONALLY, before any signer exists, and re-reads
+ * `signer()` every pass. Its predecessor opened with an `if (!session.signer)
+ * return` and was started exactly once from `onMount`: on a NIP-46 device whose
+ * session restore hadn't finished yet, the wait ended before it ever ran a single
+ * check. `session.npub` painted a second later, so the card looked perfectly
+ * healthy while nothing at all was polling — the grant sat on the relay, a reload
+ * replayed the same race, and only navigating away and back (a remount with the
+ * signer already present) unstuck it (device-B report 2026-07-24).
+ *
+ * Every pass is fully guarded, too. `receiveGrants` was `.catch()`-ed but
+ * `loadEventKeys` was not, so a single rejected keystore read rejected the loop's
+ * promise — which both callers `void` — and the wait died silently for the rest
+ * of the page's life.
+ */
+export async function pollForOrganizerGrant(opts: OrganizerGrantPollOptions): Promise<void> {
+  const intervalMs = opts.intervalMs ?? ORGANIZER_GRANT_POLL_MS;
+  while (!opts.stopped()) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    if (opts.stopped()) return;
+    const signer = opts.signer();
+    let granted: EventKeys | undefined;
+    try {
+      granted = await checkForOrganizerGrant(opts.coordinate, signer, opts.receiveGrants);
+    } catch {
+      /* an unreachable relay, a declined signer prompt, a storage hiccup — one
+         bad pass must never end the wait; the next tick retries it */
+    }
+    opts.onChecked?.(signer !== null);
+    if (opts.stopped()) return;
+    if (!granted) continue;
+    try {
+      await opts.onGranted(granted);
+    } catch {
+      /* the caller surfaces its own load failure; custody is already ours */
+    }
+    return;
+  }
 }
 
 /**
@@ -537,16 +674,25 @@ export async function generateInvites(
   }
 
   const identifier = splitCoordinate(ctx.coordinate).identifier;
-  const event = finalizeEvent(
-    {
-      kind: KIND_INVITE_LIST,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: [["d", identifier], ["a", ctx.coordinate], ["v", "2"]],
-      content: JSON.stringify({ v: 2, invites }),
-    },
-    eidSk,
-  );
-  await publishOrQueue(event, ctx.config.relays);
+  // Monotonic republish (audit P3): the invite list is addressable, and a
+  // same-second regeneration must not lose the §3.1 tie-break and silently drop
+  // the codes just added/revoked.
+  await publishMonotonic({
+    kind: KIND_INVITE_LIST,
+    author: ctx.config.eidPubkey,
+    identifier,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        {
+          kind: KIND_INVITE_LIST,
+          created_at,
+          tags: [["d", identifier], ["a", ctx.coordinate], ["v", "2"]],
+          content: JSON.stringify({ v: 2, invites }),
+        },
+        eidSk,
+      ),
+  });
   return generated;
 }
 
@@ -768,16 +914,20 @@ export async function updateEventConfig(
   const relays =
     changes.chat?.length ? unionRelays(ctx.config.relays, WHITENOISE_RELAYS) : ctx.config.relays;
   const built = buildEventConfig({ ...ctx.config, ...changes, relays });
-  const configEvent = finalizeEvent(
-    {
-      kind: built.kind,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: built.tags,
-      content: built.content,
-    },
-    eidSk,
-  );
-  await publishOrQueue(configEvent, ctx.config.relays);
+  // Monotonic republish (audit P3): a config change made in the same second as
+  // the previous 31600 must win the §3.1 tie-break, or the stale config stays
+  // authoritative and the setting silently doesn't take.
+  await publishMonotonic({
+    kind: built.kind,
+    author: ctx.config.eidPubkey,
+    identifier: ctx.config.d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        { kind: built.kind, created_at, tags: built.tags, content: built.content },
+        eidSk,
+      ),
+  });
 }
 
 export async function attachCoordinator(
@@ -822,18 +972,20 @@ export async function attachCoordinator(
   }
 
   // 1. Republish 31600 with the three-element coordinator tag (signed by E_id),
-  //    advertising the (possibly rotated) inbox.
-  const cfg = { ...ctx.config, inbox: einboxPubkey, coordinator: coordinatorPubkey, coordinatorGen: gen };
+  //    advertising the (possibly rotated) inbox. The `eck` tag is bootstrap-only
+  //    and grants/roster are the current-ECK authority (audit P5) — but on a
+  //    replace we DID just rotate the ECK, so write the fresh version onto the
+  //    config we sign rather than leaving a stale bootstrap value. Nothing reads
+  //    this as "current"; it just keeps the signed config from actively lying.
+  const currentEckId = eck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
+  const cfg = {
+    ...ctx.config,
+    inbox: einboxPubkey,
+    coordinator: coordinatorPubkey,
+    coordinatorGen: gen,
+    eck: currentEckId,
+  };
   const built = buildEventConfig(cfg);
-  const configEvent = finalizeEvent(
-    {
-      kind: built.kind,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: built.tags,
-      content: built.content,
-    },
-    eidSk,
-  );
 
   // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
   //    E_id so the coordinator can authenticate the install against the coordinate.
@@ -850,8 +1002,21 @@ export async function attachCoordinator(
     },
   });
 
+  // Monotonic config republish (audit P3): an attach in the same second as the
+  // prior config must win the §3.1 tie-break, or the grant can be published while
+  // the coordinator-bearing config never becomes current.
   await Promise.all([
-    publishOrQueue(configEvent, ctx.config.relays),
+    publishMonotonic({
+      kind: built.kind,
+      author: ctx.config.eidPubkey,
+      identifier: ctx.config.d,
+      relays: ctx.config.relays,
+      sign: (created_at) =>
+        finalizeEvent(
+          { kind: built.kind, created_at, tags: built.tags, content: built.content },
+          eidSk,
+        ),
+    }),
     publishOrQueue(grantWrap as any, ctx.config.relays),
   ]);
 
@@ -884,13 +1049,22 @@ async function writeEventKeysBackup(
   const ownPubkey = await organizer.getPublicKey();
   const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
   const d = `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
-  const event = await organizer.signEvent({
+  // Monotonic republish (audit P3): the 30078 backup is rewritten on every
+  // attach/detach/rotation. Two rotations in the same second must not let the
+  // §3.1 tie-break resurrect the older backup (stale coordinator gen / ECK set).
+  await publishMonotonic({
     kind: KIND_APP_DATA,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["d", d]],
-    content,
+    author: ownPubkey,
+    identifier: d,
+    owner: ownPubkey,
+    sign: (created_at) =>
+      organizer.signEvent({
+        kind: KIND_APP_DATA,
+        created_at,
+        tags: [["d", d]],
+        content,
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
 }
 
 /**
@@ -926,17 +1100,30 @@ export async function detachCoordinator(
   //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to
   //    all attendees) to protect future content. Reads the CURRENT (still
   //    coordinator-authored) records, so it must run before the new config publishes.
-  const { newInboxPubkey } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
+  const { newInboxPubkey, eck: rotatedEck } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
 
   // 3. Republish 31600 without the coordinator tag, advertising the NEW inbox so
   //    senders encrypt future submissions to the rotated inbox the organizer holds.
+  //    Advance the bootstrap-only `eck` tag to the freshly rotated version (audit
+  //    P5: grants/roster remain the authority, this just keeps the signed config
+  //    from carrying a stale version).
   const { coordinator: _c, coordinatorGen: _g, ...rest } = ctx.config;
   void _c;
   void _g;
-  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey });
-  const configEvent = finalizeEvent(
-    { kind: built.kind, created_at: Math.floor(Date.now() / 1000), tags: built.tags, content: built.content },
-    eidSk,
-  );
-  await publishOrQueue(configEvent, ctx.config.relays);
+  const currentEckId = rotatedEck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
+  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey, eck: currentEckId });
+  // Monotonic republish (audit P3): a detach in the same second as the previous
+  // config must win the §3.1 tie-break, or the coordinator-bearing config can
+  // stay authoritative and the detach silently doesn't take.
+  await publishMonotonic({
+    kind: built.kind,
+    author: ctx.config.eidPubkey,
+    identifier: ctx.config.d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        { kind: built.kind, created_at, tags: built.tags, content: built.content },
+        eidSk,
+      ),
+  });
 }

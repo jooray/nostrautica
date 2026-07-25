@@ -12,7 +12,7 @@ Nostrautica je aplikácia pre podujatia postavená na jednej myšlienke: **najd�
 
 Všetko beží vo vašom prehliadači. Nič netreba nastavovať na serveri — aplikácia ukladá dáta podujatia zašifrované na otvorenej sieti Nostr. Kľúče podujatia drží váš prehliadač, preto **používajte jeden prehliadač, ktorý si necháte** (a keď vás na to aplikácia vyzve, zálohujte si identitu).
 
-> **Poznámka k usporiadaniu aplikácie.** Keď ste vnútri podujatia, spodná lišta je *viazaná na dané podujatie* — **Prehľad**, **Ľudia**, **Spojenia**, **Novinky** a **Viac** sa vzťahujú na podujatie, v ktorom práve ste, a kompaktná hlavička nad nimi ukazuje jeho názov a váš status. Vaše globálne veci (všetky vaše podujatia, správy, nastavenia, vaša identita) sú v ponuke **Viac**. Ako organizátor tam navyše nájdete **Správa podujatia**, ktorá otvorí administráciu popísanú v §3.
+> **Poznámka k usporiadaniu aplikácie.** Keď ste vnútri podujatia, spodná lišta je *viazaná na dané podujatie* — **Prehľad**, **Ľudia**, **Spojenia**, **Novinky** a **Viac** sa vzťahujú na podujatie, v ktorom práve ste, a kompaktná hlavička nad nimi ukazuje jeho názov a váš status. Ďalšie dve karty, **Prednášky** a **Chat**, sa objavia len vtedy, keď tieto funkcie zapnete (§6.5) — pre vás aj pre účastníkov. Vaše globálne veci (všetky vaše podujatia, správy, nastavenia, vaša identita) sú v ponuke **Viac**. Ako organizátor tam navyše nájdete **Správa podujatia**, ktorá otvorí administráciu popísanú v §3.
 
 ## 1. Vytvorenie identity
 
@@ -41,7 +41,7 @@ Zvoľte **Vytvoriť podujatie** a vyplňte formulár:
 
   ![Výber koordinátora priamo pri vytváraní podujatia](images/organizer-sk/01b-create-coordinator-light.png)
 - **Pridať sa medzi účastníkov** — predvolene zaškrtnuté: ste zapísaní ako ktorýkoľvek iný účastník, takže prvý človek, ktorý sa pripojí, uvidí v zozname **Ľudia** aspoň vás namiesto prázdneho zoznamu (a raz, keď nahráte predstavenie, môžete byť aj vy niekomu spárovaní). Vaše meno a bio vidia len schválení účastníci; odškrtnite to, ak chcete podujatie organizovať bez toho, aby ste sa objavili v zozname.
-- **Rozšírené** (zbalené) — nahratie ikony a banneru podujatia (inak sa vygenerujú z názvu) a nastavenie limitu dĺžky predstavovacieho videa.
+- **Rozšírené** (zbalené) — nahratie ikony a banneru podujatia (inak sa vygenerujú z názvu) a nastavenie limitu dĺžky predstavovacieho videa. Ikonu a banner môžete vybrať a orezať **ešte skôr, než máte identitu** — ak vytvárate podujatie neprihlásení, aplikácia orezané obrázky podrží lokálne a nahrá ich za vás hneď po tom, ako pri odoslaní vytvorí vašu identitu, takže sa nemusíte zastavovať a prihlasovať.
 
 ### Jazyk podujatia
 
@@ -58,7 +58,17 @@ Všimnite si poznámku pod formulárom: **rotácia kľúčov funguje len dopredu
 **Retenčné obdobie** nastavíte v **Administrácia → Nastavenia → Zmazať údaje
 účastníkov po podujatí**. Zadajte kladný počet dní alebo nechajte pole
 prázdne pre neobmedzené uchovávanie. Účastníci obdobie vidia pri pripojení
-aj na stránke podujatia; zmazanie nie je zaručené, ak relay žiadosť ignoruje.
+aj na stránke podujatia. Keď obdobie uplynie (a takisto keď niekto podujatie
+opustí), koordinátor teraz zmaže **aj svoje vlastné kópie** — profily, AI profily,
+prepisy, zdôvodnenia párov, prednášky a zhrnutia, ktoré má u seba, nielen zverejnené
+záznamy — a odstráni záznamy z relayov naprieč všetkými verziami kľúča, ktoré
+podujatie kedy použilo, nielen tie aktuálne. Dve poctivé obmedzenia zostávajú:
+zmazanie na relayoch (NIP-09) je najlepšia snaha a relay si kópiu môže ponechať; a
+obsahovo adresovaná položka, ktorú stále zdieľa *iné* podujatie, prežije, kým ju
+neopustí aj to posledné. Zálohy sú samostatná vec — záloha, ktorú prevádzkovateľ
+koordinátora urobil pred zmazaním, dáta drží, kým ju nevymení ([príručka
+prevádzkovateľa](COORDINATOR-OPERATOR-GUIDE.md) to popisuje). Ide teda o skutočné
+upratovanie, len nie o kryptografickú záruku, že každá posledná kópia je všade preč.
 
 Po vytvorení dostanete **odkaz na zdieľanie**, kontrolný zoznam ďalších
 krokov a **potvrdenku** — každý zverejňovací krok sa hlási samostatne, takže
@@ -240,7 +250,7 @@ Verejné príspevky sa zobrazujú na **stránke podujatia** pre každého; prís
 V **Administrácia → Nastavenia** sú ešte dva ovládacie prvky:
 
 - **Stránka podujatia** (kind 31608) — namiesto predvoleného rozloženia si zostavíte vlastné menu a usporiadate sekcie (ktoré príspevky sa kde zobrazujú) na verejnej stránke podujatia. Poradie meníte pomocou tlačidiel ↑/↓.
-- **Vzhľad** (kind 31609) — vložíte vlastné CSS a naladíte vzhľad stránok *tohto podujatia*. Pred **Zverejnením vzhľadu** máte živý **Náhľad**; opustenie administrácie bez zverejnenia obnoví posledný uložený vzhľad. Vrství sa nad vstavaným farebným nádychom aplikácie pre dané podujatie, takže stačí málo. (Vkladajte len CSS, ktoré ste napísali sami alebo ktorému dôverujete — štýluje stránku každému účastníkovi. Poznámka: váš vzhľad platí naprieč stránkami podujatia *okrem* zopár trás, ktoré zobrazujú citlivé údaje — odovzdávanie zariadenia chatu a obrazovky pozývaní/koordinátora v administrácii sa zámerne vykresľujú bez neho, takže nepriateľský vzhľad sa na týchto konkrétnych obrazovkách nedá zneužiť na vylákanie kľúčov či pozývacích kódov.)
+- **Vzhľad** (kind 31609) — vložíte vlastné CSS a naladíte vzhľad stránok *tohto podujatia*. Pred **Zverejnením vzhľadu** máte živý **Náhľad**; opustenie administrácie bez zverejnenia obnoví všetkým posledný *zverejnený* vzhľad, ale vaše neodoslané CSS sa uloží ako koncept a po návrate sa v editore obnoví (s tlačidlom Zahodiť, ktorým ho zrušíte), takže odchod z obrazovky už nepríde o rozpracovanú prácu — to isté platí pre neodoslaný príspevok podujatia a neuložené úpravy profilu. Vrství sa nad vstavaným farebným nádychom aplikácie pre dané podujatie, takže stačí málo. (Vkladajte len CSS, ktoré ste napísali sami alebo ktorému dôverujete — štýluje stránku každému účastníkovi. Poznámka: váš vzhľad platí naprieč stránkami podujatia *okrem* zopár trás, ktoré zobrazujú citlivé údaje — odovzdávanie zariadenia chatu a obrazovky pozývaní/koordinátora v administrácii sa zámerne vykresľujú bez neho, takže nepriateľský vzhľad sa na týchto konkrétnych obrazovkách nedá zneužiť na vylákanie kľúčov či pozývacích kódov.)
 
 ![Vzhľad — CSS motívu podujatia so živým náhľadom](images/organizer-sk/10-theme-editor-light.png)
 
@@ -255,7 +265,13 @@ pre návštevníka.
 
 ## 6.5 Prednášky a skupinový chat (obe novinky, obe voliteľné)
 
-**Prednahraté prednášky.** V **Administrácia → Nastavenia → Prednahraté prednášky** to prepnite na *Zapnuté* (alebo *Najprv prednahraté*, čo v navigácii účastníkov posunie Prednášky pred Ľudí — vhodné pre formát „pozrite si vopred, stretnite sa na mieste") a **Uložte**. Schválení účastníci potom môžu posielať krátke prednášky z toho istého editora ako pri predstavení.
+**Prednahraté prednášky.** V **Administrácia → Nastavenia → Prednahraté prednášky** to prepnite na *Zapnuté* (alebo *Najprv prednahraté*, čo v navigácii účastníkov posunie Prednášky pred Ľudí — vhodné pre formát „pozrite si vopred, stretnite sa na mieste") a **Uložte**. Schválení účastníci potom môžu posielať krátke prednášky — nahraté v prehliadači, nahraté ako súbor, alebo zadané ako neverejná **YouTube / .mp4 URL** (vhodné pre prednášky príliš veľké na nahranie; koordinátor tieto nikdy nesťahuje, takže URL prednášky sú len na sledovanie).
+
+![Odosielanie prednášky — výber zdroja videa a voliteľné zapnutie spájania](images/participant/27-talks-submit-light.png)
+
+Všimnite si, že **prednášky už štandardne nevstupujú do spájania**: rečník pri každej prednáške zvolí, či zaškrtne *„Spracovať túto prednášku pre spájanie?"*. Majte to na pamäti, ak sa odoslaná prednáška neobjaví v zdôvodnení niečích spojení — to je očakávané, pokiaľ sa rečník neprihlásil (a pri URL prednáškach sa to nestane nikdy). Šetrí to náklady na prepis prednášok, ktoré nikto nechcel spájať.
+
+![Pole s URL videa a rozpoznaným YouTube odkazom](images/participant/27b-talks-url-light.png)
 
 Odoslané prednášky sa samé nezverejnia. Karta **Moderovanie prednášok** nižšie v **Administrácii** zobrazuje všetko, čo čaká na kontrolu — pri každej klepnite na **Ukážka**, potom ju buď **Zverejnite**, aby si ju účastníci mohli pozrieť, alebo **Zamietnite**. Kým to tu neurobíte, nikto okrem vás nič, čo účastník pošle, neuvidí (zverejnenie navyše potrebuje pripojeného koordinátora, rovnako ako zvyšok administrácie). Vyhľadávanie/filter v Ľuďoch (§3) má filter **Poslaná prednáška**, takže sa na rušnom podujatí viete presunúť rovno k tým, čo na vás čakajú, bez rolovania celým zoznamom.
 
@@ -301,7 +317,7 @@ obnovy; toto je záchranná sieť pre prípad, že tento plán zlyhá.
 
   ![Prehľad administrácie organizátora na celú šírku](images/organizer/13-admin-overview-desktop-light.png)
 
-- **Môžem podujatie po vytvorení upraviť?** Novinky môžete zverejňovať a upravovať voľne. Spravovať podujatie môžu aj spoluorganizátori. Základné polia (názov, dátumy) sa v súčasnej verzii z tejto obrazovky upraviť nedajú — zmeny oznámte cez príspevok.
+- **Môžem podujatie po vytvorení upraviť?** Áno. V **Administrácia → Nastavenia → Podrobnosti podujatia** upravíte základné polia — názov, zhrnutie, začiatok/koniec, miesto aj ikonu/banner — a znova ich zverejníte. (Opätovné zverejnenie sa riadi monotónnym pravidlom poradia protokolu, takže úprava nikdy neprehrá súbeh v tej istej sekunde.) Novinky môžete zverejňovať a upravovať voľne a podujatie môžu spravovať aj spoluorganizátori. Pri zmene programu alebo miesta sa aj tak oplatí zverejniť novinku, aby účastníci dostali upozornenie, nielen ticho zmenené pole.
 
 - **Koľko ma to bude stáť?** Štandardne nič — referenčný koordinátor je
   zadarmo a všetko, čo koordinátora nepotrebuje (zoznam účastníkov, videá,

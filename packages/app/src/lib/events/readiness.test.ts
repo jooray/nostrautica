@@ -56,6 +56,33 @@ describe("deriveReadiness", () => {
     expect(r.primary?.route).toEqual({ name: "join", naddr: "naddr1xyz" });
   });
 
+  it("role 'unknown' → joined is CHECKING, not an accusation, and carries no CTA", () => {
+    // The custody read itself failed (or an identity hasn't finished arriving).
+    // "action-required" here reads as "you are not a member of this event" and
+    // hands an organizer a Join button for the event they own — the 2026-07-24
+    // report. Say nothing instead.
+    const r = deriveReadiness(base({ role: "unknown", hasIntro: undefined, processed: undefined, matchesAvailable: undefined }));
+    expect(stateOf(r, "joined")).toBe("checking");
+    expect(r.steps[0].hintKey).toBe("readiness.hint.checking");
+    expect(r.primary).toBeUndefined();
+    expect(r.viewerIsMember).toBe(false);
+    expect(r.doneCount).toBe(1); // only "backup" (the signer holds the key)
+  });
+
+  it("role 'unknown' still honours the latch — a step that WAS complete stays complete", () => {
+    const r = deriveReadiness(base({ role: "unknown", latched: new Set<ReadinessStepId>(["joined"]) }));
+    expect(stateOf(r, "joined")).toBe("complete");
+  });
+
+  it("backupAcked undefined → backup is CHECKING, never a false 'secured'", () => {
+    // The local phase paints before the durable relay marker is read. Completing
+    // the step on the device-local dismiss-nag would latch that lie permanently.
+    const r = deriveReadiness(base({ signerMethod: "local", backupAcked: undefined }));
+    expect(stateOf(r, "backup")).toBe("checking");
+    expect(r.steps.find((s) => s.id === "backup")!.hintKey).toBe("readiness.hint.checking");
+    expect(r.primary).toBeUndefined(); // checking is never an action
+  });
+
   it("UX-O4: viewerIsMember is true only for approved members, gating 'See who's here'", () => {
     expect(deriveReadiness(base({ role: "visitor" })).viewerIsMember).toBe(false);
     expect(deriveReadiness(base({ role: "pending" })).viewerIsMember).toBe(false);

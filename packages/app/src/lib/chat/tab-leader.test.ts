@@ -91,7 +91,14 @@ const SCOPE = "a".repeat(64);
 const COORD = "31923:" + "f".repeat(64) + ":ev";
 
 function msg(id: string, content = "hi"): import("./messages.js").ChatMessage {
-  return { id, pubkey: "c".repeat(64), content, createdAt: 1 } as import("./messages.js").ChatMessage;
+  return {
+    id,
+    pubkey: "c".repeat(64),
+    kind: 9,
+    content,
+    createdAt: 1,
+    tags: [],
+  };
 }
 
 describe("ChatTabCoordinator — Web Locks leader election", () => {
@@ -167,6 +174,55 @@ describe("ChatTabCoordinator — leader→follower broadcast + send proxy", () =
     await vi.waitFor(() => expect(got?.messages).toHaveLength(2));
     expect(got!.coordinate).toBe(COORD);
     expect(follower.leaderCoordinate).toBe(COORD);
+    leader.dispose();
+    follower.dispose();
+  });
+
+  it("broadcasts a Svelte-$state-like Proxy message list without DataCloneError", async () => {
+    // Mirrors production: session.svelte.ts hands `this.messages` (a deep $state
+    // Proxy) straight to broadcastState. FakeChannel structuredClones like a real
+    // BroadcastChannel, so a Proxy input used to throw.
+    const leader = new ChatTabCoordinator({ scope: SCOPE, locks, createChannel: bus.make, onRoleChange: () => {} });
+    await leader.whenSettled;
+    let got: import("./messages.js").ChatMessage[] | undefined;
+    const follower = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      onLeaderState: (_c, messages) => (got = messages),
+    });
+    await follower.whenSettled;
+
+    const plain = [msg("m1", "hello"), msg("m2", "world")];
+    plain[0].tags = [["e", "abc"], ["client", "web"]];
+    const proxied = new Proxy(plain, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        // Deep-proxy array elements the way Svelte $state does.
+        if (typeof prop === "string" && /^\d+$/.test(prop) && value && typeof value === "object") {
+          return new Proxy(value as object, {});
+        }
+        return value;
+      },
+    });
+
+    expect(() => leader.broadcastState(COORD, proxied as typeof plain)).not.toThrow();
+    await vi.waitFor(() => expect(got).toHaveLength(2));
+    expect(got![0]).toEqual({
+      id: "m1",
+      pubkey: "c".repeat(64),
+      kind: 9,
+      content: "hello",
+      createdAt: 1,
+      tags: [
+        ["e", "abc"],
+        ["client", "web"],
+      ],
+    });
+    // Delivered value must be a plain object, not a Proxy (follower UI + further
+    // re-broadcasts stay structured-clone-safe).
+    expect(Object.getPrototypeOf(got![0])).toBe(Object.prototype);
     leader.dispose();
     follower.dispose();
   });

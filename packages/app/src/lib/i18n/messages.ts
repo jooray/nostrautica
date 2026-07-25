@@ -14,6 +14,7 @@ export const messages = {
     "app.tagline": "Meet the right people at events.",
     "app.loading": "Loading…",
     "route.loadFailed": "This section couldn't be loaded. Check your connection and try again.",
+    "route.renderFailed": "This section hit an error and couldn't be shown.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — you can still browse cached people and matches; changes will sync when you reconnect.",
@@ -31,6 +32,8 @@ export const messages = {
 
     // Background sync (audit UX-15)
     "sync.queued": "Saved — will send when you're back online.",
+    "draft.restored": "Restored an unsent draft.",
+    "draft.discard": "Discard draft",
     "outbox.pending.one": "{n} change waiting to send",
     "outbox.pending.many": "{n} changes waiting to send",
     "outbox.failed.one": "{n} couldn't be sent",
@@ -81,6 +84,7 @@ export const messages = {
     "home.createEvent": "Create an event",
     "home.noEvents": "No events yet",
     "home.noEvents.body": "Open an invite link to join an event, or create your own.",
+    "home.loadingEvents": "Loading your events…",
     "home.how.title": "How it works",
     "home.how.record": "Record a short intro video (and optionally a talk).",
     "home.how.matched": "Get matched with people whose skills complement yours.",
@@ -238,8 +242,22 @@ export const messages = {
     "form.errorSummary.title": "Please fix the following:",
     "op.queued": "Saved — your {what} will send when you're back online.",
     "op.introPublished": "Your intro was published.",
+    "op.introSubmittedProcessing": "Your intro was sent — the coordinator is processing it.",
     "op.talkSubmitted": "Your talk was submitted to the coordinator.",
+    "op.talkAwaitingModeration": "Your talk was sent — it's awaiting the organizer's review.",
     "op.eventCreated": "Your event was created and published.",
+    "op.eventCreateQueued": "Saved — your event will publish when you're back online. It isn't visible to others yet.",
+    "op.eventUpdated": "Your event details were updated and published.",
+    "op.eventUpdateQueued": "Saved — your changes will publish when you're back online. Attendees still see the old details.",
+    "op.postPublished": "Your post was published.",
+    "op.postQueued": "Saved — your post will publish when you're back online. It isn't visible to attendees yet.",
+    "op.pagePublished": "Your event page was saved and published.",
+    "op.pageQueued": "Saved — your event page will publish when you're back online. Attendees still see the old page.",
+    "op.themePublished": "Your theme was published.",
+    "op.themeQueued": "Saved — your theme will publish when you're back online. Attendees still see the old theme.",
+    "op.coOrgSent": "The organizer keys were sent to your co-organizer.",
+    "op.coOrgQueued":
+      "Saved — the organizer keys will send when you're back online. Your co-organizer can't unlock the event until they do.",
     "create.error.identityFailed": "Couldn't create your identity — please retry.",
     "create.error.loginToUpload":
       "Log in (or create the event first) to upload images — generated ones are used meanwhile.",
@@ -258,13 +276,23 @@ export const messages = {
     "event.ownStatus.title": "Processing problem",
     "event.ownStatus.submission": "Your profile couldn't be processed — try re-submitting.",
     "event.ownStatus.talk": "Your talk couldn't be processed — try re-recording.",
+    "event.recoverKeys.title": "Organizer on a new device?",
+    "event.recoverKeys.body":
+      "If you created this event with this account, its keys have an encrypted backup on the relays. Restoring asks your signer to unlock it.",
+    "event.recoverKeys.action": "Restore my organizer keys",
+    "event.recoverKeys.working": "Restoring…",
+    "event.recoverKeys.restored": "Your organizer keys are back on this device.",
+    "event.recoverKeys.empty": "No key backup for this event was found for this account.",
+    "event.recoverKeys.failed": "Couldn't restore your keys — check your connection or signer and try again.",
     "event.retention.line": "Your event data is deleted {days} days after the event.",
     "event.leave.action": "Leave event",
-    "event.leave.confirm": "Leave this event? Your directory entry and matches are removed, and your intro media is deleted.",
+    "event.leave.confirm": "Leave this event? This sends a request to the organizer to remove your directory entry and matches and delete your intro media. It takes effect once they process it.",
     "event.leave.confirmYes": "Leave event",
     "event.leave.cancel": "Cancel",
     "event.leave.leaving": "Leaving…",
     "event.leave.done": "You've left this event.",
+    "event.leave.requested": "Your request to leave was sent. The organizer will remove your entry, matches and media — this can take a moment.",
+    "event.leave.queued": "Your request to leave is saved and will send when you reconnect. You haven't left yet.",
     "event.leave.failed": "Couldn't leave — please try again.",
     "event.latest": "Latest",
 
@@ -327,9 +355,11 @@ export const messages = {
     "event.offline.downloading": "Downloading… ({n} of 6)",
     "event.offline.ready": "Ready to use offline.",
     "event.offline.partial": "Saved, but some parts didn’t download — try again.",
+    "event.offline.noSw": "Data saved, but the app screens aren’t cached yet. Reopen the app once (or reload), then download again so it opens with no signal.",
     "event.offline.stored": "Using {size} of storage",
     "event.offline.persisted": "kept on this device",
     "event.offline.mediaNote": "audio/video isn’t pre-downloaded",
+    "event.offline.routesReady": "screens ready offline",
     "eventheader.link": "Event ›",
 
     // Posts (spec §7.4)
@@ -463,10 +493,24 @@ export const messages = {
     "record.intro.title": "Record your intro",
     "record.intro": "Record your intro",
     "record.uploaded": "Uploaded ✓ Your {kind} is encrypted and shared with this event's attendees.",
+    "record.done.queued":
+      "Saved on this device ✓ Your {kind} is encrypted and will be sent as soon as you reconnect to a relay — it hasn't reached the event yet.",
+    "record.done.introPublished":
+      "Published ✓ Your {kind} is encrypted and shared with this event's attendees.",
+    "record.done.introProcessing":
+      "Sent ✓ Your {kind} is encrypted and on its way — the coordinator is processing it now.",
+    "record.done.talkModeration":
+      "Sent ✓ Your {kind} is encrypted and submitted — it will appear once the organizer approves it.",
     "record.kind.intro": "intro",
     "record.kind.talk": "talk",
     "record.backToEvent": "Back to event",
     "record.loginFirst": "Log in first",
+    "record.role.loggedOut": "Log in to record or upload for this event.",
+    "record.role.resolving": "Checking your access to this event…",
+    "record.role.pending": "Your request to join is still awaiting the organizer's approval. Once you're approved you'll be able to record and upload here.",
+    "record.role.revoked": "You're no longer a member of this event, so recording and uploading are closed. Ask the organizer if you think this is a mistake.",
+    "record.role.visitor": "Only approved members can record or upload for this event. Join the event first.",
+    "record.role.join": "Join this event",
     "record.reuse.title": "Reuse a previous intro",
     "record.reuse.body":
       "Pick an intro you recorded or wrote at another event — reuse it as-is, or make a fresh copy that isn't linkable across events.",
@@ -614,6 +658,11 @@ export const messages = {
     "matches.similar": "similar {pct}%",
     "matches.complementary": "complementary {pct}%",
     "matches.name": "Attendee",
+    "matches.role.loggedOut": "Log in to see who you should meet — your matches are personal to your account.",
+    "matches.role.login": "Log in",
+    "matches.role.visitor": "Matches are for members. Join this event to get your personal list of who to meet.",
+    "matches.role.join": "Join this event",
+    "matches.role.pending": "Your request to join is awaiting the organizer's approval. Your matches appear here once you're in.",
 
     // Me
     "me.notLoggedIn": "You're not logged in.",
@@ -634,6 +683,10 @@ export const messages = {
       "These are independent Nostr apps — like different clients for the same account. Copy your key below, open one, choose “log in with a key”, and paste it in — your profile and the people you followed are already there.",
     "me.backupKey": "Back up your key",
     "me.logout": "Log out",
+    "me.logout.warnUnsent":
+      "You have {n} unsent action(s) waiting to send. Logging out will discard them — they won't be published. Log out anyway?",
+    "me.logout.confirmDiscard": "Log out and discard",
+    "me.logout.cancel": "Stay logged in",
 
     // Backup card
     "backup.noKey": "Your key lives in your signer — back it up there. Nothing to export here.",
@@ -671,6 +724,7 @@ export const messages = {
     "media.transcript.machine": "Machine-generated transcript",
     "media.captionsUnavailable": "Captions unavailable",
     "media.captionsLabel": "Transcript captions",
+    "media.speed": "Speed",
 
     // QR code
     "qr.alt": "QR code",
@@ -716,7 +770,13 @@ export const messages = {
     "admin.grant.step2": "Paste this npub and add it.",
     "admin.grant.step3":
       "Keep this page open — it unlocks here automatically once the grant arrives.",
-    "admin.grant.waiting": "Waiting for the grant…",
+    "admin.grant.waiting": "Checking for the grant every few seconds…",
+    "admin.grant.waitingSigner":
+      "Waiting for your signer to connect — checking starts as soon as it does.",
+    "admin.grant.notChecking": "Automatic checking has stopped.",
+    "admin.grant.lastChecked": "Last checked at {time}.",
+    "admin.grant.checkNow": "Check now",
+    "admin.grant.checkingNow": "Checking…",
     "admin.loading": "Loading pending requests…",
     "admin.refreshing": "Refreshing…",
     "admin.pending.one": "{n} pending request ↓",
@@ -870,6 +930,7 @@ export const messages = {
     "admin.approvedTag": "Approved ✓",
     "admin.reprocess": "Re-process",
     "common.close": "Close",
+    "common.copyFailed": "Couldn't copy automatically — select the text and copy it manually.",
     "admin.person.details": "Details",
     "admin.person.title": "{name} — details",
     "admin.person.profile": "Submitted profile",
@@ -1105,6 +1166,28 @@ export const messages = {
     "talks.favorite.add": "Favorite this talk",
     "talks.favorite.remove": "Remove from favorites",
     "talks.editing": "Editing your talk — recording a new clip replaces the current one.",
+    "talks.source.label": "Talk video",
+    "talks.source.record": "Record",
+    "talks.source.upload": "Upload file",
+    "talks.source.url": "Paste a URL",
+    "talks.url.label": "Video URL",
+    "talks.url.placeholder": "YouTube link or direct .mp4 URL",
+    "talks.url.hint": "Paste an unlisted YouTube link or a direct video (.mp4) URL. The link is encrypted to the event; the file stays where you host it — ideal for talks too large to upload.",
+    "talks.url.invalid": "Enter a valid https YouTube or video (.mp4) URL.",
+    "talks.url.detectedYoutube": "Detected: YouTube video",
+    "talks.url.detectedVideo": "Detected: direct video file",
+    "talks.url.submit": "Submit talk",
+    "talks.process.label": "Process this talk for matching?",
+    "talks.process.hint": "Off by default. When on, the coordinator transcribes this talk and folds it into your matches.",
+    "talks.process.externalNote": "External (YouTube/URL) talks are never processed for matching.",
+    "talks.mod.externalLabel": "External video",
+    "talks.external.videoTitle": "Talk video",
+    "talks.external.open": "Open video ↗",
+    "talks.external.gate.title": "This talk plays from another site",
+    "talks.external.gate.host": "Playback will contact:",
+    "talks.external.gate.note":
+      "The event link itself is encrypted, but loading the video connects your device directly to that host — sharing your IP address and browser details with it. Load only if you trust it.",
+    "talks.external.gate.load": "Load video",
     "talks.field.title": "Talk title",
     "talks.field.title.placeholder": "e.g. Zero-knowledge proofs for beginners",
     "talks.field.description": "Description",
@@ -1215,11 +1298,15 @@ export const messages = {
     "record.error.talkTitle": "Give your talk a title.",
     "record.error.disclosure": "Please confirm you understand what’s shared before submitting.",
     "record.error.textRequired": "Write your intro before submitting.",
+    "record.error.tooLong": "That clip is {actual}s, but this event's limit is {limit}s. Trim it, compress it, or re-record something shorter.",
+    "record.error.tooLarge": "That file is too large to upload (over {limitMb} MB). Compress it or pick a shorter clip.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Event report",
     "report.kicker": "Post-event report",
     "report.title": "Event report",
+    "report.about": "About this event",
+    "report.generatedOn": "Report generated {date}",
     "report.print": "Print / save PDF",
     "report.loading": "Assembling your report…",
     "report.empty":
@@ -1269,6 +1356,7 @@ export const messages = {
     "app.tagline": "Stretnite tých správnych ľudí na podujatiach.",
     "app.loading": "Načítava sa…",
     "route.loadFailed": "Túto časť sa nepodarilo načítať. Skontrolujte pripojenie a skúste znova.",
+    "route.renderFailed": "V tejto časti nastala chyba a nedá sa zobraziť.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Bez pripojenia — stále si môžete prezerať uložených ľudí a spojenia; zmeny sa zosynchronizujú po opätovnom pripojení.",
@@ -1285,6 +1373,8 @@ export const messages = {
 
     // Synchronizácia na pozadí (audit UX-15)
     "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
+    "draft.restored": "Obnovený neodoslaný koncept.",
+    "draft.discard": "Zahodiť koncept",
     "outbox.pending.one": "{n} zmena čaká na odoslanie",
     "outbox.pending.few": "{n} zmeny čakajú na odoslanie",
     "outbox.pending.many": "{n} zmien čaká na odoslanie",
@@ -1338,6 +1428,7 @@ export const messages = {
     "home.createEvent": "Vytvoriť podujatie",
     "home.noEvents": "Zatiaľ žiadne podujatia",
     "home.noEvents.body": "Otvorte pozvánku a pripojte sa k podujatiu, alebo si vytvorte vlastné.",
+    "home.loadingEvents": "Načítavajú sa vaše podujatia…",
     "home.how.title": "Ako to funguje",
     "home.how.record": "Nahrajte krátke predstavovacie video (a voliteľne aj prednášku).",
     "home.how.matched": "Spojíme vás s ľuďmi, ktorých zručnosti dopĺňajú tie vaše.",
@@ -1495,8 +1586,22 @@ export const messages = {
     "form.errorSummary.title": "Opravte, prosím, nasledujúce:",
     "op.queued": "Uložené — vaše {what} sa odošle po pripojení.",
     "op.introPublished": "Vaše predstavenie bolo zverejnené.",
+    "op.introSubmittedProcessing": "Vaše predstavenie bolo odoslané — koordinátor ho spracúva.",
     "op.talkSubmitted": "Vaša prednáška bola odoslaná koordinátorovi.",
+    "op.talkAwaitingModeration": "Vaša prednáška bola odoslaná — čaká na schválenie organizátorom.",
     "op.eventCreated": "Vaše podujatie bolo vytvorené a zverejnené.",
+    "op.eventCreateQueued": "Uložené — podujatie sa zverejní po pripojení. Ostatní ho zatiaľ nevidia.",
+    "op.eventUpdated": "Údaje podujatia boli aktualizované a zverejnené.",
+    "op.eventUpdateQueued": "Uložené — zmeny sa zverejnia po pripojení. Účastníci zatiaľ vidia pôvodné údaje.",
+    "op.postPublished": "Váš príspevok bol zverejnený.",
+    "op.postQueued": "Uložené — príspevok sa zverejní po pripojení. Účastníci ho zatiaľ nevidia.",
+    "op.pagePublished": "Stránka podujatia bola uložená a zverejnená.",
+    "op.pageQueued": "Uložené — stránka sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodnú stránku.",
+    "op.themePublished": "Vzhľad bol zverejnený.",
+    "op.themeQueued": "Uložené — vzhľad sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodný vzhľad.",
+    "op.coOrgSent": "Organizátorské kľúče boli odoslané spoluorganizátorovi.",
+    "op.coOrgQueued":
+      "Uložené — organizátorské kľúče sa odošlú po pripojení. Dovtedy si spoluorganizátor podujatie neodomkne.",
     "create.error.identityFailed": "Nepodarilo sa vytvoriť vašu identitu — skúste to znova.",
     "create.error.loginToUpload":
       "Ak chcete nahrať obrázky, prihláste sa (alebo najprv vytvorte podujatie) — dovtedy sa použijú vygenerované.",
@@ -1515,13 +1620,23 @@ export const messages = {
     "event.ownStatus.title": "Problém so spracovaním",
     "event.ownStatus.submission": "Tvoj profil sa nepodarilo spracovať — skús ho odoslať znova.",
     "event.ownStatus.talk": "Tvoju prednášku sa nepodarilo spracovať — skús ju nahrať znova.",
+    "event.recoverKeys.title": "Organizátor na novom zariadení?",
+    "event.recoverKeys.body":
+      "Ak si toto podujatie vytvoril týmto účtom, jeho kľúče majú šifrovanú zálohu na relayoch. Obnovenie požiada tvoj podpisovač o jej odomknutie.",
+    "event.recoverKeys.action": "Obnoviť moje organizátorské kľúče",
+    "event.recoverKeys.working": "Obnovuje sa…",
+    "event.recoverKeys.restored": "Tvoje organizátorské kľúče sú späť na tomto zariadení.",
+    "event.recoverKeys.empty": "Pre tento účet sa nenašla žiadna záloha kľúčov k tomuto podujatiu.",
+    "event.recoverKeys.failed": "Kľúče sa nepodarilo obnoviť — skontroluj pripojenie alebo podpisovač a skús to znova.",
     "event.retention.line": "Tvoje údaje z podujatia sa vymažú {days} dní po podujatí.",
     "event.leave.action": "Opustiť podujatie",
-    "event.leave.confirm": "Opustiť toto podujatie? Tvoj záznam v adresári a zhody sa odstránia a tvoje intro médiá sa vymažú.",
+    "event.leave.confirm": "Opustiť toto podujatie? Odošle sa žiadosť organizátorovi, aby odstránil tvoj záznam v adresári a zhody a vymazal tvoje intro médiá. Prejaví sa to, keď ju spracuje.",
     "event.leave.confirmYes": "Opustiť podujatie",
     "event.leave.cancel": "Zrušiť",
     "event.leave.leaving": "Opúšťam…",
     "event.leave.done": "Opustil si toto podujatie.",
+    "event.leave.requested": "Tvoja žiadosť o odchod bola odoslaná. Organizátor odstráni tvoj záznam, zhody a médiá — môže to chvíľu trvať.",
+    "event.leave.queued": "Tvoja žiadosť o odchod je uložená a odošle sa po opätovnom pripojení. Zatiaľ si neodišiel.",
     "event.leave.failed": "Nepodarilo sa odísť — skús to znova.",
     "event.latest": "Najnovšie",
 
@@ -1585,9 +1700,11 @@ export const messages = {
     "event.offline.downloading": "Sťahujem… ({n} zo 6)",
     "event.offline.ready": "Pripravené na použitie offline.",
     "event.offline.partial": "Uložené, no niektoré časti sa nestiahli — skúste znova.",
+    "event.offline.noSw": "Dáta sú uložené, ale obrazovky aplikácie ešte nie sú uložené. Znova otvorte aplikáciu (alebo obnovte stránku) a stiahnite znova, aby sa otvorila aj bez signálu.",
     "event.offline.stored": "Využíva {size} úložiska",
     "event.offline.persisted": "ponechané v tomto zariadení",
     "event.offline.mediaNote": "zvuk/video sa nesťahuje vopred",
+    "event.offline.routesReady": "obrazovky pripravené offline",
     "eventheader.link": "Podujatie ›",
 
     // Posts (spec §7.4)
@@ -1723,10 +1840,24 @@ export const messages = {
     "record.intro": "Nahrajte svoje predstavenie",
     "record.uploaded":
       "Nahrané ✓ Vaše {kind} je zašifrované a zdieľané s účastníkmi tohto podujatia.",
+    "record.done.queued":
+      "Uložené na tomto zariadení ✓ Vaše {kind} je zašifrované a odošle sa hneď po pripojení k relay — zatiaľ sa k podujatiu nedostalo.",
+    "record.done.introPublished":
+      "Zverejnené ✓ Vaše {kind} je zašifrované a zdieľané s účastníkmi tohto podujatia.",
+    "record.done.introProcessing":
+      "Odoslané ✓ Vaše {kind} je zašifrované a na ceste — koordinátor ho práve spracúva.",
+    "record.done.talkModeration":
+      "Odoslané ✓ Vaše {kind} je zašifrované a odovzdané — zobrazí sa po schválení organizátorom.",
     "record.kind.intro": "predstavenie",
     "record.kind.talk": "prednáška",
     "record.backToEvent": "Späť na podujatie",
     "record.loginFirst": "Najprv sa prihláste",
+    "record.role.loggedOut": "Ak chcete nahrávať alebo nahrať súbor pre toto podujatie, prihláste sa.",
+    "record.role.resolving": "Overujeme váš prístup k tomuto podujatiu…",
+    "record.role.pending": "Vaša žiadosť o pripojenie stále čaká na schválenie organizátorom. Po schválení tu budete môcť nahrávať a nahrať súbory.",
+    "record.role.revoked": "Už nie ste členom tohto podujatia, takže nahrávanie a nahrávanie súborov je uzavreté. Ak si myslíte, že ide o omyl, opýtajte sa organizátora.",
+    "record.role.visitor": "Nahrávať alebo nahrať súbory pre toto podujatie môžu len schválení členovia. Najprv sa pripojte k podujatiu.",
+    "record.role.join": "Pripojiť sa k podujatiu",
     "record.reuse.title": "Znova použiť predchádzajúce predstavenie",
     "record.reuse.body":
       "Vyberte si predstavenie, ktoré ste nahrali alebo napísali na inom podujatí — použite ho tak, ako je, alebo si spravte čerstvú kópiu, ktorá nie je prepojiteľná medzi podujatiami.",
@@ -1849,7 +1980,7 @@ export const messages = {
     "lang.noResults": "Žiadny jazyk sa nenašiel",
 
     // Matches
-    "matches.title": "Ľudia na stretnutie",
+    "matches.title": "Ľudia, ktorých sa oplatí stretnúť",
     "matches.none.noIntro":
       "Zatiaľ žiadne spojenia — koordinátor začína z vášho Nostr profilu a príspevkov, skúste o pár minút. Nahraté predstavenie vaše spojenia výrazne zlepší.",
     "matches.live": "vaše predstavenie je odoslané, takže tieto sú aktuálne",
@@ -1875,6 +2006,11 @@ export const messages = {
     "matches.similar": "podobnosť {pct}%",
     "matches.complementary": "doplnkovosť {pct}%",
     "matches.name": "Účastník",
+    "matches.role.loggedOut": "Prihláste sa, aby ste videli, s kým sa stretnúť — vaše zhody sú viazané na váš účet.",
+    "matches.role.login": "Prihlásiť sa",
+    "matches.role.visitor": "Zhody sú pre členov. Pripojte sa k podujatiu a získajte osobný zoznam ľudí, s ktorými sa oplatí stretnúť.",
+    "matches.role.join": "Pripojiť sa k podujatiu",
+    "matches.role.pending": "Vaša žiadosť o pripojenie čaká na schválenie organizátorom. Vaše zhody sa tu zobrazia, keď budete schválení.",
 
     // Me
     "me.notLoggedIn": "Nie ste prihlásený(á).",
@@ -1896,6 +2032,10 @@ export const messages = {
       "Toto sú nezávislé aplikácie na Nostri — ako rôzni klienti pre ten istý účet. Skopírujte si kľúč nižšie, otvorte niektorú z nich, zvoľte „prihlásiť sa kľúčom“ a vložte ho — váš profil aj ľudia, ktorých sledujete, tam už sú.",
     "me.backupKey": "Zálohujte si kľúč",
     "me.logout": "Odhlásiť sa",
+    "me.logout.warnUnsent":
+      "Máte {n} neodoslaných akcií čakajúcich na odoslanie. Odhlásením sa zahodia — nezverejnia sa. Napriek tomu sa odhlásiť?",
+    "me.logout.confirmDiscard": "Odhlásiť a zahodiť",
+    "me.logout.cancel": "Zostať prihlásený",
 
     // Backup card
     "backup.noKey":
@@ -1934,6 +2074,7 @@ export const messages = {
     "media.transcript.machine": "Strojovo vygenerovaný prepis",
     "media.captionsUnavailable": "Titulky nie sú k dispozícii",
     "media.captionsLabel": "Titulky z prepisu",
+    "media.speed": "Rýchlosť",
 
     // QR code
     "qr.alt": "QR kód",
@@ -1979,7 +2120,13 @@ export const messages = {
     "admin.grant.step2": "Vložte tento npub a pridajte ho.",
     "admin.grant.step3":
       "Nechajte túto stránku otvorenú — po doručení udelenia sa tu automaticky odomkne.",
-    "admin.grant.waiting": "Čaká sa na udelenie…",
+    "admin.grant.waiting": "Každých pár sekúnd sa kontroluje, či udelenie prišlo…",
+    "admin.grant.waitingSigner":
+      "Čaká sa na pripojenie podpisovača — kontrola sa spustí hneď, ako sa pripojí.",
+    "admin.grant.notChecking": "Automatická kontrola sa zastavila.",
+    "admin.grant.lastChecked": "Naposledy skontrolované o {time}.",
+    "admin.grant.checkNow": "Skontrolovať teraz",
+    "admin.grant.checkingNow": "Kontroluje sa…",
     "admin.loading": "Načítavajú sa čakajúce žiadosti…",
     "admin.refreshing": "Obnovuje sa…",
     "admin.pending.one": "{n} čakajúca žiadosť ↓",
@@ -2135,6 +2282,7 @@ export const messages = {
     "admin.approvedTag": "Schválený ✓",
     "admin.reprocess": "Spracovať znova",
     "common.close": "Zavrieť",
+    "common.copyFailed": "Nepodarilo sa skopírovať automaticky — označte text a skopírujte ho ručne.",
     "admin.person.details": "Podrobnosti",
     "admin.person.title": "{name} — podrobnosti",
     "admin.person.profile": "Odoslaný profil",
@@ -2371,6 +2519,28 @@ export const messages = {
     "talks.favorite.add": "Pridať prednášku k obľúbeným",
     "talks.favorite.remove": "Odobrať z obľúbených",
     "talks.editing": "Upravujete svoju prednášku — nová nahrávka nahradí súčasnú.",
+    "talks.source.label": "Video prednášky",
+    "talks.source.record": "Nahrať",
+    "talks.source.upload": "Nahrať súbor",
+    "talks.source.url": "Vložiť URL",
+    "talks.url.label": "URL videa",
+    "talks.url.placeholder": "YouTube odkaz alebo priama .mp4 URL",
+    "talks.url.hint": "Vložte neverejný YouTube odkaz alebo priamu URL videa (.mp4). Odkaz je šifrovaný pre podujatie; súbor zostáva tam, kde ho hostujete — ideálne pre prednášky príliš veľké na nahranie.",
+    "talks.url.invalid": "Zadajte platnú https YouTube alebo video (.mp4) URL.",
+    "talks.url.detectedYoutube": "Rozpoznané: YouTube video",
+    "talks.url.detectedVideo": "Rozpoznané: priamy videosúbor",
+    "talks.url.submit": "Odoslať prednášku",
+    "talks.process.label": "Spracovať túto prednášku pre spájanie?",
+    "talks.process.hint": "Predvolene vypnuté. Keď je zapnuté, koordinátor prepíše prednášku a zahrnie ju do vašich spojení.",
+    "talks.process.externalNote": "Externé (YouTube/URL) prednášky sa nikdy nespracúvajú pre spájanie.",
+    "talks.mod.externalLabel": "Externé video",
+    "talks.external.videoTitle": "Video prednášky",
+    "talks.external.open": "Otvoriť video ↗",
+    "talks.external.gate.title": "Táto prednáška sa prehráva z inej stránky",
+    "talks.external.gate.host": "Prehrávanie sa spojí s:",
+    "talks.external.gate.note":
+      "Samotný odkaz na podujatie je šifrovaný, ale načítanie videa pripojí vaše zariadenie priamo k tomuto hostiteľovi — zdieľate s ním svoju IP adresu a údaje prehliadača. Načítajte len ak mu dôverujete.",
+    "talks.external.gate.load": "Načítať video",
     "talks.field.title": "Názov prednášky",
     "talks.field.title.placeholder": "napr. Dôkazy s nulovou znalosťou pre začiatočníkov",
     "talks.field.description": "Popis",
@@ -2482,11 +2652,15 @@ export const messages = {
     "record.error.talkTitle": "Pomenujte svoju prednášku.",
     "record.error.disclosure": "Pred odoslaním potvrďte, že rozumiete, čo sa zdieľa.",
     "record.error.textRequired": "Pred odoslaním napíšte svoje predstavenie.",
+    "record.error.tooLong": "Táto nahrávka má {actual} s, ale limit tohto podujatia je {limit} s. Skráťte ju, skomprimujte alebo nahrajte kratšiu.",
+    "record.error.tooLarge": "Tento súbor je príliš veľký na nahranie (viac než {limitMb} MB). Skomprimujte ho alebo vyberte kratšiu nahrávku.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Správa z podujatia",
     "report.kicker": "Správa po podujatí",
     "report.title": "Správa z podujatia",
+    "report.about": "O podujatí",
+    "report.generatedOn": "Správa vytvorená {date}",
     "report.print": "Tlačiť / uložiť PDF",
     "report.loading": "Zostavujeme vašu správu…",
     "report.empty":
@@ -2539,6 +2713,7 @@ export const messages = {
     "app.tagline": "Poznejte na akcích ty správné lidi.",
     "app.loading": "Načítání…",
     "route.loadFailed": "Tuto část se nepodařilo načíst. Zkontrolujte připojení a zkuste to znovu.",
+    "route.renderFailed": "V této části nastala chyba a nelze ji zobrazit.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
       "Offline — stále si můžete prohlížet uložené lidi a spojení; změny se synchronizují po opětovném připojení.",
@@ -2555,6 +2730,8 @@ export const messages = {
 
     // Synchronizace na pozadí (audit UX-15)
     "sync.queued": "Uloženo — odešle se po obnovení připojení.",
+    "draft.restored": "Obnoven neodeslaný koncept.",
+    "draft.discard": "Zahodit koncept",
     "outbox.pending.one": "{n} změna čeká na odeslání",
     "outbox.pending.few": "{n} změny čekají na odeslání",
     "outbox.pending.many": "{n} změn čeká na odeslání",
@@ -2608,6 +2785,7 @@ export const messages = {
     "home.createEvent": "Vytvořit akci",
     "home.noEvents": "Zatím žádné akce",
     "home.noEvents.body": "Otevřete pozvánku a připojte se k akci, nebo si vytvořte vlastní.",
+    "home.loadingEvents": "Načítání vašich akcí…",
     "home.how.title": "Jak to funguje",
     "home.how.record": "Nahrajte krátké představovací video (a volitelně i přednášku).",
     "home.how.matched": "Propojíme vás s lidmi, jejichž dovednosti doplňují ty vaše.",
@@ -2765,8 +2943,22 @@ export const messages = {
     "form.errorSummary.title": "Opravte prosím následující:",
     "op.queued": "Uloženo — vaše {what} se odešle po připojení.",
     "op.introPublished": "Vaše představení bylo zveřejněno.",
+    "op.introSubmittedProcessing": "Vaše představení bylo odesláno — koordinátor jej zpracovává.",
     "op.talkSubmitted": "Vaše přednáška byla odeslána koordinátorovi.",
+    "op.talkAwaitingModeration": "Vaše přednáška byla odeslána — čeká na schválení organizátorem.",
     "op.eventCreated": "Vaše akce byla vytvořena a zveřejněna.",
+    "op.eventCreateQueued": "Uloženo — akce se zveřejní po připojení. Ostatní ji zatím nevidí.",
+    "op.eventUpdated": "Údaje akce byly aktualizovány a zveřejněny.",
+    "op.eventUpdateQueued": "Uloženo — změny se zveřejní po připojení. Účastníci zatím vidí původní údaje.",
+    "op.postPublished": "Váš příspěvek byl zveřejněn.",
+    "op.postQueued": "Uloženo — příspěvek se zveřejní po připojení. Účastníci ho zatím nevidí.",
+    "op.pagePublished": "Stránka akce byla uložena a zveřejněna.",
+    "op.pageQueued": "Uloženo — stránka se zveřejní po připojení. Účastníci zatím vidí původní stránku.",
+    "op.themePublished": "Vzhled byl zveřejněn.",
+    "op.themeQueued": "Uloženo — vzhled se zveřejní po připojení. Účastníci zatím vidí původní vzhled.",
+    "op.coOrgSent": "Organizátorské klíče byly odeslány spoluorganizátorovi.",
+    "op.coOrgQueued":
+      "Uloženo — organizátorské klíče se odešlou po připojení. Do té doby si spoluorganizátor akci neodemkne.",
     "create.error.identityFailed": "Vytvoření identity se nezdařilo — zkuste to prosím znovu.",
     "create.error.loginToUpload":
       "Pro nahrání obrázků se přihlaste (nebo nejprve vytvořte akci) — mezitím se použijí vygenerované.",
@@ -2785,13 +2977,23 @@ export const messages = {
     "event.ownStatus.title": "Problém se zpracováním",
     "event.ownStatus.submission": "Tvůj profil se nepodařilo zpracovat — zkus ho odeslat znovu.",
     "event.ownStatus.talk": "Tvou přednášku se nepodařilo zpracovat — zkus ji nahrát znovu.",
+    "event.recoverKeys.title": "Organizátor na novém zařízení?",
+    "event.recoverKeys.body":
+      "Pokud jsi tuto akci vytvořil tímto účtem, její klíče mají šifrovanou zálohu na relayích. Obnovení požádá tvůj podpisovač o její odemknutí.",
+    "event.recoverKeys.action": "Obnovit mé organizátorské klíče",
+    "event.recoverKeys.working": "Obnovuje se…",
+    "event.recoverKeys.restored": "Tvé organizátorské klíče jsou zpět na tomto zařízení.",
+    "event.recoverKeys.empty": "Pro tento účet se nenašla žádná záloha klíčů k této akci.",
+    "event.recoverKeys.failed": "Klíče se nepodařilo obnovit — zkontroluj připojení nebo podpisovač a zkus to znovu.",
     "event.retention.line": "Tvá data z akce se smažou {days} dní po akci.",
     "event.leave.action": "Opustit akci",
-    "event.leave.confirm": "Opustit tuto akci? Tvůj záznam v adresáři a shody budou odstraněny a tvá intro média smazána.",
+    "event.leave.confirm": "Opustit tuto akci? Odešle se žádost organizátorovi, aby odstranil tvůj záznam v adresáři a shody a smazal tvá intro média. Projeví se to, až ji zpracuje.",
     "event.leave.confirmYes": "Opustit akci",
     "event.leave.cancel": "Zrušit",
     "event.leave.leaving": "Opouštím…",
     "event.leave.done": "Opustil jsi tuto akci.",
+    "event.leave.requested": "Tvá žádost o odchod byla odeslána. Organizátor odstraní tvůj záznam, shody a média — může to chvíli trvat.",
+    "event.leave.queued": "Tvá žádost o odchod je uložena a odešle se po opětovném připojení. Zatím jsi neodešel.",
     "event.leave.failed": "Nepodařilo se odejít — zkus to znovu.",
     "event.latest": "Nejnovější",
 
@@ -2855,9 +3057,11 @@ export const messages = {
     "event.offline.downloading": "Stahuji… ({n} z 6)",
     "event.offline.ready": "Připraveno k použití offline.",
     "event.offline.partial": "Uloženo, ale některé části se nestáhly — zkuste to znovu.",
+    "event.offline.noSw": "Data jsou uložena, ale obrazovky aplikace se zatím neuložily. Znovu otevřete aplikaci (nebo obnovte stránku) a stáhněte znovu, aby se otevřela i bez signálu.",
     "event.offline.stored": "Využívá {size} úložiště",
     "event.offline.persisted": "ponecháno v tomto zařízení",
     "event.offline.mediaNote": "zvuk/video se nestahuje předem",
+    "event.offline.routesReady": "obrazovky připravené offline",
     "eventheader.link": "Akce ›",
 
     // Příspěvky (spec §7.4)
@@ -2992,10 +3196,24 @@ export const messages = {
     "record.intro": "Nahrajte své představení",
     "record.uploaded":
       "Nahráno ✓ Vaše {kind} je zašifrováno a sdíleno s účastníky této akce.",
+    "record.done.queued":
+      "Uloženo v tomto zařízení ✓ Vaše {kind} je zašifrováno a odešle se, jakmile se znovu připojíte k relay — zatím se k akci nedostalo.",
+    "record.done.introPublished":
+      "Zveřejněno ✓ Vaše {kind} je zašifrováno a sdíleno s účastníky této akce.",
+    "record.done.introProcessing":
+      "Odesláno ✓ Vaše {kind} je zašifrováno a na cestě — koordinátor jej právě zpracovává.",
+    "record.done.talkModeration":
+      "Odesláno ✓ Vaše {kind} je zašifrováno a odevzdáno — zobrazí se po schválení organizátorem.",
     "record.kind.intro": "představení",
     "record.kind.talk": "přednáška",
     "record.backToEvent": "Zpět na akci",
     "record.loginFirst": "Nejprve se přihlaste",
+    "record.role.loggedOut": "Chcete-li nahrávat nebo nahrát soubor pro tuto akci, přihlaste se.",
+    "record.role.resolving": "Ověřujeme váš přístup k této akci…",
+    "record.role.pending": "Vaše žádost o připojení stále čeká na schválení organizátorem. Po schválení zde budete moci nahrávat a nahrávat soubory.",
+    "record.role.revoked": "Už nejste členem této akce, takže nahrávání a nahrávání souborů je uzavřeno. Pokud si myslíte, že jde o omyl, zeptejte se organizátora.",
+    "record.role.visitor": "Nahrávat nebo nahrávat soubory pro tuto akci mohou jen schválení členové. Nejprve se připojte k akci.",
+    "record.role.join": "Připojit se k akci",
     "record.reuse.title": "Znovu použít předchozí představení",
     "record.reuse.body":
       "Vyberte si představení, které jste nahráli nebo napsali na jiné akci — použijte ho tak, jak je, nebo si vytvořte čerstvou kopii, která není propojitelná mezi akcemi.",
@@ -3118,7 +3336,7 @@ export const messages = {
     "lang.noResults": "Žádný jazyk nenalezen",
 
     // Spojení
-    "matches.title": "Lidé k setkání",
+    "matches.title": "Lidé, které stojí za to potkat",
     "matches.noCoordinator":
       "K této akci není připojen žádný AI koordinátor, takže nejsou žádná spojení. Místo toho si prohlédněte seznam účastníků.",
     "matches.seeWhosHere": "Podívejte se, kdo tu je",
@@ -3144,6 +3362,11 @@ export const messages = {
     "matches.similar": "podobnost {pct}%",
     "matches.complementary": "doplňkovost {pct}%",
     "matches.name": "Účastník",
+    "matches.role.loggedOut": "Přihlaste se, abyste viděli, s kým se setkat — vaše shody jsou vázané na váš účet.",
+    "matches.role.login": "Přihlásit se",
+    "matches.role.visitor": "Shody jsou pro členy. Připojte se k akci a získejte osobní seznam lidí, se kterými se vyplatí setkat.",
+    "matches.role.join": "Připojit se k akci",
+    "matches.role.pending": "Vaše žádost o připojení čeká na schválení organizátorem. Vaše shody se zde zobrazí, jakmile budete schváleni.",
 
     // Já
     "me.notLoggedIn": "Nejste přihlášen(a).",
@@ -3164,6 +3387,10 @@ export const messages = {
       "Toto jsou nezávislé aplikace na Nostru — jako různí klienti pro stejný účet. Zkopírujte si klíč níže, otevřete některou z nich, zvolte „přihlásit se klíčem“ a vložte ho tam — váš profil i lidé, které sledujete, tam už jsou.",
     "me.backupKey": "Zazálohujte si klíč",
     "me.logout": "Odhlásit se",
+    "me.logout.warnUnsent":
+      "Máte {n} neodeslaných akcí čekajících na odeslání. Odhlášením se zahodí — nezveřejní se. Přesto se odhlásit?",
+    "me.logout.confirmDiscard": "Odhlásit a zahodit",
+    "me.logout.cancel": "Zůstat přihlášen",
 
     // Karta zálohy
     "backup.noKey": "Váš klíč žije ve vašem podpisovači — zazálohujte si ho tam. Tady není co exportovat.",
@@ -3201,6 +3428,7 @@ export const messages = {
     "media.transcript.machine": "Strojově vygenerovaný přepis",
     "media.captionsUnavailable": "Titulky nejsou k dispozici",
     "media.captionsLabel": "Titulky z přepisu",
+    "media.speed": "Rychlost",
 
     // QR kód
     "qr.alt": "QR kód",
@@ -3247,7 +3475,13 @@ export const messages = {
     "admin.grant.step2": "Vložte tento npub a přidejte ho.",
     "admin.grant.step3":
       "Nechte tuto stránku otevřenou — po doručení oprávnění se tady automaticky odemkne.",
-    "admin.grant.waiting": "Čeká se na udělení…",
+    "admin.grant.waiting": "Každých pár sekund se kontroluje, zda udělení dorazilo…",
+    "admin.grant.waitingSigner":
+      "Čeká se na připojení podepisovače — kontrola začne, jakmile se připojí.",
+    "admin.grant.notChecking": "Automatická kontrola se zastavila.",
+    "admin.grant.lastChecked": "Naposledy zkontrolováno v {time}.",
+    "admin.grant.checkNow": "Zkontrolovat nyní",
+    "admin.grant.checkingNow": "Kontroluje se…",
     "admin.loading": "Načítání čekajících žádostí…",
     "admin.refreshing": "Obnovování…",
     "admin.pending.one": "{n} čekající žádost ↓",
@@ -3403,6 +3637,7 @@ export const messages = {
     "admin.approvedTag": "Schváleno ✓",
     "admin.reprocess": "Zpracovat znovu",
     "common.close": "Zavřít",
+    "common.copyFailed": "Nepodařilo se zkopírovat automaticky — označte text a zkopírujte jej ručně.",
     "admin.person.details": "Podrobnosti",
     "admin.person.title": "{name} — podrobnosti",
     "admin.person.profile": "Odeslaný profil",
@@ -3642,6 +3877,28 @@ export const messages = {
     "talks.favorite.add": "Přidat přednášku k oblíbeným",
     "talks.favorite.remove": "Odebrat z oblíbených",
     "talks.editing": "Upravujete svou přednášku — nová nahrávka nahradí tu současnou.",
+    "talks.source.label": "Video přednášky",
+    "talks.source.record": "Nahrát",
+    "talks.source.upload": "Nahrát soubor",
+    "talks.source.url": "Vložit URL",
+    "talks.url.label": "URL videa",
+    "talks.url.placeholder": "YouTube odkaz nebo přímá .mp4 URL",
+    "talks.url.hint": "Vložte neveřejný YouTube odkaz nebo přímou URL videa (.mp4). Odkaz je šifrovaný pro akci; soubor zůstává tam, kde ho hostujete — ideální pro přednášky příliš velké na nahrání.",
+    "talks.url.invalid": "Zadejte platnou https YouTube nebo video (.mp4) URL.",
+    "talks.url.detectedYoutube": "Rozpoznáno: YouTube video",
+    "talks.url.detectedVideo": "Rozpoznáno: přímý videosoubor",
+    "talks.url.submit": "Odeslat přednášku",
+    "talks.process.label": "Zpracovat tuto přednášku pro párování?",
+    "talks.process.hint": "Ve výchozím stavu vypnuto. Když je zapnuto, koordinátor přepíše přednášku a zahrne ji do vašich spojení.",
+    "talks.process.externalNote": "Externí (YouTube/URL) přednášky se nikdy nezpracovávají pro párování.",
+    "talks.mod.externalLabel": "Externí video",
+    "talks.external.videoTitle": "Video přednášky",
+    "talks.external.open": "Otevřít video ↗",
+    "talks.external.gate.title": "Tato přednáška se přehrává z jiné stránky",
+    "talks.external.gate.host": "Přehrávání se spojí s:",
+    "talks.external.gate.note":
+      "Samotný odkaz na akci je šifrovaný, ale načtení videa připojí vaše zařízení přímo k tomuto hostiteli — sdílíte s ním svou IP adresu a údaje prohlížeče. Načtěte jen pokud mu důvěřujete.",
+    "talks.external.gate.load": "Načíst video",
     "talks.field.title": "Název přednášky",
     "talks.field.title.placeholder": "např. Důkazy s nulovou znalostí pro začátečníky",
     "talks.field.description": "Popis",
@@ -3756,11 +4013,15 @@ export const messages = {
     "record.error.talkTitle": "Pojmenujte svou přednášku.",
     "record.error.disclosure": "Před odesláním potvrďte, že rozumíte, co se sdílí.",
     "record.error.textRequired": "Před odesláním napište své představení.",
+    "record.error.tooLong": "Tato nahrávka má {actual} s, ale limit této akce je {limit} s. Zkraťte ji, zkomprimujte nebo nahrajte kratší.",
+    "record.error.tooLarge": "Tento soubor je příliš velký k nahrání (více než {limitMb} MB). Zkomprimujte jej nebo vyberte kratší nahrávku.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Zpráva z akce",
     "report.kicker": "Zpráva po akci",
     "report.title": "Zpráva z akce",
+    "report.about": "O akci",
+    "report.generatedOn": "Zpráva vytvořena {date}",
     "report.print": "Tisk / uložit PDF",
     "report.loading": "Sestavujeme vaši zprávu…",
     "report.empty":

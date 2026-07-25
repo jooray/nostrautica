@@ -108,7 +108,7 @@
         <strong class="qname">{name}</strong>
       </div>
       {#if preview}<p class="qbody">{preview}</p>{/if}
-      {#each images.slice(0, 2) as img (img)}
+      {#each [...new Set(images)].slice(0, 2) as img (img)}
         <img class="qimg" src={img} alt="" loading="lazy" />
       {/each}
     {/if}

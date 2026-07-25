@@ -39,6 +39,39 @@ export function parseCoordinate(coordinate: string): EventCoordinate {
   return { kind, pubkey, identifier };
 }
 
+/**
+ * True iff `coordinate` is a canonical Nostrautica EVENT coordinate — a valid
+ * `kind:pubkey:d` whose kind is exactly {@link KIND_CALENDAR_EVENT} (31923, audit
+ * R18). The generic {@link parseCoordinate} deliberately accepts any Nostr kind
+ * (naddr encode/decode, kind-0/10002 lookups, …); this is the stricter predicate
+ * for anywhere an EVENT identity is required — a coordinator grant, key grant, or
+ * membership coordinate — so an alias like `1:<E_id>:d` can't open a divergent
+ * namespace against the same author/identifier.
+ */
+export function isEventCoordinate(coordinate: string): boolean {
+  try {
+    return parseCoordinate(coordinate).kind === KIND_CALENDAR_EVENT;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Parse a coordinate that MUST be a Nostrautica event coordinate (kind exactly
+ * {@link KIND_CALENDAR_EVENT} = 31923, audit R18). Throws on any other kind or a
+ * malformed coordinate. Use at every boundary that installs/authorizes an event by
+ * coordinate; use the generic {@link parseCoordinate} for non-event coordinates.
+ */
+export function parseEventCoordinate(coordinate: string): EventCoordinate {
+  const parsed = parseCoordinate(coordinate);
+  if (parsed.kind !== KIND_CALENDAR_EVENT) {
+    throw new Error(
+      `not a Nostrautica event coordinate (kind ${parsed.kind}, expected ${KIND_CALENDAR_EVENT}): ${coordinate}`,
+    );
+  }
+  return parsed;
+}
+
 /** Encode an event coordinate as an naddr (optionally with relay hints). */
 export function coordinateToNaddr(
   coordinate: string,

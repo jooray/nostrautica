@@ -20,12 +20,13 @@
     authoredChanged,
     type AuthoredFields,
   } from "$lib/events/authored-profile.js";
-  import { loadSelfCopy, submitProfileAndMedia } from "$lib/media/submit.js";
+  import { loadSelfCopy, submitProfileAndMedia, aggregateOutcome } from "$lib/media/submit.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { saveFormDraft, loadFormDraft, clearDraft } from "$lib/stores/drafts.js";
   import type { MediaDescriptor } from "@nostrautica/protocol";
 
   let { naddr }: { naddr: string } = $props();
@@ -47,8 +48,13 @@
   let authoredMedia = $state<MediaDescriptor[]>([]); // preserved across an authored edit
   let authoredBusy = $state(false);
   let authoredSaved = $state(false);
+  let authoredQueued = $state(false); // save sits in the offline outbox (U2)
   let authoredError = $state<unknown>(null);
   const authoredDirty = $derived(authoredChanged(authored, authoredBaseline));
+  // Durable draft of UNSENT authored-profile edits (audit U9): survives a
+  // crash/eviction/reload, not just a deferred SW refresh. Owner-scoped per event.
+  const authoredDraftId = $derived(ctx ? `authprofile:${ctx.coordinate}` : "");
+  let authoredDraftRestored = $state(false);
 
   async function openAuthoredEditor() {
     if (!session.signer || !ctx) return;
@@ -73,6 +79,14 @@
     authored = { ...f };
     authoredBaseline = { ...f };
     authoredMedia = media;
+    // U9: restore an unsent draft that differs from the loaded baseline.
+    const draft = authoredDraftId
+      ? loadFormDraft<AuthoredFields>(authoredDraftId)
+      : undefined;
+    if (draft && authoredChanged(draft, f)) {
+      authored = { ...f, ...draft };
+      authoredDraftRestored = true;
+    }
     editingAuthored = true;
   }
 
@@ -81,17 +95,39 @@
     if (editingAuthored && authoredDirty) return refreshGuard.hold("authored");
   });
 
+  // Persist unsent authored edits as they're typed (U9); clear once they match the
+  // baseline again so a later visit doesn't restore already-saved fields.
+  $effect(() => {
+    if (!editingAuthored || !authoredDraftId) return;
+    if (authoredDirty) {
+      saveFormDraft(authoredDraftId, {
+        about: authored.about,
+        skills: authored.skills,
+        lookingFor: authored.lookingFor,
+        links: authored.links,
+        introText: authored.introText,
+      });
+    } else clearDraft(authoredDraftId);
+  });
+
   async function saveAuthored() {
     if (!session.signer || !ctx) return;
     authoredBusy = true;
     authoredError = null;
     authoredSaved = false;
+    authoredQueued = false;
     try {
       const bk = await deriveBlindingKey(session.signer);
       const { profile, introText, media } = buildAuthoredSubmission(authored, authoredMedia);
-      await submitProfileAndMedia(session.signer, ctx, { profile, media, blindingKey: bk, introText });
+      const outcome = await submitProfileAndMedia(session.signer, ctx, { profile, media, blindingKey: bk, introText });
       authoredSaved = true;
+      // U2: don't claim it's shared if the relay publish only queued locally.
+      authoredQueued = aggregateOutcome(outcome) === "queued";
+      if (authoredQueued) outbox.noteQueued();
       authoredBaseline = { ...authored };
+      // U9: submitted (or durably queued) — retire the unsent draft.
+      if (authoredDraftId) clearDraft(authoredDraftId);
+      authoredDraftRestored = false;
     } catch (e) {
       authoredError = e;
     } finally {
@@ -226,7 +262,7 @@
       {#if entry?.profile.about}<p>{entry.profile.about}</p>{/if}
       {#if entry?.profile.skills?.length}
         <div class="row" style="flex-wrap:wrap">
-          {#each entry.profile.skills as s (s)}<span class="badge">{s}</span>{/each}
+          {#each [...new Set(entry.profile.skills)] as s (s)}<span class="badge">{s}</span>{/each}
         </div>
       {/if}
       {#if entry?.profile.looking_for}
@@ -241,6 +277,20 @@
       </div>
     {:else}
       {#if authoredError}<ErrorState error={authoredError} />{/if}
+      {#if authoredDraftRestored}
+        <!-- Visible restore of unsent authored edits (U9). -->
+        <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
+          <span class="muted small" role="status">{t("draft.restored")}</span>
+          <button
+            class="btn inline"
+            style="flex:none"
+            onclick={() => {
+              authored = { ...authoredBaseline };
+              authoredDraftRestored = false;
+              if (authoredDraftId) clearDraft(authoredDraftId);
+            }}>{t("draft.discard")}</button>
+        </div>
+      {/if}
       <div class="editfield">
         <label for="au-about">{t("profile.authored.about")}</label>
         <textarea id="au-about" rows="3" bind:value={authored.about}></textarea>
@@ -269,7 +319,11 @@
         <button class="btn inline" onclick={() => (editingAuthored = false)}>{t("profile.authored.cancel")}</button>
         {#if authoredSaved}<span class="badge" role="status">{t("profile.saved")}</span>{/if}
       </div>
-      {#if authoredSaved}<p class="muted small">{t("profile.authored.saved.hint")}</p>{/if}
+      {#if authoredSaved && authoredQueued}
+        <p class="muted small" role="status">{t("sync.queued")}</p>
+      {:else if authoredSaved}
+        <p class="muted small">{t("profile.authored.saved.hint")}</p>
+      {/if}
     {/if}
   </div>
 

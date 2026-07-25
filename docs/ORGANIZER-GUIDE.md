@@ -21,9 +21,11 @@ identity when prompted).
 > **A note on how the app is laid out.** Once you're inside an event, the bottom
 > bar is *event-scoped* — **Overview**, **People**, **Matches**, **Updates**, and
 > **More** all act on the event you're in, with a compact header showing the event's
-> name and your status. Your global stuff (all your events, messages, settings, your
-> identity) lives under **More**. As the organizer you also get **Manage event** in
-> that menu, which opens the admin console described in §3.
+> name and your status. Two further tabs, **Talks** and **Chat**, appear only when
+> you've turned those features on (§6.5), for you and for attendees. Your global stuff
+> (all your events, messages, settings, your identity) lives under **More**. As the
+> organizer you also get **Manage event** in that menu, which opens the admin console
+> described in §3.
 
 ## 1. Create your identity
 
@@ -73,7 +75,11 @@ Choose **Create an event** and fill in the form:
   record an intro). Your name and bio are visible to approved attendees only;
   uncheck it if you'd rather organize without appearing in the roster.
 - **Advanced** (collapsed) — upload an event icon and banner (a design is
-  generated from the title otherwise) and set the intro-video length cap.
+  generated from the title otherwise) and set the intro-video length cap. You can
+  pick and crop the icon/banner **even before you have an identity** — if you're
+  creating the event while logged out, the app holds the cropped images locally and
+  uploads them for you right after it creates your identity on submit, so you don't
+  have to stop and sign in first.
 
 ### Event language
 
@@ -105,7 +111,17 @@ key was current. Revoking someone (§4) protects *future* content, not past.
 Configure a **retention window** in **Admin → Settings → Delete member data
 after the event**. Enter a positive number of days, or leave it blank for
 indefinite retention. Attendees see the declared period at join and on the
-event page. Deletion is best-effort, not a guarantee if a relay ignores it.
+event page. When the window passes (and likewise when someone leaves the event),
+the coordinator now deletes **its own copies too** — the profiles, AI profiles,
+transcripts, pair reasoning, talks and summaries it holds, not just the published
+records — and removes the relay entries across every key version the event ever used,
+not only the current ones. Two honest limits remain: relay deletion (NIP-09) is
+best-effort and a relay may keep a copy; and a content-addressed item that a
+*different* event still shares survives until that last event also drops it. Backups
+are separate — a backup the coordinator's operator took before the deletion still
+holds the data until they rotate it out (their [operator
+guide](COORDINATOR-OPERATOR-GUIDE.md) covers this). So this is a real cleanup, just
+not a cryptographic guarantee that every last copy is gone everywhere.
 
 After creating, you get a **shareable link**, a next-steps checklist, and a
 **receipt** — each publishing step reported independently, so a partial
@@ -348,7 +364,10 @@ Two more controls live in **Admin → Settings**:
   layout. Reorder with the ↑/↓ controls.
 - **Appearance** (kind 31609) — paste custom CSS to theme *this event's* pages.
   There's a live **Preview** before you **Publish theme**; leaving admin without
-  publishing restores the last saved theme. It sits on top of the app's built-in
+  publishing restores the last *published* theme for everyone, but your unsent CSS is
+  kept as a draft and restored in the editor when you come back (with a Discard button
+  to drop it), so navigating away no longer loses work in progress — the same holds
+  for an unsent event post and unsaved profile edits. It sits on top of the app's built-in
   per-event colour wash, so a little goes a long way. (Only paste CSS you wrote
   or trust — it styles the page for every attendee. Note: your theme applies
   across the event's pages *except* a few routes that show sensitive material
@@ -371,7 +390,19 @@ view for everything that isn't visitor-specific.
 **Prerecorded talks.** In **Admin → Settings → Prerecorded talks**, switch it *On*
 (or *Prerecord-first*, which puts Talks ahead of People in attendees' nav —
 good for a "watch ahead, meet at the venue" format) and **Save**. Approved
-attendees can then submit short talks from the same composer used for intros.
+attendees can then submit short talks — recorded in the browser, uploaded as a
+file, or given as an unlisted **YouTube / .mp4 URL** (useful for talks too large
+to upload; the coordinator never fetches these, so URL talks are watch-only).
+
+![Submitting a talk — pick a video source and, optionally, opt in to matching](images/participant/27-talks-submit-light.png)
+
+Note that **talks no longer feed matching by default**: a speaker chooses, per
+talk, whether to tick *"Process this talk for matching?"*. Leave that in mind if
+a submitted talk doesn't appear in anyone's match reasoning — that's expected
+unless the speaker opted in (and it never happens for URL talks). This keeps
+transcription costs off talks nobody asked to match.
+
+![The video-URL field, with "Detected: YouTube video"](images/participant/27b-talks-url-light.png)
 
 Submitted talks don't go live by themselves. A **Talks moderation** card
 further down **Administration** lists everything waiting for review — **Preview**
@@ -460,10 +491,13 @@ plan fails.
 
   ![Organizer admin overview, full-width](images/organizer/13-admin-overview-desktop-light.png)
 
-- **Can I edit an event after creating it?** You can post updates and edit them
-  freely. Co-organizers can also manage the event. Core fields (title, dates)
-  aren't editable from this screen in the current build — post an update to
-  communicate changes.
+- **Can I edit an event after creating it?** Yes. **Admin → Settings → Event
+  details** lets you edit the core fields — title, summary, start/end, location, and
+  the icon/banner — and republish them. (The republish follows the protocol's
+  monotonic ordering rule, so an edit never loses to a same-second race.) You can also
+  post updates and edit those freely, and co-organizers can manage the event too. For
+  a schedule or venue change it's still worth posting an update as well, so attendees
+  get a notification rather than only a quietly-changed field.
 
 - **What does this cost me?** Nothing, by default — the reference coordinator
   is free, and everything that doesn't involve a coordinator (roster, videos,

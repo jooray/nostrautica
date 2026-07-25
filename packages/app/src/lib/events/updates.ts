@@ -8,9 +8,11 @@
  * on edits so ordering doesn't jump when an update is corrected.
  */
 import { finalizeEvent } from "nostr-tools";
+import type { VerifiedEvent } from "nostr-tools/pure";
 import { KIND_LONGFORM, parseCoordinate, hexToBytes, supersedes } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 
@@ -56,6 +58,11 @@ export async function fetchEventUpdates(coordinate: string): Promise<EventUpdate
 /**
  * Publish (or, with an existing `d`, edit) an event update signed by E_id.
  * Organizer-only: requires the E_id key in the local event keystore.
+ *
+ * Routed through the monotonic publisher (R6): kind-30023 is addressable by `d`,
+ * so a same-second edit must win the §3.1 tie-break or it silently doesn't take.
+ * Returns the update AND the publication outcome (R9) so the composer keeps the
+ * draft when the event only reached the durable outbox.
  */
 export async function publishEventUpdate(
   ctx: EventContext,
@@ -67,9 +74,10 @@ export async function publishEventUpdate(
     content: string;
     publishedAt?: number;
   },
-): Promise<EventUpdate> {
+): Promise<{ update: EventUpdate; outcome: PublishOutcome }> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
+  const eidSk = hexToBytes(keys.eidNsecHex);
   const now = Math.floor(Date.now() / 1000);
   const d = input.d ?? `update-${now.toString(36)}`;
   const publishedAt = input.publishedAt ?? now;
@@ -81,23 +89,27 @@ export async function publishEventUpdate(
   ];
   if (input.summary) tags.push(["summary", input.summary]);
   if (input.image) tags.push(["image", input.image]);
-  const event = finalizeEvent(
-    {
-      kind: KIND_LONGFORM,
-      created_at: now,
-      tags,
-      content: input.content,
-    },
-    hexToBytes(keys.eidNsecHex),
-  );
-  await publishOrQueue(event, ctx.config.relays);
+  const { createdAt, published } = await publishMonotonic({
+    kind: KIND_LONGFORM,
+    author: ctx.config.eidPubkey,
+    identifier: d,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        { kind: KIND_LONGFORM, created_at, tags, content: input.content },
+        eidSk,
+      ) as VerifiedEvent,
+  });
   return {
-    d,
-    title: input.title,
-    summary: input.summary,
-    image: input.image,
-    content: input.content,
-    publishedAt,
-    editedAt: now,
+    update: {
+      d,
+      title: input.title,
+      summary: input.summary,
+      image: input.image,
+      content: input.content,
+      publishedAt,
+      editedAt: createdAt,
+    },
+    outcome: toOutcome(published),
   };
 }

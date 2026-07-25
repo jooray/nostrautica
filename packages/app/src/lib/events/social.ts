@@ -28,6 +28,22 @@ function profileKey(pubkey: string): string {
 // rarely, so most People/Matches paints skip relays entirely.
 const PROFILE_TTL_SEC = 10 * 60;
 
+/**
+ * Avatar props (name + picture) for a pubkey, resolved from a profile map, for
+ * any card/header that shows a person's avatar (People rows, talk cards, the talk
+ * detail header). The `picture` is always carried through when the map has it —
+ * the talk surfaces previously dropped it and fell back to bare initials, which,
+ * when the author was the viewer, looked identical to the More tab's own avatar
+ * (Bug 3). Missing fields leave `<Avatar>` to render its initials placeholder.
+ */
+export function avatarInfo(
+  pubkey: string,
+  profiles: Map<string, ProfileMeta>,
+): { name?: string; picture?: string } {
+  const p = profiles.get(pubkey);
+  return { name: p?.name, picture: p?.picture };
+}
+
 /** Cached kind-0s for these pubkeys (no network) — for cache-first paint. */
 export function cachedProfiles(pubkeys: string[]): Map<string, ProfileMeta> {
   const out = new Map<string, ProfileMeta>();

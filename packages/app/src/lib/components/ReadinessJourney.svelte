@@ -11,6 +11,19 @@
 
   let { readiness, naddr }: { readiness: Readiness; naddr: string } = $props();
 
+  // The primary CTA's route carries the naddr readiness was DERIVED from, while
+  // every other button here uses the `naddr` prop. Those must be the same event:
+  // the readiness store is a module singleton, and when a stale one leaked
+  // through, this card offered one event's "Join" beside another's "See who's
+  // here". The page gates on the coordinate now, so this is the second line of
+  // defence — drop the CTA rather than navigate somewhere the user didn't ask for.
+  const primary = $derived.by(() => {
+    const p = readiness.primary;
+    if (!p) return undefined;
+    const target = (p.route as { naddr?: string }).naddr;
+    return target !== undefined && target !== naddr ? undefined : p;
+  });
+
   function stepClass(i: number): "done" | "cur" | "todo" {
     const s = readiness.steps[i]!;
     if (s.state === "complete") return "done";
@@ -71,9 +84,9 @@
       {/each}
     </ol>
 
-    {#if readiness.primary}
-      <button class="btn primary" style="margin-top:0.75rem" onclick={() => router.go(readiness.primary!.route)}>
-        {t(readiness.primary.labelKey)}
+    {#if primary}
+      <button class="btn primary" style="margin-top:0.75rem" onclick={() => router.go(primary.route)}>
+        {t(primary.labelKey)}
       </button>
     {/if}
     {#if readiness.matchesReady}

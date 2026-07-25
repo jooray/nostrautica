@@ -25,7 +25,7 @@ import {
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
@@ -108,6 +108,29 @@ export interface SubmitMediaResult {
 }
 
 /**
+ * Aggregate publication outcome of a profile/intro submission (audit U2). A
+ * submission fans out into three replaceable/gift-wrapped events; each can
+ * independently reach a relay or fall back to the durable outbox. The UI reads
+ * `submission` (the load-bearing 21601 to E_inbox — what makes the intro visible
+ * to the organizer/coordinator) to decide what it may truthfully claim.
+ */
+export interface SubmitOutcome {
+  /** The 21601 profile submission to E_inbox — the one that matters. */
+  submission: PublishOutcome;
+  /** The attendee's own 31602 self-copy. */
+  selfCopy: PublishOutcome;
+  /** The cross-event reuse library entry. */
+  library: PublishOutcome;
+}
+
+/** The worst-case single outcome: `queued` if anything is still local (U2). */
+export function aggregateOutcome(o: SubmitOutcome): PublishOutcome {
+  return o.submission === "queued" || o.selfCopy === "queued" || o.library === "queued"
+    ? "queued"
+    : "published";
+}
+
+/**
  * Encrypt + upload a media blob and return its descriptor. Preflights every
  * target server and fails cleanly if none will accept the blob.
  */
@@ -175,7 +198,7 @@ export async function submitProfileAndMedia(
     /** A plain-text intro (spec F1). Written into 21601 + the 31602 self-copy. */
     introText?: string;
   },
-): Promise<void> {
+): Promise<SubmitOutcome> {
   const attendeePubkey = await signer.getPublicKey();
   const introText = args.introText?.trim() || undefined;
 
@@ -224,7 +247,7 @@ export async function submitProfileAndMedia(
     content: selfCipher,
   });
 
-  await Promise.all([
+  const [submissionOut, selfCopyOut, libraryOut] = await Promise.all([
     publishOrQueue(wrap as any, ctx.config.relays),
     publishOrQueue(selfEvent),
     // Every submitted intro — recorded OR authored text — is also folded into the
@@ -234,6 +257,14 @@ export async function submitProfileAndMedia(
       texts: introText ? [introText] : [],
     }),
   ]);
+  // U2: return the true per-event outcome instead of collapsing to success. The
+  // library entry going out is not required for the intro to reach the organizer,
+  // but its outcome is reported so the caller sees the full picture.
+  return {
+    submission: toOutcome(submissionOut),
+    selfCopy: toOutcome(selfCopyOut),
+    library: libraryOut,
+  };
 }
 
 /**
@@ -250,10 +281,11 @@ export async function addToLibrary(
   signer: AppSigner,
   blindingKey: Uint8Array,
   additions: { media?: MediaDescriptor[]; texts?: string[] },
-): Promise<void> {
+): Promise<PublishOutcome> {
   const media = additions.media ?? [];
   const texts = (additions.texts ?? []).map((s) => s.trim()).filter(Boolean);
-  if (media.length === 0 && texts.length === 0) return;
+  // Nothing to add — treat as already-published (no relay work owed).
+  if (media.length === 0 && texts.length === 0) return "published";
 
   const pubkey = await signer.getPublicKey();
   const libD = blindedDLiteral(blindingKey, "library");
@@ -284,9 +316,10 @@ export async function addToLibrary(
     tags: [["d", libD]],
     content: cipher,
   });
-  await publishOrQueue(event);
+  const published = await publishOrQueue(event);
   cacheSet(MEDIALIB_KEY, mergedMedia, event.created_at);
   cacheSet(TEXTLIB_KEY, cappedTexts, event.created_at);
+  return toOutcome(published);
 }
 
 /**

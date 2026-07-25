@@ -45,8 +45,8 @@
 <header class="site-nav">
   <div class="wrap">
     <a class="brand" href="#top">
-      <img class="logo-mark img-dark" src="assets/nostrautica-logo-dark.svg" alt="" aria-hidden="true">
-      <img class="logo-mark img-light" src="assets/nostrautica-logo-light.svg" alt="" aria-hidden="true">
+      <img class="logo-mark img-dark" src="assets/nostrautica-logo-dark.svg" width="1000" height="1000" decoding="async" alt="" aria-hidden="true">
+      <img class="logo-mark img-light" src="assets/nostrautica-logo-light.svg" width="1000" height="1000" decoding="async" alt="" aria-hidden="true">
       Nostrautica
     </a>
 
@@ -93,21 +93,21 @@
       <div class="hero-copy">
         <p class="eyebrow" data-i18n="hero.eyebrow">The networking app for events — in person or online</p>
         <h1 data-i18n-html="hero.title">Chart a course to the people <span class="accent">worth meeting.</span></h1>
-        <p class="lede" data-i18n="hero.subtitle">The networking layer for your event, in person or online. Record a short intro and Nostrautica tells you who's worth meeting, and why — in plain language. Bring your Nostr identity (npub) or get one on the way in; it's the same key you carry from event to event.</p>
+        <p class="lede" data-i18n="hero.subtitle">The networking layer for your event, in person or online. Record a short intro and Nostrautica tells you who's worth meeting, and why — in plain language. Bring your own Nostr key, or get one on the way in; it's the same key you carry from event to event.</p>
         <div class="hero-ctas">
           <a class="btn btn-primary" href="/app" data-i18n="hero.cta_primary">Launch the app</a>
           <a class="btn btn-ghost" href="#how" data-i18n="hero.cta_secondary">See how it works</a>
         </div>
         <div class="hero-badges">
           <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="hero.badge1">AI matchmaking</span></span>
-          <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="hero.badge2">Encrypted by default</span></span>
+          <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="hero.badge2">Encrypted where it counts</span></span>
           <span class="chip"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="hero.badge3">One portable identity</span></span>
         </div>
       </div>
 
       <div class="hero-visual">
-        <img class="hero-emblem img-dark" src="assets/nostrautica-logo-dark.svg" alt="" aria-hidden="true">
-        <img class="hero-emblem img-light" src="assets/nostrautica-logo-light.svg" alt="" aria-hidden="true">
+        <img class="hero-emblem img-dark" src="assets/nostrautica-logo-dark.svg" width="1000" height="1000" decoding="async" alt="" aria-hidden="true">
+        <img class="hero-emblem img-light" src="assets/nostrautica-logo-light.svg" width="1000" height="1000" decoding="async" alt="" aria-hidden="true">
         <svg class="chart-bg" viewBox="0 0 600 600" aria-hidden="true">
           <path class="route" d="M40 480 C 160 420, 200 320, 300 300" />
           <path class="route dashed" d="M300 300 C 380 280, 420 180, 540 120" />
@@ -121,12 +121,16 @@
 
         <div class="phone-stack">
           <div class="phone phone-primary">
-            <img class="img-dark" src="assets/screenshots/11-matches-dark.png" alt="Nostrautica match list: Nina Designer marked Good match, with the reason 'your interests and goals line up well for this event' and a Message button.">
-            <img class="img-light" src="assets/screenshots/11-matches-light.png" alt="Nostrautica match list: Nina Designer marked Good match, with the reason 'your interests and goals line up well for this event' and a Message button.">
+            <picture>
+              <source class="src-dark" srcset="assets/screenshots/11-matches-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+              <img src="assets/screenshots/11-matches-light.png" width="390" height="844" fetchpriority="high" decoding="async" alt="Nostrautica match list: Nina Designer marked Good match, with the reason 'your interests and goals line up well for this event' and a Message button.">
+            </picture>
           </div>
           <div class="phone phone-secondary">
-            <img class="img-dark" src="assets/screenshots/02-event-page-dark.png" alt="A Nostrautica public event page for Cypherpunk Assembly 2026, with a Join this event button.">
-            <img class="img-light" src="assets/screenshots/02-event-page-light.png" alt="A Nostrautica public event page for Cypherpunk Assembly 2026, with a Join this event button.">
+            <picture>
+              <source class="src-dark" srcset="assets/screenshots/02-event-page-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+              <img src="assets/screenshots/02-event-page-light.png" width="390" height="844" decoding="async" alt="A Nostrautica public event page for Cypherpunk Assembly 2026, with a Join this event button.">
+            </picture>
           </div>
         </div>
       </div>
@@ -194,7 +198,7 @@
           <ul class="talks-points">
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point1">Works with any agenda you already run</span></li>
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point2">Matches keep updating as people check in</span></li>
-            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point3">Talks become matching signal too</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point3">Talks can feed matching too — if you opt in</span></li>
           </ul>
         </div>
 
@@ -204,7 +208,7 @@
           <p data-i18n="formats.fire_body">Speakers record ahead of time and everyone watches before they arrive. That frees the whole venue, the whole day, for the conversations your matches actually pointed you toward.</p>
           <ul class="talks-points">
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point1">No stage to build, no AV budget to blow</span></li>
-            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point2">Talks still count as matching signal</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point2">Talks can feed matching too — if you opt in</span></li>
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point3">The room becomes the main event</span></li>
           </ul>
         </div>
@@ -222,7 +226,7 @@
       <div class="feature-split-copy">
         <p class="eyebrow" data-i18n="attendees.eyebrow">For attendees</p>
         <h2 data-i18n="attendees.title">Show up already knowing who to find.</h2>
-        <p data-i18n="attendees.intro">Just a display name to start — no email, no password, no crypto homework. Already on Nostr? Sign in with your key (npub) and skip the setup. New to it? You leave with a real identity that's yours to keep.</p>
+        <p data-i18n="attendees.intro">Just a display name to start — no email, no password, no crypto homework. Already on Nostr? Sign in with your signer or secret key and skip the setup. New to it? You leave with a real identity that's yours to keep.</p>
         <ul class="feature-list">
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f1">Record your intro in whatever language you're comfortable in</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f2">Get a ranked, reasoned list of people to meet</span></li>
@@ -235,12 +239,16 @@
 
       <div class="feature-split-visual mock-cluster">
         <div class="phone phone-primary">
-          <img class="img-dark" src="assets/screenshots/08-attendees-dark.png" alt="Nostrautica People tab, listing attendees with a search box and filters like Want to meet and Following.">
-          <img class="img-light" src="assets/screenshots/08-attendees-light.png" alt="Nostrautica People tab, listing attendees with a search box and filters like Want to meet and Following.">
+          <picture>
+            <source class="src-dark" srcset="assets/screenshots/08-attendees-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+            <img src="assets/screenshots/08-attendees-light.png" width="390" height="844" loading="lazy" decoding="async" alt="Nostrautica People tab, listing attendees with a search box and filters like Want to meet and Following.">
+          </picture>
         </div>
         <div class="phone phone-secondary">
-          <img class="img-dark" src="assets/screenshots/13-me-dark.png" alt="A Nostrautica profile screen showing the user's public Nostr npub and a Copy my secret key button.">
-          <img class="img-light" src="assets/screenshots/13-me-light.png" alt="A Nostrautica profile screen showing the user's public Nostr npub and a Copy my secret key button.">
+          <picture>
+            <source class="src-dark" srcset="assets/screenshots/13-me-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+            <img src="assets/screenshots/13-me-light.png" width="390" height="844" loading="lazy" decoding="async" alt="A Nostrautica profile screen showing the user's public Nostr npub and a Copy my secret key button.">
+          </picture>
         </div>
         <div class="phone-caption">
           <strong data-i18n="attendees.caption">The People tab: search, filter, everyone's skills at a glance.</strong>
@@ -255,26 +263,30 @@
       <div class="feature-split-copy">
         <p class="eyebrow" data-i18n="organizers.eyebrow">For organizers</p>
         <h2 data-i18n="organizers.title">Run the whole thing from your phone.</h2>
-        <p data-i18n="organizers.intro">Create an event, open the door, and let the coordinator handle the matching. There's no server to babysit: the app publishes to Nostr relays and Blossom, and that's the entire backend.</p>
+        <p data-i18n="organizers.intro">Create an event, open the door, and let the coordinator handle the matching. There's no application server to babysit — the app talks straight to Nostr relays and Blossom. AI matching and group chat run on an optional headless coordinator daemon you spin up only when you want them.</p>
         <ul class="feature-list">
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f1">Manual approval, invite codes, or both — your call</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f2">Attach an AI coordinator for matchmaking, or run without one</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f3">Public updates or members-only posts, encrypted to your attendees alone</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f4">A custom event page and your own theme CSS</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f5">Live talks or prerecorded — including the no-stage format</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f6">Encrypted group chat that survives into mobile Nostr apps</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f6">End-to-end encrypted group chat, built on the open Marmot (MLS) standard</span></li>
         </ul>
         <a class="btn btn-ghost" href="/docs/ORGANIZER-GUIDE.html" data-i18n="organizers.cta" data-i18n-href="organizers.cta_href">Read the organizer guide</a>
       </div>
 
       <div class="feature-split-visual mock-cluster">
         <div class="phone phone-primary">
-          <img class="img-dark" src="assets/screenshots/03-admin-empty-dark.png" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
-          <img class="img-light" src="assets/screenshots/03-admin-empty-light.png" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
+          <picture>
+            <source class="src-dark" srcset="assets/screenshots/03-admin-empty-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+            <img src="assets/screenshots/03-admin-empty-light.png" width="390" height="844" loading="lazy" decoding="async" alt="Nostrautica organizer admin screen, with join requests at the top and event posts below.">
+          </picture>
         </div>
         <div class="phone phone-secondary">
-          <img class="img-dark" src="assets/screenshots/05-coordinator-dark.png" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
-          <img class="img-light" src="assets/screenshots/05-coordinator-light.png" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
+          <picture>
+            <source class="src-dark" srcset="assets/screenshots/05-coordinator-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+            <img src="assets/screenshots/05-coordinator-light.png" width="390" height="844" loading="lazy" decoding="async" alt="AI coordinator attached and matchmaking active, shown in the organizer admin screen.">
+          </picture>
         </div>
       </div>
     </div>
@@ -286,7 +298,7 @@
       <div class="sov-copy">
         <p class="eyebrow" data-i18n="sovereignty.eyebrow">Own the aftermath</p>
         <h2 data-i18n="sovereignty.title">Registering isn't a sign-up. It's an identity.</h2>
-        <p data-i18n="sovereignty.body1">The first time you join, Nostrautica sets up a real Nostr keypair for you — or you sign in with the npub you already have. It's the same kind Primal, Amethyst, Damus, and Yakihonne use, and the same identity every time: this event, the next, any Nostr app — never a fresh login per event. Your profile, your follows, the people you met: none of it lives in a database Nostrautica controls, because there isn't one.</p>
+        <p data-i18n="sovereignty.body1">The first time you join, Nostrautica sets up a real Nostr keypair for you — or you sign in with the Nostr key you already have. It's the same kind Primal, Amethyst, Damus, and Yakihonne use, and the same identity every time: this event, the next, any Nostr app — never a fresh login per event. Your profile, your follows, the people you met: none of it lives in a database Nostrautica controls, because there isn't one.</p>
         <p data-i18n="sovereignty.body2">Paste your key into any of those apps afterward and you're already there: already following the people you met, already posting to the same network.</p>
       </div>
 
@@ -294,7 +306,7 @@
         <div class="principle">
           <span class="glyph">01</span>
           <h4 data-i18n="sovereignty.p1_title">Nostr-native</h4>
-          <p data-i18n="sovereignty.p1_body">Every piece of app state is a Nostr event. Nothing proprietary underneath.</p>
+          <p data-i18n="sovereignty.p1_body">Your shared data lives in Nostr events — only device-local operational state stays on your phone. Nothing proprietary underneath.</p>
         </div>
         <div class="principle">
           <span class="glyph">02</span>
@@ -338,7 +350,7 @@
         <div class="tier-card">
           <span class="tier-name" data-i18n="privacy.row3_tier">Pair-encrypted</span>
           <p data-i18n="privacy.row3_desc">Your match list and its reasoning</p>
-          <span class="tier-who" data-i18n="privacy.row3_who">Only you</span>
+          <span class="tier-who" data-i18n="privacy.row3_who">You, plus the matching service</span>
         </div>
         <div class="tier-card">
           <span class="tier-name" data-i18n="privacy.row4_tier">Private</span>
@@ -347,7 +359,7 @@
         </div>
       </div>
 
-      <p class="privacy-note" data-i18n="privacy.note">The coordinator can decrypt event-tier content — it has to, to do the transcribing. It's infrastructure the organizer chose, and the app names it plainly before you record a word.</p>
+      <p class="privacy-note" data-i18n="privacy.note">The coordinator can read event-tier content and, because it computes your matches, it also knows your match reasoning — it has to, to transcribe intros and pair people. It's infrastructure the organizer chose, the app names it plainly before you record a word, and none of it is ever made public.</p>
     </div>
   </section>
 

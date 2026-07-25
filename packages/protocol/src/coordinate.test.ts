@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   makeCoordinate,
   parseCoordinate,
+  parseEventCoordinate,
+  isEventCoordinate,
   coordinateToNaddr,
   naddrToCoordinate,
 } from "./coordinate.js";
@@ -35,6 +37,26 @@ describe("coordinates", () => {
     expect(() => parseCoordinate("31923:" + "A".repeat(64) + ":ev")).toThrow();
     expect(() => parseCoordinate("31923:" + "a".repeat(63) + ":ev")).toThrow();
     expect(() => parseCoordinate("31923:" + "a".repeat(65) + ":ev")).toThrow();
+  });
+
+  // ── R18: event-coordinate (kind exactly 31923) validation ──────────────────
+  it("parseEventCoordinate accepts only kind 31923, rejects alias kinds", () => {
+    const coord = makeCoordinate(pubkey, "ev");
+    expect(parseEventCoordinate(coord)).toEqual({ kind: 31923, pubkey, identifier: "ev" });
+    // An alias kind against the SAME author/identifier (the R18 divergent-namespace
+    // vector) is rejected.
+    expect(() => parseEventCoordinate("1:" + pubkey + ":ev")).toThrow(/31923/);
+    expect(() => parseEventCoordinate("31600:" + pubkey + ":ev")).toThrow(/31923/);
+    // Structurally malformed coordinates still throw.
+    expect(() => parseEventCoordinate("garbage")).toThrow();
+    expect(() => parseEventCoordinate("31923:" + "z".repeat(64) + ":ev")).toThrow();
+  });
+
+  it("isEventCoordinate is true only for a canonical 31923 coordinate", () => {
+    expect(isEventCoordinate(makeCoordinate(pubkey, "ev"))).toBe(true);
+    expect(isEventCoordinate("1:" + pubkey + ":ev")).toBe(false);
+    expect(isEventCoordinate("31923:" + "A".repeat(64) + ":ev")).toBe(false); // bad-case pubkey
+    expect(isEventCoordinate("not-a-coordinate")).toBe(false);
   });
 
   it("rejects kinds outside the NIP-01 16-bit range (PROTO-5)", () => {

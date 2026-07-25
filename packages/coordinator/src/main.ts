@@ -14,6 +14,7 @@ import {
 } from "./config.js";
 import { Store, acquireDaemonLock } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
+import { setRelayConnectPolicy } from "./net/relay-guard.js";
 import { buildCoordinatorAnnounce } from "./nostr/publisher.js";
 import { Coordinator, type Transport } from "./coordinator.js";
 import { verifyFfmpeg, sweepStaleTempDirs } from "./pipeline/audio.js";
@@ -26,7 +27,7 @@ import type { LlmProvider, SttProvider } from "./providers/types.js";
 import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
 import { isCliSubcommand, runCli } from "./cli.js";
-import { releaseSummary, coordinatorRelease } from "./release.js";
+import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
 
 async function runDaemon(): Promise<void> {
   // Release provenance (§13.9): tie the running daemon to a specific build.
@@ -34,6 +35,19 @@ async function runDaemon(): Promise<void> {
   const configPath = process.argv[2] ?? "coordinator.toml";
   const config = loadConfig(configPath);
   const dbPath = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "coordinator.sqlite";
+
+  // Release provenance policy (R23): a production build should be tie-able to a
+  // specific source revision. `allow_insecure_urls` is the coordinator's dev knob;
+  // outside dev, warn loudly (not fatal — a source-rsync deploy without .git that
+  // hasn't set NOSTRAUTICA_GIT_SHA/RELEASE_ID must still be able to (re)start) so an
+  // operator notices and injects provenance. The strict throwing form
+  // (assertReleaseProvenance) is exercised by the release tests.
+  if (!config.security.allow_insecure_urls && !provenanceIsKnown()) {
+    console.warn(
+      "[coordinator] WARNING: release provenance is unknown (gitSha: unknown, no NOSTRAUTICA_RELEASE_ID) — " +
+        "set NOSTRAUTICA_GIT_SHA or NOSTRAUTICA_RELEASE_ID so this daemon can be tied to a build (§13.9, R23)",
+    );
+  }
 
   await verifyFfmpeg().catch(() => {
     throw new Error("ffmpeg not found — install ffmpeg (and ffprobe) and retry");
@@ -64,6 +78,11 @@ async function runDaemon(): Promise<void> {
 
   // STT stays on Venice/local — Routstr has no STT today (spec §9.4).
   const apiKey = veniceApiKey(config);
+  // DNS pinning for provider requests (audit R22): resolve + public-only + pin,
+  // mirroring blob-fetch SSRF hardening, unless the dev insecure knob is set (local
+  // provider). Operator-authored endpoints, so this is trusted-boundary defense in
+  // depth against a misconfigured/rebinding hostname, not wire-controlled input.
+  const providerNet = { allowInsecure: config.security.allow_insecure_urls };
   const veniceOpts = apiKey
     ? {
         payment: new ApiKeyPayment(apiKey),
@@ -72,6 +91,7 @@ async function runDaemon(): Promise<void> {
         // relax it via models.<role>.require_private = false, spec §16.2), so the
         // adapter must return the unfiltered list here.
         requirePrivate: false,
+        net: providerNet,
       }
     : undefined;
 
@@ -104,7 +124,7 @@ async function runDaemon(): Promise<void> {
     if (quarantined > 0) {
       console.log(`[coordinator] cashu: quarantined ${quarantined} interrupted reservation(s) as ambiguous`);
     }
-    providers.routstr = new RoutstrLlm({ nodeUrl, payment });
+    providers.routstr = new RoutstrLlm({ nodeUrl, payment, net: providerNet });
     console.log(`[coordinator] Routstr ${nodeUrl} (Cashu) available for routing`);
   }
 
@@ -128,6 +148,14 @@ async function runDaemon(): Promise<void> {
           throw new Error("local-whisper STT not built in this daemon (set stt.provider = venice-stt)");
         })();
 
+  // Relay SSRF policy (audit C4): pin every relay connection to a public-address
+  // lookup, and (dev-only) allow insecure/private relays when explicitly configured.
+  setRelayConnectPolicy({ allowInsecure: config.security.allow_insecure_urls });
+  const relayPolicy = {
+    allowlist: config.security.relay_allowlist,
+    allowInsecure: config.security.allow_insecure_urls,
+  };
+
   const client = new NostrClient(config.relays.default);
 
   // Marmot group-chat admin bot (§4): a MarmotClient run off coordSk with its MLS
@@ -136,6 +164,9 @@ async function runDaemon(): Promise<void> {
   const chatNetwork = makeChatNetwork({
     transport: client as unknown as import("./chat/network.js").ChatNetworkTransport,
     defaultRelays: config.relays.default,
+    // Enforce the operator relay allowlist on untrusted kind-10050 inbox relays
+    // discovered for Marmot chat, same as key-package NIP-65 discovery (audit R20).
+    relayPolicy,
   });
   const { mls: chatMls } = createMarmotClientMls({ store, coordSk, network: chatNetwork });
   await chatMls.loadAll().catch((e) => console.warn("[chat] loadAll failed:", e));
@@ -159,6 +190,8 @@ async function runDaemon(): Promise<void> {
     // Install authorization + unsolicited-install caps (audit COORD-3).
     maxEvents: config.security.max_events,
     allowedEidPubkeys: config.security.allowed_eid_pubkeys,
+    // Untrusted-relay SSRF policy (audit C4).
+    relayPolicy,
     // Billing state machine (spec §9, D5): the coordinator maps this verdict onto
     // the persisted evaluating→ok|grace|blocked machine and enforces it.
     evaluateBilling: (eid, attendeeCount) => evaluateBilling(config, eid, attendeeCount),
@@ -198,6 +231,14 @@ async function runDaemon(): Promise<void> {
 
   console.log("[coordinator] running — watching for installs, submissions, admin commands");
 
+  // Periodic queue report (production incident 2026-07-24). Deliberately on its OWN
+  // timer, not inside the drain loop below: a handler that never returns blocks that
+  // loop, and a stalled worker is precisely the case the report has to stay visible
+  // for. Silent when the queue is empty and nothing is running, so a healthy idle
+  // daemon adds no log volume — and a queue that is empty WHILE work was supposedly
+  // dispatched is itself the diagnosis.
+  const stopQueueReporter = coordinator.jobs.startQueueReporter(60_000);
+
   // Job loop: drain runnable jobs, then idle briefly.
   let stopped = false;
   let shuttingDown = false;
@@ -217,10 +258,28 @@ async function runDaemon(): Promise<void> {
     stopped = true;
     console.log("[coordinator] draining in-flight work…");
     coordinator.jobs.stopClaiming(); // no new claims; the active job still finishes
+    // Bounded graceful drain: give the in-flight handler up to DRAIN_TIMEOUT to
+    // finish on its own.
+    let drained = false;
     await Promise.race([
-      drainPromise.catch(() => {}),
+      drainPromise.then(() => {
+        drained = true;
+      }).catch(() => {
+        drained = true;
+      }),
       new Promise((r) => setTimeout(r, DRAIN_TIMEOUT_MS)),
     ]);
+    if (!drained) {
+      // The drain window expired with a handler still running (audit C11). Signal it
+      // to abort, then AWAIT confirmed cancellation before closing the transport,
+      // store, and daemon lock — so the handler can never write/publish against a
+      // closed/replaced resource. A handler that ignores the abort would block here;
+      // a SECOND SIGINT/SIGTERM forces the immediate exit above.
+      console.log("[coordinator] drain timed out — aborting the in-flight handler and awaiting cancellation…");
+      coordinator.jobs.abort();
+      await drainPromise.catch(() => {});
+    }
+    stopQueueReporter();
     coordinator.stop();
     client.close();
     store.close();

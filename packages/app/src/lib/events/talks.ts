@@ -22,6 +22,8 @@ import {
   bytesToHex,
   type TalkContent,
   type TalkSubmissionContent,
+  type TalkExternalKind,
+  type TalkSourceType,
   type MediaDescriptor,
   type GiftWrap,
 } from "@nostrautica/protocol";
@@ -34,7 +36,7 @@ import { loadEventKeys, currentEck } from "./keystore.js";
 import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
 import { onlyByAuthors } from "$lib/nostr/verify.js";
 import { signerWrap } from "./giftwrap.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 async function eckBytes(coordinate: string): Promise<Uint8Array | undefined> {
@@ -71,7 +73,11 @@ export function cachedTalk(coordinate: string, d: string): TalkContent | undefin
 export async function fetchTalks(ctx: EventContext): Promise<TalkItem[]> {
   if (ctx.config.talks === "off") return [];
   const eck = await eckBytes(ctx.coordinate);
-  if (!eck) return [];
+  // No ECK yet (keys still recovering on a fresh device, or the viewer isn't a
+  // member): return the last-seen decrypted set rather than [] — an unavailable
+  // key must never blank a talk the device has already shown (screenshot a). The
+  // cache is wiped on logout, so a genuine non-member sees nothing to fall back to.
+  if (!eck) return cachedTalks(ctx.coordinate) ?? [];
   const publisher = directoryPublisher(ctx);
   // Record-authority pinning (NIP §3.7): only talks authored by the CURRENTLY
   // assigned coordinator (or E_id) are trusted — a formerly assigned coordinator's
@@ -104,6 +110,20 @@ export async function fetchTalks(ctx: EventContext): Promise<TalkItem[]> {
   }
   // Newest published first.
   const sorted = items.sort((a, b) => b.talk.published_at - a.talk.published_at);
+  // A non-empty fetch is authoritative: cache it (latest-wins on `newestAt`).
+  if (sorted.length > 0) {
+    cacheSet(talksKey(ctx.coordinate), sorted, newestAt);
+    return sorted;
+  }
+  // Zero talks decrypted this round. That's ambiguous — a genuinely empty event
+  // OR a transient relay/EOSE miss (a single-relay stack answering empty) OR a
+  // set published under a newer ECK we couldn't decrypt. Never blow away a prior
+  // non-empty cache on it (the "empty relay response cannot blank a seen talk
+  // without EOSE evidence" rule): keep and return what we last decrypted. Only
+  // commit an empty set when we never had one, so a truly empty event still reads
+  // as empty rather than perpetually loading.
+  const prior = cachedTalks(ctx.coordinate);
+  if (prior && prior.length > 0) return prior;
   cacheSet(talksKey(ctx.coordinate), sorted, newestAt);
   return sorted;
 }
@@ -123,7 +143,13 @@ export interface PendingTalk {
   title: string;
   description: string;
   speakers: string[];
-  media: MediaDescriptor;
+  // Exactly one of `media` (recorded/uploaded to Blossom) or `externalUrl`
+  // (YouTube/mp4 hosted elsewhere) is set, mirroring the wire schema.
+  media?: MediaDescriptor;
+  externalUrl?: string;
+  externalKind?: TalkExternalKind;
+  sourceType?: TalkSourceType;
+  processForMatching: boolean;
   revision: number;
   rumorCreatedAt: number;
 }
@@ -172,6 +198,10 @@ export function dedupePendingTalks(
         description: s.content.description,
         speakers: s.content.speakers,
         media: s.content.media,
+        externalUrl: s.content.external_url,
+        externalKind: s.content.external_kind,
+        sourceType: s.content.source_type,
+        processForMatching: s.content.process_for_matching,
         revision: s.content.revision,
         rumorCreatedAt: s.rumorCreatedAt,
       });
@@ -251,25 +281,39 @@ export async function submitTalk(
     talkId: string;
     title: string;
     description: string;
-    media: MediaDescriptor;
     revision: number;
+    // Exactly one source: a Blossom `media` descriptor (recording/upload) OR an
+    // `externalUrl` (+ `externalKind`) the speaker hosts elsewhere.
+    media?: MediaDescriptor;
+    externalUrl?: string;
+    externalKind?: TalkExternalKind;
+    sourceType?: TalkSourceType;
+    /** Opt this talk into coordinator STT + matching. Default off. */
+    processForMatching?: boolean;
   },
-): Promise<void> {
+): Promise<PublishOutcome> {
+  const content: TalkSubmissionContent = {
+    v: 2,
+    a: ctx.coordinate,
+    talk_d: args.talkId,
+    title: args.title,
+    description: args.description,
+    speakers: [],
+    source_type: args.sourceType,
+    process_for_matching: args.processForMatching ?? false,
+    revision: args.revision,
+    ...(args.media
+      ? { media: args.media }
+      : { external_url: args.externalUrl, external_kind: args.externalKind }),
+  };
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_TALK_SUBMISSION,
-    content: {
-      v: 2,
-      a: ctx.coordinate,
-      talk_d: args.talkId,
-      title: args.title,
-      description: args.description,
-      speakers: [],
-      media: args.media,
-      revision: args.revision,
-    },
+    content,
     tags: [["a", ctx.coordinate]],
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  // U2: surface whether the 21609 actually reached a relay (awaiting moderation)
+  // or is only queued locally, rather than claiming submission unconditionally.
+  return toOutcome(await publishOrQueue(wrap as any, ctx.config.relays));
 }
 
 // ── talk edit handoff (F2.4) ─────────────────────────────────────────────────

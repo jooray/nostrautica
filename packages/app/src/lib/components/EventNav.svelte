@@ -83,9 +83,12 @@
   {/if}
 
   {#if eventShell.showChat}
+    <!-- Active on the event group chat AND the global chat list / DM threads
+         reached from inside this event (Bug 1): the Chat tab stays lit so the
+         user still reads as "in this event" while messaging. -->
     <button
-      aria-current={active("chat") ? "page" : undefined}
-      class:active={active("chat")}
+      aria-current={active("chat", "dm", "dmPeer") ? "page" : undefined}
+      class:active={active("chat", "dm", "dmPeer")}
       onclick={() => router.go({ name: "chat", naddr })}
     >
       <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.chat")}</span>

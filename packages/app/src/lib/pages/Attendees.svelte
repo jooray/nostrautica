@@ -37,6 +37,7 @@
     following: "attendees.filter.following",
   };
 
+  // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   const cachedCtx = cachedEventContext(naddr);
   // Cache-first paint (§2.3): the roster/directory/follows/settings the app has
   // seen render instantly on revisit; the stream + social refresh in background.

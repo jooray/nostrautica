@@ -1,9 +1,11 @@
 /**
  * Multi-relay event deduplication. When streaming events from several relays,
  * every relay returns its own copy — regular events dedupe by id, while
- * replaceable/addressable events (NIP-01) resolve latest-wins per identity key,
- * matching the sort-by-created_at-take-first reduction the fetchers already do.
+ * replaceable/addressable events (NIP-01) resolve latest-wins per identity key
+ * under the shared §3.1 comparator (`supersedes`), so every reader — fetch and
+ * stream, app and coordinator — agrees on the current version.
  */
+import { supersedes } from "@nostrautica/protocol";
 
 export interface MinimalEvent {
   id: string;
@@ -45,8 +47,15 @@ export class EventDeduper<T extends MinimalEvent = MinimalEvent> {
       return true;
     }
     const prev = this.latest.get(key);
-    // Latest wins; on an equal timestamp the first arrival stays (deterministic).
-    if (prev && (prev.created_at ?? 0) >= (e.created_at ?? 0)) return false;
+    // §3.1 tie-break (audit P2): replace the retained winner whenever the
+    // candidate SUPERSEDES it — strictly newer created_at, OR equal created_at
+    // with a lexicographically LOWER id. Relay arrival order is not
+    // deterministic, so the old "first arrival stays on a tie" rule let two
+    // clients disagree on the current 31600 config, roster, coordinator
+    // assignment, theme, page, etc. Discarding the loser here (before snapshots
+    // and live callbacks) is what makes `pickLatest` downstream a no-op rather
+    // than a repair it cannot perform.
+    if (prev && !supersedes(e, prev)) return false;
     this.latest.set(key, e);
     return true;
   }

@@ -13,7 +13,13 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
-import { PROVIDER_TIMEOUTS, withProviderTimeout } from "./http.js";
+import {
+  PROVIDER_TIMEOUTS,
+  providerHttpError,
+  withProviderTimeout,
+  withUncancellableDeadline,
+} from "./http.js";
+import { guardedProviderFetch, type ProviderNetPolicy } from "../net/safe-fetch.js";
 
 const DEFAULT_BASE = "https://api.venice.ai/api/v1";
 /** Venice STT hard limit: 25 MB (spec §9.4, §3.7). */
@@ -26,13 +32,14 @@ export const VENICE_STT_MAX_BYTES = 25 * 1024 * 1024;
  * catch-all "processing_error". Retrying immediately can't fix a depleted
  * account; the job runner's long-tail backoff gives an operator time to top up
  * before it poisons (user feedback 2026-07-21).
+ *
+ * Classification, the status/body excerpt, and the LOG all live in
+ * {@link providerHttpError} now (shared with Routstr): a provider failure has to
+ * be visible in the coordinator log even when a caller swallows the exception,
+ * which is what made the 2026-07-24 incident undiagnosable from the log alone.
  */
-async function httpError(res: Response, label: string): Promise<Error> {
-  const text = await res.text().catch(() => "");
-  if (res.status === 402 || /insufficient[_ ]?(balance|credit|funds)/i.test(text)) {
-    return new Error(`Venice billing: insufficient balance (${res.status}) — ${label}: ${text}`);
-  }
-  return new Error(`${label} failed: ${res.status} ${text}`);
+async function httpError(res: Response, label: string, tag: "llm" | "stt" = "llm"): Promise<Error> {
+  return providerHttpError(res, label, tag);
 }
 
 export interface VeniceOptions {
@@ -40,6 +47,8 @@ export interface VeniceOptions {
   payment: PaymentStrategy;
   /** Restrict LLM selection to private/TEE-tier models (spec §9.4). */
   requirePrivate?: boolean;
+  /** DNS-pinning policy for outbound requests (audit R22). Default: pin + public-only. */
+  net?: ProviderNetPolicy;
 }
 
 export class VeniceLlm implements LlmProvider {
@@ -49,8 +58,18 @@ export class VeniceLlm implements LlmProvider {
     this.base = opts.baseUrl ?? DEFAULT_BASE;
   }
 
+  /**
+   * Payment headers, under their OWN deadline. This runs BEFORE
+   * `withProviderTimeout` arms the request deadline, so an unbounded `prepare()` —
+   * a CashuPayment whose mint stops answering — would hang the awaiting job
+   * forever: no timeout, no failure, no log, and (because jobs drain serially) no
+   * further work of any kind. Bounded here so the worst case is one failed job.
+   */
   private async headers(estimateTokens?: number): Promise<Record<string, string>> {
-    return { "Content-Type": "application/json", ...(await this.opts.payment.prepare({ estimateTokens })) };
+    const paid = await withUncancellableDeadline("Venice payment.prepare", PROVIDER_TIMEOUTS.payment, () =>
+      this.opts.payment.prepare({ estimateTokens }),
+    );
+    return { "Content-Type": "application/json", ...paid };
   }
 
   async models(): Promise<ModelInfo[]> {
@@ -58,11 +77,16 @@ export class VeniceLlm implements LlmProvider {
     const body = await withProviderTimeout(
       "Venice GET /models",
       PROVIDER_TIMEOUTS.metadata,
-      async (signal) => {
-        const res = await fetch(`${this.base}/models`, { headers, signal });
-        if (!res.ok) throw await httpError(res, "Venice GET /models");
-        return (await res.json()) as { data?: any[] };
-      },
+      (signal) =>
+        guardedProviderFetch(
+          `${this.base}/models`,
+          { headers, signal },
+          this.opts.net ?? {},
+          async (res) => {
+            if (!res.ok) throw await httpError(res, "Venice GET /models");
+            return (await res.json()) as { data?: any[] };
+          },
+        ),
     );
     const models = (body.data ?? []).map((m) => {
       const spec = m.model_spec ?? m.spec ?? {};
@@ -87,46 +111,53 @@ export class VeniceLlm implements LlmProvider {
     temperature?: number;
     maxTokens?: number;
     validate?: (raw: unknown) => T;
+    signal?: AbortSignal;
   }): Promise<{ value: T; usage: TokenUsage }> {
     const headers = await this.headers(req.maxTokens);
     const body = await withProviderTimeout(
       "Venice chat/completions",
       PROVIDER_TIMEOUTS.completion,
-      async (signal) => {
-        const res = await fetch(`${this.base}/chat/completions`, {
-          method: "POST",
-          headers,
-          signal,
-          body: JSON.stringify({
-            model: req.model,
-            temperature: req.temperature ?? 0.2,
-            // Reasoning models otherwise burn the whole budget on chain-of-thought and
-            // return empty content; give structured output real headroom.
-            max_tokens: req.maxTokens ?? 4096,
-            messages: [
-              { role: "system", content: req.system },
-              { role: "user", content: req.user },
-            ],
-            response_format: {
-              type: "json_schema",
-              json_schema: { name: req.schemaName, strict: true, schema: req.schema },
-            },
-            // Our system prompt is authoritative (no Venice persona), and we don't want
-            // reasoning tokens between us and the JSON.
-            venice_parameters: {
-              include_venice_system_prompt: false,
-              disable_thinking: true,
-              strip_thinking_response: true,
-            },
-          }),
-        });
-        if (!res.ok) {
-          throw await httpError(res, "Venice chat/completions");
-        }
-        const parsed = (await res.json()) as any;
-        await this.opts.payment.settle(res.headers);
-        return parsed;
-      },
+      (signal) =>
+        guardedProviderFetch(
+          `${this.base}/chat/completions`,
+          {
+            method: "POST",
+            headers,
+            signal,
+            body: JSON.stringify({
+              model: req.model,
+              temperature: req.temperature ?? 0.2,
+              // Reasoning models otherwise burn the whole budget on chain-of-thought and
+              // return empty content; give structured output real headroom.
+              max_tokens: req.maxTokens ?? 4096,
+              messages: [
+                { role: "system", content: req.system },
+                { role: "user", content: req.user },
+              ],
+              response_format: {
+                type: "json_schema",
+                json_schema: { name: req.schemaName, strict: true, schema: req.schema },
+              },
+              // Our system prompt is authoritative (no Venice persona), and we don't want
+              // reasoning tokens between us and the JSON.
+              venice_parameters: {
+                include_venice_system_prompt: false,
+                disable_thinking: true,
+                strip_thinking_response: true,
+              },
+            }),
+          },
+          this.opts.net ?? {},
+          async (res) => {
+            if (!res.ok) {
+              throw await httpError(res, "Venice chat/completions");
+            }
+            const parsed = (await res.json()) as any;
+            await this.opts.payment.settle(res.headers);
+            return parsed;
+          },
+        ),
+      req.signal,
     );
     const content = body.choices?.[0]?.message?.content;
     if (typeof content !== "string") {
@@ -152,21 +183,27 @@ export class VeniceLlm implements LlmProvider {
     };
   }
 
-  async embed(texts: string[], model?: string): Promise<number[][]> {
+  async embed(texts: string[], model?: string, callerSignal?: AbortSignal): Promise<number[][]> {
     const headers = await this.headers();
     const body = await withProviderTimeout(
       "Venice embeddings",
       PROVIDER_TIMEOUTS.embedding,
-      async (signal) => {
-        const res = await fetch(`${this.base}/embeddings`, {
-          method: "POST",
-          headers,
-          signal,
-          body: JSON.stringify({ model: model ?? "text-embedding-bge-m3", input: texts }),
-        });
-        if (!res.ok) throw await httpError(res, "Venice embeddings");
-        return (await res.json()) as { data?: { embedding: number[] }[] };
-      },
+      (signal) =>
+        guardedProviderFetch(
+          `${this.base}/embeddings`,
+          {
+            method: "POST",
+            headers,
+            signal,
+            body: JSON.stringify({ model: model ?? "text-embedding-bge-m3", input: texts }),
+          },
+          this.opts.net ?? {},
+          async (res) => {
+            if (!res.ok) throw await httpError(res, "Venice embeddings");
+            return (await res.json()) as { data?: { embedding: number[] }[] };
+          },
+        ),
+      callerSignal,
     );
     const embedModel = model ?? "text-embedding-bge-m3";
     return (body.data ?? []).map((d, i) => {
@@ -201,7 +238,7 @@ export class VeniceStt implements SttProvider {
 
   async transcribe(
     audio: { data: Uint8Array; mime: string; language?: string },
-    opts?: { model?: string },
+    opts?: { model?: string; signal?: AbortSignal },
   ): Promise<{ text: string; language?: string }> {
     if (audio.data.length > VENICE_STT_MAX_BYTES) {
       throw new Error(
@@ -217,20 +254,31 @@ export class VeniceStt implements SttProvider {
     form.append("model", opts?.model ?? "openai/whisper-large-v3");
     if (audio.language) form.append("language", audio.language);
 
-    const headers = await this.opts.payment.prepare({});
+    // Bounded like VeniceLlm.headers(): prepare() runs outside the STT deadline.
+    const headers = await withUncancellableDeadline(
+      "Venice STT payment.prepare",
+      PROVIDER_TIMEOUTS.payment,
+      () => this.opts.payment.prepare({}),
+    );
     const body = await withProviderTimeout(
       "Venice STT",
       PROVIDER_TIMEOUTS.stt,
-      async (signal) => {
-        const res = await fetch(`${this.base}/audio/transcriptions`, {
-          method: "POST",
-          headers, // do NOT set Content-Type; fetch sets the multipart boundary
-          body: form,
-          signal,
-        });
-        if (!res.ok) throw await httpError(res, "Venice STT");
-        return (await res.json()) as { text?: unknown; language?: unknown };
-      },
+      (signal) =>
+        guardedProviderFetch(
+          `${this.base}/audio/transcriptions`,
+          {
+            method: "POST",
+            headers, // do NOT set Content-Type; fetch sets the multipart boundary
+            body: form,
+            signal,
+          },
+          this.opts.net ?? {},
+          async (res) => {
+            if (!res.ok) throw await httpError(res, "Venice STT", "stt");
+            return (await res.json()) as { text?: unknown; language?: unknown };
+          },
+        ),
+      opts?.signal,
     );
     if (body.text !== undefined && typeof body.text !== "string") {
       throw new ProviderContractError(this.id, "stt", opts?.model ?? "openai/whisper-large-v3", "text was not a string");

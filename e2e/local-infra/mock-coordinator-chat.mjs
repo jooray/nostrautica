@@ -19,6 +19,18 @@ const { Coordinator } = await import(new URL("coordinator.js", DIST));
 const { MockStt, MockLlm } = await import(new URL("providers/mock.js", DIST));
 const { makeChatNetwork } = await import(new URL("chat/network.js", DIST));
 const { createMarmotClientMls } = await import(new URL("chat/mls.js", DIST));
+const { setRelayConnectPolicy } = await import(new URL("net/relay-guard.js", DIST));
+
+// C4 (audit): the coordinator refuses ws:// and loopback/private relay hosts unless
+// the operator opts in — the connect-time SSRF guard (relay-guard) refuses the
+// socket, and sanitizeRelayUrls drops the URL from config-derived relay lists (which
+// would also starve chat key-package discovery + welcome delivery, silently making
+// every attendee hang on "Setting up your secure chat…"). The local e2e stack IS a
+// ws://localhost relay, so flip BOTH knobs for this dev double: setRelayConnectPolicy
+// for the guard, and relayPolicy on the Coordinator for the sanitizer. Equivalent to
+// `security.allow_insecure_urls = true` in a real coordinator.toml.
+setRelayConnectPolicy({ allowInsecure: true });
+const RELAY_POLICY = { allowInsecure: true };
 
 const RELAY = process.env.MOCK_RELAY ?? "ws://localhost:7777";
 const DB = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "/tmp/mock-coord-chat.sqlite";
@@ -107,6 +119,7 @@ const coordinator = new Coordinator({
   embedModel: { provider: "mock", model: "mock-embed" },
   translateModel: { provider: "mock", model: "mock-translate" },
   defaultRelays: [RELAY],
+  relayPolicy: RELAY_POLICY,
   transcribe: async () => "Hi, I'm here to meet people building privacy technology.",
   topK: 20,
   chatMls,

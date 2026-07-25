@@ -2,32 +2,60 @@ name: Deploy PWA (nsite)
 
 # Publishes the static PWA as an nsite on tagged releases (spec §11). Signs with a
 # NIP-46 bunker key stored in the NSYTE_BUNKER_URI secret.
+#
+# Publication is gated (audit R15): the FULL release gate — guardrails, unit suite,
+# supported e2e orchestrator, docs build/tests, clean-context Docker build — must be
+# green before anything is published, and a missing deploy credential FAILS the run
+# instead of silently skipping the only real step. Every third-party action is pinned
+# to a commit SHA and the deploy CLI to an exact version.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 jobs:
+  # Run the identical gate a PR clears — no tag ships without passing it.
+  gate:
+    uses: ./.github/workflows/release-gate.yml
+
   deploy:
     runs-on: ubuntu-latest
+    needs: gate
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # Fail LOUDLY when the deploy credential is absent (audit R15). Previously the
+      # only deploy step was `if: env.NSYTE_BUNKER_URI != ''`, so a run with no secret
+      # went green having published nothing. A tag deploy with no bunker is a
+      # misconfiguration, not a no-op.
+      - name: Require deploy credential
+        env:
+          NSYTE_BUNKER_URI: ${{ secrets.NSYTE_BUNKER_URI }}
+        run: |
+          if [ -z "$NSYTE_BUNKER_URI" ]; then
+            echo "::error::NSYTE_BUNKER_URI secret is not set — cannot publish the nsite. Set it in repo/environment secrets." >&2
+            exit 1
+          fi
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           version: 11
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @nostrautica/protocol build
       - run: pnpm --filter @nostrautica/app build
+      # nsyte is a Deno CLI published to JSR (@nsyte/cli) — it is NOT on npm, so the
+      # old `npx nsyte` could never resolve. Run it via Deno at a PINNED JSR version
+      # (audit R15: pin the deploy CLI) so a release can't drift onto a new nsyte.
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
       - name: Deploy to nsite
-        if: ${{ env.NSYTE_BUNKER_URI != '' }}
         env:
           NSYTE_BUNKER_URI: ${{ secrets.NSYTE_BUNKER_URI }}
         run: |
-          npx nsyte deploy packages/app/build \
+          deno run -A jsr:@nsyte/cli@0.27.2 deploy packages/app/build \
             --fallback /index.html \
             --bunker "$NSYTE_BUNKER_URI" \
             --relays wss://relay.primal.net,wss://relay.damus.io,wss://nos.lol

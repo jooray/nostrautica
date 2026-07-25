@@ -26,6 +26,7 @@ import {
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
+  KIND_CALENDAR_EVENT,
   KIND_DELETION,
   KIND_NOTE,
   KIND_REPOST,
@@ -33,6 +34,7 @@ import {
   KIND_PROFILE,
   giftwrapSince,
   unwrapRumor,
+  unwrapRumorEnvelope,
   eckDecrypt,
   base64ToBytes,
   hexToBytes,
@@ -58,6 +60,7 @@ import {
   AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
+  parseEventCoordinate,
   type EckVersion,
   type EventConfig,
   type TalksMode,
@@ -67,6 +70,8 @@ import {
   type ProfileCorrectionContent,
   type TalkSubmissionContent,
   type TalkContent,
+  type TalkExternalKind,
+  type TalkSourceType,
   type AiProfile,
   type RosterContent,
   type MatchMatrixContent,
@@ -85,6 +90,7 @@ import { processAttendee } from "./pipeline/process.js";
 import type { NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
+  pairInputsHash,
   scoreBatch,
   scoreReverseBatch,
   type BatchCandidate,
@@ -115,7 +121,7 @@ import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
-import { sanitizeRelayUrls } from "./net/relay-urls.js";
+import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
 import {
   sanitizeLlmText,
   sanitizeAiProfile,
@@ -133,10 +139,51 @@ const MAX_MEDIA_PER_SUBMISSION = 4;
 /** Total media bytes downloaded per submission (audit COORD-4). */
 const MAX_SUBMISSION_MEDIA_BYTES = 500 * 1024 * 1024;
 
+/**
+ * Per-FILE media cap (audit R17 follow-up): 250 MiB, the same bound the app's
+ * client precheck and playback/download enforce (MAX_MEDIA_DOWNLOAD_BYTES in
+ * app/blossom/client.ts). Without a per-file cap here, several files that each pass
+ * the client's 250 MiB check (e.g. 3×250 MiB) would each be accepted individually
+ * yet blow the 500 MiB aggregate budget with a confusing late, partial skip. A
+ * single descriptor over this bound is rejected up front with a clear reason —
+ * anything the app would have refused to upload/play is refused server-side too.
+ */
+const MAX_MEDIA_FILE_BYTES = 250 * 1024 * 1024;
+
 /** Distinct talks (by talk_d) one speaker may submit per event (audit COORD-4:
  *  unbounded talk submissions each triggered their own paid STT job). Editing
  *  an already-submitted talk_d is never capped — only new ones. */
 const MAX_TALKS_PER_SPEAKER = 10;
+
+/**
+ * Event-wide attendee-population cap (audit C3). The 31604 roster protocol cap is
+ * 2,000, so the coordinator must never grow its attendee set (pending + approved +
+ * revoked) past it and then FAIL to publish the roster. A join that would create a
+ * NEW attendee beyond this is refused.
+ */
+const MAX_ATTENDEES_PER_EVENT = 2000;
+
+/** Durable inbox rate accounting (audit C3): fixed 60s window. */
+const INBOX_RATE_WINDOW_MS = 60_000;
+/** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
+const MAX_RUMORS_PER_SENDER_WINDOW = 30;
+/** Max inbound rumors accepted for ONE event per window across all senders. */
+const MAX_RUMORS_PER_EVENT_WINDOW = 600;
+/**
+ * Rate-bucket key for the coordinator's OWN inbox (audit R4): anyone can publish a
+ * kind-1059 wrap to the coordinator's public pubkey, so its inbox needs the same
+ * per-sender / per-inbox gate the event inboxes have — applied BEFORE the durable
+ * install/admin dispatch. A fixed key (not a real coordinate) shares the inbox_rate
+ * table; the per-inbox bucket bounds how many rate rows a distinct-sender flood can
+ * create per window (once the inbox total is over budget, per-sender rows stop).
+ */
+const COORD_INBOX_RATE_KEY = "coordinator-inbox";
+
+/** Bounded inbound work queue (audit C3): global concurrent handlers + queue depth.
+ *  Subscription callbacks are dispatched through this so a burst of gift wraps can't
+ *  spawn unbounded concurrent handlers or pile unbounded closures in memory. */
+const INBOX_MAX_CONCURRENCY = 8;
+const INBOX_MAX_QUEUE = 2000;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
 function effectiveMaxMediaSec(configured: number): number {
@@ -198,6 +245,18 @@ export interface PublishOutcome {
 export interface Transport {
   publish(event: NostrEvent, relays?: string[]): Promise<void | PublishOutcome>;
   fetch(filter: any, relays?: string[], timeoutMs?: number): Promise<NostrEvent[]>;
+  /** PAGINATED full-history fetch (audit R4): walks the whole history in `until`-
+   *  windowed pages so a >5000-event flood can't truncate startup recovery. Optional:
+   *  a transport without it degrades to the (capped) one-shot `fetch`. */
+  fetchAll?(
+    filter: any,
+    relays?: string[],
+    opts?: { pageSize?: number; overlapSec?: number; maxTotal?: number; timeoutMs?: number },
+  ): Promise<NostrEvent[]>;
+  /** Prove a relay set is reachable (≥1 relay connects/EOSEs) before a relay
+   *  handover promotes it (audit C9). Optional: a transport without it degrades to
+   *  the old break-before-make behavior. */
+  probe?(relays: string[], timeoutMs?: number): Promise<boolean>;
 }
 
 const short = (pk: string) => pk.slice(0, 8);
@@ -257,9 +316,12 @@ export interface CoordinatorDeps {
   matchRng?: () => number;
   fetchBlob?: (urls: string[], sha256: string) => Promise<Uint8Array>;
   /** Override the transcription stage (tests inject to skip Blossom/ffmpeg).
-   *  May return text only, or a {@link TranscriptResult} with a detected language. */
+   *  May return text only, or a {@link TranscriptResult} with a detected language.
+   *  Receives the caller cancellation signal (audit R13) so an injected implementation
+   *  can honor shutdown / per-event teardown. */
   transcribe?: (
     descriptor: MediaDescriptor,
+    signal?: AbortSignal,
   ) => Promise<string | import("./pipeline/transcribe.js").TranscriptResult>;
   /** Max media bytes to download per blob (audit C3). */
   maxMediaBytes?: number;
@@ -282,6 +344,13 @@ export interface CoordinatorDeps {
    * Hex pubkeys.
    */
   allowedEidPubkeys?: string[];
+  /**
+   * Policy applied to untrusted relay URLs (audit C4): an operator host allowlist and
+   * the dev-only insecure/private-relay allowance. Applied to every relay-source path
+   * (grant config_relays, live 31600 relays, NIP-65 discovery). Omitted ⇒ any public
+   * wss:// relay is accepted (still SSRF-guarded at connect).
+   */
+  relayPolicy?: RelayPolicy;
   /**
    * Billing policy evaluation (spec §9, D5). Given the billing principal (event
    * identity) and the current approved-attendee count, returns the wire billing
@@ -346,6 +415,11 @@ interface EventState {
   /** The event's end time (unix seconds) from its 31923 `end` tag (falls back to
    *  `start`), the anchor the retention window counts from. 0 when unknown. */
   eventEndSec: number;
+  /** Newest applied 31923 metadata event id + timestamp (audit P9 replaceable
+   *  ordering). A live 31923 edit is applied only when it SUPERSEDES this, so a
+   *  shuffled relay re-read can never regress title/eventEndSec to a stale revision. */
+  metaEventId?: string;
+  metaCreatedAt: number;
   /** True once the retention sweep has expired this event: paid processing is parked
    *  and member records have been deleted. A terminal state distinct from billing park. */
   retentionExpired?: boolean;
@@ -369,6 +443,8 @@ export class Coordinator {
   private readonly wrapRetryDelaysMs: number[];
   private readonly maxEvents: number;
   private readonly allowedEidPubkeys: Set<string>;
+  /** Untrusted-relay policy (audit C4): host allowlist + dev-only insecure allowance. */
+  private readonly relayPolicy: RelayPolicy;
   private readonly prefilter: PrefilterConfig;
   private readonly topK: number;
   private readonly batchSize: number;
@@ -401,6 +477,35 @@ export class Coordinator {
   /** Coordinates for which a 21606 budget_exceeded was already emitted (H-2): emit
    *  once per block, cleared on resume so a later re-exceed re-notifies. */
   private readonly budgetNotified = new Set<string>();
+  /** Bounded inbound work queue (audit C3): pending handler closures + the number of
+   *  handlers currently running, enforcing a global concurrency limit and a queue
+   *  depth cap so a gift-wrap burst can't spawn unbounded concurrent work. */
+  private readonly inboundQueue: Array<() => Promise<void>> = [];
+  private inboundRunning = 0;
+  private inboundDropped = 0;
+  /**
+   * Per-(coordinate, subject) in-process async mutex (audit R1). The inbound
+   * scheduler runs up to 8 handlers concurrently, so two DISTINCT commands for the
+   * same membership subject (e.g. an older revoke and a newer approve) could execute
+   * concurrently and interleave — an older revoke finishing AFTER a newer approve and
+   * winning, despite the durable (created_at, id) comparator. This serializes a
+   * subject's whole effect chain (the watermark read/upsert PLUS the async
+   * grant/roster/deletion/publish that follows), so same-subject transitions apply
+   * strictly one at a time and the comparator's ordering actually holds. Belt: the
+   * per-mutation ownership token ({@link stillOwnsSubject}) stops a handler that is
+   * somehow past the mutex yet superseded from producing side effects.
+   */
+  private readonly subjectChains = new Map<string, Promise<unknown>>();
+  /** Per-event cancellation (audit R3): retention/detach abort an event's in-flight
+   *  job handlers and AWAIT them before purging/deleting custody, so a running
+   *  STT/LLM/publish can't recreate purged derived data or publish with stale state. */
+  private readonly eventAbort = new Map<string, AbortController>();
+  /** In-flight event-scoped job bodies, tracked per coordinate so retention/detach can
+   *  await their unwinding after aborting (audit R3). */
+  private readonly activeEventHandlers = new Map<string, Set<Promise<void>>>();
+  /** Coordinates whose retention expiry is currently running (audit R3): guards the
+   *  boot + hourly sweeps against double-executing the same event's expiry. */
+  private readonly retentionInProgress = new Set<string>();
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -408,6 +513,7 @@ export class Coordinator {
     this.wrapRetryDelaysMs = deps.wrapRetryDelaysMs ?? [5_000, 30_000];
     this.maxEvents = deps.maxEvents ?? DEFAULT_MAX_EVENTS;
     this.allowedEidPubkeys = new Set(deps.allowedEidPubkeys ?? []);
+    this.relayPolicy = deps.relayPolicy ?? {};
     this.coordPubkey = getPublicKey(deps.coordSk);
     this.prefilter = deps.prefilter ?? DEFAULT_PREFILTER;
     this.topK = deps.topK ?? 20;
@@ -441,8 +547,16 @@ export class Coordinator {
 
   // ── job handlers (the pipeline, spec §9.2) ─────────────────────────────────
   private registerJobHandlers(): void {
-    this.jobs.register("process_attendee", async (p, { enqueue }) => {
-      await this.processAttendeeJob(p.coordinate, p.pubkey);
+    this.jobs.register("process_attendee", async (p, { enqueue, signal }) => {
+      let committed = false;
+      await this.runEventJob(p.coordinate, signal, async (sig) => {
+        committed = await this.processAttendeeJob(p.coordinate, p.pubkey, sig);
+      });
+      // Enqueue matching ONLY when the ai_profile was actually committed (audit C2):
+      // a stale run whose result was discarded (a newer submission superseded it
+      // mid-flight) must not enqueue a recompute off data that was never written —
+      // that would score the newer roster against a hash the DB no longer holds.
+      if (!committed) return;
       // Key the recompute by the attendee's resulting profile hash: re-delivery of
       // the same submission dedupes, a CHANGED profile gets a fresh recompute.
       const hash = this.deps.store.getAttendee(p.coordinate, p.pubkey)?.profile_hash ?? "none";
@@ -452,14 +566,15 @@ export class Coordinator {
       });
     });
 
-    this.jobs.register("match_recompute", async (p, { enqueue }) => {
+    this.jobs.register("match_recompute", async (p, { enqueue, signal }) => {
+     await this.runEventJob(p.coordinate, signal, async (sig) => {
       // Re-check config at execution (audit H4): matching may have been turned off
       // after this job was queued — exit before any embedding/scoring provider call.
       if (this.events.get(p.coordinate)?.matching === "off") return;
       // Spend gate (spec §8/§9): billing block OR exceeded budget parks this before
       // any embed spend.
       await this.assertSpendAllowed(p.coordinate, p.pubkey);
-      const pairs = await this.selectPairs(p.coordinate, p.pubkey);
+      const pairs = await this.selectPairs(p.coordinate, p.pubkey, sig);
       if (!pairs.length) return;
       // FORWARD direction (p.pubkey → others): one target + ≤K candidates per call.
       // Group the target's pending directed pairs into ≤K-candidate batches (one
@@ -468,9 +583,18 @@ export class Coordinator {
       // hash, and results are written per directed pair keyed by inputs_hash.
       const batches = groupIntoBatches(pairs, this.batchSize);
       log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} forward pair(s) in ${batches.length} batch(es)`);
+      // Count what the dispatch ACTUALLY queued. "Dispatched N batches" was a lie
+      // whenever a dedupe key collided with a finished row (2026-07-24): the line
+      // above printed, nothing was queued, and the next log line never came.
+      let queued = 0;
       for (const batch of batches) {
         const key = `batch:${p.coordinate}:${batch[0]!.a}:${batchDedupe(batch)}`;
-        enqueue("score_batch", key, { coordinate: p.coordinate, pairs: batch });
+        if (enqueue("score_batch", key, { coordinate: p.coordinate, pairs: batch }) === "enqueued") queued++;
+      }
+      if (queued < batches.length) {
+        log(
+          `[match] ${short(p.pubkey)} forward dispatch: only ${queued}/${batches.length} batch(es) queued — the rest were suppressed by existing job rows`,
+        );
       }
 
       // REVERSE direction (others → p.pubkey): each other is a distinct TARGET with
@@ -486,21 +610,37 @@ export class Coordinator {
           reverse.push({ a: pair.b, b: pair.a, inputsHash: pair.inputsHash });
         }
       }
+      let reverseQueued = 0;
+      let reverseBatches = 0;
       for (let i = 0; i < reverse.length; i += this.batchSize) {
         const batch = reverse.slice(i, i + this.batchSize);
+        reverseBatches++;
         // Dedupe by shared candidate + the target set — a re-delivery collapses.
         const key = `rbatch:${p.coordinate}:${p.pubkey}:${batchDedupe(batch.map((r) => ({ b: r.a, inputsHash: r.inputsHash })))}`;
-        enqueue("score_reverse_batch", key, { coordinate: p.coordinate, pairs: batch });
+        if (enqueue("score_reverse_batch", key, { coordinate: p.coordinate, pairs: batch }) === "enqueued") {
+          reverseQueued++;
+        }
       }
       if (reverse.length) {
-        log(`[match] reverse: ${reverse.length} target(s) → ${short(p.pubkey)} in ${Math.ceil(reverse.length / this.batchSize)} batch(es)`);
+        log(`[match] reverse: ${reverse.length} target(s) → ${short(p.pubkey)} in ${reverseBatches} batch(es)`);
+        if (reverseQueued < reverseBatches) {
+          log(
+            `[match] ${short(p.pubkey)} reverse dispatch: only ${reverseQueued}/${reverseBatches} batch(es) queued — the rest were suppressed by existing job rows`,
+          );
+        }
       }
+     });
     });
 
-    this.jobs.register("score_batch", async (p, { enqueue }) => {
+    this.jobs.register("score_batch", async (p, { enqueue, signal }) => {
+     const inPairs = p.pairs as CandidatePair[];
+     let summary = "nothing to score";
+     await this.batchOutcome(`forward batch ${short(inPairs[0]?.a ?? "?")} ×${inPairs.length}`, () => summary, () =>
+      this.runEventJob(p.coordinate, signal, async (sig) => {
       await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.a);
       const pairs = p.pairs as CandidatePair[];
-      const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs);
+      const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs, sig);
+      summary = `${scored.length} scored, ${missing} unparsed`;
       // A directed write only changes the TARGET's list (the candidate's own view
       // comes from their own batch), so only the target republishes. The key
       // carries the scored set's content hash so new scores trigger a fresh
@@ -520,12 +660,18 @@ export class Coordinator {
       if (missing > 0) {
         throw new Error(`batch response missing ${missing} candidate(s); retrying unscored remainder`);
       }
+     }));
     });
 
-    this.jobs.register("score_reverse_batch", async (p, { enqueue }) => {
+    this.jobs.register("score_reverse_batch", async (p, { enqueue, signal }) => {
+     const inPairs = p.pairs as CandidatePair[];
+     let summary = "nothing to score";
+     await this.batchOutcome(`reverse batch ${short(inPairs[0]?.b ?? "?")} ×${inPairs.length}`, () => summary, () =>
+      this.runEventJob(p.coordinate, signal, async (sig) => {
       await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.b);
       const pairs = p.pairs as CandidatePair[];
-      const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs);
+      const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs, sig);
+      summary = `${scored.length} scored, ${missing} unparsed`;
       // Each reverse pair {a: other, b: shared} writes the OTHER's directed row, so
       // every distinct target republishes its own list. Group scored pairs by target.
       const byTarget = new Map<string, CandidatePair[]>();
@@ -543,30 +689,39 @@ export class Coordinator {
       if (missing > 0) {
         throw new Error(`reverse batch missing ${missing} target(s); retrying unscored remainder`);
       }
+     }));
     });
 
-    this.jobs.register("publish_matches", async (p) => {
-      await this.publishMatchesJob(p.coordinate, p.pubkey);
+    this.jobs.register("publish_matches", async (p, { signal }) => {
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.publishMatchesJob(p.coordinate, p.pubkey);
+      });
     });
 
     // Transcribe a submitted talk (spec F2). Reuses the intro transcription pipeline
     // unchanged (audio.ts segments long talks). The transcript is stored on the talk
     // row (published on the 31610 at talk_publish time) and folded into the speaker's
     // ai_profile so the talk feeds matching (§9.2).
-    this.jobs.register("process_talk", async (p) => {
-      await this.processTalkJob(p.coordinate, p.pubkey, p.talkD as string);
+    this.jobs.register("process_talk", async (p, { signal }) => {
+      await this.runEventJob(p.coordinate, signal, async (sig) => {
+        await this.processTalkJob(p.coordinate, p.pubkey, p.talkD as string, sig);
+      });
     });
 
     // Marmot MLS membership changes (§4.2, audit COORD-9): add/remove run through
     // the durable runner so a transient marmot/relay failure retries instead of
     // stranding membership drift; persistent failure poisons → organizer 21606.
-    this.jobs.register("chat_sync_member", async (p) => {
+    this.jobs.register("chat_sync_member", async (p, { signal }) => {
       if (!this.marmot) return;
-      await this.marmot.syncMember(p.coordinate, p.pubkey);
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.marmot!.syncMember(p.coordinate, p.pubkey);
+      });
     });
-    this.jobs.register("chat_revoke_member", async (p) => {
+    this.jobs.register("chat_revoke_member", async (p, { signal }) => {
       if (!this.marmot) return;
-      await this.marmot.handleRevoke(p.coordinate, p.pubkey);
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.marmot!.handleRevoke(p.coordinate, p.pubkey);
+      });
     });
   }
 
@@ -601,8 +756,9 @@ export class Coordinator {
   }): Promise<void> {
     const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
-    // wss-only, well-formed, deduped, capped (audit COORD-16).
-    const grantRelays = sanitizeRelayUrls(grant.configRelays);
+    // wss-only, no credentials/fragments, public host, allowlist, deduped, capped
+    // (audit COORD-16 + C4).
+    const grantRelays = sanitizeRelayUrls(grant.configRelays, this.relayPolicy);
     const relays = grantRelays.length ? grantRelays : this.deps.defaultRelays;
 
     // Load public config + event details for scoring context.
@@ -615,7 +771,12 @@ export class Coordinator {
     // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
     // disagreed with the convention and with every other reader.
     const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31600));
-    const evtEvent = cfgEvents.find((e) => e.kind === 31923);
+    // Newest 31923 wins too (audit P9): relays return replaceable events in arbitrary
+    // order and this event controls the title and, critically, `eventEndSec` — the
+    // anchor the retention sweep deletes member records from. v1 took the FIRST
+    // returned 31923, so a shuffled relay order (or a restart) could select a stale
+    // revision with an earlier end date and expire member records prematurely.
+    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31923));
     // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
     // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
     // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
@@ -647,6 +808,42 @@ export class Coordinator {
       // highest ever installed OR detached for this coordinate (a replayed
       // historical grant can never re-install), and a grant inbox key that derives
       // the config's declared inbox.
+      //
+      // Replay / tombstone guards run FIRST (audit COORD-3, C1, NIP §3.5): they do
+      // not depend on the fetched config, they are the security-critical TERMINAL
+      // checks, and putting them ahead of the config-propagation checks means a
+      // replayed historical grant is rejected outright even while the config it once
+      // authorized against is momentarily unfetchable or stale — the retryable
+      // propagation paths below must never keep re-attempting a genuine replay.
+      //
+      // A gen BELOW the highest ever installed/detached is a hard reject — a replayed
+      // historical grant can never re-install. A gen EQUAL to it is normally a replay
+      // of an already-consumed grant, EXCEPT when it is a RESUME of a partially
+      // completed install of that same gen (audit C1): if installEvent threw after
+      // recordInstalledGen bumped the high-water mark (e.g. ensureChat/billing failed
+      // mid-install), the event row is still present and NOT tombstoned, and the same
+      // grant redelivered must be allowed to run to completion rather than be rejected
+      // as stale. A tombstoned coordinate (detached) or a missing event row at the
+      // high gen is a genuine replay and stays rejected.
+      const highGen = this.deps.store.installHighGen(grant.coordinate);
+      if (gen < highGen) {
+        log(
+          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} < the highest generation ever installed/detached (${highGen}) — replayed or stale`,
+        );
+        return;
+      }
+      if (gen === highGen) {
+        const resumable =
+          this.deps.store.getEvent(grant.coordinate) !== undefined &&
+          !this.deps.store.isInstallTombstoned(grant.coordinate);
+        if (!resumable) {
+          log(
+            `[install] REJECTED ${grant.coordinate}: grant gen ${gen} = the high-water mark (${highGen}) with no resumable install — replayed or stale`,
+          );
+          return;
+        }
+        log(`[install] ${grant.coordinate}: resuming a partially-completed install at gen ${gen}`);
+      }
       if (!config) {
         // Not an authorization decision — the authoritative 31600 isn't fetchable
         // right now (relay gap, or not yet propagated after a just-created event).
@@ -656,18 +853,24 @@ export class Coordinator {
         );
       }
       if (config.coordinator !== this.coordPubkey) {
+        if (!config.coordinator) {
+          // The newest 31600 we can fetch names NO coordinator. A brand-new event is
+          // created coordinator-LESS, and an organizer's attach publishes the
+          // coordinator-naming config and the 21603 grant nearly simultaneously — so
+          // an install fetch that races ahead of relay propagation reads the prior
+          // coordinator-less config. This is propagation lag, NOT authorization
+          // failure (the replay/tombstone guards above already caught a genuine
+          // replay): throw so the grant retries with backoff until the attach's
+          // config lands. If it never does, processRumorWithRetry gives up and logs
+          // clearly, leaving the wrap unseen for the boot rescan — exactly the
+          // !config path's contract. (A config naming a DIFFERENT, real coordinator
+          // is terminal below: that grant is genuinely not for this daemon.)
+          throw new Error(
+            `install ${grant.coordinate}: newest 31600 names no coordinator yet — config propagation lag, retryable`,
+          );
+        }
         log(
-          `[install] REJECTED ${grant.coordinate}: 31600 ${config.coordinator ? `names ${short(config.coordinator)}` : "names no coordinator"}, not this daemon (${short(this.coordPubkey)})`,
-        );
-        return;
-      }
-      // A gen at or below the highest ever installed/detached is a hard reject — a
-      // replayed historical grant can never re-install (checked BEFORE the config-gen
-      // match so a stale grant is rejected outright, not endlessly retried).
-      const highGen = this.deps.store.installHighGen(grant.coordinate);
-      if (gen <= highGen) {
-        log(
-          `[install] REJECTED ${grant.coordinate}: grant gen ${gen} ≤ the highest generation ever installed/detached (${highGen}) — replayed or stale`,
+          `[install] REJECTED ${grant.coordinate}: 31600 names ${short(config.coordinator)}, not this daemon (${short(this.coordPubkey)})`,
         );
         return;
       }
@@ -770,6 +973,8 @@ export class Coordinator {
       gen,
       retentionDays: config?.retentionDays,
       eventEndSec: parseEventEndSec(evtEvent),
+      metaEventId: evtEvent?.id,
+      metaCreatedAt: evtEvent?.created_at ?? 0,
       retentionExpired: this.deps.store.isRetentionExpired(grant.coordinate) || undefined,
     };
     this.events.set(grant.coordinate, state);
@@ -787,6 +992,18 @@ export class Coordinator {
     // (audit H2); a restart of a known event keeps the 3-day overlap.
     const since = grant.backfill === "full" ? 0 : giftwrapSince(Math.floor(this.now() / 1000));
     this.subscribeEventInbox(state, since);
+    // Explicitly BACKFILL the E_inbox history from before this subscription's epoch
+    // (audit H2, C3). The live subscription alone is not enough: a relay delivers a
+    // subscription's stored events in arbitrary (often newest-first) order, so a
+    // 21601 profile submission can arrive AHEAD of its own 21600 join request — the
+    // C3 enrollment gate then drops the submission as "never joined" and, because a
+    // live subscription never resends an already-delivered stored event, it is lost
+    // until a restart. Worse, an attendee who joined BEFORE the daemon subscribed
+    // could be missed entirely. This one-shot ordered fetch (join requests first, so
+    // an enrollment row exists before any same-identity submission is evaluated)
+    // closes both; the seen_rumors ledger dedupes it against the live stream, and
+    // transport.fetch is capped (C3) so the backfill stays bounded.
+    await this.backfillEventInbox(state, since);
     // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
     this.subscribeEventConfig(state);
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
@@ -867,6 +1084,21 @@ export class Coordinator {
     return { bytes: base64ToBytes(latest.key), id: latest.id };
   }
 
+  /** Persist the event's current ECK set (audit C1: after a rotation mint). */
+  private persistEck(state: EventState): void {
+    const row = this.deps.store.getEvent(state.coordinate);
+    if (row) {
+      this.deps.store.upsertEvent({
+        coordinate: state.coordinate,
+        configJson: row.config_json,
+        inboxNsec: row.inbox_nsec,
+        eckJson: JSON.stringify(state.eck),
+        configRelays: row.config_relays,
+        now: this.now(),
+      });
+    }
+  }
+
   private publishKeys(state: EventState): PublishKeys {
     const { bytes, id } = this.currentEck(state);
     return { coordSk: this.deps.coordSk, eck: bytes, eckId: id };
@@ -885,14 +1117,19 @@ export class Coordinator {
     if (this.deps.store.isRumorSeen(wrap.id)) return undefined;
     let rumor: Rumor;
     try {
-      rumor = unwrapRumor(wrap, recipientSk);
+      // R19: take the UNTOUCHED authenticated rumor (its created_at is exactly
+      // what the seal author signed, so rumor.id still hashes its contents and
+      // durable command ordering is not processing-time-dependent). The protocol
+      // no longer clamps in place; this handler enforces the future-date bound
+      // itself (below), dropping — not silently clamping — a future-dated rumor.
+      rumor = unwrapRumorEnvelope(wrap, recipientSk).rumor;
     } catch {
       this.deps.store.markRumorSeen(wrap.id, this.now()); // can never decrypt — drop
       return undefined;
     }
     // Freshness (COORD-11): drop rumors future-dated > 15 min (clock-skew guard
-    // against replay-with-shifted-timestamp; the protocol layer clamps too —
-    // defense in depth here).
+    // against replay-with-shifted-timestamp). With R19 the rumor is unmutated, so
+    // this bound now acts on the authenticated created_at.
     if (typeof rumor.created_at === "number" && rumor.created_at > Math.floor(this.now() / 1000) + 15 * 60) {
       log(`[wrap] dropped future-dated rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}, created_at ${rumor.created_at})`);
       this.deps.store.markRumorSeen(rumor.id, this.now());
@@ -962,10 +1199,204 @@ export class Coordinator {
     }
   }
 
+  /**
+   * Enqueue an inbound handler on the bounded work queue (audit C3). Enforces a
+   * global concurrency limit and a queue-depth cap: past the cap the task is DROPPED
+   * (the rumor stays unseen, so a later backfill rescan recovers a legitimately
+   * dropped one), keeping memory and concurrent handler count bounded under a burst.
+   */
+  private scheduleInbound(task: () => Promise<void>): void {
+    if (this.inboundQueue.length >= INBOX_MAX_QUEUE) {
+      this.inboundDropped++;
+      if (this.inboundDropped % 100 === 1) {
+        log(`[inbox] work queue full (${INBOX_MAX_QUEUE}) — dropping inbound wrap (total dropped: ${this.inboundDropped}); left unseen for rescan`);
+      }
+      return;
+    }
+    this.inboundQueue.push(task);
+    this.pumpInbound();
+  }
+
+  /** Drain the inbound queue up to the global concurrency limit (audit C3). */
+  private pumpInbound(): void {
+    while (this.inboundRunning < INBOX_MAX_CONCURRENCY && this.inboundQueue.length > 0) {
+      const task = this.inboundQueue.shift()!;
+      this.inboundRunning++;
+      void task()
+        .catch(() => {})
+        .finally(() => {
+          this.inboundRunning--;
+          this.pumpInbound();
+        });
+    }
+  }
+
+  /**
+   * Serialize `fn` against every other holder of the same (coordinate, subject) —
+   * the per-subject async mutex (audit R1). Runs `fn` after the prior holder settles
+   * (success OR failure — one failed transition never deadlocks the next), returns
+   * `fn`'s result, and prunes the chain when it is the tail so the map stays bounded.
+   */
+  private withSubjectLock<T>(coordinate: string, subject: string, fn: () => Promise<T>): Promise<T> {
+    const key = `${coordinate}\u0000${subject}`;
+    const prev = this.subjectChains.get(key) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    // Store a settle-swallowing tail so a rejection never becomes an unhandled
+    // rejection and the next waiter still runs.
+    const tail = run.then(
+      () => {},
+      () => {},
+    );
+    this.subjectChains.set(key, tail);
+    void tail.then(() => {
+      if (this.subjectChains.get(key) === tail) this.subjectChains.delete(key);
+    });
+    return run;
+  }
+
+  /**
+   * True while `rumorId` is still the recorded owner of (coordinate, subject) — a
+   * newer distinct command has NOT superseded it (audit R1 ownership token). Checked
+   * before a durable mutation/publish so a superseded handler that somehow got past
+   * the per-subject mutex stops producing side effects. No watermark (order-less
+   * operation) ⇒ true (nothing to supersede).
+   */
+  private stillOwnsSubject(coordinate: string, subject: string, rumorId: string): boolean {
+    const op = this.deps.store.getCommandWatermark(coordinate, subject);
+    return !op || op.rumor_id === rumorId;
+  }
+
+  /** The per-event abort signal (audit R3), created lazily and reused until the event
+   *  is torn down. Combined into each event-scoped job handler's signal. */
+  private eventSignal(coordinate: string): AbortSignal {
+    let ac = this.eventAbort.get(coordinate);
+    if (!ac) {
+      ac = new AbortController();
+      this.eventAbort.set(coordinate, ac);
+    }
+    return ac.signal;
+  }
+
+  /**
+   * Run an event-scoped job body under a combined (job/shutdown ∪ per-event) abort
+   * signal, tracked so retention/detach can await its completion before purging
+   * (audit R3). A per-event teardown (the event signal fired but NOT the shutdown/job
+   * signal) is swallowed — the event is going away and its jobs are about to be
+   * cancelled, so the handler stops cleanly and the runner completes the job rather
+   * than retrying it toward poison. A shutdown abort or a real error propagates.
+   */
+  private async runEventJob(
+    coordinate: string,
+    jobSignal: AbortSignal,
+    fn: (signal: AbortSignal) => Promise<void>,
+  ): Promise<void> {
+    const eventSig = this.eventSignal(coordinate);
+    const combined = AbortSignal.any([jobSignal, eventSig]);
+    const set = this.activeEventHandlers.get(coordinate) ?? new Set<Promise<void>>();
+    this.activeEventHandlers.set(coordinate, set);
+    const p = (async () => {
+      try {
+        await fn(combined);
+      } catch (e) {
+        if (eventSig.aborted && !jobSignal.aborted) {
+          log(`[job] event ${coordinate} torn down mid-handler — stopped (will be cancelled)`);
+          return;
+        }
+        throw e;
+      }
+    })();
+    set.add(p);
+    try {
+      await p;
+    } finally {
+      set.delete(p);
+      if (set.size === 0) this.activeEventHandlers.delete(coordinate);
+    }
+  }
+
+  /**
+   * Log exactly ONE outcome line per scoring batch — the missing counterpart to the
+   * `[match] … → scoring N pair(s) in M batch(es)` dispatch line.
+   *
+   * Before this, a dispatched batch that never produced a score was
+   * indistinguishable from a batch that was never queued: both looked like the
+   * dispatch line followed by nothing (production incident 2026-07-24, where six
+   * minutes of silence turned out to be work that had never been queued at all).
+   * With the pair of lines, "dispatched but slow", "dispatched and failed" and
+   * "never dispatched" are three visibly different shapes in the log.
+   *
+   * Wall-clock, not `this.now()`: an elapsed time must stay meaningful under an
+   * injected/logical test clock. One line per batch, never per pair.
+   */
+  private async batchOutcome(label: string, summary: () => string, run: () => Promise<void>): Promise<void> {
+    const started = Date.now();
+    try {
+      await run();
+      log(`[match] ${label}: ${summary()} in ${Date.now() - started}ms`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const verb = e instanceof ParkJobError ? "PARKED" : "FAILED";
+      log(`[match] ${label}: ${verb} after ${Date.now() - started}ms — ${msg.slice(0, 300)}`);
+      throw e;
+    }
+  }
+
+  /**
+   * Abort every in-flight handler for an event and AWAIT their unwinding (audit R3),
+   * so a subsequent purge / custody delete never races a handler that could recreate
+   * purged data or publish with captured state. Resets the controller afterward so a
+   * later re-install of the same coordinate runs under a fresh signal.
+   */
+  private async stopAndAwaitEventHandlers(coordinate: string): Promise<void> {
+    this.eventAbort.get(coordinate)?.abort(new Error("event lifecycle ended"));
+    const set = this.activeEventHandlers.get(coordinate);
+    if (set && set.size > 0) await Promise.allSettled([...set]);
+    this.eventAbort.delete(coordinate);
+  }
+
+  /**
+   * The event is still live at the generation a handler captured, its retention
+   * window is open, and it is not detach-tombstoned (audit R3). A job handler
+   * re-checks this immediately before every durable write / publication so an aborted
+   * or superseded run — one that detached or expired mid-flight — cannot recreate
+   * derived rows or publish using now-stale state.
+   */
+  private eventStillLive(coordinate: string, gen?: number): boolean {
+    const s = this.events.get(coordinate);
+    if (!s) return false;
+    if (s.retentionExpired || this.deps.store.isRetentionExpired(coordinate)) return false;
+    if (this.deps.store.isInstallTombstoned(coordinate)) return false;
+    if (gen !== undefined && s.gen !== gen) return false;
+    return true;
+  }
+
+  /**
+   * Durable inbox rate gate (audit C3): accept at most MAX_RUMORS_PER_SENDER_WINDOW
+   * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
+   * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
+   */
+  private inboxRateAllows(coordinate: string, senderPubkey: string): boolean {
+    const now = this.now();
+    const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
+    if (eventCount > MAX_RUMORS_PER_EVENT_WINDOW) return false;
+    const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
+    return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+  }
+
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
   async handleCoordinatorWrap(wrap: GiftWrap): Promise<void> {
     const rumor = this.unwrapFresh(wrap, this.deps.coordSk);
     if (!rumor) return;
+    // Rate-limit the coordinator's OWN inbox BEFORE any durable dispatch (audit R4):
+    // the inbox is publicly addressable, so gate per-sender / per-inbox exactly like
+    // an event inbox. A rate-rejected wrap is left UNSEEN (not written to the durable
+    // seen ledger) so the ledger can't be grown by a flood — a legitimately-throttled
+    // rumor is simply retried by a later backfill rescan once the burst subsides.
+    if (!this.inboxRateAllows(COORD_INBOX_RATE_KEY, rumor.pubkey)) {
+      log(`[coord-inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)}`);
+      this.inFlightRumors.delete(rumor.id);
+      return;
+    }
     await this.processRumorWithRetry(wrap.id, rumor, async () => {
       if (rumor.kind === KIND_COORDINATOR_GRANT) {
         const grant = coordinatorGrantContentSchema.parse(JSON.parse(rumor.content));
@@ -973,7 +1404,10 @@ export class Coordinator {
         // sealed by the event's E_id — rumor.pubkey is the verified seal author —
         // exactly the check 21604 admin commands already get. Otherwise anyone with
         // a plausible-looking payload could "install" an event and pick its relays.
-        const eidPubkey = parseCoordinate(grant.a).pubkey;
+        // The grant `a` is a canonical 31923 event coordinate (schema-enforced,
+        // audit R18) — re-assert it here so a non-event alias can never install a
+        // divergent namespace even if the payload reached this boundary another way.
+        const eidPubkey = parseEventCoordinate(grant.a).pubkey;
         if (rumor.pubkey !== eidPubkey) {
           log(`[install] REJECTED 21603 for ${grant.a}: seal author ${short(rumor.pubkey)} is not E_id ${short(eidPubkey)}`);
           return;
@@ -1028,6 +1462,32 @@ export class Coordinator {
     if (!state) return;
     const rumor = this.unwrapFresh(wrap, state.inboxSk);
     if (!rumor) return;
+    // Durable per-sender / per-event rate accounting (audit C3). A sender or event
+    // flooding the inbox is DROPPED but left UNSEEN (audit R4): marking rate-rejected
+    // wraps seen permanently grew the seen ledger with attacker-chosen ids AND
+    // permanently discarded a legitimately-throttled rumor. Leaving it unseen bounds
+    // the ledger and lets a later backfill rescan recover a genuine rumor once the
+    // burst subsides; a sustained flood is simply re-dropped by this gate each pass.
+    // The in-flight claim taken by unwrapFresh is released here since we bypass
+    // processRumorWithRetry (which would otherwise release it).
+    if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
+      log(`[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate}`);
+      this.inFlightRumors.delete(rumor.id);
+      return;
+    }
+    // Enrollment gate (audit C3): a profile submission from an identity with NO
+    // attendee row (never sent a join request) is dropped — an unknown sender must
+    // not be able to create a pending attendee row by submitting a profile. Left
+    // UNSEEN (not marked) so a legitimate submission that merely raced ahead of its
+    // own join request is recovered by the next backfill rescan once the join lands.
+    if (
+      rumor.kind === KIND_PROFILE_SUBMISSION &&
+      !this.deps.store.getAttendee(coordinate, rumor.pubkey)
+    ) {
+      log(`[submission] dropped from ${short(rumor.pubkey)}: no enrollment row (never joined) for ${coordinate}`);
+      this.inFlightRumors.delete(rumor.id);
+      return;
+    }
     await this.processRumorWithRetry(wrap.id, rumor, async () => {
       // Retention expiry is terminal for attendee-authored event data. Consume
       // late/replayed inbox rumors without mutating private state or recreating
@@ -1095,32 +1555,52 @@ export class Coordinator {
     order: { createdAt: number; rumorId: string },
   ): Promise<void> {
     if (content.a !== state.coordinate) return;
-    // Per-subject watermark (NIP §3.4): reject a withdrawal that does not supersede
-    // the last one applied for this sender, so a re-delivered stale rumor after a
-    // rejoin can never re-withdraw the freshly re-approved attendee.
-    const subject = `withdraw:${pubkey}`;
-    const wm = this.deps.store.getCommandWatermark(state.coordinate, subject);
-    if (wm && !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: wm.rumor_id, created_at: wm.created_at })) {
-      log(`[withdraw] skipped stale withdrawal from ${short(pubkey)}: does not supersede watermark`);
-      return;
-    }
-    this.deps.store.setCommandWatermark(state.coordinate, subject, order.createdAt, order.rumorId);
+    // Unified membership subject (audit R2): a withdrawal shares the `member:<pk>`
+    // watermark with organizer approve/revoke, so a delayed old withdrawal orders
+    // against a NEWER reapproval and is rejected — pre-fix it used an independent
+    // `withdraw:<pk>` watermark and could undo a newer approval (and purge data).
+    const subject = `member:${pubkey}`;
+    // Serialize the whole withdrawal effect chain for this member subject (audit R1),
+    // so it can't interleave with a concurrent organizer approve/revoke for the same
+    // attendee.
+    await this.withSubjectLock(state.coordinate, subject, async () => {
+      // Per-subject ordering + durable resume (NIP §3.4 + audit C1): reject a stale
+      // DISTINCT membership transition (so a re-delivered old withdrawal can't undo a
+      // rejoin), but let the SAME rumor RESUME until its effect chain is durably
+      // 'complete'. The operation is marked complete only AFTER the revoke — and, for
+      // a delete_data withdrawal, AFTER the artifacts are actually purged — so the
+      // rumor is never acknowledged while data still exists (audit C1).
+      if (this.beginOrderedOperation(state.coordinate, subject, order) === "skip") {
+        log(`[withdraw] skipped withdrawal from ${short(pubkey)}: stale distinct transition or already fully applied`);
+        return;
+      }
 
-    const existing = this.deps.store.getAttendee(state.coordinate, pubkey);
-    if (!existing) {
-      log(`[withdraw] ${short(pubkey)} not enrolled — nothing to withdraw`);
-      return;
-    }
-    log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
-    // The public effect chain is identical to an organizer revoke (idempotent).
-    await this.revokeAttendee(state, pubkey);
-    if (content.delete_data) {
-      // Full deletion: purge the coordinator's stored derived artifacts for this
-      // attendee. The public directory/roster/match records were already removed
-      // by revokeAttendee; this removes the private DB copies too.
-      this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
-      log(`[withdraw] purged stored artifacts for ${short(pubkey)}`);
-    }
+      const existing = this.deps.store.getAttendee(state.coordinate, pubkey);
+      if (!existing) {
+        log(`[withdraw] ${short(pubkey)} not enrolled — nothing to withdraw`);
+        // Nothing to do — the operation is complete.
+        this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
+        return;
+      }
+      log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
+      // The public effect chain is identical to an organizer revoke (idempotent, and
+      // its ECK rotation resumes idempotently via the same operation progress).
+      await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      if (content.delete_data) {
+        // Ownership token recheck (audit R1, belt to the mutex): don't purge if a
+        // newer membership command superseded this withdrawal mid-flight.
+        if (!this.stillOwnsSubject(state.coordinate, subject, order.rumorId)) return;
+        // Full deletion: purge the coordinator's stored derived artifacts for this
+        // attendee. The public directory/roster/match records were already removed
+        // by revokeAttendee; this removes the private DB copies too. If this throws,
+        // the operation stays 'pending' (not completed below) so the withdrawal is
+        // retried and re-purged — never acknowledged with data still present.
+        this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
+        log(`[withdraw] purged stored artifacts for ${short(pubkey)}`);
+      }
+      // The full withdrawal (revoke + optional purge) completed — mark it durably done.
+      this.deps.store.completeCommandOp(state.coordinate, subject, order.rumorId);
+    });
   }
 
   /**
@@ -1152,6 +1632,11 @@ export class Coordinator {
       );
       return;
     }
+    // A talk's video is EITHER a Blossom `media` descriptor (recording/upload) or
+    // an `external_url` (YouTube/mp4 the speaker hosts elsewhere). External talks
+    // store the JSON literal 'null' for media and fingerprint on the URL.
+    const isExternal = content.external_url !== undefined;
+    const fingerprint = isExternal ? content.external_url! : content.media!.x;
     const applied = this.deps.store.upsertTalk({
       coordinate: state.coordinate,
       pubkey,
@@ -1159,10 +1644,14 @@ export class Coordinator {
       title: content.title,
       description: content.description,
       speakersJson: JSON.stringify(content.speakers),
-      mediaJson: JSON.stringify(content.media),
+      mediaJson: isExternal ? "null" : JSON.stringify(content.media),
+      externalUrl: content.external_url ?? null,
+      externalKind: content.external_kind ?? null,
+      sourceType: content.source_type ?? null,
+      processForMatching: content.process_for_matching,
       lang: state.lang,
       revision: content.revision,
-      mediaX: content.media.x,
+      mediaX: fingerprint,
       now: this.now(),
     });
     if (!applied) {
@@ -1171,12 +1660,22 @@ export class Coordinator {
       return;
     }
     log(`[talk] "${content.title}" from ${short(pubkey)} (rev ${content.revision}) → pending moderation`);
-    // Transcribe in the background (keyed by media x so a re-delivery dedupes).
-    this.jobs.enqueue(
-      "process_talk",
-      `talk:${state.coordinate}:${pubkey}:${content.talk_d}:${content.media.x}`,
-      { coordinate: state.coordinate, pubkey, talkD: content.talk_d },
-    );
+    // Transcribe + fold into matching ONLY a Blossom talk the speaker opted in
+    // (process_for_matching). External (YouTube/mp4) talks are never fetched — the
+    // C3 SSRF allowlist covers Blossom origins only — so they are view-only. An
+    // un-opted talk skips paid STT entirely (talks aren't matched by default).
+    if (!isExternal && content.process_for_matching) {
+      this.jobs.enqueue(
+        "process_talk",
+        `talk:${state.coordinate}:${pubkey}:${content.talk_d}:${content.media!.x}`,
+        { coordinate: state.coordinate, pubkey, talkD: content.talk_d },
+      );
+    } else {
+      log(
+        `[talk] "${content.title}" not processed for matching ` +
+          `(${isExternal ? `external ${content.external_kind} URL` : "process_for_matching off"})`,
+      );
+    }
   }
 
   /**
@@ -1242,6 +1741,15 @@ export class Coordinator {
     const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     if (existing?.status === "approved") {
       await this.grantAndPublish(state, attendeePubkey);
+      return;
+    }
+
+    // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
+    // is refused — the coordinator must never grow its attendee set past what the
+    // 31604 roster can carry and then fail to publish it. Existing rows (re-delivered
+    // joins) are unaffected.
+    if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+      log(`[join] REJECTED ${short(attendeePubkey)}: event ${state.coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
       return;
     }
 
@@ -1377,7 +1885,15 @@ export class Coordinator {
     // by the compare-and-set on source_revision / media x).
     const cancelled = this.deps.store.supersedePendingJobs(`proc:${coordinate}:${pubkey}:`, key);
     if (cancelled > 0) log(`[pipeline] ${short(pubkey)}: superseded ${cancelled} stale pending process job(s)`);
-    this.jobs.enqueue("process_attendee", key, { coordinate, pubkey });
+    // Carry the expected source revision in the payload (audit C2). The job's
+    // conditional commit is gated on the revision it actually READS at execution
+    // (the authoritative "what this run derived from"); this payload copy records
+    // the revision that was current at enqueue for traceability/debugging.
+    this.jobs.enqueue("process_attendee", key, {
+      coordinate,
+      pubkey,
+      sourceRevision: attendee?.source_revision ?? null,
+    });
   }
 
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
@@ -1643,17 +2159,24 @@ export class Coordinator {
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
-  private async processAttendeeJob(coordinate: string, pubkey: string): Promise<void> {
+  /**
+   * Run the AI pipeline for one attendee and CONDITIONALLY commit the result
+   * (audit C2). Returns true iff the ai_profile was actually written — i.e. the
+   * attendee's `source_revision` still matched the revision this run derived from.
+   * A stale run (a newer submission landed mid-STT/LLM) returns false so the caller
+   * skips enqueuing matching off a result that was discarded.
+   */
+  private async processAttendeeJob(coordinate: string, pubkey: string, signal?: AbortSignal): Promise<boolean> {
     const state = this.events.get(coordinate);
-    if (!state) return;
+    if (!state) return false;
     // Re-check config at execution time (audit H4): a job queued while matching was
     // ON must not call any provider if matching has since been turned OFF.
-    if (state.matching === "off") return;
+    if (state.matching === "off") return false;
     // Spend gate (spec §8/§9): a blocked event OR exceeded budget parks this before
     // any STT/LLM spend.
     await this.assertSpendAllowed(coordinate, pubkey);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-    if (!attendee) return;
+    if (!attendee) return false;
     const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Server-side media caps (audit COORD-4): per-descriptor duration cap (the
     // event's configured max) and a total-download budget per submission —
@@ -1686,12 +2209,33 @@ export class Coordinator {
         fetchNostrContext: (pk, n) => this.fetchNostrContext(state, pk, n),
         nostrContextN: state.nostrContextN,
         lang: state.lang,
+        // Record ownership refs for the derived artifacts (audit C5).
+        coordinate,
+        // Shutdown cancellation (audit C11): the pipeline checks this at stage
+        // boundaries so an in-flight STT/LLM run unwinds instead of writing against
+        // a store the shutdown is about to close.
+        signal,
         now: this.now,
       },
       { pubkey, profile, media: cappedMedia, introText, extraTranscripts },
     );
 
-    this.deps.store.upsertAttendee({
+    // Lifecycle recheck before any durable write (audit R3): if the event detached or
+    // its retention window expired while STT/LLM ran, do not recreate the ai_profile /
+    // transcripts a purge just removed, and do not publish a directory entry for a
+    // now-terminal event.
+    signal?.throwIfAborted();
+    if (!this.eventStillLive(coordinate, state.gen)) {
+      log(`[pipeline] ${short(pubkey)}: event no longer live (detached/expired) — discarding result`);
+      return false;
+    }
+    // Conditional commit (audit C2): write the ai_profile ONLY if the attendee's
+    // source_revision is still the one this run derived from. A newer submission
+    // that landed while STT/LLM ran has already advanced source_revision, so this
+    // matches 0 rows and the stale result is discarded — a running job can no longer
+    // overwrite a newer submission's data. The newer revision's own process job
+    // (enqueued by handleSubmission) recomputes and commits against ITS revision.
+    const committed = this.deps.store.commitAiProfile({
       coordinate,
       pubkey,
       aiProfileJson: JSON.stringify(aiProfile),
@@ -1700,13 +2244,19 @@ export class Coordinator {
       // Always write the fresh set (may be "[]") so a re-record overwrites stale
       // transcripts rather than leaving old ones via COALESCE.
       transcriptsJson: JSON.stringify(transcripts),
+      expectedSourceRevision: attendee.source_revision,
       now: this.now(),
     });
+    if (!committed) {
+      log(`[pipeline] ${short(pubkey)}: discarded stale ai_profile — a newer submission landed during processing`);
+      return false;
+    }
     // The pipeline succeeded: clear any previously surfaced poison status for
     // this attendee's stages (audit COORD-15) so the organizer view recovers.
     this.deps.store.clearPoisonStatuses(coordinate, pubkey);
     await this.publishDirectory(state, pubkey);
     log(`[pipeline] ${short(pubkey)} ai_profile ready — skills: ${aiProfile.skills.slice(0, 4).join(", ")}`);
+    return true;
   }
 
   /**
@@ -1721,6 +2271,13 @@ export class Coordinator {
     for (const d of media) {
       if (typeof d.duration === "number" && d.duration > state.maxMediaSec) {
         log(`[pipeline] ${short(pubkey)}: skipping ${d.duration}s media (over the ${state.maxMediaSec}s cap)`);
+        continue;
+      }
+      // Per-file cap (R17 follow-up): reject a single descriptor larger than the
+      // app's own 250 MiB upload/playback bound with a clear reason, instead of
+      // letting it silently consume — or overflow — the aggregate budget.
+      if (d.size > MAX_MEDIA_FILE_BYTES) {
+        log(`[pipeline] ${short(pubkey)}: skipping ${d.size}-byte media (over the ${MAX_MEDIA_FILE_BYTES}-byte per-file cap; the app rejects it too)`);
         continue;
       }
       if (totalBytes + d.size > MAX_SUBMISSION_MEDIA_BYTES) {
@@ -1740,7 +2297,7 @@ export class Coordinator {
    * ai_profile via a reprocess so the talk feeds matching (§9.2). If the talk is
    * already published, re-publish it with the fresh transcript.
    */
-  private async processTalkJob(coordinate: string, pubkey: string, talkD: string): Promise<void> {
+  private async processTalkJob(coordinate: string, pubkey: string, talkD: string, signal?: AbortSignal): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state) return;
     // Re-check config at execution time (audit COORD-28, mirroring the matching-off
@@ -1754,6 +2311,9 @@ export class Coordinator {
     await this.assertSpendAllowed(coordinate, pubkey);
     const talk = this.deps.store.getTalk(coordinate, pubkey, talkD);
     if (!talk) return;
+    // External talks are never processed (no Blossom blob to fetch — SSRF
+    // allowlist); defensive guard in case a stale job reaches here.
+    if (talk.external_url != null) return;
     const media = JSON.parse(talk.media_json) as MediaDescriptor;
     // Duration cap (audit COORD-4): never transcribe over-length talk media.
     if (typeof media.duration === "number" && media.duration > state.maxMediaSec) {
@@ -1762,7 +2322,7 @@ export class Coordinator {
     }
     const transcribe =
       this.deps.transcribe ??
-      ((d: MediaDescriptor) =>
+      ((d: MediaDescriptor, _sig?: AbortSignal) =>
         transcribeMedia(
           {
             store: this.deps.store,
@@ -1775,6 +2335,8 @@ export class Coordinator {
             maxDurationSec: state.maxTalkSec,
             onUsage: ({ bytes, durationSec }) =>
               this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
+            // Shutdown / per-event teardown (audit R13): unwind blocked STT/ffmpeg.
+            signal,
             now: this.now,
           },
           d,
@@ -1784,7 +2346,7 @@ export class Coordinator {
     // talk's media (no transcript) without poisoning the whole talk job (H-3).
     let r: string | import("./pipeline/transcribe.js").TranscriptResult;
     try {
-      r = await transcribe(media);
+      r = await transcribe(media, signal);
     } catch (e) {
       if (e instanceof MediaPolicyError) {
         log(`[talk] media rejected for "${talk.title}" (${short(pubkey)}): ${e.message}`);
@@ -1794,6 +2356,13 @@ export class Coordinator {
     }
     const text = typeof r === "string" ? r : r.text;
     const detected = typeof r === "string" ? undefined : r.lang;
+    // Lifecycle recheck before writing the transcript / publishing (audit R3): if the
+    // event detached or expired during STT, don't recreate a transcript a purge removed.
+    signal?.throwIfAborted();
+    if (!this.eventStillLive(coordinate, state.gen)) {
+      log(`[talk] event no longer live (detached/expired) — discarding transcript for ${short(pubkey)}`);
+      return;
+    }
     if (text) {
       transcript = {
         x: media.x,
@@ -1842,7 +2411,9 @@ export class Coordinator {
   private async publishTalk(state: EventState, pubkey: string, talkD: string): Promise<void> {
     const talk = this.deps.store.getTalk(state.coordinate, pubkey, talkD);
     if (!talk) return;
-    const media = JSON.parse(talk.media_json) as MediaDescriptor;
+    // External talks carry the JSON literal 'null' for media and a URL instead.
+    const isExternal = talk.external_url != null;
+    const media = isExternal ? undefined : (JSON.parse(talk.media_json) as MediaDescriptor);
     const transcript = talk.transcript_json
       ? (JSON.parse(talk.transcript_json) as MediaTranscript)
       : undefined;
@@ -1862,7 +2433,13 @@ export class Coordinator {
       title: talk.title,
       description: talk.description,
       speakers,
-      media,
+      ...(media
+        ? { media }
+        : {
+            external_url: talk.external_url!,
+            external_kind: talk.external_kind as TalkExternalKind,
+          }),
+      ...(talk.source_type ? { source_type: talk.source_type as TalkSourceType } : {}),
       ...(transcript ? { transcript } : {}),
       lang: talk.lang,
       revision: talk.revision,
@@ -1921,12 +2498,12 @@ export class Coordinator {
       .map((a) => ({ pubkey: a.pubkey, profileHash: a.profile_hash! }));
   }
 
-  private async selectPairs(coordinate: string, pubkey: string) {
+  private async selectPairs(coordinate: string, pubkey: string, signal?: AbortSignal) {
     const roster = this.buildMatchingRoster(coordinate);
     const target = roster.find((a) => a.pubkey === pubkey);
     if (!target) return [];
     if (roster.length > this.prefilter.threshold && this.roles.embed.llm.embed) {
-      await this.attachEmbeddings(coordinate, roster);
+      await this.attachEmbeddings(coordinate, roster, signal);
     }
     return selectPairsToScore(this.deps.store, coordinate, target, roster, this.prefilter);
   }
@@ -1937,7 +2514,7 @@ export class Coordinator {
    * profile_hash + the embedding model id in the artifact table, so a recompute
    * only embeds attendees whose profile CHANGED — not the full roster every time.
    */
-  private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[]): Promise<void> {
+  private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[], signal?: AbortSignal): Promise<void> {
     const provider = this.roles.embed.llm;
     if (!provider.embed) return;
     const modelKey = `${this.roles.embed.provider}:${this.roles.embed.model}`;
@@ -1955,7 +2532,11 @@ export class Coordinator {
       else missing.push({ index, pubkey: a.pubkey, hash, text: textFor(a.pubkey) });
     });
     if (missing.length === 0) return;
-    const embeddings = await provider.embed(missing.map((m) => m.text), this.roles.embed.model);
+    const embeddings = await provider.embed(missing.map((m) => m.text), this.roles.embed.model, signal);
+    // Lifecycle recheck before persisting derived artifacts (audit R3): the event may
+    // have detached/expired during the embed call; don't recreate ownership refs +
+    // roster_embedding rows a purge just removed.
+    if (!this.eventStillLive(coordinate)) return;
     missing.forEach((m, i) => {
       const embedding = embeddings[i]!;
       roster[m.index]!.embedding = embedding;
@@ -1966,6 +2547,7 @@ export class Coordinator {
         model: this.roles.embed.model,
         output: embedding,
         now: this.now(),
+        owner: { coordinate, pubkey: m.pubkey },
       });
     });
   }
@@ -1982,6 +2564,7 @@ export class Coordinator {
   private async scoreBatchJob(
     coordinate: string,
     pairs: CandidatePair[],
+    signal?: AbortSignal,
   ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off" || pairs.length === 0) return { scored: [], missing: 0 };
@@ -2013,12 +2596,21 @@ export class Coordinator {
       candidates,
       this.matchRng,
       this.loadDisplayName(coordinate, target),
+      signal,
     );
+    // Lifecycle recheck before any directed write (audit R3): the event may have
+    // detached/expired during the scoring call; don't recreate pair rows a purge
+    // just removed.
+    if (!this.eventStillLive(coordinate)) return { scored: [], missing: 0 };
     const scored: CandidatePair[] = [];
     for (const [candId, ds] of scores) {
       const p = pairById.get(candId)!;
       if (!this.bothApproved(coordinate, p.a, p.b)) {
         log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: an attendee was revoked during scoring`);
+        continue;
+      }
+      if (!this.pairInputsCurrent(coordinate, p)) {
+        log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: a profile changed during scoring (inputs_hash moved)`);
         continue;
       }
       recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
@@ -2042,6 +2634,7 @@ export class Coordinator {
   private async scoreReverseBatchJob(
     coordinate: string,
     pairs: CandidatePair[],
+    signal?: AbortSignal,
   ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off" || pairs.length === 0) return { scored: [], missing: 0 };
@@ -2073,12 +2666,19 @@ export class Coordinator {
       targets,
       this.matchRng,
       this.loadDisplayName(coordinate, shared),
+      signal,
     );
+    // Lifecycle recheck before any directed write (audit R3), as in scoreBatchJob.
+    if (!this.eventStillLive(coordinate)) return { scored: [], missing: 0 };
     const scored: CandidatePair[] = [];
     for (const [targetId, ds] of scores) {
       const p = pairByTarget.get(targetId)!;
       if (!this.bothApproved(coordinate, p.a, p.b)) {
         log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: an attendee was revoked during scoring`);
+        continue;
+      }
+      if (!this.pairInputsCurrent(coordinate, p)) {
+        log(`[match] discarding stale score ${short(p.a)} → ${short(p.b)}: a profile changed during scoring (inputs_hash moved)`);
         continue;
       }
       recordDirectedScore(this.deps.store, coordinate, p, ds, this.now());
@@ -2112,6 +2712,22 @@ export class Coordinator {
     );
   }
 
+  /**
+   * The pair's inputs_hash still matches BOTH endpoints' current profile hashes
+   * (audit C2). Scoring captures a pair's inputs_hash at selection, awaits the
+   * provider, then writes — if either endpoint's ai_profile was recomputed during
+   * that call (a newer submission committed a different profile_hash), the score was
+   * computed against inputs the DB no longer holds. Rechecked immediately before the
+   * write so a score derived from stale inputs is discarded, not stored under the
+   * now-current inputs_hash. Returns false if either profile hash is missing.
+   */
+  private pairInputsCurrent(coordinate: string, pair: CandidatePair): boolean {
+    const ha = this.deps.store.getAttendee(coordinate, pair.a)?.profile_hash;
+    const hb = this.deps.store.getAttendee(coordinate, pair.b)?.profile_hash;
+    if (!ha || !hb) return false;
+    return pairInputsHash(ha, hb) === pair.inputsHash;
+  }
+
   /** Display name from the join request (B1), for name-aware match reasoning. */
   private loadDisplayName(coordinate: string, pubkey: string): string | undefined {
     return this.deps.store.getAttendee(coordinate, pubkey)?.display_name ?? undefined;
@@ -2120,6 +2736,9 @@ export class Coordinator {
   private async publishMatchesJob(coordinate: string, pubkey: string): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off") return; // never publish lists when matching is off (H4)
+    // Lifecycle recheck before publication (audit R3): a detached/expired event must
+    // not publish a match list using captured state after custody was deleted.
+    if (!this.eventStillLive(coordinate, state.gen)) return;
     const list = buildMatchList(this.deps.store, coordinate, pubkey, this.topK, Math.floor(this.now() / 1000));
     if (list.matches.length === 0) return;
     const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, sanitizeMatchList(list), this.nextCreatedAt);
@@ -2181,7 +2800,11 @@ export class Coordinator {
       case "approve":
       case "reprocess":
       case "revoke":
-        return `pubkey:${String(args.pubkey ?? "")}`;
+        // Unified membership subject (audit R2): organizer approve/revoke AND attendee
+        // withdrawal all use `member:<pk>` so every membership transition orders
+        // against the others under one watermark, instead of approve/revoke
+        // (`pubkey:`) and withdrawal (`withdraw:`) never comparing.
+        return `member:${String(args.pubkey ?? "")}`;
       case "talk_publish":
       case "talk_reject":
         return `talk:${String(args.pubkey ?? "")}:${String(args.talk_d ?? "")}`;
@@ -2211,33 +2834,36 @@ export class Coordinator {
       return;
     }
 
-    // Per-subject ordering (NIP §3.4): reject a command strictly older than the
-    // watermark of the last applied command for this (coordinate, subject). Approve
-    // vs revoke interleavings then resolve deterministically by (created_at, id)
-    // instead of relay arrival order. Different subjects have independent watermarks.
+    // Per-subject ordering + durable resume (NIP §3.4 + audit C1): reject a DISTINCT
+    // command strictly older than the last operation for this (coordinate, subject),
+    // but let the SAME rumor RESUME until it has a durable 'complete' marker. The
+    // operation is recorded 'pending' here and marked 'complete' only after the full
+    // effect chain below succeeds — so a mid-effect crash (grant/roster/deletion
+    // publish, DB write) is retried instead of being suppressed by its own watermark
+    // and falsely acknowledged. Approve vs revoke interleavings still resolve
+    // deterministically by (created_at, id); different subjects are independent.
     const subject = this.commandSubject(coordinate, cmd, args);
-    if (order) {
-      const wm = this.deps.store.getCommandWatermark(coordinate, subject);
-      if (wm && !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: wm.rumor_id, created_at: wm.created_at })) {
-        log(`[admin] skipped stale "${cmd}" for ${subject}: (${order.createdAt},${order.rumorId.slice(0, 8)}) does not supersede watermark (${wm.created_at},${wm.rumor_id.slice(0, 8)})`);
-        return;
-      }
+    // Serialize the WHOLE ordered operation for this subject (audit R1): the watermark
+    // read/upsert AND the async effect chain that follows run under a per-subject
+    // mutex, so two distinct same-subject commands (e.g. an older revoke and a newer
+    // approve) can't interleave and let the older one finish last and win.
+    await this.withSubjectLock(coordinate, subject, async () => {
+    if (order && this.beginOrderedOperation(coordinate, subject, order) === "skip") {
+      log(`[admin] skipped "${cmd}" for ${subject}: stale distinct command or already fully applied`);
+      return;
     }
-    // The command passed ordering — record the new watermark up front so a later
-    // out-of-order duplicate is rejected even if this handler throws mid-effect
-    // (the effects are idempotent; re-running an older command must not).
-    if (order) this.deps.store.setCommandWatermark(coordinate, subject, order.createdAt, order.rumorId);
 
     if (cmd === "detach") {
       // Signed immediate detach (NIP §3.5): same effects as a config-based detach.
       await this.detachEvent(coordinate, { reason: "21604 detach command" });
-      return;
-    }
-    if (cmd === "approve") {
+    } else if (cmd === "approve") {
       // Manual approval routed through the coordinator so IT grants the ECK and
       // publishes the directory/roster (attendees discover those under the
       // coordinator's key).
       const pubkey = String(args.pubkey ?? "");
+      // Ownership token recheck (audit R1, belt to the mutex): a superseded handler
+      // that somehow got past the mutex must not apply its decision.
+      if (order && !this.stillOwnsSubject(coordinate, subject, order.rumorId)) return;
       const attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
       if (attendee) {
         if (attendee.status !== "approved") {
@@ -2256,13 +2882,30 @@ export class Coordinator {
       await this.reevaluateBilling(coordinate);
       this.resumeParkedWork(coordinate);
       this.deps.store.clearPairs(coordinate);
+      // Forgetting the scores is not enough: the job queue ALSO remembers, via the
+      // content-addressed dedupe keys of the finished `score_batch`/`publish_matches`
+      // rows, which are kept for 30 days. Identical profiles ⇒ identical keys ⇒ every
+      // re-enqueue below is silently discarded by `INSERT OR IGNORE`. That is the
+      // 2026-07-24 incident verbatim: the second recompute of an event deleted all
+      // pair scores, logged its batch dispatches, created nothing, ran nothing, and
+      // left the event with no matches and no error. A recompute means "redo it", so
+      // the queue's memory of having already done it has to go too.
+      const forgotten = this.deps.store.clearMatchJobMemo(coordinate);
       const key = `${this.now()}`;
+      let enqueued = 0;
+      let discarded = 0;
       for (const a of this.deps.store.approvedAttendees(coordinate)) {
-        this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:${key}`, {
+        const outcome = this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:${key}`, {
           coordinate,
           pubkey: a.pubkey,
         });
+        if (outcome === "enqueued") enqueued++;
+        else if (outcome === "done" || outcome === "poison") discarded++;
       }
+      log(
+        `[admin] recompute ${coordinate}: cleared cached pairs + ${forgotten} finished job row(s), enqueued ${enqueued} match job(s)` +
+          (discarded > 0 ? `, ${discarded} DISCARDED as already-done` : ""),
+      );
     } else if (cmd === "reprocess") {
       // Same as recompute: re-evaluate + resume so a raise resumes parked work.
       await this.reevaluateBilling(coordinate);
@@ -2273,18 +2916,57 @@ export class Coordinator {
       }
     } else if (cmd === "revoke") {
       const pubkey = String(args.pubkey ?? "");
-      if (pubkey) await this.revokeAttendee(state, pubkey);
+      // Pass the operation context so the ECK rotation resumes idempotently on a
+      // retry (audit C1): the intended new key is minted once and reused, never
+      // re-minted, and missing grants/roster are repaired by the idempotent republish.
+      if (pubkey) await this.revokeAttendee(state, pubkey, order ? { subject, rumorId: order.rumorId } : undefined);
     } else if (cmd === "talk_publish") {
       // Moderate a submitted talk: publish its 31610 (spec F2). No-op if talks are off.
-      if (state.talks === "off") return;
-      const pubkey = String(args.pubkey ?? "");
-      const talkD = String(args.talk_d ?? "");
-      if (pubkey && talkD) await this.publishTalk(state, pubkey, talkD);
+      if (state.talks !== "off") {
+        const pubkey = String(args.pubkey ?? "");
+        const talkD = String(args.talk_d ?? "");
+        if (pubkey && talkD) await this.publishTalk(state, pubkey, talkD);
+      }
     } else if (cmd === "talk_reject") {
       const pubkey = String(args.pubkey ?? "");
       const talkD = String(args.talk_d ?? "");
       if (pubkey && talkD) await this.rejectTalk(state, pubkey, talkD);
     }
+
+    // The full effect chain completed — durably mark the operation complete (audit
+    // C1). The watermark now means "last FULLY applied command": a later out-of-order
+    // duplicate is rejected, while a redelivery of THIS rumor before this point (a
+    // crash mid-effect left it 'pending') is allowed to resume rather than suppressed.
+    if (order) this.deps.store.completeCommandOp(coordinate, subject, order.rumorId);
+    });
+  }
+
+  /**
+   * Ordering + resume gate for a durable command operation (audit C1). Returns
+   * "skip" to reject (a stale DISTINCT command, or a re-delivery of an
+   * already-'complete' rumor), or "run" to proceed — in which case the operation is
+   * (re-)recorded 'pending' and the caller MUST mark it complete on success. The
+   * SAME rumor is always allowed to resume while its operation is still 'pending'.
+   */
+  private beginOrderedOperation(
+    coordinate: string,
+    subject: string,
+    order: { createdAt: number; rumorId: string },
+  ): "skip" | "run" {
+    const op = this.deps.store.getCommandWatermark(coordinate, subject);
+    if (op) {
+      if (op.rumor_id === order.rumorId) {
+        if (op.state === "complete") return "skip"; // already fully applied — idempotent
+        // pending same rumor → resume
+      } else if (
+        !supersedes({ id: order.rumorId, created_at: order.createdAt }, { id: op.rumor_id, created_at: op.created_at })
+      ) {
+        return "skip"; // older/equal DISTINCT command
+      }
+      // a strictly-newer distinct command takes the subject over
+    }
+    this.deps.store.beginCommandOp(coordinate, subject, order.createdAt, order.rumorId, this.now());
+    return "run";
   }
 
   /**
@@ -2292,12 +2974,69 @@ export class Coordinator {
    * old ciphertexts stay readable to old key-holders, but all FUTURE directory/
    * roster/match content is encrypted under the new ECK, which the removed
    * attendee never receives. Their directory entry is deleted (NIP-09).
+   *
+   * ECK authority (audit P5, maintainer decision): the current ECK version is
+   * defined by the coordinator-signed grants (21602) and roster (31604), NOT by the
+   * `eck` tag in the E_id-signed 31600. That tag is BOOTSTRAP-ONLY — the initial key
+   * a fresh install is granted — and the coordinator never reads it as the
+   * current-version authority (`config.eck` is parsed by the protocol layer but
+   * never consulted here). A coordinator cannot sign the E_id's 31600, so rotation
+   * advances the key purely through grants/roster and leaves NO state expecting a
+   * 31600 `eck` update. See handoff for the doc impact on PROTOCOL-NIP.md.
    */
-  async revokeAttendee(state: EventState, removedPubkey: string): Promise<void> {
-    const prev = this.currentEck(state); // capture the pre-rotation ECK
+  async revokeAttendee(
+    state: EventState,
+    removedPubkey: string,
+    opCtx?: { subject: string; rumorId: string },
+  ): Promise<void> {
+    // Durable idempotent ECK-rotation state machine (audit C1). The intended new key
+    // is minted EXACTLY ONCE per operation and recorded in the command's progress
+    // BEFORE state.eck / eck_json are touched. A retry (in-memory, or after a crash)
+    // reuses the recorded key instead of minting a fresh one — pre-fix each retry
+    // ran `max(id)+1` and minted ANOTHER ECK, so a rotation interrupted mid-republish
+    // produced duplicate rotations and stranded grants. `prevBytes` is the
+    // pre-rotation ECK, recovered from `prevId` so a resume (where state.eck already
+    // holds the new key) still deletes the removed entry at the OLD blinded d.
+    // Ownership token recheck (audit R1, belt to the per-subject mutex): if a NEWER
+    // distinct membership command has taken this subject over, this revoke was
+    // superseded — stop before ANY mutation/publication so a stale older revoke can't
+    // undo a newer approval or rotate the ECK behind it.
+    if (opCtx && !this.stillOwnsSubject(state.coordinate, opCtx.subject, opCtx.rumorId)) {
+      log(`[revoke] ${short(removedPubkey)}: superseded by a newer membership command — skipping side effects`);
+      return;
+    }
+    const progress = opCtx ? this.deps.store.getCommandOpProgress(state.coordinate, opCtx.subject) : {};
+    const rot = progress.eckRotation as { newId: number; newKey: string; prevId: number } | undefined;
+    let newId: number;
+    let prevBytes: Uint8Array;
+    if (rot) {
+      // RESUME: reuse the already-decided rotation.
+      newId = rot.newId;
+      const prevVer = state.eck.find((v) => v.id === rot.prevId);
+      prevBytes = prevVer ? base64ToBytes(prevVer.key) : this.currentEck(state).bytes;
+      if (!state.eck.some((v) => v.id === newId)) {
+        state.eck = [...state.eck, { id: newId, key: rot.newKey }];
+        this.persistEck(state);
+      }
+    } else {
+      const prev = this.currentEck(state); // capture the pre-rotation ECK
+      prevBytes = prev.bytes;
+      newId = state.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
+      const newKey = bytesToBase64(generateEck());
+      // Record the intended rotation FIRST (durable), so a retry never re-mints.
+      if (opCtx) {
+        this.deps.store.setCommandOpProgress(state.coordinate, opCtx.subject, opCtx.rumorId, {
+          ...progress,
+          eckRotation: { newId, newKey, prevId: prev.id },
+        });
+      }
+      state.eck = [...state.eck, { id: newId, key: newKey }];
+      this.persistEck(state);
+    }
 
-    // 1. Delete the removed attendee's directory entry (addressable, NIP-09).
-    const removedD = blindedD(prev.bytes, state.coordinate, removedPubkey);
+    // 1. Delete the removed attendee's directory entry (addressable, NIP-09) at the
+    //    PRE-rotation blinded d.
+    const removedD = blindedD(prevBytes, state.coordinate, removedPubkey);
     const deletion = finalizeEvent(
       {
         kind: KIND_DELETION,
@@ -2309,17 +3048,8 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // 2. Mark removed, then mint the new ECK version.
+    // 2. Mark removed (idempotent).
     this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey: removedPubkey, status: "revoked", now: this.now() });
-    const newId = state.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
-    state.eck = [...state.eck, { id: newId, key: bytesToBase64(generateEck()) }];
-    const row = this.deps.store.getEvent(state.coordinate);
-    if (row) {
-      this.deps.store.upsertEvent({
-        coordinate: state.coordinate, configJson: row.config_json, inboxNsec: row.inbox_nsec,
-        eckJson: JSON.stringify(state.eck), configRelays: row.config_relays, now: this.now(),
-      });
-    }
 
     // 3. Drop every cached pair that involves the removed attendee so remaining
     //    lists/matrix don't reference them after rotation (audit H3).
@@ -2403,7 +3133,11 @@ export class Coordinator {
       map.get(coordinate)?.close();
       map.delete(coordinate);
     }
-    // Cancel pending/running paid work for the event.
+    // Abort and AWAIT every in-flight job handler for this event BEFORE deleting its
+    // custody (audit R3): otherwise a running STT/LLM/scoring/publish handler could
+    // recreate derived data or publish using the captured event state after the
+    // custody row is gone. THEN cancel the queued jobs.
+    await this.stopAndAwaitEventHandlers(coordinate);
     const cancelled = this.deps.store.cancelJobsForEvent(coordinate);
     // Capture chat state + notify context BEFORE dropping live state, so the
     // chat-orphaned notice below can still be sent.
@@ -2461,12 +3195,23 @@ export class Coordinator {
   async retentionSweep(): Promise<void> {
     const nowSec = Math.floor(this.now() / 1000);
     for (const state of [...this.events.values()]) {
-      if (state.retentionExpired) continue;
+      // Skip only when DURABLY expired (audit R3): the in-memory flag is set at the
+      // START of expiry, but the sweep must be able to RESUME an expiry that failed
+      // before its durable `markRetentionExpired` (e.g. a crash mid-purge) — so the
+      // resume decision keys off the persisted flag, not the in-memory one.
+      if (this.deps.store.isRetentionExpired(state.coordinate)) continue;
       const deadline = this.retentionDeadline(state);
       if (deadline === null || nowSec <= deadline) continue;
-      await this.expireRetention(state).catch((e) =>
-        log(`[retention] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e}`),
-      );
+      // Guard against the boot + hourly sweeps double-running one event's expiry.
+      if (this.retentionInProgress.has(state.coordinate)) continue;
+      this.retentionInProgress.add(state.coordinate);
+      try {
+        await this.expireRetention(state);
+      } catch (e) {
+        log(`[retention] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e} — will retry next sweep`);
+      } finally {
+        this.retentionInProgress.delete(state.coordinate);
+      }
     }
   }
 
@@ -2479,24 +3224,47 @@ export class Coordinator {
    */
   private async expireRetention(state: EventState): Promise<void> {
     log(`[retention] ${state.coordinate}: window elapsed — deleting member records + parking processing`);
-    const prev = this.currentEck(state);
     const nowSec = Math.floor(this.now() / 1000);
+    // Park new work + gate late inbox rumors IMMEDIATELY (audit R3): the in-memory
+    // flag stops fresh handlers before we abort the running ones. It is NOT the
+    // durable terminal flag — that is set LAST, after the local purge, so a crash
+    // between here and there resumes the deletion on the next sweep/restart.
+    state.retentionExpired = true;
+    // Stop and AWAIT every in-flight job handler for this event (audit R3), THEN drop
+    // its queued jobs — so no running STT/LLM/scoring can recreate the derived data /
+    // relay records we are about to purge, and no queued job runs after.
+    await this.stopAndAwaitEventHandlers(state.coordinate);
+    this.deps.store.cancelJobsForEvent(state.coordinate);
     const deletions: string[][] = [];
-    // 31603 directory entry per (currently-approved) attendee, blinded under the
-    // current ECK; 31605 match list shares the same blinded d, different kind.
+    const seenAddr = new Set<string>();
+    const pushAddr = (a: string, k: string) => {
+      if (seenAddr.has(a)) return;
+      seenAddr.add(a);
+      deletions.push([a, k]);
+    };
+    // 31603 directory entry per (currently-approved) attendee + 31605 match list
+    // (same blinded d, different kind). Blinded `d` derives from the ECK, so an
+    // attendee has an entry under EACH ECK version this event ever granted (a
+    // rotation republishes under the new blinded d without deleting the old one on
+    // every relay). Delete across ALL historical ECK versions (audit C5) so a
+    // pre-rotation directory/match record is not left readable after retention.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
-      const d = blindedD(prev.bytes, state.coordinate, a.pubkey);
-      deletions.push([`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY)]);
-      deletions.push([`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST)]);
+      for (const ver of state.eck) {
+        const d = blindedD(base64ToBytes(ver.key), state.coordinate, a.pubkey);
+        pushAddr(`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY));
+        pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
+      }
     }
     // 31604 roster + 31606 matrix keyed on the event `d` (not blinded).
-    deletions.push([`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER)]);
-    deletions.push([`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX)]);
-    // Published 31610 talks, at the ECK version each was published under.
+    pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER));
+    pushAddr(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX));
+    // Published 31610 talks: delete under every historical ECK version (audit C5),
+    // not only the one recorded on the row, so a rotated-away talk address is cleaned.
     for (const talk of this.deps.store.publishedTalksForEvent(state.coordinate)) {
-      const eckBytes = this.eckById(state, talk.published_eck_id ?? prev.id);
-      const d = talkBlindedD(eckBytes, state.coordinate, talk.pubkey, talk.talk_d);
-      deletions.push([`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK)]);
+      for (const ver of state.eck) {
+        const d = talkBlindedD(base64ToBytes(ver.key), state.coordinate, talk.pubkey, talk.talk_d);
+        pushAddr(`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK));
+      }
     }
     // One NIP-09 kind-5 carrying every address (a-tag + k-tag pairs).
     const tags: string[][] = [];
@@ -2510,10 +3278,21 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // Stop paid processing: terminal park (durable) + cancel in-flight jobs.
+    // Full local purge (audit C5): "delete member data after the event" must delete
+    // the coordinator's OWN copies too, not just the relay records. Reference-counted,
+    // so a transcript/summary/artifact another event still references survives. Note:
+    // backups taken BEFORE this sweep still contain the data — the operator must rotate
+    // them (disclosed in the operator guide); the coordinator can't reach external files.
+    // Purge runs BEFORE the durable terminal mark (audit R3): the mark is what makes
+    // future sweeps SKIP the event, so recording it before the purge (as the pre-fix
+    // code did) meant a crash in between left data present forever while the event was
+    // durably recorded as swept. Ordered this way, a crash resumes the purge instead.
+    this.deps.store.purgeEventArtifacts(state.coordinate);
+
+    // Terminal park, DURABLE and LAST (audit R3): only now is the event recorded as
+    // fully expired, so a sweep/restart before this point re-runs the (idempotent)
+    // purge to completion.
     this.deps.store.markRetentionExpired(state.coordinate);
-    state.retentionExpired = true;
-    const cancelled = this.deps.store.cancelJobsForEvent(state.coordinate);
 
     // Notify organizers via 21606 (billing block untouched — this is a lifecycle
     // stage). error_category is a sanitized class, never attendee text.
@@ -2528,7 +3307,7 @@ export class Coordinator {
       at: nowSec,
     });
     await this.deps.transport.publish(status, state.configRelays);
-    log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), cancelled ${cancelled} job(s), notified organizer`);
+    log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), purged local data, notified organizer`);
   }
 
   // ── context fetch ───────────────────────────────────────────────────────────
@@ -2600,7 +3379,7 @@ export class Coordinator {
   private async fetchKeyPackages(coordinate: string, authors: string[]): Promise<NostrEvent[]> {
     const state = this.events.get(coordinate);
     if (!state || authors.length === 0) return [];
-    return discoverKeyPackages(this.deps.transport, authors, state.configRelays, this.deps.defaultRelays);
+    return discoverKeyPackages(this.deps.transport, authors, state.configRelays, this.deps.defaultRelays, this.relayPolicy);
   }
 
   /**
@@ -2698,7 +3477,9 @@ export class Coordinator {
     // install grants/admin commands sent during a longer outage would be missed.
     // Already-handled rumors dedupe via the seen ledger.
     try {
-      const wraps = await this.deps.transport.fetch(
+      // Paginated so a >5000-wrap flood on the public coordinator inbox can't crowd a
+      // legitimate older install grant / admin command out of recovery (audit R4).
+      const wraps = await this.fetchFullHistory(
         { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: 0 },
         this.deps.defaultRelays,
       );
@@ -2725,6 +3506,13 @@ export class Coordinator {
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.push(() => clearInterval(retentionTimer));
+    // Resume any relay handover left pending by a transient outage or a restart
+    // (audit C9): probe the stored candidate and promote it once reachable. Run once
+    // at boot, then periodically.
+    await this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`));
+    const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
+    if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
+    this.closers.push(() => clearInterval(relayTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
   }
@@ -2819,7 +3607,10 @@ export class Coordinator {
   ): void {
     const existing = map.get(coordinate);
     if (existing?.key === key) return; // idempotent
-    existing?.close();
+    // Make-before-break (audit R10): open the NEW subscription FIRST, register it,
+    // and only THEN close the old one — so there is never a window with no live
+    // subscription for this coordinate during a relay handover. Cross-subscription
+    // dedupe (seen_rumors + in-flight claim) makes the brief overlap safe.
     let closed = false;
     const raw = open();
     const close = () => {
@@ -2829,6 +3620,7 @@ export class Coordinator {
     };
     map.set(coordinate, { key, close });
     this.closers.push(close);
+    existing?.close();
   }
 
   private eckFromStore(coordinate: string): EckVersion[] {
@@ -2836,10 +3628,162 @@ export class Coordinator {
     return row ? (JSON.parse(row.eck_json) as EckVersion[]) : [];
   }
 
+  /**
+   * Full-history fetch that PAGINATES when the transport supports it (audit R4), so a
+   * >5000-event flood can't silently truncate startup recovery and crowd out a
+   * legitimate older install/join. Falls back to the capped one-shot `fetch` for a
+   * transport without `fetchAll`.
+   */
+  private async fetchFullHistory(filter: any, relays: string[]): Promise<NostrEvent[]> {
+    const fetchAll = (this.deps.transport as Transport).fetchAll;
+    if (fetchAll) return fetchAll.call(this.deps.transport, filter, relays);
+    return this.deps.transport.fetch(filter, relays);
+  }
+
+  // ── relay handover: make-before-break (audit C9) ──────────────────────────
+  /**
+   * Prove a candidate relay set reachable via the transport probe (≥1 relay
+   * connects/EOSEs). A transport with no `probe` degrades to "assume reachable" so
+   * older/fake transports keep the previous immediate-promote behavior.
+   */
+  private async probeRelays(relays: string[]): Promise<boolean> {
+    const probe = (this.deps.transport as { probe?: (r: string[], t?: number) => Promise<boolean> }).probe;
+    if (!probe) return true;
+    try {
+      return await probe.call(this.deps.transport, relays);
+    } catch {
+      return false;
+    }
+  }
+
+  /** True while `candidate` is STILL the durable pending handover target for the
+   *  coordinate (audit R10 compare-and-set): a newer config that recorded a different
+   *  candidate — or a completed promotion that cleared it — makes this false, so a
+   *  stale handover stops before repointing subscriptions. */
+  private isPendingCandidate(coordinate: string, candidate: string[]): boolean {
+    const pending = this.deps.store.getPendingRelays(coordinate);
+    return !!pending && relayKey(pending) === relayKey(candidate);
+  }
+
+  /**
+   * Bounded catch-up on the CANDIDATE relays before a handover promotion (audit R10):
+   * pull the event's E_inbox history from the new relay set and run each wrap through
+   * the normal inbox path (deduped by seen_rumors), so a rumor delivered only to the
+   * new relays is not lost across the swap — AND the candidate is proven to actually
+   * serve the event's data, not merely EOSE a dummy filter. Errors are swallowed (the
+   * handover simply defers to a later retry).
+   */
+  private async catchUpInboxOnRelays(state: EventState, relays: string[]): Promise<void> {
+    const inboxPk = getPublicKey(state.inboxSk);
+    const since = giftwrapSince(Math.floor(this.now() / 1000));
+    let wraps: NostrEvent[];
+    try {
+      wraps = (await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
+        relays,
+      )) as unknown as NostrEvent[];
+    } catch (e) {
+      log(`[relay] candidate catch-up for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    for (const w of wraps) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
+  }
+
+  /**
+   * Make-before-break relay handover (audit C9 + R10). The candidate is already
+   * recorded durably (under the config lock, so `pending` reflects the newest config).
+   * Here: compare-and-set that this candidate is still current, prove it reachable,
+   * complete a bounded catch-up on the REAL candidate relays, re-check the CAS (a newer
+   * config may have superseded during the awaits), and only then promote — opening the
+   * new subscriptions before retiring the old. A superseded or unreachable candidate
+   * leaves the healthy old subscriptions live; the timer/restart retries the still-
+   * pending one, so a typo'd or briefly-unreachable relay list never orphans an event.
+   */
+  private async beginRelayHandover(state: EventState, candidate: string[]): Promise<void> {
+    if (!this.isPendingCandidate(state.coordinate, candidate)) return; // already superseded
+    const reachable = await this.probeRelays(candidate);
+    if (!reachable) {
+      log(
+        `[relay] handover for ${state.coordinate} DEFERRED — candidate ${candidate.join(",")} not reachable; staying on last-known-good ${state.configRelays.join(",")}`,
+      );
+      return;
+    }
+    // Re-check BEFORE the (bounded) catch-up work, and again after it, so a newer
+    // config that landed during the probe/fetch wins the compare-and-set.
+    if (!this.isPendingCandidate(state.coordinate, candidate)) {
+      log(`[relay] handover for ${state.coordinate} candidate superseded during probe — not promoting`);
+      return;
+    }
+    await this.catchUpInboxOnRelays(state, candidate);
+    if (!this.isPendingCandidate(state.coordinate, candidate)) {
+      log(`[relay] handover for ${state.coordinate} candidate superseded during catch-up — not promoting`);
+      return;
+    }
+    this.promoteRelays(state, candidate);
+  }
+
+  /** Promote a proven candidate relay set: persist as last-known-good, clear the
+   *  pending marker, and repoint the E_inbox/config/chat subscriptions (COORD-8,
+   *  open-before-close). Guarded by the R10 compare-and-set: a candidate a newer
+   *  config already superseded is NOT promoted (and its pending marker is left for the
+   *  newer candidate). */
+  private promoteRelays(state: EventState, candidate: string[]): void {
+    if (!this.isPendingCandidate(state.coordinate, candidate)) {
+      log(`[relay] handover for ${state.coordinate}: candidate superseded — not promoting`);
+      return;
+    }
+    state.configRelays = candidate;
+    const row = this.deps.store.getEvent(state.coordinate);
+    if (row) {
+      this.deps.store.upsertEvent({
+        coordinate: state.coordinate,
+        configJson: row.config_json,
+        inboxNsec: row.inbox_nsec,
+        eckJson: row.eck_json,
+        configRelays: JSON.stringify(candidate),
+        now: this.now(),
+      });
+    }
+    this.deps.store.clearPendingRelays(state.coordinate);
+    this.subscribeEventInbox(state, giftwrapSince(Math.floor(this.now() / 1000)));
+    this.subscribeEventConfig(state);
+    if (state.chat) this.subscribeChat(state);
+    log(`[relay] handover for ${state.coordinate} PROMOTED to ${candidate.join(",")} (proven reachable)`);
+  }
+
+  /**
+   * Retry every event with a pending relay handover (audit C9): re-probe the stored
+   * candidate and promote it if it is now reachable. Driven by a periodic timer in
+   * {@link start} and run once at boot so a handover deferred by a transient relay
+   * outage (or interrupted by a restart) completes on its own once relays recover.
+   */
+  async retryRelayHandovers(): Promise<void> {
+    for (const coordinate of this.deps.store.coordinatesWithPendingRelays()) {
+      const state = this.events.get(coordinate);
+      const candidate = this.deps.store.getPendingRelays(coordinate);
+      if (!state || !candidate) {
+        // Event no longer live (detached) — drop a dangling candidate.
+        if (!state) this.deps.store.clearPendingRelays(coordinate);
+        continue;
+      }
+      if (relayKey(candidate) === relayKey(state.configRelays)) {
+        this.deps.store.clearPendingRelays(coordinate); // already on it
+        continue;
+      }
+      // Route through the same probe → catch-up → compare-and-set → promote path
+      // (audit R10). Promotion re-validates the durable pending marker at its
+      // (synchronous) entry, so a candidate a concurrently-applied newer config just
+      // superseded is not promoted even without holding the config lock here.
+      await this.beginRelayHandover(state, candidate);
+    }
+  }
+
   private subscribeCoordInbox(): () => void {
     return (this.deps.transport as any).subscribe?.(
       { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: giftwrapSince() },
-      (e: NostrEvent) => void this.handleCoordinatorWrap(e as unknown as GiftWrap).catch(() => {}),
+      // Bounded inbound queue (audit C3): dispatch through the global-concurrency
+      // scheduler instead of fire-and-forget.
+      (e: NostrEvent) => this.scheduleInbound(() => this.handleCoordinatorWrap(e as unknown as GiftWrap)),
       this.deps.defaultRelays,
     ) ?? (() => {});
   }
@@ -2851,13 +3795,64 @@ export class Coordinator {
     this.replaceSubscription(this.inboxSubs, state.coordinate, key, () =>
       (this.deps.transport as any).subscribe?.(
         { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
-        (e: NostrEvent) => void this.handleInboxWrap(state.coordinate, e as unknown as GiftWrap).catch(() => {}),
+        // Bounded inbound queue (audit C3): global-concurrency scheduler.
+        (e: NostrEvent) => this.scheduleInbound(() => this.handleInboxWrap(state.coordinate, e as unknown as GiftWrap)),
         state.configRelays,
       ),
     );
     log(
       `[sub] ${wasSubscribed ? "re-subscribed (relay/inbox change)" : "listening"} on E_inbox for ${state.scoringCtx.title} (since=${since})`,
     );
+  }
+
+  /**
+   * One-shot backfill of an event's E_inbox history from `since` (audit H2, C3).
+   * Mirrors the boot-time coordinator-inbox backfill (COORD-11) for the per-event
+   * inbox, and additionally ORDERS the fetched wraps so that 21600 join requests are
+   * dispatched before any other rumor kind. That ordering is load-bearing: the C3
+   * enrollment gate drops a 21601 profile submission from an identity with no
+   * attendee row, so a submission that a relay happens to return ahead of its own
+   * join (stored events come back in arbitrary, often newest-first, order) would be
+   * dropped and — since the live subscription never re-delivers an already-sent
+   * stored event — permanently lost. Processing every join first guarantees the
+   * enrollment row exists before any same-identity submission is evaluated.
+   *
+   * Dedupe against the live subscription is handled by the durable seen_rumors
+   * ledger (a wrap seen here is skipped there and vice versa); `transport.fetch` is
+   * capped (C3) so the backfill stays bounded, and each wrap runs through the same
+   * `handleInboxWrap` path (rate accounting, retention, ordered ops) as live traffic.
+   */
+  private async backfillEventInbox(state: EventState, since: number): Promise<void> {
+    const inboxPk = getPublicKey(state.inboxSk);
+    let wraps: NostrEvent[];
+    try {
+      // Paginated full-history walk (audit R4): a >5000-wrap flood on the public
+      // event inbox can't truncate recovery and crowd out an older legitimate join.
+      wraps = (await this.fetchFullHistory(
+        { kinds: [KIND_GIFT_WRAP], "#p": [inboxPk], since },
+        state.configRelays,
+      )) as unknown as NostrEvent[];
+    } catch (e) {
+      log(`[boot] E_inbox backfill for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`);
+      return;
+    }
+    if (!wraps.length) return;
+    // Peek at each wrap's kind (read-only decrypt, no seen/in-flight side effects) so
+    // joins can be dispatched first. A wrap we cannot decrypt (addressed elsewhere, or
+    // ours to publish, not consume) sorts last and is dropped by handleInboxWrap.
+    const ordered = wraps
+      .map((w) => {
+        let joinFirst = 1;
+        try {
+          if (unwrapRumor(w as unknown as GiftWrap, state.inboxSk).kind === KIND_JOIN_REQUEST) joinFirst = 0;
+        } catch {
+          /* undecryptable — leave last; handleInboxWrap marks it seen and drops it */
+        }
+        return { w, joinFirst };
+      })
+      .sort((a, b) => a.joinFirst - b.joinFirst);
+    log(`[boot] E_inbox backfill for ${state.scoringCtx.title}: ${wraps.length} historical wrap(s)`);
+    for (const { w } of ordered) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
   }
 
   /**
@@ -2870,11 +3865,18 @@ export class Coordinator {
     const key = `${state.eidPubkey}:${state.identifier}|${relayKey(state.configRelays)}`;
     this.replaceSubscription(this.configSubs, state.coordinate, key, () =>
       (this.deps.transport as any).subscribe?.(
-        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST], authors: [state.eidPubkey], "#d": [state.identifier] },
+        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST, KIND_CALENDAR_EVENT], authors: [state.eidPubkey], "#d": [state.identifier] },
         (e: NostrEvent) => {
           if (e.kind === KIND_INVITE_LIST) {
             this.inviteHashCache.delete(state.coordinate);
             log(`[join] invite list updated for "${state.scoringCtx.title}" — invite cache invalidated`);
+            return;
+          }
+          // Live 31923 metadata edit (audit P9): the title/summary and — critically —
+          // the retention anchor `eventEndSec` are editable after install, so watch
+          // for a superseding revision instead of only reading the 31923 once.
+          if (e.kind === KIND_CALENDAR_EVENT) {
+            this.handleMetaUpdate(state.coordinate, e);
             return;
           }
           void this.handleConfigUpdate(state.coordinate, e).catch(() => {});
@@ -2885,19 +3887,77 @@ export class Coordinator {
   }
 
   /**
+   * Apply a live 31923 metadata edit (audit P9). Accepted only from this event's
+   * E_id, matching its `d`, and only when it SUPERSEDES the applied metadata under
+   * the global §3.1 comparator (strictly newer, or same created_at with a lower id).
+   * Updates the scoring context (title/summary/hashtags) and, decisively, the
+   * retention anchor `eventEndSec` — so a moved end date re-times the retention
+   * sweep instead of leaving it pinned to the install-time value.
+   */
+  private handleMetaUpdate(coordinate: string, event: NostrEvent): void {
+    const state = this.events.get(coordinate);
+    if (!state) return;
+    if (event.kind !== KIND_CALENDAR_EVENT) return;
+    if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
+    const d = event.tags.find((t) => t[0] === "d")?.[1];
+    if (d !== state.identifier) return; // wrong event
+    if (state.metaEventId) {
+      if (!supersedes({ id: event.id, created_at: event.created_at }, { id: state.metaEventId, created_at: state.metaCreatedAt })) {
+        return;
+      }
+    } else if (event.created_at < state.metaCreatedAt) {
+      return;
+    }
+    state.eventEndSec = parseEventEndSec(event);
+    state.scoringCtx = {
+      ...state.scoringCtx,
+      title: event.tags.find((t) => t[0] === "title")?.[1] ?? state.scoringCtx.title,
+      summary: event.tags.find((t) => t[0] === "summary")?.[1] ?? state.scoringCtx.summary,
+      hashtags: event.tags.filter((t) => t[0] === "t").map((t) => t[1]!),
+    };
+    state.metaEventId = event.id;
+    state.metaCreatedAt = event.created_at;
+    log(`[config] applied live 31923 metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
+  }
+
+  /**
    * Apply a live 31600 config update (audit H5). Only an event authored by this
    * event's E_id, matching its `d`, and strictly newer than the applied config is
    * accepted (replaceable-event ordering); stale/forged/wrong-`d` events are
    * ignored. Diffs drive effects: matching/visibility (H4), relay handover, and
    * language/context invalidation.
    */
+  /**
+   * Handle a live 31600 config update (audit H5 + R10). The APPLY runs under a
+   * per-coordinate config lock so concurrent config callbacks can't interleave their
+   * read-modify-write of the applied-config watermark — the newest config's relay
+   * candidate is what ends up in the durable pending marker. The relay handover then
+   * runs OUTSIDE the lock and promotes only via compare-and-set against that pending
+   * marker, so a slow handover for an older config can never promote after a newer
+   * config recorded a different candidate.
+   */
   async handleConfigUpdate(coordinate: string, event: NostrEvent): Promise<void> {
+    const candidate = await this.withSubjectLock(coordinate, "config", () =>
+      this.applyConfigUpdate(coordinate, event),
+    );
+    if (candidate) {
+      const state = this.events.get(coordinate);
+      if (state) await this.beginRelayHandover(state, candidate);
+    }
+  }
+
+  /**
+   * Apply a live 31600 config (audit H5) under the config lock; returns the relay
+   * candidate to hand over to when the relay set CHANGED (else undefined). See
+   * {@link handleConfigUpdate} for the concurrency contract.
+   */
+  private async applyConfigUpdate(coordinate: string, event: NostrEvent): Promise<string[] | undefined> {
     const state = this.events.get(coordinate);
-    if (!state) return;
-    if (event.kind !== KIND_EVENT_CONFIG) return;
-    if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
+    if (!state) return undefined;
+    if (event.kind !== KIND_EVENT_CONFIG) return undefined;
+    if (event.pubkey !== state.eidPubkey) return undefined; // must be signed by E_id
     const d = event.tags.find((t) => t[0] === "d")?.[1];
-    if (d !== state.identifier) return; // wrong event
+    if (d !== state.identifier) return undefined; // wrong event
     // Replaceable ordering (§3.1): ignore a config that does not SUPERSEDE the one
     // already applied — strictly newer, or same created_at with a lower id. v1
     // rejected `id <=` (kept the HIGHER id on a tie); v2 keeps the lowest id, in
@@ -2909,10 +3969,10 @@ export class Coordinator {
           { id: state.configEventId, created_at: state.configCreatedAt },
         )
       ) {
-        return;
+        return undefined;
       }
     } else if (event.created_at < state.configCreatedAt) {
-      return;
+      return undefined;
     }
 
     let config: EventConfig;
@@ -2920,7 +3980,7 @@ export class Coordinator {
       config = parseEventConfig(state.eidPubkey, event.tags);
     } catch {
       log(`[config] ignored malformed 31600 for ${short(state.eidPubkey)}`);
-      return;
+      return undefined;
     }
 
     // Durable detach (NIP §3.5, decision D6): the newest 31600 is a detach signal
@@ -2938,7 +3998,7 @@ export class Coordinator {
             : "no longer names a coordinator";
       log(`[config] 31600 for ${coordinate} ${why} — detaching from this daemon`);
       await this.detachEvent(coordinate, { gen: state.gen, reason: `config update: ${why}` });
-      return;
+      return undefined;
     }
 
     const prev = {
@@ -2951,9 +4011,16 @@ export class Coordinator {
     };
 
     // Apply to persisted config + in-memory state. Relay tags are untrusted
-    // input — validated (wss-only, deduped, capped, audit COORD-16).
-    const configRelays = sanitizeRelayUrls(config.relays);
-    const relays = configRelays.length ? configRelays : state.configRelays;
+    // input — validated (wss-only, no creds, public host, allowlist, audit COORD-16 + C4).
+    const configRelays = sanitizeRelayUrls(config.relays, this.relayPolicy);
+    const candidateRelays = configRelays.length ? configRelays : state.configRelays;
+    // Make-before-break relay handover (audit C9): a relay CHANGE does NOT
+    // immediately repoint subscriptions or persist as last-known-good. We keep
+    // config_relays (last-known-good) live and record the candidate SEPARATELY, then
+    // prove the candidate reachable before promoting — so a typo'd relay list can
+    // never cut a healthy event off from its current relays.
+    const relayChanged = relayKey(state.configRelays) !== relayKey(candidateRelays);
+    const persistedRelays = relayChanged ? state.configRelays : candidateRelays;
     const eventRow = this.deps.store.getEvent(coordinate);
     if (eventRow) {
       this.deps.store.upsertEvent({
@@ -2961,7 +4028,7 @@ export class Coordinator {
         configJson: JSON.stringify(config),
         inboxNsec: eventRow.inbox_nsec,
         eckJson: eventRow.eck_json,
-        configRelays: JSON.stringify(relays),
+        configRelays: JSON.stringify(persistedRelays),
         now: this.now(),
       });
     }
@@ -2972,8 +4039,17 @@ export class Coordinator {
     state.scoringCtx = { ...state.scoringCtx, lang: config.lang };
     state.nostrContextN = config.nostrContext;
     state.blossomOrigins = config.blossom;
+    // Duration caps (audit C8): update ALL THREE limits atomically. maxMediaSec is
+    // the declared-duration screen; maxIntroSec/maxTalkSec are the authoritative
+    // ffprobe-side decoded-duration enforcement (H-3). Pre-fix only maxMediaSec was
+    // refreshed here, so after a live limit change the ffprobe check kept enforcing
+    // the INSTALL-time value — an understated descriptor could pass the (lowered)
+    // declared screen and then be transcribed under the stale (higher) real limit.
     state.maxMediaSec = effectiveMaxMediaSec(Math.max(config.maxVideoSec, config.maxTalkSec));
-    state.configRelays = relays;
+    state.maxIntroSec = effectiveMaxMediaSec(config.maxVideoSec);
+    state.maxTalkSec = effectiveMaxMediaSec(config.maxTalkSec);
+    // state.configRelays stays the last-known-good set until a handover is PROVEN
+    // (audit C9). It is advanced only in promoteRelays, below.
     state.chat = isMarmotChatEnabled(config);
     state.retentionDays = config.retentionDays;
     state.configEventId = event.id;
@@ -2992,13 +4068,13 @@ export class Coordinator {
     }
     log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
 
-    // Relay handover (audit COORD-8): the E_inbox / config / chat subscriptions
-    // are keyed by their relay set, so a relay change re-creates them on the new
-    // relays instead of staying pinned to the old ones.
-    if (relayKey(prev.relays) !== relayKey(state.configRelays)) {
-      this.subscribeEventInbox(state, giftwrapSince(Math.floor(this.now() / 1000)));
-      this.subscribeEventConfig(state);
-      if (state.chat) this.subscribeChat(state);
+    // Relay handover (audit COORD-8 + C9 + R10 make-before-break): a relay change
+    // records the candidate DURABLY under the config lock (so pending reflects the
+    // newest config), and the actual probe/catch-up/promote runs after the lock in
+    // {@link handleConfigUpdate} via compare-and-set. The healthy old subscriptions
+    // stay live until the candidate is proven reachable and caught up.
+    if (relayChanged) {
+      this.deps.store.setPendingRelays(coordinate, candidateRelays);
     }
 
     // Effects.
@@ -3024,6 +4100,8 @@ export class Coordinator {
       if (state.chat) await this.ensureChat(state);
       else this.marmot.freeze(coordinate);
     }
+    // The caller runs the relay handover (outside the lock) for the recorded candidate.
+    return relayChanged ? candidateRelays : undefined;
   }
 
   // ── billing state machine (spec §9, D5, §13.4) ─────────────────────────────
@@ -3276,6 +4354,19 @@ export class Coordinator {
   // expose for grant version bumping
   eckOf(coordinate: string): EckVersion[] {
     return this.events.get(coordinate)?.eck ?? [];
+  }
+
+  /** Test accessor: the event's live decoded-duration limits (audit C8) — the
+   *  authoritative ffprobe-side caps that must track config reloads. */
+  durationLimitsOf(coordinate: string): { maxMediaSec: number; maxIntroSec: number; maxTalkSec: number } | undefined {
+    const s = this.events.get(coordinate);
+    return s ? { maxMediaSec: s.maxMediaSec, maxIntroSec: s.maxIntroSec, maxTalkSec: s.maxTalkSec } : undefined;
+  }
+
+  /** Test accessor: the event's retention anchor `eventEndSec` (audit P9) — driven
+   *  by the newest 31923 metadata revision. */
+  eventEndSecOf(coordinate: string): number | undefined {
+    return this.events.get(coordinate)?.eventEndSec;
   }
 
   /** Grant a fresh key backup shape for a coordinator-issued grant. */

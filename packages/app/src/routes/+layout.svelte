@@ -163,11 +163,28 @@
   });
 
   // Shared event context/role for the shell nav + persistent header (§4.4).
-  // Reads session.pubkey so it re-syncs the role on login/logout.
+  // Reads session.pubkey so it re-syncs the role on login/logout. Uses the
+  // shell naddr (Bug 1): on the global chat routes that resolves to the active
+  // event context, so the event nav's tab gating (showChat/showPeople/role) is
+  // available there without re-fetching heavy state.
   $effect(() => {
     if (!booted) return;
     void session.pubkey;
-    void eventShell.sync(eventNaddr(router.route));
+    void eventShell.sync(shellNaddr);
+  });
+
+  // Active event context (Bug 1): remember the event the user is currently inside
+  // so a hop into the global chat list / a DM keeps the full event nav and the
+  // DM → chat list → event → All events back-stack. Set on any event route; the
+  // moment the user reaches the global events list (home) the context clears.
+  // Chat/DM and other global routes (me/settings) leave it untouched — "you're in
+  // this event" persists as long as possible.
+  $effect(() => {
+    if (!booted) return;
+    const r = router.route;
+    const evn = eventNaddr(r);
+    if (evn) router.setEventOrigin(evn);
+    else if (r.name === "home") router.setEventOrigin(undefined);
   });
 
   // Marmot chat prewarm (MARMOT-GROUP-CHAT §4.2). The coordinator can only add a
@@ -211,10 +228,20 @@
 
   const evNaddr = $derived(eventNaddr(router.route));
   const routeName = $derived(router.route.name);
+  // Bug 1: on the global chat routes (chat list, DM thread) eventNaddr() is
+  // undefined, so fall back to the active event context — the event the user
+  // walked in from — so the event nav + back-stack persist there. A fresh tab
+  // opened straight to a DM has no context, so it keeps the global nav.
+  const inChatContext = $derived(routeName === "dm" || routeName === "dmPeer");
+  const shellNaddr = $derived(evNaddr ?? (inChatContext ? router.eventOrigin : undefined));
   // The layout owns one compact event header on subpages. EventHome renders its
-  // own full hero; Record is chrome-light (focused recording flow).
+  // own full hero; Record is chrome-light (focused recording flow); the Report
+  // renders its own print-friendly event hero (so the PDF carries the graphics).
   const showCompactHeader = $derived(
-    evNaddr !== undefined && routeName !== "event" && routeName !== "record",
+    evNaddr !== undefined &&
+      routeName !== "event" &&
+      routeName !== "record" &&
+      routeName !== "report",
   );
   const compactStatus = $derived.by(() => {
     switch (eventShell.role) {
@@ -300,8 +327,12 @@
 <!-- Polite route-change announcement for assistive tech (A2). -->
 <div class="visually-hidden" role="status" aria-live="polite">{routeAnnounce}</div>
 
-{#if evNaddr}
-  <EventNav naddr={evNaddr} />
+<!-- Bug 1: keep the full event nav on the global chat routes when there's an
+     active event context AND the viewer is actually a member of it (U8/U5 role
+     gating — a non-member's DMs still get the global nav, never a fabricated
+     event shell). Real event routes always render it, as before. -->
+{#if shellNaddr && (evNaddr || eventShell.isMember)}
+  <EventNav naddr={shellNaddr} />
 {:else}
   <BottomNav />
 {/if}

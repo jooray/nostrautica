@@ -91,6 +91,22 @@ function defaultChannel(name: string): BroadcastChannelLike | null {
   return null;
 }
 
+/**
+ * Strip Svelte `$state` (and any other) Proxies down to plain structured-clone-
+ * able `ChatMessage` values. Nested `tags` arrays are re-spread too — a Proxy
+ * tag row is enough to make the whole `postMessage` throw.
+ */
+export function plainChatMessages(messages: readonly ChatMessage[]): ChatMessage[] {
+  return messages.map((m) => ({
+    id: m.id,
+    pubkey: m.pubkey,
+    kind: m.kind,
+    content: m.content,
+    createdAt: m.createdAt,
+    tags: (m.tags ?? []).map((row) => [...row]),
+  }));
+}
+
 export class ChatTabCoordinator {
   role: TabRole = "pending";
   /** Whether leadership is guaranteed single-writer (Web Locks path). Off it, followers are read-only. */
@@ -273,13 +289,40 @@ export class ChatTabCoordinator {
   // ── leader → follower broadcasts ───────────────────────────────────────────
   /** Leader: publish the current message list for `coordinate` to followers. */
   broadcastState(coordinate: string, messages: ChatMessage[]): void {
-    if (this.role !== "leader") return;
-    this.channel?.postMessage({ t: "state", scope: this.scope, coordinate, messages } satisfies Wire);
+    if (this.role !== "leader" || !this.channel) return;
+    // Callers pass `chatSession.messages` straight off Svelte `$state` — that's a
+    // deep reactive Proxy. BroadcastChannel uses the structured-clone algorithm,
+    // which cannot clone Proxies (DataCloneError: "[object Array] could not be
+    // cloned"). The throw used to escape into `onMessage` and get mis-logged as
+    // "malformed history rumor" / "local echo failed", aborting the rest of that
+    // path's callers' try/catch framing. Snapshot to plain data first (same class
+    // of bug as publish-queue.ts queuing `$state` relay lists into IndexedDB).
+    const plain = plainChatMessages(messages);
+    try {
+      this.channel.postMessage({
+        t: "state",
+        scope: this.scope,
+        coordinate,
+        messages: plain,
+      } satisfies Wire);
+    } catch (err) {
+      console.warn("marmot: tab state broadcast failed", err);
+    }
   }
   /** Leader: publish the current membership set for `coordinate` to followers. */
   broadcastMembers(coordinate: string, members: string[]): void {
-    if (this.role !== "leader") return;
-    this.channel?.postMessage({ t: "members", scope: this.scope, coordinate, members } satisfies Wire);
+    if (this.role !== "leader" || !this.channel) return;
+    const plain = [...members];
+    try {
+      this.channel.postMessage({
+        t: "members",
+        scope: this.scope,
+        coordinate,
+        members: plain,
+      } satisfies Wire);
+    } catch (err) {
+      console.warn("marmot: tab members broadcast failed", err);
+    }
   }
 
   // ── follower → leader proxy ────────────────────────────────────────────────

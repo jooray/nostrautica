@@ -411,10 +411,15 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
   z-index: 2;
 }
 .phone img { width: 100%; height: 100%; object-fit: cover; position: absolute; inset: 0; }
+/* The <picture> wrapper around a screenshot must add no box of its own; the
+   inner <img> is absolutely positioned inside .phone. */
+.phone picture { display: contents; }
 
-/* Theme-swapped assets (logo, screenshots): light shown by default (light
-   is the site default), dark shown once [data-theme="dark"] is set — either
-   by manual toggle or, absent one, by the prefers-color-scheme fallback. */
+/* Theme-swapped SVG assets (nav/footer logo mark, hero emblem): light shown by
+   default (light is the site default), dark shown once [data-theme="dark"] is
+   set — either by manual toggle or, absent one, by the prefers-color-scheme
+   fallback. The screenshots no longer use this class pair; they are served via
+   <picture> + media queries (see assets/app.js) so only one variant downloads. */
 .img-dark { display: none; }
 .img-light { display: block; }
 :root[data-theme="dark"] .img-dark { display: block; }

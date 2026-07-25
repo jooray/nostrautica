@@ -86,7 +86,9 @@ export interface SttProvider {
   capabilities(): Promise<{ models: string[]; maxUploadBytes: number }>;
   transcribe(
     audio: { data: Uint8Array; mime: string; language?: string },
-    opts?: { model?: string },
+    /** `signal` (audit R13): caller cancellation (shutdown / per-event teardown),
+     *  combined with the adapter's own STT deadline so a blocked upload unwinds. */
+    opts?: { model?: string; signal?: AbortSignal },
   ): Promise<{ text: string; language?: string }>;
 }
 
@@ -108,8 +110,11 @@ export interface LlmProvider {
      * trusted value. Typically a zod schema's `.parse`.
      */
     validate?: (raw: unknown) => T;
+    /** Caller cancellation (audit R13): shutdown / per-event teardown, combined with
+     *  the adapter's own completion deadline via `AbortSignal.any()`. */
+    signal?: AbortSignal;
   }): Promise<{ value: T; usage: TokenUsage }>;
-  embed?(texts: string[], model?: string): Promise<number[][]>; // optional capability
+  embed?(texts: string[], model?: string, signal?: AbortSignal): Promise<number[][]>; // optional capability (R13 signal)
 }
 
 export interface PaymentStrategy {

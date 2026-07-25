@@ -26,7 +26,36 @@
   let mediaEl = $state<HTMLMediaElement | null>(null);
   let lastReport = 0;
 
+  // Playback speed (user request 2026-07-24): watch a long talk or intro at 2×.
+  // The choice persists across players/sessions — someone who prefers 1.5× keeps
+  // it — and is re-applied on every load() since a fresh media element resets to
+  // 1.0. Native <video>/<audio> controls expose speed inconsistently (absent on
+  // most mobile browsers), so we surface an explicit selector.
+  const SPEEDS = [1, 1.5, 2] as const;
+  const RATE_KEY = "nostrautica:playbackRate";
+  function initialRate(): number {
+    if (typeof localStorage === "undefined") return 1;
+    const stored = Number(localStorage.getItem(RATE_KEY));
+    return SPEEDS.includes(stored as (typeof SPEEDS)[number]) ? stored : 1;
+  }
+  let rate = $state(initialRate());
+  function setRate(r: number) {
+    rate = r;
+    if (mediaEl) mediaEl.playbackRate = r;
+    try {
+      localStorage.setItem(RATE_KEY, String(r));
+    } catch {
+      /* private mode / storage disabled — the in-memory rate still applies */
+    }
+  }
+  /** "1×", "1.5×", "2×" — trim the trailing ".0" so 1× and 2× read cleanly. */
+  function rateLabel(r: number): string {
+    return `${r}×`;
+  }
+
   function onLoadedMeta() {
+    // A new media element always starts at 1.0 — restore the chosen rate.
+    if (mediaEl) mediaEl.playbackRate = rate;
     if (resumeAt > 0 && mediaEl && resumeAt < mediaEl.duration - 1) {
       mediaEl.currentTime = resumeAt;
     }
@@ -90,7 +119,10 @@
       ontimeupdate={onTimeUpdate}
     ></audio>
   {:else}
-    {#if !captionsUrl}<!-- svelte-ignore a11y_media_has_caption -->{/if}
+    <!-- Captions come from an optional transcript track, rendered below only when a
+         transcript exists; user-recorded talk/intro clips frequently have none, so a
+         caption track is not always available for this player. -->
+    <!-- svelte-ignore a11y_media_has_caption -->
     <video
       bind:this={mediaEl}
       src={url}
@@ -111,6 +143,19 @@
       {/if}
     </video>
   {/if}
+  <div class="speed" role="group" aria-label={t("media.speed")}>
+    <span class="speed-label">{t("media.speed")}</span>
+    {#each SPEEDS as s (s)}
+      <button
+        class="btn inline speed-btn"
+        aria-pressed={rate === s}
+        class:primary={rate === s}
+        onclick={() => setRate(s)}
+      >
+        {rateLabel(s)}
+      </button>
+    {/each}
+  </div>
 {:else if error}
   <div class="card warn">{t("media.playError", { reason: error })}</div>
 {:else}
@@ -155,5 +200,23 @@
     font-size: 0.85rem;
     cursor: pointer;
     text-decoration: underline;
+  }
+  .speed {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    margin-top: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .speed-label {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-right: 0.15rem;
+  }
+  .speed-btn {
+    min-height: 30px;
+    padding: 0.2rem 0.5rem;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
   }
 </style>

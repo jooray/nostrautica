@@ -10,9 +10,10 @@ import {
   KIND_DM_RELAY_LIST,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
+import type { VerifiedEvent } from "nostr-tools/pure";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { ONBOARDING_RELAY_LIST, DM_RELAY_LIST } from "$lib/nostr/relays.js";
 import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
@@ -33,13 +34,15 @@ export async function publishProfile(
   const pubkey = await signer.getPublicKey();
   const existing = await latest(KIND_PROFILE, pubkey);
   const content = mergeProfileContent(existing?.content, edits);
-  const event = await signer.signEvent({
+  // Monotonic (R6): kind-0 is replaceable; two quick profile edits must converge
+  // on the later one rather than tie on created_at and lose the id tie-break.
+  await publishMonotonic({
     kind: KIND_PROFILE,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [],
-    content,
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({ kind: KIND_PROFILE, created_at, tags: [], content }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
 }
 
 /** Publish kind-10002 relay defaults IF the user has none yet (spec §5.4 item 2). */
@@ -50,13 +53,15 @@ export async function ensureRelayList(signer: AppSigner): Promise<boolean> {
   const tags: Tag[] = ONBOARDING_RELAY_LIST.map((r) =>
     r.read && r.write ? ["r", r.url] : ["r", r.url, r.read ? "read" : "write"],
   );
-  const event = await signer.signEvent({
+  // Monotonic (R6): kind-10002 is replaceable; keep it on the §3.1 rule like
+  // every other list publisher (belt-and-suspenders with the never-override read).
+  await publishMonotonic({
     kind: KIND_RELAY_LIST,
-    created_at: Math.floor(Date.now() / 1000),
-    tags,
-    content: "",
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({ kind: KIND_RELAY_LIST, created_at, tags, content: "" }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
   return true;
 }
 
@@ -79,13 +84,22 @@ export async function ensureDmRelayList(signer: AppSigner): Promise<boolean> {
   const pubkey = await signer.getPublicKey();
   const existing = await latest(KIND_DM_RELAY_LIST, pubkey);
   if (existing) return false; // never override a user's existing DM relay list
-  const event = await signer.signEvent({
+  // Publish through the monotonic publisher (audit P3/P7) so the account
+  // identity's 10050 follows the same §3.1 created_at rule as every other
+  // replaceable publisher — belt-and-suspenders with the check-before-publish
+  // above, which already guarantees we only publish when none exists.
+  await publishMonotonic({
     kind: KIND_DM_RELAY_LIST,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: dmRelayListTags(DM_RELAY_LIST),
-    content: "",
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_DM_RELAY_LIST,
+        created_at,
+        tags: dmRelayListTags(DM_RELAY_LIST),
+        content: "",
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
   return true;
 }
 
@@ -116,15 +130,23 @@ export async function followUser(signer: AppSigner, target: string): Promise<boo
     throw new Error(t("error.followListGuard"));
   }
   const merged = mergeFollowTags(existingTags, [target]);
-  const event = await signer.signEvent({
+  // Monotonic (R6): kind-3 is replaceable; a follow right after another edit must
+  // win the §3.1 tie-break rather than tie-and-lose (which would drop the follow).
+  const { published } = await publishMonotonic({
     kind: KIND_CONTACTS,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: merged,
-    // Carry the existing content through (audit UX-16): kind-3 content is legacy
-    // relay-metadata JSON other clients still read — republishing "" wiped it.
-    content: existing?.content ?? "",
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_CONTACTS,
+        created_at,
+        tags: merged,
+        // Carry the existing content through (audit UX-16): kind-3 content is legacy
+        // relay-metadata JSON other clients still read — republishing "" wiped it.
+        content: existing?.content ?? "",
+      }) as Promise<VerifiedEvent>,
   });
-  return publishOrQueue(event);
+  return published;
 }
 
 /** Outcome of a `followAll` run — reported honestly to the user (spec §13). */
@@ -196,13 +218,18 @@ export async function followAll(signer: AppSigner, targets: string[]): Promise<F
     return { followed: [], alreadyFollowing: plan.alreadyFollowing, failed: [] };
   }
   try {
-    const event = await signer.signEvent({
+    await publishMonotonic({
       kind: KIND_CONTACTS,
-      created_at: Math.floor(Date.now() / 1000),
-      tags: plan.mergedTags,
-      content: existing?.content ?? "",
+      author: pubkey,
+      owner: pubkey,
+      sign: (created_at) =>
+        signer.signEvent({
+          kind: KIND_CONTACTS,
+          created_at,
+          tags: plan.mergedTags!,
+          content: existing?.content ?? "",
+        }) as Promise<VerifiedEvent>,
     });
-    await publishOrQueue(event);
     return { followed: plan.toAdd, alreadyFollowing: plan.alreadyFollowing, failed: [] };
   } catch {
     return { followed: [], alreadyFollowing: plan.alreadyFollowing, failed: plan.toAdd };
@@ -217,13 +244,19 @@ export async function followAll(signer: AppSigner, targets: string[]): Promise<F
  * call this for keys the app generated itself.
  */
 export async function seedFollows(signer: AppSigner, eventPubkey: string): Promise<void> {
+  const pubkey = await signer.getPublicKey();
   const existing = await fetchFollowTags(signer);
   if (existing.some((tag) => tag[0] === "p")) return;
-  const event = await signer.signEvent({
+  await publishMonotonic({
     kind: KIND_CONTACTS,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["p", eventPubkey]],
-    content: "",
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_CONTACTS,
+        created_at,
+        tags: [["p", eventPubkey]],
+        content: "",
+      }) as Promise<VerifiedEvent>,
   });
-  await publishOrQueue(event);
 }

@@ -24,14 +24,413 @@ const ENC_PREFIX = "nip44:";
 
 /**
  * The store's logical schema version, written to SQLite's `PRAGMA user_version`
- * on every open. It exists so the backup/restore tooling (store/backup.ts) can
- * refuse to restore a snapshot taken by a NEWER binary onto an older one: the
- * on-disk shape would carry columns/semantics this build can't honor. Bump this
- * whenever a migration changes the durable shape in a way a downgrade can't
- * tolerate. Historic databases open at `user_version = 0` and are transparently
- * brought up to the current value by the in-constructor migrations.
+ * at the end of every read-write open. It exists so a coordinator refuses to open
+ * (and the backup/restore tooling refuses to restore) a database written by a
+ * NEWER binary: the on-disk shape would carry columns/semantics this build can't
+ * honor. Bump this — and add a matching numbered entry to {@link MIGRATIONS} —
+ * whenever a migration changes the durable shape at a downgrade-incompatible
+ * boundary (audit O3).
+ *
+ * History (audit O3): v1 originally spanned MANY additive migrations all labelled
+ * version 1, so an older binary that also accepted version 1 could not tell that a
+ * newer binary had modified the database. From v2 on, every downgrade-incompatible
+ * boundary advances `user_version` through an ordered, transactional migration, and
+ * an open refuses a database whose `user_version` exceeds this constant.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 4;
+
+/**
+ * An ordered, transactional schema migration (audit O3). `up` runs inside a
+ * `BEGIN IMMEDIATE` transaction and, on success, `user_version` is advanced to
+ * `version`. `up` MUST be idempotent (re-runnable) — a database interrupted between
+ * a migration's DDL and its `user_version` stamp re-runs the whole migration on the
+ * next open.
+ */
+interface Migration {
+  version: number;
+  up: (db: DatabaseSync) => void;
+}
+
+/**
+ * The historical (pre-versioning) baseline shape (audit O3). Every statement is
+ * idempotent — `CREATE TABLE IF NOT EXISTS` and `ALTER TABLE … ADD COLUMN` guarded
+ * by a try/catch on "column already exists". It is applied UNCONDITIONALLY on every
+ * read-write open so the physical column set is guaranteed for ANY historical
+ * database regardless of the exact `user_version` it was stamped at — including the
+ * many pre-v2 databases stamped `user_version = 1` whose column completeness depends
+ * on which of these ALTERs a past binary happened to run. The numbered migrations
+ * below carry the version-advancing (downgrade-incompatible) boundaries on top.
+ */
+function applyBaselineDDL(db: DatabaseSync): void {
+  db.exec(SCHEMA);
+  // Migration: add the directional-reasoning column to older DBs.
+  try {
+    db.exec("ALTER TABLE pairs ADD COLUMN reasoning_b TEXT");
+  } catch {
+    /* column already exists */
+  }
+  // Migration: directional scoring (batched matcher, spec §16.2). Each direction
+  // (a→b, b→a) is scored independently, so the a→b score/similarity/complementarity
+  // live in the base columns and the b→a values in the *_b columns. Older rows have
+  // NULL *_b columns; pairsFor() COALESCEs them back to the shared value.
+  for (const col of ["score_b", "similarity_b", "complementarity_b"]) {
+    try {
+      db.exec(`ALTER TABLE pairs ADD COLUMN ${col} REAL`);
+    } catch {
+      /* column already exists */
+    }
+  }
+  // Migration (H1): job-lease columns on older DBs. Must run BEFORE the lease
+  // index is created (the index references lease_until).
+  for (const col of ["claimed_at INTEGER", "lease_until INTEGER", "worker_token TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
+  // Migration (Q10/F1/F3/B1/P0-2/wire-v2 §3.3): attendee revision + ordering columns.
+  for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT", "profile_created_at INTEGER", "profile_rumor_id TEXT", "profile_rev INTEGER", "correction_rev INTEGER", "correction_created_at INTEGER", "correction_rumor_id TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
+  try {
+    db.exec("ALTER TABLE transcripts ADD COLUMN lang TEXT");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (COORD-7): the ECK version a talk's 31610 was published under.
+  try {
+    db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (wire-v2 §3.3): canonical content hash for equal-revision rejection.
+  try {
+    db.exec("ALTER TABLE talks ADD COLUMN content_hash TEXT");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (2026-07-24): external talk sources + per-talk matching opt-in.
+  for (const col of [
+    "external_url TEXT",
+    "external_kind TEXT",
+    "source_type TEXT",
+    "process_for_matching INTEGER NOT NULL DEFAULT 1",
+  ]) {
+    try {
+      db.exec(`ALTER TABLE talks ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
+  // Migration (COORD-24): consumption timestamps for TTL pruning.
+  try {
+    db.exec("ALTER TABLE marmot_consumed_kps ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (wire-v2 §3.5): the install generation on older event rows.
+  try {
+    db.exec("ALTER TABLE events ADD COLUMN gen INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (wire-v2 §10.2): per-device chat-key label on older binding rows.
+  try {
+    db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN label TEXT");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (wire-v2 §6.2): per-direction icebreakers on cached pair rows.
+  for (const col of ["icebreakers_json TEXT", "icebreakers_b_json TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE pairs ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
+  // Migration (wire-v2 §6.2): retention-expired terminal flag on the events row.
+  try {
+    db.exec("ALTER TABLE events ADD COLUMN retention_expired INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (audit C1): durable command-operation state (coord-1).
+  for (const col of ["state TEXT NOT NULL DEFAULT 'complete'", "progress_json TEXT"]) {
+    try {
+      db.exec(`ALTER TABLE command_watermarks ADD COLUMN ${col}`);
+    } catch {
+      /* column already exists */
+    }
+  }
+  // Migration (audit C9): the CANDIDATE relay set of an in-progress handover (coord-1).
+  try {
+    db.exec("ALTER TABLE events ADD COLUMN pending_relays TEXT");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (wire-v2 §3.2): durable monotonic-publish watermark per address.
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS publish_watermarks (
+      address TEXT PRIMARY KEY,
+      last_created_at INTEGER NOT NULL
+    )`,
+  );
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
+}
+
+/**
+ * Downgrade-incompatible schema additions for the audit-C3/C5/C10 remediation
+ * (audit O3, version 2). Idempotent — safe to re-run against a database that has
+ * already reached (or partially reached) version 2.
+ *
+ *  - C3: durable per-sender / per-event inbox rate accounting.
+ *  - C5: ownership/reference records for content-addressed derived artifacts
+ *    (transcripts, pipeline artifacts, nostr summaries) so a reference-counted
+ *    deletion can drop a subject's data without harming another event that shares
+ *    the same deduplicated payload.
+ */
+function applyRemediationDDL(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS inbox_rate (
+      coordinate TEXT NOT NULL,
+      pubkey TEXT NOT NULL,          -- '' = event-wide bucket
+      window_start INTEGER NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (coordinate, pubkey)
+    );
+    CREATE TABLE IF NOT EXISTS transcript_refs (
+      blob_sha256 TEXT NOT NULL,
+      coordinate TEXT NOT NULL,
+      pubkey TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (blob_sha256, coordinate, pubkey)
+    );
+    CREATE TABLE IF NOT EXISTS artifact_refs (
+      stage TEXT NOT NULL,
+      inputs_hash TEXT NOT NULL,
+      coordinate TEXT NOT NULL,
+      pubkey TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (stage, inputs_hash, coordinate, pubkey)
+    );
+    CREATE TABLE IF NOT EXISTS summary_refs (
+      pubkey TEXT NOT NULL,
+      inputs_hash TEXT NOT NULL,
+      coordinate TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (pubkey, inputs_hash, coordinate)
+    );
+  `);
+}
+
+/**
+ * Unify the membership command-watermark subject (audit R2, version 3). Organizer
+ * approve/revoke used subject `pubkey:<pk>` while attendee withdrawals used
+ * `withdraw:<pk>` — two INDEPENDENT watermarks for the same attendee's membership, so
+ * a delayed old withdrawal ordered only against other withdrawals and could undo a
+ * newer reapproval (and purge data). From v3 both flows use one `member:<pk>` subject
+ * so every membership transition orders against the others.
+ *
+ * This migration rewrites existing rows onto the unified subject. Where an attendee
+ * has BOTH a `pubkey:<pk>` and a `withdraw:<pk>` row (which would collide on the
+ * unified PRIMARY KEY), it keeps the one that WINS the §3.1 comparator — higher
+ * `created_at`, then the lexically-LOWER `rumor_id` on a tie — i.e. the effective
+ * last membership decision, carrying its `state`/`progress_json` so an in-progress
+ * ECK rotation still resumes. Downgrade-incompatible: an older binary would read the
+ * old subjects and lose the unification, so it advances `user_version`.
+ */
+function applyMembershipSubjectMerge(db: DatabaseSync): void {
+  const rows = db
+    .prepare(
+      "SELECT coordinate, subject, created_at, rumor_id, state, progress_json FROM command_watermarks WHERE subject LIKE 'pubkey:%' OR subject LIKE 'withdraw:%'",
+    )
+    .all() as {
+    coordinate: string;
+    subject: string;
+    created_at: number;
+    rumor_id: string;
+    state: string | null;
+    progress_json: string | null;
+  }[];
+  const winners = new Map<
+    string,
+    { coordinate: string; subject: string; created_at: number; rumor_id: string; state: string | null; progress_json: string | null }
+  >();
+  for (const r of rows) {
+    const pk = r.subject.slice(r.subject.indexOf(":") + 1);
+    const newSubject = `member:${pk}`;
+    const key = `${r.coordinate} ${newSubject}`;
+    const cur = winners.get(key);
+    const wins =
+      !cur ||
+      r.created_at > cur.created_at ||
+      (r.created_at === cur.created_at && r.rumor_id < cur.rumor_id);
+    if (wins) winners.set(key, { ...r, subject: newSubject });
+  }
+  db.prepare("DELETE FROM command_watermarks WHERE subject LIKE 'pubkey:%' OR subject LIKE 'withdraw:%'").run();
+  const ins = db.prepare(
+    "INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  for (const w of winners.values()) {
+    ins.run(w.coordinate, w.subject, w.created_at, w.rumor_id, w.state ?? "complete", w.progress_json ?? null);
+  }
+}
+
+/**
+ * Quarantine legacy pipeline artifacts with no ownership ref (audit R11, version 4).
+ * Schema v2 introduced `artifact_refs` for reference-counted deletion but never
+ * backfilled the `pipeline_artifacts` that already existed — those pre-v2 rows have
+ * NO ref, so a purge (which discovers artifacts only through `artifact_refs`) can
+ * never reach them and they survive forever (unbounded growth + attendee-derived
+ * text retained past retention). This migration:
+ *   1. adds the `quarantined_at` column (guarded — earlier partial runs / new DBs
+ *      already have it via the baseline DDL);
+ *   2. stamps `quarantined_at = now` on every artifact that has no `artifact_refs`
+ *      row, so pruneOldData can GC it after a grace window.
+ * It is NON-destructive: a live event still using such an artifact re-touches it via
+ * a cache hit (see `recordArtifactRef`), which clears the quarantine before the GC
+ * window elapses, so nothing an active event needs is lost.
+ */
+function applyArtifactLegacyQuarantine(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(pipeline_artifacts)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "quarantined_at")) {
+    db.exec("ALTER TABLE pipeline_artifacts ADD COLUMN quarantined_at INTEGER");
+  }
+  const now = Date.now();
+  const hasRefs = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifact_refs'")
+    .get();
+  if (hasRefs) {
+    db.prepare(
+      `UPDATE pipeline_artifacts SET quarantined_at = ?
+         WHERE quarantined_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM artifact_refs r
+             WHERE r.stage = pipeline_artifacts.stage AND r.inputs_hash = pipeline_artifacts.inputs_hash
+           )`,
+    ).run(now);
+  } else {
+    // A database old enough to have no artifact_refs table at all has no ownership
+    // records whatsoever → every existing artifact is legacy.
+    db.prepare("UPDATE pipeline_artifacts SET quarantined_at = ? WHERE quarantined_at IS NULL").run(now);
+  }
+}
+
+/** The ordered numbered migrations (audit O3). Version 1 is the historical baseline
+ *  (applied unconditionally by {@link applyBaselineDDL}); version 2 is the audit
+ *  remediation batch; version 3 unifies the membership command subject (audit R2);
+ *  version 4 quarantines legacy unreferenced pipeline artifacts (audit R11). */
+const MIGRATIONS: Migration[] = [
+  { version: 2, up: applyRemediationDDL },
+  { version: 3, up: applyMembershipSubjectMerge },
+  { version: 4, up: applyArtifactLegacyQuarantine },
+];
+
+/**
+ * Bring a database up to {@link SCHEMA_VERSION} (audit O3). Refuses a database
+ * written by a NEWER binary (its `user_version` exceeds ours — opening it could
+ * silently mis-handle columns/semantics this build doesn't know about), applies the
+ * idempotent baseline shape, then runs every pending numbered migration in its own
+ * transaction, advancing `user_version` at each boundary. Read-only inspection
+ * (doctor, audit O2) must NOT go through here — it uses {@link inspectDatabaseReadOnly}.
+ */
+function migrate(db: DatabaseSync): void {
+  const uv = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  if (uv > SCHEMA_VERSION) {
+    throw new Error(
+      `database schema v${uv} was written by a NEWER coordinator than this binary (v${SCHEMA_VERSION}); refusing to open — upgrade the coordinator (or restore a matching backup) before starting`,
+    );
+  }
+  applyBaselineDDL(db);
+  for (const m of MIGRATIONS) {
+    if (m.version <= uv) continue;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      m.up(db);
+      db.exec(`PRAGMA user_version = ${m.version}`);
+      db.exec("COMMIT");
+    } catch (e) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        /* no active txn */
+      }
+      throw e;
+    }
+  }
+  // Stamp the current version even when there were no pending migrations (a fresh
+  // database whose baseline already matches, or one already at SCHEMA_VERSION).
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+/**
+ * Read-only database inspection (audit O2): open the file with a READ-ONLY SQLite
+ * connection and report its integrity, schema version, and (optionally) protected-row
+ * decryptability WITHOUT constructing the migrating {@link Store}. `doctor` uses this
+ * so an `ExecStartPre` health check can never migrate/encrypt/upgrade the database
+ * before startup or a rollback decision is made — the file is left byte-identical.
+ */
+export function inspectDatabaseReadOnly(
+  path: string,
+  identitySk?: Uint8Array,
+): {
+  integrity: string;
+  userVersion: number;
+  schemaTooNew: boolean;
+  installedEventCount: number;
+  /** Number of event rows proven to decrypt under `identitySk`, or null if not checked. */
+  decryptedRows: number | null;
+} {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const ic = db.prepare("PRAGMA integrity_check").all() as { integrity_check: string }[];
+    const msgs = ic.map((r) => r.integrity_check);
+    const integrity = msgs.length === 1 && msgs[0] === "ok" ? "ok" : msgs.join("; ");
+    const uv = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    let installedEventCount = 0;
+    try {
+      installedEventCount = (db.prepare("SELECT COUNT(*) AS n FROM events").get() as { n: number }).n;
+    } catch {
+      /* no events table yet (pre-install database) */
+    }
+    let decryptedRows: number | null = null;
+    if (identitySk) {
+      decryptedRows = 0;
+      const rows = db.prepare("SELECT coordinate, inbox_nsec, eck_json FROM events").all() as {
+        coordinate: string;
+        inbox_nsec: string;
+        eck_json: string;
+      }[];
+      for (const row of rows) {
+        const nsec = row.inbox_nsec.startsWith(ENC_PREFIX)
+          ? selfDecrypt(identitySk, row.inbox_nsec.slice(ENC_PREFIX.length))
+          : row.inbox_nsec;
+        if (!/^[0-9a-f]{64}$/i.test(nsec)) {
+          throw new Error(`event ${row.coordinate}: decrypted inbox_nsec is not 32-byte hex`);
+        }
+        const eck = row.eck_json.startsWith(ENC_PREFIX)
+          ? selfDecrypt(identitySk, row.eck_json.slice(ENC_PREFIX.length))
+          : row.eck_json;
+        JSON.parse(eck);
+        decryptedRows++;
+      }
+    }
+    return {
+      integrity,
+      userVersion: uv,
+      schemaTooNew: uv > SCHEMA_VERSION,
+      installedEventCount,
+      decryptedRows,
+    };
+  } finally {
+    db.close();
+  }
+}
 
 /** The at-rest encryption prefix, exported for the backup tool's decryption proof. */
 export const AT_REST_ENC_PREFIX = ENC_PREFIX;
@@ -89,7 +488,24 @@ export function acquireDaemonLock(dbPath: string): DaemonLock {
   };
 }
 
-export type JobState = "pending" | "running" | "done" | "poison";
+/** `waiting` is the billing/budget PARK state (H-2) — `claimNextJob` never claims it. */
+export type JobState = "pending" | "running" | "waiting" | "done" | "poison";
+
+/**
+ * What an `enqueueJob` call actually did: `"enqueued"` when a row was created, or
+ * the state of the EXISTING row whose dedupe key suppressed it. Callers log the
+ * terminal cases — a `done`/`poison` collision means requested work will NOT run,
+ * which is silent, permanent, and was the 2026-07-24 production incident.
+ */
+export type EnqueueOutcome = "enqueued" | JobState;
+
+/** Job types that make up the matching stage (used by the recompute memo reset). */
+export const MATCH_JOB_TYPES = [
+  "match_recompute",
+  "score_batch",
+  "score_reverse_batch",
+  "publish_matches",
+] as const;
 
 /** A Cashu payment reservation in the durable journal (audit finding H8). */
 export type CashuJournalState = "in_flight" | "settled" | "ambiguous";
@@ -167,7 +583,16 @@ export interface TalkRow {
   title: string;
   description: string;
   speakers_json: string;
+  /** kind:"talk" media descriptor as JSON, or the JSON literal 'null' for external talks. */
   media_json: string;
+  /** External (off-Blossom) talk video URL — YouTube or direct mp4 — or null. */
+  external_url: string | null;
+  /** "youtube" | "video" for an external talk, else null. */
+  external_kind: string | null;
+  /** "recording" | "upload" | "external" (null on legacy rows). */
+  source_type: string | null;
+  /** 1 if the speaker opted this talk into coordinator STT + matching, else 0. */
+  process_for_matching: number;
   transcript_json: string | null;
   lang: string;
   revision: number;
@@ -351,12 +776,23 @@ CREATE TABLE IF NOT EXISTS pipeline_artifacts (
   model TEXT NOT NULL,
   output_json TEXT NOT NULL,
   created_at INTEGER NOT NULL,
+  -- Set (unix ms) when the artifact is a LEGACY orphan with no ownership ref
+  -- (audit R11): pre-v2 artifacts predate artifact_refs, so a ref-counted purge
+  -- would never find them. The v4 migration quarantines every unreferenced artifact;
+  -- recording an ownership ref (creation or cache hit) clears it, and pruneOldData
+  -- GCs artifacts still quarantined + unreferenced after a grace window. NULL = a
+  -- normally-owned artifact.
+  quarantined_at INTEGER,
   PRIMARY KEY (stage, inputs_hash)
 );
 -- Prerecorded talks (spec F2, audit U11). One row per (coordinate, speaker, talk_d).
--- media_json is the kind:"talk" descriptor; transcript_json is filled by process_talk;
--- status drives organizer moderation (pending → published/rejected); revision supports
--- editing (a bumped revision replaces the previous 31610 at publish time).
+-- media_json is the kind:"talk" descriptor (the JSON literal 'null' for external
+-- talks); transcript_json is filled by process_talk (only when process_for_matching
+-- is set and the media is on Blossom); status drives organizer moderation (pending →
+-- published/rejected); revision supports editing (a bumped revision replaces the
+-- previous 31610 at publish time). external_url/external_kind (2026-07-24) carry a
+-- YouTube/mp4 talk hosted off-Blossom — the coordinator never fetches these (SSRF),
+-- so they are view-only and never transcribed/matched.
 CREATE TABLE IF NOT EXISTS talks (
   coordinate TEXT NOT NULL,
   pubkey TEXT NOT NULL,
@@ -365,6 +801,10 @@ CREATE TABLE IF NOT EXISTS talks (
   description TEXT NOT NULL DEFAULT '',
   speakers_json TEXT NOT NULL DEFAULT '[]',
   media_json TEXT NOT NULL,
+  external_url TEXT,
+  external_kind TEXT,
+  source_type TEXT,
+  process_for_matching INTEGER NOT NULL DEFAULT 0,
   transcript_json TEXT,
   lang TEXT NOT NULL DEFAULT 'en',
   revision INTEGER NOT NULL DEFAULT 0,
@@ -435,10 +875,14 @@ CREATE TABLE IF NOT EXISTS marmot_consumed_kps (
   created_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (coordinate, kp_event_id)
 );
--- Per-subject admin-command watermark (NIP §3.4): the (created_at, rumor_id) of the
--- last applied 21604 command per (coordinate, subject). A command strictly older
--- than the watermark under the §3.1 comparator is rejected, so approve/revoke
--- interleavings resolve deterministically per subject instead of by arrival order.
+-- Per-subject command watermark (NIP §3.4): the (created_at, rumor_id) of the last
+-- FULLY applied command per (coordinate, subject), plus a pending/complete state and
+-- resume progress_json (audit C1). A command strictly older than the watermark under
+-- the §3.1 comparator is rejected, so transitions resolve deterministically per
+-- subject instead of by arrival order. Membership transitions — organizer
+-- approve/revoke AND attendee withdrawal — share ONE subject member:<pk> (audit R2,
+-- schema v3) so a delayed old withdrawal orders against a newer reapproval instead of
+-- against an independent watermark.
 CREATE TABLE IF NOT EXISTS command_watermarks (
   coordinate TEXT NOT NULL,
   subject TEXT NOT NULL,
@@ -494,119 +938,10 @@ export class Store {
     this.identitySk = identitySk;
     this.db = new DatabaseSync(path);
     this.db.exec("PRAGMA journal_mode = WAL;");
-    this.db.exec(SCHEMA);
-    // Migration: add the directional-reasoning column to older DBs.
-    try {
-      this.db.exec("ALTER TABLE pairs ADD COLUMN reasoning_b TEXT");
-    } catch {
-      /* column already exists */
-    }
-    // Migration: directional scoring (batched matcher, spec §16.2). Each direction
-    // (a→b, b→a) is scored independently, so the a→b score/similarity/complementarity
-    // live in the base columns and the b→a values in the *_b columns. Older rows have
-    // NULL *_b columns; pairsFor() COALESCEs them back to the shared value.
-    for (const col of ["score_b", "similarity_b", "complementarity_b"]) {
-      try {
-        this.db.exec(`ALTER TABLE pairs ADD COLUMN ${col} REAL`);
-      } catch {
-        /* column already exists */
-      }
-    }
-    // Migration (H1): job-lease columns on older DBs. Must run BEFORE the lease
-    // index is created (the index references lease_until).
-    for (const col of ["claimed_at INTEGER", "lease_until INTEGER", "worker_token TEXT"]) {
-      try {
-        this.db.exec(`ALTER TABLE jobs ADD COLUMN ${col}`);
-      } catch {
-        /* column already exists */
-      }
-    }
-    // Migration (Q10): revision-tracking columns on older attendee rows.
-    // Migration (F1): transcripts_json on attendees; lang on transcripts.
-    // Migration (F3): correction_json on attendees (ai_profile correction/hide).
-    // Migration (B1 2026-07-16): display_name — match reasoning needs real names.
-    // Migration (P0-2 2026-07-22): profile submission ordering key (latest-wins).
-    // Migration (wire-v2 §3.3): rev-primary ordering keys for 21601 submissions and
-    // 21608 corrections (profile_rev / correction_rev/created_at/rumor_id).
-    for (const col of ["source_revision TEXT", "ai_source_revision TEXT", "transcripts_json TEXT", "correction_json TEXT", "display_name TEXT", "profile_created_at INTEGER", "profile_rumor_id TEXT", "profile_rev INTEGER", "correction_rev INTEGER", "correction_created_at INTEGER", "correction_rumor_id TEXT"]) {
-      try {
-        this.db.exec(`ALTER TABLE attendees ADD COLUMN ${col}`);
-      } catch {
-        /* column already exists */
-      }
-    }
-    try {
-      this.db.exec("ALTER TABLE transcripts ADD COLUMN lang TEXT");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (COORD-7): the ECK version a talk's 31610 was published under,
-    // so post-rotation deletion addresses the OLD blinded d (and republish can
-    // move the entry to the new ECK).
-    try {
-      this.db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (wire-v2 §3.3): canonical content hash for equal-revision rejection.
-    try {
-      this.db.exec("ALTER TABLE talks ADD COLUMN content_hash TEXT");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (COORD-24): consumption timestamps for TTL pruning. Existing rows
-    // backfill to 0, so the first prune after upgrade sweeps them (they're all
-    // older than any 30-day window by definition of being legacy).
-    try {
-      this.db.exec("ALTER TABLE marmot_consumed_kps ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (wire-v2 §3.5): the install generation on older event rows.
-    try {
-      this.db.exec("ALTER TABLE events ADD COLUMN gen INTEGER NOT NULL DEFAULT 0");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (wire-v2 §10.2): per-device chat-key label on older binding rows.
-    try {
-      this.db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN label TEXT");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (wire-v2 §6.2): per-direction icebreakers on cached pair rows.
-    // JSON arrays (≤ 3 strings), addressed to `a` and `b` respectively — parallel
-    // to reasoning/reasoning_b. NULL on legacy rows (no icebreakers surfaced).
-    for (const col of ["icebreakers_json TEXT", "icebreakers_b_json TEXT"]) {
-      try {
-        this.db.exec(`ALTER TABLE pairs ADD COLUMN ${col}`);
-      } catch {
-        /* column already exists */
-      }
-    }
-    // Migration (wire-v2 §6.2): retention-expired terminal flag on the events row.
-    // Once the retention sweep has deleted an event's member records + parked paid
-    // processing, this stays set across restarts so a re-install of the same event
-    // row never resumes paid work before the next sweep tick re-detects expiry.
-    try {
-      this.db.exec("ALTER TABLE events ADD COLUMN retention_expired INTEGER NOT NULL DEFAULT 0");
-    } catch {
-      /* column already exists */
-    }
-    // Migration (wire-v2 §3.2): durable monotonic-publish watermark per replaceable
-    // address, so restarts keep created_at monotonic instead of relying on the wall
-    // clock having advanced past everything published before the restart.
-    this.db.exec(
-      `CREATE TABLE IF NOT EXISTS publish_watermarks (
-        address TEXT PRIMARY KEY,
-        last_created_at INTEGER NOT NULL
-      )`,
-    );
-    this.db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
-    // Record the logical schema version so the backup/restore tooling can reason
-    // about downgrade safety. The in-place migrations above have already brought
-    // the durable shape up to SCHEMA_VERSION, so stamping it here is correct.
-    this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    // Refuse a newer database, apply the idempotent baseline shape, and run every
+    // pending numbered migration transactionally (audit O3). Doctor's read-only
+    // inspection (audit O2) deliberately does NOT come through here.
+    migrate(this.db);
     // Migration (F1): encrypt any legacy plaintext event-key rows in place.
     if (this.identitySk) this.encryptPlaintextKeyRows();
   }
@@ -734,6 +1069,47 @@ export class Store {
     return !!this.db.prepare("SELECT 1 FROM seen_rumors WHERE rumor_id = ?").get(rumorId);
   }
 
+  // ── durable inbox rate accounting (audit C3) ──────────────────────────────
+  /**
+   * Fixed-window rate accounting for the public inbox (audit C3): atomically bump
+   * and return the count of inbound rumors for a (coordinate, pubkey) bucket in the
+   * current `windowMs` window (`pubkey === ""` is the event-wide bucket). A new
+   * window resets the count to 1. Durable so a burst survives restart accounting
+   * instead of resetting the ledger every boot. The caller compares the returned
+   * count against the configured per-window cap and drops the rumor when over.
+   */
+  bumpInboxRate(coordinate: string, pubkey: string, now: number, windowMs: number): number {
+    const windowStart = windowMs > 0 ? now - (now % windowMs) : now;
+    const row = this.db
+      .prepare("SELECT window_start, count FROM inbox_rate WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { window_start: number; count: number } | undefined;
+    const count = row && row.window_start === windowStart ? row.count + 1 : 1;
+    this.db
+      .prepare(
+        `INSERT INTO inbox_rate (coordinate, pubkey, window_start, count) VALUES (?, ?, ?, ?)
+         ON CONFLICT(coordinate, pubkey) DO UPDATE SET window_start = excluded.window_start, count = excluded.count`,
+      )
+      .run(coordinate, pubkey, windowStart, count);
+    return count;
+  }
+
+  /** Count of attendee rows for an event (audit C3 population cap: pending + approved
+   *  + revoked). Used to bound roster growth below the 2,000 protocol cap. */
+  attendeeCount(coordinate: string): number {
+    return (
+      this.db.prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ?").get(coordinate) as { n: number }
+    ).n;
+  }
+
+  /** Count of non-approved (pending) attendee rows for an event (audit C3). */
+  pendingAttendeeCount(coordinate: string): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'pending'")
+        .get(coordinate) as { n: number }
+    ).n;
+  }
+
   // ── events (installed via 21603) ──────────────────────────────────────────
   upsertEvent(row: {
     coordinate: string;
@@ -809,6 +1185,37 @@ export class Store {
     this.db.prepare("UPDATE events SET retention_expired = 0 WHERE coordinate = ?").run(coordinate);
   }
 
+  // ── relay-handover candidate set (audit C9) ───────────────────────────────
+  /** Record the CANDIDATE relay set of an in-progress make-before-break handover,
+   *  kept separate from config_relays (last-known-good) until it is proven reachable. */
+  setPendingRelays(coordinate: string, relays: string[]): void {
+    this.db.prepare("UPDATE events SET pending_relays = ? WHERE coordinate = ?").run(JSON.stringify(relays), coordinate);
+  }
+  /** The candidate relay set of a pending handover, or undefined when none. */
+  getPendingRelays(coordinate: string): string[] | undefined {
+    const row = this.db.prepare("SELECT pending_relays FROM events WHERE coordinate = ?").get(coordinate) as
+      | { pending_relays: string | null }
+      | undefined;
+    if (!row?.pending_relays) return undefined;
+    try {
+      const v = JSON.parse(row.pending_relays);
+      return Array.isArray(v) ? (v as string[]) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  /** Clear a pending handover's candidate set (promoted, or abandoned). */
+  clearPendingRelays(coordinate: string): void {
+    this.db.prepare("UPDATE events SET pending_relays = NULL WHERE coordinate = ?").run(coordinate);
+  }
+  /** Coordinates that currently have a pending relay handover (restart resume). */
+  coordinatesWithPendingRelays(): string[] {
+    const rows = this.db
+      .prepare("SELECT coordinate FROM events WHERE pending_relays IS NOT NULL")
+      .all() as { coordinate: string }[];
+    return rows.map((r) => r.coordinate);
+  }
+
   // ── durable monotonic-publish watermark (NIP §3.2) ────────────────────────
   /**
    * Bump and return the `created_at` for a replaceable publish at `address`
@@ -832,21 +1239,79 @@ export class Store {
     return next;
   }
 
-  // ── admin-command per-subject watermarks (NIP §3.4) ───────────────────────
-  /** The last applied command's (created_at, rumor_id) for a (coordinate, subject). */
-  getCommandWatermark(coordinate: string, subject: string): { created_at: number; rumor_id: string } | undefined {
+  // ── admin-command per-subject operation state (NIP §3.4 + audit C1) ────────
+  /**
+   * The current command operation for a (coordinate, subject): its ordering key
+   * (created_at, rumor_id), completion `state`, and any resume `progress_json`. The
+   * recorded command is the newest one accepted for the subject; `state` says
+   * whether its effect chain has FULLY completed. A stale/older DISTINCT command is
+   * rejected against this; the SAME rumor may resume while `state` is 'pending'.
+   */
+  getCommandWatermark(
+    coordinate: string,
+    subject: string,
+  ): { created_at: number; rumor_id: string; state: string; progress_json: string | null } | undefined {
     return this.db
-      .prepare("SELECT created_at, rumor_id FROM command_watermarks WHERE coordinate = ? AND subject = ?")
-      .get(coordinate, subject) as { created_at: number; rumor_id: string } | undefined;
+      .prepare("SELECT created_at, rumor_id, state, progress_json FROM command_watermarks WHERE coordinate = ? AND subject = ?")
+      .get(coordinate, subject) as
+      | { created_at: number; rumor_id: string; state: string; progress_json: string | null }
+      | undefined;
   }
-  /** Record the watermark of the just-applied command for a (coordinate, subject). */
+  /**
+   * Record the watermark of a fully-applied command (state 'complete'). Kept for
+   * back-compat with callers that apply a command atomically; the resumable path
+   * uses {@link beginCommandOp} + {@link completeCommandOp} instead.
+   */
   setCommandWatermark(coordinate: string, subject: string, createdAt: number, rumorId: string): void {
     this.db
       .prepare(
-        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id) VALUES (?, ?, ?, ?)
-         ON CONFLICT(coordinate, subject) DO UPDATE SET created_at = excluded.created_at, rumor_id = excluded.rumor_id`,
+        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, 'complete', NULL)
+         ON CONFLICT(coordinate, subject) DO UPDATE SET created_at = excluded.created_at, rumor_id = excluded.rumor_id, state = 'complete', progress_json = NULL`,
       )
       .run(coordinate, subject, createdAt, rumorId);
+  }
+  /**
+   * Mark a command's effect chain as STARTED but not yet complete (audit C1). Sets
+   * the operation to this (created_at, rumor_id) with state 'pending'. Progress is
+   * PRESERVED when the same rumor is resuming (so a mid-rotation ECK id survives a
+   * retry) and RESET when a different (newer) command takes the subject over.
+   */
+  beginCommandOp(coordinate: string, subject: string, createdAt: number, rumorId: string, _now: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO command_watermarks (coordinate, subject, created_at, rumor_id, state, progress_json) VALUES (?, ?, ?, ?, 'pending', NULL)
+         ON CONFLICT(coordinate, subject) DO UPDATE SET
+           created_at = excluded.created_at,
+           rumor_id = excluded.rumor_id,
+           state = 'pending',
+           progress_json = CASE WHEN command_watermarks.rumor_id = excluded.rumor_id THEN command_watermarks.progress_json ELSE NULL END`,
+      )
+      .run(coordinate, subject, createdAt, rumorId);
+  }
+  /** Mark the current command operation for a subject as fully complete (audit C1).
+   *  No-op if a different rumor has since taken the subject over. */
+  completeCommandOp(coordinate: string, subject: string, rumorId: string): void {
+    this.db
+      .prepare("UPDATE command_watermarks SET state = 'complete' WHERE coordinate = ? AND subject = ? AND rumor_id = ?")
+      .run(coordinate, subject, rumorId);
+  }
+  /** The parsed resume progress for a subject's current operation (audit C1). */
+  getCommandOpProgress(coordinate: string, subject: string): Record<string, unknown> {
+    const row = this.getCommandWatermark(coordinate, subject);
+    if (!row?.progress_json) return {};
+    try {
+      const v = JSON.parse(row.progress_json);
+      return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  }
+  /** Persist resume progress for a subject's current operation, only while it is
+   *  still the recorded rumor (audit C1: ECK-rotation state machine). */
+  setCommandOpProgress(coordinate: string, subject: string, rumorId: string, progress: Record<string, unknown>): void {
+    this.db
+      .prepare("UPDATE command_watermarks SET progress_json = ? WHERE coordinate = ? AND subject = ? AND rumor_id = ?")
+      .run(JSON.stringify(progress), coordinate, subject, rumorId);
   }
 
   // ── install generation / detach tombstone (NIP §3.5) ──────────────────────
@@ -978,6 +1443,51 @@ export class Store {
       .get(coordinate, pubkey) as AttendeeRow | undefined;
   }
 
+  /**
+   * Compare-and-set commit of a completed AI pipeline run (audit C2). The
+   * ai_profile / profile_hash / transcripts are written ONLY when the attendee's
+   * current `source_revision` still equals the revision the run was derived from
+   * (`expectedSourceRevision`). If a newer submission landed while the STT/LLM
+   * calls were in flight, the row's source_revision has already advanced and this
+   * write matches 0 rows — the stale result is discarded instead of overwriting the
+   * newer submission's data (and its enqueue of matching is skipped by the caller).
+   * `IS` (not `=`) so a NULL expected/stored revision compares correctly on legacy
+   * rows. Returns true iff the row was updated.
+   */
+  commitAiProfile(row: {
+    coordinate: string;
+    pubkey: string;
+    aiProfileJson: string;
+    profileHash: string;
+    aiSourceRevision: string | null;
+    transcriptsJson: string;
+    expectedSourceRevision: string | null;
+    now: number;
+  }): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE attendees SET
+           ai_profile_json = :aiProfileJson,
+           profile_hash = :profileHash,
+           ai_source_revision = :aiSourceRevision,
+           transcripts_json = :transcriptsJson,
+           updated_at = :now
+         WHERE coordinate = :coordinate AND pubkey = :pubkey
+           AND source_revision IS :expectedSourceRevision`,
+      )
+      .run({
+        coordinate: row.coordinate,
+        pubkey: row.pubkey,
+        aiProfileJson: row.aiProfileJson,
+        profileHash: row.profileHash,
+        aiSourceRevision: row.aiSourceRevision,
+        transcriptsJson: row.transcriptsJson,
+        expectedSourceRevision: row.expectedSourceRevision,
+        now: row.now,
+      });
+    return Number(info.changes) > 0;
+  }
+
   approvedAttendees(coordinate: string): {
     pubkey: string;
     role: string;
@@ -1004,10 +1514,41 @@ export class Store {
       .prepare("SELECT text, lang FROM transcripts WHERE blob_sha256 = ?")
       .get(blobSha256) as { text: string; lang: string | null } | undefined;
   }
-  putTranscript(blobSha256: string, text: string, now: number, lang?: string): void {
+  /**
+   * Cache a transcript keyed by its content-addressed blob hash (dedupe), and — when
+   * an `owner` is given — record an ownership reference (audit C5). The transcript
+   * PAYLOAD is deduplicated across events; the `transcript_refs` rows record WHICH
+   * (event, attendee) depend on it, so a reference-counted purge can drop one
+   * subject's data without deleting a payload another event still references.
+   */
+  putTranscript(
+    blobSha256: string,
+    text: string,
+    now: number,
+    lang?: string,
+    owner?: { coordinate: string; pubkey: string },
+  ): void {
     this.db
       .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
       .run(blobSha256, text, lang ?? null, now);
+    if (owner) {
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO transcript_refs (blob_sha256, coordinate, pubkey, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(blobSha256, owner.coordinate, owner.pubkey, now);
+    }
+  }
+
+  /** Record an ownership reference to a content-addressed transcript (audit C5)
+   *  without rewriting the payload — used by the pipeline once a blob is transcribed
+   *  (or injected) so a purge can reference-count it. Idempotent. */
+  recordTranscriptRef(blobSha256: string, coordinate: string, pubkey: string, now: number): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO transcript_refs (blob_sha256, coordinate, pubkey, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(blobSha256, coordinate, pubkey, now);
   }
 
   // ── nostr summaries (cache by pubkey + inputs hash) ───────────────────────
@@ -1017,12 +1558,27 @@ export class Store {
       .get(pubkey, inputsHash) as { summary: string } | undefined;
     return row?.summary;
   }
-  putSummary(pubkey: string, inputsHash: string, summary: string, now: number): void {
+  putSummary(
+    pubkey: string,
+    inputsHash: string,
+    summary: string,
+    now: number,
+    owner?: { coordinate: string },
+  ): void {
     this.db
       .prepare(
         "INSERT OR REPLACE INTO nostr_summaries (pubkey, inputs_hash, summary, created_at) VALUES (?, ?, ?, ?)",
       )
       .run(pubkey, inputsHash, summary, now);
+    // Record which event references this per-account summary (audit C5) so a purge
+    // deletes it only when no OTHER event still references the same (pubkey, inputs).
+    if (owner) {
+      this.db
+        .prepare(
+          "INSERT OR IGNORE INTO summary_refs (pubkey, inputs_hash, coordinate, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .run(pubkey, inputsHash, owner.coordinate, now);
+    }
   }
 
   // ── talks (spec F2) ───────────────────────────────────────────────────────
@@ -1039,10 +1595,16 @@ export class Store {
     title: string;
     description: string;
     speakersJson: string;
+    /** kind:"talk" descriptor JSON, or the JSON literal 'null' for external talks. */
     mediaJson: string;
+    externalUrl?: string | null;
+    externalKind?: string | null;
+    sourceType?: string | null;
+    processForMatching?: boolean;
     lang: string;
     revision: number;
-    /** New media sha256 (x); when it differs from the stored one the transcript is dropped. */
+    /** Content fingerprint (media sha256 x, or the external URL); when it differs from
+     *  the stored one the transcript is dropped (a re-recorded/replaced talk). */
     mediaX: string;
     now: number;
   }): boolean {
@@ -1078,13 +1640,17 @@ export class Store {
     }
     this.db
       .prepare(
-        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, transcript_json, lang, revision, content_hash, status, published_at, updated_at)
-         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :transcriptJson, :lang, :revision, :contentHash, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
+        `INSERT INTO talks (coordinate, pubkey, talk_d, title, description, speakers_json, media_json, external_url, external_kind, source_type, process_for_matching, transcript_json, lang, revision, content_hash, status, published_at, updated_at)
+         VALUES (:coordinate, :pubkey, :talkD, :title, :description, :speakersJson, :mediaJson, :externalUrl, :externalKind, :sourceType, :processForMatching, :transcriptJson, :lang, :revision, :contentHash, 'pending', COALESCE((SELECT published_at FROM talks WHERE coordinate = :coordinate AND pubkey = :pubkey AND talk_d = :talkD), 0), :now)
          ON CONFLICT(coordinate, pubkey, talk_d) DO UPDATE SET
            title = excluded.title,
            description = excluded.description,
            speakers_json = excluded.speakers_json,
            media_json = excluded.media_json,
+           external_url = excluded.external_url,
+           external_kind = excluded.external_kind,
+           source_type = excluded.source_type,
+           process_for_matching = excluded.process_for_matching,
            transcript_json = excluded.transcript_json,
            lang = excluded.lang,
            revision = excluded.revision,
@@ -1100,6 +1666,10 @@ export class Store {
         description: row.description,
         speakersJson: row.speakersJson,
         mediaJson: row.mediaJson,
+        externalUrl: row.externalUrl ?? null,
+        externalKind: row.externalKind ?? null,
+        sourceType: row.sourceType ?? null,
+        processForMatching: row.processForMatching ? 1 : 0,
         transcriptJson: keepTranscript,
         lang: row.lang,
         revision: row.revision,
@@ -1359,10 +1929,10 @@ export class Store {
    * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
    */
   purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
-    // Collect every media ciphertext hash (`x`) this attendee submitted, so the
-    // corresponding STT transcript rows can be deleted. Transcripts are keyed by
-    // `descriptor.x` (see transcribe.ts). Sources: the attendee's stored profile
-    // media (`profile_json.__media`) and their talk media (`talks.media_json`).
+    // Collect every media ciphertext hash (`x`) this attendee submitted, so LEGACY
+    // transcript rows (written before ownership refs existed, audit C5) can still be
+    // attributed and dropped. Sources: the attendee's stored profile media
+    // (`profile_json.__media`) and their talk media (`talks.media_json`).
     const blobHashes = new Set<string>();
     const att = this.db
       .prepare("SELECT profile_json FROM attendees WHERE coordinate = ? AND pubkey = ?")
@@ -1388,17 +1958,195 @@ export class Store {
     }
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const delTranscript = this.db.prepare("DELETE FROM transcripts WHERE blob_sha256 = ?");
-      for (const x of blobHashes) delTranscript.run(x);
-      this.db.prepare("DELETE FROM talks WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
-      this.db.prepare("DELETE FROM submissions WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
-      this.db.prepare("DELETE FROM nostr_summaries WHERE pubkey = ?").run(pubkey);
+      this.purgeSubjectInTxn(coordinate, pubkey, blobHashes);
       this.db.prepare("DELETE FROM attendees WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      // The withdrawing attendee's chat-device bindings are their PII (audit R12):
+      // remove them too. The command_watermark for `member:<pk>` is deliberately KEPT
+      // — it is the replay bar that stops a re-delivered old withdrawal from undoing a
+      // later reapproval (audit R2); the event is still live, so it is security state.
+      this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
       this.db.exec("ROLLBACK");
       throw e;
     }
+  }
+
+  /**
+   * Full event-wide local purge (audit C5 + R12): remove EVERY coordinator-held
+   * derived copy AND every event-scoped personal identifier for an event. Used by the
+   * retention sweep (NIP §6.2) so "delete member data after the event" actually
+   * deletes the local plaintext, not just the relay records. Idempotent.
+   *
+   * Explicit, TESTED retention table inventory (audit R12 — every event-scoped table
+   * has a documented disposition; a new table MUST be classified here):
+   *
+   *   DELETED (attendee-derived data or personal identifiers):
+   *     - attendees                          profiles / ai_profiles / corrections
+   *     - submissions, talks                 per-subject (via purgeSubjectInTxn)
+   *     - transcripts / pipeline_artifacts / nostr_summaries   reference-counted:
+   *                                          a payload another event still references
+   *                                          SURVIVES; this event's refs are dropped
+   *     - transcript_refs / artifact_refs / summary_refs       ownership rows
+   *     - pairs, job_status, usage, inbox_rate, invite_usage   derived/accounting
+   *     - command_watermarks                 subjects carry attendee pubkeys + rumor
+   *                                          ids (R12). Safe post-expiry: the event is
+   *                                          terminal and retention_expired gates every
+   *                                          future inbox rumor, so replay protection
+   *                                          no longer depends on these rows.
+   *     - jobs (ALL states incl. terminal/waiting)   payloads carry attendee pubkeys
+   *                                          (R12); cancelJobsForEvent only drops
+   *                                          pending/running, so poison/waiting rows
+   *                                          would otherwise leak identities.
+   *     - marmot_chat_keys                   attendee account/chat pubkeys + device
+   *                                          bindings (R12)
+   *     - marmot_consumed_kps                consumed key-package event ids (R12)
+   *     - marmot_groups                      the event's MLS group row (coordinate-keyed)
+   *
+   *   RETAINED (minimal security / replay state, justified — audit R12):
+   *     - install_state                      detach tombstone + install generation
+   *                                          high-water mark: a security replay bar
+   *                                          (a replayed historical grant must never
+   *                                          re-install). Carries no attendee data.
+   *     - billing_state                      the event-identity billing principal + its
+   *                                          verdict — an operator/billing decision,
+   *                                          not attendee data.
+   *     - seen_rumors                        the durable dedupe/replay ledger (global,
+   *                                          not coordinate-scoped); pruning it would
+   *                                          re-open replay windows. Holds rumor IDS
+   *                                          only, no attendee content.
+   *     - marmot_kv                          the coordinator's OWN MLS key material /
+   *                                          group secrets, namespaced by group handle
+   *                                          not by coordinate. Not attendee PII; a
+   *                                          clean coordinate-scoped delete isn't
+   *                                          available here (see handoff).
+   */
+  purgeEventArtifacts(coordinate: string): void {
+    const pubkeys = (
+      this.db.prepare("SELECT DISTINCT pubkey FROM attendees WHERE coordinate = ?").all(coordinate) as {
+        pubkey: string;
+      }[]
+    ).map((r) => r.pubkey);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const pubkey of pubkeys) {
+        const blobHashes = new Set<string>();
+        const att = this.db
+          .prepare("SELECT profile_json FROM attendees WHERE coordinate = ? AND pubkey = ?")
+          .get(coordinate, pubkey) as { profile_json: string | null } | undefined;
+        if (att?.profile_json) {
+          try {
+            const media = (JSON.parse(att.profile_json) as { __media?: { x?: string }[] }).__media ?? [];
+            for (const m of media) if (typeof m.x === "string") blobHashes.add(m.x);
+          } catch {
+            /* malformed */
+          }
+        }
+        const talkRows = this.db
+          .prepare("SELECT media_json FROM talks WHERE coordinate = ? AND pubkey = ?")
+          .all(coordinate, pubkey) as { media_json: string }[];
+        for (const t of talkRows) {
+          try {
+            const x = (JSON.parse(t.media_json) as { x?: string }).x;
+            if (typeof x === "string") blobHashes.add(x);
+          } catch {
+            /* ignore */
+          }
+        }
+        this.purgeSubjectInTxn(coordinate, pubkey, blobHashes);
+      }
+      // Event-scoped derived + accounting tables (see the inventory above). Billing/
+      // install-generation state is deliberately retained (a detach/re-install
+      // decision, not attendee data).
+      this.db.prepare("DELETE FROM attendees WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM job_status WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM usage WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM inbox_rate WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM invite_usage WHERE coordinate = ?").run(coordinate);
+      // Personal identifiers the pre-R12 purge missed:
+      this.db.prepare("DELETE FROM command_watermarks WHERE coordinate = ?").run(coordinate);
+      // ALL job states (terminal/waiting too) — payloads carry attendee pubkeys.
+      this.db
+        .prepare("DELETE FROM jobs WHERE json_extract(payload, '$.coordinate') = ?")
+        .run(coordinate);
+      this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM marmot_consumed_kps WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM marmot_groups WHERE coordinate = ?").run(coordinate);
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+  }
+
+  /**
+   * Reference-counted deletion of one subject's (coordinate, pubkey) derived
+   * artifacts, WITHIN an already-open transaction (audit C5). Deletes the subject's
+   * talks, submissions, and ownership-ref rows, then drops each content-addressed
+   * payload (transcript / pipeline artifact / nostr summary) only when NO ownership
+   * reference to it remains — so a payload another event still references survives.
+   * `legacyBlobs` are media hashes attributed to the subject from their stored
+   * profile/talk media, covering transcripts written before refs existed.
+   */
+  private purgeSubjectInTxn(coordinate: string, pubkey: string, legacyBlobs: Set<string>): void {
+    // ── transcripts ──
+    const ownedBlobs = new Set<string>(legacyBlobs);
+    for (const r of this.db
+      .prepare("SELECT blob_sha256 FROM transcript_refs WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { blob_sha256: string }[]) {
+      ownedBlobs.add(r.blob_sha256);
+    }
+    this.db.prepare("DELETE FROM transcript_refs WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+    const transcriptRefCount = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM transcript_refs WHERE blob_sha256 = ?",
+    );
+    const delTranscript = this.db.prepare("DELETE FROM transcripts WHERE blob_sha256 = ?");
+    for (const x of ownedBlobs) {
+      if ((transcriptRefCount.get(x) as { n: number }).n === 0) delTranscript.run(x);
+    }
+    // ── pipeline artifacts ──
+    const ownedArtifacts = this.db
+      .prepare("SELECT stage, inputs_hash FROM artifact_refs WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { stage: string; inputs_hash: string }[];
+    this.db.prepare("DELETE FROM artifact_refs WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+    const artifactRefCount = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM artifact_refs WHERE stage = ? AND inputs_hash = ?",
+    );
+    const delArtifact = this.db.prepare("DELETE FROM pipeline_artifacts WHERE stage = ? AND inputs_hash = ?");
+    for (const a of ownedArtifacts) {
+      if ((artifactRefCount.get(a.stage, a.inputs_hash) as { n: number }).n === 0) {
+        delArtifact.run(a.stage, a.inputs_hash);
+      }
+    }
+    // ── nostr summaries (per-account, keyed by pubkey + inputs_hash) ──
+    // Delete only this event's ref, then drop the payload when no other event
+    // references it — fixing the pre-C5 global-by-pubkey deletion that damaged other
+    // events. Legacy summaries (no ref rows) are dropped for this pubkey.
+    const ownedSummaries = this.db
+      .prepare("SELECT inputs_hash FROM summary_refs WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { inputs_hash: string }[];
+    this.db.prepare("DELETE FROM summary_refs WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+    const summaryRefCount = this.db.prepare(
+      "SELECT COUNT(*) AS n FROM summary_refs WHERE pubkey = ? AND inputs_hash = ?",
+    );
+    const delSummary = this.db.prepare("DELETE FROM nostr_summaries WHERE pubkey = ? AND inputs_hash = ?");
+    for (const s of ownedSummaries) {
+      if ((summaryRefCount.get(pubkey, s.inputs_hash) as { n: number }).n === 0) {
+        delSummary.run(pubkey, s.inputs_hash);
+      }
+    }
+    // Legacy summaries with no surviving ref anywhere: drop this pubkey's rows that
+    // are referenced by NO event at all.
+    this.db
+      .prepare(
+        `DELETE FROM nostr_summaries WHERE pubkey = ? AND inputs_hash NOT IN
+           (SELECT inputs_hash FROM summary_refs WHERE pubkey = ?)`,
+      )
+      .run(pubkey, pubkey);
+    // ── the subject's own rows ──
+    this.db.prepare("DELETE FROM talks WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+    this.db.prepare("DELETE FROM submissions WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
   }
 
   pairsFor(coordinate: string, pubkey: string): {
@@ -1472,13 +2220,68 @@ export class Store {
   }
 
   // ── jobs ──────────────────────────────────────────────────────────────────
-  /** Enqueue a job (idempotent on dedupe_key: a duplicate is silently ignored). */
-  enqueueJob(type: string, dedupeKey: string, payload: unknown): void {
-    this.db
+  /**
+   * Enqueue a job. Idempotent on `dedupe_key` (UNIQUE): a duplicate does not
+   * create a second row — that is what keeps a re-delivered rumor or a restart
+   * mid-pipeline from paying twice.
+   *
+   * It RETURNS what happened, because "silently ignored" was too silent. Terminal
+   * rows (`done`/`poison`) are kept for 30 days, so an enqueue that collides with
+   * one is discarded permanently and invisibly. That is exactly how an organizer
+   * recompute could wipe the cached pair scores (`clearPairs`) and then enqueue
+   * scoring work whose dedupe keys matched the previous run's finished rows: the
+   * batches were logged as dispatched, no row was created, nothing ever ran, and
+   * not one line said so (production incident 2026-07-24).
+   */
+  enqueueJob(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
+    const info = this.db
       .prepare(
         "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', 0)",
       )
       .run(type, dedupeKey, JSON.stringify(payload));
+    if (Number(info.changes) > 0) return "enqueued";
+    const row = this.db.prepare("SELECT state FROM jobs WHERE dedupe_key = ?").get(dedupeKey) as
+      | { state: JobState }
+      | undefined;
+    // No row despite the ignore (deleted between statements) — report it as queued;
+    // the caller's next enqueue of the same key will insert normally.
+    return row?.state ?? "enqueued";
+  }
+
+  /**
+   * Drop the TERMINAL (`done`/`poison`) matching-stage job rows for one event, so
+   * their content-addressed dedupe keys stop suppressing a re-enqueue of the same
+   * work. Called on the organizer `recompute` path next to `clearPairs`: that
+   * command means "forget the cached results and redo them", which has to include
+   * the job queue's memory of having already done them, or the recompute deletes
+   * every score and re-creates none (production incident 2026-07-24).
+   *
+   * Deliberately narrow. Only matching-stage rows, and only terminal ones —
+   * `pending`/`running`/`waiting` rows are live work that must keep coalescing, and
+   * `process_attendee` is left alone so a recompute never re-runs STT.
+   */
+  clearMatchJobMemo(coordinate: string): number {
+    const placeholders = MATCH_JOB_TYPES.map(() => "?").join(",");
+    const info = this.db
+      .prepare(
+        `DELETE FROM jobs
+           WHERE state IN ('done','poison')
+             AND type IN (${placeholders})
+             AND json_extract(payload, '$.coordinate') = ?`,
+      )
+      .run(...MATCH_JOB_TYPES, coordinate);
+    return Number(info.changes);
+  }
+
+  /** Row count per job state (queue-depth reporting). Absent states are omitted. */
+  jobStateCounts(): Partial<Record<JobState, number>> {
+    const rows = this.db.prepare("SELECT state, COUNT(*) AS c FROM jobs GROUP BY state").all() as {
+      state: JobState;
+      c: number;
+    }[];
+    const out: Partial<Record<JobState, number>> = {};
+    for (const r of rows) out[r.state] = Number(r.c);
+    return out;
   }
 
   /**
@@ -1820,12 +2623,56 @@ export class Store {
     model: string;
     output: unknown;
     now: number;
+    /** Ownership reference for reference-counted deletion (audit C5). */
+    owner?: { coordinate: string; pubkey: string };
   }): void {
     this.db
       .prepare(
         "INSERT OR IGNORE INTO pipeline_artifacts (stage, inputs_hash, provider, model, output_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       )
       .run(row.stage, row.inputsHash, row.provider, row.model, this.protect(JSON.stringify(row.output)), row.now);
+    if (row.owner) {
+      this.recordArtifactRef(row.stage, row.inputsHash, row.owner, row.now);
+    }
+  }
+
+  /**
+   * Record an ownership reference to a content-addressed pipeline artifact WITHOUT
+   * rewriting its payload (audit R11). Called on every USE of an artifact — both a
+   * fresh generation (via {@link putArtifact}) and a CACHE HIT, so a second event
+   * that reuses a shared artifact actually becomes an owner and the ref count is
+   * correct at purge time. Also clears any legacy quarantine flag: an artifact that
+   * now has a live owner must not be GC'd as an orphan. Idempotent.
+   */
+  recordArtifactRef(
+    stage: string,
+    inputsHash: string,
+    owner: { coordinate: string; pubkey: string },
+    now: number,
+  ): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO artifact_refs (stage, inputs_hash, coordinate, pubkey, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(stage, inputsHash, owner.coordinate, owner.pubkey, now);
+    this.db
+      .prepare("UPDATE pipeline_artifacts SET quarantined_at = NULL WHERE stage = ? AND inputs_hash = ?")
+      .run(stage, inputsHash);
+  }
+
+  /**
+   * Record an ownership reference to a per-account nostr summary on a CACHE HIT
+   * (audit R11) — the miss path already records it via {@link putSummary}. Without
+   * this a second event reusing a cached summary never becomes an owner, so a purge
+   * could delete a summary another event still uses (or leave it unattributed).
+   * Idempotent; does not rewrite the summary payload.
+   */
+  recordSummaryRef(pubkey: string, inputsHash: string, coordinate: string, now: number): void {
+    this.db
+      .prepare(
+        "INSERT OR IGNORE INTO summary_refs (pubkey, inputs_hash, coordinate, created_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(pubkey, inputsHash, coordinate, now);
   }
 
   // ── organizer-visible job status (audit Q12) ──────────────────────────────
@@ -1889,7 +2736,36 @@ export class Store {
   pruneOldData(now: number, maxAgeMs = 30 * 24 * 60 * 60 * 1000): number {
     const cutoff = now - maxAgeMs;
     const kps = this.db.prepare("DELETE FROM marmot_consumed_kps WHERE created_at < ?").run(cutoff);
-    return Number(kps.changes);
+    // Legacy artifact GC (audit R11): drop artifacts the v4 migration quarantined
+    // (no ownership ref) that are STILL unreferenced after the grace window — a live
+    // event would have re-touched (and un-quarantined) them via a cache hit by now.
+    // Bounds unbounded pre-v2 artifact growth and expires attendee-derived text that
+    // no current event owns.
+    const legacy = this.db
+      .prepare(
+        `DELETE FROM pipeline_artifacts
+           WHERE quarantined_at IS NOT NULL AND quarantined_at < ?
+             AND NOT EXISTS (
+               SELECT 1 FROM artifact_refs r
+               WHERE r.stage = pipeline_artifacts.stage AND r.inputs_hash = pipeline_artifacts.inputs_hash
+             )`,
+      )
+      .run(cutoff);
+    // Expire dead inbox rate buckets (audit R4): a (coordinate, sender) row whose last
+    // window is long past is only kept alive by having been touched; dropping stale
+    // ones bounds the table against a distinct-sender flood. Windows are 60s, so a
+    // one-hour retention is generous — a currently-relevant bucket is far newer.
+    const rate = this.db
+      .prepare("DELETE FROM inbox_rate WHERE window_start < ?")
+      .run(now - 60 * 60 * 1000);
+    // Expire terminal job rows (audit R4): 'done'/'poison' jobs are kept only briefly
+    // (debugging/idempotency) then GC'd, so the queue table can't grow without bound.
+    // Re-running a long-past job is safe — its inputs are content-addressed (cached,
+    // no re-bill) and its rumor is already in the seen ledger.
+    const jobs = this.db
+      .prepare("DELETE FROM jobs WHERE state IN ('done', 'poison') AND COALESCE(claimed_at, 0) < ?")
+      .run(cutoff);
+    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────

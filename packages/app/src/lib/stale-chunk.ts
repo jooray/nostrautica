@@ -9,8 +9,17 @@
  * Latch is a timestamp in sessionStorage: refuse another reload within
  * COOLDOWN_MS of the last one. A healthy tab past the cooldown can recover
  * again on a later deploy.
+ *
+ * R8: the recovery reload is routed through `refreshGuard` — the SAME guard that
+ * protects a completed recording / selected file / unsaved draft from the
+ * automatic service-worker reload. A stale-chunk reload is just as destructive
+ * to in-memory media, so it must DEFER while unsaved work is held and apply only
+ * once it clears. The cooldown latch is set when the guarded reload actually
+ * RUNS (not when it's merely requested), so a reload deferred behind unsaved work
+ * doesn't burn the cooldown window before it ever happens.
  */
 import { isStaleChunkError } from "$lib/nostr/errors.js";
+import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
 const LATCH_KEY = "nostrautica:stale-chunk-reload";
 /** Refuse a second auto-reload inside this window (guards broken deploys). */
@@ -37,17 +46,27 @@ function markReloaded(): void {
 
 /**
  * If `reason` looks like a missing post-deploy chunk (or is omitted — used by
- * the vite:preloadError path which already means that), reload once per
- * cooldown window. Returns true when a reload was triggered so callers can
- * skip rendering a dead-end error surface.
+ * the vite:preloadError path which already means that), request a guarded reload
+ * once per cooldown window. Returns true when recovery was requested so callers
+ * can skip rendering a dead-end error surface.
+ *
+ * The reload goes through `refreshGuard`: it fires immediately when no unsaved
+ * work is held, or defers until the last dirty holder (a completed recording, a
+ * selected file, an unsaved form) clears — then the cooldown latch is stamped as
+ * it runs. Deferral means a completed take is never destroyed by a stale-chunk
+ * reload the way `window.location.reload()` used to (R8).
  */
 export function recoverFromStaleChunk(reason?: unknown): boolean {
   if (typeof window === "undefined") return false;
   if (reason !== undefined && !isStaleChunkError(reason)) return false;
   const last = lastReloadAt();
   if (last && Date.now() - last < COOLDOWN_MS) return false;
-  markReloaded();
-  window.location.reload();
+  refreshGuard.requestRefresh(() => {
+    // Latch only when the reload ACTUALLY runs (possibly after unsaved work
+    // clears), so a deferred reload doesn't spend the cooldown before it happens.
+    markReloaded();
+    window.location.reload();
+  });
   return true;
 }
 

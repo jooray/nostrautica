@@ -10,6 +10,8 @@
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
+  import { countQueuedForOwner } from "$lib/nostr/publish-queue.js";
 
   const clients = [
     { name: "Primal", url: "https://primal.net" },
@@ -24,9 +26,28 @@
   let copied = $state(false);
   async function copyNpub() {
     if (!session.npub) return;
-    await navigator.clipboard.writeText(session.npub);
-    copied = true;
-    setTimeout(() => (copied = false), 1500);
+    // U15: centralized copy with fallback; npub is public + shown on screen.
+    if ((await copyText(session.npub)) === "copied") {
+      copied = true;
+      setTimeout(() => (copied = false), 1500);
+    }
+  }
+
+  // Logout with an unsent-actions guard (audit U1). Logging out DISCARDS this
+  // account's still-queued outbox items (a shared-device safety measure), so warn
+  // first when any exist — otherwise a queued join/DM/follow would vanish silently.
+  let confirmingLogout = $state(false);
+  let unsentCount = $state(0);
+  async function requestLogout() {
+    unsentCount = session.pubkey
+      ? await countQueuedForOwner(session.pubkey).catch(() => 0)
+      : 0;
+    if (unsentCount > 0) confirmingLogout = true;
+    else void session.logout();
+  }
+  function confirmLogout() {
+    confirmingLogout = false;
+    void session.logout();
   }
 </script>
 
@@ -83,6 +104,14 @@
   {/if}
 
   <div class="card">
-    <button class="btn danger" onclick={() => session.logout()}>{t("me.logout")}</button>
+    {#if confirmingLogout}
+      <p role="alert">{t("me.logout.warnUnsent", { n: unsentCount })}</p>
+      <div class="row" style="gap:0.5rem;flex-wrap:wrap">
+        <button class="btn danger" onclick={confirmLogout}>{t("me.logout.confirmDiscard")}</button>
+        <button class="btn" onclick={() => (confirmingLogout = false)}>{t("me.logout.cancel")}</button>
+      </div>
+    {:else}
+      <button class="btn danger" onclick={requestLogout}>{t("me.logout")}</button>
+    {/if}
   </div>
 {/if}

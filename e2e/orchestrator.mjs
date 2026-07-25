@@ -30,6 +30,8 @@ import { createConnection } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { WebSocket } from "ws";
+import { getPublicKey } from "nostr-tools/pure";
+import { npubEncode } from "nostr-tools/nip19";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
@@ -54,11 +56,37 @@ const NEEDS = {
   chat: { relay: true, blossom: true, coordinator: true },
   full: { relay: true, blossom: true, coordinator: true },
 }[tier];
+// Chat specs (tests/chat) run ONLY on the coordinator tiers — they need the Marmot
+// admin bot the smoke/integration tiers never start (audit O8). The chat suite is a
+// distinct spec dir, not the same smoke/integration specs the old chat tier re-ran.
 const SPEC_DIRS =
-  tier === "smoke" ? ["tests/smoke"] : ["tests/smoke", "tests/integration"];
+  tier === "smoke"
+    ? ["tests/smoke"]
+    : NEEDS.coordinator
+      ? ["tests/smoke", "tests/integration", "tests/chat"]
+      : ["tests/smoke", "tests/integration"];
 
-const PORTS = { preview: 4173, relay: 7777, blossom: 3000, proxy: 8443 };
+// Browser engines per tier (audit U18). Only the smoke tier is multi-engine —
+// Firefox/WebKit are smoke-only projects (playwright.config.ts) so they never run
+// the relay/coordinator tiers. The relay-bound tiers stay Chromium-only (its fake
+// camera + local-network flags are what the record/join specs were written against).
+const PROJECTS = tier === "smoke" ? ["chromium", "firefox", "webkit"] : ["chromium"];
+const projectArgs = PROJECTS.flatMap((p) => ["--project", p]);
+
+const PORTS = { preview: 4173, relay: 7777, blossom: 3000, proxy: 8443, wssRelay: 7778 };
 const TLS_DIR = "/tmp/nostrautica-tls";
+// The coordinator tiers need a `wss://` relay: the protocol keeps only wss relay
+// tags in the 31600 config (SSRF hardening), and Marmot chat publishes its key
+// package to `ctx.config.relays` ONLY. So chat/full front the nak relay with a
+// self-signed wss proxy and point the app's config relays at it. Integration stays
+// on plain ws (it never touches config-relay-only features like chat).
+const WSS_RELAY = NEEDS.coordinator;
+const RELAY_URL_FOR_APP = WSS_RELAY ? `wss://localhost:${PORTS.wssRelay}` : `ws://127.0.0.1:${PORTS.relay}`;
+// A FIXED coordinator identity for the chat/full tiers so the specs know the npub to
+// attach without scraping the double's stdout. Any 32-byte scalar < curve order works;
+// this is a throwaway test key, never used off localhost.
+const COORD_SK_HEX = "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a";
+const COORD_NPUB = npubEncode(getPublicKey(Buffer.from(COORD_SK_HEX, "hex")));
 
 /** Children we started, torn down in reverse on exit. */
 const children = [];
@@ -213,7 +241,8 @@ function httpOk(url, { https = false } = {}) {
 
 function wsOpen(url) {
   return new Promise((res) => {
-    const ws = new WebSocket(url);
+    // Accept the wss proxy's self-signed cert (dev-only).
+    const ws = new WebSocket(url, url.startsWith("wss:") ? { rejectUnauthorized: false } : undefined);
     const t = setTimeout(() => {
       ws.terminate();
       res(false);
@@ -248,7 +277,9 @@ function build() {
   // never touches public infrastructure. Only the relay tiers need it; the smoke
   // build talks to nothing.
   if (NEEDS.relay) {
-    env.VITE_NOSTRAUTICA_RELAYS = `ws://127.0.0.1:${PORTS.relay}`;
+    // On coordinator tiers this is the wss proxy (config-relay chat needs wss); on
+    // integration it's the plain ws relay.
+    env.VITE_NOSTRAUTICA_RELAYS = RELAY_URL_FOR_APP;
     env.VITE_NOSTRAUTICA_BLOSSOM = `https://localhost:${PORTS.proxy}`;
   }
   log(`building the app (BASE_PATH unset${NEEDS.relay ? ", relay/blossom → local" : ""})…`);
@@ -310,6 +341,12 @@ function startProxy() {
   });
 }
 
+function startWssRelayProxy() {
+  spawnTracked("wss-relay-proxy", "node", [resolve(HERE, "local-infra/wss-relay-proxy.mjs")], {
+    env: { ...process.env, PROXY_LISTEN_PORT: String(PORTS.wssRelay), BACKEND_PORT: String(PORTS.relay), TLS_DIR },
+  });
+}
+
 function startCoordinator() {
   const db = `/tmp/nostrautica-e2e-coord-${tier}.sqlite`;
   // Wipe any prior run's DB so the double starts clean.
@@ -320,8 +357,23 @@ function startCoordinator() {
       /* ignore */
     }
   }
-  const script = tier === "chat" ? "local-infra/mock-coordinator-chat.mjs" : "local-infra/mock-coordinator.mjs";
-  const env = { ...process.env, NOSTRAUTICA_COORDINATOR_DB: db, MOCK_RELAY: `ws://localhost:${PORTS.relay}` };
+  // Both coordinator tiers use the chat double: it wires the REAL Marmot admin bot
+  // AND implements every matching schema (ai_profile/pair/batch), so it's a superset
+  // of the matching-only double. tests/chat runs on chat AND full, and needs MLS on
+  // both — the matching-only mock-coordinator.mjs would leave every chat scenario
+  // hung on "Setting up your secure chat…". (mock-coordinator.mjs is kept for manual
+  // matching-only screenshot runs.)
+  const script = "local-infra/mock-coordinator-chat.mjs";
+  const env = {
+    ...process.env,
+    NOSTRAUTICA_COORDINATOR_DB: db,
+    // The coordinator reads relays from the event config (wss proxy on these tiers),
+    // so it must connect there too — and accept the proxy's self-signed cert. Its
+    // MOCK_RELAY default also points at the same wss origin.
+    MOCK_RELAY: RELAY_URL_FOR_APP,
+    MOCK_COORD_SK: COORD_SK_HEX,
+    NODE_TLS_REJECT_UNAUTHORIZED: "0",
+  };
   spawnTracked("coordinator", "node", [resolve(HERE, script)], { env });
 }
 
@@ -337,6 +389,10 @@ async function main() {
   // Playwright run below starts `vite preview` with PUBLIC_CSP_EXTRA_CONNECT set
   // at run time (gotcha #1). The orchestrator owns only the non-preview infra.
   if (NEEDS.relay) await ensureComponent("relay", () => wsOpen(`ws://127.0.0.1:${PORTS.relay}`), startRelay);
+  if (WSS_RELAY) {
+    ensureTlsCert();
+    await ensureComponent("wss-relay-proxy", () => wsOpen(`wss://127.0.0.1:${PORTS.wssRelay}`), startWssRelayProxy);
+  }
   if (NEEDS.blossom) {
     ensureTlsCert();
     await ensureComponent("blossom", () => tcpOpen(PORTS.blossom), startBlossom);
@@ -347,6 +403,7 @@ async function main() {
   // LOUD setup failure — never a silent skip (audit D-11).
   if (anyChildDied()) return;
   if (NEEDS.relay) await pollUntil("relay", () => wsOpen(`ws://127.0.0.1:${PORTS.relay}`));
+  if (WSS_RELAY) await pollUntil("wss relay proxy", () => wsOpen(`wss://127.0.0.1:${PORTS.wssRelay}`));
   if (NEEDS.blossom) {
     await pollUntil("blossom", () => tcpOpen(PORTS.blossom));
     await pollUntil("blossom https proxy", () => httpOk(`https://127.0.0.1:${PORTS.proxy}/`, { https: true }));
@@ -371,9 +428,12 @@ async function main() {
     NOSTRAUTICA_E2E_RELAY: `ws://127.0.0.1:${PORTS.relay}`,
     NOSTRAUTICA_URL: `http://127.0.0.1:${PORTS.preview}`,
     BLOSSOM_PUBLIC_BASE_URL: `https://localhost:${PORTS.proxy}`,
+    // The chat specs (tests/chat) attach THIS coordinator by npub; unset on tiers
+    // without a coordinator, so those specs self-skip loudly-safely.
+    ...(NEEDS.coordinator ? { NOSTRAUTICA_E2E_COORDINATOR_NPUB: COORD_NPUB } : {}),
   };
   // Tracked so a SIGINT to the orchestrator also tears down the Playwright group.
-  const pw = spawnTracked("playwright", "pnpm", ["exec", "playwright", "test", ...SPEC_DIRS, ...playwrightArgs], {
+  const pw = spawnTracked("playwright", "pnpm", ["exec", "playwright", "test", ...SPEC_DIRS, ...projectArgs, ...playwrightArgs], {
     cwd: HERE,
     env,
     stdio: "inherit",

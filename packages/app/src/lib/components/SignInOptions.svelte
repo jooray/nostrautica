@@ -11,6 +11,7 @@
   } from "$lib/signer/nip46.js";
   import { NIP46_RELAYS } from "$lib/nostr/relays.js";
   import QrCode from "$lib/components/QrCode.svelte";
+  import { copyText } from "$lib/util/clipboard.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { onMount } from "svelte";
 
@@ -73,11 +74,18 @@
     startNostrConnect();
   }
 
+  let copyFailed = $state(false);
   async function copyUri() {
     if (!nc) return;
-    await navigator.clipboard.writeText(nc.uri);
-    copiedUri = true;
-    setTimeout(() => (copiedUri = false), 1500);
+    // U15: truthful copy — on failure the URI stays visible below to select.
+    if ((await copyText(nc.uri)) === "copied") {
+      copyFailed = false;
+      copiedUri = true;
+      setTimeout(() => (copiedUri = false), 1500);
+    } else {
+      copyFailed = true;
+      setTimeout(() => (copyFailed = false), 4000);
+    }
   }
 
   const looksLikeBunker = $derived(pasteKey.trim().startsWith("bunker://"));
@@ -209,6 +217,9 @@
           {copiedUri ? t("signin.remote.copied") : t("signin.remote.copy")}
         </button>
       </div>
+      {#if copyFailed}
+        <p class="muted" role="status" style="margin:0.25rem 0 0">{t("common.copyFailed")}</p>
+      {/if}
       <p class="muted" style="margin-top:0.5rem">{t("signin.remote.waiting")}</p>
       {#if ncHint}
         <p class="muted" style="margin-top:0.25rem">{t("signin.remote.staleHint")}</p>

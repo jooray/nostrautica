@@ -1,6 +1,6 @@
 {
   "name": "@nostrautica/app",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "description": "Nostrautica PWA — static SvelteKit client (relays + Blossom only).",
   "license": "MIT",
   "type": "module",
@@ -8,7 +8,7 @@
     "dev": "vite dev",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "typecheck": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings",
     "test": "vitest run",
     "lint": "eslint src"
   },
@@ -29,6 +29,7 @@
     "qrcode": "^1.5.4",
     "svelte": "^5.16.0",
     "svelte-check": "^4.1.1",
+    "ts-mls": "workspace:*",
     "typescript": "^5.7.2",
     "vite": "^7.0.0",
     "@vite-pwa/sveltekit": "^1.0.0",

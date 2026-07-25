@@ -57,12 +57,32 @@ describe("EventDeduper", () => {
     }
   });
 
-  it("keeps the first arrival on an equal created_at", () => {
+  it("converges on the lexicographically lowest id on an equal created_at, in either arrival order (audit P2)", () => {
+    // §3.1 tie-break: equal created_at → the LOWER id ("a") is current, whichever
+    // relay delivered first. Relay arrival order is non-deterministic, so the two
+    // orders must produce the same snapshot or clients disagree about the winner.
+    for (const order of [
+      ["a", "b"],
+      ["b", "a"],
+    ]) {
+      const d = new EventDeduper();
+      const lo = ev({ id: "a", kind: 31600, pubkey: "a", tags: [["d", "x"]], created_at: 100 });
+      const hi = ev({ id: "b", kind: 31600, pubkey: "a", tags: [["d", "x"]], created_at: 100 });
+      const first = order[0] === "a" ? lo : hi;
+      const second = order[0] === "a" ? hi : lo;
+      // The first arrival is always surfaced; the lower id ("a") arriving second
+      // must still supersede and displace the higher id it found.
+      expect(d.accept(first)).toBe(true);
+      expect(d.accept(second)).toBe(order[0] === "b"); // "a" second replaces "b"; "b" second loses
+      expect(d.snapshot()).toEqual([lo]);
+    }
+  });
+
+  it("rejects an exact re-delivery of the current replaceable event (same id)", () => {
     const d = new EventDeduper();
     const a = ev({ id: "a", kind: 31600, pubkey: "a", tags: [["d", "x"]], created_at: 100 });
-    const b = ev({ id: "b", kind: 31600, pubkey: "a", tags: [["d", "x"]], created_at: 100 });
     expect(d.accept(a)).toBe(true);
-    expect(d.accept(b)).toBe(false);
+    expect(d.accept({ ...a })).toBe(false); // same id, seen already
     expect(d.snapshot()).toEqual([a]);
   });
 

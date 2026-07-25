@@ -6,6 +6,16 @@
     <meta name="theme-color" content="#0e0e15" />
     <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
     <!--
+      PWA manifest link (audit U6). @vite-pwa generates manifest.webmanifest into
+      the build output but does NOT inject this link, so Chromium never saw the
+      app as installable — `beforeinstallprompt` never fired and the Android
+      install path stayed hidden. `%sveltekit.assets%` resolves to the base path
+      (empty locally, "/app" in production, matching the favicon above), so this
+      is correct for both `vite preview` and the BASE_PATH=/app production build.
+      CSP already allows it (manifest-src 'self').
+    -->
+    <link rel="manifest" href="%sveltekit.assets%/manifest.webmanifest" />
+    <!--
       Anti-FOUC theme resolution (item 3 / UX-40). This runs SYNCHRONOUSLY before
       the body paints, so the very first frame already carries the user's real
       theme — a light-preferring visitor never gets the hardcoded-dark flash the
@@ -161,6 +171,11 @@
       (APPR-11/UX-5); object-src/base-uri/form-action are belt-and-braces for a
       client-side app with no plugins, no <base>, and no form posts.
 
+      frame-src is pinned to youtube-nocookie.com ONLY: a talk's video can be an
+      unlisted YouTube link (external talk source, 2026-07-24), embedded via the
+      privacy no-cookie host. No other origin may be framed — direct-mp4 external
+      talks render as a same-origin <video src=https:…> under media-src, not a frame.
+
       WARNING: PUBLIC_CSP_EXTRA_CONNECT must NEVER be set in production builds
       (APPR-11). Local e2e builds (VITE_NOSTRAUTICA_* overrides) set
       PUBLIC_CSP_EXTRA_CONNECT=" ws: http:" because plain-scheme localhost infra
@@ -169,7 +184,7 @@
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob: https:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
+      content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-src https://www.youtube-nocookie.com; img-src 'self' https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT% data: blob:; media-src 'self' blob: https:; connect-src 'self' wss: https:%sveltekit.env.PUBLIC_CSP_EXTRA_CONNECT%; worker-src 'self' blob:; manifest-src 'self'"
     />
     %sveltekit.head%
   </head>

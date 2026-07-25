@@ -4,6 +4,7 @@ import {
   installStaleChunkRecovery,
   recoverFromStaleChunk,
 } from "./stale-chunk.js";
+import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 
 describe("recoverFromStaleChunk", () => {
   const store = new Map<string, string>();
@@ -14,6 +15,7 @@ describe("recoverFromStaleChunk", () => {
     store.clear();
     reload.mockReset();
     listeners.clear();
+    refreshGuard.__resetForTests();
     vi.stubGlobal("sessionStorage", {
       getItem: (k: string) => store.get(k) ?? null,
       setItem: (k: string, v: string) => {
@@ -34,6 +36,27 @@ describe("recoverFromStaleChunk", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    refreshGuard.__resetForTests();
+  });
+
+  it("DEFERS the reload while unsaved work is held, then runs it on release (R8)", () => {
+    // A completed recording / selected file / unsaved form holds the guard dirty.
+    const release = refreshGuard.hold("record");
+    // Recovery is requested (caller skips the dead-end error), but the reload must
+    // NOT fire — that would destroy the in-memory take, exactly the old bug.
+    expect(recoverFromStaleChunk()).toBe(true);
+    expect(reload).not.toHaveBeenCalled();
+    // Cooldown latch must NOT be stamped yet — the reload hasn't actually run.
+    expect(store.has("nostrautica:stale-chunk-reload")).toBe(false);
+    // Work saved/cleared → the deferred reload applies automatically, once.
+    release();
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(store.has("nostrautica:stale-chunk-reload")).toBe(true);
+  });
+
+  it("reloads immediately when no unsaved work is held (R8)", () => {
+    expect(recoverFromStaleChunk()).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it("reloads once on a stale-chunk TypeError", () => {

@@ -7,6 +7,7 @@
   import { router } from "$lib/router/router.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -32,12 +33,11 @@
   async function copyNpub(e: MouseEvent) {
     e.stopPropagation();
     if (!session.npub) return;
-    try {
-      await navigator.clipboard.writeText(session.npub);
+    // U15: centralized copy (Clipboard API + execCommand fallback). The npub is
+    // public and shown on screen, so a failed copy needs no extra reveal.
+    if ((await copyText(session.npub)) === "copied") {
       copied = true;
       setTimeout(() => (copied = false), 1500);
-    } catch {
-      /* clipboard blocked — no-op */
     }
   }
 
@@ -89,7 +89,7 @@
 {/if}
 
 <div class="card list">
-  {#each rows as r (r.label)}
+  {#each rows as r (r.go.name)}
     <button class="rowlink" onclick={() => router.go(r.go)}>
       <span class="ico-wrap"><Icon name={r.icon} size={22} /></span>
       <span class="rlabel">{r.label}</span>

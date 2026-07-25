@@ -30,7 +30,8 @@ import {
   type MergedSection,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
@@ -112,10 +113,10 @@ export async function fetchEventPage(
 export async function publishEventPage(
   ctx: EventContext,
   model: EventPageModel,
-): Promise<void> {
+): Promise<PublishOutcome> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
-  const { identifier } = parseCoordinate(ctx.coordinate);
+  const { pubkey: eidPubkey, identifier } = parseCoordinate(ctx.coordinate);
   const menu = splitMenu(model.menu);
   const sections = splitSections(model.sections);
 
@@ -139,20 +140,25 @@ export async function publishEventPage(
   }
   tags.push(...menuToRTags(menu.publicItems));
 
-  const event = finalizeEvent(
-    {
-      kind: KIND_EVENT_PAGE,
-      created_at: Math.floor(Date.now() / 1000),
-      tags,
-      content: JSON.stringify({
-        v: 2,
-        sections: sections.publicItems,
-        ...(privateCiphertext ? { private: privateCiphertext } : {}),
-      }),
-    },
-    hexToBytes(keys.eidNsecHex),
-  );
-  await publishOrQueue(event, ctx.config.relays);
+  const content = JSON.stringify({
+    v: 2,
+    sections: sections.publicItems,
+    ...(privateCiphertext ? { private: privateCiphertext } : {}),
+  });
+  // Monotonic republish (audit P3): a same-second re-save of the page must win
+  // the §3.1 tie-break, or the editor's change silently doesn't take.
+  const { published } = await publishMonotonic({
+    kind: KIND_EVENT_PAGE,
+    author: eidPubkey,
+    identifier,
+    relays: ctx.config.relays,
+    sign: (created_at) =>
+      finalizeEvent(
+        { kind: KIND_EVENT_PAGE, created_at, tags, content },
+        hexToBytes(keys.eidNsecHex!),
+      ),
+  });
+  return toOutcome(published);
 }
 
 // ── Menu targets ─────────────────────────────────────────────────────────────

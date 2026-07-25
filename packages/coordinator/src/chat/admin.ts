@@ -118,16 +118,25 @@ export class MarmotAdmin {
 
   // ── authorized chat identities ─────────────────────────────────────────────
   /**
-   * The chat identities eligible to be added for ONE account: the account key
-   * itself (the local-key path — its own key is the MLS identity) plus every
-   * ACTIVE attested chat device key (the NIP-46/NIP-07 path, §3.2).
+   * The chat identities eligible to be added for ONE account (audit P6, maintainer
+   * decision — ATTESTED DEVICES ONLY): every ACTIVE attested chat device key bound
+   * to this account via an authenticated kind-21607 attestation (§3.2, §10.1).
+   *
+   * The attendee's ACCOUNT pubkey is NOT included. Pre-fix it was always eligible,
+   * so any kind-30443 key package signed by the account key could be added to the
+   * group WITHOUT a 21607 possession proof, a label, a roster `chat_keys` entry, or
+   * a slot in the five-device cap — bypassing v2's per-device authorization,
+   * visibility, and revocation model (and it could promote an organizer account key
+   * straight to MLS admin). Under v2, a chat identity exists only once it has a
+   * proven, roster-visible, cap-bounded device attestation. A local-key attendee
+   * simply attests its own key as a device (op:"add" with a self-proof) like any
+   * other; there is no implicit account-key path.
    */
   authorizedIdentities(coordinate: string, accountPubkey: string): string[] {
-    const chat = this.store
+    return this.store
       .chatKeysForAccount(coordinate, accountPubkey)
       .filter((k) => k.status === "active")
       .map((k) => k.chat_pubkey);
-    return [accountPubkey, ...chat];
   }
 
   /**

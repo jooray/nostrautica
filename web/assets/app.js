@@ -126,8 +126,24 @@
     if (dict[key]) btn.setAttribute("aria-label", dict[key]);
   }
 
+  // Theme-swapped screenshots are served via <picture> with a dark <source>
+  // gated on media="(prefers-color-scheme: dark)", so the browser downloads
+  // only the variant that matches the OS scheme on first paint (no eager
+  // duplicate). But that media query can't see the manual light/dark toggle,
+  // so once JS knows the resolved theme we rewrite each dark source's media to
+  // force-match ("all") or force-miss ("not all"). A second variant downloads
+  // only in the minority case where the manual choice disagrees with the OS —
+  // the common no-choice path still loads exactly one image.
+  function applyThemeToPictures(theme) {
+    var media = theme === "dark" ? "all" : "not all";
+    document.querySelectorAll("picture source.src-dark").forEach(function (s) {
+      if (s.getAttribute("media") !== media) s.setAttribute("media", media);
+    });
+  }
+
   function applyTheme(theme) {
     document.documentElement.setAttribute("data-theme", theme);
+    applyThemeToPictures(theme);
     syncThemeButtonLabel();
   }
 

@@ -26,7 +26,36 @@ import { registerSW } from "virtual:pwa-register";
 import { install } from "$lib/stores/install.svelte.js";
 import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 import { ControllerLatch } from "$lib/pwa-latch.js";
+import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route-modules.js";
+import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
+
+/**
+ * Warm the critical participant route chunks once the service worker is in
+ * control (audit U7). Lazy route chunks aren't precached — they're runtime-cached
+ * only when a controlling SW fetches them — so a participant who installs and
+ * goes offline without visiting Record/Talks would find those screens missing.
+ * Importing them here, on idle, lands their chunks in the SW runtime cache. Only
+ * runs when a controller exists (otherwise the fetch wouldn't be cached) and only
+ * once per page. Best-effort: failures (offline) are swallowed by warmRouteModules.
+ */
+let warmedRoutes = false;
+function warmCriticalRoutesWhenControlled(): void {
+  if (warmedRoutes || typeof navigator === "undefined") return;
+  if (!navigator.serviceWorker?.controller) return; // no controller → fetch wouldn't cache
+  warmedRoutes = true;
+  const run = () => {
+    // R7: warm the SHELL's entry JS/CSS first — these ride the entry chunk (not a
+    // lazy route) and are NOT precached, so without this a first-visit-then-cold-
+    // offline-launch serves the precached index.html and 404s its own scripts.
+    // Then warm the critical lazy participant routes.
+    void ensureEntryShellCached();
+    void warmRouteModules(CRITICAL_PARTICIPANT_ROUTES);
+  };
+  const ric = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
+  if (typeof ric === "function") ric(run);
+  else setTimeout(run, 3000);
+}
 
 export function registerPwa(): void {
   if (typeof window === "undefined") return;
@@ -43,7 +72,12 @@ export function registerPwa(): void {
     if (latch.shouldReload()) {
       refreshGuard.requestRefresh(() => window.location.reload());
     }
+    // A newly-acquired controller can now cache runtime fetches — warm the
+    // critical participant chunks (U7). Skipped when the change triggers a reload.
+    else warmCriticalRoutesWhenControlled();
   });
+  // Already controlled on load (returning visitor) — warm now.
+  warmCriticalRoutesWhenControlled();
 
   const updateSW = registerSW({
     immediate: true,

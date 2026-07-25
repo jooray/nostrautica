@@ -130,10 +130,23 @@ export const MAX_ICEBREAKER_LEN = 280;
  */
 function normalizeIcebreakers(raw: unknown): string[] | undefined {
   if (!Array.isArray(raw)) return undefined;
-  const out = raw
-    .filter((s): s is string => typeof s === "string" && s.trim() !== "")
-    .slice(0, MAX_ICEBREAKERS)
-    .map((s) => s.slice(0, MAX_ICEBREAKER_LEN));
+  // Deduped BEFORE the cap, so three starters two of which are identical still
+  // ship two distinct ones rather than a padded list. Clients key their render on
+  // the icebreaker STRING (Matches.svelte), and in Svelte 5 a duplicate {#each}
+  // key is a hard throw that kills the route — asking a model for three openers
+  // on one shared interest repeats itself often enough that this is a real crash
+  // vector, not a tidiness concern. Truncation is applied first: two long
+  // starters sharing a 280-char prefix become identical only after slicing.
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const s of raw) {
+    if (typeof s !== "string" || s.trim() === "") continue;
+    const clipped = s.slice(0, MAX_ICEBREAKER_LEN);
+    if (seen.has(clipped)) continue;
+    seen.add(clipped);
+    out.push(clipped);
+    if (out.length >= MAX_ICEBREAKERS) break;
+  }
   return out.length > 0 ? out : undefined;
 }
 
@@ -180,10 +193,24 @@ export const BATCH_SYSTEM_PROMPT = [
   'Example of BAD (never do this): "This pair has high complementarity because both are musicians',
   'seeking bandmates, resulting in a strong match score."',
   "",
-  "icebreakers — up to THREE short conversation starters (each ≤ 280 chars) the target can open",
-  "with when they meet this candidate. Each is a CONCRETE opening line or question grounded in both",
-  "people's actual details — never a restatement of the reasoning or an analytical remark. Return",
-  "fewer (or an empty list) when you can't ground a good one; never pad.",
+  "icebreakers — up to THREE opening MESSAGES the target can send this candidate. The app pastes the",
+  "FIRST one straight into a direct-message box addressed to this candidate, so it must be sendable",
+  "as-is, with no editing.",
+  "WHO IS WHO. This is the most important rule and it INVERTS the field above:",
+  ' • The speaker is the TARGET. "I"/"my" = the target. Everything in the TARGET ATTENDEE block —',
+  '   their book, project, company, job, skills — belongs to the target, so it is "my", NEVER "your".',
+  ' • The listener is THIS candidate. "you"/"your" = the candidate. Only details from THIS',
+  '   candidate\'s own block may be called "your".',
+  " • Never hand one person's work to the other. If the TARGET wrote a novel, do not ask the candidate",
+  '   about "your novel" — that novel is the target\'s, so it is "my novel".',
+  " • Write a message, not a briefing. Describing the two of them to a third party (\"You're a",
+  '   cypherpunk and she studies X — ask her about Y") cannot be sent to anyone; do not do it.',
+  'Example of GOOD: "Hi Sunny — I\'m putting a band together and I hear you play bass. What would you',
+  'want our first setlist to sound like?"',
+  'Example of BAD (never do this): "You\'re starting a band and Sunny plays bass — ask her about your',
+  'first setlist."',
+  "Each ≤ 280 chars, concrete, grounded in both profiles, and different from one another. Return fewer",
+  "(or an empty list) when you can't ground a good one; never pad.",
   "",
   "Return one entry per candidate, using the candidate's number as `index`. Score EVERY candidate exactly once.",
 ].join("\n");
@@ -273,6 +300,7 @@ export async function scoreBatch(
   candidates: readonly BatchCandidate[],
   rng: () => number = Math.random,
   targetName?: string,
+  signal?: AbortSignal,
 ): Promise<BatchScoreResult> {
   const scores = new Map<string, DirectedScore>();
   if (candidates.length === 0) return { scores, missing: [] };
@@ -287,6 +315,15 @@ export async function scoreBatch(
 
   const user = [
     ...eventBlock,
+    "",
+    // Ownership stated next to the blocks, not only in the system prompt: the
+    // observed failure (prod 2026-07-24) was attribute theft — the target's own
+    // novel, app and code handed back to them as the candidate's — and it happens
+    // right here, where two same-shaped profiles sit adjacent. Said on its own
+    // line so the `TARGET ATTENDEE:` / `--- CANDIDATE n ---` delimiters keep their
+    // exact shape: tests and the benchmark harness parse them.
+    "Everything under TARGET ATTENDEE belongs to the target. Everything under a CANDIDATE heading",
+    "belongs to that candidate. Never credit one person with the other's work.",
     "",
     "TARGET ATTENDEE:",
     profileText(target, targetName),
@@ -303,6 +340,7 @@ export async function scoreBatch(
     model,
     temperature: 0.3,
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
+    signal,
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
@@ -373,9 +411,24 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
   ' • ABSOLUTELY NO analytical framing: never say "this pair", "based on their profiles", "high',
   '   complementarity", "scores", "match", or explain why a rating was given. No hedging boilerplate.',
   "",
-  "icebreakers — up to THREE short conversation starters (each ≤ 280 chars) THIS target can open with",
-  "when they meet the shared person. Each is a CONCRETE opening line or question grounded in both",
-  "people's actual details — never a restatement of the reasoning. Return fewer (or none) rather than pad.",
+  "icebreakers — up to THREE opening MESSAGES THIS target can send the shared person. The app pastes",
+  "the FIRST one straight into a direct-message box addressed to the shared person, so it must be",
+  "sendable as-is, with no editing.",
+  "WHO IS WHO. This is the most important rule and it INVERTS the field above:",
+  ' • The speaker is THIS target. "I"/"my" = this target. Everything in this target\'s own block —',
+  '   their book, project, company, job, skills — belongs to them, so it is "my", NEVER "your".',
+  ' • The listener is the SHARED person. "you"/"your" = the shared person. Only details from the',
+  '   SHARED PERSON\'s block may be called "your".',
+  " • Never hand one person's work to the other. If the target wrote a novel, do not ask the shared",
+  '   person about "your novel" — that novel is the target\'s, so it is "my novel".',
+  " • Write a message, not a briefing. Describing the two of them to a third party (\"You're a",
+  '   cypherpunk and she studies X — ask her about Y") cannot be sent to anyone; do not do it.',
+  'Example of GOOD: "Hi Sunny — I\'m putting a band together and I hear you play bass. What would you',
+  'want our first setlist to sound like?"',
+  'Example of BAD (never do this): "You\'re starting a band and Sunny plays bass — ask her about your',
+  'first setlist."',
+  "Each ≤ 280 chars, concrete, grounded in both profiles, and different from one another. Return fewer",
+  "(or none) rather than pad.",
   "",
   "Return one entry per target, using the target's number as `index`. Score EVERY target exactly once.",
 ].join("\n");
@@ -393,6 +446,7 @@ export async function scoreReverseBatch(
   targets: readonly BatchCandidate[],
   rng: () => number = Math.random,
   sharedName?: string,
+  signal?: AbortSignal,
 ): Promise<BatchScoreResult> {
   const scores = new Map<string, DirectedScore>();
   if (targets.length === 0) return { scores, missing: [] };
@@ -406,6 +460,10 @@ export async function scoreReverseBatch(
 
   const user = [
     ...eventBlock,
+    "",
+    // Ownership stated alongside the blocks — see the note in scoreBatch.
+    "Everything under SHARED PERSON belongs to that person. Everything under a TARGET heading belongs",
+    "to that target. Never credit one person with the other's work.",
     "",
     "SHARED PERSON (the one each target below would meet):",
     profileText(shared, sharedName),
@@ -422,6 +480,7 @@ export async function scoreReverseBatch(
     model,
     temperature: 0.3,
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
+    signal,
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
