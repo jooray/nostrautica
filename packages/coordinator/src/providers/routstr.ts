@@ -10,7 +10,12 @@
  */
 import type { LlmProvider, ModelInfo, PaymentStrategy, TokenUsage } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
-import { PROVIDER_TIMEOUTS, withProviderTimeout } from "./http.js";
+import {
+  PROVIDER_TIMEOUTS,
+  providerHttpError,
+  withProviderTimeout,
+  withUncancellableDeadline,
+} from "./http.js";
 import { guardedProviderFetch, type ProviderNetPolicy } from "../net/safe-fetch.js";
 
 export interface RoutstrOptions {
@@ -34,7 +39,7 @@ export class RoutstrLlm implements LlmProvider {
       PROVIDER_TIMEOUTS.metadata,
       (signal) =>
         guardedProviderFetch(`${this.base()}/models`, { signal }, this.opts.net ?? {}, async (res) => {
-          if (!res.ok) throw new Error(`Routstr GET /models failed: ${res.status}`);
+          if (!res.ok) throw await providerHttpError(res, "Routstr GET /models");
           return (await res.json()) as { data?: any[] };
         }),
     );
@@ -66,9 +71,14 @@ export class RoutstrLlm implements LlmProvider {
     validate?: (raw: unknown) => T;
     signal?: AbortSignal;
   }): Promise<{ value: T; usage: TokenUsage }> {
+    // prepare() runs BEFORE the completion deadline is armed and takes no signal —
+    // a CashuPayment whose mint stops answering would otherwise park the serial job
+    // loop forever with nothing logged. Bounded so the worst case is a failed job.
     const headers = {
       "Content-Type": "application/json",
-      ...(await this.opts.payment.prepare({ estimateTokens: req.maxTokens })),
+      ...(await withUncancellableDeadline("Routstr payment.prepare", PROVIDER_TIMEOUTS.payment, () =>
+        this.opts.payment.prepare({ estimateTokens: req.maxTokens }),
+      )),
     };
     let body: any;
     try {
@@ -99,7 +109,7 @@ export class RoutstrLlm implements LlmProvider {
             this.opts.net ?? {},
             async (res) => {
               if (!res.ok) {
-                throw new Error(`Routstr chat/completions failed: ${res.status} ${await res.text()}`);
+                throw await providerHttpError(res, "Routstr chat/completions");
               }
               const parsed = (await res.json()) as any;
               // Change proofs (if any) come back in response headers — settle the wallet.

@@ -1,0 +1,30 @@
+# Local Tier-2 test stack config (see project memory: local-tier2-test-stack)
+[identity]
+# nsec provided via NOSTRAUTICA_COORDINATOR_NSEC env var
+
+[relays]
+default = ["ws://localhost:7777"]
+
+[providers.venice]
+api_key_env = "VENICE_API_KEY"
+require_private = false
+
+[stt]
+provider = "venice-stt"
+model = "openai/whisper-large-v3"
+
+[models.summary]
+provider = "venice"
+model = "qwen3-4b"
+
+[models.match]
+provider = "venice"
+model = "deepseek-v4-flash"
+
+[models.translate]
+provider = "venice"
+model = "zai-org-glm-4.7-flash"
+
+[models.embed]
+provider = "venice"
+model = "text-embedding-bge-m3"

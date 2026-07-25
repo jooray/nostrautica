@@ -488,7 +488,24 @@ export function acquireDaemonLock(dbPath: string): DaemonLock {
   };
 }
 
-export type JobState = "pending" | "running" | "done" | "poison";
+/** `waiting` is the billing/budget PARK state (H-2) — `claimNextJob` never claims it. */
+export type JobState = "pending" | "running" | "waiting" | "done" | "poison";
+
+/**
+ * What an `enqueueJob` call actually did: `"enqueued"` when a row was created, or
+ * the state of the EXISTING row whose dedupe key suppressed it. Callers log the
+ * terminal cases — a `done`/`poison` collision means requested work will NOT run,
+ * which is silent, permanent, and was the 2026-07-24 production incident.
+ */
+export type EnqueueOutcome = "enqueued" | JobState;
+
+/** Job types that make up the matching stage (used by the recompute memo reset). */
+export const MATCH_JOB_TYPES = [
+  "match_recompute",
+  "score_batch",
+  "score_reverse_batch",
+  "publish_matches",
+] as const;
 
 /** A Cashu payment reservation in the durable journal (audit finding H8). */
 export type CashuJournalState = "in_flight" | "settled" | "ambiguous";
@@ -2203,13 +2220,68 @@ export class Store {
   }
 
   // ── jobs ──────────────────────────────────────────────────────────────────
-  /** Enqueue a job (idempotent on dedupe_key: a duplicate is silently ignored). */
-  enqueueJob(type: string, dedupeKey: string, payload: unknown): void {
-    this.db
+  /**
+   * Enqueue a job. Idempotent on `dedupe_key` (UNIQUE): a duplicate does not
+   * create a second row — that is what keeps a re-delivered rumor or a restart
+   * mid-pipeline from paying twice.
+   *
+   * It RETURNS what happened, because "silently ignored" was too silent. Terminal
+   * rows (`done`/`poison`) are kept for 30 days, so an enqueue that collides with
+   * one is discarded permanently and invisibly. That is exactly how an organizer
+   * recompute could wipe the cached pair scores (`clearPairs`) and then enqueue
+   * scoring work whose dedupe keys matched the previous run's finished rows: the
+   * batches were logged as dispatched, no row was created, nothing ever ran, and
+   * not one line said so (production incident 2026-07-24).
+   */
+  enqueueJob(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
+    const info = this.db
       .prepare(
         "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', 0)",
       )
       .run(type, dedupeKey, JSON.stringify(payload));
+    if (Number(info.changes) > 0) return "enqueued";
+    const row = this.db.prepare("SELECT state FROM jobs WHERE dedupe_key = ?").get(dedupeKey) as
+      | { state: JobState }
+      | undefined;
+    // No row despite the ignore (deleted between statements) — report it as queued;
+    // the caller's next enqueue of the same key will insert normally.
+    return row?.state ?? "enqueued";
+  }
+
+  /**
+   * Drop the TERMINAL (`done`/`poison`) matching-stage job rows for one event, so
+   * their content-addressed dedupe keys stop suppressing a re-enqueue of the same
+   * work. Called on the organizer `recompute` path next to `clearPairs`: that
+   * command means "forget the cached results and redo them", which has to include
+   * the job queue's memory of having already done them, or the recompute deletes
+   * every score and re-creates none (production incident 2026-07-24).
+   *
+   * Deliberately narrow. Only matching-stage rows, and only terminal ones —
+   * `pending`/`running`/`waiting` rows are live work that must keep coalescing, and
+   * `process_attendee` is left alone so a recompute never re-runs STT.
+   */
+  clearMatchJobMemo(coordinate: string): number {
+    const placeholders = MATCH_JOB_TYPES.map(() => "?").join(",");
+    const info = this.db
+      .prepare(
+        `DELETE FROM jobs
+           WHERE state IN ('done','poison')
+             AND type IN (${placeholders})
+             AND json_extract(payload, '$.coordinate') = ?`,
+      )
+      .run(...MATCH_JOB_TYPES, coordinate);
+    return Number(info.changes);
+  }
+
+  /** Row count per job state (queue-depth reporting). Absent states are omitted. */
+  jobStateCounts(): Partial<Record<JobState, number>> {
+    const rows = this.db.prepare("SELECT state, COUNT(*) AS c FROM jobs GROUP BY state").all() as {
+      state: JobState;
+      c: number;
+    }[];
+    const out: Partial<Record<JobState, number>> = {};
+    for (const r of rows) out[r.state] = Number(r.c);
+    return out;
   }
 
   /**

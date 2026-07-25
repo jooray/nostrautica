@@ -583,9 +583,18 @@ export class Coordinator {
       // hash, and results are written per directed pair keyed by inputs_hash.
       const batches = groupIntoBatches(pairs, this.batchSize);
       log(`[match] ${short(p.pubkey)} → scoring ${pairs.length} forward pair(s) in ${batches.length} batch(es)`);
+      // Count what the dispatch ACTUALLY queued. "Dispatched N batches" was a lie
+      // whenever a dedupe key collided with a finished row (2026-07-24): the line
+      // above printed, nothing was queued, and the next log line never came.
+      let queued = 0;
       for (const batch of batches) {
         const key = `batch:${p.coordinate}:${batch[0]!.a}:${batchDedupe(batch)}`;
-        enqueue("score_batch", key, { coordinate: p.coordinate, pairs: batch });
+        if (enqueue("score_batch", key, { coordinate: p.coordinate, pairs: batch }) === "enqueued") queued++;
+      }
+      if (queued < batches.length) {
+        log(
+          `[match] ${short(p.pubkey)} forward dispatch: only ${queued}/${batches.length} batch(es) queued — the rest were suppressed by existing job rows`,
+        );
       }
 
       // REVERSE direction (others → p.pubkey): each other is a distinct TARGET with
@@ -601,23 +610,37 @@ export class Coordinator {
           reverse.push({ a: pair.b, b: pair.a, inputsHash: pair.inputsHash });
         }
       }
+      let reverseQueued = 0;
+      let reverseBatches = 0;
       for (let i = 0; i < reverse.length; i += this.batchSize) {
         const batch = reverse.slice(i, i + this.batchSize);
+        reverseBatches++;
         // Dedupe by shared candidate + the target set — a re-delivery collapses.
         const key = `rbatch:${p.coordinate}:${p.pubkey}:${batchDedupe(batch.map((r) => ({ b: r.a, inputsHash: r.inputsHash })))}`;
-        enqueue("score_reverse_batch", key, { coordinate: p.coordinate, pairs: batch });
+        if (enqueue("score_reverse_batch", key, { coordinate: p.coordinate, pairs: batch }) === "enqueued") {
+          reverseQueued++;
+        }
       }
       if (reverse.length) {
-        log(`[match] reverse: ${reverse.length} target(s) → ${short(p.pubkey)} in ${Math.ceil(reverse.length / this.batchSize)} batch(es)`);
+        log(`[match] reverse: ${reverse.length} target(s) → ${short(p.pubkey)} in ${reverseBatches} batch(es)`);
+        if (reverseQueued < reverseBatches) {
+          log(
+            `[match] ${short(p.pubkey)} reverse dispatch: only ${reverseQueued}/${reverseBatches} batch(es) queued — the rest were suppressed by existing job rows`,
+          );
+        }
       }
      });
     });
 
     this.jobs.register("score_batch", async (p, { enqueue, signal }) => {
-     await this.runEventJob(p.coordinate, signal, async (sig) => {
+     const inPairs = p.pairs as CandidatePair[];
+     let summary = "nothing to score";
+     await this.batchOutcome(`forward batch ${short(inPairs[0]?.a ?? "?")} ×${inPairs.length}`, () => summary, () =>
+      this.runEventJob(p.coordinate, signal, async (sig) => {
       await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.a);
       const pairs = p.pairs as CandidatePair[];
       const { scored, missing } = await this.scoreBatchJob(p.coordinate, pairs, sig);
+      summary = `${scored.length} scored, ${missing} unparsed`;
       // A directed write only changes the TARGET's list (the candidate's own view
       // comes from their own batch), so only the target republishes. The key
       // carries the scored set's content hash so new scores trigger a fresh
@@ -637,14 +660,18 @@ export class Coordinator {
       if (missing > 0) {
         throw new Error(`batch response missing ${missing} candidate(s); retrying unscored remainder`);
       }
-     });
+     }));
     });
 
     this.jobs.register("score_reverse_batch", async (p, { enqueue, signal }) => {
-     await this.runEventJob(p.coordinate, signal, async (sig) => {
+     const inPairs = p.pairs as CandidatePair[];
+     let summary = "nothing to score";
+     await this.batchOutcome(`reverse batch ${short(inPairs[0]?.b ?? "?")} ×${inPairs.length}`, () => summary, () =>
+      this.runEventJob(p.coordinate, signal, async (sig) => {
       await this.assertSpendAllowed(p.coordinate, (p.pairs as CandidatePair[])[0]?.b);
       const pairs = p.pairs as CandidatePair[];
       const { scored, missing } = await this.scoreReverseBatchJob(p.coordinate, pairs, sig);
+      summary = `${scored.length} scored, ${missing} unparsed`;
       // Each reverse pair {a: other, b: shared} writes the OTHER's directed row, so
       // every distinct target republishes its own list. Group scored pairs by target.
       const byTarget = new Map<string, CandidatePair[]>();
@@ -662,7 +689,7 @@ export class Coordinator {
       if (missing > 0) {
         throw new Error(`reverse batch missing ${missing} target(s); retrying unscored remainder`);
       }
-     });
+     }));
     });
 
     this.jobs.register("publish_matches", async (p, { signal }) => {
@@ -1284,6 +1311,33 @@ export class Coordinator {
     } finally {
       set.delete(p);
       if (set.size === 0) this.activeEventHandlers.delete(coordinate);
+    }
+  }
+
+  /**
+   * Log exactly ONE outcome line per scoring batch — the missing counterpart to the
+   * `[match] … → scoring N pair(s) in M batch(es)` dispatch line.
+   *
+   * Before this, a dispatched batch that never produced a score was
+   * indistinguishable from a batch that was never queued: both looked like the
+   * dispatch line followed by nothing (production incident 2026-07-24, where six
+   * minutes of silence turned out to be work that had never been queued at all).
+   * With the pair of lines, "dispatched but slow", "dispatched and failed" and
+   * "never dispatched" are three visibly different shapes in the log.
+   *
+   * Wall-clock, not `this.now()`: an elapsed time must stay meaningful under an
+   * injected/logical test clock. One line per batch, never per pair.
+   */
+  private async batchOutcome(label: string, summary: () => string, run: () => Promise<void>): Promise<void> {
+    const started = Date.now();
+    try {
+      await run();
+      log(`[match] ${label}: ${summary()} in ${Date.now() - started}ms`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const verb = e instanceof ParkJobError ? "PARKED" : "FAILED";
+      log(`[match] ${label}: ${verb} after ${Date.now() - started}ms — ${msg.slice(0, 300)}`);
+      throw e;
     }
   }
 
@@ -2828,13 +2882,30 @@ export class Coordinator {
       await this.reevaluateBilling(coordinate);
       this.resumeParkedWork(coordinate);
       this.deps.store.clearPairs(coordinate);
+      // Forgetting the scores is not enough: the job queue ALSO remembers, via the
+      // content-addressed dedupe keys of the finished `score_batch`/`publish_matches`
+      // rows, which are kept for 30 days. Identical profiles ⇒ identical keys ⇒ every
+      // re-enqueue below is silently discarded by `INSERT OR IGNORE`. That is the
+      // 2026-07-24 incident verbatim: the second recompute of an event deleted all
+      // pair scores, logged its batch dispatches, created nothing, ran nothing, and
+      // left the event with no matches and no error. A recompute means "redo it", so
+      // the queue's memory of having already done it has to go too.
+      const forgotten = this.deps.store.clearMatchJobMemo(coordinate);
       const key = `${this.now()}`;
+      let enqueued = 0;
+      let discarded = 0;
       for (const a of this.deps.store.approvedAttendees(coordinate)) {
-        this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:${key}`, {
+        const outcome = this.jobs.enqueue("match_recompute", `match:${coordinate}:${a.pubkey}:${key}`, {
           coordinate,
           pubkey: a.pubkey,
         });
+        if (outcome === "enqueued") enqueued++;
+        else if (outcome === "done" || outcome === "poison") discarded++;
       }
+      log(
+        `[admin] recompute ${coordinate}: cleared cached pairs + ${forgotten} finished job row(s), enqueued ${enqueued} match job(s)` +
+          (discarded > 0 ? `, ${discarded} DISCARDED as already-done` : ""),
+      );
     } else if (cmd === "reprocess") {
       // Same as recompute: re-evaluate + resume so a raise resumes parked work.
       await this.reevaluateBilling(coordinate);

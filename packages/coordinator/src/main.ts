@@ -231,6 +231,14 @@ async function runDaemon(): Promise<void> {
 
   console.log("[coordinator] running — watching for installs, submissions, admin commands");
 
+  // Periodic queue report (production incident 2026-07-24). Deliberately on its OWN
+  // timer, not inside the drain loop below: a handler that never returns blocks that
+  // loop, and a stalled worker is precisely the case the report has to stay visible
+  // for. Silent when the queue is empty and nothing is running, so a healthy idle
+  // daemon adds no log volume — and a queue that is empty WHILE work was supposedly
+  // dispatched is itself the diagnosis.
+  const stopQueueReporter = coordinator.jobs.startQueueReporter(60_000);
+
   // Job loop: drain runnable jobs, then idle briefly.
   let stopped = false;
   let shuttingDown = false;
@@ -271,6 +279,7 @@ async function runDaemon(): Promise<void> {
       coordinator.jobs.abort();
       await drainPromise.catch(() => {});
     }
+    stopQueueReporter();
     coordinator.stop();
     client.close();
     store.close();

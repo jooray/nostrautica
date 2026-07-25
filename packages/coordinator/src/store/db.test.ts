@@ -747,3 +747,68 @@ describe("reference-counted purge (audit C5)", () => {
     expect(store.getEventUsage(c)).toEqual({ bytes: 0, durationSec: 0, calls: 0 });
   });
 });
+
+/**
+ * The job queue's memory of finished work (production incident 2026-07-24). The
+ * dedupe key is what stops a re-delivered rumor or a mid-pipeline restart from
+ * paying twice — but a TERMINAL row keeps that key for 30 days, so the same key
+ * asked for again is discarded permanently. That is correct for a redelivery and
+ * catastrophic for a recompute, which deliberately throws the results away first.
+ */
+describe("job enqueue outcomes and the recompute memo reset", () => {
+  const coordinate = "31923:eid:my-event";
+
+  it("reports whether a row was created, and the existing state when it wasn't", () => {
+    const store = new Store();
+    expect(store.enqueueJob("work", "k", { coordinate })).toBe("enqueued");
+    expect(store.enqueueJob("work", "k", { coordinate })).toBe("pending");
+    const claimed = store.claimNextJob(1000, "A", 60_000)!;
+    expect(store.enqueueJob("work", "k", { coordinate })).toBe("running");
+    store.completeJob(claimed.id, "A");
+    // The one that used to be invisible: the work is NOT queued and never will be.
+    expect(store.enqueueJob("work", "k", { coordinate })).toBe("done");
+  });
+
+  it("clearMatchJobMemo frees a finished scoring key so the same batch can re-run", () => {
+    const store = new Store();
+    store.enqueueJob("score_batch", "batch:x", { coordinate });
+    const j = store.claimNextJob(1000, "A", 60_000)!;
+    store.completeJob(j.id, "A");
+    expect(store.enqueueJob("score_batch", "batch:x", { coordinate })).toBe("done");
+
+    expect(store.clearMatchJobMemo(coordinate)).toBe(1);
+    expect(store.enqueueJob("score_batch", "batch:x", { coordinate })).toBe("enqueued");
+  });
+
+  it("only forgets TERMINAL matching rows — live work and other stages are untouched", () => {
+    const store = new Store();
+    // Live matching work: still pending/parked, must keep coalescing.
+    store.enqueueJob("score_batch", "live", { coordinate });
+    store.enqueueJob("publish_matches", "parked", { coordinate });
+    const parked = store.claimNextJob(1000, "A", 60_000)!;
+    store.claimNextJob(1000, "B", 60_000); // claim the other so parkJob targets the right row
+    store.parkJob(parked.id, "budget", "A");
+    // A finished job from a DIFFERENT stage: re-running it would re-bill STT.
+    store.enqueueJob("process_attendee", "proc:done", { coordinate });
+    const proc = store.claimNextJob(2000, "C", 60_000)!;
+    store.completeJob(proc.id, "C");
+    // A finished matching row for ANOTHER event must not be swept either.
+    store.enqueueJob("score_batch", "other-event", { coordinate: "31923:eid:other" });
+    const other = store.claimNextJob(3000, "D", 60_000)!;
+    store.completeJob(other.id, "D");
+
+    expect(store.clearMatchJobMemo(coordinate)).toBe(0);
+    expect(store.enqueueJob("process_attendee", "proc:done", { coordinate })).toBe("done");
+    expect(store.enqueueJob("score_batch", "other-event", { coordinate: "31923:eid:other" })).toBe("done");
+  });
+
+  it("jobStateCounts groups the queue by state", () => {
+    const store = new Store();
+    store.enqueueJob("a", "1", { coordinate });
+    store.enqueueJob("a", "2", { coordinate });
+    const c = store.claimNextJob(1000, "A", 60_000)!;
+    expect(store.jobStateCounts()).toEqual({ pending: 1, running: 1 });
+    store.completeJob(c.id, "A");
+    expect(store.jobStateCounts()).toEqual({ pending: 1, done: 1 });
+  });
+});

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Event as NostrEvent } from "nostr-tools/core";
 import {
@@ -141,6 +141,8 @@ interface Counters {
   dropRoleOnce?: string;
   /** How many profile-translation calls the pipeline made. */
   translateCalls: number;
+  /** When set, every batch-scoring call throws — drives the batch FAILED log line. */
+  failBatchScore?: boolean;
 }
 
 const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
@@ -203,6 +205,9 @@ function makeLlm(counters: Counters): MockLlm {
         offers: f.skills,
         seeks: which === "crypto" ? ["designer", "programmer"] : ["collaborators"],
       };
+    }
+    if (req.schemaName === "batch_score" || req.schemaName === "reverse_batch_score") {
+      if (counters.failBatchScore) throw new Error("venice is on fire");
     }
     if (req.schemaName === "batch_score") {
       // Forward batched scoring: ONE target + numbered candidates (spec §16.2).
@@ -4427,5 +4432,79 @@ describe("audit C3 — public inbox is population-bounded", () => {
     void seenBefore;
     // Some of the 60 were rate-dropped (the sender cap is 30/window).
     expect(dropped).toBeGreaterThan(0);
+  });
+});
+
+
+describe("prod 2026-07-24 — an organizer recompute must actually re-run the scoring", () => {
+  /**
+   * The incident: an organizer sent "recompute", the log showed every batch being
+   * dispatched, and then nothing at all — no scores, no published lists, no error,
+   * for the rest of the event. `clearPairs` had deleted every cached score, and the
+   * scoring jobs it then enqueued collided with the PREVIOUS run's finished rows on
+   * their content-addressed dedupe keys, so `INSERT OR IGNORE` discarded all of them
+   * in silence. The event was left with zero pair scores and stale match lists.
+   *
+   * This test fails against the pre-fix code with `expect(14).toBeGreaterThan(14)`:
+   * the second recompute spends nothing and publishes nothing.
+   */
+  it("a SECOND recompute over unchanged profiles re-scores and republishes", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+
+    await admin(h, "recompute", {});
+    await h.coordinator.jobs.drain();
+    const callsAfterFirst = h.llm.completeCalls;
+    const listsAfterFirst = h.transport.published.filter((e) => e.kind === KIND_MATCH_LIST).length;
+
+    // Second recompute, identical profiles ⇒ identical batch dedupe keys.
+    await admin(h, "recompute", {});
+    await h.coordinator.jobs.drain();
+    expect(h.llm.completeCalls).toBeGreaterThan(callsAfterFirst);
+    expect(h.transport.published.filter((e) => e.kind === KIND_MATCH_LIST).length).toBeGreaterThan(listsAfterFirst);
+  });
+
+  it("leaves the event with a full set of scored pairs after every recompute", async () => {
+    const h = await setup();
+    const a = await join(h, generateSecretKey(), "crypto");
+    const b = await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    for (let round = 0; round < 3; round++) {
+      await admin(h, "recompute", {});
+      await h.coordinator.jobs.drain();
+      // Both directions scored again, every time — never the empty pair table the
+      // incident left behind.
+      expect(h.store.pairsFor(h.coordinate, a).map((r) => r.other)).toEqual([b]);
+      expect(h.store.pairsFor(h.coordinate, b).map((r) => r.other)).toEqual([a]);
+    }
+  });
+
+  it("logs a per-batch outcome line with elapsed ms, and a FAILED line when a batch throws", async () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+      lines.push(args.join(" "));
+    });
+    try {
+      const h = await setup();
+      await join(h, generateSecretKey(), "crypto");
+      await join(h, generateSecretKey(), "design");
+      await h.coordinator.jobs.drain();
+      expect(lines.some((l) => /\[match\] forward batch \w+ ×\d+: \d+ scored, \d+ unparsed in \d+ms/.test(l))).toBe(true);
+
+      // Now make the scoring provider fail and confirm the batch says so.
+      lines.length = 0;
+      h.counters.failBatchScore = true;
+      await admin(h, "recompute", {});
+      await h.coordinator.jobs.drain();
+      expect(lines.some((l) => /\[match\] forward batch \w+ ×\d+: FAILED after \d+ms — .*venice is on fire/.test(l))).toBe(
+        true,
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

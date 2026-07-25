@@ -13,7 +13,12 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
-import { PROVIDER_TIMEOUTS, withProviderTimeout } from "./http.js";
+import {
+  PROVIDER_TIMEOUTS,
+  providerHttpError,
+  withProviderTimeout,
+  withUncancellableDeadline,
+} from "./http.js";
 import { guardedProviderFetch, type ProviderNetPolicy } from "../net/safe-fetch.js";
 
 const DEFAULT_BASE = "https://api.venice.ai/api/v1";
@@ -27,13 +32,14 @@ export const VENICE_STT_MAX_BYTES = 25 * 1024 * 1024;
  * catch-all "processing_error". Retrying immediately can't fix a depleted
  * account; the job runner's long-tail backoff gives an operator time to top up
  * before it poisons (user feedback 2026-07-21).
+ *
+ * Classification, the status/body excerpt, and the LOG all live in
+ * {@link providerHttpError} now (shared with Routstr): a provider failure has to
+ * be visible in the coordinator log even when a caller swallows the exception,
+ * which is what made the 2026-07-24 incident undiagnosable from the log alone.
  */
-async function httpError(res: Response, label: string): Promise<Error> {
-  const text = await res.text().catch(() => "");
-  if (res.status === 402 || /insufficient[_ ]?(balance|credit|funds)/i.test(text)) {
-    return new Error(`Venice billing: insufficient balance (${res.status}) — ${label}: ${text}`);
-  }
-  return new Error(`${label} failed: ${res.status} ${text}`);
+async function httpError(res: Response, label: string, tag: "llm" | "stt" = "llm"): Promise<Error> {
+  return providerHttpError(res, label, tag);
 }
 
 export interface VeniceOptions {
@@ -52,8 +58,18 @@ export class VeniceLlm implements LlmProvider {
     this.base = opts.baseUrl ?? DEFAULT_BASE;
   }
 
+  /**
+   * Payment headers, under their OWN deadline. This runs BEFORE
+   * `withProviderTimeout` arms the request deadline, so an unbounded `prepare()` —
+   * a CashuPayment whose mint stops answering — would hang the awaiting job
+   * forever: no timeout, no failure, no log, and (because jobs drain serially) no
+   * further work of any kind. Bounded here so the worst case is one failed job.
+   */
   private async headers(estimateTokens?: number): Promise<Record<string, string>> {
-    return { "Content-Type": "application/json", ...(await this.opts.payment.prepare({ estimateTokens })) };
+    const paid = await withUncancellableDeadline("Venice payment.prepare", PROVIDER_TIMEOUTS.payment, () =>
+      this.opts.payment.prepare({ estimateTokens }),
+    );
+    return { "Content-Type": "application/json", ...paid };
   }
 
   async models(): Promise<ModelInfo[]> {
@@ -238,7 +254,12 @@ export class VeniceStt implements SttProvider {
     form.append("model", opts?.model ?? "openai/whisper-large-v3");
     if (audio.language) form.append("language", audio.language);
 
-    const headers = await this.opts.payment.prepare({});
+    // Bounded like VeniceLlm.headers(): prepare() runs outside the STT deadline.
+    const headers = await withUncancellableDeadline(
+      "Venice STT payment.prepare",
+      PROVIDER_TIMEOUTS.payment,
+      () => this.opts.payment.prepare({}),
+    );
     const body = await withProviderTimeout(
       "Venice STT",
       PROVIDER_TIMEOUTS.stt,
@@ -253,7 +274,7 @@ export class VeniceStt implements SttProvider {
           },
           this.opts.net ?? {},
           async (res) => {
-            if (!res.ok) throw await httpError(res, "Venice STT");
+            if (!res.ok) throw await httpError(res, "Venice STT", "stt");
             return (await res.json()) as { text?: unknown; language?: unknown };
           },
         ),

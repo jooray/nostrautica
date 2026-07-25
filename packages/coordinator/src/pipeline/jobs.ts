@@ -6,10 +6,17 @@
  * mid-pipeline never re-bills (IMPLEMENTATION_PLAN §3.11).
  */
 import { randomUUID } from "node:crypto";
-import type { Store, JobRow } from "../store/db.js";
+import type { Store, JobRow, EnqueueOutcome } from "../store/db.js";
 
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn; signal: AbortSignal }) => Promise<void>;
-export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => void;
+/** Returns what the enqueue did, so a caller can summarize a dispatch (see
+ *  {@link JobRunner.enqueue}); most callers ignore it. */
+export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => EnqueueOutcome;
+
+/** `[hh:mm:ss] ` prefix, matching coordinator.ts's `log()`. */
+function stamp(): string {
+  return new Date().toISOString().slice(11, 19);
+}
 
 /**
  * A handler throws this to PARK its job (spec §9 billing/budget gates, H-2) rather
@@ -101,8 +108,22 @@ export class JobRunner {
     this.handlers.set(type, handler);
   }
 
-  enqueue(type: string, dedupeKey: string, payload: unknown): void {
-    this.store.enqueueJob(type, dedupeKey, payload);
+  /**
+   * Enqueue, and make a DISCARDED enqueue visible. Coalescing onto a row that is
+   * still `pending`/`running`/`waiting` is the intended behavior and stays quiet;
+   * colliding with a `done`/`poison` row is not — that row is terminal, nothing
+   * will re-run it, and the requested work simply never happens. Until this line
+   * existed the only symptom was a dispatch log followed by silence forever
+   * (production incident 2026-07-24).
+   */
+  enqueue(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
+    const outcome = this.store.enqueueJob(type, dedupeKey, payload);
+    if (outcome === "done" || outcome === "poison") {
+      console.warn(
+        `[${stamp()}] [job] ${type} enqueue DISCARDED — dedupe key already '${outcome}': ${dedupeKey.slice(0, 120)} — this work will NOT run`,
+      );
+    }
+    return outcome;
   }
 
   /** Reclaim leases stranded by a crash (audit H1). Call at startup + periodically. */
@@ -160,12 +181,58 @@ export class JobRunner {
     }
   }
 
+  /**
+   * The job currently executing, or undefined when idle. Read by
+   * {@link reportQueueDepth} so a stalled handler is visible as "running for 340s"
+   * rather than as an absence of output.
+   */
+  private inFlight?: { id: number; type: string; startedAt: number };
+
+  /**
+   * One line describing the queue, emitted only when there is something to say.
+   * Called on a timer (see {@link startQueueReporter}) rather than from the drain
+   * loop on purpose: a handler that never returns blocks the loop, and the whole
+   * point is to still see the queue in exactly that case.
+   *
+   * Idle-and-empty prints nothing — but a `running` entry with a growing age, or a
+   * non-zero pending/waiting count that never moves, distinguishes "the work is
+   * stuck" from "the work was never queued", which is the distinction the
+   * 2026-07-24 incident had no way to make.
+   */
+  reportQueueDepth(): void {
+    const counts = this.store.jobStateCounts();
+    const pending = counts.pending ?? 0;
+    const waiting = counts.waiting ?? 0;
+    const running = counts.running ?? 0;
+    const poison = counts.poison ?? 0;
+    if (pending === 0 && waiting === 0 && running === 0 && poison === 0 && !this.inFlight) return;
+    const active = this.inFlight
+      ? `${this.inFlight.type} #${this.inFlight.id} for ${Math.round((this.now() - this.inFlight.startedAt) / 1000)}s`
+      : "idle";
+    console.log(
+      `[${stamp()}] [jobs] queue: ${pending} pending, ${running} running, ${waiting} waiting (parked), ${poison} poisoned — worker: ${active}`,
+    );
+  }
+
+  /** Start the periodic queue report (unref'd). Returns a stop function. */
+  startQueueReporter(intervalMs = 60_000): () => void {
+    const timer = setInterval(() => this.reportQueueDepth(), intervalMs);
+    (timer as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  }
+
   private async execute(job: JobRow, token: string): Promise<void> {
     const handler = this.handlers.get(job.type);
     if (!handler) {
+      // Poisoned WITHOUT a word until now — a job type that lost its registration
+      // (a rename, a half-applied deploy) vanished into the poison state silently.
+      console.warn(`[${stamp()}] [job] ${job.type} #${job.id} POISONED: no handler registered`);
       this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true, token);
       return;
     }
+    const startedAt = this.now();
+    this.inFlight = { id: job.id, type: job.type, startedAt };
+    console.log(`[${stamp()}] [job] ${job.type} #${job.id} started (attempt ${job.attempts + 1})`);
     // Heartbeat the lease while the handler runs (audit P0-6). A pipeline handler
     // can download + transcode media, call several models, or score a batch — far
     // longer than the 5-minute lease. Without a heartbeat the lease expires under
@@ -186,33 +253,45 @@ export class JobRunner {
       });
       // If our lease expired and another worker took over, completeJob affects 0
       // rows — we discard our result rather than clobber the new owner's state.
-      this.store.completeJob(job.id, token);
+      const owned = this.store.completeJob(job.id, token);
+      const ms = this.now() - startedAt;
+      if (owned) {
+        console.log(`[${stamp()}] [job] ${job.type} #${job.id} done in ${ms}ms`);
+      } else {
+        // Silently dropping a finished result is exactly the kind of thing that
+        // looks like "the pipeline just stopped" from the outside.
+        console.warn(
+          `[${stamp()}] [job] ${job.type} #${job.id} finished in ${ms}ms but its lease was LOST — result discarded (another worker owns it)`,
+        );
+      }
     } catch (err) {
+      const ms = this.now() - startedAt;
       // A shutdown abort (audit C11) is not a real failure: leave the job `running`
       // with its lease so it is neither retried-toward-poison nor lost — the next
       // start's stranded-lease recovery reclaims it. Consumes no retry.
       if (this.abortController.signal.aborted) {
-        const t = new Date().toISOString().slice(11, 19);
-        console.log(`[${t}] [job] ${job.type} aborted for shutdown — left claimable for restart`);
+        console.log(
+          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms — left claimable for restart`,
+        );
         return;
       }
       // A billing/budget PARK is not a failure: move to `waiting` (coalesced, no
       // retry consumed, never poisons) — resumed when the block clears (H-2).
       if (err instanceof ParkJobError) {
         const parked = this.store.parkJob(job.id, err.message, token);
-        if (parked) {
-          const t = new Date().toISOString().slice(11, 19);
-          console.log(`[${t}] [job] ${job.type} PARKED (waiting): ${err.message.slice(0, 120)}`);
-        }
+        // Logged even when the park did NOT stick (lease lost): "we decided to park
+        // and someone else owns the row" is still an outcome the log must carry.
+        console.log(
+          `[${stamp()}] [job] ${job.type} #${job.id} PARKED (waiting) after ${ms}ms${parked ? "" : " [lease lost — not applied]"}: ${err.message.slice(0, 160)}`,
+        );
         return;
       }
       const attempts = job.attempts + 1;
       const poison = attempts >= this.maxAttempts;
       const backoff = this.backoffForAttempt(attempts);
       const msg = err instanceof Error ? err.message : String(err);
-      const t = new Date().toISOString().slice(11, 19);
       console.warn(
-        `[${t}] [job] ${job.type} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts})`}: ${msg.slice(0, 160)}`,
+        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
       );
       const owned = this.store.failJob(job.id, attempts, this.now() + backoff, msg, poison, token);
       // Only surface the poison if we still owned the lease (a stale worker whose
@@ -222,6 +301,7 @@ export class JobRunner {
       }
     } finally {
       clearInterval(heartbeat);
+      this.inFlight = undefined;
     }
   }
 }
