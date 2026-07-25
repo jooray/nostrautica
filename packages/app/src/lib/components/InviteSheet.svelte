@@ -15,14 +15,26 @@
   let {
     invites,
     eventTitle,
+    usedPubkeys,
     onClose,
-  }: { invites: GeneratedInvite[]; eventTitle: string; onClose: () => void } = $props();
+  }: {
+    invites: GeneratedInvite[];
+    eventTitle: string;
+    /**
+     * Invite-pubkeys already redeemed (from `redeemedInvitePubkeys`). Optional and
+     * empty-by-default: a caller with no redemption data must get the whole sheet,
+     * never a silently shortened one.
+     */
+    usedPubkeys?: ReadonlySet<string>;
+    onClose: () => void;
+  } = $props();
 
   onMount(() => enterSecretSurface());
 
-  // No client-side redemption tracking yet, so every generated code is unused;
-  // the filter is the single source of truth for what prints.
-  const sheet = $derived(invitesForSheet(invites));
+  // The filter is the single source of truth for what prints. Reactive over
+  // `usedPubkeys`, so a walk-in who scans a code while this overlay is open drops
+  // off it on the next report refresh — the door case this exists for.
+  const sheet = $derived(invitesForSheet(invites, usedPubkeys));
 
   function print() {
     window.print();

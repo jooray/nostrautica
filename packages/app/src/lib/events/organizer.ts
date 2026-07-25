@@ -628,6 +628,44 @@ export interface GeneratedInvite {
 }
 
 /**
+ * Every invite ever issued for this event: the `{h, label}` set from the
+ * published 31601 (replaceable, so it accumulates across every batch the
+ * organizer generated, on any of their devices).
+ *
+ * Two callers, for two reasons. `generateInvites` needs it because labels are
+ * numbered off the merged list (`invite-${invites.length + 1}`), which is what
+ * makes them unique and monotonic across batches — and because the republish
+ * must not drop earlier codes. The "who has joined" export needs it because the
+ * labels ARE the report: the codes themselves are never stored anywhere, so this
+ * plaintext hash+label list is the only durable record that a given invite was
+ * ever handed out.
+ *
+ * Returns `[]` rather than throwing on a missing/corrupt list, exactly as the
+ * generate path always did — an unreadable list means "nothing published yet"
+ * for numbering purposes, and the export layer unions with its own cache so an
+ * empty answer can't erase labels it already knows (see invite-export.ts).
+ */
+export async function fetchPublishedInvites(
+  ctx: EventContext,
+): Promise<{ h: string; label?: string }[]> {
+  const existing = await fetchEvents(
+    {
+      kinds: [KIND_INVITE_LIST],
+      authors: [ctx.config.eidPubkey],
+      "#d": [splitCoordinate(ctx.coordinate).identifier],
+    },
+    ctx.config.relays,
+  );
+  const latest = pickLatest(existing);
+  if (!latest) return [];
+  try {
+    return inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Generate N single-use invite codes (spec §6.5). Each code IS an nsec; the
  * organizer publishes only sha256(invite-pubkey) in a replaceable 31601 (so
  * observers can't enumerate or front-run codes). The nsec rides the link's URL
@@ -644,20 +682,9 @@ export async function generateInvites(
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eidSk = hexToBytes(keys.eidNsecHex);
 
-  // Merge with any already-published invite hashes (replaceable event).
-  const existing = await fetchEvents(
-    { kinds: [KIND_INVITE_LIST], authors: [ctx.config.eidPubkey], "#d": [splitCoordinate(ctx.coordinate).identifier] },
-    ctx.config.relays,
-  );
-  const latest = pickLatest(existing);
-  let invites: { h: string; label?: string }[] = [];
-  if (latest) {
-    try {
-      invites = inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
-    } catch {
-      invites = [];
-    }
-  }
+  // Merge with any already-published invite hashes (replaceable event) — this is
+  // also what makes labels monotonic across batches (see fetchPublishedInvites).
+  const invites = await fetchPublishedInvites(ctx);
 
   const generated: GeneratedInvite[] = [];
   const base = appBaseUrl.replace(/[#/]+$/, "");
