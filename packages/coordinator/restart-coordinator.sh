@@ -44,6 +44,61 @@ running_pids() { pgrep -f "$NODE_ARGV" 2>/dev/null || true; }
 
 fail() { echo "!!! $* — coordinator is NOT running $(date -Is)"; exit 1; }
 
+# --- Preferred path: systemd owns the lifecycle ---------------------------------
+# Installed unit ⇒ this script must NOT launch anything itself. A setsid-started
+# daemon and a unit-started one fight over the single-daemon SQLite lock and the
+# loser exits immediately, so exactly one of the two may own the process.
+#
+# A branch rather than a flag day, deliberately: the deploy rsyncs this script to
+# the host BEFORE the unit necessarily exists there, so a version that hard-required
+# systemd would break the very deploy that installs it. The legacy setsid path below
+# stays as the fallback and is what runs until the unit is enabled.
+#
+# Motivation (2026-07-25): the daemon exited silently ~3 minutes after a deploy and
+# stayed dead for 29 minutes, because nothing supervised it. `Restart=always` in the
+# unit turns that into a five-second gap, and journald records the exit code — the
+# evidence that did not exist for the original outage.
+UNIT="nostrautica-coordinator"
+if systemctl --user cat "$UNIT" >/dev/null 2>&1; then
+  log_offset=0
+  [ -f "$LOG" ] && log_offset="$(wc -c < "$LOG" | tr -d ' ')"
+  echo "=== coordinator restarting via systemd --user ($UNIT) $(date -Is) ==="
+  systemctl --user restart "$UNIT" || fail "systemctl --user restart $UNIT failed"
+
+  # Readiness still comes from the daemon's OWN log line, never from systemd's
+  # notion of "active": Type=simple reports active the moment the process is
+  # forked, which says nothing about the SQLite lock being acquired or startup
+  # having finished. Same marker and same byte-offset slice as the legacy path —
+  # which is why the unit MUST keep appending to $LOG (StandardOutput=append:).
+  waited=0
+  while :; do
+    if ! systemctl --user is-active --quiet "$UNIT"; then
+      echo "--- new coordinator log tail: ---"
+      tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | tail -n 20
+      echo "--- systemd status: ---"
+      systemctl --user --no-pager --lines=15 status "$UNIT" 2>&1 | tail -n 20
+      fail "coordinator unit went inactive during startup"
+    fi
+    if tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | grep -qF "$READY_MARK"; then
+      break
+    fi
+    if [ "$waited" -ge "$READY_TIMEOUT" ]; then
+      echo "--- new coordinator log tail: ---"
+      tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | tail -n 20
+      fail "coordinator did not report ready within ${READY_TIMEOUT}s"
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  # Grace check: Restart=always means a crash-and-respawn loop can still look
+  # "active" here, so assert the unit has not been restarting under us.
+  sleep 2
+  systemctl --user is-active --quiet "$UNIT" || fail "coordinator became ready then went inactive"
+  echo "=== coordinator restarted OK $(date -Is) (ready in ${waited}s, systemd unit $UNIT, log: $LOG) ==="
+  exit 0
+fi
+
+# --- Legacy path: this script owns the lifecycle (pre-systemd hosts) -------------
 # --- Stop the old daemon and wait for it (and the lock) to actually go away ------
 old_pids="$(running_pids)"
 if [ -n "$old_pids" ]; then
