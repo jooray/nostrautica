@@ -36,3 +36,6 @@ docs/internal/
 # playwright artifacts
 e2e/test-results/
 RELEASE_ID
+
+# Local Tier-2 test stack config (see docs/E2E-TESTING-GUIDE.md) — machine-specific
+packages/coordinator/local-test.toml
