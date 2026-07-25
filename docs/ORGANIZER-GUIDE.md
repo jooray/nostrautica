@@ -460,6 +460,85 @@ plan fails.
   it's also a feeling AI can't capture on its own — and if it's a video, it
   helps people recognize their matches in person.
 
+## 8. Tracking invite codes after you mail them out
+
+If you sell tickets somewhere other than Nostrautica — Eventbrite, your own
+webshop, cash at the door — the only thing you have on a buyer is their email
+address. You send each of them one invite link; some join right away, some
+never get around to it, and a few days before the event you want to nudge
+exactly the people who haven't shown up yet.
+
+**Set this expectation early: the app never learns anyone's email address,
+and it never sends anyone an email.** Mailing codes out, and matching a code
+back to the person you sent it to, is entirely your own job, done in your own
+tools — a mail-merge, a spreadsheet, whatever ticketing system you already
+use. All the app can ever tell you is which code *numbers* have been used.
+
+### Every code carries a number
+
+Each invite code you generate is labelled — **invite-1, invite-2**, and so
+on — right next to it wherever it appears. That number is the only thing
+linking a code back to a person, and only you know who: write it in a column
+next to their email address the moment you send the code out, in a file of
+your own.
+
+Numbers keep counting up. Generate 20 codes today and 10 more next week, and
+the new ones start at **invite-21** — nothing already handed out changes its
+number, and none get reused.
+
+### Two exports for two different moments
+
+Open **Exports**, under invite codes in Admin (§3). There are two downloads
+here, on purpose, because they answer different questions at different times:
+
+- **Codes for mailing** gives you the actual codes and links to paste into a
+  mail-merge — but only for the batch on screen right now, and only right
+  now. Invite codes are one-time secrets the app deliberately never keeps a
+  copy of anywhere, so export (or at least copy) a batch before you generate
+  the next one or leave the page — once you do either, that batch's codes
+  are gone for good. Their numbers stay reserved; you just no longer have
+  anyone to hand them to.
+- **Who has joined** tells you which code numbers have been used. It needs no
+  codes at all, so you can open it any time — weeks or months later, on any
+  device where you're signed in as the organizer. This is the one you come
+  back to.
+
+### The workflow
+
+1. **Create your codes**, then immediately export **Codes for mailing** in
+   the spreadsheet format (CSV).
+2. **Mail-merge it** against your ticket list, keeping each code's number in
+   a column next to the matching email address, in a file of your own.
+3. Closer to the event — or any time after — open **Exports** again and
+   download **Who has joined**, with **Unused codes only** selected.
+4. **Match those numbers** back to email addresses in your file.
+5. **Re-send** to just that shorter list, instead of mailing everyone again.
+
+### Which format to pick
+
+The spreadsheet file is the default, and it's the one to use for a
+mail-merge — open it straight in Excel, Google Sheets, or whatever you
+already use. The plain list of links is there mainly for people who script
+their own mailing instead.
+
+### One honest caveat
+
+"Used" only ever counts up: once the app has seen a code used, it stays
+marked used, permanently. But "unused" is a softer signal than it looks —
+for an event that finished a while back, or if you simply haven't opened the
+organizer view since some people joined, a handful of codes can still show
+as unused even though those people genuinely did join. Treat **used** as
+certain, and **unused** as "probably not yet — worth a quick check before
+you re-mail someone." A little annoyance for someone who already joined
+beats no reminder at all for someone who didn't, but it's worth knowing this
+can happen rather than being caught off guard by it.
+
+### At the door
+
+The invite sheet (§3) already leaves out any code that's been used, so if
+you print it again close to the event, everyone who joined online in the
+meantime simply won't be on the page anymore.
+
 ## Troubleshooting & FAQ
 
 - **What do attendees see before they're approved?** Only the public event page
