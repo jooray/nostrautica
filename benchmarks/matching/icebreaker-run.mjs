@@ -45,6 +45,7 @@ import {
   buildSharedArtifactCases,
   buildProdReplicaCases,
   buildReverseCases,
+  buildReverseDenseCases,
 } from "./icebreaker-fixture.mjs";
 import { gradeIcebreaker, mentionsEntity, summarize } from "./icebreaker-grade.mjs";
 // The reverse variants live in their own module because reverse-score-run.mjs sends
@@ -52,6 +53,7 @@ import { gradeIcebreaker, mentionsEntity, summarize } from "./icebreaker-grade.m
 // move). Two copies of a control are two different controls the day one is edited.
 import {
   REVERSE_VARIANTS,
+  ROLE_FIELDS,
   START,
   replaceOnce,
   spliceReverseBlock,
@@ -303,6 +305,11 @@ const ALL_CASES = [
   ...buildSharedArtifactCases(K),
   ...buildProdReplicaCases(K),
   ...buildReverseCases(K),
+  // Every entry is the ambiguous case, so the denominator is all trap rather than
+  // one trap diluted by k−1 ordinary pairs — see buildReverseDenseCases. Opt-in by
+  // bucket: it is a stress test, and pooling it with the sparse buckets would make
+  // both numbers mean nothing.
+  ...buildReverseDenseCases(K),
 ];
 const CASES = BUCKETS.length ? ALL_CASES.filter((c) => BUCKETS.includes(c.bucket)) : ALL_CASES;
 if (CASES.length === 0) throw new Error(`no cases in buckets ${BUCKETS} (have ${[...new Set(ALL_CASES.map((c) => c.bucket))]})`);
@@ -343,7 +350,24 @@ const isReverse = (c) => c.bucket.startsWith("reverse-");
   const rev = CASES.find(isReverse);
   if (rev) {
     const live = liveReverseUserBlock(rev.shared, rev.targets);
-    for (const key of ["R1", "R2", "R3"]) VARIANTS[key].user(live);
+    for (const key of ["R1", "R2", "R3", "R4", "R5"]) VARIANTS[key].user(live);
+    // R5 moves blocks rather than rewording them, so the assertion is positional.
+    const r5 = VARIANTS.R5.user(live);
+    if (r5.indexOf("SHARED PERSON (") < r5.indexOf("--- TARGET 1 ---")) throw new Error("R5 did not reorder");
+    if (VARIANTS.R5.system("sk") === VARIANTS.R3.system("sk")) throw new Error("R5 system prompt equals R3");
+    // R4 is R3 plus the role fields: same user block, different schema and one
+    // extra system paragraph. Assert both halves, so a variant that silently lost
+    // its schema transform cannot be reported as a second copy of R3.
+    if (VARIANTS.R4.user(live) !== live) throw new Error("R4 must send the live user block verbatim");
+    if (VARIANTS.R4.system("sk") === VARIANTS.R3.system("sk")) throw new Error("R4 system prompt equals R3");
+    const r4 = VARIANTS.R4.schema(SCHEMA).properties.matches.items;
+    for (const f of ROLE_FIELDS) {
+      if (!r4.required.includes(f)) throw new Error(`R4 schema is missing ${f}`);
+      // Alphabetical, NOT the schema's property order: Venice emits keys sorted,
+      // so a role field named after "icebreakers" is generated after the openers
+      // and steers nothing. This assertion is the whole variant.
+      if (!(f < "icebreakers")) throw new Error(`R4 field ${f} sorts after "icebreakers" and would be a no-op`);
+    }
     if (VARIANTS.R1.user(live) === live) throw new Error("R1 user block is identical to the live one");
     if (VARIANTS.R2.user(live) === live) throw new Error("R2 user block is identical to the live one");
     // R2 is the control for the restructure, so the two must differ in the SYSTEM
@@ -377,6 +401,10 @@ if (process.env.DRY) {
 async function runVariant(key, lang) {
   const v = VARIANTS[key];
   const system = v.system(lang);
+  // A variant may change the OUTPUT schema as well as the prompt (R4 adds the
+  // per-entry role fields). Everything downstream reads `matches[].icebreakers`,
+  // which no variant may remove, so grading is unaffected.
+  const schema = v.schema ? v.schema(SCHEMA) : SCHEMA;
   const rows = [];
   let failed = 0;
   const reverse = v.shape === "reverse";
@@ -416,7 +444,7 @@ async function runVariant(key, lang) {
             user: v.user(
               reverse ? liveReverseUserBlock(kase.shared, kase.targets) : liveUserBlock(kase.target, kase.candidates),
             ),
-            schema: SCHEMA,
+            schema,
             schemaName: reverse ? "reverse_batch_score" : "batch_score",
             temperature: 0.3,
             // K=10 (production's default batch_size) returns ten entries with three
@@ -491,10 +519,14 @@ mkdirSync(join(here, "results"), { recursive: true });
 // English-only result the README's first numbers came from.
 // Variants in the filename too: a reverse-shape run and a forward-shape run of
 // the same model/langs are different experiments and must not clobber each other.
+// The bucket filter belongs in the name too: the same variants over the sparse
+// reverse buckets and over reverse-dense are different experiments with very
+// different denominators, and without this they would clobber each other.
+const BUCKET_TAG = BUCKETS.length === 1 ? `_${BUCKETS[0]}` : "";
 const out = join(
   here,
   "results",
-  `ICEBREAKER_${MODEL}_K${K}_${LANGS.join("-")}_${WANTED.join("-")}${REPEATS > 1 ? `_x${REPEATS}` : ""}.json`,
+  `ICEBREAKER_${MODEL}_K${K}_${LANGS.join("-")}_${WANTED.join("-")}${BUCKET_TAG}${REPEATS > 1 ? `_x${REPEATS}` : ""}.json`,
 );
 
 const runs = [];

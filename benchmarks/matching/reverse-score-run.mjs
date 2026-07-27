@@ -99,6 +99,11 @@ async function runVariant(key, seed) {
   const v = REVERSE_VARIANTS[key];
   if (!v) throw new Error(`unknown variant ${key} (have ${Object.keys(REVERSE_VARIANTS)})`);
   const system = v.system("en");
+  // A variant may change the output schema (R4 adds the per-entry role fields).
+  // Nothing here reads them — the metrics come from `score`/`similarity`/
+  // `complementarity` — but the schema must match the prompt or the model is being
+  // asked for fields it was never told about, which is a different experiment.
+  const schema = v.schema ? v.schema(SCHEMA) : SCHEMA;
   const edges = [];
   const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
   const latencies = [];
@@ -117,7 +122,7 @@ async function runVariant(key, seed) {
             model: MODEL,
             system,
             user: v.user(liveUserBlock(shared, targets)),
-            schema: SCHEMA,
+            schema,
             schemaName: "reverse_batch_score",
             temperature: 0.3,
             // Ten entries of reasoning plus three icebreakers each overruns the

@@ -135,6 +135,137 @@ export function assertStrippedLayout(r2) {
 // R2 keeps the CURRENT languageInstruction: the 2026-07-25 change to that block
 // shipped with the wording it controls for, so re-testing it here would confound
 // two fixes. R3 sends production's bytes untouched, in both prompts.
+/**
+ * R4 asks the model to NAME the two roles in the output, per entry, immediately
+ * before it writes that entry's icebreakers.
+ *
+ * Rationale: R2 and R3 are both attempts to make the roles unmissable on the way
+ * IN — wording, then layout. Neither can do anything about the fact that by the
+ * time the model is emitting opener #3 of entry #7, the binding line for entry 7 is
+ * hundreds of tokens back and the shared person's profile is the nearest, longest
+ * block of concrete nouns. Generation is autoregressive, so the cheapest place to
+ * restate the binding is in the model's own output, in the token positions right
+ * before the openers: the model reads what it just wrote.
+ *
+ * THE FIELD NAMES ARE LOad-BEARING, and not for readability. Venice's structured
+ * output emits object keys in ALPHABETICAL order, not in the order the schema
+ * lists them — verified on every cached response in this directory, which all come
+ * back `complementarity, icebreakers, index, reasoning_for_target, score,
+ * similarity`. So a field called `writer_name` would be generated AFTER the
+ * icebreakers and steer nothing; the first draft of this variant did exactly that
+ * and would have measured a no-op at full cost. `addressed_to` and `authored_by`
+ * sort ahead of `complementarity`, so they are the first two things the model
+ * writes in every entry.
+ *
+ * (The same fact has a free corollary worth knowing: production's `icebreakers`
+ * are already generated BEFORE `reasoning_for_target`, so the openers are not
+ * written "after" the reasoning however the prompt is worded.)
+ *
+ * Cost if this ships: ~15 tokens per entry. The coordinator's parser ignores
+ * unknown fields, so the fields are diagnostic only — nothing downstream reads
+ * them, they exist to steer the decode.
+ */
+export const ROLE_FIELDS = ["addressed_to", "authored_by"];
+
+export function withSelfLabelling(schema) {
+  const item = schema.properties.matches.items;
+  return {
+    ...schema,
+    properties: {
+      ...schema.properties,
+      matches: {
+        ...schema.properties.matches,
+        items: {
+          ...item,
+          required: [...item.required, ...ROLE_FIELDS],
+          properties: {
+            addressed_to: { type: "string" },
+            authored_by: { type: "string" },
+            ...item.properties,
+          },
+        },
+      },
+    },
+  };
+}
+
+export const SELF_LABEL_INSTRUCTION = [
+  "",
+  "ROLE FIELDS. Every entry starts with two fields that fix who is speaking, and they come out",
+  "before anything else in the entry. Fill them first, then write the rest of the entry to agree",
+  "with what you just wrote:",
+  " • authored_by — the Name from THIS entry's own TARGET block. That person is typing this entry's",
+  '   icebreakers, so everything in their block is "my".',
+  ' • addressed_to — the Name from the SHARED PERSON block. That person is being written TO, so',
+  '   everything in their block is "your". It is the same name in every entry.',
+  "Copy both names exactly as spelled in the blocks; do not translate them. Then, in the icebreakers:",
+  'anything called "your" must come from addressed_to\'s block, and anything of authored_by\'s stays',
+  '"my".',
+].join("\n");
+
+/**
+ * R5 does the thing R3 only approximated: it physically prints the WRITERS first
+ * and the shared person LAST, mirroring the forward block, whose one structural
+ * advantage is that its first-printed person is the sender. R3 kept the shared
+ * person on top and countered it with a directory and per-entry lines; R5 removes
+ * the thing being countered.
+ *
+ * This is a benchmark-only variant with a real production cost attached, which is
+ * why it is measured before it is considered: coordinator.test.ts's fake LLM
+ * decides who it was asked about by slicing the user block on `SHARED PERSON (`,
+ * then `TARGET ATTENDEES:`, then `--- TARGET n ---`, IN THAT ORDER, and
+ * scoring.test.ts pins those three landmarks. Shipping this shape means rewriting
+ * both. Worth doing only if it wins by a margin the fixture can actually resolve.
+ */
+const SHARED_HEAD = "\n\nSHARED PERSON (the one each target below would meet):";
+const TARGETS_HEAD = "\n\nTARGET ATTENDEES: one numbered block per WRITER";
+const PRINTED_FIRST = " writes nothing and is only read — being printed first does not make them the writer.";
+
+export function reorderWritersFirst(u) {
+  const s = u.indexOf(SHARED_HEAD);
+  const t = u.indexOf(TARGETS_HEAD);
+  if (s === -1 || t === -1 || t < s) throw new Error("R5: could not locate the shared/targets sections");
+  const head = u.slice(0, s);
+  const shared = u
+    .slice(s, t)
+    .replace("the one each target below would meet", "the one each target above would meet")
+    .replace("is the RECIPIENT of every icebreaker below:", "is the RECIPIENT of every icebreaker above:");
+  const targets = u.slice(t);
+  // The directory's closing line argues against an order that no longer exists.
+  if (!head.includes(PRINTED_FIRST)) throw new Error("R5: directory closing line missing");
+  const out =
+    head.replace(
+      PRINTED_FIRST,
+      " writes nothing and is only read — their profile is printed LAST, after every writer.",
+    ) +
+    targets +
+    shared;
+  if (out.indexOf("SHARED PERSON (") < out.indexOf("--- TARGET 1 ---")) {
+    throw new Error("R5: the shared block did not move below the targets");
+  }
+  return out;
+}
+
+// R5's system prompt cannot keep R3's BLOCK ORDER bullet: it describes a layout R5
+// does not have, and a prompt that misdescribes its own user block is not a fair
+// control either way. So the bullet is restated for the new order — meaning R5
+// differs from R3 by a layout change AND the paragraph that narrates it, which is
+// the honest way to test "does print order matter" and not a clean single-variable
+// experiment.
+const R3_ORDER_BULLET = [
+  " • BLOCK ORDER IS NOT ROLE ORDER. The shared person is printed FIRST only because they are the",
+  "   same person in every entry. Printed first does not mean speaking. The writer of entry n is",
+  "   TARGET n — never the shared person — and the line directly under each target's profile says",
+  '   so ("Entry n is written BY the TARGET n profile above, TO …"). If the order the blocks are',
+  "   printed in ever seems to disagree with that line, the line is right.",
+].join("\n");
+const R5_ORDER_BULLET = [
+  " • WRITERS ARE PRINTED FIRST. Every numbered TARGET block is a WRITER. They come first, and the",
+  "   shared person is printed LAST, because they are the same person in every entry and never",
+  "   write anything — they are only read. The writer of entry n is TARGET n, and the line directly",
+  '   under each target\'s profile says so ("Entry n is written BY the TARGET n profile above, TO …").',
+].join("\n");
+
 export const REVERSE_VARIANTS = {
   R2: {
     label: "R2-roles",
@@ -151,6 +282,23 @@ export const REVERSE_VARIANTS = {
     shape: "reverse",
     system: (lang) => REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
     user: (u) => u,
+  },
+  // R4 = R3 plus the self-labelling fields. R3 is its control, and the only
+  // difference is the schema and the paragraph that explains it.
+  R4: {
+    label: "R4-selflabel",
+    shape: "reverse",
+    system: (lang) => REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang) + SELF_LABEL_INSTRUCTION,
+    user: (u) => u,
+    schema: withSelfLabelling,
+  },
+  // R5 = R3 with the blocks physically reordered, writers first.
+  R5: {
+    label: "R5-writersfirst",
+    shape: "reverse",
+    system: (lang) =>
+      replaceOnce(REVERSE_BATCH_SYSTEM_PROMPT, R3_ORDER_BULLET, R5_ORDER_BULLET) + languageInstruction(lang),
+    user: reorderWritersFirst,
   },
 };
 

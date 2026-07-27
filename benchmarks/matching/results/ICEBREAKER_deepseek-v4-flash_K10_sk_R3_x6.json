@@ -28968,6 +28968,19 @@
         "briefingPct": 0,
         "clean": 2220,
         "cleanPct": 99.9
+      },
+      "baseSummary": {
+        "total": 0,
+        "grounded": 0,
+        "groundedPct": 0,
+        "attributionErrors": 0,
+        "attributionErrorPct": 0,
+        "theft": 0,
+        "falseClaim": 0,
+        "briefing": 0,
+        "briefingPct": 0,
+        "clean": 0,
+        "cleanPct": 0
       }
     }
   ]
