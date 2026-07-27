@@ -247,9 +247,58 @@ const PREPOSITIONS = new Set([
   "na", "pre", "o", "s", "so", "v", "vo", "k", "ku", "do", "od", "z", "zo", "po", "pri",
   "za", "u", "pro", "ke", "se", "ve", "ze",
 ]);
-/** Content one would PUBLISH under an artifact — still the artifact owner's. */
-const PRODUCT_NOUN =
-  /^(kurz|kurzy|kurzov|kurzoch|course|courses|kniha|knihy|knihu|knihe|book|books|roman|romanu|novel|album|albumu|aplikacia|aplikaciu|app|apps|projekt|projektu|project|epizoda|episode|clanok|article|verzia|version|kapitola|chapter|workshop|workshopy|podcast|seria|series|newsletter|blog|post|posts)$/;
+/**
+ * A noun that names WHAT THE ARTIFACT IS — its category — as opposed to a service
+ * somebody performed on it.
+ *
+ * This list is the hinge of `governs()`, and which way the hinge swings was got
+ * wrong for six rounds. The rule used to be "an intervening noun keeps the claim
+ * UNLESS it is a known service word", with a hand-maintained SERVICE_NOUN list.
+ * That default is backwards: service words are an open class, invented freshly by
+ * the model in whatever language it is writing, so every run turned up another one
+ * and every one was a false positive that inflated the error count. In a single
+ * Slovak run this list needed "branding", then "brandovanie", then the locative
+ * "brandovaní", then "brandáž" — four spellings of one idea, each discovered by
+ * hand-reading flagged rows, each having already corrupted a published number.
+ *
+ * So the default is inverted: an intervening noun BLOCKS the claim unless it is a
+ * category from this list. Categories are a closed class — the kinds of thing a
+ * person makes — and they are enumerable from the fixture's own `kind` values plus
+ * ordinary synonyms. The failure mode flips from over-counting (a correct opener
+ * graded as theft, which is what has repeatedly produced wrong conclusions) to
+ * under-counting (a real theft missed because the model reached for an unusual
+ * category word), which at least fails in the direction of not claiming a fix.
+ *
+ * Slovak and Czech inflect, so most entries are stems with their case endings.
+ */
+// Built from STEMS plus the Slovak/Czech case-and-number endings, not from a list
+// of surface forms. Enumerating forms is what let `"Tvoje projekty ako Pelagic
+// Standard"` through: the singular "projekt" was listed and the plural "projekty"
+// was not, so a textbook instance of the failure this benchmark exists to catch —
+// the model lifting "project" out of the recipient's `hot project 🔥` line and
+// handing them the sender's work — was graded clean.
+const SK_END = "(|a|u|e|y|i|ou|om|om|och|ov|ami|mi|ach|iach|ie|iu|ia|om)";
+const NOUN_STEMS = [
+  // content published under an artifact (keeps "o tvojich kurzoch na X" flagged)
+  "kurz", "epizod", "clank", "clanok", "verzi", "kapitol", "workshop", "newsletter", "blog", "post",
+  // artifact categories
+  "knih", "kniz", "roman", "album", "nahravk", "podcast", "relaci", "serial", "seri",
+  "dokument", "film", "vyskum", "studi", "aplikaci", "appk", "program", "projekt",
+  "kniznic", "sad", "nastroj", "dataset", "index", "atlas", "map", "priestor", "klub",
+  "konferenci", "festival", "podujati", "fond", "grant", "imprint", "vydavatelstv",
+  "kurikul", "metodik", "metod", "penazenk", "protokol", "system", "casopis",
+];
+const EN_NOUNS = [
+  "course", "courses", "episode", "episodes", "article", "articles", "version", "chapter",
+  "book", "books", "novel", "novels", "record", "recording", "show", "series", "documentary",
+  "research", "paper", "papers", "study", "app", "apps", "programme", "project", "projects",
+  "library", "libraries", "crate", "stack", "toolkit", "tool", "tools", "space", "club",
+  "conference", "event", "fund", "press", "curriculum", "method", "wallet", "protocol",
+  "zine", "album", "podcast", "dataset", "index", "atlas", "map", "maps", "system", "systems",
+];
+const PRODUCT_NOUN = new RegExp(
+  `^(${NOUN_STEMS.map((s) => s + SK_END).join("|")}|${EN_NOUNS.join("|")})$`,
+);
 /** A finite verb or copula between the two means they are in different phrases. */
 const LINKING =
   /^(je|su|nie|bol|bola|boli|byl|byla|is|are|was|were|sounds|looks|needs|feels|potrebuje|chyba|chybi|ma|maju|have|has|had|would|could|might|znie|vyzera)$/;
@@ -273,8 +322,27 @@ const LINKING =
  * "your Nightjar Ledger project" and "tvoj podcast Salt & Signal" are real thefts
  * in this very run.
  */
+/**
+ * Round SIX (2026-07-27, the dense reverse bucket). Same class again, missed for a
+ * purely lexical reason: the list carried the English "branding" but not the Slovak
+ * gerund it is always translated as. `"tvoje brandovanie Salt & Signal"` — the
+ * recipient really did do that branding, and the sender really does host the
+ * podcast — was graded THEFT, while `"tvoja práca na Salt & Signal"` (same claim,
+ * with a preposition) was correctly left alone.
+ *
+ * The lesson is not "add a word": every entry here is English-first, so any service
+ * noun the model reaches for in Slovak or Czech is a false positive waiting for the
+ * run that happens to produce it. The gerund forms below are added with their
+ * inflections for that reason.
+ */
+// The -vanie gerund is matched by STEM, with the full case paradigm
+// (-ie/-ia/-iu/-i/-im after deaccenting), not form by form. Listing forms one at a
+// time is what let round six through twice in one run: "tvoje brandovanie X" was
+// fixed and "o tvojom brandovaní X" — the locative, same word — was still graded
+// THEFT ten minutes later. Slovak and Czech inflect these productively, so a list
+// of nominatives is a list of future false positives.
 const SERVICE_NOUN =
-  /^(branding|artwork|rebrand|logo|packaging|identity|visuals|cover|covers|typography|vizia|vizual|identita|obal|logo|praca|prace|specializacia|vision|work)$/;
+  /^(branding|artwork|rebrand|logo|packaging|identity|visuals|cover|covers|typography|vizia|vizual|identita|obal|logo|praca|prace|specializacia|vision|work|brandingu|brandingom|(brandovan|stvarnen|prevedn|spracovan|vizualizovan)(ie|ia|iu|i|im))$/;
 
 /**
  * Does a claim ending at `gap`'s start govern the artifact that follows it?
@@ -292,14 +360,19 @@ function governs(gap) {
   const words = deaccent(g).split(/\s+/).filter(Boolean);
   if (words.length > GAP_MAX_WORDS) return false;
   if (words.some((w) => LINKING.test(w))) return false;
-  // "tvoja vízia Ironwood Assembly" — the possessive's head is the service, and
-  // Slovak drops the preposition, so this never reaches the branch below.
-  if (words.every((w) => SERVICE_NOUN.test(w))) return false;
+  // Something stands between the possessive and the artifact, so the possessive's
+  // head is that something, not the artifact. The claim only REACHES the artifact
+  // when the intervening noun names what the artifact IS ("tvoj podcast X",
+  // "your book X", "o tvojich kurzoch na X") rather than what the other person did
+  // to it ("tvoja brandáž X", "your branding for X"). A preposition, when present,
+  // bounds the phrase — words after it belong to the artifact's side.
+  //
+  // Note this is deliberately "some", not "the first word": Slovak stacks
+  // adjectives before the head ("tvoja nová kniha X"), and an adjective is neither
+  // a category nor a service.
   const prep = words.findIndex((w) => PREPOSITIONS.has(w));
-  if (prep === -1) return true;
-  // A preposition means the claim governs the noun BEFORE it. That noun is still
-  // the artifact owner's only when it is content published under the artifact.
-  return words.slice(0, prep).some((w) => PRODUCT_NOUN.test(w));
+  const head = prep === -1 ? words : words.slice(0, prep);
+  return head.some((w) => PRODUCT_NOUN.test(w));
 }
 
 /**

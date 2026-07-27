@@ -320,3 +320,95 @@ test("round five does not swallow the artifact whose category IS a design system
   const other = { firstName: "Kai", signature: { entity: "Sundial Custody", kind: "library", verb: "built" } };
   assert.deepEqual(gradeIcebreaker("Your Pelagic Standard design system is lovely.", owner, other), ["THEFT"]);
 });
+
+// ── round six (2026-07-27, the dense reverse bucket) ─────────────────────────
+// The list held the English "branding" but not the Slovak gerund the model
+// actually writes, so a correct opener — the recipient really did the branding,
+// the sender really hosts the podcast — was graded THEFT, while the same claim
+// with a preposition was left alone. Both directions are pinned, because the
+// narrowness of SERVICE_NOUN is load-bearing: widening it far enough to mask a
+// real theft would be a worse bug than the one it fixes.
+test("round six: a Slovak service gerund is not a claim on the artifact", () => {
+  const sender = { signature: { entity: "Salt & Signal" }, firstName: "Gideon" };
+  const recipient = { signature: { entity: "Ferrous Tideline" }, firstName: "Dmitri" };
+  for (const good of [
+    "Ahoj Dmitri – som kryptografka a tvoje brandovanie Salt & Signal ma velmi zaujalo.",
+    "Tvoje brandovania Salt & Signal su presne ten smer, ktorym chcem ist.",
+    "Tvoja praca na Salt & Signal ma velmi zaujala.",
+    // The locative. Same word, and it was still graded THEFT after the first fix,
+    // which is why SERVICE_NOUN now matches this family by stem + case ending.
+    "Ahoj, pocula som o tvojom brandovani Salt & Signal – to je moj podcast!",
+    "Zaujalo ma tvoje spracovanie Salt & Signal.",
+  ]) {
+    assert.deepEqual(gradeIcebreaker(good, sender, recipient), [], `should be clean: ${good}`);
+  }
+});
+
+test("round six does not mask a real theft of the same artifact", () => {
+  const sender = { signature: { entity: "Salt & Signal" }, firstName: "Gideon" };
+  const recipient = { signature: { entity: "Ferrous Tideline" }, firstName: "Dmitri" };
+  for (const bad of [
+    "Ahoj Dmitri, pocuvam tvoj podcast Salt & Signal a rozmyslam nad epizodou.",
+    "Tvoja relacia Salt & Signal je skvela.",
+    "Vidim, ze si vytvoril Salt & Signal – ja ho moderujem.",
+  ]) {
+    assert.ok(
+      gradeIcebreaker(bad, sender, recipient).includes("THEFT"),
+      `should still be THEFT: ${bad}`,
+    );
+  }
+});
+
+// ── round seven (2026-07-27): the rule was inverted, so pin BOTH directions ───
+// `governs()` used to claim the artifact unless an intervening noun was on a
+// hand-kept SERVICE list. Service words are an open class the model invents per
+// language — one Slovak run needed "branding", "brandovanie", "brandovaní" and
+// "brandáž" — so the default now blocks unless the intervening noun is a CATEGORY
+// of the artifact. These are real openers from the dense reverse run, hand-read
+// and classified before the rule changed.
+const DENSE_SENDER = { signature: { entity: "Sundial Custody" }, firstName: "Rosa" };
+const DENSE_RECIP = { signature: { entity: "Kestrel Mesh" }, firstName: "Jonah" };
+
+test("round seven: a SERVICE the recipient performed is never a claim on the artifact", () => {
+  for (const good of [
+    "Casimir, videl som tvoju brandaz Sundial Custody – skvela. Mam kniznicu, ktora potrebuje partnera.",
+    "Ahoj Jonah, pocula som o tvojom brandovani Sundial Custody – to je moja kniznica!",
+    "Zaujala ma tvoja vizualna praca na Sundial Custody.",
+  ]) {
+    assert.deepEqual(gradeIcebreaker(good, DENSE_SENDER, DENSE_RECIP), [], `should be clean: ${good}`);
+  }
+});
+
+test("round seven: a CATEGORY noun still carries the claim to the artifact", () => {
+  // The inversion must not buy its false-positive fix with blindness: these are
+  // the shapes the prod failure actually took.
+  for (const bad of [
+    "Ahoj Kenji, tvoja Sundial Custody kniznica je presne to, co potrebujem.",
+    "Ahoj Kenji, tvoja Sundial Custody je skvela.",
+    "Pocul som o tvojej kniznici Sundial Custody.",
+    "Tvoj projekt Sundial Custody ma zaujal.",
+  ]) {
+    assert.ok(
+      gradeIcebreaker(bad, DENSE_SENDER, DENSE_RECIP).includes("THEFT"),
+      `should be THEFT: ${bad}`,
+    );
+  }
+});
+
+test("round seven: the category list is built from stems, so PLURALS still carry the claim", () => {
+  // "Tvoje projekty ako Pelagic Standard" was graded clean because the list held
+  // the singular "projekt" and not the plural "projekty" — while being a textbook
+  // instance of the failure this benchmark exists to catch: the model lifting the
+  // word "project" out of the recipient's `hot project` line and handing them the
+  // sender's work. Slovak inflects for case AND number, so surface-form lists are
+  // not viable; PRODUCT_NOUN is stem-built for this reason.
+  const sender = { signature: { entity: "Pelagic Standard" }, firstName: "Ines" };
+  const recipient = { signature: { entity: "Kestrel Mesh" }, firstName: "Jonah" };
+  for (const bad of [
+    "Tvoje projekty ako Pelagic Standard ukazuju, ze rozumies systemom.",
+    "Tvoje aplikacie ako Pelagic Standard su presne to, co hladam.",
+    "Zaujali ma tvoje knihy ako Pelagic Standard.",
+  ]) {
+    assert.ok(gradeIcebreaker(bad, sender, recipient).includes("THEFT"), `should be THEFT: ${bad}`);
+  }
+});
