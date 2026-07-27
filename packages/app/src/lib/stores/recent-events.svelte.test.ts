@@ -11,6 +11,8 @@ import { coordinateToNaddr } from "@nostrautica/protocol";
 import { recentEvents } from "./recent-events.svelte.js";
 
 const KEY = "nostrautica:recent-events";
+const OWNER_A = "1".repeat(64);
+const OWNER_B = "2".repeat(64);
 const PK = "a".repeat(64);
 const COORD = `31923:${PK}:my-event`;
 const NADDR = coordinateToNaddr(COORD);
@@ -30,6 +32,8 @@ beforeEach(() => {
     setItem: (k: string, v: string) => void store.set(k, v),
     removeItem: (k: string) => void store.delete(k),
   });
+  recentEvents.setOwner(null);
+  recentEvents.clear();
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -100,5 +104,29 @@ describe("recentEvents identity", () => {
     expect(recentEvents.list).toHaveLength(1);
     expect(recentEvents.list[0].role).toBe("organizer");
     expect(recentEvents.list[0].title).toBe("A (renamed)"); // newest title
+  });
+
+  it("isolates role state by owner while keeping anonymous history separate", () => {
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Public", role: "visitor" });
+    recentEvents.setOwner(OWNER_A);
+    expect(recentEvents.list).toEqual([]);
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Owned", role: "organizer" });
+
+    recentEvents.setOwner(OWNER_B);
+    expect(recentEvents.list).toEqual([]);
+    recentEvents.setOwner(OWNER_A);
+    expect(recentEvents.list[0]?.role).toBe("organizer");
+    recentEvents.setOwner(null);
+    expect(recentEvents.list[0]?.role).toBe("visitor");
+  });
+
+  it("allows authoritative reconciliation to correct a sticky stale role", () => {
+    recentEvents.setOwner(OWNER_A);
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Event", role: "organizer", at: 42 });
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", at: 42 });
+    expect(recentEvents.list[0]?.role).toBe("organizer");
+
+    recentEvents.reconcile({ coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", at: 42 });
+    expect(recentEvents.list[0]).toMatchObject({ role: "visitor", at: 42 });
   });
 });

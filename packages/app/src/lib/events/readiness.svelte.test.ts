@@ -225,6 +225,45 @@ describe("readinessStore: local phase", () => {
     expect(stateOf("intro")).toBe("checking");
   });
 
+  it("uses the authenticated own directory text intro as positive evidence", async () => {
+    const ctx = ctxFor();
+    loadEventKeys.mockResolvedValue({ coordinate: ctx.coordinate, role: "attendee", eck: ECK });
+    loadSelfCopy.mockResolvedValue(undefined);
+    fetchDirectoryEntry.mockResolvedValue({ media: [], intro_text: "hello from the directory" });
+    await readinessStore.load(ctx, signer());
+    expect(stateOf("intro")).toBe("complete");
+  });
+
+  it("uses own directory intro media as positive evidence", async () => {
+    const ctx = ctxFor();
+    loadEventKeys.mockResolvedValue({ coordinate: ctx.coordinate, role: "attendee", eck: ECK });
+    loadSelfCopy.mockResolvedValue(undefined);
+    fetchDirectoryEntry.mockResolvedValue({ media: [{ kind: "intro" }] });
+    await readinessStore.load(ctx, signer());
+    expect(stateOf("intro")).toBe("complete");
+  });
+
+  it("does not turn absent directory intro fields into negative evidence", async () => {
+    const ctx = ctxFor();
+    loadEventKeys.mockResolvedValue({ coordinate: ctx.coordinate, role: "attendee", eck: ECK });
+    loadSelfCopy.mockResolvedValue(undefined);
+    fetchDirectoryEntry.mockResolvedValue({ media: [] });
+    await readinessStore.load(ctx, signer());
+    expect(stateOf("intro")).toBe("checking");
+  });
+
+  it("re-evaluates when delayed cache hydration supplies a self-copy", async () => {
+    const ctx = ctxFor();
+    loadEventKeys.mockResolvedValue({ coordinate: ctx.coordinate, role: "attendee", eck: ECK });
+    loadSelfCopy.mockResolvedValue(undefined);
+    await readinessStore.load(ctx, signer());
+    expect(stateOf("intro")).toBe("checking");
+
+    cachedSelfCopy.mockReturnValue({ media: [], introText: "hydrated later" });
+    readinessStore.refreshFromCache();
+    expect(stateOf("intro")).toBe("complete");
+  });
+
   it("skips the self-copy fetch when the cache already proves an intro exists", async () => {
     // For a remote signer that fetch is a nip44Decrypt the user has to approve —
     // Amber popped a dialog on every single visit to confirm a step already

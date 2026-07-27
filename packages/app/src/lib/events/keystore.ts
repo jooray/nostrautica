@@ -469,9 +469,10 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
 export async function unlockEventKeysForLogin(
   decrypt: (ciphertext: string) => Promise<string>,
   owner?: string,
-): Promise<void> {
+): Promise<boolean> {
   const o = ownerForRead(owner);
-  if (!o) return;
+  if (!o) return true;
+  let complete = true;
   for (const locked of await backend.lockedList(o)) {
     try {
       const restored = JSON.parse(await decrypt(locked.ciphertext)) as EventKeys;
@@ -483,9 +484,11 @@ export async function unlockEventKeysForLogin(
       await backend.put({ ...merged, coordinate: locked.coordinate, owner: o });
       await backend.lockedDelete(o, locked.coordinate);
     } catch {
+      complete = false;
       /* undecryptable (or the signer isn't ready yet) — retried next login */
     }
   }
+  return complete;
 }
 
 /** The highest-numbered ECK version the user holds, or undefined. */

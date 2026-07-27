@@ -30,7 +30,7 @@ const { lockEventKeysForLogout, unlockEventKeysForLogin } = vi.hoisted(() => ({
       _owner?: string,
     ) => {},
   ),
-  unlockEventKeysForLogin: vi.fn(async (_decrypt: (ct: string) => Promise<string>, _owner?: string) => {}),
+  unlockEventKeysForLogin: vi.fn(async (_decrypt: (ct: string) => Promise<string>, _owner?: string) => true),
 }));
 vi.mock("$lib/events/keystore.js", () => ({
   setActiveOwner: vi.fn(),
@@ -50,12 +50,13 @@ vi.mock("$lib/chat/identity.js", () => ({
 
 // Not-owner-scoped localStorage residues (audit UX-6) — spied on so the wiring
 // test can assert logout() actually clears them.
-const { recentEventsClear, clearAllJoinSent } = vi.hoisted(() => ({
+const { recentEventsClear, recentEventsSetOwner, clearAllJoinSent } = vi.hoisted(() => ({
   recentEventsClear: vi.fn(),
+  recentEventsSetOwner: vi.fn(),
   clearAllJoinSent: vi.fn(),
 }));
 vi.mock("$lib/stores/recent-events.svelte.js", () => ({
-  recentEvents: { clear: recentEventsClear },
+  recentEvents: { clear: recentEventsClear, setOwner: recentEventsSetOwner },
 }));
 vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent }));
 
@@ -122,6 +123,7 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
     lockChatIdentityForLogout.mockClear();
     unlockChatIdentityForLogin.mockClear();
     recentEventsClear.mockClear();
+    recentEventsSetOwner.mockClear();
     clearAllJoinSent.mockClear();
   });
 
@@ -131,10 +133,10 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
     expect(lockChatIdentityForLogout).not.toHaveBeenCalled();
   });
 
-  it("logout clears non-owner-scoped residues (recent events, join-sent markers)", async () => {
+  it("logout hides owner-scoped recent events and clears join-sent markers", async () => {
     await session.createLocalKey();
     await session.logout();
-    expect(recentEventsClear).toHaveBeenCalledTimes(1);
+    expect(recentEventsSetOwner).toHaveBeenLastCalledWith(null);
     expect(clearAllJoinSent).toHaveBeenCalledTimes(1);
   });
 
@@ -183,6 +185,23 @@ describe("event-key lock/unlock wiring (audit UX-6)", () => {
     await session.createLocalKey();
     expect(resolved).toBe(true);
   });
+
+  it("does not publish the reactive identity before event custody unlock settles", async () => {
+    let finish!: () => void;
+    unlockEventKeysForLogin.mockImplementationOnce(
+      () => new Promise<boolean>((resolve) => (finish = () => resolve(true))),
+    );
+    const login = session.createLocalKey();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(session.pubkey).toBeNull();
+    expect(session.signer).toBeNull();
+    expect(session.custodyReady).toBe(false);
+
+    finish();
+    await login;
+    expect(session.loggedIn).toBe(true);
+    expect(session.custodyReady).toBe(true);
+  });
 });
 
 describe("logout self-encrypt failure surfacing (H-5)", () => {
@@ -217,6 +236,7 @@ describe("cross-tab remote logout (H-5)", () => {
   beforeEach(async () => {
     await session.logout().catch(() => {});
     recentEventsClear.mockClear();
+    recentEventsSetOwner.mockClear();
     clearAllJoinSent.mockClear();
   });
 
@@ -226,7 +246,7 @@ describe("cross-tab remote logout (H-5)", () => {
     session.applyRemoteLogout(owner);
     expect(session.loggedIn).toBe(false);
     expect(session.pubkey).toBeNull();
-    expect(recentEventsClear).toHaveBeenCalled();
+    expect(recentEventsSetOwner).toHaveBeenLastCalledWith(null);
     expect(clearAllJoinSent).toHaveBeenCalled();
   });
 

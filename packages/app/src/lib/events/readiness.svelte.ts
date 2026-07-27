@@ -115,6 +115,9 @@ class ReadinessStore {
    * inputs, which would drop `processing` / `matches` back to "checking".
    */
   private refined = false;
+  private activeContext: EventContext | undefined;
+  private activeSigner: AppSigner | null = null;
+  private activeParts: Gathered | undefined;
 
   private latchFor(coord: string): Set<ReadinessStepId> {
     let s = this.latch.get(coord);
@@ -131,6 +134,9 @@ class ReadinessStore {
     this.coordinate = undefined;
     this.refined = false;
     this.loading = false;
+    this.activeContext = undefined;
+    this.activeSigner = null;
+    this.activeParts = undefined;
   }
 
   /**
@@ -156,7 +162,24 @@ class ReadinessStore {
     const cached = this.seedFromCache(coord, fresh);
     const role = roleFrom(keys, coord);
     if (!this.shouldPaintLocal(cached, role)) return;
-    this.commit(coord, this.derive(ctx, signer, this.localParts(coord, signer, role)));
+    const parts = this.localParts(coord, signer, role);
+    this.remember(ctx, signer, parts);
+    this.commit(coord, this.derive(ctx, signer, parts));
+  }
+
+  /**
+   * Re-read the owner-scoped self-copy after background cache hydration or a
+   * submission write-through. This only accepts positive intro evidence, so a
+   * cache miss cannot regress a network-refined answer.
+   */
+  refreshFromCache(): void {
+    const ctx = this.activeContext;
+    const parts = this.activeParts;
+    if (!ctx || !parts || this.coordinate !== ctx.coordinate || parts.hasIntro === true) return;
+    const self = cachedSelfCopy(ctx.coordinate);
+    if (!self || !hasIntroFrom(self)) return;
+    parts.hasIntro = true;
+    this.commit(ctx.coordinate, this.derive(ctx, this.activeSigner, parts));
   }
 
   async load(
@@ -195,6 +218,7 @@ class ReadinessStore {
 
       const role: Role = custodyRead ? roleFrom(keys, coord) : "unknown";
       const parts = this.localParts(coord, signer, role);
+      this.remember(ctx, signer, parts);
       if (this.shouldPaintLocal(cached, role)) {
         this.commit(coord, this.derive(ctx, signer, parts));
       }
@@ -224,7 +248,8 @@ class ReadinessStore {
             const bk = await deriveBlindingKey(signer);
             const self = await loadSelfCopy(signer, ctx, bk);
             // An intro can be a recording (media kind "intro") OR a text intro (F1).
-            parts.hasIntro = hasIntroFrom(self);
+            // No relay self-copy is an unknown, not evidence that no intro exists.
+            parts.hasIntro = self ? hasIntroFrom(self) : undefined;
           } catch {
             parts.hasIntro = undefined; // couldn't tell — model shows "Checking status"
           }
@@ -234,6 +259,15 @@ class ReadinessStore {
           try {
             const pubkey = await signer.getPublicKey();
             const entry = await fetchDirectoryEntry(ctx, pubkey);
+            // The authenticated own directory record is a second affirmative
+            // source while the self-copy is unavailable. Missing intro fields do
+            // not prove absence because coordinator publication can lag submission.
+            if (
+              entry &&
+              hasIntroFrom({ media: entry.media, introText: entry.intro_text })
+            ) {
+              parts.hasIntro = true;
+            }
             // A directory entry with an ai_profile means processing finished; an
             // entry without one (or an intro submitted but not yet in the
             // directory) means it's still in progress.
@@ -292,6 +326,12 @@ class ReadinessStore {
       ...parts,
     };
     return deriveReadiness(input);
+  }
+
+  private remember(ctx: EventContext, signer: AppSigner | null, parts: Gathered): void {
+    this.activeContext = ctx;
+    this.activeSigner = signer;
+    this.activeParts = parts;
   }
 
   /**

@@ -77,7 +77,10 @@ export class Nip46IdentityMismatchError extends Error {
 const DEFAULT_PERMS = [
   "sign_event:0", // profile (kind-0 metadata)
   "sign_event:3", // contacts / follow list
+  "sign_event:5", // deletion request
   "sign_event:13", // NIP-59 seal (gift-wrap join requests + NIP-17 DMs)
+  "sign_event:10000", // mute list
+  "sign_event:10050", // preferred DM relays
   "sign_event:10002", // relay list (NIP-65)
   "sign_event:24242", // Blossom auth
   "sign_event:30078", // app data (settings, key backups)
@@ -108,6 +111,19 @@ const NOSTRCONNECT_TIMEOUT_MS = 120_000;
 const RESTORE_TIMEOUT_MS = 12_000;
 /** Courtesy `logout` RPC budget — not every signer answers it; don't stall logout. */
 const LOGOUT_TIMEOUT_MS = 3_000;
+/** A transport probe is machine-paced and must not consume the human approval budget. */
+const PROBE_TIMEOUT_MS = 12_000;
+
+const HEX_PUBKEY = /^[0-9a-f]{64}$/;
+
+function validPubkey(value: unknown): value is string {
+  return typeof value === "string" && HEX_PUBKEY.test(value);
+}
+
+function requirePubkey(value: unknown, context: string): string {
+  if (!validPubkey(value)) throw new Error(`${context}: signer returned an invalid pubkey`);
+  return value;
+}
 
 /**
  * Pool for the NIP-46 RPC transport. Kind-24133 replies are EPHEMERAL — a
@@ -254,7 +270,10 @@ function withTimeout<T>(
  * socket immediately instead of waiting out the reconnect backoff. Failures of
  * recovery attempts are ignored; only the first attempt's error is surfaced.
  */
-function connectWithRecovery(bunker: BunkerSigner): Promise<void> {
+function connectWithRecovery(
+  bunker: BunkerSigner,
+  connect = () => bunker.connect(CLIENT_METADATA),
+): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (fn: () => void) => {
@@ -268,7 +287,7 @@ function connectWithRecovery(bunker: BunkerSigner): Promise<void> {
         ? null
         : () => {
             if (settled || document.visibilityState !== "visible") return;
-            bunker.connect(CLIENT_METADATA).then(
+            connect().then(
               () => settle(resolve),
               () => {},
             );
@@ -278,7 +297,7 @@ function connectWithRecovery(bunker: BunkerSigner): Promise<void> {
             );
           };
     if (onVisible) document.addEventListener("visibilitychange", onVisible);
-    bunker.connect(CLIENT_METADATA).then(
+    connect().then(
       () => settle(resolve),
       (e) => {
         // A failure while backgrounded is most likely the throttled socket
@@ -315,28 +334,53 @@ export function onNip46AuthUrl(listener: AuthUrlListener): () => void {
   };
 }
 
+/** Only let signer-provided approval links reach window.open or an href. */
+export function safeNip46AuthUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Handle a remote signer's `auth_url` challenge: open the URL so the user can
  * approve out of band. The RPC then completes on the same request id.
  *
- * `window.open` is the fast path; when it's blocked (returns null / throws —
- * typical on mobile since this runs outside a user gesture) the URL is handed
- * to any registered UI listener to render as a real tappable link.
+ * `window.open` is the fast path. The URL is also handed to registered UI
+ * listeners so the persistent shell retains a tappable approval link after
+ * login, including when a mobile browser blocks the popup.
  */
 function onAuth(url: string): void {
   if (typeof window === "undefined") return;
+  const safeUrl = safeNip46AuthUrl(url);
+  if (!safeUrl) return;
   let popup: Window | null = null;
   try {
     // No "noopener" in the features string: with it, window.open returns null
     // even on SUCCESS, which would defeat blocked-popup detection. Severing
     // the opener by hand gives the same protection (the new tab starts as
     // same-origin about:blank, so the assignment is allowed).
-    popup = window.open(url, "_blank");
+    popup = window.open(safeUrl, "_blank");
     if (popup) popup.opener = null;
   } catch {
     popup = null;
   }
-  if (!popup) for (const listener of authUrlListeners) listener(url);
+  for (const listener of authUrlListeners) listener(safeUrl);
+}
+
+function selectedPointer(original: BunkerPointer, bunker: BunkerSigner, switched: boolean): BunkerPointer {
+  return switched
+    ? { ...original, relays: [...bunker.bp.relays] }
+    : { ...original, relays: [...original.relays] };
+}
+
+async function switchRelaysBounded(bunker: BunkerSigner): Promise<boolean> {
+  return withTimeout(bunker.switchRelays(), PROBE_TIMEOUT_MS, undefined, timeoutMessage()).catch(
+    () => false,
+  );
 }
 
 export class Nip46Signer implements AppSigner {
@@ -389,26 +433,43 @@ export class Nip46Signer implements AppSigner {
       onauth: onAuth,
       pool,
     });
-    // Bounded so a dead bunker can't block app boot forever (spec §5.3).
-    // connectWithRecovery: a PWA resuming from background hits the same
-    // lost-ack gap on restore as on first connect.
+    // An authorized persisted channel remains usable after its one-time connect
+    // secret has been consumed. Probe it first; only fall back to a bounded
+    // connect for signers that require a fresh handshake.
     try {
-      await withTimeout(connectWithRecovery(bunker), RESTORE_TIMEOUT_MS, undefined, () =>
-        timeoutMessage(unreachable),
-      );
+      let authorized = false;
+      try {
+        await withTimeout(bunker.ping(), RESTORE_TIMEOUT_MS, undefined, () =>
+          timeoutMessage(unreachable),
+        );
+        authorized = true;
+      } catch {
+        // The fallback retains lost-ack foreground recovery but is independently bounded.
+      }
+      if (!authorized) {
+        await withTimeout(connectWithRecovery(bunker), RESTORE_TIMEOUT_MS, undefined, () =>
+          timeoutMessage(unreachable),
+        );
+      }
       // Identity check: never trust that the reconnected bunker still answers
       // for the same user. A session without `userPubkey` is pre-upgrade —
       // accepted once; session.restore() backfills it immediately after.
-      const pk = await withTimeout(
+      const pk = requirePubkey(await withTimeout(
         bunker.getPublicKey(),
         RESTORE_TIMEOUT_MS,
         undefined,
         () => timeoutMessage(unreachable),
-      );
+      ), "NIP-46 restore");
       if (session.userPubkey && pk !== session.userPubkey) {
         throw new Nip46IdentityMismatchError();
       }
-      const signer = new Nip46Signer(bunker, clientSk, pointer, pool);
+      const switched = await switchRelaysBounded(bunker);
+      const signer = new Nip46Signer(
+        bunker,
+        clientSk,
+        selectedPointer(pointer, bunker, switched),
+        pool,
+      );
       signer.pk = pk;
       return signer;
     } catch (e) {
@@ -520,6 +581,10 @@ export class Nip46Signer implements AppSigner {
       giveUp(reason);
     };
 
+    // fromURI installs its REQ synchronously, but nostr-tools exposes no EOSE or
+    // relay-ready promise for it. Do not pretend the same-device deep link is
+    // ready after an arbitrary delay: foreground socket nudging plus the visible
+    // fresh-code retry are the reliable public-API recovery available here.
     const connecting = BunkerSigner.fromURI(
       clientSk,
       uri,
@@ -552,7 +617,13 @@ export class Nip46Signer implements AppSigner {
         // is only known from the signer's connect reply, so it can't be built
         // ahead of time — but `bp` is typed public API here, so a nostr-tools
         // rename is a compile error, not a silent persistence break.
-        const pointer: BunkerPointer = { pubkey: bunker.bp.pubkey, relays, secret };
+        const pointer: BunkerPointer = {
+          pubkey: bunker.bp.pubkey,
+          // fromURI performs switch_relays before resolving. Persist what the
+          // signer selected, not the nostrconnect URI's stale relay list.
+          relays: [...bunker.bp.relays],
+          secret,
+        };
         return new Nip46Signer(bunker, clientSk, pointer, pool);
       },
       (e: unknown) => {
@@ -570,7 +641,9 @@ export class Nip46Signer implements AppSigner {
   /**
    * Connect to a pasted `bunker://` URI. `abort` (from a Cancel button) rejects
    * the returned promise. Malformed input fails with a human message before any
-   * crypto runs.
+   * crypto runs. nostr-tools' connect() hardcodes an empty permissions field,
+   * so this path uses its public sendRequest() to ask for the same permissions
+   * as the QR flow.
    */
   static async fromBunkerUri(
     bunkerUri: string,
@@ -604,7 +677,14 @@ export class Nip46Signer implements AppSigner {
       throw new Error(t("error.badBunkerLink"));
     }
     try {
-      await withTimeout(connectWithRecovery(bunker), CONNECT_TIMEOUT_MS, abort, () =>
+      const connect = () =>
+        bunker.sendRequest("connect", [
+          pointer.pubkey,
+          pointer.secret ?? "",
+          DEFAULT_PERMS.join(","),
+          JSON.stringify(CLIENT_METADATA),
+        ]).then(() => undefined);
+      await withTimeout(connectWithRecovery(bunker, connect), CONNECT_TIMEOUT_MS, abort, () =>
         timeoutMessage(unreachable),
       );
     } catch (e) {
@@ -612,11 +692,17 @@ export class Nip46Signer implements AppSigner {
       pool.destroy();
       throw e;
     }
-    return new Nip46Signer(bunker, clientSk, pointer, pool);
+    const switched = await switchRelaysBounded(bunker);
+    return new Nip46Signer(bunker, clientSk, selectedPointer(pointer, bunker, switched), pool);
   }
 
   async getPublicKey(): Promise<string> {
-    if (!this.pk) this.pk = await this.bunker.getPublicKey();
+    if (!this.pk) {
+      this.pk = requirePubkey(
+        await this.rpcWithForegroundRetry(() => this.bunker.getPublicKey()),
+        "NIP-46 get_public_key",
+      );
+    }
     return this.pk;
   }
 
@@ -626,31 +712,83 @@ export class Nip46Signer implements AppSigner {
   // request in their signer app, and turns a dead relay into a visible error.
   private static readonly RPC_TIMEOUT_MS = 60_000;
 
+  /**
+   * Mobile signer handoffs background the app and can lose an ephemeral reply.
+   * If that happens, returning to the foreground wins the race against the first
+   * attempt: probe the re-established transport, then retry exactly once. Both
+   * attempts and the probe have explicit deadlines, so neither path can wedge.
+   */
+  private async rpcWithForegroundRetry<T>(operation: () => Promise<T>): Promise<T> {
+    if (typeof document === "undefined") {
+      return withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, timeoutMessage());
+    }
+
+    let hiddenWhilePending = document.visibilityState === "hidden";
+    let resume!: () => void;
+    const resumed = new Promise<symbol>((resolve) => {
+      resume = () => resolve(Symbol.for("nip46-resumed"));
+    });
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") hiddenWhilePending = true;
+      else if (hiddenWhilePending) resume();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    try {
+      const first = withTimeout(
+        operation(),
+        Nip46Signer.RPC_TIMEOUT_MS,
+        undefined,
+        timeoutMessage(),
+      );
+      const result = await Promise.race([first, resumed]);
+      if (typeof result !== "symbol") return result;
+
+      // The library has no request cancellation API. The abandoned first request
+      // may still answer, but its bounded wrapper is observed to avoid an
+      // unhandled rejection; the user-visible operation has one controlled retry.
+      void first.catch(() => {});
+      await withTimeout(this.bunker.ping(), PROBE_TIMEOUT_MS, undefined, timeoutMessage());
+      return await withTimeout(
+        operation(),
+        Nip46Signer.RPC_TIMEOUT_MS,
+        undefined,
+        timeoutMessage(),
+      );
+    } finally {
+      document.removeEventListener("visibilitychange", onVisibility);
+    }
+  }
+
   async signEvent(template: EventTemplate): Promise<VerifiedEvent> {
     const pubkey = await this.getPublicKey();
-    return (await withTimeout(
-      this.bunker.signEvent({ ...template, pubkey } as any),
-      Nip46Signer.RPC_TIMEOUT_MS,
-      undefined,
-      timeoutMessage(),
-    )) as VerifiedEvent;
+    const requested = {
+      kind: template.kind,
+      created_at: template.created_at,
+      content: template.content,
+      tags: JSON.stringify(template.tags),
+    };
+    const signed = await this.rpcWithForegroundRetry(() => this.bunker.signEvent(template));
+    if (
+      signed.pubkey !== pubkey ||
+      signed.kind !== requested.kind ||
+      signed.created_at !== requested.created_at ||
+      signed.content !== requested.content ||
+      JSON.stringify(signed.tags) !== requested.tags
+    ) {
+      throw new Error("NIP-46 sign_event: signer returned a different event");
+    }
+    return signed;
   }
 
   async nip44Encrypt(recipientPubkey: string, plaintext: string): Promise<string> {
-    return withTimeout(
+    return this.rpcWithForegroundRetry(() =>
       this.bunker.nip44Encrypt(recipientPubkey, plaintext),
-      Nip46Signer.RPC_TIMEOUT_MS,
-      undefined,
-      timeoutMessage(),
     );
   }
 
   async nip44Decrypt(counterpartyPubkey: string, ciphertext: string): Promise<string> {
-    return withTimeout(
+    return this.rpcWithForegroundRetry(() =>
       this.bunker.nip44Decrypt(counterpartyPubkey, ciphertext),
-      Nip46Signer.RPC_TIMEOUT_MS,
-      undefined,
-      timeoutMessage(),
     );
   }
 

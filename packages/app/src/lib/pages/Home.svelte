@@ -55,16 +55,29 @@
   // wait on the two relay scans before filling the list (CACHING-PLAN §2.14). The
   // fresh-device recovery + grant scan then run in the background and backfill
   // again once they land.
-  function backfillFromKeystore(keys: { coordinate: string; role: "organizer" | "attendee" }[]) {
+  function backfillFromKeystore(
+    keys: { coordinate: string; role: "organizer" | "attendee" }[],
+    authoritative = false,
+  ) {
+    const byCoordinate = new Map(keys.map((k) => [k.coordinate, k]));
+    if (authoritative) {
+      for (const prior of recentEvents.list) {
+        recentEvents.reconcile({
+          ...prior,
+          role: byCoordinate.get(prior.coordinate)?.role ?? "visitor",
+        });
+      }
+    }
     for (const k of keys) {
-      if (recentEvents.has(k.coordinate)) continue;
       try {
-        recentEvents.record({
+        const prior = recentEvents.list.find((e) => e.coordinate === k.coordinate);
+        recentEvents.reconcile({
           coordinate: k.coordinate,
-          naddr: coordinateToNaddr(k.coordinate),
-          title: placeholderTitle(k.coordinate),
+          naddr: prior?.naddr ?? coordinateToNaddr(k.coordinate),
+          title: prior?.title ?? placeholderTitle(k.coordinate),
+          icon: prior?.icon,
           role: k.role,
-          at: 1, // backfill without bumping to the top
+          at: prior?.at ?? 1, // reconciliation must preserve recent navigation order
         });
       } catch {
         /* one malformed coordinate must not abort the whole backfill */
@@ -74,7 +87,7 @@
 
   onMount(async () => {
     // 1. Instant: local custody answers "My events" with no network.
-    backfillFromKeystore(await listEventKeys().catch(() => []));
+    if (session.custodyReady) backfillFromKeystore(await listEventKeys().catch(() => []));
     perfMark("Home", "cache-paint");
     // 2. Warm the contexts the user is most likely to tap next.
     for (const e of recentEvents.list.slice(0, 4)) prefetchEventContext(e.naddr);
@@ -83,7 +96,7 @@
     //    newly-recovered/approved event appears without blocking first paint.
     //  - recoverEventKeys: 30078 backups → events this identity CREATED (E_id).
     //  - receiveGrants: 21602/21605 gift-wraps → events APPROVED into / co-organizer.
-    if (session.signer) {
+    if (session.signer && session.custodyReady) {
       // Backstop: never let a hung relay strand the user on the spinner. The
       // scans have their own ~8s hard cap, so this only fires if something wedges.
       const guard = setTimeout(() => (settled = true), 12000);
@@ -92,15 +105,41 @@
         receiveGrants(session.signer),
       ]).then(async () => {
         clearTimeout(guard);
-        backfillFromKeystore(await listEventKeys().catch(() => []));
-        void enrichEvents();
-        settled = true;
-        perfMark("Home", "network-settled");
+        try {
+          backfillFromKeystore(await listEventKeys(), true);
+          void enrichEvents();
+          settled = true;
+          perfMark("Home", "network-settled");
+        } catch {
+          // A failed custody read is not evidence that every event is a visitor.
+          settled = true;
+        }
       });
     } else {
       settled = true;
       perfMark("Home", "network-settled");
     }
+  });
+
+  // NIP-46 restore is deliberately detached from first paint. Reconcile again
+  // when that identity's encrypted event custody has finished unlocking.
+  let reconciledGeneration = session.custodyGeneration;
+  $effect(() => {
+    const generation = session.custodyGeneration;
+    const signer = session.signer;
+    if (!session.custodyReady || !signer || generation === reconciledGeneration) return;
+    reconciledGeneration = generation;
+    void (async () => {
+      settled = false;
+      backfillFromKeystore(await listEventKeys());
+      await Promise.allSettled([recoverEventKeys(signer), receiveGrants(signer)]);
+      backfillFromKeystore(await listEventKeys(), true);
+      void enrichEvents();
+      settled = true;
+    })().catch(() => {
+      // A storage failure is not an authoritative empty list or visitor role.
+      settled = true;
+    });
   });
 
   async function enrichEvents() {

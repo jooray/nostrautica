@@ -36,6 +36,18 @@ import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 // readiness paint the last intro/library instantly instead of re-decrypting.
 type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string; rev?: number };
 
+// Parameterized replaceable events created in the same wall-clock second must
+// not rely on the event-id tie-break to decide which edit survives. Keep each
+// d-slot strictly increasing for this session, seeded from its persisted cache.
+const lastReplaceableTimestamp = new Map<string, number>();
+
+function nextReplaceableTimestamp(slot: string, persistedAt = 0): number {
+  const now = Math.floor(Date.now() / 1000);
+  const next = Math.max(now, persistedAt + 1, (lastReplaceableTimestamp.get(slot) ?? 0) + 1);
+  lastReplaceableTimestamp.set(slot, next);
+  return next;
+}
+
 /**
  * Whether a self-copy carries an intro (audit UX-O5). An intro is EITHER a
  * recording (media of kind "intro") OR an authored text intro (F1). Both the
@@ -239,17 +251,29 @@ export async function submitProfileAndMedia(
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
   };
+  const selfKey = selfCopyKey(ctx.coordinate);
+  const selfD = blindedD(args.blindingKey, ctx.coordinate, attendeePubkey);
   const selfCipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(selfContent));
   const selfEvent = await signer.signEvent({
     kind: KIND_MY_PROFILE,
-    created_at: Math.floor(Date.now() / 1000),
-    tags: [["d", blindedD(args.blindingKey, ctx.coordinate, attendeePubkey)]],
+    created_at: nextReplaceableTimestamp(selfD, cacheGet<SelfCopy>(selfKey)?.at),
+    tags: [["d", selfD]],
     content: selfCipher,
   });
 
+  const publishSelfCopy = publishOrQueue(selfEvent).then((published) => {
+    // Both outcomes are durable: either a relay accepted the event or the outbox
+    // persisted it. Write through before navigation can re-read stale intro state.
+    cacheSet(
+      selfKey,
+      { profile: args.profile, media: args.media, introText, rev } satisfies SelfCopy,
+      selfEvent.created_at,
+    );
+    return published;
+  });
   const [submissionOut, selfCopyOut, libraryOut] = await Promise.all([
     publishOrQueue(wrap as any, ctx.config.relays),
-    publishOrQueue(selfEvent),
+    publishSelfCopy,
     // Every submitted intro — recorded OR authored text — is also folded into the
     // cross-event reuse library so it can be picked at a later event (F1 reuse).
     addToLibrary(signer, args.blindingKey, {
@@ -312,7 +336,7 @@ export async function addToLibrary(
   const cipher = await signer.nip44Encrypt(pubkey, JSON.stringify(content));
   const event = await signer.signEvent({
     kind: KIND_MY_PROFILE,
-    created_at: Math.floor(Date.now() / 1000),
+    created_at: nextReplaceableTimestamp(libD, cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.at),
     tags: [["d", libD]],
     content: cipher,
   });

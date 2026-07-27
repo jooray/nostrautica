@@ -57,13 +57,15 @@ vi.mock("./keystore.js", () => ({
 vi.mock("$lib/events/keystore.js", () => ({
   setActiveOwner: vi.fn(),
   lockEventKeysForLogout: vi.fn(async () => {}),
-  unlockEventKeysForLogin: vi.fn(async () => {}),
+  unlockEventKeysForLogin: vi.fn(async () => true),
 }));
 vi.mock("$lib/chat/identity.js", () => ({
   lockChatIdentityForLogout: vi.fn(async () => {}),
   unlockChatIdentityForLogin: vi.fn(async () => {}),
 }));
-vi.mock("$lib/stores/recent-events.svelte.js", () => ({ recentEvents: { clear: vi.fn() } }));
+vi.mock("$lib/stores/recent-events.svelte.js", () => ({
+  recentEvents: { clear: vi.fn(), setOwner: vi.fn() },
+}));
 vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent: vi.fn() }));
 
 import { session } from "./session.svelte.js";

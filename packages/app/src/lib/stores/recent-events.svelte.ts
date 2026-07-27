@@ -107,10 +107,14 @@ function dedupe(list: RecentEvent[]): RecentEvent[] {
   return [...byNaddr.values()].sort((a, b) => b.at - a.at).slice(0, MAX);
 }
 
-function load(): RecentEvent[] {
+function storageKey(owner: string | null): string {
+  return owner ? `${KEY}:${owner}` : KEY;
+}
+
+function load(owner: string | null): RecentEvent[] {
   if (typeof localStorage === "undefined") return [];
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(storageKey(owner));
     return dedupe(raw ? (JSON.parse(raw) as RecentEvent[]) : []);
   } catch {
     return [];
@@ -119,30 +123,42 @@ function load(): RecentEvent[] {
 
 class RecentEvents {
   list = $state<RecentEvent[]>([]);
+  owner = $state<string | null>(null);
 
   init(): void {
-    const cleaned = load(); // migrates legacy entries + dedupes
-    if (typeof localStorage !== "undefined") localStorage.setItem(KEY, JSON.stringify(cleaned));
+    const cleaned = load(this.owner); // migrates legacy entries + dedupes
+    if (typeof localStorage !== "undefined")
+      localStorage.setItem(storageKey(this.owner), JSON.stringify(cleaned));
     this.list = cleaned;
+  }
+
+  /** Switch the visible role/navigation cache to the active identity. */
+  setOwner(owner: string | null): void {
+    if (this.owner === owner) return;
+    this.owner = owner;
+    this.init();
   }
 
   /**
    * Record (or refresh) an event the user interacted with. `at` may be supplied
    * to backfill without bumping the event to the top (used by reconcile).
    */
-  record(evt: Omit<RecentEvent, "at"> & { at?: number }): void {
+  record(evt: Omit<RecentEvent, "at"> & { at?: number }, authoritativeRole = false): void {
     if (typeof localStorage === "undefined") return;
     // Never store an unnavigable entry (see dedupe): reconstruct the naddr from
     // the coordinate, or refuse the record.
     const naddr = naddrOf(evt as RecentEvent);
     if (!naddr) return;
     evt = { ...evt, naddr };
-    const all = load();
+    const all = load(this.owner);
     const prior = all.find((e) => e.coordinate === evt.coordinate);
     const existing = all.filter((e) => e.coordinate !== evt.coordinate);
-    // Never downgrade a stored role (organizer > attendee > visitor).
+    // Ordinary navigation cannot downgrade a role based on a transient miss.
+    // An explicit reconciliation follows a successful authoritative custody
+    // read and may correct an old sticky organizer/attendee label.
     const rank = { visitor: 0, attendee: 1, organizer: 2 } as const;
-    const role = prior && rank[prior.role] > rank[evt.role] ? prior.role : evt.role;
+    const role =
+      !authoritativeRole && prior && rank[prior.role] > rank[evt.role] ? prior.role : evt.role;
     // Prefer a real title over a placeholder; keep an existing icon if none given.
     const title = evt.title || prior?.title || "Event";
     const icon = evt.icon ?? prior?.icon;
@@ -153,27 +169,29 @@ class RecentEvents {
     // two collide on `naddr` — the render key. Every assignment to `list` must
     // leave it unique on both identity fields, or the next render throws.
     const next = dedupe([{ ...evt, title, icon, role, at }, ...existing]);
-    localStorage.setItem(KEY, JSON.stringify(next));
+    localStorage.setItem(storageKey(this.owner), JSON.stringify(next));
     this.list = next;
+  }
+
+  reconcile(evt: Omit<RecentEvent, "at"> & { at?: number }): void {
+    this.record(evt, true);
   }
 
   /** True if an event (by coordinate) is already tracked. */
   has(coordinate: string): boolean {
-    return load().some((e) => e.coordinate === coordinate);
+    return load(this.owner).some((e) => e.coordinate === coordinate);
   }
 
   remove(coordinate: string): void {
-    const next = load().filter((e) => e.coordinate !== coordinate);
-    if (typeof localStorage !== "undefined") localStorage.setItem(KEY, JSON.stringify(next));
+    const next = load(this.owner).filter((e) => e.coordinate !== coordinate);
+    if (typeof localStorage !== "undefined")
+      localStorage.setItem(storageKey(this.owner), JSON.stringify(next));
     this.list = next;
   }
 
-  /** Wipe the whole list (audit UX-6: logout must not leave the previous
-   *  identity's event titles + roles visible to the next person on a shared
-   *  device — this list isn't owner-scoped, so a full clear is the only
-   *  correct option, not just a per-owner filter). */
+  /** Wipe the active owner's list. */
   clear(): void {
-    if (typeof localStorage !== "undefined") localStorage.removeItem(KEY);
+    if (typeof localStorage !== "undefined") localStorage.removeItem(storageKey(this.owner));
     this.list = [];
   }
 }

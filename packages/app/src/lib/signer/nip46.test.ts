@@ -20,7 +20,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NIP46_RELAYS } from "$lib/nostr/relays.js";
 
-const { FakePool, fromURI, fromBunker, parseBunkerInput } = vi.hoisted(() => {
+const { FakePool, fromURI, fromBunker, parseBunkerInput, createNostrConnectURI } = vi.hoisted(() => {
   /** Only the surface signer/nip46.ts touches: destroy, ensureRelay, the health hooks. */
   class FakePool {
     static instances: FakePool[] = [];
@@ -45,6 +45,9 @@ const { FakePool, fromURI, fromBunker, parseBunkerInput } = vi.hoisted(() => {
     fromURI: vi.fn(),
     fromBunker: vi.fn(),
     parseBunkerInput: vi.fn(),
+    createNostrConnectURI: vi.fn((o: { clientPubkey: string; secret: string; perms?: string[] }) =>
+      `nostrconnect://${o.clientPubkey}?secret=${o.secret}`,
+    ),
   };
 });
 
@@ -52,8 +55,7 @@ vi.mock("nostr-tools/pool", () => ({ SimplePool: FakePool }));
 vi.mock("nostr-tools/nip46", () => ({
   BunkerSigner: { fromURI, fromBunker },
   parseBunkerInput,
-  createNostrConnectURI: (o: { clientPubkey: string; secret: string }) =>
-    `nostrconnect://${o.clientPubkey}?secret=${o.secret}`,
+  createNostrConnectURI,
 }));
 
 const {
@@ -61,6 +63,7 @@ const {
   isBunkerScheme,
   looksLikeBunkerUri,
   normalizeBunkerUri,
+  safeNip46AuthUrl,
 } = await import("./nip46.js");
 
 const PUBKEY = "ab".repeat(32);
@@ -68,6 +71,14 @@ const PUBKEY = "ab".repeat(32);
 const fakeBunker = () => ({
   bp: { pubkey: PUBKEY, relays: [] as string[], secret: null },
   connect: vi.fn(async () => {}),
+  ping: vi.fn(async () => {}),
+  switchRelays: vi.fn(async () => false),
+  sendRequest: vi.fn(async (_method: string, _params: string[]) => "ack"),
+  getPublicKey: vi.fn(async () => PUBKEY),
+  signEvent: vi.fn(),
+  nip44Encrypt: vi.fn(),
+  nip44Decrypt: vi.fn(),
+  logout: vi.fn(async () => {}),
   close: vi.fn(async () => {}),
 });
 /** What the real fromURI does with >1 relay once aborted: nothing, forever. */
@@ -78,6 +89,33 @@ beforeEach(() => {
   fromURI.mockReset();
   fromBunker.mockReset();
   parseBunkerInput.mockReset();
+  createNostrConnectURI.mockClear();
+});
+
+describe("auth_url validation", () => {
+  it("accepts only credential-free https URLs", () => {
+    expect(safeNip46AuthUrl("https://signer.example/approve?id=1")).toBe(
+      "https://signer.example/approve?id=1",
+    );
+    expect(safeNip46AuthUrl("http://signer.example/approve")).toBeNull();
+    expect(safeNip46AuthUrl("javascript:alert(1)")).toBeNull();
+    expect(safeNip46AuthUrl("https://user:pass@signer.example/approve")).toBeNull();
+  });
+});
+
+describe("permissions", () => {
+  it("requests the complete event-kind set in nostrconnect URIs", () => {
+    fromURI.mockReturnValue(neverSettles());
+    const handle = Nip46Signer.startNostrConnect(["wss://relay.example"]);
+    handle.connected.catch(() => {});
+    handle.cancel();
+    const perms = createNostrConnectURI.mock.calls[0][0].perms as string[];
+    expect(perms).toEqual(expect.arrayContaining([
+      "sign_event:5",
+      "sign_event:10000",
+      "sign_event:10050",
+    ]));
+  });
 });
 
 describe("bunker link detection is case-insensitive (iOS auto-capitalisation)", () => {
@@ -224,6 +262,28 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     // The union is policy re-derived per connect, not state frozen into storage:
     // a later change to NIP46_RELAYS must take effect on the next restore.
     expect(signer.serialize().bunker.relays).toEqual(["wss://relay.nsec.app"]);
+    const connect = bunker.sendRequest.mock.calls[0]!;
+    expect(connect[0]).toBe("connect");
+    expect(connect[1][2]).toContain("sign_event:10050");
+  });
+
+  it("persists signer-selected relays after switch_relays", async () => {
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://old.example"],
+      secret: "secret",
+    });
+    const bunker = fakeBunker();
+    bunker.switchRelays.mockImplementation(async () => {
+      bunker.bp.relays = ["wss://signer-selected.example"];
+      return true;
+    });
+    fromBunker.mockReturnValue(bunker);
+
+    const signer = await Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=wss%3A%2F%2Fold.example&secret=secret`,
+    );
+    expect(signer.serialize().bunker.relays).toEqual(["wss://signer-selected.example"]);
   });
 
   it("accepts a capitalised link by normalizing before parsing", async () => {
@@ -248,5 +308,89 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     );
     expect(parseBunkerInput).not.toHaveBeenCalled();
     expect(FakePool.instances.length).toBe(0);
+  });
+});
+
+describe("persisted restore", () => {
+  const persisted = {
+    clientSkHex: "01".repeat(32),
+    bunker: { pubkey: PUBKEY, relays: ["wss://relay.example"], secret: "consumed" },
+    userPubkey: PUBKEY,
+  };
+
+  it("probes an authorized channel before reusing a consumed connect secret", async () => {
+    const bunker = fakeBunker();
+    fromBunker.mockReturnValue(bunker);
+    const signer = await Nip46Signer.fromPersisted(persisted);
+    expect(bunker.ping).toHaveBeenCalledTimes(1);
+    expect(bunker.connect).not.toHaveBeenCalled();
+    expect(await signer.getPublicKey()).toBe(PUBKEY);
+  });
+
+  it("falls back to connect when the transport probe fails", async () => {
+    const bunker = fakeBunker();
+    bunker.ping.mockRejectedValueOnce(new Error("not authorized"));
+    fromBunker.mockReturnValue(bunker);
+    await Nip46Signer.fromPersisted(persisted);
+    expect(bunker.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects an invalid user pubkey", async () => {
+    const bunker = fakeBunker();
+    bunker.getPublicKey.mockResolvedValue("not-a-pubkey");
+    fromBunker.mockReturnValue(bunker);
+    await expect(Nip46Signer.fromPersisted(persisted)).rejects.toThrow(/invalid pubkey/);
+  });
+});
+
+describe("ordinary RPC validation and foreground recovery", () => {
+  async function signerWith(bunker = fakeBunker()) {
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://relay.example"],
+      secret: null,
+    });
+    fromBunker.mockReturnValue(bunker);
+    return { signer: await Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`,
+    ), bunker };
+  }
+
+  it("sends the exact event template and rejects a modified response", async () => {
+    const { signer, bunker } = await signerWith();
+    const template = { kind: 1, created_at: 123, content: "hello", tags: [["t", "test"]] };
+    bunker.signEvent.mockResolvedValue({
+      ...template,
+      content: "changed",
+      pubkey: PUBKEY,
+      id: "00".repeat(32),
+      sig: "00".repeat(64),
+    });
+    await expect(signer.signEvent(template)).rejects.toThrow(/different event/);
+    expect(bunker.signEvent).toHaveBeenCalledWith(template);
+    expect(bunker.signEvent.mock.calls[0][0]).not.toHaveProperty("pubkey");
+  });
+
+  it("probes and retries once after a pending RPC was backgrounded", async () => {
+    let state: DocumentVisibilityState = "visible";
+    const fakeDocument = new EventTarget() as Document;
+    Object.defineProperty(fakeDocument, "visibilityState", { get: () => state });
+    vi.stubGlobal("document", fakeDocument);
+    try {
+      const { signer, bunker } = await signerWith();
+      bunker.nip44Encrypt
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockResolvedValueOnce("ciphertext");
+      const result = signer.nip44Encrypt(PUBKEY, "hello");
+      state = "hidden";
+      document.dispatchEvent(new Event("visibilitychange"));
+      state = "visible";
+      document.dispatchEvent(new Event("visibilitychange"));
+      await expect(result).resolves.toBe("ciphertext");
+      expect(bunker.ping).toHaveBeenCalledTimes(1);
+      expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

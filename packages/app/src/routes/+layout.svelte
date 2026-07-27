@@ -11,6 +11,7 @@
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
   import { initSessionBroadcast } from "$lib/signer/session-broadcast.js";
+  import { onNip46AuthUrl } from "$lib/signer/nip46.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
   import { connectivity } from "$lib/stores/connectivity.svelte.js";
@@ -38,6 +39,7 @@
   let booted = $state(false);
   let main = $state<HTMLElement | null>(null);
   let routeAnnounce = $state("");
+  let signerAuthUrl = $state<string | null>(null);
   // Skip focusing/announcing the very first render so we don't steal focus from a
   // deep-linked page's own load; subsequent navigations manage focus + announce.
   let firstRoute = true;
@@ -117,6 +119,10 @@
     void restored;
   });
 
+  // auth_url can arrive during any signer RPC, long after the login component
+  // has unmounted. Keep a shell-level, user-gesture-safe approval link available.
+  $effect(() => onNip46AuthUrl((url) => (signerAuthUrl = url)));
+
   // Run identity warmers after both restoration and an explicit later login.
   $effect(() => {
     const pubkey = session.pubkey;
@@ -170,6 +176,8 @@
   $effect(() => {
     if (!booted) return;
     void session.pubkey;
+    void session.custodyGeneration;
+    if (session.pubkey && !session.custodyReady) return;
     void eventShell.sync(shellNaddr);
   });
 
@@ -300,6 +308,24 @@
       >
         {t("logout.dismiss")}
       </button>
+    </div>
+  {/if}
+  {#if signerAuthUrl}
+    <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
+      {t("signin.remote.authRequired")}
+      <a
+        class="btn primary"
+        href={signerAuthUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        style="margin-left:0.5rem"
+      >{t("signin.remote.openAuth")}</a>
+      <button
+        type="button"
+        class="btn inline"
+        style="margin-left:0.5rem"
+        onclick={() => (signerAuthUrl = null)}
+      >{t("logout.dismiss")}</button>
     </div>
   {/if}
   {#if showCompactHeader}
