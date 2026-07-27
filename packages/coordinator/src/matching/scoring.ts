@@ -496,6 +496,20 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
   '   SENDER\'s own and is "my", NEVER "your".',
   ' • RECIPIENT = the SHARED person. Second person ("you"/"your") is always them. Only what appears',
   '   in the SHARED PERSON block may be called "your".',
+  // The 2026-07-25 addition. Everything else in this block was already true of the
+  // deployed prompt and it still inverted roles wholesale at a live event: the
+  // reader was handed their own album as "tvoj projekt". The forward prompt, whose
+  // rules are the same sentences with the roles mirrored, never does this — the one
+  // structural difference is that ITS first-printed person is the SENDER while this
+  // shape's is the RECIPIENT. So the failure looks like the model taking whoever is
+  // printed first and under their own heading as the one speaking. That is what
+  // this bullet contradicts by name, and why the user block now states the writer
+  // of each entry on the line under that entry's profile.
+  " • BLOCK ORDER IS NOT ROLE ORDER. The shared person is printed FIRST only because they are the",
+  "   same person in every entry. Printed first does not mean speaking. The writer of entry n is",
+  "   TARGET n — never the shared person — and the line directly under each target's profile says",
+  '   so ("Entry n is written BY the TARGET n profile above, TO …"). If the order the blocks are',
+  "   printed in ever seems to disagree with that line, the line is right.",
   " • Never hand one person's work to the other. If the SENDER wrote a novel, never ask the",
   '   RECIPIENT about "your novel" — the SENDER wrote it, so it is "my novel". If the RECIPIENT',
   '   built a tool, never call it "my tool". The SENDER does not borrow the RECIPIENT\'s job,',
@@ -533,9 +547,37 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
 
 /**
  * The reverse-batch user block. Exported for the same reason as
- * buildBatchUserBlock: the benchmark must send production's bytes. This shape is
- * the one to watch — the RECIPIENT of every icebreaker is printed first and the
- * SENDERs are buried in a numbered list, the opposite of the forward shape.
+ * buildBatchUserBlock: the benchmark must send production's bytes.
+ *
+ * This is the shape that inverts. The forward block and this one carry the same
+ * ownership rules, word for word with the roles mirrored, and the benchmark scores
+ * the forward one at 0 attribution errors in English AND Slovak — including on a
+ * Slovak replica of the exact pair that broke — while this one keeps producing them
+ * (1/171 with the pre-2026-07-25 wording, 1/182 with the current wording; the
+ * rewording changed nothing measurable). The one thing that differs is print order:
+ * forward prints the SENDER first under its own heading, this prints the RECIPIENT
+ * first and leaves each SENDER as item n of a numbered list. The failures read
+ * exactly like a model that took the first-printed person as the one speaking.
+ *
+ * Two devices against that, because the shared person cannot simply be moved below
+ * the list (there are K senders and one recipient, and the recipient has to be
+ * stated once for the batch to be worth batching):
+ *
+ *  1. A writer directory ABOVE the shared person's block, one line per entry, the
+ *     writer named FIRST — so the first people the model reads about are the
+ *     senders, in the role they actually have, before the recipient's heading can
+ *     claim the protagonist slot.
+ *  2. A binding line under EVERY target's profile, naming that target as the writer
+ *     of that entry. This mirrors the forward block, where the SENDER line sits
+ *     directly under the SENDER's profile; here it has to be repeated per entry
+ *     because every entry has a different sender.
+ *
+ * Constraints on this text that are not obvious from reading it: the
+ * `SHARED PERSON (the one each target below would meet):` heading must be
+ * immediately followed by the shared profile, `TARGET ATTENDEES:` must appear
+ * exactly once and after it, and each `--- TARGET n ---` must be immediately
+ * followed by that target's profile — the coordinator test's fake LLM slices the
+ * user block on precisely those three landmarks to decide who it was asked about.
  */
 export function buildReverseBatchUserBlock(
   event: EventContextForScoring,
@@ -543,6 +585,11 @@ export function buildReverseBatchUserBlock(
   sharedName: string | undefined,
   ordered: readonly BatchCandidate[],
 ): string {
+  // Names when we have them, positional labels when we do not (pre-migration rows
+  // and profiles without a display name): the directory is useless if half its
+  // lines say "undefined".
+  const recipient = sharedName?.trim() || "the shared person";
+  const writer = (c: BatchCandidate, i: number) => c.name?.trim() || `TARGET ${i + 1}`;
   return [
     ...eventBlock(event),
     "",
@@ -554,14 +601,25 @@ export function buildReverseBatchUserBlock(
     "funded it, or worked on it — and that never makes it theirs. Never credit one person with the",
     "other's work.",
     "",
+    "WHO WRITES EACH ENTRY (the writer is named first):",
+    ...ordered.map((c, i) => `  entry ${i + 1}: ${writer(c, i)} (TARGET ${i + 1} below) writes to ${recipient}`),
+    `${recipient} writes nothing and is only read — being printed first does not make them the writer.`,
+    "",
     "SHARED PERSON (the one each target below would meet):",
     profileText(shared, sharedName),
     '(The shared person is the RECIPIENT of every icebreaker below: what is listed for them is "your".)',
     "",
-    "TARGET ATTENDEES:",
+    "TARGET ATTENDEES: one numbered block per WRITER — the icebreakers in entry n are typed by TARGET n.",
     '(Each target is the SENDER of the icebreakers in their own entry: only what is listed under',
     'their heading is "my".)',
-    ...ordered.map((c, i) => [`--- TARGET ${i + 1} ---`, profileText(c.profile, c.name)].join("\n")),
+    ...ordered.map((c, i) =>
+      [
+        `--- TARGET ${i + 1} ---`,
+        profileText(c.profile, c.name),
+        `(Entry ${i + 1} is written BY the TARGET ${i + 1} profile above, TO ${recipient}: in entry ${i + 1}` +
+          ` "my" = ${writer(c, i)}, "your" = ${recipient}.)`,
+      ].join("\n"),
+    ),
   ].join("\n");
 }
 

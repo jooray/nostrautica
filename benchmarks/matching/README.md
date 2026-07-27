@@ -87,7 +87,14 @@ export VENICE_API_KEY=...
 node icebreaker-run.mjs deepseek-v4-flash 4 en,sk IB1,IB2                # forward shape
 node icebreaker-run.mjs deepseek-v4-flash 4 sk R1,R2 reverse-shared-artifact,reverse-shared-thin,reverse-prod-replica
 node icebreaker-regrade.mjs results/ICEBREAKER_deepseek-v4-flash_K4_sk_R1-R2.json
+# reverse shape at production's batch size, control vs live, both languages:
+REPEATS=3 CONC=6 node icebreaker-run.mjs deepseek-v4-flash 10 sk,en R2,R3 \
+  reverse-shared-artifact,reverse-shared-thin,reverse-prod-replica
+# did the same change move the SCORES?
+node reverse-score-run.mjs deepseek-v4-flash 10 R2,R3 1,2 && node evaluate.mjs
 ```
+`DRY=1` on icebreaker-run.mjs prints the exact bytes each reverse variant would
+send and exits, which is how to check a control reconstruction before it is billed.
 
 - `icebreaker-fixture.mjs` — SIGNED_PERSONAS (derived; `personas.mjs` untouched so
   the scoring results stay comparable) + fixed, RNG-free case pairing, in buckets:
@@ -113,6 +120,18 @@ node icebreaker-regrade.mjs results/ICEBREAKER_deepseek-v4-flash_K4_sk_R1-R2.jso
 - `icebreaker-regrade.mjs <result.json>` — re-score a saved run offline; every
   icebreaker is stored verbatim, so fixing the grader costs no API spend. This is
   how every number below survived four grader corrections without new API calls.
+- `reverse-variants.mjs` — the reverse-shape prompt variants (`R2` = deployed
+  2026-07-25, `R3` = live), imported by BOTH icebreaker-run.mjs and
+  reverse-score-run.mjs. It is a module rather than copy-paste because the two
+  benchmarks answer two halves of one question — did attribution improve, did the
+  scores move — and two copies of a control are two different controls the day one
+  of them is edited.
+- `reverse-score-run.mjs [model] [K] [variants] [seeds]` — SCORE quality of the
+  reverse shape, which run.mjs never measured (it only ever ran the forward shape,
+  against prompts.mjs). Writes `results/REVERSE_*.json` in evaluate.mjs's edge
+  format, so `node evaluate.mjs` prints reverse rows (`prompt` = `rev-…`) next to
+  the historical forward ones. Uses the PLAIN personas, not the signature-artifact
+  clones: gold-pairs.json is about those profiles.
 
 ### Result — deepseek-v4-flash (production model), K=4, 20 targets, English only
 
@@ -211,6 +230,58 @@ Honest reading: the reverse shape produces attribution errors at roughly
 one in 171. What it does clear is the reverse shape's third-party briefings (5 → 0)
 with no regression anywhere else. At these rates a run of this size cannot separate
 0.5% from 0%; showing that would need ~10× the calls.
+
+## Second attempt: restructure the reverse block (R3, 2026-07-25)
+
+The wording was not the problem — R2 already said, in as many words, that the
+target is the SENDER. So R3 changes the SHAPE, on the hypothesis that role salience
+follows print order and heading prominence:
+
+1. A **writer directory above the shared person's block** (`WHO WRITES EACH ENTRY`),
+   one line per entry with the writer named FIRST, so the first people the prompt
+   introduces are the senders, in the role they actually hold.
+2. A **binding line inside every numbered entry** (`(Entry n is written BY the
+   TARGET n profile above, TO <recipient> …)`) — the forward block puts its SENDER
+   line directly under the SENDER's profile; here that has to repeat per entry
+   because every entry has a different sender.
+3. One system bullet, `BLOCK ORDER IS NOT ROLE ORDER`, which is the only line that
+   names the suspected cause and overrules it.
+
+The blocks are NOT simply reordered, for two reasons. There are K senders and one
+recipient, so the forward layout cannot be mirrored; and `coordinator.test.ts`'s
+fake LLM decides who it was asked about by slicing the user block on the
+`SHARED PERSON (…)` heading, then `TARGET ATTENDEES:`, then `--- TARGET n ---`, in
+that order — moving them would silently make it answer about the wrong people.
+`scoring.test.ts` pins those three landmarks so a future restructure fails loudly.
+
+### Did the SCORES move? (new: `reverse-score-run.mjs`)
+
+Nothing had ever measured score quality in this shape, so a prompt change here was
+unfalsifiable in the direction that matters most: a fix for attribution that
+degrades matching is a bad trade. Same gold pairs and metrics as the forward
+benchmark, K=10 (production's `batch_size` default), all 380 directed edges, two
+seeds per variant because recall@1 has a denominator of 20 and moves in 5% steps.
+
+| prompt | seed | r@1 | r@3 | strong | medium | weak | sep | o>W | o>M | disc | posBias | format-fails |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| rev-R2-roles | 1 | 0.63 | 0.84 | 0.930 | 0.740 | 0.503 | 0.427 | 0.965 | 0.873 | 0.311 | −0.03 | 1 |
+| rev-R2-roles | 2 | 0.40 | 0.90 | 0.927 | 0.733 | 0.504 | 0.424 | 0.967 | 0.919 | 0.321 | −0.06 | 0 |
+| rev-R3-order | 1 | 0.70 | 0.90 | 0.935 | 0.713 | 0.413 | 0.522 | 0.990 | 0.935 | 0.322 | −0.07 | 0 |
+| rev-R3-order | 2 | 0.80 | 0.95 | 0.917 | 0.658 | 0.440 | 0.477 | 0.961 | 0.935 | 0.318 | −0.03 | 0 |
+
+**Scoring did not regress; it improved slightly.** Pooling the two seeds, gold
+recall@1 goes 20/39 → 30/40 (Fisher exact p = 0.037) and recall@3 34/39 → 37/40
+(p = 0.48, i.e. nothing). Strong-vs-weak separation rises 0.43 → 0.50 in BOTH
+seeds, and the mechanism is visible in the columns: strong pairs stay at 0.92-0.94
+while WEAK pairs drop 0.50 → 0.41-0.44, so the gain is the model being less
+generous to bad matches, not more generous to good ones. Ordering accuracy and
+score discrimination are flat. Read the recall numbers with the denominator in
+mind: 20 directed gold pairs per run, and the two R2 seeds alone span 0.40-0.63, so
+the r@1 gap is suggestive, not established.
+
+Also worth recording: R2 produced one unparseable response in 80 calls, R3 none.
+Not a metric, just the observation that the extra structure did not cost format
+reliability.
 
 ### Grader corrections, and why they are pinned
 

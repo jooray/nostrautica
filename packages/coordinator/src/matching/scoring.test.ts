@@ -372,6 +372,107 @@ describe("reverse batched scoring (spec §16.2 reverse variant)", () => {
     expect(scores.size).toBe(0);
     expect(llm.completeCalls).toBe(0);
   });
+
+  // ── the 2026-07-25 restructure ──────────────────────────────────────────────
+  // The forward shape scores 0 attribution errors in en and sk; this one does not,
+  // and the prompts say the same things. The difference is that this shape prints
+  // the RECIPIENT first under a heading and leaves each SENDER as item n of a list.
+  // These tests pin the two devices that push the senders back up: a writer
+  // directory above the shared person, and a per-entry binding line under every
+  // target. Reword them freely — but a version of this block where a sender is
+  // named nowhere except inside a numbered list is the version that shipped the bug.
+  it("names every writer ABOVE the shared person's block, writer first", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    const targets = [
+      { id: "t1", profile: profile("t1"), name: "Marek Hraško" },
+      { id: "t2", profile: profile("t2"), name: "Jana Kováčová" },
+    ];
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), targets, () => 0, "Pavol Nemec");
+    // Sliced against the shared person's HEADING, not the first "SHARED PERSON" —
+    // the ownership preamble names it several lines earlier.
+    const directory = seen!.user.slice(
+      seen!.user.indexOf("WHO WRITES EACH ENTRY"),
+      seen!.user.indexOf("SHARED PERSON (the one"),
+    );
+    // Load-bearing: the directory is ABOVE the shared person's heading, or it is
+    // just more text after the block that already won the protagonist slot. Read
+    // back against the numbered blocks (the list is shuffled) — a directory whose
+    // numbering disagreed with the blocks would be worse than none.
+    for (const n of [1, 2]) {
+      const name = seen!.user.match(new RegExp(`--- TARGET ${n} ---\\nName: (.+)`))![1];
+      expect(directory).toContain(`entry ${n}: ${name} (TARGET ${n} below) writes to Pavol Nemec`);
+    }
+    expect(directory).toContain("being printed first does not make them the writer");
+  });
+
+  it("binds the writer again inside every numbered entry", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), candidates(3), () => 0, "Sofia");
+    for (const n of [1, 2, 3]) {
+      expect(seen!.user).toContain(`(Entry ${n} is written BY the TARGET ${n} profile above, TO Sofia:`);
+    }
+    // The binding follows its own profile, so it cannot be read as belonging to the
+    // next target: the line for entry 1 sits before the "--- TARGET 2 ---" heading.
+    const e1 = seen!.user.indexOf("(Entry 1 is written BY");
+    expect(e1).toBeGreaterThan(seen!.user.indexOf("--- TARGET 1 ---"));
+    expect(e1).toBeLessThan(seen!.user.indexOf("--- TARGET 2 ---"));
+  });
+
+  it("nameless targets degrade to positional labels, never to 'undefined'", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), candidates(2), () => 0);
+    expect(seen!.user).toContain("entry 1: TARGET 1 (TARGET 1 below) writes to the shared person");
+    expect(seen!.user).not.toContain("undefined");
+  });
+
+  it("keeps the three landmarks coordinator.test.ts's fake LLM slices on", async () => {
+    // That fake reads the user block to decide who it was asked to score: it splits
+    // on the SHARED PERSON heading, then on TARGET ATTENDEES:, then on the TARGET
+    // delimiters. A restructure that reorders those, or prints TARGET ATTENDEES:
+    // twice, silently makes it answer about the wrong people — which no assertion
+    // in that file spells out, so it is asserted here instead.
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", EVENT, profile("shared"), candidates(2), () => 0);
+    const u = seen!.user;
+    expect(u).toContain("SHARED PERSON (the one each target below would meet):\nSummary: shared summary");
+    expect(u.split("TARGET ATTENDEES:")).toHaveLength(2);
+    expect(u.indexOf("SHARED PERSON (")).toBeLessThan(u.indexOf("TARGET ATTENDEES:"));
+    expect(u.indexOf("TARGET ATTENDEES:")).toBeLessThan(u.indexOf("--- TARGET 1 ---"));
+    // Order is shuffled (rng 0 reverses), so match the shape, not a given target.
+    expect(u).toMatch(/--- TARGET 1 ---\nSummary: cand\d summary/);
+    // The shared block the fake extracts must hold the shared profile and nothing
+    // from any target: it is everything between the two headings.
+    const sharedBlock = u.slice(u.indexOf("SHARED PERSON ("), u.indexOf("TARGET ATTENDEES:"));
+    expect(sharedBlock).not.toContain("cand0");
+  });
+
+  it("tells the model that print order is not role order", () => {
+    // The deployed prompt already said the target is the sender, in these same
+    // words, and production inverted it anyway. This is the only line that names
+    // the suspected cause — the recipient being printed first — and overrules it.
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("BLOCK ORDER IS NOT ROLE ORDER");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("Printed first does not mean speaking");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("the line is right");
+    // The forward shape prints its SENDER first and does not have this problem, so
+    // it must NOT carry the rule — the forward prompt is benchmark-clean as it is.
+    expect(BATCH_SYSTEM_PROMPT).not.toContain("BLOCK ORDER IS NOT ROLE ORDER");
+  });
 });
 
 describe("name-aware reasoning (B1, TEST-REPORT-2026-07-16-MATCHING)", () => {

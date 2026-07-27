@@ -253,6 +253,28 @@ const PRODUCT_NOUN =
 /** A finite verb or copula between the two means they are in different phrases. */
 const LINKING =
   /^(je|su|nie|bol|bola|boli|byl|byla|is|are|was|were|sounds|looks|needs|feels|potrebuje|chyba|chybi|ma|maju|have|has|had|would|could|might|znie|vyzera)$/;
+/**
+ * Round FIVE of false positives (2026-07-25, the K=10 reverse run). The same error
+ * as round four in two word orders the gap rule could not see, because the
+ * intervening noun is the RECIPIENT's service TO the artifact, not the artifact:
+ *
+ *   "Your Ironwood Assembly branding is fantastic — I founded the conference series"
+ *   "ako by tvoja vízia Ironwood Assembly mohla pomôcť môjmu mentorstvu"
+ *
+ * Both get ownership RIGHT: the recipient really did the branding, the sender really
+ * founded the conference. English puts the service noun AFTER the artifact (a
+ * compound: head = "branding"), Slovak puts it before with no preposition, which is
+ * why neither reached `governs()`'s preposition branch.
+ *
+ * Deliberately narrow. "design" is NOT here: one persona's artifact IS a design
+ * system, so treating it as a service would mask a real theft — the same reason
+ * consumption verbs and PRODUCT_NOUN are drawn as tightly as they are. Category
+ * nouns ("project", "podcast", "dokument", "album") stay out for the same reason:
+ * "your Nightjar Ledger project" and "tvoj podcast Salt & Signal" are real thefts
+ * in this very run.
+ */
+const SERVICE_NOUN =
+  /^(branding|artwork|rebrand|logo|packaging|identity|visuals|cover|covers|typography|vizia|vizual|identita|obal|logo|praca|prace|specializacia|vision|work)$/;
 
 /**
  * Does a claim ending at `gap`'s start govern the artifact that follows it?
@@ -270,6 +292,9 @@ function governs(gap) {
   const words = deaccent(g).split(/\s+/).filter(Boolean);
   if (words.length > GAP_MAX_WORDS) return false;
   if (words.some((w) => LINKING.test(w))) return false;
+  // "tvoja vízia Ironwood Assembly" — the possessive's head is the service, and
+  // Slovak drops the preposition, so this never reaches the branch below.
+  if (words.every((w) => SERVICE_NOUN.test(w))) return false;
   const prep = words.findIndex((w) => PREPOSITIONS.has(w));
   if (prep === -1) return true;
   // A preposition means the claim governs the noun BEFORE it. That noun is still
@@ -309,8 +334,14 @@ export function attributionOf(text, entity) {
   const after = text.slice(at.end, at.end + WINDOW);
   if (SECOND_AFTER_RES.some((re) => re.test(after))) return "second";
   if (FIRST_AFTER_RES.some((re) => re.test(after))) return "first";
-  const second = lastGoverning(before, [SECOND_POSS_RE, ...SECOND_MADE_RES]);
-  const first = lastGoverning(before, [FIRST_POSS_RE, ...FIRST_MADE_RES]);
+  // "Your Ironwood Assembly branding": the artifact is a modifier and the head of
+  // the phrase is the service noun after it, so the possessive claims the service.
+  // Only POSSESSIVES are suppressed — a stated "you built X branding" would still
+  // be a verb claim, and those are read separately below.
+  const nextWord = deaccent(after).trim().split(/[\s,.;:!?—–-]+/)[0] ?? "";
+  const serviceHead = SERVICE_NOUN.test(nextWord);
+  const second = lastGoverning(before, serviceHead ? SECOND_MADE_RES : [SECOND_POSS_RE, ...SECOND_MADE_RES]);
+  const first = lastGoverning(before, serviceHead ? FIRST_MADE_RES : [FIRST_POSS_RE, ...FIRST_MADE_RES]);
   if (second === -1 && first === -1) return "none";
   return second > first ? "second" : "first";
 }

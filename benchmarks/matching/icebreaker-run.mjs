@@ -19,23 +19,26 @@
  * (icebreaker-fixture.mjs), so "whose is this?" is decidable by string match
  * instead of by a judge. See icebreaker-grade.mjs.
  *
- * Variants are not copies of the production prompt — IB2 IS the production
- * prompt, imported from the built coordinator, and the two controls are built by
- * splicing the historical blocks back into it, with startup assertions that the
- * splice reproduces the shipped text byte-for-byte and that the user block this
- * harness sends is the one production sends. A benchmark that drifts from what
- * ships measures nothing.
+ * Variants are not copies of the production prompt — IB2 (forward) and R3
+ * (reverse) ARE the production prompts, imported from the built coordinator, and
+ * every control is built by splicing the historical blocks back into them, with
+ * startup assertions that the splice reproduces the shipped text byte-for-byte and
+ * that the user block this harness sends is the one production sends. A benchmark
+ * that drifts from what ships measures nothing. The reverse variants live in
+ * reverse-variants.mjs because reverse-score-run.mjs sends the same two prompts.
  *
- *   node icebreaker-run.mjs [model] [K] [langs] [variants]
+ *   node icebreaker-run.mjs [model] [K] [langs] [variants] [buckets]
  *   e.g. node icebreaker-run.mjs deepseek-v4-flash 4 en,sk IB1,IB2
+ *   REPEATS=n re-asks every case n times (sample size; see runVariant), CONC=n sets
+ *   calls in flight.
  *   VENICE_API_KEY must be set. Rebuild dist first:
  *     pnpm --filter @nostrautica/coordinator build
- *   Results → results/ICEBREAKER_<model>_K<k>_<langs>.json
+ *   Results → results/ICEBREAKER_<model>_K<k>_<langs>_<variants>.json
  */
 import { writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { complete, pool, parseJsonLoose } from "./lib.mjs";
+import { complete, pool, parseJsonLoose, cacheKey, readCache, writeCache } from "./lib.mjs";
 import { EVENT } from "./personas.mjs";
 import {
   buildCases,
@@ -44,6 +47,16 @@ import {
   buildReverseCases,
 } from "./icebreaker-fixture.mjs";
 import { gradeIcebreaker, mentionsEntity, summarize } from "./icebreaker-grade.mjs";
+// The reverse variants live in their own module because reverse-score-run.mjs sends
+// the same two prompts to answer the other half of the question (did the scores
+// move). Two copies of a control are two different controls the day one is edited.
+import {
+  REVERSE_VARIANTS,
+  START,
+  replaceOnce,
+  spliceReverseBlock,
+  stripReverseDirection,
+} from "./reverse-variants.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const {
@@ -62,6 +75,19 @@ const WANTED = (process.argv[5] || "IB1,IB2").split(",").map((s) => s.trim()).fi
 // how you find out whether a fixture can reproduce a failure at all before paying
 // for a full run: a benchmark where the CONTROL also scores 0% proves nothing.
 const BUCKETS = (process.argv[6] || "").split(",").map((s) => s.trim()).filter(Boolean);
+/** How many times to re-ask each case (see runVariant) and how many calls in flight. */
+const REPEATS = Number(process.env.REPEATS || 1);
+// 16, not the old 4. Concurrency here cannot affect any number this benchmark
+// reports, which is the only reason it is safe to raise: every call is an
+// independent (fixed person, fixed list) batch, the case list is RNG-free, entries
+// are matched back by the `index` the model returns rather than by arrival, and
+// every metric is a count over rows. The one thing that does change is the ORDER
+// rows land in the saved file, which nothing reads. A K=10 run at 4 took ~30s per
+// call wall-clock and over an hour per language; that is what made the first
+// attempt run into its runner's 60-minute limit.
+const CONC = Number(process.env.CONC || 16);
+/** Per-call cache, so a killed or interrupted run resumes instead of re-billing. */
+const CACHE_DIR = "./cache/icebreaker";
 
 // ── system-prompt variants ───────────────────────────────────────────────────
 // IB0: the block as it shipped before 2026-07-24 — it names no speaker and no
@@ -98,7 +124,7 @@ const IB1_BLOCK = [
   "(or an empty list) when you can't ground a good one; never pad.",
 ].join("\n");
 
-const START = "icebreakers —";
+/** START (shared with the reverse variants) is where the icebreaker block begins. */
 const END = "\n\nReturn one entry per candidate";
 
 function spliceIcebreakerBlock(prompt, block) {
@@ -146,26 +172,6 @@ const R1_BLOCK = [
   "(or none) rather than pad.",
 ].join("\n");
 
-const REV_END = "\n\nReturn one entry per target";
-
-function spliceReverseBlock(prompt, block) {
-  const i = prompt.indexOf(START);
-  const j = prompt.indexOf(REV_END);
-  if (i === -1 || j === -1 || j < i) throw new Error("could not locate the reverse icebreaker block");
-  return prompt.slice(0, i) + block + prompt.slice(j);
-}
-
-{
-  const currentBlock = REVERSE_BATCH_SYSTEM_PROMPT.slice(
-    REVERSE_BATCH_SYSTEM_PROMPT.indexOf(START),
-    REVERSE_BATCH_SYSTEM_PROMPT.indexOf(REV_END),
-  );
-  if (spliceReverseBlock(REVERSE_BATCH_SYSTEM_PROMPT, currentBlock) !== REVERSE_BATCH_SYSTEM_PROMPT) {
-    throw new Error("reverse splice self-check failed");
-  }
-  if (currentBlock === R1_BLOCK) throw new Error("live reverse block equals the control — is dist stale?");
-}
-
 // ── user-block variants ──────────────────────────────────────────────────────
 // Production builds the user block; this harness must send the SAME bytes, so it
 // starts from buildBatchUserBlock() and edits the lines under test back to their
@@ -200,11 +206,6 @@ const REV_RECIPIENT_LINE =
   '\n(The shared person is the RECIPIENT of every icebreaker below: what is listed for them is "your".)';
 const REV_SENDER_LINES =
   '\n(Each target is the SENDER of the icebreakers in their own entry: only what is listed under\ntheir heading is "my".)';
-
-function replaceOnce(text, needle, replacement) {
-  if (!text.includes(needle)) throw new Error(`user-block anchor missing: ${needle.slice(0, 48)}…`);
-  return text.replace(needle, replacement);
-}
 
 /** The 2026-07-24 language block — the control's version of languageInstruction. */
 const LANG_NAMES = { en: "English", sk: "Slovak", cs: "Czech", de: "German" };
@@ -243,15 +244,18 @@ const VARIANTS = {
     label: "R1-deployed",
     shape: "reverse",
     system: (lang) => spliceReverseBlock(REVERSE_BATCH_SYSTEM_PROMPT, R1_BLOCK) + oldLanguageInstruction(lang),
-    user: (u) =>
-      replaceOnce(replaceOnce(replaceOnce(u, REV_NEW_PREAMBLE, REV_R1_PREAMBLE), REV_RECIPIENT_LINE, ""), REV_SENDER_LINES, ""),
+    user: (u) => {
+      const old = stripReverseDirection(u);
+      return replaceOnce(
+        replaceOnce(replaceOnce(old, REV_NEW_PREAMBLE, REV_R1_PREAMBLE), REV_RECIPIENT_LINE, ""),
+        REV_SENDER_LINES,
+        "",
+      );
+    },
   },
-  R2: {
-    label: "R2-new",
-    shape: "reverse",
-    system: (lang) => REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
-    user: (u) => u,
-  },
+  // R2 (2026-07-25 roles wording) and R3 (live, block-order restructure) come from
+  // reverse-variants.mjs — reverse-score-run.mjs measures the same two prompts.
+  ...REVERSE_VARIANTS,
 };
 
 // Self-check: the control language block must differ from the live one for a
@@ -339,9 +343,35 @@ const isReverse = (c) => c.bucket.startsWith("reverse-");
   const rev = CASES.find(isReverse);
   if (rev) {
     const live = liveReverseUserBlock(rev.shared, rev.targets);
-    for (const key of ["R1", "R2"]) VARIANTS[key].user(live);
+    for (const key of ["R1", "R2", "R3"]) VARIANTS[key].user(live);
     if (VARIANTS.R1.user(live) === live) throw new Error("R1 user block is identical to the live one");
+    if (VARIANTS.R2.user(live) === live) throw new Error("R2 user block is identical to the live one");
+    // R2 is the control for the restructure, so the two must differ in the SYSTEM
+    // prompt too — one bullet — and R3 must be production's own bytes untouched.
+    if (VARIANTS.R2.system("sk") === VARIANTS.R3.system("sk")) throw new Error("R2/R3 system prompts are identical");
+    if (VARIANTS.R3.user(live) !== live) throw new Error("R3 must send the live user block verbatim");
+    // The restored layout itself is asserted inside R2.user (assertStrippedLayout):
+    // the strip is pattern-based, and a control that is a half-copy of the thing it
+    // controls for is worse than no control.
   }
+}
+
+// DRY=1 prints the exact bytes each reverse variant would send and exits, so a
+// change to the strip can be read before it is billed. Four grader rounds and two
+// prompt rounds in this project were paid for twice for want of this.
+if (process.env.DRY) {
+  const rev = CASES.find(isReverse);
+  if (!rev) throw new Error("DRY needs a reverse case in the selected buckets");
+  const live = liveReverseUserBlock(rev.shared, rev.targets);
+  for (const key of WANTED) {
+    const v = VARIANTS[key];
+    if (v.shape !== "reverse") continue;
+    console.log(`\n${"=".repeat(78)}\n${v.label} USER BLOCK\n${"=".repeat(78)}\n${v.user(live)}`);
+    console.log(`\n--- ${v.label} icebreaker system block ---\n${
+      v.system(LANGS[0]).slice(v.system(LANGS[0]).indexOf(START))
+    }`);
+  }
+  process.exit(0);
 }
 
 async function runVariant(key, lang) {
@@ -350,32 +380,59 @@ async function runVariant(key, lang) {
   const rows = [];
   let failed = 0;
   const reverse = v.shape === "reverse";
+  // REPEATS re-asks the same case, which is the only honest way to get the sample
+  // size this failure needs: attribution errors run at ~0.5% of openers, so 17
+  // trap cases (~170 openers at K=4) cannot tell 0.5% from 0% — see the README's
+  // power note. Temperature is 0.3, not 0, so repeats are independent draws rather
+  // than a cached answer; the FIXTURE is what stays fixed between variants.
+  const work = [];
+  for (let rep = 0; rep < REPEATS; rep++) {
+    for (const c of CASES.filter((x) => isReverse(x) === reverse)) work.push({ kase: c, rep });
+  }
   await pool(
-    CASES.filter((c) => isReverse(c) === reverse),
-    async (kase) => {
+    work,
+    async ({ kase, rep }) => {
       const { bucket } = kase;
       // Forward: one SENDER (the target) + K RECIPIENTs. Reverse: one RECIPIENT
       // (the shared person) + K SENDERs. `index` numbers the LIST either way, so
       // the list is what varies and the single person is fixed.
       const listed = reverse ? kase.targets : kase.candidates;
       const fixed = reverse ? kase.shared : kase.target;
-      let value;
-      try {
-        const { content } = await complete({
-          model: MODEL,
-          system,
-          user: v.user(
-            reverse ? liveReverseUserBlock(kase.shared, kase.targets) : liveUserBlock(kase.target, kase.candidates),
-          ),
-          schema: SCHEMA,
-          schemaName: reverse ? "reverse_batch_score" : "batch_score",
-          temperature: 0.3,
-        });
-        value = parseJsonLoose(content);
-      } catch (e) {
-        failed++;
-        console.error(`  [${v.label}/${lang}] ${fixed.id} call failed: ${e.message}`);
-        return;
+      // Cached per call, like run.mjs. This is not a micro-optimisation: a
+      // 200-call run takes over an hour and the first attempt at one was killed
+      // by its runner 2.5 arms in, losing every response because nothing was on
+      // disk yet. With the cache a re-run replays what already happened for free
+      // and only pays for what is missing. `rep` is in the key, so repeats stay
+      // distinct draws rather than one answer served three times.
+      const ck = cacheKey([
+        "icebreaker", MODEL, K, v.label, lang, kase.bucket, fixed.id, listed.map((x) => x.id), rep,
+      ]);
+      let value = readCache(CACHE_DIR, ck);
+      if (!value) {
+        try {
+          const { content } = await complete({
+            model: MODEL,
+            system,
+            user: v.user(
+              reverse ? liveReverseUserBlock(kase.shared, kase.targets) : liveUserBlock(kase.target, kase.candidates),
+            ),
+            schema: SCHEMA,
+            schemaName: reverse ? "reverse_batch_score" : "batch_score",
+            temperature: 0.3,
+            // K=10 (production's default batch_size) returns ten entries with three
+            // openers each. The 4096 default truncates that mid-JSON, and a truncated
+            // response is a lost CASE, not a lost row — parseJsonLoose throws.
+            maxTokens: 12000,
+          });
+          value = parseJsonLoose(content);
+        } catch (e) {
+          // Deliberately NOT cached: a rate-limit or a truncated response is a
+          // transient loss, and caching it would make the gap permanent.
+          failed++;
+          console.error(`  [${v.label}/${lang}] ${fixed.id} call failed: ${e.message}`);
+          return;
+        }
+        writeCache(CACHE_DIR, ck, value);
       }
       for (const m of value?.matches ?? []) {
         const entry = listed[Number(m.index) - 1];
@@ -389,6 +446,7 @@ async function runVariant(key, lang) {
             variant: v.label,
             lang,
             bucket,
+            rep,
             // The candidate whose own profile advertises the target's artifact —
             // the prod 2026-07-25 shape, reported separately below.
             sharer: cand.sharesTargetArtifact === true,
@@ -404,7 +462,7 @@ async function runVariant(key, lang) {
         }
       }
     },
-    4,
+    CONC,
   );
   return {
     key,
@@ -423,9 +481,20 @@ async function runVariant(key, lang) {
 }
 
 console.log(
-  `model=${MODEL} K=${K} langs=${LANGS.join(",")} variants=${WANTED.join(",")} — ` +
-    `${CASES.length} calls per variant per language ` +
+  `model=${MODEL} K=${K} langs=${LANGS.join(",")} variants=${WANTED.join(",")} repeats=${REPEATS} — ` +
+    `${CASES.length * REPEATS} calls per variant per language ` +
     `(buckets: ${[...new Set(CASES.map((c) => c.bucket))].join(", ")})\n`,
+);
+
+mkdirSync(join(here, "results"), { recursive: true });
+// Language in the filename so a per-language run never clobbers the 2026-07-24
+// English-only result the README's first numbers came from.
+// Variants in the filename too: a reverse-shape run and a forward-shape run of
+// the same model/langs are different experiments and must not clobber each other.
+const out = join(
+  here,
+  "results",
+  `ICEBREAKER_${MODEL}_K${K}_${LANGS.join("-")}_${WANTED.join("-")}${REPEATS > 1 ? `_x${REPEATS}` : ""}.json`,
 );
 
 const runs = [];
@@ -434,6 +503,10 @@ for (const lang of LANGS) {
     if (!VARIANTS[key]) throw new Error(`unknown variant ${key} (have ${Object.keys(VARIANTS)})`);
     console.log(`→ ${VARIANTS[key].label} / ${lang}`);
     runs.push(await runVariant(key, lang));
+    // Written after EVERY arm, not once at the end. A four-arm run takes over an
+    // hour; the first one was killed by its runner during arm three and every
+    // response was lost because the file did not exist yet.
+    writeFileSync(out, JSON.stringify({ model: MODEL, k: K, langs: LANGS, runs }, null, 2));
   }
 }
 
@@ -451,17 +524,6 @@ for (const r of runs) {
   console.log(fmt(r, r.sharerSummary, "sharers"));
 }
 
-mkdirSync(join(here, "results"), { recursive: true });
-// Language in the filename so a per-language run never clobbers the 2026-07-24
-// English-only result the README's first numbers came from.
-// Variants in the filename too: a reverse-shape run and a forward-shape run of
-// the same model/langs are different experiments and must not clobber each other.
-const out = join(
-  here,
-  "results",
-  `ICEBREAKER_${MODEL}_K${K}_${LANGS.join("-")}_${WANTED.join("-")}.json`,
-);
-writeFileSync(out, JSON.stringify({ model: MODEL, k: K, langs: LANGS, runs }, null, 2));
 console.log(`\nwrote ${out}`);
 
 // Sample of what actually went wrong, so a regression is diagnosable not just

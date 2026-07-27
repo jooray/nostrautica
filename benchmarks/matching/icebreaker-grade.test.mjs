@@ -21,8 +21,12 @@ test("attributionOf reads the nearest possessive", () => {
   assert.equal(attributionOf("Can your book Tamers of Entropy get a rebrand?", "Tamers of Entropy"), "second");
   assert.equal(attributionOf("I'm the one who wrote my novel Tamers of Entropy", "Tamers of Entropy"), "first");
   assert.equal(attributionOf("Nothing here mentions it", "Tamers of Entropy"), "none");
-  // An earlier "I" must not beat a nearer "your".
-  assert.equal(attributionOf("I really enjoyed your Kestrel Mesh work", "Kestrel Mesh"), "second");
+  // An earlier "I" must not beat a nearer "your". (The example used to say "your
+  // Kestrel Mesh work"; round five made a trailing SERVICE noun mean the possessive
+  // claims the service and not the artifact, so it now reads "none" there and the
+  // precedence has to be shown on a noun that is the artifact's own category.)
+  assert.equal(attributionOf("I really enjoyed your Kestrel Mesh project", "Kestrel Mesh"), "second");
+  assert.equal(attributionOf("I really enjoyed your Kestrel Mesh work", "Kestrel Mesh"), "none");
   // ...and vice versa.
   assert.equal(attributionOf("You might like my Tamers of Entropy", "Tamers of Entropy"), "first");
   assert.equal(attributionOf("Is Kestrel Mesh yours?", "Kestrel Mesh"), "second");
@@ -262,4 +266,57 @@ test("admiring the other person's work is not a false claim", () => {
   assert.deepEqual(gradeIcebreaker("I've been building my Kestrel Mesh for months.", target, candidate), [
     "FALSE_CLAIM",
   ]);
+});
+
+test("round five: a SERVICE noun as the head is not a claim on the artifact", () => {
+  // Real rows from the 2026-07-25 K=10 reverse run. In every one the model has
+  // ownership RIGHT — the recipient did the branding, the sender founded the
+  // conference — and the grader called them THEFT because the possessive sat next
+  // to the artifact name. English makes a compound whose head is the service;
+  // Slovak puts the service first and drops the preposition. Neither reached the
+  // preposition branch that round four added.
+  const founder = {
+    firstName: "Theo",
+    signature: { entity: "Ironwood Assembly", kind: "conference series", verb: "founded" },
+  };
+  const brander = {
+    firstName: "Pia",
+    signature: { entity: "Petrichor Fund", kind: "grant programme", verb: "runs" },
+  };
+  const ok = [
+    "Your Ironwood Assembly branding is fantastic — I founded the conference series with the same name.",
+    "Theo — I write checks into freedom tech. Your Ironwood Assembly branding is exactly the polish early teams need.",
+    "Ahoj Theo, rád by som sa porozprával o tom, ako by tvoja vízia Ironwood Assembly mohla pomôcť môjmu mentorstvu.",
+  ];
+  for (const t of ok) assert.deepEqual(gradeIcebreaker(t, founder, brander), [], t);
+
+  // The thefts from the SAME run must stay flagged: a category noun ("project",
+  // "podcast", "dokument") means the possessive really does take the artifact.
+  const drummer = { firstName: "Tom", signature: { entity: "Nightjar Ledger", kind: "audit toolkit", verb: "built" } };
+  const hw = { firstName: "Sunny", signature: { entity: "Copperwake", kind: "hardware wallet", verb: "designed" } };
+  assert.deepEqual(
+    gradeIcebreaker("Hi Sunny — I'm a drummer looking for a bassist. Your Nightjar Ledger project shows great timing.", drummer, hw),
+    ["THEFT"],
+  );
+  const host = { firstName: "Gid", signature: { entity: "Salt & Signal", kind: "podcast", verb: "hosts" } };
+  const designer = { firstName: "Pav", signature: { entity: "Pelagic Standard", kind: "design system", verb: "designed" } };
+  assert.deepEqual(
+    gradeIcebreaker("Gideon, počúvam tvoj podcast Salt & Signal a rozmýšľam nad epizódou.", host, designer),
+    ["THEFT"],
+  );
+  // And the bare possessive with nothing after it is untouched.
+  assert.deepEqual(
+    gradeIcebreaker("Ahoj, som zvedavý na tvoju Sundial Custody — spojíme to s mojou knižnicou?", {
+      firstName: "Kai", signature: { entity: "Sundial Custody", kind: "key-management library", verb: "built" },
+    }, designer),
+    ["THEFT"],
+  );
+});
+
+test("round five does not swallow the artifact whose category IS a design system", () => {
+  // "design" is deliberately absent from SERVICE_NOUN: one persona's artifact is a
+  // design system, so treating the word as a service would hide a real theft.
+  const owner = { firstName: "Pav", signature: { entity: "Pelagic Standard", kind: "design system", verb: "designed" } };
+  const other = { firstName: "Kai", signature: { entity: "Sundial Custody", kind: "library", verb: "built" } };
+  assert.deepEqual(gradeIcebreaker("Your Pelagic Standard design system is lovely.", owner, other), ["THEFT"]);
 });
