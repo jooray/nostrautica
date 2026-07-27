@@ -271,6 +271,69 @@ export function buildReverseCases(k = 4) {
   return out;
 }
 
+// ── dense reverse trap (2026-07-27) ───────────────────────────────────────────
+// Why this bucket exists: buildReverseCases puts ONE trap in a batch of k. The
+// shared person advertises a single target's artifact, so with production's k=10
+// only a tenth of the graded openers can trip the hard checks at all — the other
+// nine entries are ordinary pairs whose openers are counted in the denominator and
+// can never be counted in the numerator. Every rate this benchmark has ever
+// reported for the reverse shape is therefore diluted ~10x, which is exactly why
+// 8 errors vs 2 across ~2,300 openers is statistically unreadable: the comparison
+// is really 8 vs 2 out of ~230, hidden inside a denominator ten times too big.
+//
+// Here the shared person advertises EVERY target's artifact, so every entry in the
+// batch is the ambiguous case and the denominator stops lying. This is a STRESS
+// bucket, not a prevalence estimate: the rate it reports is the rate *given* the
+// trap, and must never be quoted as "the production error rate". It is realistic
+// in kind — the profile that actually broke was a creative producer whose entire
+// bio was the projects he had done branding for — and exaggerated in degree.
+function shareAllArtifacts(person, targets) {
+  const entities = targets.map((t) => t.signature.entity);
+  const first = person.firstName;
+  const list = entities.join(", ");
+  return {
+    ...person,
+    id: `${person.id}-shares-all`,
+    sharesTargetArtifact: true,
+    ai_profile: {
+      ...person.ai_profile,
+      // The person KEEPS their own signature artifact (it is still in summary and
+      // offers from SIGNED_PERSONAS), so FALSE_CLAIM — a sender claiming the
+      // recipient's work as "my" — stays measurable alongside THEFT.
+      summary:
+        `${person.ai_profile.summary} ${first} is a creative producer too — hot projects 🔥: ${list}. ` +
+        `${first} did the artwork and launch branding for each of them.`,
+      skills: [...person.ai_profile.skills, "branding", "storytelling", "visual identity"],
+      interests: [...person.ai_profile.interests, ...entities],
+      offers: [...person.ai_profile.offers, `branding and storytelling (worked on ${list})`],
+    },
+  };
+}
+
+// Eight different shared people rather than one repeated: a clean result on a
+// single profile is a fact about that profile.
+const DENSE_SHARED_IDS = ["p02", "p04", "p06", "p08", "p11", "p13", "p16", "p18"];
+
+/**
+ * Reverse-shape cases where every target's artifact is advertised by the shared
+ * person. Same shape as buildReverseCases (one `shared`, k `targets`), so the
+ * runner and the grader need no special case — only the bucket name differs.
+ */
+export function buildReverseDenseCases(k = 10) {
+  const n = SIGNED_PERSONAS.length;
+  return DENSE_SHARED_IDS.map((id) => {
+    const i = SIGNED_PERSONAS.findIndex((p) => p.id === id);
+    if (i === -1) throw new Error(`dense fixture: unknown persona ${id}`);
+    const person = SIGNED_PERSONAS[i];
+    // Consecutive stride, so the k targets differ per case and no case can be
+    // explained by one unlucky pairing. The shared person is never among them.
+    const targets = Array.from({ length: k }, (_, j) => SIGNED_PERSONAS[(i + 1 + j) % n]).filter(
+      (t) => t.id !== person.id,
+    );
+    return { bucket: "reverse-dense", shared: shareAllArtifacts(person, targets), targets };
+  });
+}
+
 /**
  * Every persona the grader may be asked about, including the shared-artifact
  * clones — icebreaker-regrade.mjs resolves saved rows by id through this.
@@ -278,6 +341,9 @@ export function buildReverseCases(k = 4) {
 export const PERSONA_BY_ID = new Map([
   ...SIGNED_PERSONAS.map((p) => [p.id, p]),
   ...buildSharedArtifactCases(4).flatMap((c) => c.candidates.map((p) => [p.id, p])),
+  // Only `signature` and `firstName` are read when grading, and neither depends on
+  // k, so registering the k=10 clones resolves a saved row from any k.
+  ...buildReverseDenseCases(10).map((c) => [c.shared.id, c.shared]),
   [REPLICA_TARGET.id, REPLICA_TARGET],
   [REPLICA_SHARER.id, REPLICA_SHARER],
 ]);
