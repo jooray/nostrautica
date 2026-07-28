@@ -31,7 +31,9 @@ import {
   inviteHash,
   KIND_INVITE_LIST,
   type InviteListContent,
+  type ChatBackend,
 } from "@nostrautica/protocol";
+import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
@@ -40,7 +42,7 @@ const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly, publishSigned }));
 
-import { generateInvites } from "./organizer.js";
+import { generateInvites, updateEventConfig } from "./organizer.js";
 import {
   __setKeystoreBackend,
   setActiveOwner,
@@ -233,5 +235,85 @@ describe("generateInvites label numbering", () => {
       inviteHash(getPublicKey(nip19Decode(generated[0].nsec).data as Uint8Array)),
       inviteHash(getPublicKey(nip19Decode(generated[1].nsec).data as Uint8Array)),
     ]);
+  });
+});
+
+/**
+ * Admin relay editing (Settings → Relays). An organizer can rewrite an existing
+ * event's 31600 `relay` tags, but nothing else may: editing another field must
+ * carry the old relays forward unchanged (no silent migration onto new app
+ * defaults), and a chat-enabled event must keep the Whitenoise pair folded in so
+ * Marmot routing can't be dropped by hand.
+ */
+describe("updateEventConfig relay editing", () => {
+  const fullConfig = {
+    d: IDENTIFIER,
+    eidPubkey: EID_PUBKEY,
+    inbox: getPublicKey(generateSecretKey()),
+    relays: ["wss://old.example", "wss://relay.damus.io"],
+    blossom: [] as string[],
+    maxVideoSec: 90,
+    maxTalkSec: 900,
+    matching: "on",
+    matchVisibility: "pair",
+    approval: "manual",
+    eck: 1,
+    nostrContext: 100,
+    lang: "en",
+    talks: "off",
+    chat: [] as ChatBackend[],
+  };
+  function ctxWith(overrides: Partial<typeof fullConfig>): EventContext {
+    return {
+      coordinate: COORD,
+      naddr: "naddr1test",
+      config: { ...fullConfig, ...overrides },
+    } as unknown as EventContext;
+  }
+  function publishedRelayTags(): string[] {
+    const ev = publishSigned.mock.calls[0][0] as { tags: string[][] };
+    return ev.tags.filter((t) => t[0] === "relay").map((t) => t[1]);
+  }
+
+  it("rewrites the 31600 relay tags to exactly the admin-provided set", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    await updateEventConfig(ctxWith({}), {
+      relays: ["wss://nostr.cypherpunk.today", "wss://relay.primal.net"],
+    });
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+    expect(publishedRelayTags()).toEqual([
+      "wss://nostr.cypherpunk.today",
+      "wss://relay.primal.net",
+    ]);
+  });
+
+  it("leaves relays untouched when only another field is edited (no silent migration)", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    await updateEventConfig(ctxWith({}), { retentionDays: 30 });
+    expect(publishedRelayTags()).toEqual(["wss://old.example", "wss://relay.damus.io"]);
+  });
+
+  it("keeps the Whitenoise pair folded in when the event has chat enabled", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    await updateEventConfig(ctxWith({ chat: ["marmot"] }), {
+      relays: ["wss://nostr.cypherpunk.today"],
+    });
+    expect(publishedRelayTags()).toEqual(
+      unionRelays(["wss://nostr.cypherpunk.today"], WHITENOISE_RELAYS),
+    );
+  });
+
+  it("dedupes/trims the set and rejects an all-empty relay list", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    await updateEventConfig(ctxWith({}), {
+      relays: ["wss://a.example", "wss://a.example/", "  wss://b.example  "],
+    });
+    expect(publishedRelayTags()).toEqual(["wss://a.example", "wss://b.example"]);
+
+    publishSigned.mockClear();
+    await expect(updateEventConfig(ctxWith({}), { relays: ["", "   "] })).rejects.toThrow(
+      /at least one relay/,
+    );
+    expect(publishSigned).not.toHaveBeenCalled();
   });
 });

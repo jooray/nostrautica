@@ -920,28 +920,43 @@ async function rotateEckAndInbox(
  */
 export async function updateEventConfig(
   ctx: EventContext,
-  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[]; retentionDays: number | undefined }>,
+  changes: Partial<{
+    talks: TalksMode;
+    maxTalkSec: number;
+    chat: ChatBackend[];
+    retentionDays: number | undefined;
+    relays: string[];
+  }>,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
-  // Turning chat on for an already-published event: fold in the Whitenoise
-  // relays up front too, same as at-creation (create.ts) — the coordinator's
-  // routing self-heal (ensureChat) covers the group's own MLS state, but the
-  // event's public 31600 relay list should already advertise them.
-  const relays =
-    changes.chat?.length ? unionRelays(ctx.config.relays, WHITENOISE_RELAYS) : ctx.config.relays;
+  // Relay list. An admin can rewrite it explicitly (Settings → Relays); otherwise
+  // the event keeps the relays it was published with. We NEVER silently migrate a
+  // live event onto changed app defaults — only newly created events pick those up
+  // (create.ts). Whether chat is being turned on now or is already active, fold in
+  // the Whitenoise relays up front (same as at-creation) so a manual relay edit
+  // cannot drop the pair Marmot routing depends on.
+  const chatActive = (changes.chat ?? ctx.config.chat).length > 0;
+  const editedRelays = changes.relays ? unionRelays(changes.relays) : ctx.config.relays;
+  if (changes.relays && editedRelays.length === 0) {
+    throw new Error("at least one relay is required");
+  }
+  const relays = chatActive ? unionRelays(editedRelays, WHITENOISE_RELAYS) : editedRelays;
   const built = buildEventConfig({ ...ctx.config, ...changes, relays });
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
-  // authoritative and the setting silently doesn't take.
+  // authoritative and the setting silently doesn't take. Read + publish across the
+  // OLD and NEW relay sets together: the current version may live only on the old
+  // relays (so the tie-break must see it), and the update must reach both the
+  // relays existing subscribers watch and any newly added ones.
   await publishMonotonic({
     kind: built.kind,
     author: ctx.config.eidPubkey,
     identifier: ctx.config.d,
-    relays: ctx.config.relays,
+    relays: unionRelays(ctx.config.relays, relays),
     sign: (created_at) =>
       finalizeEvent(
         { kind: built.kind, created_at, tags: built.tags, content: built.content },

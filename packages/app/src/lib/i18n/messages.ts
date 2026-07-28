@@ -1218,6 +1218,14 @@ export const messages = {
       "The directory, matches and talks are deleted from relays {n} days after the event ends. Deletion is best-effort.",
     "admin.retention.consequenceOff": "No automatic deletion — member data is kept indefinitely.",
     "admin.retention.invalid": "Enter a whole number of days (1 or more), or leave it blank for no deletion.",
+    "admin.relays.title": "Event relays",
+    "admin.relays.body":
+      "The relays this event publishes to and is found on. Changing this only affects this event — existing attendees keep working on the old relays until they refresh. New events use the app defaults automatically.",
+    "admin.relays.placeholder": "wss://relay.example.com",
+    "admin.relays.hint": "One relay per line. Must start with wss:// (ws:// is allowed only for localhost).",
+    "admin.relays.save": "Save relays",
+    "admin.relays.empty": "Add at least one relay.",
+    "admin.relays.invalid": "Not a valid relay URL: {url}",
     "admin.talks.mod.section": "Talks moderation",
     "admin.talks.mod.title": "Pending talks",
     "admin.talks.mod.body":
@@ -2607,6 +2615,14 @@ export const messages = {
       "Adresár, spárovania a prednášky sa z relé zmažú {n} dní po skončení podujatia. Mazanie je podľa najlepšej snahy.",
     "admin.retention.consequenceOff": "Žiadne automatické mazanie — údaje účastníkov sa uchovávajú natrvalo.",
     "admin.retention.invalid": "Zadajte celý počet dní (1 alebo viac), alebo pole nechajte prázdne pre žiadne mazanie.",
+    "admin.relays.title": "Relaye udalosti",
+    "admin.relays.body":
+      "Relaye, na ktoré sa táto udalosť publikuje a kde ju možno nájsť. Zmena ovplyvní iba túto udalosť — existujúci účastníci fungujú na pôvodných relayoch, kým sa neobnovia. Nové udalosti použijú predvolené relaye aplikácie automaticky.",
+    "admin.relays.placeholder": "wss://relay.example.com",
+    "admin.relays.hint": "Jeden relay na riadok. Musí začínať wss:// (ws:// je povolené iba pre localhost).",
+    "admin.relays.save": "Uložiť relaye",
+    "admin.relays.empty": "Pridajte aspoň jeden relay.",
+    "admin.relays.invalid": "Neplatná adresa relayu: {url}",
     "admin.talks.mod.section": "Moderovanie prednášok",
     "admin.talks.mod.title": "Čakajúce prednášky",
     "admin.talks.mod.body":
@@ -4001,6 +4017,14 @@ export const messages = {
       "Adresář, spárování a přednášky se z relayů smažou {n} dní po skončení akce. Mazání je podle nejlepší snahy.",
     "admin.retention.consequenceOff": "Žádné automatické mazání — data účastníků se uchovávají trvale.",
     "admin.retention.invalid": "Zadejte celý počet dní (1 nebo více), nebo pole nechte prázdné pro žádné mazání.",
+    "admin.relays.title": "Relaye události",
+    "admin.relays.body":
+      "Relaye, na které se tato událost publikuje a kde ji lze najít. Změna ovlivní pouze tuto událost — stávající účastníci fungují na původních relayích, dokud se neobnoví. Nové události použijí výchozí relaye aplikace automaticky.",
+    "admin.relays.placeholder": "wss://relay.example.com",
+    "admin.relays.hint": "Jeden relay na řádek. Musí začínat wss:// (ws:// je povoleno pouze pro localhost).",
+    "admin.relays.save": "Uložit relaye",
+    "admin.relays.empty": "Přidejte alespoň jeden relay.",
+    "admin.relays.invalid": "Neplatná adresa relaye: {url}",
     "admin.talks.mod.section": "Moderování přednášek",
     "admin.talks.mod.title": "Čekající přednášky",
     "admin.talks.mod.body":
