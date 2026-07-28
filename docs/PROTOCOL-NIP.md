@@ -939,7 +939,7 @@ transcoding, so an unexpected field is a hard error, not a silently-ignored one)
   shared chat key, no relay backup of chat secrets, and no cross-device restore of chat
   identity. A device is *added* by attestation and *removed* by revocation; loss of a
   device is handled by revoking its key, not recovering it.
-- One account may hold up to `MAX_CHAT_KEYS_PER_ACCOUNT = 5` concurrent device keys per
+- One account may hold up to `MAX_CHAT_KEYS_PER_ACCOUNT = 10` concurrent device keys per
   event. Each device gets its own MLS leaf, its own key package (kind `30443`, with a
   stable `client_id` slot per device), and its own Welcome; each device sees history only
   from its own join epoch forward (MLS semantics — history never syncs, by design).
@@ -1061,7 +1061,7 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
   100000, `MAX_NOTES` 2000, `MAX_NOTE` 5000, `MAX_LANG` 35, `MAX_TRANSCRIPT_TEXT`
   100000, `MAX_INTRO_TEXT` 2000, `MAX_LIBRARY_TEXTS` 20, `MAX_TALK_TITLE` 200,
   `MAX_TALK_DESC` 2000, `talk_d` length 1..64, `MAX_CHAT_KEY_LABEL` 60,
-  `MAX_CHAT_KEY_CLIENT_ID` 120, `MAX_CHAT_KEYS_PER_ACCOUNT` 5.
+  `MAX_CHAT_KEY_CLIENT_ID` 120, `MAX_CHAT_KEYS_PER_ACCOUNT` 10.
 - Icebreakers (31605, §6.2): ≤ 3 per match entry, ≤ 280 chars each.
 - Members-only post markdown editor cap: 60,000 UTF-8 bytes
   (`MAX_MEMBERS_POST_MARKDOWN_BYTES`). Theme CSS: 32,768 bytes (`MAX_THEME_CSS_BYTES`).

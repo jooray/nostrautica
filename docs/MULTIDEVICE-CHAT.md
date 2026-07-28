@@ -79,7 +79,7 @@ Better than expected — **the coordinator's data model is already multi-key-per
 What the coordinator is missing is exactly what PROTOCOL-NIP §10.2 adds:
 **proof of possession in 21607** (today `ChatHandoffCard.svelte:36-57` will attest any
 npub the user types — griefing/mis-binding becomes worse, not better, once devices
-multiply), plus a per-account device cap (`MAX_CHAT_KEYS_PER_ACCOUNT = 5`) and the roster
+multiply), plus a per-account device cap (`MAX_CHAT_KEYS_PER_ACCOUNT = 10`) and the roster
 `chat_keys` array.
 
 ## 4. Target design
@@ -157,7 +157,7 @@ Protocol:
 
 - `schemas.ts` — 21607 v2 shape (+`label`, +`proof`, drop `.optional()` client_id?);
   roster `chat_keys` array; retire `chatDeviceKeyBackupSchema`; constants
-  `MAX_CHAT_KEYS_PER_ACCOUNT = 5`, `MAX_CHAT_KEY_LABEL = 60`.
+  `MAX_CHAT_KEYS_PER_ACCOUNT = 10`, `MAX_CHAT_KEY_LABEL = 60`.
 - `crypto.ts` — domain-separated chat-device challenge builder + verifier (shared with
   the invite-proof v2 helper style).
 

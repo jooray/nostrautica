@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { encryptMedia } from "./media.js";
 import {
+  MAX_CHAT_KEYS_PER_ACCOUNT,
   talkSubmissionContentSchema,
   talkContentSchema,
   mediaDescriptorSchema,
@@ -254,23 +255,28 @@ describe("every §7 payload round-trips through JSON", () => {
     }));
 
   it("31604 roster rejects more than MAX_CHAT_KEYS_PER_ACCOUNT chat_keys", () => {
-    expect(() =>
-      rosterContentSchema.parse({
-        v: 2,
-        eck_current: 1,
-        attendees: [
-          {
-            pubkey: hex,
-            d: "d",
-            role: "attendee",
-            chat_keys: Array.from({ length: 6 }, (_, i) => ({
-              pubkey: String(i).repeat(64).slice(0, 64),
-              added_at: 1,
-            })),
-          },
-        ],
-      }),
-    ).toThrow();
+    // Sized off the constant, not a literal: this test hardcoded 6 and so began
+    // failing the moment the cap moved 5 → 10 (2026-07-29), which says nothing
+    // about the schema. Build one key too many, whatever the cap currently is.
+    const roster = (n: number) => ({
+      v: 2,
+      eck_current: 1,
+      attendees: [
+        {
+          pubkey: hex,
+          d: "d",
+          role: "attendee",
+          chat_keys: Array.from({ length: n }, (_, i) => ({
+            pubkey: i.toString(16).padStart(64, "0"),
+            added_at: 1,
+          })),
+        },
+      ],
+    });
+    expect(() => rosterContentSchema.parse(roster(MAX_CHAT_KEYS_PER_ACCOUNT + 1))).toThrow();
+    // …and the cap itself must still be accepted, so the boundary is pinned on
+    // both sides rather than just "big number throws".
+    expect(() => rosterContentSchema.parse(roster(MAX_CHAT_KEYS_PER_ACCOUNT))).not.toThrow();
   });
 
   it("21607 chat device attestation round-trips (add with proof+label, revoke)", () => {
