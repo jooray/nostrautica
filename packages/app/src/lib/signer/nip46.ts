@@ -417,17 +417,33 @@ function onAuth(url: string): void {
   for (const listener of authUrlListeners) listener(safeUrl);
 }
 
-function selectedPointer(original: BunkerPointer, bunker: BunkerSigner, switched: boolean): BunkerPointer {
-  return switched
-    ? { ...original, relays: [...bunker.bp.relays] }
-    : { ...original, relays: [...original.relays] };
-}
-
-async function switchRelaysBounded(bunker: BunkerSigner): Promise<boolean> {
-  return withTimeout(bunker.switchRelays(), PROBE_TIMEOUT_MS, undefined, timeoutMessage()).catch(
-    () => false,
-  );
-}
+/**
+ * Never let `switch_relays` decide our transport (2026-07-28 login incident).
+ *
+ * nostr-tools' `switchRelays()` does `this.bp.relays = <whatever the signer
+ * answered>` and re-subscribes on exactly that set — it REPLACES, it does not
+ * union. `fromURI` calls it internally before resolving (raced against a 1s
+ * timer, so whether it lands at all is non-deterministic), and we used to call
+ * it again on the bunker-paste and restore paths.
+ *
+ * The effect was that a freshly-connected session ran on the signer's relay
+ * list ALONE, silently discarding the `signerRelays()` union that every other
+ * path applies — while the SAME account after one refresh got
+ * `pointer ∪ NIP46_RELAYS` back from `fromPersisted`. That asymmetry is
+ * indefensible for a transport whose replies are ephemeral and unreplayable:
+ * kind-24133 only lands if a socket we share with the signer is open in the
+ * exact window it publishes, which is the entire reason NIP46_RELAYS is four
+ * independent operators (see relays.ts). Handing that decision to the signer
+ * can narrow four sockets to one — and Amber's own default list still names
+ * `wss://relay.nsec.app`, which has answered every WebSocket upgrade with HTTP
+ * 502 since 2026-07-25.
+ *
+ * So: `skipSwitchRelays` on every construction, and `signerRelays()` stays the
+ * single authority on which relays we talk to. The signer answered our
+ * handshake on these relays, so it is demonstrably listening on them; a signer
+ * that wants to move can do so by advertising a different pointer next time.
+ */
+const NO_SWITCH_RELAYS = { skipSwitchRelays: true } as const;
 
 export class Nip46Signer implements AppSigner {
   readonly method = "nip46" as const;
@@ -484,6 +500,7 @@ export class Nip46Signer implements AppSigner {
     const bunker = BunkerSigner.fromBunker(clientSk, transport, {
       onauth: onAuth,
       pool,
+      ...NO_SWITCH_RELAYS,
     });
     // An authorized persisted channel remains usable after its one-time connect
     // secret has been consumed. Probe it first; only fall back to a bounded
@@ -515,11 +532,10 @@ export class Nip46Signer implements AppSigner {
       if (session.userPubkey && pk !== session.userPubkey) {
         throw new Nip46IdentityMismatchError();
       }
-      const switched = await switchRelaysBounded(bunker);
       const signer = new Nip46Signer(
         bunker,
         clientSk,
-        selectedPointer(pointer, bunker, switched),
+        { ...pointer, relays: [...pointer.relays] },
         pool,
         health,
       );
@@ -641,7 +657,7 @@ export class Nip46Signer implements AppSigner {
     const connecting = BunkerSigner.fromURI(
       clientSk,
       uri,
-      { onauth: onAuth, pool },
+      { onauth: onAuth, pool, ...NO_SWITCH_RELAYS },
       controller.signal,
     );
     // `connecting` may settle long after we've stopped waiting on it (destroying
@@ -672,8 +688,10 @@ export class Nip46Signer implements AppSigner {
         // rename is a compile error, not a silent persistence break.
         const pointer: BunkerPointer = {
           pubkey: bunker.bp.pubkey,
-          // fromURI performs switch_relays before resolving. Persist what the
-          // signer selected, not the nostrconnect URI's stale relay list.
+          // The relays the handshake ACTUALLY completed on — i.e. the ones we
+          // advertised in the QR and the signer answered on. `switch_relays` is
+          // suppressed (see NO_SWITCH_RELAYS), so this is never a signer-chosen
+          // set that quietly replaced ours.
           relays: [...bunker.bp.relays],
           secret,
         };
@@ -724,7 +742,11 @@ export class Nip46Signer implements AppSigner {
     let bunker: BunkerSigner;
     try {
       // Throws "bad point: is not on curve" for a valid-hex but off-curve pubkey.
-      bunker = BunkerSigner.fromBunker(clientSk, transport, { onauth: onAuth, pool });
+      bunker = BunkerSigner.fromBunker(clientSk, transport, {
+        onauth: onAuth,
+        pool,
+        ...NO_SWITCH_RELAYS,
+      });
     } catch {
       pool.destroy();
       throw new Error(t("error.badBunkerLink"));
@@ -745,8 +767,13 @@ export class Nip46Signer implements AppSigner {
       pool.destroy();
       throw e;
     }
-    const switched = await switchRelaysBounded(bunker);
-    return new Nip46Signer(bunker, clientSk, selectedPointer(pointer, bunker, switched), pool, health);
+    return new Nip46Signer(
+      bunker,
+      clientSk,
+      { ...pointer, relays: [...pointer.relays] },
+      pool,
+      health,
+    );
   }
 
   async getPublicKey(): Promise<string> {

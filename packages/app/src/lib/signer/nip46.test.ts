@@ -267,7 +267,12 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     expect(connect[1][2]).toContain("sign_event:10050");
   });
 
-  it("persists signer-selected relays after switch_relays", async () => {
+  it("never lets switch_relays narrow the transport (2026-07-28 login incident)", async () => {
+    // nostr-tools' switchRelays() REPLACES bp.relays with the signer's answer and
+    // re-subscribes on that set alone — it does not union. A signer naming one
+    // relay would collapse four independent ephemeral-reply sockets to one (and
+    // Amber's default list still names the 502-ing relay.nsec.app). We suppress it
+    // on every construction so `signerRelays()` stays the only authority.
     parseBunkerInput.mockResolvedValue({
       pubkey: PUBKEY,
       relays: ["wss://old.example"],
@@ -283,7 +288,13 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     const signer = await Nip46Signer.fromBunkerUri(
       `bunker://${PUBKEY}?relay=wss%3A%2F%2Fold.example&secret=secret`,
     );
-    expect(signer.serialize().bunker.relays).toEqual(["wss://signer-selected.example"]);
+    expect(bunker.switchRelays).not.toHaveBeenCalled();
+    expect((fromBunker.mock.calls[0][2] as { skipSwitchRelays?: boolean }).skipSwitchRelays).toBe(
+      true,
+    );
+    // The pointer records the relays the handshake actually completed on; the
+    // union with NIP46_RELAYS is re-derived per connect, never frozen into storage.
+    expect(signer.serialize().bunker.relays).toEqual(["wss://old.example"]);
   });
 
   it("re-drives the connect wait when a signer relay drops and recovers", async () => {

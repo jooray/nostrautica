@@ -469,6 +469,58 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(memoHas(wrap.id)).toBe(true);
   });
 
+  it("does not latch the full-history backfill when EVERY unwrap failed", async () => {
+    // The 2026-07-28 shape: a remote signer (Amber) that answers `get_public_key`
+    // but can't complete the nip44_decrypt round trips. Every unwrap fails, so the
+    // scan finds nothing — but that is a transport outage, not an empty inbox.
+    // Latching the marker here narrows every later scan to giftwrapSince()
+    // (now − 3 days), permanently hiding an ECK grant from an event joined a month
+    // ago on this device.
+    // vitest runs this package under `environment: "node"`, where the
+    // backfill marker's localStorage doesn't exist and every read/write is
+    // swallowed — so the marker has to be given somewhere real to live before
+    // this behaviour is observable at all.
+    const store = new Map<string, string>();
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+      },
+    });
+    try {
+    const wrap = await keyGrantWrap();
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    const deaf = {
+      method: "nip46" as const,
+      getPublicKey: async () => attendeePk,
+      signEvent: attendee.signEvent.bind(attendee),
+      nip44Encrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+      nip44Decrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+    };
+
+    expect(await receiveGrants(deaf)).toEqual([]);
+    expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since: number }).since).toBe(0);
+    // Pre-fix this latched anyway and scan 2 would have used `now − 3 days`,
+    // never seeing this (older) wrap again. The marker stayed unset, so the
+    // retry is still a FULL-history scan and the grant is found.
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since: number }).since).toBe(0);
+    // Only the pass that actually read a wrap latches it.
+    await receiveGrants(attendee);
+    expect((fetchEventsRelayOnly.mock.calls[2]![0] as { since: number }).since).toBeGreaterThan(0);
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
   it("bounds the persisted grant memo, evicting oldest-inserted entries (App-7)", async () => {
     // Seed the memo above the cap with synthetic, insertion-ordered old entries.
     const seeded: Record<string, true> = {};

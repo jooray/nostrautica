@@ -96,7 +96,16 @@
     //    newly-recovered/approved event appears without blocking first paint.
     //  - recoverEventKeys: 30078 backups → events this identity CREATED (E_id).
     //  - receiveGrants: 21602/21605 gift-wraps → events APPROVED into / co-organizer.
-    if (session.signer && session.custodyReady) {
+    //
+    // Gated on the SIGNER only, never on `custodyReady`. Both scans read from
+    // relays and decrypt through the signer; neither needs the on-device custody
+    // snapshot to have unlocked. Gating them on `custodyReady` meant that when an
+    // unlock failed — precisely the remote-signer-unreachable case — the app not
+    // only had no local keys but also refused to go and fetch them, and since
+    // `custodyGeneration` never bumps on a failed unlock the $effect below could
+    // not retry either. An organizer was left on "No events yet" for the whole
+    // session with nothing retrying.
+    if (session.signer) {
       // Backstop: never let a hung relay strand the user on the spinner. The
       // scans have their own ~8s hard cap, so this only fires if something wedges.
       const guard = setTimeout(() => (settled = true), 12000);
@@ -121,14 +130,23 @@
     }
   });
 
-  // NIP-46 restore is deliberately detached from first paint. Reconcile again
-  // when that identity's encrypted event custody has finished unlocking.
-  let reconciledGeneration = session.custodyGeneration;
+  // NIP-46 restore is deliberately detached from first paint (+layout.svelte,
+  // UX-19), so the identity can arrive long after this component mounted.
+  // Reconcile whenever the ACTIVE IDENTITY changes or its custody finishes
+  // unlocking — keyed on both, not on `custodyGeneration` alone: that counter
+  // only advances on a SUCCESSFUL unlock, so a background restore whose custody
+  // unlock failed used to produce no key change at all and this effect never
+  // ran, stranding the user's event list empty with no retry.
+  const reconcileKey = () =>
+    session.signer && session.pubkey ? `${session.pubkey}:${session.custodyGeneration}` : "";
+  // Seeded from the state at INIT so a mount that already has an identity does
+  // not duplicate the scans onMount is about to run for that same identity.
+  let reconciled = reconcileKey();
   $effect(() => {
-    const generation = session.custodyGeneration;
+    const key = reconcileKey();
     const signer = session.signer;
-    if (!session.custodyReady || !signer || generation === reconciledGeneration) return;
-    reconciledGeneration = generation;
+    if (!signer || !key || key === reconciled) return;
+    reconciled = key;
     void (async () => {
       settled = false;
       backfillFromKeystore(await listEventKeys());
@@ -218,6 +236,14 @@
   <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
     <Icon name="plus" size={17} />{t("home.createAnother")}
   </button>
+{:else if !session.loggedIn && session.restoring}
+  <!-- A persisted NIP-46 session is reconnecting in the background (UX-19: the
+       shell must not block on it). Until it settles we do NOT know whether this
+       person is logged out — telling them to log in while their own session is
+       coming back is what made a returning organizer log in a second time on
+       2026-07-28. Show the pending state instead; the branches above take over
+       the moment the restore lands (or fails). -->
+  <p class="muted" role="status" aria-live="polite">{t("home.restoringSession")}</p>
 {:else if !session.loggedIn}
   <div class="card">
     <h2>{t("home.getStarted")}</h2>

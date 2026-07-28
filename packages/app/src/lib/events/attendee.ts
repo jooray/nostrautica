@@ -217,6 +217,16 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   )) as unknown as GiftWrap[];
 
   const coordinates = new Set<string>();
+  // Did this scan prove the SIGNER can actually read our wraps? A full-history
+  // backfill that unwrapped nothing is not evidence there was nothing to find —
+  // on a remote signer (Amber) every unwrap is two NIP-46 round trips, and a
+  // signer that was unreachable/unapproved for the whole pass fails all of them
+  // identically to "no grants here". Latching `markGrantsBackfilled` on that
+  // narrows every later scan to `giftwrapSince()` (now − 3 days), so an ECK
+  // grant from an event joined last month becomes PERMANENTLY undiscoverable on
+  // this device. Mirrors the `meaningful` guard recover.ts already has.
+  let unwrapped = 0;
+  let unwrapFailed = 0;
   // Per-wrap memo (CACHING-PLAN §2.3), owner-scoped, persisted: a wrap whose
   // processing reached a DEFINITIVE outcome never needs `signerUnwrap` again on
   // a re-scan — the #1 Amber/NIP-46 prompt/latency saver. The relay-only fetch
@@ -255,7 +265,9 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     let rumor;
     try {
       rumor = await signerUnwrap(signer, wrap);
+      unwrapped++;
     } catch {
+      unwrapFailed++;
       continue; // transient/foreign — NOT memoized, retried next scan
     }
     if (rumor.kind === KIND_ORGANIZER_GRANT) {
@@ -364,8 +376,11 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     memoDirty = true;
   }
   // The full-history scan completed without throwing (a fetch failure would have
-  // rejected above), so later scans can safely narrow to the live-overlap window.
-  if (fullBackfill) markGrantsBackfilled(pubkey);
+  // rejected above) AND was meaningful: either there was nothing addressed to us
+  // to unwrap, or the signer successfully unwrapped at least one wrap. A pass
+  // where every single unwrap failed is a signer/transport outage, not an empty
+  // inbox — leave the marker unset so the next scan re-runs the full history.
+  if (fullBackfill && (unwrapped > 0 || unwrapFailed === 0)) markGrantsBackfilled(pubkey);
   if (memoDirty) {
     // Bound the memo (audit App-7): unlike the DM memo this had no cap, so it
     // grew one entry per gift wrap ever seen (grants AND every skipped DM/chat
