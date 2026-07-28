@@ -40,4 +40,13 @@ describe("signerRelays (NIP-46 transport set)", () => {
     // see the union tests above — just not handed out in our nostrconnect QR.
     expect(NIP46_RELAYS).not.toContain("wss://relay.nsec.app");
   });
+
+  it("advertises three distinct signer relays for ephemeral-reply redundancy", () => {
+    // Widened from two 2026-07-28: a kind-24133 reply isn't replayable, so it
+    // only lands if a shared socket is open in the exact window the signer
+    // publishes. Two relays meant one operator outage halved those odds during
+    // the login wait; a third independent operator widens the reply surface.
+    expect(new Set(NIP46_RELAYS).size).toBe(3);
+    expect(NIP46_RELAYS).toContain("wss://relay.nostr.net");
+  });
 });

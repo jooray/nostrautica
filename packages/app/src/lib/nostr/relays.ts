@@ -70,8 +70,21 @@ export const WHITENOISE_RELAYS = ENV_RELAYS
  * on the inbound side — `signerRelays()` unions whatever a bunker pointer names
  * with this list, so a pointer that knows only relay.nsec.app is degraded rather
  * than instantly fatal.
+ *
+ * Widened from two to three relays 2026-07-28. The whole redundancy argument is
+ * "the signer publishes its ephemeral reply to ALL of these, any one open socket
+ * is enough" — but kind-24133 replies are not replayable, so the reply only
+ * lands if a socket we share with the signer is open in the exact window it
+ * publishes. With only two relays a single operator outage halves those odds
+ * during the login-critical wait. `relay.nostr.net` is a third independent,
+ * open-write operator already trusted in `DEFAULT_RELAYS` (probed 2026-07-21),
+ * so it costs one more warm mobile socket for a materially wider reply surface.
  */
-export const NIP46_RELAYS = ENV_RELAYS ?? ["wss://relay.primal.net", "wss://nos.lol"];
+export const NIP46_RELAYS = ENV_RELAYS ?? [
+  "wss://relay.primal.net",
+  "wss://nos.lol",
+  "wss://relay.nostr.net",
+];
 
 /**
  * Relay set used to TALK to a signer we already have a pointer for (a pasted
