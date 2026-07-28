@@ -98,6 +98,42 @@ export class DmUnreadStore {
     cacheSet(READ_KEY, this.watermarks, undefined, this.owner);
   }
 
+  /**
+   * Advance every thread's watermark to its newest incoming message at once
+   * ("mark all as read"). Threads whose watermark is already at or past their
+   * newest incoming message are skipped, so this is idempotent and cannot move a
+   * watermark backwards.
+   *
+   * Deliberately ONE `cacheSet` for the whole batch rather than calling
+   * `markThreadRead` per peer — that would persist the map once per thread, so
+   * an inbox with fifty conversations would do fifty writes to produce one
+   * result. Also acknowledges the ciphertext-only activity badge: that badge
+   * exists to say "something arrived that we haven't decrypted yet", and a user
+   * asking to mark everything read means that too, not just the threads we
+   * happen to have plaintext for.
+   */
+  markAllRead(messages: DmMessage[] = this.messages): void {
+    const owner = this.owner;
+    if (!owner) return;
+    const next = { ...this.watermarks };
+    let changed = false;
+    for (const peer of new Set(
+      messages.filter((message) => message.from !== owner).map((message) => message.peer),
+    )) {
+      const newest = newestIncoming(messages, owner, peer);
+      if (!newest) continue;
+      const prior = next[peer];
+      if (prior && compareDmPosition(newest, prior) <= 0) continue;
+      next[peer] = newest;
+      changed = true;
+    }
+    if (changed) {
+      this.watermarks = next;
+      cacheSet(READ_KEY, next, undefined, owner);
+    }
+    this.acknowledgeEncryptedActivity();
+  }
+
   observeEncryptedWrapIds(owner: string, ids: Iterable<string>): void {
     if (this.owner !== owner) this.init(owner);
     const known = new Set(this.activity.known);

@@ -152,7 +152,16 @@
     </div>
   {/if}
 
-  <h2>{t("chats.dmSection")}</h2>
+  <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem">
+    <h2 style="margin:0">{t("chats.dmSection")}</h2>
+    <!-- Only offered when there is something to clear, so the control isn't a
+         permanent no-op sitting next to an already-read inbox. -->
+    {#if dmUnread.confirmedCount > 0 || dmUnread.hasEncryptedActivity}
+      <button class="btn inline" style="flex:none" onclick={() => dmUnread.markAllRead()}>
+        {t("dm.markAllRead")}
+      </button>
+    {/if}
+  </div>
   {#if error && threads.length === 0}
     <ErrorState {error} onRetry={refresh} retrying={loading} />
   {:else if loading}
