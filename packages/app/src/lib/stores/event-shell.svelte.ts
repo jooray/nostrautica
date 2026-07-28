@@ -102,6 +102,10 @@ class EventShell {
       return;
     }
     this.naddr = naddr;
+    if (session.pubkey && !session.custodyReady) {
+      this.loading = true;
+      return;
+    }
     const cached = cachedEventContext(naddr);
     if (cached) {
       this.ctx = cached; // no flash on inter-subpage navigation
@@ -119,13 +123,13 @@ class EventShell {
         const cachedRole = cacheGet<EventRole>(roleKey(ctx.coordinate))?.data;
         if (cachedRole) this.role = cachedRole;
       }
-      const approved = await isApproved(ctx.coordinate).catch(() => false);
-      let keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+      const approved = await isApproved(ctx.coordinate);
+      let keys = await loadEventKeys(ctx.coordinate);
       // Fresh-device deep-link: no local custody for an event this identity may
       // have created — read back the 30078 eventkeys backup (once per session).
       if (!keys && session.signer) {
         await recoverEventKeys(session.signer).catch(() => {});
-        keys = await loadEventKeys(ctx.coordinate).catch(() => undefined);
+        keys = await loadEventKeys(ctx.coordinate);
       }
       if (tok !== this.token) return;
       const organizer = keys?.role === "organizer";
@@ -137,13 +141,9 @@ class EventShell {
             ? "pending"
             : "visitor";
       this.role = resolved;
-      // Persist the resolved role, but never downgrade a cached member/organizer
-      // to "visitor" on a transient miss — local custody is authoritative, and a
-      // failed grant scan must not erase a known role (§2.13).
-      const prior = cacheGet<EventRole>(roleKey(ctx.coordinate))?.data;
-      const downgrade =
-        (prior === "organizer" || prior === "attendee") && resolved === "visitor";
-      if (!downgrade) cacheSet(roleKey(ctx.coordinate), resolved, Math.floor(Date.now() / 1000));
+      // This point is reached only after successful approval + custody reads, so
+      // it is authoritative and may correct a sticky stale organizer label.
+      cacheSet(roleKey(ctx.coordinate), resolved, Math.floor(Date.now() / 1000));
     } catch {
       /* keep whatever context/role we already have */
     } finally {

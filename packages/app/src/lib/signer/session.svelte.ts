@@ -40,6 +40,12 @@ import { broadcastLogout } from "./session-broadcast.js";
 class Session {
   signer = $state<AppSigner | null>(null);
   pubkey = $state<string | null>(null);
+  /** Event custody has been fully unlocked and can be read authoritatively. */
+  custodyReady = $state(false);
+  /** Bumps after each successful custody unlock, including same-owner restores. */
+  custodyGeneration = $state(0);
+  /** A persisted session is still being restored in the background. */
+  restoring = $state(false);
   /** True right after a brand-new local key is generated (drives the backup nag). */
   freshLocalKey = $state(false);
   /**
@@ -85,15 +91,6 @@ class Session {
       await Promise.resolve(signer.close?.()).catch(() => {});
       return false;
     }
-    this.pubkey = pubkey;
-    this.signer = signer;
-    // A fresh login clears any stale "logout couldn't self-encrypt" warning.
-    this.logoutError = false;
-    // Scope the per-event keystore to this identity (audit G2 owner-scoping).
-    setActiveOwner(this.pubkey);
-    // Scope the persistent app-cache to this identity too (CACHING-PLAN §3.1),
-    // so owner-scoped cachedX() reads resolve against the current owner.
-    setActiveCacheOwner(this.pubkey);
     // Decrypt any event-key + chat/MLS custody locked at a previous logout on
     // this device (audit UX-6), before returning — in particular, chat state
     // MUST resolve before anything calls `resolveChatIdentity`, or a
@@ -104,17 +101,52 @@ class Session {
     // restore's decrypt round-trip is already run in the background at the
     // call site (`+layout.svelte`, audit UX-19) rather than gating first
     // paint, so slowness here doesn't reintroduce that regression.
+    // Both awaits stay, and the cost is real — N locked events means N serial
+    // signer decrypts before the UI moves at all, which on Amber is N round
+    // trips. It buys different things on each line, and only one of them is
+    // load-bearing. The EVENT-KEY unlock must be awaited: `custodyReady` is
+    // published in the same tick as the identity below precisely so nothing
+    // reads custody in a window where the snapshot is still encrypted, and
+    // returning early would put that window back. The CHAT unlock's ordering
+    // guarantee, by contrast, comes from `unlockInFlight` inside
+    // `unlockChatIdentityForLogin` — it is registered synchronously and
+    // `ensureChatDeviceKey` waits on it (and fails closed if a locked snapshot
+    // survives), so merely CALLING it before publishing the identity is what
+    // prevents the MLS-credential fork; the await is defence in depth. Dropping
+    // it would save exactly one round trip out of N+1, so it is not worth
+    // trading a belt-and-braces guarantee against an unrecoverable failure for.
     // Never swallow these silently: a failed unlock leaves the live store empty
     // while the real keys sit locked, and everything downstream then behaves as
     // if this user had no keys. The failure itself is non-fatal (the snapshot is
     // intact and the next login retries), but it must be diagnosable — an
     // organizer reporting "my event vanished" needs to leave a trace.
-    await unlockEventKeysForLogin((ct) => signer.nip44Decrypt(pubkey, ct), pubkey).catch((e) => {
+    let custodyReady = false;
+    try {
+      custodyReady = await unlockEventKeysForLogin((ct) => signer.nip44Decrypt(pubkey, ct), pubkey);
+    } catch (e) {
       console.warn("[session] event-key unlock failed; keys remain locked, retried next login", e);
-    });
+    }
     await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch((e) => {
       console.warn("[session] chat-identity unlock failed; device key remains locked", e);
     });
+    // Do not expose a live identity until custody has settled. Event pages react
+    // to pubkey/signer and previously made a permanent visitor decision in this
+    // window while the organizer snapshot was still encrypted.
+    if (tok !== this.opToken) {
+      await Promise.resolve(signer.close?.()).catch(() => {});
+      return false;
+    }
+    this.pubkey = pubkey;
+    this.signer = signer;
+    this.custodyReady = custodyReady;
+    if (custodyReady) this.custodyGeneration += 1;
+    // A fresh login clears any stale "logout couldn't self-encrypt" warning.
+    this.logoutError = false;
+    // Scope owner-backed stores only after custody has settled, matching the
+    // reactive session publication above.
+    setActiveOwner(pubkey);
+    setActiveCacheOwner(pubkey);
+    recentEvents.setOwner(pubkey);
     // R21: the reactive outbox is owner-filtered but caches the PREVIOUS account's
     // items until its next poll. Clear it synchronously the moment the new owner is
     // scoped, then refresh so this account sees only its own queue — never a flash
@@ -130,81 +162,101 @@ class Session {
     // this restore is still resolving its persisted signer, the adoption below is
     // dropped rather than clobbering the newer session or undoing the logout.
     const tok = this.nextOp();
-    const method = await loadLoginMethod();
-    if (method === "local") {
-      const sk = await loadLocalKey();
-      if (sk) return this.adopt(new LocalSigner(sk), tok);
-    }
-    // NIP-07 can be re-established silently if the extension is present.
-    if (method === "nip07" && hasNip07()) {
-      return this.adopt(new Nip07Signer(), tok);
-    }
-    // NIP-46 (Amber): reconnect the persisted bunker session (spec §5.3).
-    if (method === "nip46") {
-      const persisted = await loadNip46Session<Nip46Session>();
-      if (persisted) {
-        try {
-          const signer = await Nip46Signer.fromPersisted(persisted);
-          // If a newer op superseded us, adopt() dropped + closed the signer;
-          // don't re-persist a session a logout may have just cleared (H-6).
-          if (!(await this.adopt(signer, tok))) return false;
-          // Re-persist: backfills `userPubkey` for pre-upgrade sessions so the
-          // identity check applies from the next restore onwards.
-          await saveNip46Session(signer.serialize());
-          return true;
-        } catch (e) {
-          // A bunker answering for a DIFFERENT user is invalid for good —
-          // clear it so it is never retried. Transient failures (signer
-          // offline) keep the session for the next boot.
-          if (e instanceof Nip46IdentityMismatchError) {
-            await clearKeystore().catch(() => {});
+    this.restoring = true;
+    try {
+      const method = await loadLoginMethod();
+      if (method === "local") {
+        const sk = await loadLocalKey();
+        if (sk) return this.adopt(new LocalSigner(sk), tok);
+      }
+      // NIP-07 can be re-established silently if the extension is present.
+      if (method === "nip07" && hasNip07()) {
+        return this.adopt(new Nip07Signer(), tok);
+      }
+      // NIP-46 (Amber): reconnect the persisted bunker session (spec §5.3).
+      if (method === "nip46") {
+        const persisted = await loadNip46Session<Nip46Session>();
+        if (persisted) {
+          try {
+            const signer = await Nip46Signer.fromPersisted(persisted);
+            // If a newer op superseded us, adopt() dropped + closed the signer;
+            // don't re-persist a session a logout may have just cleared (H-6).
+            if (!(await this.adopt(signer, tok))) return false;
+            // Re-persist: backfills `userPubkey` for pre-upgrade sessions so the
+            // identity check applies from the next restore onwards.
+            await saveNip46Session(signer.serialize());
+            return true;
+          } catch (e) {
+            // A bunker answering for a DIFFERENT user is invalid for good —
+            // clear it so it is never retried. Transient failures (signer
+            // offline) keep the session for the next boot.
+            if (e instanceof Nip46IdentityMismatchError) {
+              await clearKeystore().catch(() => {});
+            }
+            // Fall back to logged-out.
+            return false;
           }
-          // Fall back to logged-out.
-          return false;
         }
       }
+      return false;
+    } finally {
+      if (tok === this.opToken) this.restoring = false;
     }
-    return false;
   }
 
-  async loginNip07(): Promise<void> {
+  /**
+   * Every login helper answers whether a session actually resulted (H-6). They
+   * used to return `void`, so a superseded adoption — the `adopt()` opToken
+   * check dropping this login because a newer one, or a logout, landed while it
+   * awaited the signer — was indistinguishable from success to the caller:
+   * `SignInOptions` fired `onSignedIn()` and navigated to Home while logged out,
+   * where the user was told to sign in again. `false` means "no session; do not
+   * treat this as a login".
+   */
+  async loginNip07(): Promise<boolean> {
     if (!hasNip07()) throw new Error("No NIP-07 extension found");
     const tok = this.nextOp();
-    if (!(await this.adopt(new Nip07Signer(), tok))) return;
+    if (!(await this.adopt(new Nip07Signer(), tok))) return false;
     await saveLoginMethod("nip07");
+    return true;
   }
 
-  async loginNip46(signer: Nip46Signer): Promise<void> {
+  async loginNip46(signer: Nip46Signer): Promise<boolean> {
     const tok = this.nextOp();
-    if (!(await this.adopt(signer, tok))) return;
+    if (!(await this.adopt(signer, tok))) return false;
     // Persist the bunker session (incl. the expected user pubkey — adopt()
     // just cached it) so the user stays logged in across refreshes.
     await saveNip46Session(signer.serialize());
+    return true;
   }
 
   /** Generate a brand-new local key (normie default), persist it, log in. */
-  async createLocalKey(): Promise<void> {
+  async createLocalKey(): Promise<boolean> {
     const tok = this.nextOp();
     const signer = LocalSigner.generate();
     await saveLocalKey(signer.getSecretKey());
-    if (!(await this.adopt(signer, tok))) return;
+    if (!(await this.adopt(signer, tok))) return false;
     this.freshLocalKey = true;
+    return true;
   }
 
   /** Import a pasted/URL credential (nsec / ncryptsec+pw / hex) as a local key. */
-  async importLocalKey(input: string, passphrase?: string): Promise<void> {
+  async importLocalKey(input: string, passphrase?: string): Promise<boolean> {
     const tok = this.nextOp();
     const sk = importCredential(input, passphrase);
     const signer = new LocalSigner(sk);
     await saveLocalKey(sk);
-    if (!(await this.adopt(signer, tok))) return;
+    if (!(await this.adopt(signer, tok))) return false;
     this.freshLocalKey = false;
+    return true;
   }
 
   async logout(): Promise<void> {
     // Bump the token FIRST (H-6): any in-flight background restore/adoption is now
     // superseded and will drop itself instead of logging the user back in.
     this.nextOp();
+    this.restoring = false;
+    this.custodyReady = false;
     this.logoutError = false;
     // Self-encrypt event-key custody (E_id/E_inbox nsecs, ECKs) into an
     // on-device backup BEFORE tearing down the signer or clearing anything
@@ -267,7 +319,7 @@ class Session {
     // Not owner-scoped stores (audit UX-6): the previous identity's event
     // titles/roles and "Pending" join markers must not linger for the next
     // person on a shared device.
-    recentEvents.clear();
+    recentEvents.setOwner(null);
     clearAllJoinSent();
     this.signer = null;
     this.pubkey = null;
@@ -296,6 +348,8 @@ class Session {
     if (this.pubkey && this.pubkey !== owner) return;
     // Supersede any in-flight restore/adoption in THIS tab too (H-6 interplay).
     this.nextOp();
+    this.restoring = false;
+    this.custodyReady = false;
     // R21: the originating tab already discarded this owner's queued items from
     // shared IndexedDB; drop this tab's reactive outbox view synchronously so it
     // doesn't keep showing them until its next poll.
@@ -304,7 +358,7 @@ class Session {
     setActiveOwner(null);
     setActiveCacheOwner(null);
     clearBlindingCache();
-    recentEvents.clear();
+    recentEvents.setOwner(null);
     clearAllJoinSent();
     void Promise.resolve(this.signer?.close?.()).catch(() => {});
     this.signer = null;

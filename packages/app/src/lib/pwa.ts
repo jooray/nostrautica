@@ -86,8 +86,25 @@ export function registerPwa(): void {
 
       const check = async () => {
         try {
-          // Bypass the HTTP cache so a cached sw.js can't mask a new deploy.
-          await fetch(swUrl, { cache: "no-store" });
+          // PRIME the HTTP cache with the current sw.js, then update.
+          //
+          // This used to be `cache: "no-store"`, which was the wrong tool: it
+          // bypasses the cache for THIS request and stores nothing, so the
+          // response was fetched and thrown away while `registration.update()`
+          // below — a separate request — could still be answered from a stale
+          // cache entry. `cache: "reload"` also bypasses the cache on the way
+          // out but WRITES the fresh response back, so update() finds the new
+          // script whether or not it consults the cache.
+          //
+          // Why this mattered (prod 2026-07-28): nginx served /app/sw.js via a
+          // generic `\.(js|css|...)$ expires 1d` rule, so browsers could answer
+          // their own update check from cache for up to 24h. Clients sat on an
+          // old precached shell, and each 24h boundary let exactly one deploy
+          // through before shutting again — which is why it looked intermittent
+          // and browser-specific. The nginx side is fixed (sw.js is now
+          // no-store), but the client must not depend on a server header to
+          // notice a new version.
+          await fetch(swUrl, { cache: "reload" });
           await registration.update();
         } catch {
           /* offline — try again next tick */

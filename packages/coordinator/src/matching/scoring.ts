@@ -85,6 +85,14 @@ export interface EventContextForScoring {
  * benchmark-validated and must not be reworded, so this is a separate trailing
  * block. For English events it is empty (no stray "write in English" phrasing).
  * Attendee inputs may be in ANY language — the model must translate as needed.
+ *
+ * It also re-states the icebreaker SENDER/RECIPIENT binding, because prod
+ * 2026-07-25 (Slovak event) inverted it while getting the same ownership RIGHT in
+ * `reasoning_for_target` one field earlier: WHO IS WHO is necessarily written with
+ * English pronoun tokens, and carrying "my"/"your" into môj/tvoj was left to
+ * guesswork. This block is the only place that knows which language the output is
+ * actually in, and it is last in the system prompt (highest recency), so the
+ * binding is repeated here in terms of ROLES rather than English words.
  */
 export function languageInstruction(lang: string): string {
   const base = (lang || "en").toLowerCase();
@@ -95,7 +103,13 @@ export function languageInstruction(lang: string): string {
     "OUTPUT LANGUAGE:",
     "The attendee profiles below may be written in any language (English profiles at a",
     `${name}-language event are normal). Regardless of the input language, write every`,
-    `reasoning string in ${name} (${base}). All other JSON fields (scores) are unchanged.`,
+    `reasoning string and every icebreaker in ${name} (${base}). All other JSON fields (scores) are`,
+    "unchanged.",
+    `Translating moves no ownership. In the icebreakers, ${name}'s FIRST-person possessive forms`,
+    "still mean the SENDER (the attendee this entry is written for, the one who will send the",
+    `message) and ${name}'s SECOND-person possessive forms still mean the RECIPIENT (the other`,
+    `person). Use ${name}'s own forms for that distinction, and never attach a second-person`,
+    "possessive to anything that appears in the SENDER's own profile block.",
   ].join("\n");
 }
 
@@ -196,19 +210,42 @@ export const BATCH_SYSTEM_PROMPT = [
   "icebreakers — up to THREE opening MESSAGES the target can send this candidate. The app pastes the",
   "FIRST one straight into a direct-message box addressed to this candidate, so it must be sendable",
   "as-is, with no editing.",
-  "WHO IS WHO. This is the most important rule and it INVERTS the field above:",
-  ' • The speaker is the TARGET. "I"/"my" = the target. Everything in the TARGET ATTENDEE block —',
-  '   their book, project, company, job, skills — belongs to the target, so it is "my", NEVER "your".',
-  ' • The listener is THIS candidate. "you"/"your" = the candidate. Only details from THIS',
-  '   candidate\'s own block may be called "your".',
-  " • Never hand one person's work to the other. If the TARGET wrote a novel, do not ask the candidate",
-  '   about "your novel" — that novel is the target\'s, so it is "my novel".',
+  "WHO IS WHO. This is the most important rule. Compared with the field above only the PRONOUNS",
+  "change — the two people keep their roles, they never swap:",
+  ' • SENDER = the person under TARGET ATTENDEE. They are typing, so first person ("I"/"my") is',
+  "   always them. Everything under TARGET ATTENDEE — their book, app, courses, company, job,",
+  '   skills — is the SENDER\'s own and is "my", NEVER "your".',
+  ' • RECIPIENT = THIS candidate. Second person ("you"/"your") is always them. Only what appears',
+  '   under THIS candidate\'s own heading may be called "your".',
+  " • Never hand one person's work to the other. If the SENDER wrote a novel, never ask the",
+  '   RECIPIENT about "your novel" — the SENDER wrote it, so it is "my novel". If the RECIPIENT',
+  '   built a tool, never call it "my tool". The SENDER does not borrow the RECIPIENT\'s job,',
+  "   profession or skills either.",
+  " • WHOSE IS IT, when both profiles name the same thing: a candidate's profile may mention",
+  "   something the SENDER made — they read it, funded it, drew its cover, did its branding, or list",
+  '   it as a "hot project" they worked on. A mention does NOT transfer authorship. The TARGET',
+  "   ATTENDEE block is the authority on what the SENDER made: anything it presents as the target's",
+  '   stays "my", however prominently a candidate lists it.',
+  '   MECHANICAL CHECK before you write "your <name>" (or that phrase in another language): find that',
+  "   name in BOTH blocks. If it appears in the TARGET ATTENDEE block at all, the phrase is FORBIDDEN",
+  '   — it is the SENDER\'s, so write "my <name>". Only a name that appears solely under THIS',
+  '   candidate\'s heading may take "your". Their contribution to it ("your cover", "your branding")',
+  "   still takes second person; the thing itself does not.",
   " • Write a message, not a briefing. Describing the two of them to a third party (\"You're a",
   '   cypherpunk and she studies X — ask her about Y") cannot be sent to anyone; do not do it.',
+  " • This is a rule about ROLES, not about the English words. It holds in whatever language you",
+  "   write in: use that language's own first-person possessive forms for the SENDER and its",
+  "   second-person possessive forms for the RECIPIENT. The forms change; the owner never does.",
+  "Re-read each icebreaker before returning it: every second-person possessive must point at",
+  "something from THIS candidate's block, every first-person one at something from the TARGET",
+  "ATTENDEE block. If one does not, the roles got swapped — rewrite it.",
   'Example of GOOD: "Hi Sunny — I\'m putting a band together and I hear you play bass. What would you',
   'want our first setlist to sound like?"',
   'Example of BAD (never do this): "You\'re starting a band and Sunny plays bass — ask her about your',
   'first setlist."',
+  "Example of BAD (the trap): a candidate's profile proudly lists the SENDER's novel, because that",
+  'candidate designed its cover. "What style did you have in mind for your novel?" is WRONG — the',
+  'SENDER wrote the novel, so it is "my novel"; only the cover is "your" work.',
   "Each ≤ 280 chars, concrete, grounded in both profiles, and different from one another. Return fewer",
   "(or an empty list) when you can't ground a good one; never pad.",
   "",
@@ -287,6 +324,67 @@ function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
   return a;
 }
 
+/** EVENT/ABOUT/TOPICS header shared by both batch shapes; empty lines dropped. */
+function eventBlock(event: EventContextForScoring): string[] {
+  return [
+    `EVENT: ${event.title}`,
+    event.summary ? `ABOUT: ${event.summary}` : "",
+    event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
+  ].filter(Boolean);
+}
+
+/**
+ * The forward-batch user block. Exported (rather than inlined in scoreBatch) so
+ * benchmarks/matching/icebreaker-run.mjs can assert byte-for-byte that the block
+ * it sends is the block production sends — the ownership/role lines below are part
+ * of the attribution fix, so a benchmark that reconstructed them by hand would
+ * silently drift from what ships.
+ *
+ * `ordered` must already be in the order the numbering should use: `index` in the
+ * response is 1-based into this array.
+ */
+export function buildBatchUserBlock(
+  event: EventContextForScoring,
+  target: AiProfile,
+  targetName: string | undefined,
+  ordered: readonly BatchCandidate[],
+): string {
+  return [
+    ...eventBlock(event),
+    "",
+    // Ownership stated next to the blocks, not only in the system prompt: the
+    // observed failure (prod 2026-07-24) was attribute theft — the target's own
+    // novel, app and code handed back to them as the candidate's — and it happens
+    // right here, where two same-shaped profiles sit adjacent. Said on its own
+    // line so the `TARGET ATTENDEE:` / `--- CANDIDATE n ---` delimiters keep their
+    // exact shape: tests and the benchmark harness parse them.
+    //
+    // The provenance sentence is the 2026-07-25 addition. A possessive rule cannot
+    // settle the case that actually broke: the candidate's own bio led with the
+    // TARGET's book as their "hot project" (they had done its artwork), so the same
+    // artifact sat in both blocks and the model resolved the tie the wrong way —
+    // handing the reader their own novel and courses as the candidate's. Provenance
+    // has to be asserted structurally, from which block introduces a thing as its
+    // owner's, because the profile text alone is genuinely ambiguous.
+    "Everything under TARGET ATTENDEE belongs to the target. Everything under a CANDIDATE heading",
+    "belongs to that candidate. A candidate's profile may mention something the TARGET made — they",
+    "read it, funded it, or worked on it — and that never makes it theirs. Never credit one person",
+    "with the other's work.",
+    "",
+    "TARGET ATTENDEE:",
+    profileText(target, targetName),
+    // Role labels sit physically next to the data they bind, because the icebreaker
+    // failure was a wholesale role swap (the reader written as the candidate's
+    // profession), not just a slipped possessive.
+    '(The attendee above is the SENDER of every icebreaker below: what is listed for them is "my".)',
+    "",
+    "CANDIDATES:",
+    '(Each candidate is the RECIPIENT of the icebreakers in their own entry: only what is listed',
+    'under their heading is "your".)',
+    ...ordered.map((c, i) => [`--- CANDIDATE ${i + 1} ---`, profileText(c.profile, c.name)].join("\n")),
+  ].join("\n");
+}
+
 /**
  * Score one target against K candidates in a single LLM call. Per-candidate parse:
  * a malformed/missing candidate is reported in `missing` and never poisons the rest
@@ -307,30 +405,7 @@ export async function scoreBatch(
 
   // Shuffle to spread position bias; `index` (1-based) maps back to the candidate.
   const ordered = shuffle(candidates, rng);
-  const eventBlock = [
-    `EVENT: ${event.title}`,
-    event.summary ? `ABOUT: ${event.summary}` : "",
-    event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
-  ].filter(Boolean);
-
-  const user = [
-    ...eventBlock,
-    "",
-    // Ownership stated next to the blocks, not only in the system prompt: the
-    // observed failure (prod 2026-07-24) was attribute theft — the target's own
-    // novel, app and code handed back to them as the candidate's — and it happens
-    // right here, where two same-shaped profiles sit adjacent. Said on its own
-    // line so the `TARGET ATTENDEE:` / `--- CANDIDATE n ---` delimiters keep their
-    // exact shape: tests and the benchmark harness parse them.
-    "Everything under TARGET ATTENDEE belongs to the target. Everything under a CANDIDATE heading",
-    "belongs to that candidate. Never credit one person with the other's work.",
-    "",
-    "TARGET ATTENDEE:",
-    profileText(target, targetName),
-    "",
-    "CANDIDATES:",
-    ...ordered.map((c, i) => [`--- CANDIDATE ${i + 1} ---`, profileText(c.profile, c.name)].join("\n")),
-  ].join("\n");
+  const user = buildBatchUserBlock(event, target, targetName, ordered);
 
   const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
     system: BATCH_SYSTEM_PROMPT + languageInstruction(event.lang),
@@ -414,24 +489,139 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
   "icebreakers — up to THREE opening MESSAGES THIS target can send the shared person. The app pastes",
   "the FIRST one straight into a direct-message box addressed to the shared person, so it must be",
   "sendable as-is, with no editing.",
-  "WHO IS WHO. This is the most important rule and it INVERTS the field above:",
-  ' • The speaker is THIS target. "I"/"my" = this target. Everything in this target\'s own block —',
-  '   their book, project, company, job, skills — belongs to them, so it is "my", NEVER "your".',
-  ' • The listener is the SHARED person. "you"/"your" = the shared person. Only details from the',
-  '   SHARED PERSON\'s block may be called "your".',
-  " • Never hand one person's work to the other. If the target wrote a novel, do not ask the shared",
-  '   person about "your novel" — that novel is the target\'s, so it is "my novel".',
+  "WHO IS WHO. This is the most important rule. Compared with the field above only the PRONOUNS",
+  "change — the two people keep their roles, they never swap:",
+  ' • SENDER = THIS target. They are typing, so first person ("I"/"my") is always them. Everything',
+  "   under this target's own heading — their book, app, courses, company, job, skills — is the",
+  '   SENDER\'s own and is "my", NEVER "your".',
+  ' • RECIPIENT = the SHARED person. Second person ("you"/"your") is always them. Only what appears',
+  '   in the SHARED PERSON block may be called "your".',
+  // The 2026-07-25 addition. Everything else in this block was already true of the
+  // deployed prompt and it still inverted roles wholesale at a live event: the
+  // reader was handed their own album as "tvoj projekt". The forward prompt, whose
+  // rules are the same sentences with the roles mirrored, never does this — the one
+  // structural difference is that ITS first-printed person is the SENDER while this
+  // shape's is the RECIPIENT. So the failure looks like the model taking whoever is
+  // printed first and under their own heading as the one speaking. That is what
+  // this bullet contradicts by name, and why the user block now states the writer
+  // of each entry on the line under that entry's profile.
+  " • BLOCK ORDER IS NOT ROLE ORDER. The shared person is printed FIRST only because they are the",
+  "   same person in every entry. Printed first does not mean speaking. The writer of entry n is",
+  "   TARGET n — never the shared person — and the line directly under each target's profile says",
+  '   so ("Entry n is written BY the TARGET n profile above, TO …"). If the order the blocks are',
+  "   printed in ever seems to disagree with that line, the line is right.",
+  " • Never hand one person's work to the other. If the SENDER wrote a novel, never ask the",
+  '   RECIPIENT about "your novel" — the SENDER wrote it, so it is "my novel". If the RECIPIENT',
+  '   built a tool, never call it "my tool". The SENDER does not borrow the RECIPIENT\'s job,',
+  "   profession or skills either.",
+  " • WHOSE IS IT, when both profiles name the same thing: the shared person's profile may mention",
+  "   something the SENDER made — they read it, funded it, drew its cover, did its branding, or list",
+  '   it as a "hot project" they worked on. A mention does NOT transfer authorship. Each target\'s own',
+  "   block is the authority on what that SENDER made: anything it presents as theirs stays \"my\",",
+  "   however prominently the shared person lists it.",
+  '   MECHANICAL CHECK before you write "your <name>" (or that phrase in another language): find that',
+  "   name in BOTH blocks. If it appears in THIS target's own block at all, the phrase is FORBIDDEN —",
+  '   it is the SENDER\'s, so write "my <name>". Only a name that appears solely in the SHARED PERSON',
+  '   block may take "your". Their contribution to it ("your cover", "your branding") still takes',
+  "   second person; the thing itself does not.",
   " • Write a message, not a briefing. Describing the two of them to a third party (\"You're a",
   '   cypherpunk and she studies X — ask her about Y") cannot be sent to anyone; do not do it.',
+  " • This is a rule about ROLES, not about the English words. It holds in whatever language you",
+  "   write in: use that language's own first-person possessive forms for the SENDER and its",
+  "   second-person possessive forms for the RECIPIENT. The forms change; the owner never does.",
+  "Re-read each icebreaker before returning it: every second-person possessive must point at",
+  "something from the SHARED PERSON block, every first-person one at something from THIS target's",
+  "own block. If one does not, the roles got swapped — rewrite it.",
   'Example of GOOD: "Hi Sunny — I\'m putting a band together and I hear you play bass. What would you',
   'want our first setlist to sound like?"',
   'Example of BAD (never do this): "You\'re starting a band and Sunny plays bass — ask her about your',
   'first setlist."',
+  "Example of BAD (the trap): the shared person's profile proudly lists the SENDER's novel, because",
+  'they designed its cover. "What style did you have in mind for your novel?" is WRONG — the SENDER',
+  'wrote the novel, so it is "my novel"; only the cover is "your" work.',
   "Each ≤ 280 chars, concrete, grounded in both profiles, and different from one another. Return fewer",
   "(or none) rather than pad.",
   "",
   "Return one entry per target, using the target's number as `index`. Score EVERY target exactly once.",
 ].join("\n");
+
+/**
+ * The reverse-batch user block. Exported for the same reason as
+ * buildBatchUserBlock: the benchmark must send production's bytes.
+ *
+ * This is the shape that inverts. The forward block and this one carry the same
+ * ownership rules, word for word with the roles mirrored, and the benchmark scores
+ * the forward one at 0 attribution errors in English AND Slovak — including on a
+ * Slovak replica of the exact pair that broke — while this one keeps producing them
+ * (1/171 with the pre-2026-07-25 wording, 1/182 with the current wording; the
+ * rewording changed nothing measurable). The one thing that differs is print order:
+ * forward prints the SENDER first under its own heading, this prints the RECIPIENT
+ * first and leaves each SENDER as item n of a numbered list. The failures read
+ * exactly like a model that took the first-printed person as the one speaking.
+ *
+ * Two devices against that, because the shared person cannot simply be moved below
+ * the list (there are K senders and one recipient, and the recipient has to be
+ * stated once for the batch to be worth batching):
+ *
+ *  1. A writer directory ABOVE the shared person's block, one line per entry, the
+ *     writer named FIRST — so the first people the model reads about are the
+ *     senders, in the role they actually have, before the recipient's heading can
+ *     claim the protagonist slot.
+ *  2. A binding line under EVERY target's profile, naming that target as the writer
+ *     of that entry. This mirrors the forward block, where the SENDER line sits
+ *     directly under the SENDER's profile; here it has to be repeated per entry
+ *     because every entry has a different sender.
+ *
+ * Constraints on this text that are not obvious from reading it: the
+ * `SHARED PERSON (the one each target below would meet):` heading must be
+ * immediately followed by the shared profile, `TARGET ATTENDEES:` must appear
+ * exactly once and after it, and each `--- TARGET n ---` must be immediately
+ * followed by that target's profile — the coordinator test's fake LLM slices the
+ * user block on precisely those three landmarks to decide who it was asked about.
+ */
+export function buildReverseBatchUserBlock(
+  event: EventContextForScoring,
+  shared: AiProfile,
+  sharedName: string | undefined,
+  ordered: readonly BatchCandidate[],
+): string {
+  // Names when we have them, positional labels when we do not (pre-migration rows
+  // and profiles without a display name): the directory is useless if half its
+  // lines say "undefined".
+  const recipient = sharedName?.trim() || "the shared person";
+  const writer = (c: BatchCandidate, i: number) => c.name?.trim() || `TARGET ${i + 1}`;
+  return [
+    ...eventBlock(event),
+    "",
+    // Ownership + provenance alongside the blocks — see the note in
+    // buildBatchUserBlock; the reverse shape has the same tie to break, with the
+    // roles mirrored (each target is a SENDER, the shared person the RECIPIENT).
+    "Everything under SHARED PERSON belongs to that person. Everything under a TARGET heading belongs",
+    "to that target. The shared person's profile may mention something a TARGET made — they read it,",
+    "funded it, or worked on it — and that never makes it theirs. Never credit one person with the",
+    "other's work.",
+    "",
+    "WHO WRITES EACH ENTRY (the writer is named first):",
+    ...ordered.map((c, i) => `  entry ${i + 1}: ${writer(c, i)} (TARGET ${i + 1} below) writes to ${recipient}`),
+    `${recipient} writes nothing and is only read — being printed first does not make them the writer.`,
+    "",
+    "SHARED PERSON (the one each target below would meet):",
+    profileText(shared, sharedName),
+    '(The shared person is the RECIPIENT of every icebreaker below: what is listed for them is "your".)',
+    "",
+    "TARGET ATTENDEES: one numbered block per WRITER — the icebreakers in entry n are typed by TARGET n.",
+    '(Each target is the SENDER of the icebreakers in their own entry: only what is listed under',
+    'their heading is "my".)',
+    ...ordered.map((c, i) =>
+      [
+        `--- TARGET ${i + 1} ---`,
+        profileText(c.profile, c.name),
+        `(Entry ${i + 1} is written BY the TARGET ${i + 1} profile above, TO ${recipient}: in entry ${i + 1}` +
+          ` "my" = ${writer(c, i)}, "your" = ${recipient}.)`,
+      ].join("\n"),
+    ),
+  ].join("\n");
+}
 
 /**
  * Score K targets against one shared candidate in a single call. `targets` carry
@@ -452,25 +642,7 @@ export async function scoreReverseBatch(
   if (targets.length === 0) return { scores, missing: [] };
 
   const ordered = shuffle(targets, rng);
-  const eventBlock = [
-    `EVENT: ${event.title}`,
-    event.summary ? `ABOUT: ${event.summary}` : "",
-    event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
-  ].filter(Boolean);
-
-  const user = [
-    ...eventBlock,
-    "",
-    // Ownership stated alongside the blocks — see the note in scoreBatch.
-    "Everything under SHARED PERSON belongs to that person. Everything under a TARGET heading belongs",
-    "to that target. Never credit one person with the other's work.",
-    "",
-    "SHARED PERSON (the one each target below would meet):",
-    profileText(shared, sharedName),
-    "",
-    "TARGET ATTENDEES:",
-    ...ordered.map((c, i) => [`--- TARGET ${i + 1} ---`, profileText(c.profile, c.name)].join("\n")),
-  ].join("\n");
+  const user = buildReverseBatchUserBlock(event, shared, sharedName, ordered);
 
   const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
     system: REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(event.lang),

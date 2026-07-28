@@ -297,8 +297,15 @@
           document.getElementById("n")?.focus();
           return;
         }
-        await session.createLocalKey();
-        const signer = session.signer!;
+        // H-6: `createLocalKey` reports false when a newer login/logout superseded
+        // its adoption, and then leaves `session.signer` null. The old
+        // `session.signer!` asserted past exactly that case, so a second tab
+        // signing out mid-join turned the next line into "cannot read properties
+        // of null" — surfaced to the joiner as a raw TypeError. Create.svelte
+        // already guarded this; Join did not.
+        if (!(await session.createLocalKey())) throw new Error(t("signin.superseded"));
+        const signer = session.signer;
+        if (!signer) throw new Error(t("signin.superseded"));
         displayName = newName.trim();
         about = newAbout.trim();
         // Upload the chosen photo to public Blossom (needs the just-created signer).

@@ -48,6 +48,7 @@ import { talkBlindedD } from "./nostr/publisher.js";
 
 class FakeTransport implements Transport {
   published: NostrEvent[] = [];
+  publishCalls: { event: NostrEvent; relays?: string[] }[] = [];
   seed: NostrEvent[] = [];
   /** Recorded subscriptions (COORD-8/COORD-29 tests): filter, relays, handler, closed. */
   subs: { filter: any; relays?: string[]; onEvent: (e: NostrEvent) => void; closed: boolean }[] = [];
@@ -65,7 +66,8 @@ class FakeTransport implements Transport {
    *  test can hold a command's effect chain in-flight (holding its subject mutex)
    *  while a concurrent command is dispatched. */
   onPublish?: (event: NostrEvent) => Promise<void> | void;
-  async publish(event: NostrEvent): Promise<void | { replaced?: boolean }> {
+  async publish(event: NostrEvent, relays?: string[]): Promise<void | { replaced?: boolean }> {
+    this.publishCalls.push({ event, relays });
     if (this.onPublish) await this.onPublish(event);
     if (this.failPublishes > 0) {
       this.failPublishes--;
@@ -352,6 +354,8 @@ async function setup(
      *  grant wrap (and inject a mid-install failure). */
     skipAutoInstall?: boolean;
     transcribeError?: string;
+    eventRelays?: string[];
+    defaultRelays?: string[];
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -419,7 +423,7 @@ async function setup(
     ...(opts.evaluateBilling ? { evaluateBilling: opts.evaluateBilling } : {}),
     ...(opts.billingGracePeriodSec !== undefined ? { billingGracePeriodSec: opts.billingGracePeriodSec } : {}),
     ...(opts.budgets ? { budgets: opts.budgets } : {}),
-    defaultRelays: ["wss://test"],
+    defaultRelays: opts.defaultRelays ?? ["wss://test"],
     batchSize: opts.batchSize,
     prefilter: opts.prefilter,
     chatMls: opts.chatMls,
@@ -447,7 +451,7 @@ async function setup(
   // installs — the behavior those tests assert.
   if (!opts.skipAutoInstall) {
     await coordinator.installEvent({
-      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: opts.eventRelays ?? ["wss://test"], gen: 1, source: "grant", backfill: "full",
     });
   }
 
@@ -2662,6 +2666,29 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(mls.invited).toEqual([devicePk]);
   });
 
+  // The Whitenoise interop relays used to reach the chat subscriptions by
+  // accident: the app unioned them into the event's `relay` tags, so they showed
+  // up in `configRelays`. They now live in the config's separate `chat_relay`
+  // set (and parseEventConfig migrates old configs out of `relay`), so the
+  // chat-only subscriptions have to add them back explicitly — otherwise the
+  // 30443 watcher silently stops seeing a Whitenoise attendee's key package on
+  // the relay their client publishes it to (prod report 2026-07-20), while the
+  // rest of the daemon keeps publishing 31603/31606/kind-5 only to relays that
+  // accept them.
+  it("watches 30443 on the event relays PLUS the chat interop relays, and nothing else does", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const interop = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
+    const kpSub = h.transport.subs.find((s: any) => s.filter?.kinds?.includes(30443));
+    expect(kpSub).toBeDefined();
+    expect(kpSub!.relays).toEqual(["wss://test", ...interop]);
+    // Every non-chat subscription stays on the event's own relays.
+    for (const sub of h.transport.subs) {
+      if (sub.filter?.kinds?.includes(30443) || sub.filter?.kinds?.includes(445)) continue;
+      for (const url of interop) expect(sub.relays ?? []).not.toContain(url);
+    }
+  });
+
   it("a persistently failing sync poisons and surfaces a 21606 to the organizer", async () => {
     const mls = new StubMls();
     mls.failIsMember = true;
@@ -3689,6 +3716,46 @@ describe("NIP §6.3 — attendee-scoped 21606 status", () => {
       .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
     expect(toAttendee.length).toBeGreaterThan(0);
     expect(toAttendee[toAttendee.length - 1]!.pubkey).toBe(pk);
+  });
+});
+
+describe("account-addressed gift-wrap relay delivery", () => {
+  const eventRelay = "wss://event.example";
+  const defaultRelay = "wss://default.example";
+
+  it("publishes an attendee grant to custom event and coordinator default relays", async () => {
+    const h = await setup(0, { eventRelays: [eventRelay], defaultRelays: [defaultRelay] });
+    const attendeeSk = generateSecretKey();
+    await join(h, attendeeSk, "crypto");
+
+    const grantCall = h.transport.publishCalls.find(({ event }) => {
+      try {
+        return unwrapRumor(event as any, attendeeSk).kind === KIND_KEY_GRANT;
+      } catch {
+        return false;
+      }
+    });
+    expect(grantCall?.relays).toEqual([eventRelay, defaultRelay]);
+  });
+
+  it("publishes an organizer status to custom event and coordinator default relays", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, {
+      eventRelays: [eventRelay],
+      defaultRelays: [defaultRelay],
+      retentionDays: 1,
+      eventEndSec: nowSec - 2 * 86_400,
+    });
+    await h.coordinator.retentionSweep();
+
+    const statusCall = h.transport.publishCalls.find(({ event }) => {
+      try {
+        return unwrapRumor(event as any, h.eidSk).kind === KIND_COORDINATOR_STATUS;
+      } catch {
+        return false;
+      }
+    });
+    expect(statusCall?.relays).toEqual([eventRelay, defaultRelay]);
   });
 });
 

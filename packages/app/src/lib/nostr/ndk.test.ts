@@ -37,10 +37,12 @@ import {
   __setNdkForTests,
   __resetRelayHealthForTests,
   addRelays,
+  publishSigned,
   __dynamicRelayCount,
   __resetDynamicRelaysForTests,
 } from "./ndk.js";
 import { DEFAULT_RELAYS } from "./relays.js";
+import { normalizeRelayUrl } from "@nostr-dev-kit/ndk";
 import type NDK from "@nostr-dev-kit/ndk";
 
 describe("isAcceptedRelayUrl (APPR-8)", () => {
@@ -320,6 +322,133 @@ describe("relayHealth (item 5: no false 'blocked' before an attempt)", () => {
     pendingConnects.shift()?.();
     await second;
     expect(relayHealth()).toBe("failed");
+  });
+});
+
+// ── Per-relay publish failures never surface as exceptions ───────────────────
+// Firefox, prod, 2026-07-28: with DevTools "pause on exceptions" on, publishing a
+// 31600 (or the NIP-09 kind-5 that retires the legacy chat backup) halted the
+// debugger on `Error: blocked: kind 31600 is not accepted by this relay`. A
+// chat-enabled event's relay set includes the two whitenoise relays, which accept
+// ONLY kinds 0/3/445/1059/10000/10002/10050/30443 and refuse everything else with
+// exactly that message — so those two refusals happen on EVERY such publish, by
+// design. NDK routed them through `.catch(onError)` ending in a bare `throw err`,
+// which a debugger sees as uncaught (its only enclosing try is inside the engine's
+// self-hosted promise job). publishSigned now fans out itself, attaching both
+// handlers to each per-relay promise at creation and never re-throwing.
+describe("publishSigned: a relay refusing the kind is handled, not thrown", () => {
+  type FakeRelay = ReturnType<typeof fakeRelay>;
+
+  function fakeRelay(url: string, behaviour: (resolve: () => void, reject: (e: Error) => void) => void) {
+    const listeners = new Map<string, Array<() => void>>();
+    const relay = {
+      url: normalizeRelayUrl(url),
+      status: 5 /* NDKRelayStatus.CONNECTED */,
+      publishCalls: 0,
+      connect: async () => {},
+      connectivity: {
+        publish: () => {
+          relay.publishCalls++;
+          return new Promise<string>((res, rej) => behaviour(() => res("ok"), rej));
+        },
+      },
+      // NDK's throwing publisher — if publishSigned ever calls this again, the
+      // `throw err` that pauses the debugger is back.
+      publish: () => {
+        throw new Error("NDKRelay.publish must not be used by publishSigned");
+      },
+      on: (name: string, fn: () => void) => {
+        listeners.set(name, [...(listeners.get(name) ?? []), fn]);
+      },
+      removeListener: (name: string, fn: () => void) => {
+        listeners.set(name, (listeners.get(name) ?? []).filter((f) => f !== fn));
+      },
+      emit: () => {},
+    };
+    return relay;
+  }
+
+  function ndkWithRelays(relays: FakeRelay[]) {
+    const pool = {
+      relays: new Map(relays.map((r) => [r.url, r])),
+      useTemporaryRelay: () => {},
+      connectedRelays: () => relays,
+    };
+    return {
+      pool,
+      debug: Object.assign(() => {}, { extend: () => Object.assign(() => {}, { extend: () => () => {} }) }),
+    } as unknown as NDK;
+  }
+
+  const BLOCKED = "blocked: kind 31600 is not accepted by this relay";
+  const signed = { id: "e".repeat(64), kind: 31600, pubkey: "a".repeat(64), created_at: 1, tags: [], content: "", sig: "s" };
+
+  const refusing = (url: string) => fakeRelay(url, (_ok, fail) => fail(new Error(BLOCKED)));
+  const accepting = (url: string) => fakeRelay(url, (ok) => ok());
+
+  afterEach(() => {
+    __setNdkForTests(null);
+    vi.restoreAllMocks();
+  });
+
+  it("resolves when one relay accepts and two refuse the kind", async () => {
+    const relays = [
+      refusing("wss://relay.us.whitenoise.chat"),
+      accepting("wss://nostr.cypherpunk.today"),
+      refusing("wss://relay.eu.whitenoise.chat"),
+    ];
+    __setNdkForTests(ndkWithRelays(relays));
+    const outcomes = await publishSigned(signed as never, relays.map((r) => r.url));
+    expect(outcomes.filter((o) => o.ok).map((o) => o.url)).toEqual([
+      normalizeRelayUrl("wss://nostr.cypherpunk.today"),
+    ]);
+    expect(outcomes.filter((o) => !o.ok).map((o) => o.reason)).toEqual([BLOCKED, BLOCKED]);
+  });
+
+  it("logs each refusal quietly (debug, not error) so it stays diagnosable", async () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const relays = [refusing("wss://relay.us.whitenoise.chat"), accepting("wss://nostr.cypherpunk.today")];
+    __setNdkForTests(ndkWithRelays(relays));
+    await publishSigned(signed as never, relays.map((r) => r.url));
+    expect(debugSpy).toHaveBeenCalledWith(expect.stringContaining(BLOCKED));
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it("a refusal that lands AFTER the publish resolved is still handled (no orphan)", async () => {
+    const orphans: unknown[] = [];
+    const onOrphan = (r: unknown) => orphans.push(r);
+    process.on("unhandledRejection", onOrphan);
+    try {
+      let rejectLate: (e: Error) => void = () => {};
+      const slow = fakeRelay("wss://relay.eu.whitenoise.chat", (_ok, fail) => {
+        rejectLate = fail;
+      });
+      const relays = [slow, accepting("wss://nostr.cypherpunk.today")];
+      __setNdkForTests(ndkWithRelays(relays));
+      vi.useFakeTimers();
+      const p = publishSigned(signed as never, relays.map((r) => r.url));
+      // The slow relay loses the per-relay budget; the publish already succeeded.
+      await vi.advanceTimersByTimeAsync(3000);
+      await p;
+      vi.useRealTimers();
+      // ...and only NOW does it answer OK=false. In production this is the exact
+      // shape that used to reach `unhandledrejection`.
+      rejectLate(new Error(BLOCKED));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(orphans).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+      process.off("unhandledRejection", onOrphan);
+    }
+  });
+
+  it("throws only when EVERY relay refused, keeping the wording publishOrQueue keys off", async () => {
+    const relays = [refusing("wss://relay.us.whitenoise.chat"), refusing("wss://relay.eu.whitenoise.chat")];
+    __setNdkForTests(ndkWithRelays(relays));
+    await expect(publishSigned(signed as never, relays.map((r) => r.url))).rejects.toThrow(
+      /not enough relays received the event/i,
+    );
   });
 });
 

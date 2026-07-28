@@ -28,10 +28,18 @@ import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
 import { isCliSubcommand, runCli } from "./cli.js";
 import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
+import { installExitLogging } from "./lifecycle.js";
 
 async function runDaemon(): Promise<void> {
-  // Release provenance (§13.9): tie the running daemon to a specific build.
-  console.log(`[coordinator] ${releaseSummary()}`);
+  // Exit forensics FIRST, before anything that can throw (production outage
+  // 2026-07-25: the daemon died 3 minutes after a deploy and logged nothing at
+  // all). See lifecycle.ts for what each handler covers and why.
+  installExitLogging();
+
+  // Release provenance (§13.9) + process identity: tie the running daemon to a
+  // specific build AND to a pid/start time, so a restart — or a death followed by
+  // no restart — is unmistakable in a log that spans many deploys.
+  console.log(`[coordinator] START pid ${process.pid} on node ${process.version} — ${releaseSummary()}`);
   const configPath = process.argv[2] ?? "coordinator.toml";
   const config = loadConfig(configPath);
   const dbPath = process.env.NOSTRAUTICA_COORDINATOR_DB ?? "coordinator.sqlite";
@@ -249,14 +257,19 @@ async function runDaemon(): Promise<void> {
   // Graceful shutdown (reliability tail): stop claiming new jobs, await the active
   // job (bounded), abort subscriptions, then close the transport + store + lock. A
   // SECOND signal forces an immediate exit (a hung job never blocks stop forever).
-  const shutdown = async () => {
+  //
+  // The signal NAME is logged before any draining begins, so an operator reading
+  // the log after the fact can tell an intentional stop (systemd/deploy SIGTERM,
+  // an operator's Ctrl-C) from a crash — the distinction we could not make during
+  // the 2026-07-25 outage, where the daemon simply vanished from the log.
+  const shutdown = async (signal: string) => {
     if (shuttingDown) {
-      console.log("[coordinator] second signal — forcing exit");
+      console.log(`[coordinator] second signal (${signal}) — forcing exit`);
       process.exit(1);
     }
     shuttingDown = true;
     stopped = true;
-    console.log("[coordinator] draining in-flight work…");
+    console.log(`[coordinator] ${signal} received — draining in-flight work…`);
     coordinator.jobs.stopClaiming(); // no new claims; the active job still finishes
     // Bounded graceful drain: give the in-flight handler up to DRAIN_TIMEOUT to
     // finish on its own.
@@ -284,11 +297,13 @@ async function runDaemon(): Promise<void> {
     client.close();
     store.close();
     daemonLock.release();
-    console.log("[coordinator] stopped");
+    console.log(`[coordinator] stopped (${signal}, clean)`);
+    // Exit 0 on a clean signal stop — systemd reads this as a successful stop, not
+    // a crash (and the exit-logging backstop records the code either way).
     process.exit(0);
   };
-  process.on("SIGINT", () => void shutdown());
-  process.on("SIGTERM", () => void shutdown());
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   while (!stopped) {
     drainPromise = coordinator.jobs.drain();

@@ -24,6 +24,7 @@ import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
 import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants, MAX_GRANT_WRAPS } from "./attendee.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
+import { startScanBudget, scanIncomplete, type ScanOutcome } from "./scan-budget.js";
 
 // Cache-path setup (CACHING-PLAN §2.3): mock the relay stream so fetchMatches
 // runs against a fixed 31605, and inject an in-memory keystore for the ECK.
@@ -116,6 +117,7 @@ function makeConfig(
     inbox,
     coordinator,
     relays: [],
+    chatRelays: [],
     blossom: [],
     maxVideoSec: 90,
     maxTalkSec: 900,
@@ -467,6 +469,139 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     // Definitively rejected WITH a config in hand: never retried, never prompts
     // the signer for this wrap again.
     expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  it("does not latch the full-history backfill when EVERY unwrap failed", async () => {
+    // The 2026-07-28 shape: a remote signer (Amber) that answers `get_public_key`
+    // but can't complete the nip44_decrypt round trips. Every unwrap fails, so the
+    // scan finds nothing — but that is a transport outage, not an empty inbox.
+    // Latching the marker here narrows every later scan to giftwrapSince()
+    // (now − 3 days), permanently hiding an ECK grant from an event joined a month
+    // ago on this device.
+    // vitest runs this package under `environment: "node"`, where the
+    // backfill marker's localStorage doesn't exist and every read/write is
+    // swallowed — so the marker has to be given somewhere real to live before
+    // this behaviour is observable at all.
+    const store = new Map<string, string>();
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+      },
+    });
+    try {
+    const wrap = await keyGrantWrap();
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    const deaf = {
+      method: "nip46" as const,
+      getPublicKey: async () => attendeePk,
+      signEvent: attendee.signEvent.bind(attendee),
+      nip44Encrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+      nip44Decrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+    };
+
+    expect(await receiveGrants(deaf)).toEqual([]);
+    expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since: number }).since).toBe(0);
+    // Pre-fix this latched anyway and scan 2 would have used `now − 3 days`,
+    // never seeing this (older) wrap again. The marker stayed unset, so the
+    // retry is still a FULL-history scan and the grant is found.
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since: number }).since).toBe(0);
+    // Only the pass that actually read a wrap latches it.
+    await receiveGrants(attendee);
+    expect((fetchEventsRelayOnly.mock.calls[2]![0] as { since: number }).since).toBeGreaterThan(0);
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
+  it("stops unwrapping when the shared budget runs out, and says so", async () => {
+    // The 2026-07-28 prompt storm: every un-memoized wrap costs TWO NIP-46
+    // round trips, and this loop had no cap at all — a mailbox with hundreds of
+    // wraps queued hundreds of Amber dialogs with no progress UI and no way out.
+    const wraps = [await keyGrantWrap(1), await keyGrantWrap(2), await keyGrantWrap(3)];
+    fetchEventsRelayOnly.mockResolvedValue(wraps);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+
+    let unwraps = 0;
+    const counted = {
+      method: "nip46" as const,
+      getPublicKey: async () => attendeePk,
+      signEvent: attendee.signEvent.bind(attendee),
+      nip44Encrypt: attendee.nip44Encrypt.bind(attendee),
+      nip44Decrypt: async (pk: string, ct: string) => {
+        unwraps++;
+        return attendee.nip44Decrypt(pk, ct);
+      },
+    };
+
+    const outcomes: ScanOutcome[] = [];
+    // One wrap's worth of allowance (a wrap is two decrypts: wrap → seal → rumor).
+    const budget = startScanBudget({ maxCalls: 1, now: () => 0 });
+    await receiveGrants(counted, { budget, onOutcome: (o) => outcomes.push(o) });
+
+    expect(unwraps).toBe(2); // exactly one wrap walked, not three
+    expect(outcomes[0]).toMatchObject({ attempted: 1, succeeded: 1, truncated: true });
+    expect(scanIncomplete(outcomes[0]!)).toBe(true);
+  });
+
+  it("a truncated full-history pass does not latch the backfill marker", async () => {
+    // A pass that ran out of budget saw only part of the history. Latching would
+    // narrow every later scan to giftwrapSince() and permanently hide the wraps
+    // it never reached — the same trap as the all-unwraps-failed case above.
+    const store = new Map<string, string>();
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+      },
+    });
+    try {
+      fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap(1), await keyGrantWrap(2)]);
+      fetchEvents.mockResolvedValue([signedConfig()]);
+
+      await receiveGrants(attendee, { budget: startScanBudget({ maxCalls: 1, now: () => 0 }) });
+      expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since: number }).since).toBe(0);
+      // Still a FULL-history scan next time: the marker stayed unset.
+      await receiveGrants(attendee);
+      expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since: number }).since).toBe(0);
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
+  it("reports a pass where the signer answered nothing as incomplete", async () => {
+    // Resolving with `[]` here is exactly what "you have no events" looks like.
+    // The outcome is the only thing that can tell the two apart.
+    fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    const deaf = {
+      method: "nip46" as const,
+      getPublicKey: async () => attendeePk,
+      signEvent: attendee.signEvent.bind(attendee),
+      nip44Encrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+      nip44Decrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+    };
+
+    const outcomes: ScanOutcome[] = [];
+    expect(await receiveGrants(deaf, { onOutcome: (o) => outcomes.push(o) })).toEqual([]);
+    expect(outcomes[0]).toMatchObject({ attempted: 1, succeeded: 0, truncated: false });
+    expect(scanIncomplete(outcomes[0]!)).toBe(true);
   });
 
   it("bounds the persisted grant memo, evicting oldest-inserted entries (App-7)", async () => {

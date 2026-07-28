@@ -298,6 +298,90 @@ záchranná síť pro případ, že tento plán selže.
 - **Spoluorganizátoři** — v **Administrace → Nastavení → Spoluorganizátoři** přidejte někoho podle jeho npub a sdílejte plnou organizátorskou kontrolu (úprava akce, schvalování, správa koordinátora). Jejich klíče jsou jim zabaleny jako dárek; přístup získají, až příště otevřou akci. Tohle je zároveň vaše záchranná síť, pokud vám spadne prohlížeč.
 - **Podporujte představení včas.** Spojení existují jen pro lidi, kteří nahráli představení — nejlepší, co můžete pro kvalitu spojení udělat, je dostat všechny k nahrání ještě před začátkem akce. Nahrání je pro účastníky volitelné a aplikace jim to i říká, ale vyplatí se na to tlačit: nahrané představení dá AI víc na práci, umožní ostatním účastníkům předem zjistit, jestli by si s daným člověkem opravdu sedli, ještě než k němu přijdou — párování není jen o projektech a dovednostech, je to i pocit, který AI sama o sobě nedokáže zachytit — a jde-li o video, pomůže lidem poznat svá spojení naživo.
 
+## 8. Sledování pozvánkových kódů po jejich rozeslání
+
+Pokud prodáváte vstupenky mimo Nostrautiku — přes Eventbrite, vlastní
+e-shop, nebo v hotovosti u dveří — o kupujícím víte jedinou věc: jeho
+e-mailovou adresu. Každému pošlete jeden pozvánkový odkaz; někteří se
+připojí hned, jiní se k tomu nikdy nedostanou, a pár dní před akcí chcete
+připomenout přesně těm, kdo se ještě nezaregistrovali.
+
+**Tohle si ujasněte hned na začátku: aplikace se nikdy nedozví ničí
+e-mailovou adresu a sama nikomu neposílá žádný e-mail.** Rozeslání kódů i
+spárování kódu s konkrétním člověkem je celé vaše vlastní práce ve vašich
+vlastních nástrojích — hromadná korespondence, tabulka, případně prodejní
+systém, který už používáte. Aplikace vám umí říct jediné: která *čísla*
+kódů už byla použita.
+
+### Každý kód má svoje číslo
+
+Každý vygenerovaný pozvánkový kód má u sebe označení — **invite-1,
+invite-2** a tak dál — ať se objeví kdekoli. Tohle číslo je jediné, co kód
+spojuje s konkrétním člověkem, a víte to jen vy: zapište si ho do sloupce
+vedle jeho e-mailu ve chvíli, kdy mu kód posíláte, do vlastního souboru.
+
+Číslování se nikdy nevrací zpátky na začátek. Dnes vygenerujete 20 kódů a
+za týden dalších 10 — nová dávka začne na **invite-21**, žádný z už
+rozdaných kódů si číslo nezmění ani se nezopakuje.
+
+### Dva exporty pro dvě různé chvíle
+
+Otevřete **Exporty** pod pozvánkovými kódy v administraci (§3). Záměrně
+jsou tu dva různé soubory ke stažení, protože odpovídají na dvě různé
+otázky ve dvou různých chvílích:
+
+- **Kódy k rozeslání** vám dají skutečné kódy a odkazy k vložení do
+  hromadné korespondence — ale jen tu dávku, kterou právě vidíte na
+  obrazovce, a jen právě teď. Pozvánkové kódy jsou jednorázové tajemství,
+  které aplikace záměrně nikde neukládá, takže dávku exportujte (nebo
+  aspoň zkopírujte) dřív, než vygenerujete další nebo opustíte stránku —
+  pak jsou kódy z dané dávky nenávratně pryč. Jejich čísla zůstanou
+  „rezervovaná", jen je už nemáte komu dát.
+- **Kdo se už připojil** ukáže, která čísla kódů byla použita. Nepotřebuje
+  k tomu žádné kódy, takže si ho můžete otevřít kdykoli — o týdny i
+  měsíce později, na kterémkoli zařízení, kde jste přihlášení jako
+  organizátor. K tomuhle exportu se budete vracet.
+
+### Doporučený postup
+
+1. **Vygenerujte kódy** a hned potom exportujte **Kódy k rozeslání**
+   (formát pro tabulkový program, CSV).
+2. **Udělejte hromadnou korespondenci** proti seznamu kupujících — u
+   každého e-mailu si ve vlastním souboru poznamenejte číslo
+   odpovídajícího kódu.
+3. Blíž k akci — nebo kdykoli později — znovu otevřete **Exporty** a
+   stáhněte **Kdo se už připojil**, s vybraným **Jen nepoužité kódy**.
+4. **Spárujte** tato čísla zpátky s e-mailovými adresami ve vlastním
+   souboru.
+5. **Napište znovu** jen téhle kratší skupině, místo abyste psali úplně
+   všem znovu.
+
+### Jaký formát zvolit
+
+Soubor pro tabulkový program je výchozí a je to ten, který chcete na
+hromadnou korespondenci — otevře se přímo v Excelu, Google Sheets nebo v
+čemkoli, co už používáte. Obyčejný seznam odkazů je tu spíš pro ty, kdo si
+rozesílání řeší vlastním skriptem.
+
+### Jedna upřímná poznámka
+
+„Použito" počítá jen dopředu: jakmile aplikace jednou uvidí kód jako
+použitý, zůstane tak označený navždy. „Nepoužito" je ale slabší signál, než
+se zdá — u akce, která skončila už dávno, nebo pokud jste od připojení
+některých lidí administraci jednoduše neotevřeli, se pár kódů může pořád
+tvářit jako nepoužitých, přestože se dotyční lidé skutečně připojili.
+Berte **použito** jako jisté a **nepoužito** jako „asi ještě ne — vyplatí
+se to ověřit, než někomu napíšete znovu". Drobná nepříjemnost pro člověka,
+který se už připojil, je lepší než žádná připomínka pro toho, kdo se
+nepřipojil — ale je dobré předem vědět, že se to může stát, než aby vás to
+zaskočilo.
+
+### U dveří
+
+Pozvánkový list (§3) sám o sobě vynechává každý už použitý kód, takže když
+si ho vytisknete znovu blíž k akci, každý, kdo se mezitím připojil online,
+na něm už prostě nebude.
+
 ## Řešení problémů a časté dotazy
 
 - **Co vidí účastníci, dokud nejsou schválení?** Jen veřejnou stránku akce — název, shrnutí, data, místo a vaše zveřejněné novinky. Seznam účastníků, videa a spojení jsou zašifrované pro schválené účastníky.

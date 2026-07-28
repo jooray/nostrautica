@@ -159,7 +159,42 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
       expect(p).toContain('"I"/"my"'); // the reader speaks in the first person
       expect(p).toContain("Never hand one person's work to the other");
       expect(p).toContain("Write a message, not a briefing");
+      // Named ROLES, not just pronouns. Prod 2026-07-25 (Slovak) swapped the two
+      // people wholesale — the reader was written as the candidate's profession
+      // and handed their own app — so the binding must survive translation into a
+      // language whose possessives are nothing like "my"/"your".
+      expect(p).toContain("SENDER");
+      expect(p).toContain("RECIPIENT");
+      expect(p).toContain("they never swap");
+      expect(p).toContain("It holds in whatever language you");
+      // A shared artifact (the candidate's bio led with the target's book, whose
+      // cover they drew) is ambiguous from the text alone, so provenance is
+      // asserted from the BLOCK a thing appears in, not from the wording.
+      expect(p).toContain("WHOSE IS IT, when both profiles name the same thing");
+      expect(p).toContain("A mention does NOT transfer authorship");
+      // "INVERTS the field above" was itself a hazard: read as licence to swap the
+      // people, not just the pronouns. It must not come back.
+      expect(p).not.toContain("INVERTS the field above");
     }
+  });
+
+  it("the user block asserts provenance and labels the two roles (prod 2026-07-25)", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreBatch(llm, "m", EVENT, profile("t"), candidates(2));
+    // A mention in the candidate's own profile must not read as authorship.
+    expect(seen!.user).toContain("may mention something the TARGET made");
+    expect(seen!.user).toContain("never makes it theirs");
+    // Roles labelled next to the data they bind.
+    expect(seen!.user).toContain("is the SENDER of every icebreaker below");
+    expect(seen!.user).toContain("is the RECIPIENT of the icebreakers in their own entry");
+    // Delimiters unchanged: scoring.test.ts's echo mock, matcher.ts and the
+    // benchmark harness all parse them.
+    expect(seen!.user).toContain("TARGET ATTENDEE:\nSummary: t summary");
+    expect(seen!.user).toContain("--- CANDIDATE 1 ---\nSummary: ");
   });
 
   it("the scoring schema + prompt include icebreakers (NIP §6.2)", () => {
@@ -251,8 +286,23 @@ describe("per-event output language (spec §7.1/§9.3)", () => {
     expect(seen!.system).toContain("may be written in any language");
   });
 
+  it("the language block covers icebreakers and re-binds the roles in that language", () => {
+    // Prod 2026-07-25: a Slovak event got the ownership RIGHT in
+    // reasoning_for_target and inverted it in the icebreakers of the same entry.
+    // WHO IS WHO can only name English pronouns; this block is the one place that
+    // knows the output language, and it lands last in the system prompt.
+    const sk = languageInstruction("sk");
+    expect(sk).toContain("every icebreaker in Slovak (sk)");
+    expect(sk).toContain("Translating moves no ownership");
+    expect(sk).toContain("Slovak's FIRST-person possessive forms");
+    expect(sk).toContain("still mean the SENDER");
+    expect(sk).toContain("Slovak's SECOND-person possessive forms still mean the RECIPIENT");
+    expect(sk).toContain("never attach a second-person");
+  });
+
   it("names the language from its ISO code (e.g. cs → Czech)", () => {
     expect(languageInstruction("cs")).toContain("Czech (cs)");
+    expect(languageInstruction("cs")).toContain("Czech's FIRST-person possessive forms");
   });
 });
 
@@ -308,6 +358,12 @@ describe("reverse batched scoring (spec §16.2 reverse variant)", () => {
     expect(seen!.user).toContain("Summary: shared summary");
     expect(seen!.user).toContain("--- TARGET 1 ---");
     expect(seen!.system).toContain("Slovak (sk)");
+    // Same provenance + role labelling as the forward shape, roles mirrored: here
+    // the shared person is the RECIPIENT and each target a SENDER.
+    expect(seen!.user).toContain("may mention something a TARGET made");
+    expect(seen!.user).toContain("never makes it theirs");
+    expect(seen!.user).toContain("is the RECIPIENT of every icebreaker below");
+    expect(seen!.user).toContain("is the SENDER of the icebreakers in their own entry");
   });
 
   it("empty target list short-circuits without an LLM call", async () => {
@@ -315,6 +371,107 @@ describe("reverse batched scoring (spec §16.2 reverse variant)", () => {
     const { scores } = await scoreReverseBatch(llm, "m", EVENT, profile("s"), []);
     expect(scores.size).toBe(0);
     expect(llm.completeCalls).toBe(0);
+  });
+
+  // ── the 2026-07-25 restructure ──────────────────────────────────────────────
+  // The forward shape scores 0 attribution errors in en and sk; this one does not,
+  // and the prompts say the same things. The difference is that this shape prints
+  // the RECIPIENT first under a heading and leaves each SENDER as item n of a list.
+  // These tests pin the two devices that push the senders back up: a writer
+  // directory above the shared person, and a per-entry binding line under every
+  // target. Reword them freely — but a version of this block where a sender is
+  // named nowhere except inside a numbered list is the version that shipped the bug.
+  it("names every writer ABOVE the shared person's block, writer first", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    const targets = [
+      { id: "t1", profile: profile("t1"), name: "Marek Hraško" },
+      { id: "t2", profile: profile("t2"), name: "Jana Kováčová" },
+    ];
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), targets, () => 0, "Pavol Nemec");
+    // Sliced against the shared person's HEADING, not the first "SHARED PERSON" —
+    // the ownership preamble names it several lines earlier.
+    const directory = seen!.user.slice(
+      seen!.user.indexOf("WHO WRITES EACH ENTRY"),
+      seen!.user.indexOf("SHARED PERSON (the one"),
+    );
+    // Load-bearing: the directory is ABOVE the shared person's heading, or it is
+    // just more text after the block that already won the protagonist slot. Read
+    // back against the numbered blocks (the list is shuffled) — a directory whose
+    // numbering disagreed with the blocks would be worse than none.
+    for (const n of [1, 2]) {
+      const name = seen!.user.match(new RegExp(`--- TARGET ${n} ---\\nName: (.+)`))![1];
+      expect(directory).toContain(`entry ${n}: ${name} (TARGET ${n} below) writes to Pavol Nemec`);
+    }
+    expect(directory).toContain("being printed first does not make them the writer");
+  });
+
+  it("binds the writer again inside every numbered entry", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), candidates(3), () => 0, "Sofia");
+    for (const n of [1, 2, 3]) {
+      expect(seen!.user).toContain(`(Entry ${n} is written BY the TARGET ${n} profile above, TO Sofia:`);
+    }
+    // The binding follows its own profile, so it cannot be read as belonging to the
+    // next target: the line for entry 1 sits before the "--- TARGET 2 ---" heading.
+    const e1 = seen!.user.indexOf("(Entry 1 is written BY");
+    expect(e1).toBeGreaterThan(seen!.user.indexOf("--- TARGET 1 ---"));
+    expect(e1).toBeLessThan(seen!.user.indexOf("--- TARGET 2 ---"));
+  });
+
+  it("nameless targets degrade to positional labels, never to 'undefined'", async () => {
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", EVENT, profile("s"), candidates(2), () => 0);
+    expect(seen!.user).toContain("entry 1: TARGET 1 (TARGET 1 below) writes to the shared person");
+    expect(seen!.user).not.toContain("undefined");
+  });
+
+  it("keeps the three landmarks coordinator.test.ts's fake LLM slices on", async () => {
+    // That fake reads the user block to decide who it was asked to score: it splits
+    // on the SHARED PERSON heading, then on TARGET ATTENDEES:, then on the TARGET
+    // delimiters. A restructure that reorders those, or prints TARGET ATTENDEES:
+    // twice, silently makes it answer about the wrong people — which no assertion
+    // in that file spells out, so it is asserted here instead.
+    let seen: { user: string } | undefined;
+    const llm = new MockLlm((req) => {
+      seen = req;
+      return { matches: [] };
+    });
+    await scoreReverseBatch(llm, "m", EVENT, profile("shared"), candidates(2), () => 0);
+    const u = seen!.user;
+    expect(u).toContain("SHARED PERSON (the one each target below would meet):\nSummary: shared summary");
+    expect(u.split("TARGET ATTENDEES:")).toHaveLength(2);
+    expect(u.indexOf("SHARED PERSON (")).toBeLessThan(u.indexOf("TARGET ATTENDEES:"));
+    expect(u.indexOf("TARGET ATTENDEES:")).toBeLessThan(u.indexOf("--- TARGET 1 ---"));
+    // Order is shuffled (rng 0 reverses), so match the shape, not a given target.
+    expect(u).toMatch(/--- TARGET 1 ---\nSummary: cand\d summary/);
+    // The shared block the fake extracts must hold the shared profile and nothing
+    // from any target: it is everything between the two headings.
+    const sharedBlock = u.slice(u.indexOf("SHARED PERSON ("), u.indexOf("TARGET ATTENDEES:"));
+    expect(sharedBlock).not.toContain("cand0");
+  });
+
+  it("tells the model that print order is not role order", () => {
+    // The deployed prompt already said the target is the sender, in these same
+    // words, and production inverted it anyway. This is the only line that names
+    // the suspected cause — the recipient being printed first — and overrules it.
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("BLOCK ORDER IS NOT ROLE ORDER");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("Printed first does not mean speaking");
+    expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("the line is right");
+    // The forward shape prints its SENDER first and does not have this problem, so
+    // it must NOT carry the rule — the forward prompt is benchmark-clean as it is.
+    expect(BATCH_SYSTEM_PROMPT).not.toContain("BLOCK ORDER IS NOT ROLE ORDER");
   });
 });
 

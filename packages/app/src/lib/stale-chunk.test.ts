@@ -10,12 +10,21 @@ describe("recoverFromStaleChunk", () => {
   const store = new Map<string, string>();
   const reload = vi.fn();
   const listeners = new Map<string, Set<EventListener>>();
+  const cacheDelete = vi.fn(async () => true);
+  const unregister = vi.fn(async () => true);
 
   beforeEach(() => {
     store.clear();
     reload.mockReset();
+    cacheDelete.mockClear();
+    unregister.mockClear();
     listeners.clear();
     refreshGuard.__resetForTests();
+    vi.stubGlobal("caches", { keys: async () => ["precache-v1", "app-immutable"], delete: cacheDelete });
+    vi.stubGlobal("navigator", {
+      onLine: true,
+      serviceWorker: { getRegistrations: async () => [{ unregister }] },
+    });
     vi.stubGlobal("sessionStorage", {
       getItem: (k: string) => store.get(k) ?? null,
       setItem: (k: string, v: string) => {
@@ -86,6 +95,57 @@ describe("recoverFromStaleChunk", () => {
     clearStaleChunkReloadLatch();
     expect(recoverFromStaleChunk()).toBe(true);
     expect(reload).toHaveBeenCalledTimes(2);
+  });
+
+  // ── R9: escaping a service worker that keeps re-serving a frozen shell ──────
+  // Prod 2026-07-28: sw.js was byte-identical across deploys, so its precached
+  // index.html never refreshed. Every navigation — including the recovery reload
+  // — was answered from that precache and re-booted the identical dead module
+  // graph, whose chunks the new deploy had deleted. Reloading harder cannot fix
+  // that; the worker has to go.
+  const err = () => new Error("Failed to fetch dynamically imported module: /chunks/BA0VkHab.js");
+
+  it("first failure plain-reloads; a SECOND one purges caches + unregisters the worker", async () => {
+    expect(recoverFromStaleChunk(err())).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(cacheDelete).not.toHaveBeenCalled(); // a plain reload usually IS enough
+
+    // Past the cooldown, still broken → the reload demonstrably didn't help.
+    store.set("nostrautica:stale-chunk-reload", String(Date.now() - 60_000));
+    expect(recoverFromStaleChunk(err())).toBe(true);
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(2));
+    expect(cacheDelete).toHaveBeenCalledWith("precache-v1");
+    expect(cacheDelete).toHaveBeenCalledWith("app-immutable");
+    expect(unregister).toHaveBeenCalledTimes(1);
+  });
+
+  it("the Retry button (force) escapes even inside the cooldown", async () => {
+    expect(recoverFromStaleChunk(err())).toBe(true); // stamps the latch
+    expect(recoverFromStaleChunk(err())).toBe(false); // cooldown holds off automatics
+    expect(recoverFromStaleChunk(err(), { force: true })).toBe(true);
+    await vi.waitFor(() => expect(unregister).toHaveBeenCalledTimes(1));
+  });
+
+  it("never purges the worker while OFFLINE — that would leave nothing to boot", async () => {
+    vi.stubGlobal("navigator", {
+      onLine: false,
+      serviceWorker: { getRegistrations: async () => [{ unregister }] },
+    });
+    store.set("nostrautica:stale-chunk-reload", String(Date.now() - 60_000));
+    expect(recoverFromStaleChunk(err())).toBe(true);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(cacheDelete).not.toHaveBeenCalled();
+    expect(unregister).not.toHaveBeenCalled();
+  });
+
+  it("purges at most once per session", async () => {
+    store.set("nostrautica:stale-chunk-reload", String(Date.now() - 60_000));
+    expect(recoverFromStaleChunk(err())).toBe(true);
+    await vi.waitFor(() => expect(unregister).toHaveBeenCalledTimes(1));
+    store.set("nostrautica:stale-chunk-reload", String(Date.now() - 60_000));
+    expect(recoverFromStaleChunk(err())).toBe(true);
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(2));
+    expect(unregister).toHaveBeenCalledTimes(1); // not twice
   });
 
   it("installStaleChunkRecovery reloads on vite:preloadError and unhandledrejection", () => {

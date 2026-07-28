@@ -7,6 +7,7 @@
   import {
     Nip46Signer,
     onNip46AuthUrl,
+    isBunkerScheme,
     type NostrConnectHandle,
   } from "$lib/signer/nip46.js";
   import { NIP46_RELAYS } from "$lib/nostr/relays.js";
@@ -88,15 +89,27 @@
     }
   }
 
-  const looksLikeBunker = $derived(pasteKey.trim().startsWith("bunker://"));
+  // Shared with the connect path (isBunkerScheme lives next to fromBunkerUri) so
+  // the two can't disagree about what a bunker link is. They did: this check was
+  // a case-SENSITIVE startsWith, so iOS auto-capitalising the first typed
+  // character sent `Bunker://…` down the "Import key" branch, where it died with
+  // a bech32 error that says nothing about the real problem.
+  const looksLikeBunker = $derived(isBunkerScheme(pasteKey));
 
-  async function run(fn: () => Promise<void>) {
+  /**
+   * `fn` returns whether a session actually resulted. It used to return
+   * nothing, and `onSignedIn()` fired unconditionally — so a login the session
+   * dropped as superseded (H-6: a newer login or a logout landed while this one
+   * awaited the signer) still navigated to Home, where the logged-out user was
+   * asked to sign in again. Only a truthful `true` navigates now.
+   */
+  async function run(fn: () => Promise<boolean>) {
     error = null;
     authUrl = null;
     busy = true;
     try {
-      await fn();
-      onSignedIn?.();
+      if (await fn()) onSignedIn?.();
+      else error = t("signin.superseded");
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       // A user-initiated Cancel isn't an error — just reset the form quietly.
@@ -110,8 +123,9 @@
 
   const loginNip07 = () =>
     run(async () => {
-      await session.loginNip07();
-      remember("nip07");
+      const ok = await session.loginNip07();
+      if (ok) remember("nip07");
+      return ok;
     });
 
   // NOT routed through run(): the QR is shown passively on mount and waits for a
@@ -124,7 +138,11 @@
     nc = handle;
     try {
       const signer = await handle.connected;
-      await session.loginNip46(signer);
+      // Same H-6 truthfulness rule as `run()` — this path doesn't go through it.
+      if (!(await session.loginNip46(signer))) {
+        error = t("signin.superseded");
+        return;
+      }
       remember("nip46");
       onSignedIn?.();
     } catch (e) {
@@ -157,8 +175,9 @@
           pasteKey.trim(),
           bunkerAbort.signal,
         );
-        await session.loginNip46(signer);
-        remember("paste");
+        const ok = await session.loginNip46(signer);
+        if (ok) remember("paste");
+        return ok;
       } finally {
         bunkerConnecting = false;
         bunkerAbort = null;
@@ -171,8 +190,9 @@
 
   const importLocal = () =>
     run(async () => {
-      await session.importLocalKey(pasteKey.trim(), pastePw || undefined);
-      remember("paste");
+      const ok = await session.importLocalKey(pasteKey.trim(), pastePw || undefined);
+      if (ok) remember("paste");
+      return ok;
     });
 </script>
 
@@ -209,8 +229,17 @@
     {#if nc}
       <p class="muted">{t("signin.remote.scan")}</p>
       <QrCode data={nc.uri} />
-      <!-- Tapping opens Amber (nostrconnect:// deep link) on the same device. -->
-      <a class="btn primary" href={nc.uri} style="margin-top:0.5rem">{t("signin.remote.openAmber")}</a>
+      <!--
+        Tapping follows the nostrconnect:// deep link to whichever signer app on
+        THIS device registered the scheme (Amber and Amethyst on Android, Clave on
+        iOS, Primal on both). The label used to say "Open in Amber", naming one
+        Android-only app when several signers exist across platforms — on any
+        device without Amber the button looked broken rather than unhandled.
+        The QR above stays on every platform regardless: displaying it here and
+        scanning it from a SEPARATE phone running a signer is a supported flow,
+        not a fallback.
+      -->
+      <a class="btn primary" href={nc.uri} style="margin-top:0.5rem">{t("signin.remote.openSigner")}</a>
       <div class="row" style="margin-top:0.5rem">
         <span class="mono" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{nc.uri}</span>
         <button class="btn inline" style="flex:none" aria-live="polite" onclick={copyUri}>
@@ -240,11 +269,22 @@
 
   <div style="order:{order('paste', 3)}">
     <div class="field-label">{t("signin.paste")}</div>
+    <!--
+      Every keyboard-assist feature off. This field takes an nsec / ncryptsec /
+      bunker:// URI — all case- and character-exact. iOS in particular
+      auto-capitalises the first typed character (`Bunker://…`, `Nsec1…`) and
+      autocorrects bech32 gibberish into words, which produced errors that looked
+      like a bad key rather than a mangled one. inputmode="url" also gets the
+      iOS keyboard to surface ":" and "/" without a shift.
+    -->
     <input
       placeholder={t("signin.paste.placeholder")}
       bind:value={pasteKey}
       autocomplete="off"
+      autocapitalize="none"
+      autocorrect="off"
       spellcheck="false"
+      inputmode="url"
     />
     {#if pasteKey.trim().startsWith("ncryptsec1")}
       <input type="password" placeholder={t("signin.paste.passphrase")} bind:value={pastePw} />

@@ -27,6 +27,12 @@ import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 import { loadEventKeys, saveEventKeys } from "./keystore.js";
+import {
+  startScanBudget,
+  emptyOutcome,
+  type ScanBudget,
+  type ScanOutcome,
+} from "./scan-budget.js";
 
 const EVENTKEYS_PREFIX = "nostrautica:eventkeys:";
 
@@ -90,50 +96,80 @@ async function restore(coordinate: string, backup: EventKeysBackup): Promise<voi
  * Read the identity's kind-30078 eventkeys backups and restore organizer custody
  * into the local keystore. Returns the coordinates recovered. Idempotent and
  * cheap to call on every device/identity load (guarded to run once per session).
+ *
+ * Bounded (see `scan-budget.ts`): every backup costs one `nip44Decrypt`, which
+ * on a remote signer is a round trip with a 60s ceiling and possibly a human
+ * approval dialog. Walking an unbounded list of them is the prompt storm the
+ * 2026-07-28 "my events vanished" report ran into. `opts.budget` lets a caller
+ * share one allowance across several scans; `opts.onOutcome` reports whether
+ * this pass can be trusted as complete, so the caller can say "your signer
+ * didn't answer" instead of "you have no events".
  */
 export async function recoverEventKeys(
   signer: AppSigner,
-  opts: { force?: boolean } = {},
+  opts: {
+    force?: boolean;
+    budget?: ScanBudget;
+    onOutcome?: (outcome: ScanOutcome) => void;
+  } = {},
 ): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
   if (!opts.force && recovered.has(pubkey)) return [];
 
-  const events = await fetchEvents(
-    { kinds: [KIND_APP_DATA], authors: [pubkey] },
-    DEFAULT_RELAYS,
-  );
+  const budget = opts.budget ?? startScanBudget();
+  const outcome = emptyOutcome();
+  try {
+    const events = await fetchEvents(
+      { kinds: [KIND_APP_DATA], authors: [pubkey] },
+      DEFAULT_RELAYS,
+    );
 
-  const restoredCoords: string[] = [];
-  let candidates = 0; // eventkeys backups we saw
-  let decrypted = 0; // …of which we could actually read
-  for (const e of events) {
-    const d = e.tags.find((t) => t[0] === "d")?.[1];
-    if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
-    candidates++;
-    let backup: EventKeysBackup;
-    try {
-      const json = await signer.nip44Decrypt(pubkey, e.content);
-      backup = eventKeysBackupSchema.parse(JSON.parse(json));
-    } catch {
-      continue; // not our backup / undecryptable / SIGNER NOT READY / malformed
+    const restoredCoords: string[] = [];
+    let candidates = 0; // eventkeys backups we saw
+    let decrypted = 0; // …of which we could actually read
+    for (const e of events) {
+      const d = e.tags.find((t) => t[0] === "d")?.[1];
+      if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
+      candidates++;
+      // Out of time or out of prompts: stop rather than start another decrypt.
+      // The sweep is resumable — nothing here is memoized as a negative — so a
+      // truncated pass costs a retry, while continuing costs the user an
+      // open-ended chain of signer dialogs with no way to tell it is happening.
+      if (!budget.take()) {
+        outcome.truncated = true;
+        break;
+      }
+      outcome.attempted++;
+      let backup: EventKeysBackup;
+      try {
+        const json = await signer.nip44Decrypt(pubkey, e.content);
+        backup = eventKeysBackupSchema.parse(JSON.parse(json));
+      } catch {
+        continue; // not our backup / undecryptable / SIGNER NOT READY / malformed
+      }
+      outcome.succeeded++;
+      decrypted++;
+      const coordinate = await resolveCoordinate(backup);
+      if (!coordinate) continue;
+      await restore(coordinate, backup);
+      if (!restoredCoords.includes(coordinate)) restoredCoords.push(coordinate);
     }
-    decrypted++;
-    const coordinate = await resolveCoordinate(backup);
-    if (!coordinate) continue;
-    await restore(coordinate, backup);
-    if (!restoredCoords.includes(coordinate)) restoredCoords.push(coordinate);
-  }
 
-  // Latch the once-per-session guard ONLY after a genuine sweep — otherwise a
-  // remote signer (NIP-46/Amber) that wasn't reachable yet, or a relay race that
-  // returned nothing, would permanently disable recovery and strand a real
-  // organizer on "Visitor". A meaningful sweep is: we fetched app-data AND either
-  // there were no eventkeys backups to read, or we successfully decrypted ≥1
-  // (proving the signer can read them). Anything else stays retryable so the next
-  // event-shell sync (a tab nav, or the signer finally answering) tries again.
-  const meaningful = events.length > 0 && (candidates === 0 || decrypted > 0);
-  if (meaningful) recovered.add(pubkey);
-  return restoredCoords;
+    // Latch the once-per-session guard ONLY after a genuine sweep — otherwise a
+    // remote signer (NIP-46/Amber) that wasn't reachable yet, or a relay race that
+    // returned nothing, would permanently disable recovery and strand a real
+    // organizer on "Visitor". A meaningful sweep is: we fetched app-data, we did
+    // not run out of budget partway, AND either there were no eventkeys backups
+    // to read, or we successfully decrypted ≥1 (proving the signer can read
+    // them). Anything else stays retryable so the next event-shell sync (a tab
+    // nav, or the signer finally answering) tries again.
+    const meaningful =
+      !outcome.truncated && events.length > 0 && (candidates === 0 || decrypted > 0);
+    if (meaningful) recovered.add(pubkey);
+    return restoredCoords;
+  } finally {
+    opts.onOutcome?.(outcome);
+  }
 }
 
 /** Reset the once-per-session guard (tests, or on logout). */

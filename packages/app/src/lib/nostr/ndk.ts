@@ -5,12 +5,18 @@
  * We sign events with the app's own signer (see signer/), then hand the already
  * signed event to NDK for publishing — NDK is our relay transport, not our signer.
  */
-import NDK, { NDKEvent, NDKRelaySet } from "@nostr-dev-kit/ndk";
-import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
+import NDK, {
+  NDKEvent,
+  NDKRelaySet,
+  NDKRelayStatus,
+  calculateRelaySetFromEvent,
+} from "@nostr-dev-kit/ndk";
+import type { NDKFilter, NDKRelay, NDKSubscription } from "@nostr-dev-kit/ndk";
 import NDKCacheAdapterDexie from "@nostr-dev-kit/cache-dexie";
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { DEFAULT_RELAYS, DEFAULT_READ_RELAYS, unionRelays } from "./relays.js";
 import { streamEvents } from "./stream.js";
+import { noteRelayPublishFailure } from "./errors.js";
 
 /**
  * A relay filter using plain numeric kinds (Nostrautica's custom kinds aren't in
@@ -276,28 +282,174 @@ export function relaySet(urls?: string[]): NDKRelaySet | undefined {
 }
 
 /**
+ * Per-relay publish budget. Matches NDK's own `NDKRelay.publish` default (2500 ms)
+ * so switching to our own fan-out (below) didn't change how long a publish waits
+ * on a slow relay.
+ */
+const RELAY_PUBLISH_TIMEOUT_MS = 2500;
+
+/** What one relay did with the event. `ok:false` is normal, never fatal. */
+export interface RelayPublishOutcome {
+  url: string;
+  ok: boolean;
+  /** The relay's OK=false reason, or the transport/timeout message. */
+  reason?: string;
+}
+
+/**
+ * Publish to ONE relay. Resolves — always. It never rejects, and no callback it
+ * installs ever re-throws.
+ *
+ * This exists because NDK's own per-relay path cannot satisfy that. Firefox,
+ * 2026-07-28: with "pause on exceptions" on, publishing any 31600/31601/kind-5
+ * halted the debugger on `Error: blocked: kind 5 is not accepted by this relay`
+ * — a chat-enabled event's relay set includes the two whitenoise relays, which
+ * accept only kinds 0/3/445/1059/10000/10002/10050/30443 and refuse everything
+ * else with exactly that message. NDK's `NDKRelayPublisher.publish` funnels every
+ * per-relay failure through `.catch(onError)` where `onError` ends in a bare
+ * `throw err`. Re-throwing inside a promise reaction handler has no catch scope
+ * that a JS debugger can see (the only `try` around it is in the engine's
+ * self-hosted promise job, which is invisible to the Debugger API), so Firefox
+ * classifies it as uncaught and pauses — even though NDK's `NDKRelaySet.publish`
+ * does then handle the resulting rejection. Hence: our own fan-out, built on
+ * `relay.connectivity.publish`, which merely REJECTS a promise we hand a handler
+ * to at creation. A rejection with a handler attached is not an exception and
+ * never pauses a debugger, whereas `throw` inside a handler always does.
+ *
+ * (Empirically checked first: NDK 3.0.3's publish path was driven against local
+ * relays that refuse the kind fast, refuse it after the publish timeout, accept
+ * it, go silent, close mid-publish, or demand AUTH — with the app's retry loop on
+ * top — and produced zero unhandled rejections. So the guard in errors.ts was
+ * never going to see these: the debugger pause is the `throw`, not an orphan.)
+ */
+function publishToRelay(relay: NDKRelay, ndkEvent: NDKEvent): Promise<RelayPublishOutcome> {
+  return new Promise<RelayPublishOutcome>((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean, reason?: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      relay.removeListener("connect", onConnect);
+      // Diagnosable but quiet: a refusal is expected operating conditions, not an
+      // app error, so it goes to console.debug (see noteRelayPublishFailure).
+      if (!ok) noteRelayPublishFailure(relay.url, reason);
+      resolve({ url: relay.url, ok, reason });
+    };
+    // A relay that never answers (stale socket, WSS silently dropped) would leave
+    // connectivity.publish pending forever — this is the only thing that bounds it.
+    const timer = setTimeout(
+      () => finish(false, `Timeout: ${RELAY_PUBLISH_TIMEOUT_MS}ms`),
+      RELAY_PUBLISH_TIMEOUT_MS,
+    );
+    const send = (): void => {
+      let pending: Promise<unknown>;
+      try {
+        pending = relay.connectivity.publish(ndkEvent.rawEvent());
+      } catch (err) {
+        finish(false, messageOf(err));
+        return;
+      }
+      // BOTH handlers attached at creation, in the same expression that creates
+      // the promise: there is no window in which this rejection is unobserved,
+      // and neither handler re-throws.
+      pending.then(
+        () => {
+          markPublished(relay, ndkEvent);
+          finish(true);
+        },
+        (err) => finish(false, messageOf(err)),
+      );
+    };
+    const onConnect = (): void => send();
+    if (relay.status >= NDKRelayStatus.CONNECTED) {
+      send();
+    } else {
+      relay.on("connect", onConnect);
+      // NDK's own relay-set builder fires this unawaited (an orphan rejection
+      // whenever a relay is unreachable); ours carries its handler.
+      void relay.connect().catch(() => {
+        /* the timeout above reports it — nothing else to do */
+      });
+    }
+  });
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Re-emit the acceptance signals NDK's own publisher emits, so anything listening
+ * on the relay/event (NDK internals, cache adapters) sees the same lifecycle. A
+ * listener that throws must not become this publish's problem — hence the guard.
+ */
+function markPublished(relay: NDKRelay, ndkEvent: NDKEvent): void {
+  try {
+    relay.emit("published", ndkEvent);
+    ndkEvent.emit("relay:published", relay);
+    getNdk().subManager?.seenEvent(ndkEvent.id, relay);
+  } catch {
+    /* a misbehaving listener never fails the publish */
+  }
+}
+
+/**
  * Publish an already-signed event to the given relays (or the default pool).
  * Succeeds if it reaches at least one relay; per-relay failures (rate limits,
- * timeouts, PoW/auth) are expected and non-fatal. Throws only if the event
- * reached zero relays (so the caller can queue it for a retry).
+ * timeouts, PoW/auth, "this relay doesn't take that kind") are expected and
+ * non-fatal. Throws only if the event reached zero relays (so the caller can
+ * queue it for a retry).
+ *
+ * Relay SELECTION is unchanged: an explicit list still goes through `relaySet`,
+ * and an absent one still goes through NDK's `calculateRelaySetFromEvent` — the
+ * same call `NDKEvent.publish` makes internally.
+ *
+ * Deliberately NOT carried over from `NDKEvent.publish`: its
+ * `cacheAdapter.addUnpublishedEvent` bookkeeping. Nothing reads it back (no
+ * caller of `getUnpublishedEvents` exists in NDK or here) and this app has its
+ * own durable outbox — see publish-queue.ts, which is what actually re-sends a
+ * failed publish.
  */
 export async function publishSigned(
   event: VerifiedEvent,
   relays?: string[],
-): Promise<void> {
-  const ndkEvent = new NDKEvent(getNdk(), event as any);
-  try {
-    await ndkEvent.publish(relaySet(relays));
-  } catch (err) {
-    // NDK throws NDKPublishError only when fewer than 1 relay accepted; but it may
-    // also carry partial success. Treat any relay acceptance as success.
-    const reached =
-      (err as any)?.publishedToRelays?.size ??
-      (ndkEvent as any)?.onRelays?.length ??
-      0;
-    if (reached > 0) return;
-    throw err;
+): Promise<RelayPublishOutcome[]> {
+  const instance = getNdk();
+  const ndkEvent = new NDKEvent(instance, event as any);
+  const set = relaySet(relays) ?? (await calculateRelaySetFromEvent(instance, ndkEvent, 1));
+  const targets = [...set.relays];
+  if (targets.length === 0) throw new Error("Not enough relays received the event (no relays)");
+
+  // Optimistic local echo, exactly as NDKEvent.publish does it: live subscriptions
+  // see the event immediately instead of waiting for it to come back off a relay.
+  instance.subManager?.dispatchEvent(ndkEvent.rawEvent(), undefined, true);
+  // NIP-09: a deletion invalidates its targets in the local cache. Fire-and-forget
+  // like NDK, but WITH a handler — NDK calls this unawaited (twice), which for a
+  // rejecting cache adapter is an orphan rejection on every kind-5 publish.
+  if (instance.cacheAdapter?.deleteEventIds) {
+    void Promise.resolve(
+      instance.cacheAdapter.deleteEventIds(
+        ndkEvent.tags.filter((t) => t[0] === "e").map((t) => t[1] as string),
+      ),
+    ).catch(() => {
+      /* cache hygiene only — never affects whether the deletion was published */
+    });
   }
+
+  // Every per-relay promise is created with its handlers already attached, so a
+  // relay refusing the kind can neither reject into the void nor throw.
+  const outcomes = await Promise.all(targets.map((relay) => publishToRelay(relay, ndkEvent)));
+  const accepted = outcomes.filter((o) => o.ok);
+  ndkEvent.publishStatus = accepted.length > 0 ? "success" : "error";
+  if (accepted.length > 0) return outcomes;
+
+  // Zero relays took it. Keep NDK's wording — isBenignRelayError and the outbox UI
+  // both key off "not enough relays received", and publishOrQueue turns this into
+  // a durable queue entry rather than a lost event.
+  throw new Error(
+    `Not enough relays received the event (0 published, 1 required): ` +
+      outcomes.map((o) => `${o.url}: ${o.reason ?? "declined"}`).join("; "),
+  );
 }
 
 /** Subscribe with a filter; caller handles events and cleanup. */

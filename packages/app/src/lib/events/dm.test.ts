@@ -8,26 +8,49 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { KIND_DM, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 import type { VerifiedEvent } from "nostr-tools/pure";
 
-const { fetchEvents, publishOrQueue, streamEvents, signerUnwrap } = vi.hoisted(() => ({
+const { fetchEvents, publishOrQueue, streamEvents, signerWrap, signerUnwrap } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
   publishOrQueue: vi.fn(),
   streamEvents: vi.fn(),
+  signerWrap: vi.fn(async (_s: unknown, recipient: string, _input: unknown) => ({
+    kind: 1059,
+    tags: [["p", recipient]],
+  })),
   signerUnwrap: vi.fn(),
 }));
 
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  fetchEvents,
+  fetchEventsRelayOnly: vi.fn(),
+  isAcceptedRelayUrl: (value: string) => {
+    try {
+      const url = new URL(value);
+      return url.protocol === "wss:" ||
+        (url.protocol === "ws:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname));
+    } catch {
+      return false;
+    }
+  },
+}));
 vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue }));
 vi.mock("$lib/nostr/stream.js", () => ({ streamEvents }));
 // signerWrap tags the wrap with the intended recipient's "p" so we can assert routing.
 vi.mock("./giftwrap.js", () => ({
-  signerWrap: async (_s: unknown, recipient: string) => ({
-    kind: 1059,
-    tags: [["p", recipient]],
-  }),
+  signerWrap,
   signerUnwrap,
 }));
 
-import { relayUrlsFromDmList, selectDmRelays, sendDm, fetchDms, cachedDms } from "./dm.js";
+import {
+  relayUrlsFromDmList,
+  selectDmRelays,
+  sendDm,
+  fetchDms,
+  cachedDms,
+  scanDmGiftWraps,
+  MAX_DM_RELAYS,
+  DM_HISTORY_PAGE_LIMIT,
+  DM_HISTORY_PAGES_PER_SCAN,
+} from "./dm.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 import {
   __setPersistBackend,
@@ -76,6 +99,20 @@ describe("relayUrlsFromDmList (pure)", () => {
       ]),
     ).toEqual(["wss://a", "wss://b"]);
   });
+
+  it("rejects unsafe URLs, dedupes, and caps untrusted relay lists", () => {
+    const valid = Array.from({ length: MAX_DM_RELAYS + 5 }, (_, i) => `wss://relay-${i}.example`);
+    expect(
+      relayUrlsFromDmList([
+        ["relay", "https://not-a-relay.example"],
+        ["relay", "ws://public-insecure.example"],
+        ["relay", "not a url"],
+        ["relay", "ws://localhost:7777"],
+        ...valid.map((url) => ["relay", url]),
+        ["relay", valid[0] + "/"],
+      ]),
+    ).toEqual(["ws://localhost:7777", ...valid.slice(0, MAX_DM_RELAYS - 1)]);
+  });
 });
 
 describe("selectDmRelays (pure)", () => {
@@ -89,12 +126,20 @@ describe("selectDmRelays (pure)", () => {
   it("falls back to defaults alone when the recipient has no 10050", () => {
     expect(selectDmRelays([], ["wss://d1", "wss://d2"])).toEqual(["wss://d1", "wss://d2"]);
   });
+  it("rejects invalid routes and caps the effective relay set", () => {
+    const inboxes = Array.from({ length: MAX_DM_RELAYS + 5 }, (_, i) => `wss://inbox-${i}.example`);
+    const out = selectDmRelays(["https://bad.example", ...inboxes], ["wss://default.example"]);
+    expect(out).toHaveLength(MAX_DM_RELAYS);
+    expect(out).not.toContain("https://bad.example");
+    expect(out).toContain("wss://default.example");
+  });
 });
 
 describe("sendDm relay routing", () => {
   beforeEach(() => {
     fetchEvents.mockReset();
     publishOrQueue.mockReset();
+    signerWrap.mockClear();
   });
 
   const signer = {
@@ -129,6 +174,113 @@ describe("sendDm relay routing", () => {
     await sendDm(signer, RECIPIENT, "hi");
     const [recipientCall] = publishOrQueue.mock.calls;
     expect(recipientCall[1]).toEqual(DEFAULT_RELAYS);
+  });
+
+  it("wraps one identical rumor for the recipient and self copies", async () => {
+    fetchEvents.mockResolvedValue([]);
+    await sendDm(signer, RECIPIENT, "same rumor");
+    expect(signerWrap).toHaveBeenCalledTimes(2);
+    expect(signerWrap.mock.calls[0][2]).toEqual(signerWrap.mock.calls[1][2]);
+    expect(signerWrap.mock.calls[0][2]).toEqual(expect.objectContaining({
+      content: "same rumor",
+      created_at: expect.any(Number),
+    }));
+  });
+});
+
+function wraps(count: number, newest: number, prefix: string) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `${prefix}-${i}`,
+    created_at: newest - i,
+  }));
+}
+
+describe("scanDmGiftWraps ciphertext routing and history", () => {
+  beforeEach(() => {
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    fetchEvents.mockReset();
+    streamEvents.mockReset();
+  });
+
+  it("reads incoming wraps from the owner's custom kind-10050 inbox union defaults", async () => {
+    const owner = "1".repeat(64);
+    setActiveCacheOwner(owner);
+    fetchEvents.mockResolvedValue([dmListEvent(owner, ["wss://my-private-inbox.example"])]);
+    streamEvents.mockReturnValue({ ready: Promise.resolve([]), stop: () => {} });
+
+    await scanDmGiftWraps(owner);
+
+    expect(fetchEvents).toHaveBeenCalledWith({ kinds: [KIND_DM_RELAY_LIST], authors: [owner] });
+    expect(streamEvents).toHaveBeenCalledTimes(1);
+    expect(streamEvents.mock.calls[0][1].relays).toEqual(
+      selectDmRelays(["wss://my-private-inbox.example"]),
+    );
+    expect(signerUnwrap).not.toHaveBeenCalled();
+  });
+
+  it("observes recent ciphertext without consuming paginated history", async () => {
+    const owner = "4".repeat(64);
+    setActiveCacheOwner(owner);
+    fetchEvents.mockResolvedValue([]);
+    streamEvents.mockReturnValue({
+      ready: Promise.resolve([{ id: "recent-wrap", created_at: 900 }]),
+      stop: () => {},
+    });
+
+    await scanDmGiftWraps(owner, { history: false });
+
+    expect(streamEvents).toHaveBeenCalledTimes(1);
+    expect(streamEvents.mock.calls[0][0]).toMatchObject({ since: expect.any(Number) });
+    expect(streamEvents.mock.calls[0][0]).not.toHaveProperty("until");
+  });
+
+  it("paginates backward, deduping the inclusive timestamp boundary", async () => {
+    const owner = "2".repeat(64);
+    setActiveCacheOwner(owner);
+    fetchEvents.mockResolvedValue([]);
+    const first = wraps(DM_HISTORY_PAGE_LIMIT, 1_000, "first");
+    const second = [
+      first[first.length - 1],
+      ...wraps(DM_HISTORY_PAGE_LIMIT - 1, 800, "second"),
+    ];
+    streamEvents
+      .mockReturnValueOnce({ ready: Promise.resolve(first), stop: () => {} })
+      .mockReturnValueOnce({ ready: Promise.resolve(second), stop: () => {} })
+      .mockReturnValueOnce({ ready: Promise.resolve([]), stop: () => {} });
+
+    const result = await scanDmGiftWraps(owner);
+
+    expect(result).toHaveLength(DM_HISTORY_PAGE_LIMIT * 2 - 1);
+    expect(new Set(result.map((wrap) => wrap.id)).size).toBe(result.length);
+    expect(streamEvents.mock.calls.map(([filter]) => filter.until)).toEqual([
+      undefined,
+      1_000 - DM_HISTORY_PAGE_LIMIT + 1,
+      800 - (DM_HISTORY_PAGE_LIMIT - 2),
+    ]);
+  });
+
+  it("bounds a repeated full page and forces the inclusive cursor backward", async () => {
+    const owner = "3".repeat(64);
+    setActiveCacheOwner(owner);
+    fetchEvents.mockResolvedValue([]);
+    const repeated = wraps(DM_HISTORY_PAGE_LIMIT, 100, "stuck").map((wrap) => ({
+      ...wrap,
+      created_at: 100,
+    }));
+    streamEvents.mockReturnValue({ ready: Promise.resolve(repeated), stop: () => {} });
+
+    const result = await scanDmGiftWraps(owner);
+
+    expect(result).toHaveLength(DM_HISTORY_PAGE_LIMIT);
+    expect(streamEvents).toHaveBeenCalledTimes(DM_HISTORY_PAGES_PER_SCAN);
+    expect(streamEvents.mock.calls.map(([filter]) => filter.until)).toEqual([
+      undefined,
+      100,
+      99,
+      98,
+      97,
+    ]);
   });
 });
 

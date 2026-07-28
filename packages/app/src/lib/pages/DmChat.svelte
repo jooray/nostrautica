@@ -22,6 +22,8 @@
   import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
+  import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
 
   let { npub }: { npub: string } = $props();
 
@@ -46,6 +48,24 @@
   let composerEl = $state<HTMLElement | null>(null);
   let muteBusy = $state(false);
   const muted = $derived(!!peer && mutes.isMuted(peer));
+
+  async function markVisibleRead(): Promise<void> {
+    if (!peer || typeof document === "undefined" || document.visibilityState !== "visible") return;
+    await tick();
+    dmUnread.markThreadRead(peer, messages);
+    dmUnread.acknowledgeEncryptedActivity();
+  }
+
+  $effect(() => {
+    void cacheHydration.version;
+    if (!peer || !session.pubkey || messages.length > 0) return;
+    const cached = cachedDms(session.pubkey).filter((m) => m.peer === peer);
+    if (!cached.length) return;
+    messages = cached;
+    dmUnread.syncMessages(session.pubkey, cachedDms(session.pubkey));
+    loading = false;
+    void markVisibleRead();
+  });
 
   // Draft-safe auto-refresh (App-2): persist the compose text (owner-scoped) so a
   // deploy that reloads the tab doesn't lose it, and hold off that reload while
@@ -126,11 +146,13 @@
       // until its self-wrap round-trips (and a queued offline send would never
       // show at all).
       messages = mergeOptimisticDms(mine, messages);
+      if (session.pubkey) dmUnread.syncMessages(session.pubkey, all);
       error = null;
       if (atBottom) {
         await tick();
         scroller?.scrollTo({ top: scroller.scrollHeight });
       }
+      await markVisibleRead();
     } catch (e) {
       error = e;
     } finally {
@@ -162,8 +184,10 @@
       const cached = cachedDms(session.pubkey).filter((m) => m.peer === peer);
       if (cached.length) {
         messages = cached;
+        dmUnread.syncMessages(session.pubkey, cachedDms(session.pubkey));
         loading = false;
         perfMark("DmChat", "cache-paint");
+        void markVisibleRead();
       }
     }
     await connectNdk();
@@ -179,8 +203,12 @@
     }
     await refresh();
     timer = setInterval(refresh, 5_000);
+    document.addEventListener("visibilitychange", markVisibleRead);
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", markVisibleRead);
+  });
 
   let sendSlow = $state(false);
   async function send() {

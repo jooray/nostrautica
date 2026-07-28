@@ -119,6 +119,10 @@
   // ctx is set (here or by the network path) this no-ops.
   $effect(() => {
     void cacheHydration.version;
+    // Owner-scoped self-copy hydration can finish after the event context and
+    // network readiness pass. Re-read that positive intro evidence even when
+    // the rest of the page is already warm.
+    readinessStore.refreshFromCache();
     if (ctx) return;
     const c = cachedEventContext(naddr);
     if (!c) return;
@@ -240,7 +244,7 @@
     // The role recorded here is only trustworthy once an identity exists, which
     // is why this whole function is gated on that — an organizer's own event was
     // being filed as "visitor" while their signer was still reconnecting.
-    recentEvents.record({
+    recentEvents.reconcile({
       coordinate: c.coordinate,
       naddr: c.naddr,
       title: c.title,
@@ -286,7 +290,19 @@
   onDestroy(() => clearTimeout(identityTimer));
   function waitForIdentity(c: EventContext) {
     identityTimer = setTimeout(() => {
-      if (session.signer || !identityPending) return; // the $effect got there first
+      if ((session.signer && session.custodyReady) || !identityPending) return; // the $effect got there first
+      // Restore is deliberately detached from first paint and may need a ping,
+      // connect fallback, identity check and relay switch. It is still bounded;
+      // wait for that bounded operation rather than racing it with a false
+      // visitor decision.
+      if (session.restoring) {
+        waitForIdentity(c);
+        return;
+      }
+      // A signer whose custody unlock failed is not an anonymous viewer. Keep the
+      // role unresolved rather than translating a storage/decrypt failure into
+      // "visitor"; a later successful login will bump custodyGeneration.
+      if (session.signer) return;
       identityPending = false;
       void syncIdentity(c, null, Promise.resolve()).catch(() => {});
     }, 30_000);
@@ -303,14 +319,14 @@
     try {
       await connectNdk();
       // The grant scan doesn't need the event context — run both in parallel.
-      const grantsScan = session.signer
+      const grantsScan = session.signer && session.custodyReady
         ? receiveGrants(session.signer).catch(() => {})
         : Promise.resolve();
       // Neither does "is an identity still on its way?" (see `identityPending`):
       // a persisted login method with no live signer means a background NIP-46
       // restore is running and nothing owner-scoped may be concluded yet.
       const loginPending = session.signer
-        ? Promise.resolve(false)
+        ? Promise.resolve(!session.custodyReady)
         : loadLoginMethod().then((m) => !!m).catch(() => false);
       ctx = await loadEventContext(naddr);
       perfMark("EventHome", "cache-paint"); // first meaningful data (ctx) is set
@@ -318,7 +334,7 @@
       // Whether the ECK was already in the keystore BEFORE this visit's fetches:
       // if not (fresh device), the public-content pass below can't decrypt
       // members-only additions and is re-run once the grant scan lands them.
-      const hadEck = await primeFromLocalCustody(ctx, session.signer);
+      const hadEck = identityPending ? false : await primeFromLocalCustody(ctx, session.signer);
       // Public content (custom layout 31608 + official feed) needs no keys and
       // no grant scan — start immediately so the page fills while grants resolve.
       const publicLoad = (async () => {
@@ -341,10 +357,8 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       bodyLoading = false;
-      // Only claim the role is resolved when it actually was. While an identity
-      // is still arriving nothing owner-scoped has been decided, and forcing this
-      // true is what put a "Visitor" badge on an organizer's own event.
-      if (!identityPending) roleResolved = true;
+      // Role resolution is set only by successful custody/approval reads above.
+      // A keystore failure must not turn the default state into "visitor".
       perfMark("EventHome", "network-settled");
     }
   });
@@ -356,14 +370,17 @@
   // the background session restore stayed a "visitor" — wrong badge, wrong
   // "My events" role, wrong readiness card — for the entire visit, and a reload
   // just raced the same restore again.
-  // svelte-ignore state_referenced_locally -- an identity present at mount is onMount's job; this effect covers only a LATER arrival or a switch
-  let identitySynced: string | null = session.pubkey;
+  // svelte-ignore state_referenced_locally -- an identity present at mount is onMount's job; this effect covers only a LATER arrival or custody generation
+  let identitySynced = `${session.pubkey ?? ""}:${session.custodyGeneration}`;
   $effect(() => {
     const pubkey = session.pubkey;
     const signer = session.signer;
+    const custodyReady = session.custodyReady;
+    const generation = session.custodyGeneration;
     const c = ctx;
-    if (!c || !pubkey || !signer || identitySynced === pubkey) return;
-    identitySynced = pubkey;
+    const identity = `${pubkey ?? ""}:${generation}`;
+    if (!c || !pubkey || !signer || !custodyReady || identitySynced === identity) return;
+    identitySynced = identity;
     untrack(() => {
       void (async () => {
         identityPending = false;

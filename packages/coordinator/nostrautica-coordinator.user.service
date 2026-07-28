@@ -1,0 +1,179 @@
+# USER-scoped systemd unit for the Nostrautica coordinator as production actually
+# runs it: as the `nostrautica` user, out of that user's $HOME, from the rsync'd
+# source tree the deploy hook pushes.
+#
+# WHY THIS EXISTS SEPARATELY FROM nostrautica-coordinator.service
+# The sibling `nostrautica-coordinator.service` is the canonical hardened SYSTEM
+# unit for an /opt + /var/lib + /etc layout. It cannot be used here: it sets
+# ProtectHome=true, and this deployment's code, config, .env, SQLite database and
+# log ALL live under /home/nostrautica — ProtectHome would hide the daemon's own
+# code from it (that unit's header documents exactly this trap). Keep both: use the
+# system unit for a fresh /opt-layout install, this one for this host.
+#
+# WHY IT EXISTS AT ALL — production outage 2026-07-25: the coordinator exited
+# silently ~3 minutes after a deploy and stayed dead for 29 minutes, because
+# NOTHING supervised it. It was started by `setsid bash run-coordinator.sh` from
+# the deploy script, so when it left, no supervisor noticed and no one was told.
+# Cause unknown (not OOM, not the logged fatal path). This unit's job is that
+# nothing ever silently stays dead again; src/lifecycle.ts's job is that the next
+# one leaves evidence.
+#
+# Install (as the `nostrautica` user on the coordinator host):
+#   loginctl enable-linger nostrautica     # ALREADY DONE on this host; see below
+#   mkdir -p ~/log ~/.config/systemd/user
+#   install -Dm644 ~/nostrautica/packages/coordinator/nostrautica-coordinator.user.service \
+#     ~/.config/systemd/user/nostrautica-coordinator.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now nostrautica-coordinator
+#
+# Check it:
+#   systemctl --user status nostrautica-coordinator
+#   journalctl --user -u nostrautica-coordinator -f      # state transitions + EXIT CODES
+#   tail -f ~/log/nostrautica-coordinator.log            # the daemon's own output
+#
+# `loginctl enable-linger nostrautica` is not optional: without linger the user
+# manager (and every unit in it) is torn down when the last login session for that
+# user ends, so the coordinator would die on SSH logout and never start at boot.
+# It is already enabled on this host — re-check with `loginctl show-user
+# nostrautica -p Linger` after any host rebuild.
+#
+# Deliberately NOT here:
+#   * No ExecStartPre=doctor gate, unlike the system unit. Two reasons. (a) That
+#     unit's own header still warns `doctor` can run DB migrations — src/cli.ts
+#     shows the audit-O2 fix landed and it now opens SQLite read-only, but a
+#     supervisor that restarts unattended is the last place to rely on a stale
+#     comment about schema writes. (b) More importantly, `doctor` probes every
+#     relay and does a provider auth check: gating an AUTOMATIC restart on network
+#     reachability means a transient DNS/provider blip burns the start-limit budget
+#     below and leaves the unit failed — a preflight that makes a supervised
+#     service less available. Run `doctor` by hand around config changes and
+#     upgrades (guide §3), not on every restart.
+#   * No WatchdogSec. The daemon does not sd_notify, so systemd can detect that it
+#     EXITED, not that it hung. Supervision here is exit-driven only.
+#   * No User=/Group= — meaningless in a user unit; the manager already is the user.
+#   * No ProtectHome=/ProtectSystem=strict — see above, the payload lives in $HOME.
+#   * No MemoryDenyWriteExecute=. V8's JIT maps writable-then-executable pages and
+#     Node dies under it (would need --jitless, far too slow for STT/LLM work). The
+#     system unit documents this too; do not "harden" it back on.
+#   * No After=/Wants=network-online.target — that is a SYSTEM target and does not
+#     exist in the per-user manager, so naming it here buys ordering against
+#     nothing. With linger the user manager can start before the network is up;
+#     Restart=always (below) covers a first start that fails on DNS/relays.
+#
+# NOTE ON THE DEPLOY PATH: `restart-coordinator.sh` (invoked by the post-receive
+# hook) currently stops/starts the daemon itself with pgrep + setsid. Once this unit
+# owns the lifecycle, that script must drive `systemctl --user restart` instead —
+# otherwise the two fight and a manually started daemon holds the single-daemon
+# SQLite lock the unit's copy then fails to acquire. That migration is tracked
+# separately; do not enable this unit expecting the current deploy script to
+# cooperate with it.
+
+[Unit]
+Description=Nostrautica coordinator (user-scoped, /home/nostrautica deployment)
+Documentation=https://nostrautica.cypherpunk.today/docs/COORDINATOR-OPERATOR-GUIDE.html
+
+# Don't thrash on a genuine crash loop: at most 5 starts per 5 minutes, then
+# systemd gives up and leaves the unit failed. Be clear-eyed about the trade this
+# encodes — supervision buys RESILIENCE (a one-off death self-heals in seconds),
+# not a DIAGNOSIS. A daemon that is broken by config, a bad build, or a poisoned
+# input still ends up stopped and still needs a human reading
+# `journalctl --user -u nostrautica-coordinator` and the log file.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/nostrautica/nostrautica/packages/coordinator
+
+# Go through run-coordinator.sh rather than calling node directly: it sources
+# ./.env (identity nsec, VENICE_API_KEY, NOSTRAUTICA_COORDINATOR_DB) and derives
+# NOSTRAUTICA_RELEASE_ID from ../../RELEASE_ID, which the deploy hook writes
+# because the rsync'd tree has no .git to describe. Bypassing it produces a daemon
+# with no credentials and no release provenance (§13.9, R23). systemd does no PATH
+# lookup, hence the absolute interpreter path — /usr/bin/bash on this RPM-based
+# host (/bin/bash on a Debian-family one).
+ExecStart=/usr/bin/bash /home/nostrautica/nostrautica/packages/coordinator/run-coordinator.sh
+
+# ── Keep the log FILE, not just journald ─────────────────────────────────────
+# LOAD-BEARING, do not "clean up" into pure journald: restart-coordinator.sh judges
+# a deploy successful by grepping a byte-offset slice of exactly this file for the
+# daemon's readiness marker, and fails the deploy if it never appears. Send output
+# only to the journal and this file stops growing, the readiness grep never matches,
+# and EVERY future deploy fails. The operator guide and all existing troubleshooting
+# also point at this path. `append:` (systemd >= 240) opens the file in O_APPEND, so
+# the two fds below interleave the way `>> "$LOG" 2>&1` did. The directory is not
+# created for us — `mkdir -p ~/log` is part of the install above.
+# journald still independently records unit state transitions and, crucially, the
+# exit code or killing signal — the one fact the 2026-07-25 outage could not give us.
+StandardOutput=append:/home/nostrautica/log/nostrautica-coordinator.log
+StandardError=append:/home/nostrautica/log/nostrautica-coordinator.log
+
+# ── Crash supervision ────────────────────────────────────────────────────────
+# `always`, NOT `on-failure`, and this is the whole point of the unit: the
+# 2026-07-25 exit may well have been code 0 (nothing was logged, and a clean
+# event-loop drain or a stray process.exit() cannot be ruled out). `on-failure`
+# ignores a successful exit, so it would have watched the daemon leave and done
+# nothing — exactly the 29-minute outage this unit exists to prevent. `always` also
+# restarts after a manual `kill`, which is correct: only `systemctl --user stop`
+# should be able to leave it stopped.
+Restart=always
+RestartSec=5
+
+# ── Graceful stop matching the daemon's own drain ─────────────────────────────
+# src/main.ts drains the in-flight job on the first SIGTERM (bounded by
+# DRAIN_TIMEOUT_MS = 30s) and force-exits on a second signal. KillMode=mixed sends
+# SIGTERM to the main process only, so it orchestrates its own ffmpeg-child
+# teardown, then SIGKILLs the whole cgroup if it overruns. 45s > the 30s drain — a
+# smaller TimeoutStopSec would SIGKILL mid-job and lose the drain.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+
+# ── Hardening that still means something inside $HOME ────────────────────────
+NoNewPrivileges=true
+UMask=0077
+
+# Seccomp-based restrictions: these need no mount namespace, so they apply in a
+# user manager exactly as in a system one. The daemon only makes outbound
+# connections (relays, providers, Blossom) plus local unix sockets. If DNS or
+# interface enumeration ever misbehaves under this, AF_NETLINK is the first thing
+# to add — glibc's getaddrinfo uses a netlink socket for AI_ADDRCONFIG.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+
+# Capability drop + private /tmp. READ BEFORE EDITING: in a per-user manager,
+# CapabilityBoundingSet=/AmbientCapabilities= implicitly enable PrivateUsers=
+# (systemd.exec: "only available for system services, or for services running in
+# per-user instances of the service manager in which case PrivateUsers= is
+# implicitly enabled"), which needs unprivileged user namespaces in the kernel.
+# PrivateTmp= needs file-system namespacing, which in a user unit likewise only
+# works together with PrivateUsers=. It is set explicitly here so that dependency
+# is visible rather than surprising — and so this block is one obvious thing to
+# comment out if the unit ever fails to start with a namespace/permission error on
+# a host with unprivileged userns disabled. Doing so costs almost no security: an
+# unprivileged process has no capabilities to drop in the first place. A daemon
+# that starts beats a theoretically tighter one that doesn't.
+PrivateUsers=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+
+# ── Resource controls ────────────────────────────────────────────────────────
+# Same ceilings as the system unit. In a user manager these depend on the memory
+# and pids controllers being delegated to user@.service (the default on current
+# systemd with cgroup v2); if they are not, systemd warns and the caps simply do
+# not apply — it does not fail the unit, so check `systemctl --user show
+# nostrautica-coordinator -p MemoryMax` once after install rather than assuming.
+MemoryHigh=1536M
+MemoryMax=2G
+TasksMax=256
+LimitNOFILE=8192
+
+[Install]
+# User units are wanted by default.target, not multi-user.target.
+WantedBy=default.target

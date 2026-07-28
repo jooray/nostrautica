@@ -35,6 +35,7 @@
     fetchCoordinatorLastSeen,
     cachedCoordinatorLastSeen,
     generateInvites,
+    fetchPublishedInvites,
     revokeAttendeeClient,
     sendAdminCommand,
     checkForOrganizerGrant,
@@ -42,6 +43,25 @@
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
+  import {
+    cachedInviteReport,
+    saveInviteReport,
+    mergeIssued,
+    observeUsed,
+    buildUsageRows,
+    filterUsageRows,
+    usedCount,
+    codesCsv,
+    codesTxt,
+    usageCsv,
+    exportFilename,
+    CSV_BOM,
+    type PublishedInvite,
+    type InviteUsage,
+    type UsageScope,
+  } from "$lib/events/invite-export.js";
+  import { redeemedInvitePubkeys } from "$lib/events/invite-sheet.js";
+  import { cachedProfiles } from "$lib/events/social.js";
   import { fetchCoordinatorStatuses, cachedCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
@@ -218,6 +238,11 @@
       ctx.config.talks !== "off" && ctx.config.coordinator
         ? await fetchPendingTalks(ctx, keys).catch(() => [])
         : [];
+    // Invite usage rides along on the same pass (background): it derives from the
+    // `pending` we just merged plus one small addressable 31601 read, and the
+    // "N of M codes used" count is something the organizer re-checks constantly
+    // — it should be current without them having to open an export panel.
+    void refreshInviteReport();
   }
 
   // ── pending talk moderation (spec F2.3) ────────────────────────────────────
@@ -330,6 +355,13 @@
     pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
     coordStatuses = cachedCoordinatorStatuses(coord) ?? coordStatuses;
     coordLastSeen = cachedCoordinatorLastSeen(coord) ?? coordLastSeen;
+    // The invite report is the one surface that must work with no relay at all
+    // (the organizer reads it long after the event), so seed it synchronously.
+    const rep = cachedInviteReport(coord);
+    if (rep) {
+      inviteIssued = rep.issued;
+      inviteUsed = rep.used;
+    }
   }
 
   // ── Waiting for organizer custody (P2 recovery path) ───────────────────────
@@ -431,9 +463,28 @@
     if (s < 86400) return t("admin.coord.hAgo", { n: Math.round(s / 3600) });
     return t("admin.coord.dAgo", { n: Math.round(s / 86400) });
   }
-  const coordStale = $derived(
+  // How long a gap before we EXPLAIN the gap. Not a health threshold — see below.
+  const COORD_QUIET_AFTER_SEC = 3600;
+  /**
+   * Purely cosmetic: whether to append "the coordinator only publishes when
+   * there's something to do" to the last-activity line.
+   *
+   * This used to be `coordStale`, painted in danger red with "looks stale — is it
+   * still running?" past one hour, and it was simply wrong (production report
+   * 2026-07-28: a healthy coordinator flagged as dying after a 20-hour overnight
+   * gap). `fetchCoordinatorLastSeen` reads the newest 31603/31604/31605/31606 the
+   * coordinator authored for THIS event — its work product, not a heartbeat. The
+   * coordinator publishes those only when someone joins or a job runs, and the
+   * protocol has no periodic liveness signal at all: kind 31611 is a discovery
+   * announcement published once per boot, and 21606 statuses are per-job. So an
+   * event where nobody joined overnight produces exactly the same silence as a
+   * dead daemon, and no threshold can separate them. Absence of work is not
+   * evidence of death, so we no longer claim it is — we just say why the number
+   * is large.
+   */
+  const coordQuiet = $derived(
     coordLastSeen !== undefined &&
-      Math.floor(Date.now() / 1000) - coordLastSeen > 3600,
+      Math.floor(Date.now() / 1000) - coordLastSeen > COORD_QUIET_AFTER_SEC,
   );
 
   // Coordinator status (kind 21606, audit Q12): poisoned/health items surfaced by
@@ -502,7 +553,6 @@
       talksAwaiting: visibleTalks.length,
       matchesAvailable: ctx?.config.matching === "on",
       hasCoordinator: !!ctx?.config.coordinator,
-      coordinatorStale: coordStale,
       coordinatorUnknown: coordLastSeen === undefined,
       billingBlocked: !!billing,
     }),
@@ -618,6 +668,10 @@
     try {
       const base = window.location.origin + window.location.pathname;
       invites = await generateInvites(session.signer, ctx, inviteCount, base);
+      // The 31601 just grew by `inviteCount` labels; pull the new list in so the
+      // "N of M used" count and the joined-report include this batch immediately
+      // rather than after the next 30s poll.
+      void refreshInviteReport();
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -634,19 +688,99 @@
   // tool, or the same as a downloadable file.
   let copiedAllLinks = $state(false);
   async function copyAllLinks() {
-    await doCopy(invites.map((inv) => inv.link).join("\n"), () => {
+    await doCopy(codesTxt(invites), () => {
       copiedAllLinks = true;
       setTimeout(() => (copiedAllLinks = false), 1500);
     });
   }
-  function downloadLinksFile() {
-    const text = invites.map((inv) => inv.link).join("\n");
-    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+
+  function downloadFile(filename: string, text: string, mime: string) {
+    const url = URL.createObjectURL(new Blob([text], { type: mime }));
     const a = document.createElement("a");
     a.href = url;
-    a.download = `nostrautica-invites-${naddr.slice(0, 12)}.txt`;
+    a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  // ── Invite exports (organizer sells tickets off-platform) ──────────────────
+  // The organizer knows each buyer only by EMAIL, so `label` is the join key
+  // between this app and their own spreadsheet — no email ever reaches the app or
+  // a relay. See invite-export.ts for why the two exports are separate things
+  // with separate lifetimes, and why the used-set is union-only.
+  let showExports = $state(false);
+  /** CSV by default: the links-only .txt drops the label, so it can't be joined. */
+  let codesFormat = $state<"csv" | "txt">("csv");
+  let reportScope = $state<UsageScope>("all");
+  let inviteIssued = $state<PublishedInvite[]>([]);
+  let inviteUsed = $state<InviteUsage>({});
+  let inviteReportBusy = $state(false);
+
+  /**
+   * A display name for a redeemer from state that is ALREADY warm — the
+   * decrypted directory entry, the join request's self-declared name, or a
+   * cached kind-0. Deliberately no fetching: the report must render offline and
+   * months after the event, and `buildUsageRows` calls this per row.
+   */
+  function nameForRedeemer(pubkey: string): string | undefined {
+    const dir = directory?.find((e) => e.pubkey === pubkey);
+    if (dir?.name) return dir.name;
+    const req = pending.find((r) => r.attendeePubkey === pubkey);
+    if (req?.name) return req.name;
+    return cachedProfiles([pubkey]).get(pubkey)?.name;
+  }
+
+  const inviteRows = $derived(buildUsageRows(inviteIssued, inviteUsed, nameForRedeemer));
+  const inviteUsedCount = $derived(usedCount(inviteRows));
+  // Which of the codes generated in THIS session have since been redeemed, so the
+  // QR sheet stops offering them (the walk-in door case: generate a batch, display
+  // the sheet, people scan it, re-open it). Only ever filters within the generating
+  // session — after a reload `invites` is empty and the sheet doesn't render at all.
+  const redeemedInSession = $derived(redeemedInvitePubkeys(invites, inviteUsed));
+
+  /**
+   * Recompute the joined-report: published labels from the 31601, redemptions
+   * from the join queue this device already unwrapped (`pending` — the DURABLE
+   * merged queue, so it's strictly better than a fresh bounded scan), unioned
+   * into the persistent owner-scoped cache.
+   *
+   * Never throws and never blocks a caller: a failed 31601 fetch degrades to the
+   * cached label list, which is the whole reason the cache is a union.
+   */
+  async function refreshInviteReport() {
+    if (!ctx) return;
+    const coordinate = ctx.coordinate;
+    inviteReportBusy = true;
+    try {
+      const fresh = await fetchPublishedInvites(ctx).catch(() => []);
+      // Verify redemptions against the UNION of published hashes, not just the
+      // fresh fetch: a proof for a code whose list entry we only have cached is
+      // still a real redemption of a real label.
+      const issued = mergeIssued(cachedInviteReport(coordinate)?.issued, fresh);
+      const observed = observeUsed(pending, new Set(issued.map((i) => i.h)), coordinate);
+      const merged = saveInviteReport(coordinate, issued, observed);
+      if (destroyed) return;
+      inviteIssued = merged.issued;
+      inviteUsed = merged.used;
+    } finally {
+      inviteReportBusy = false;
+    }
+  }
+
+  function downloadCodes() {
+    if (invites.length === 0) return;
+    if (codesFormat === "csv") {
+      // BOM: Excel on Windows otherwise guesses the ANSI codepage and mangles
+      // accented labels (see invite-export.ts).
+      downloadFile(exportFilename("codes", naddr, "csv"), CSV_BOM + codesCsv(invites), "text/csv");
+    } else {
+      downloadFile(exportFilename("codes", naddr, "txt"), codesTxt(invites), "text/plain");
+    }
+  }
+
+  function downloadUsedReport() {
+    const rows = filterUsageRows(inviteRows, reportScope);
+    downloadFile(exportFilename("used", naddr, "csv"), CSV_BOM + usageCsv(rows), "text/csv");
   }
 
   let recomputing = $state(false);
@@ -915,18 +1049,18 @@
       <div class="field-label">{t("admin.coordinator.title")}</div>
       <p class="muted">{t("admin.coordinator.attached")} <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
       <p class="muted" style="margin:0 0 0.5rem">
-        <!-- Stale/unknown liveness is never green (§9). -->
+        <!-- Unknown liveness is never green (§9) — but a known-but-old last
+             activity is not a fault, so it stays green and gets an explanation
+             instead of a red warning (see coordQuiet). -->
         {#if !coordLivenessChecked && coordLastSeen === undefined}
           <span class="badge warn">{t("admin.checkingStatus")}</span>
         {:else if coordLastSeen === undefined}
           <span class="badge warn">{t("admin.coordinator.notSeen")}</span>
-        {:else if coordStale}
-          <span class="badge warn">{sinceLabel(coordLastSeen)}</span>
         {:else}
           <span class="badge ok">{sinceLabel(coordLastSeen)}</span>
         {/if}
-        {#if coordStale}
-          <span style="color:var(--danger)">{t("admin.coordinator.stale")}</span>
+        {#if coordQuiet}
+          <span>{t("admin.coordinator.idle")}</span>
         {/if}
       </p>
       {#if billing}
@@ -1076,6 +1210,110 @@
         {generating ? t("admin.invites.generating") : t("admin.invites.generate")}
       </button>
     </div>
+
+    <!-- "14 of 40 codes used" — the number an organizer who mailed codes to
+         off-platform ticket buyers re-checks constantly. Shown whenever any
+         invite has ever been published for this event, including from cache with
+         no relay reachable. -->
+    {#if inviteIssued.length > 0}
+      <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem" aria-live="polite">
+        {t("admin.invites.usedCount", {
+          used: inviteUsedCount,
+          total: inviteIssued.length,
+        })}
+      </p>
+    {/if}
+
+    <!-- Exports are NOT gated on `invites.length`: the "who has joined" export
+         exists precisely to be usable long after the session that generated the
+         codes, and the whole toolbar below vanishes on reload. -->
+    <div class="row" style="margin-top:0.5rem">
+      <button
+        class="btn inline"
+        aria-expanded={showExports}
+        onclick={() => (showExports = !showExports)}
+      >
+        {t("admin.invites.exports")}
+      </button>
+    </div>
+
+    {#if showExports}
+      <div class="card" style="background:var(--bg-elev2);margin-top:0.5rem">
+        <p class="muted" style="margin:0 0 0.75rem">{t("admin.invites.exports.intro")}</p>
+
+        <!-- ── Export A: the codes themselves (this session only) ──────────── -->
+        <div class="field-label">{t("admin.invites.exportCodes.title")}</div>
+        <p class="muted" style="margin:0.25rem 0 0.5rem">
+          {t("admin.invites.exportCodes.body")}
+        </p>
+        {#snippet codeExportControls()}
+          <fieldset class="export-choice" disabled={invites.length === 0}>
+            <legend class="field-label">{t("admin.invites.format")}</legend>
+            <label>
+              <input type="radio" value="csv" bind:group={codesFormat} style="width:auto" />
+              <span>{t("admin.invites.format.csv")}</span>
+            </label>
+            <label>
+              <input type="radio" value="txt" bind:group={codesFormat} style="width:auto" />
+              <span>{t("admin.invites.format.txt")}</span>
+            </label>
+          </fieldset>
+          <button class="btn inline" onclick={downloadCodes} disabled={invites.length === 0}>
+            {codesFormat === "csv"
+              ? t("admin.invites.downloadCsv")
+              : t("admin.invites.download")}
+          </button>
+        {/snippet}
+        {#if invites.length > 0}
+          <!-- §13.3: the CSV/txt this writes contains live nsecs, and the choice
+               controls sit next to them — keep the whole block inside the
+               secret surface so no 31609 stylesheet is live alongside it. -->
+          <SecretSurface>
+            <p class="muted" style="margin:0 0 0.5rem;color:var(--danger)">
+              {t("admin.invites.exportCodes.warning")}
+            </p>
+            {@render codeExportControls()}
+          </SecretSurface>
+        {:else}
+          <p class="muted" style="margin:0 0 0.5rem">
+            {t("admin.invites.exportCodes.unavailable")}
+          </p>
+          {@render codeExportControls()}
+        {/if}
+
+        <!-- ── Export B: who has joined (derived, needs no codes) ──────────── -->
+        <div class="field-label" style="margin-top:1rem">
+          {t("admin.invites.exportUsed.title")}
+        </div>
+        <p class="muted" style="margin:0.25rem 0 0.5rem">
+          {t("admin.invites.exportUsed.body")}
+        </p>
+        {#if inviteIssued.length === 0}
+          <p class="muted" style="margin:0">{t("admin.invites.exportUsed.empty")}</p>
+        {:else}
+          <fieldset class="export-choice">
+            <legend class="field-label">{t("admin.invites.scope")}</legend>
+            <label>
+              <input type="radio" value="all" bind:group={reportScope} style="width:auto" />
+              <span>{t("admin.invites.scope.all")}</span>
+            </label>
+            <label>
+              <input type="radio" value="unused" bind:group={reportScope} style="width:auto" />
+              <span>{t("admin.invites.scope.unused")}</span>
+            </label>
+          </fieldset>
+          <button class="btn inline" onclick={downloadUsedReport}>
+            {t("admin.invites.exportUsed.download")}
+          </button>
+          <p class="muted" style="margin:0.5rem 0 0;font-size:0.8rem">
+            {inviteReportBusy
+              ? t("admin.invites.exportBusy")
+              : t("admin.invites.usedNote")}
+          </p>
+        {/if}
+      </div>
+    {/if}
+
     {#if invites.length > 0}
       <!-- §13.3: invite links embed single-use nsecs (and QR codes of them);
            suppress the organizer's event CSS while they're on screen so no
@@ -1086,7 +1324,11 @@
             <button class="btn inline" onclick={copyAllLinks}>
               {copiedAllLinks ? t("admin.invites.copiedAll") : t("admin.invites.copyAll")}
             </button>
-            <button class="btn inline" onclick={downloadLinksFile}>{t("admin.invites.download")}</button>
+            <!-- The standalone "Download as .txt" moved into Exports above, where
+                 it is one option of a format toggle that defaults to CSV. Two
+                 buttons in one card writing the same file read as a bug, and the
+                 .txt form is the one that cannot be joined against an email list
+                 (it drops the label) — so it should not be the default path. -->
           {/if}
           <!-- Printable invite sheet (spec §13): QR per unused code, N per page. -->
           <button class="btn inline" onclick={() => (showInviteSheet = true)}>
@@ -1145,11 +1387,32 @@
   <InviteSheet
     {invites}
     eventTitle={ctx?.title ?? ""}
+    usedPubkeys={redeemedInSession}
     onClose={() => (showInviteSheet = false)}
   />
 {/if}
 
 <style>
+  /* Export format / scope pickers: a two-option radio group, so the choice and
+     what it produces are both readable without opening a select. */
+  .export-choice {
+    border: 0;
+    padding: 0;
+    margin: 0 0 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+  }
+  .export-choice label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+  }
+  .export-choice:disabled label {
+    opacity: 0.55;
+  }
+
   /* Section dividers for the ops-console grouping (§9). */
   .section-head {
     margin: 1.5rem 0 0.25rem;

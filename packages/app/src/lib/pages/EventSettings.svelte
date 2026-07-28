@@ -3,7 +3,8 @@
   import Icon from "$lib/components/icons/Icon.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { session } from "$lib/signer/session.svelte.js";
-  import { connectNdk } from "$lib/nostr/ndk.js";
+  import { connectNdk, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
+  import { unionRelays, chatInteropRelays, chatRelaysOf } from "$lib/nostr/relays.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
   import { receiveGrants } from "$lib/events/attendee.js";
@@ -525,6 +526,69 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       savingRetention = false;
+    }
+  }
+
+  // Event relays (the 31600 `relay` tags). Admin-only manual edit: existing events
+  // are NEVER migrated onto changed app defaults automatically — only a deliberate
+  // edit here rewrites a live event's relay list (newly created events pick up the
+  // defaults via create.ts). One relay per line; wss:// (ws:// only for loopback).
+  let relaysInput = $state("");
+  let savingRelays = $state(false);
+  let relaysSaved = $state(false);
+  $effect(() => {
+    if (ctx) relaysInput = ctx.config.relays.join("\n");
+  });
+  function parseRelaysInput(): string[] {
+    return unionRelays(
+      relaysInput
+        .split("\n")
+        .map((r) => r.trim())
+        .filter(Boolean),
+    );
+  }
+  const relaysDirty = $derived(
+    !!ctx && parseRelaysInput().join("\n") !== ctx.config.relays.join("\n"),
+  );
+  async function saveRelays() {
+    if (!ctx) return;
+    const relays = parseRelaysInput();
+    if (relays.length === 0) {
+      error = t("admin.relays.empty");
+      return;
+    }
+    const invalid = relays.find((r) => !isAcceptedRelayUrl(r));
+    if (invalid) {
+      error = t("admin.relays.invalid", { url: invalid });
+      return;
+    }
+    savingRelays = true;
+    relaysSaved = false;
+    error = null;
+    try {
+      await updateEventConfig(ctx, { relays });
+      // The saved set is exactly what was typed. Chat-enabled events also carry a
+      // separate `chat_relay` set (updateEventConfig keeps the Marmot interop pair
+      // in it), which is deliberately NOT mixed back into this box: those relays
+      // accept only chat kinds, and showing them here invited an organizer to
+      // treat them as event relays — which is how they ended up rejecting every
+      // config/roster/deletion publish in the first place.
+      const chatRelays = unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays));
+      ctx = {
+        ...ctx,
+        config: {
+          ...ctx.config,
+          relays,
+          chatRelays: ctx.config.chat.length > 0 ? chatRelays : chatRelaysOf(ctx.config),
+        },
+      };
+      relaysInput = relays.join("\n");
+      relaysSaved = true;
+      setTimeout(() => (relaysSaved = false), 1500);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      savingRelays = false;
     }
   }
 
@@ -1311,9 +1375,9 @@
     </select>
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveTalks} disabled={savingTalks || talksMode === ctx?.config.talks}>
-        {savingTalks ? t("admin.talks.saving") : t("admin.talks.save")}
+        {savingTalks ? t("admin.saving") : t("admin.talks.save")}
       </button>
-      {#if talksSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if talksSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 
@@ -1340,9 +1404,39 @@
     </p>
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveRetention} disabled={savingRetention || !retentionDirty}>
-        {savingRetention ? t("admin.talks.saving") : t("admin.talks.save")}
+        {savingRetention ? t("admin.saving") : t("admin.retention.save")}
       </button>
-      {#if retentionSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if retentionSaved}<span class="muted">{t("admin.saved")}</span>{/if}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="field-label">{t("admin.relays.title")}</div>
+    <p class="muted">{t("admin.relays.body")}</p>
+    <textarea
+      rows="5"
+      spellcheck="false"
+      autocapitalize="off"
+      style="width:100%;font-family:monospace;font-size:0.85rem"
+      placeholder={t("admin.relays.placeholder")}
+      aria-label={t("admin.relays.title")}
+      bind:value={relaysInput}
+    ></textarea>
+    <p class="muted" style="margin:0.4rem 0 0;font-size:0.8rem">{t("admin.relays.hint")}</p>
+    <!-- Group chat rides on its own relay set, kept out of the box above because
+         those relays accept chat kinds only. Surfaced read-only so an organizer
+         who sees the event's chat reaching Whitenoise users isn't left wondering
+         which relays that happens over. -->
+    {#if ctx && chatRelaysOf(ctx.config).length > 0}
+      <p class="muted" style="margin:0.4rem 0 0;font-size:0.8rem">
+        {t("admin.relays.chat", { relays: chatRelaysOf(ctx.config).join(", ") })}
+      </p>
+    {/if}
+    <div class="row" style="margin-top:0.5rem">
+      <button class="btn inline" onclick={saveRelays} disabled={savingRelays || !relaysDirty}>
+        {savingRelays ? t("admin.saving") : t("admin.relays.save")}
+      </button>
+      {#if relaysSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 
@@ -1363,9 +1457,9 @@
         onclick={saveChat}
         disabled={savingChat || !ctx?.config.coordinator || chatEnabled === (ctx?.config.chat.includes("marmot") ?? false)}
       >
-        {savingChat ? t("admin.talks.saving") : t("admin.talks.save")}
+        {savingChat ? t("admin.saving") : t("chat.toggle.save")}
       </button>
-      {#if chatSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if chatSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 

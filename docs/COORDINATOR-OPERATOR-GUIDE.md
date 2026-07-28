@@ -179,6 +179,79 @@ single-daemon lock while it drains for up to 30 s, so the replacement can't acqu
 it) — systemd, waiting for the old unit to stop before starting the new one, avoids
 that race.
 
+### 4b. Alternative: the user-scoped unit (code and state under `/home`)
+
+Not every deployment can be moved onto the `/opt` + `/var/lib` + `/etc` layout. If
+the coordinator is deployed by rsync into a service account's home directory and
+started by `run-coordinator.sh` (which sources `.env` and derives the release id),
+the system unit in §4 is the wrong tool: its `ProtectHome=true` would hide the
+daemon's own code from it. The repo ships a second, user-scoped unit for exactly
+that shape: `packages/coordinator/nostrautica-coordinator.user.service`.
+
+**Pick which one:** `/opt` layout, root install, full sandbox → §4's system unit
+(stronger isolation, and prefer it for a new install). Code, config, database, and
+log all inside one service account's `$HOME` → the user unit. Never install both.
+
+```sh
+# as the service account (e.g. nostrautica), on the coordinator host
+loginctl enable-linger nostrautica              # REQUIRED — see below
+mkdir -p ~/log ~/.config/systemd/user
+install -Dm644 ~/nostrautica/packages/coordinator/nostrautica-coordinator.user.service \
+  ~/.config/systemd/user/nostrautica-coordinator.service
+systemctl --user daemon-reload
+systemctl --user enable --now nostrautica-coordinator
+systemctl --user status nostrautica-coordinator
+journalctl --user -u nostrautica-coordinator -f     # state changes + exit codes
+tail -f ~/log/nostrautica-coordinator.log           # the daemon's own output
+```
+
+`loginctl enable-linger <user>` is mandatory, not hygiene: without linger the
+per-user manager is torn down with the user's last login session, so the coordinator
+would die on SSH logout and would never start at boot. Verify with
+`loginctl show-user <user> -p Linger`.
+
+How it differs from the system unit, and why:
+
+- **`Restart=always`, not `on-failure`.** A production outage (2026-07-25) had the
+  daemon exit with nothing in its log and stay dead for 29 minutes; a clean `code 0`
+  exit could not be ruled out, and `on-failure` ignores those. The start limit
+  (5 starts / 5 min) still stops a genuine crash loop — supervision buys resilience,
+  not a diagnosis, so a persistently broken daemon still ends up stopped and still
+  needs a human in the journal.
+- **Output still goes to the log file** (`StandardOutput=`/`StandardError=` set to
+  `append:~/log/nostrautica-coordinator.log`). This is load-bearing: the deploy's
+  restart script judges readiness by grepping that exact file, so redirecting to
+  journald only would break every deploy. journald independently records the unit's
+  state transitions and the exit code/signal, which is the fact the outage lacked.
+- **Reduced sandbox.** `ProtectHome`/`ProtectSystem=strict` are deliberately absent
+  (the payload lives in `$HOME`), and `MemoryDenyWriteExecute` stays off for V8 as in
+  §4. It keeps `NoNewPrivileges`, a full capability drop, `PrivateTmp`,
+  `RestrictAddressFamilies`, `SystemCallFilter=@system-service`, and the
+  memory/tasks/fd caps. In a per-user manager the capability drop and `PrivateTmp`
+  require user namespaces (systemd implicitly enables `PrivateUsers=`), and the
+  memory/tasks caps require those cgroup controllers to be delegated to
+  `user@.service` — the unit's header says what to check and what to comment out if
+  a host lacks either.
+- **No `ExecStartPre` doctor gate.** `doctor` is read-only and safe as a gate (§3),
+  but it probes relays and provider auth, so gating *automatic* restarts on it lets
+  a transient DNS or provider blip burn the start-limit budget and leave the unit
+  failed. Run `doctor` by hand around config changes and upgrades instead.
+
+Whichever unit you use, the daemon now makes its own lifecycle explicit in the log:
+`[coordinator] START pid … — nostrautica-coordinator <release>` on every start, a
+`FATAL — uncaughtException|unhandledRejection …` line with a stack for the two paths
+that kill Node without going through the normal fatal handler, `SIGTERM received —
+draining in-flight work…` for an intentional stop, and a final one-line
+`EXIT code <n> (pid …, up …s)` backstop on *every* exit. An `EXIT` line with no
+`FATAL` or signal line above it means nothing in the daemon asked to stop — read the
+journal for the code and signal.
+
+Note that the unit and a detached restart script cannot both own the lifecycle: as
+long as the deploy path starts the daemon itself with `setsid`, a manually started
+instance holds the single-daemon lock and the unit's copy fails to acquire it. Point
+the deploy at `systemctl --user restart nostrautica-coordinator` before enabling the
+unit.
+
 ## 5. Back up — `backup`
 
 The database is more than a cache. Relay-backed records and derived artifacts are

@@ -5,11 +5,15 @@
  * with requiredRelayCount=1), so per-relay failures must never surface as
  * uncaught exceptions.
  *
- * NDK has an orphan-rejection bug: when a relay is slower than the publish
- * timeout, the timeout wins the Promise.race and the relay's later OK=false
- * response rejects a promise nobody is awaiting → an unhandled rejection. We
- * install a global guard that swallows these benign relay rejections (and logs
- * them quietly) while letting genuine app errors surface.
+ * Handling happens AT THE PUBLISH SITE (nostr/ndk.ts `publishToRelay`): every
+ * per-relay promise is created with its handlers already attached, and none of
+ * them re-throws. That is what actually keeps a refusal off the debugger — an
+ * `unhandledrejection` listener cannot, because by the time it fires the browser
+ * has already classified the rejection as uncaught and paused.
+ *
+ * `installRelayErrorGuard` stays as a BACKSTOP for relay rejections raised
+ * somewhere we don't own (a dependency's internal fire-and-forget), so one of
+ * those degrades to a console.debug line instead of a red console error.
  */
 
 // NIP-01 OK=false message prefixes + the transport errors NDK emits per relay.
@@ -37,6 +41,25 @@ export function isBenignRelayError(reason: unknown): boolean {
         : (reason as any)?.message ?? "";
   if (typeof msg !== "string" || !msg) return false;
   return BENIGN_RELAY_PATTERNS.some((re) => re.test(msg));
+}
+
+/**
+ * Report that ONE relay didn't take an event. Called from the publish fan-out
+ * (nostr/ndk.ts) for every per-relay failure, so a refusal is always visible to
+ * someone debugging without ever being an error the user or the debugger sees.
+ *
+ * Concretely: a chat-enabled event's relay set includes the whitenoise relays,
+ * which accept only kinds 0/3/445/1059/10000/10002/10050/30443 and answer
+ * everything else with "blocked: kind N is not accepted by this relay". Every
+ * 31600/31601/kind-5 publish therefore fails at two relays by design — that is
+ * console.debug material, not a warning. Anything that does NOT read like an
+ * expected relay rejection is still worth a warning: it usually means the relay
+ * is broken in a new way.
+ */
+export function noteRelayPublishFailure(url: string, reason: unknown): void {
+  const msg = reason instanceof Error ? reason.message : String(reason ?? "declined");
+  if (isBenignRelayError(msg)) console.debug(`[relay] ${url} declined the event: ${msg}`);
+  else console.warn(`[relay] ${url} publish failed: ${msg}`);
 }
 
 /**

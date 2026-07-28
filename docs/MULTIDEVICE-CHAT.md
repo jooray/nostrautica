@@ -79,7 +79,7 @@ Better than expected — **the coordinator's data model is already multi-key-per
 What the coordinator is missing is exactly what PROTOCOL-NIP §10.2 adds:
 **proof of possession in 21607** (today `ChatHandoffCard.svelte:36-57` will attest any
 npub the user types — griefing/mis-binding becomes worse, not better, once devices
-multiply), plus a per-account device cap (`MAX_CHAT_KEYS_PER_ACCOUNT = 5`) and the roster
+multiply), plus a per-account device cap (`MAX_CHAT_KEYS_PER_ACCOUNT = 10`) and the roster
 `chat_keys` array.
 
 ## 4. Target design
@@ -111,9 +111,10 @@ Normative wire details in `PROTOCOL-NIP.md` §10. Summary of the moving parts:
    (fail-open restore) and App-12 (backup convergence) are deleted, not fixed. A "lost
    device" is handled by revoking its key from any other logged-in device (or by the
    fact that event chats are time-bounded anyway).
-6. **Relays**: no new relay concept. Chat traffic keeps using event relays ∪
-   `WHITENOISE_RELAYS` (`relays.ts:54`, `coordinator.ts:142`). A future dedicated
-   `["chat_relay", …]` 31600 tag is compatible but not required.
+6. **Relays**: chat traffic uses event relays ∪ the chat interop set. The
+   `["chat_relay", …]` 31600 tag anticipated here shipped on 2026-07-28 — the interop
+   relays are no longer unioned into `config.relays`, because they reject every kind
+   outside the Marmot/NIP-17 chat surface (see NIP §"Event Networking Config").
 7. **Welcome/joining**: unchanged per device — each device publishes its own 30443, the
    coordinator invites it, the Welcome arrives gift-wrapped to its 10050 relays, and the
    device joins with its own leaf. The unbound-candidate routing rule (NIP §10.4) applies
@@ -156,7 +157,7 @@ Protocol:
 
 - `schemas.ts` — 21607 v2 shape (+`label`, +`proof`, drop `.optional()` client_id?);
   roster `chat_keys` array; retire `chatDeviceKeyBackupSchema`; constants
-  `MAX_CHAT_KEYS_PER_ACCOUNT = 5`, `MAX_CHAT_KEY_LABEL = 60`.
+  `MAX_CHAT_KEYS_PER_ACCOUNT = 10`, `MAX_CHAT_KEY_LABEL = 60`.
 - `crypto.ts` — domain-separated chat-device challenge builder + verifier (shared with
   the invite-proof v2 helper style).
 

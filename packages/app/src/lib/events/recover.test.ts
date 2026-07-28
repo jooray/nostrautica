@@ -30,6 +30,7 @@ import {
   type KeystoreBackend,
 } from "./keystore.js";
 import { recoverEventKeys, resetRecoveryGuard } from "./recover.js";
+import { startScanBudget, scanIncomplete, type ScanOutcome } from "./scan-budget.js";
 
 type Stored = EventKeys & { owner: string };
 function memBackend() {
@@ -169,5 +170,88 @@ describe("recoverEventKeys round-trip", () => {
 
     const restored = await recoverEventKeys(organizer);
     expect(restored).toEqual([]);
+  });
+});
+
+describe("recoverEventKeys is bounded and reports its outcome", () => {
+  beforeEach(() => {
+    fetchEvents.mockReset();
+    resetRecoveryGuard();
+  });
+
+  it("stops decrypting once the shared budget is spent, and stays retryable", async () => {
+    // Each backup is one signer decrypt — a 60s-ceiling round trip on a remote
+    // signer, possibly with an approval dialog. The sweep had no cap, so an
+    // identity with many 30078s walked all of them with no progress UI and no
+    // way for the user to tell it was happening.
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const backups = [
+      await makeBackupEvent(organizer, { includeA: true }),
+      await makeBackupEvent(organizer, { includeA: true }),
+      await makeBackupEvent(organizer, { includeA: true }),
+    ];
+    fetchEvents.mockResolvedValue(backups.map((b) => b.event));
+
+    let decrypts = 0;
+    const counted = {
+      method: "local" as const,
+      getPublicKey: async () => owner,
+      signEvent: organizer.signEvent.bind(organizer),
+      nip44Encrypt: organizer.nip44Encrypt.bind(organizer),
+      nip44Decrypt: async (pk: string, ct: string) => {
+        decrypts++;
+        return organizer.nip44Decrypt(pk, ct);
+      },
+    };
+
+    __setKeystoreBackend(memBackend().backend);
+    setActiveOwner(owner);
+
+    const outcomes: ScanOutcome[] = [];
+    const restored = await recoverEventKeys(counted, {
+      budget: startScanBudget({ maxCalls: 2, now: () => 0 }),
+      onOutcome: (o) => outcomes.push(o),
+    });
+
+    expect(decrypts).toBe(2); // not 3
+    expect(restored.length).toBe(2);
+    expect(outcomes[0]).toMatchObject({ attempted: 2, succeeded: 2, truncated: true });
+    expect(scanIncomplete(outcomes[0]!)).toBe(true);
+
+    // A truncated sweep must NOT latch the once-per-session guard, or the
+    // backups it never reached become unreachable for the rest of the session.
+    fetchEvents.mockClear();
+    await recoverEventKeys(counted);
+    expect(fetchEvents).toHaveBeenCalled();
+  });
+
+  it("reports a sweep where the signer answered nothing as incomplete", async () => {
+    // Returning `[]` here is byte-identical to "this identity created no
+    // events" — which is what Home used to render as "No events yet".
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const { event } = await makeBackupEvent(organizer, { includeA: true });
+    fetchEvents.mockResolvedValue([event]);
+
+    const deaf = {
+      method: "nip46" as const,
+      getPublicKey: async () => owner,
+      signEvent: organizer.signEvent.bind(organizer),
+      nip44Encrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+      nip44Decrypt: async () => {
+        throw new Error("signer unreachable");
+      },
+    };
+
+    __setKeystoreBackend(memBackend().backend);
+    setActiveOwner(owner);
+
+    const outcomes: ScanOutcome[] = [];
+    expect(await recoverEventKeys(deaf, { onOutcome: (o) => outcomes.push(o) })).toEqual([]);
+    expect(outcomes[0]).toMatchObject({ attempted: 1, succeeded: 0, truncated: false });
+    expect(scanIncomplete(outcomes[0]!)).toBe(true);
   });
 });

@@ -57,13 +57,15 @@ vi.mock("./keystore.js", () => ({
 vi.mock("$lib/events/keystore.js", () => ({
   setActiveOwner: vi.fn(),
   lockEventKeysForLogout: vi.fn(async () => {}),
-  unlockEventKeysForLogin: vi.fn(async () => {}),
+  unlockEventKeysForLogin: vi.fn(async () => true),
 }));
 vi.mock("$lib/chat/identity.js", () => ({
   lockChatIdentityForLogout: vi.fn(async () => {}),
   unlockChatIdentityForLogin: vi.fn(async () => {}),
 }));
-vi.mock("$lib/stores/recent-events.svelte.js", () => ({ recentEvents: { clear: vi.fn() } }));
+vi.mock("$lib/stores/recent-events.svelte.js", () => ({
+  recentEvents: { clear: vi.fn(), setOwner: vi.fn() },
+}));
 vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent: vi.fn() }));
 
 import { session } from "./session.svelte.js";
@@ -102,6 +104,29 @@ describe("H-6 session operation token", () => {
     expect(await p).toBe(false);
     expect(session.pubkey).toBe("winner-pk"); // login not clobbered
     expect(h.signers[0]!.close).toHaveBeenCalled(); // superseded transport closed
+  });
+
+  it("tells a superseded login it did NOT sign in", async () => {
+    // The login helpers used to return `void`, so SignInOptions could not tell
+    // "signed in" from "the session dropped this adoption as superseded" — it
+    // called onSignedIn() either way and navigated to Home while logged out,
+    // where the user was asked to sign in a second time.
+    const loser = h.makeSigner(); // signers[0]
+    const login = session.loginNip46(loser as never);
+    await settle();
+    await session.logout(); // supersedes the in-flight login
+    h.signers[0]!.resolve("loser-pk");
+
+    expect(await login).toBe(false);
+    expect(session.loggedIn).toBe(false);
+  });
+
+  it("tells an uncontested login it DID sign in", async () => {
+    const winner = h.makeSigner();
+    const login = session.loginNip46(winner as never);
+    h.signers[0]!.resolve("winner-pk");
+    expect(await login).toBe(true);
+    expect(session.pubkey).toBe("winner-pk");
   });
 
   it("does not log the user back in when a restore finishes AFTER logout", async () => {

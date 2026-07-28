@@ -287,6 +287,18 @@ silently drop them.
   - `["coordinator", <pubkey-hex>, <gen>]` — optional, three-element (§3.5). Absent =
     no coordinator.
   - `["relay", <wss-url>]` × N — relay set for the event's encrypted traffic.
+  - `["chat_relay", <wss-url>]` × N — relays used ONLY by the event's group chat
+    (Marmot/MLS interop), omitted entirely when there are none. Kept out of `relay`
+    on purpose: the Whitenoise interop relays accept only the chat kinds
+    (`0/3/445/1059/10000/10002/10050/30443`) and answer every other kind with
+    `blocked: kind N is not accepted by this relay`, so a reader MUST NOT publish
+    this protocol's own events there. Chat operations use `relay ∪ chat_relay`;
+    everything else uses `relay` alone. **Compatibility:** configs published before
+    this tag existed carry the interop relays inside their `relay` tags; a reader
+    SHOULD treat a known chat-only relay found in `relay` as if it had been in
+    `chat_relay` (move, never drop — an existing group is routing over it), and a
+    reader that does not understand `chat_relay` simply gets the general relay set,
+    which is correct for everything except chat interop.
   - `["blossom", <https-url>]` × N — allowed Blossom origins for media.
   - `["max_video_sec", <int>]` — intro-video cap, default 90; `"0"` means unlimited.
   - `["max_talk_sec", <int>]` — talk cap, default 900; `"0"` means unlimited.
@@ -927,7 +939,7 @@ transcoding, so an unexpected field is a hard error, not a silently-ignored one)
   shared chat key, no relay backup of chat secrets, and no cross-device restore of chat
   identity. A device is *added* by attestation and *removed* by revocation; loss of a
   device is handled by revoking its key, not recovering it.
-- One account may hold up to `MAX_CHAT_KEYS_PER_ACCOUNT = 5` concurrent device keys per
+- One account may hold up to `MAX_CHAT_KEYS_PER_ACCOUNT = 10` concurrent device keys per
   event. Each device gets its own MLS leaf, its own key package (kind `30443`, with a
   stable `client_id` slot per device), and its own Welcome; each device sees history only
   from its own join epoch forward (MLS semantics — history never syncs, by design).
@@ -1049,7 +1061,7 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
   100000, `MAX_NOTES` 2000, `MAX_NOTE` 5000, `MAX_LANG` 35, `MAX_TRANSCRIPT_TEXT`
   100000, `MAX_INTRO_TEXT` 2000, `MAX_LIBRARY_TEXTS` 20, `MAX_TALK_TITLE` 200,
   `MAX_TALK_DESC` 2000, `talk_d` length 1..64, `MAX_CHAT_KEY_LABEL` 60,
-  `MAX_CHAT_KEY_CLIENT_ID` 120, `MAX_CHAT_KEYS_PER_ACCOUNT` 5.
+  `MAX_CHAT_KEY_CLIENT_ID` 120, `MAX_CHAT_KEYS_PER_ACCOUNT` 10.
 - Icebreakers (31605, §6.2): ≤ 3 per match entry, ≤ 280 chars each.
 - Members-only post markdown editor cap: 60,000 UTF-8 bytes
   (`MAX_MEMBERS_POST_MARKDOWN_BYTES`). Theme CSS: 32,768 bytes (`MAX_THEME_CSS_BYTES`).
@@ -1077,4 +1089,5 @@ neighboring modules — tunable per deployment, not part of interop compatibilit
   `reasoning`) word-boundary-truncated to 2000 chars with URL schemes stripped.
 - Marmot: key-package kind `30443`, group-message kind `445` (routed by `#h`); the
   Whitenoise relays (`wss://relay.us.whitenoise.chat`, `wss://relay.eu.whitenoise.chat`)
-  are folded into chat relay routing.
+  are the chat interop set — carried in the config's `chat_relay` tags and in the
+  group's own MLS routing state, never in the event's `relay` set.

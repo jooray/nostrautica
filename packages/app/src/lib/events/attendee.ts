@@ -53,6 +53,12 @@ import { eventRelayHints } from "./event-context.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
 import { recordOwnStatus } from "./attendee-status.js";
+import {
+  startScanBudget,
+  emptyOutcome,
+  type ScanBudget,
+  type ScanOutcome,
+} from "./scan-budget.js";
 
 /**
  * Authenticate a received 21605 Organizer Grant (spec §8, audit finding C2).
@@ -199,8 +205,19 @@ function markGrantsBackfilled(pubkey: string): void {
 /** Cap on the persisted grant-wrap memo (audit App-7), mirroring the DM memo. */
 export const MAX_GRANT_WRAPS = 5000;
 
-export async function receiveGrants(signer: AppSigner): Promise<string[]> {
+export async function receiveGrants(
+  signer: AppSigner,
+  opts: { budget?: ScanBudget; onOutcome?: (outcome: ScanOutcome) => void } = {},
+): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
+  // Bounded (see `scan-budget.ts`): every un-memoized wrap costs TWO signer
+  // round trips (giftwrap.ts unwraps the wrap, then the seal), each with a 60s
+  // ceiling on a remote signer and possibly a human approval dialog. Walking a
+  // full-history backfill of them unbounded is the prompt storm behind the
+  // 2026-07-28 "my events vanished" report. A truncated pass is reported rather
+  // than swallowed, so the caller can distinguish it from an empty inbox.
+  const budget = opts.budget ?? startScanBudget();
+  const outcome = emptyOutcome();
   const fullBackfill = !hasBackfilledGrants(pubkey);
   // Relay-only read (no dexie cache in the loop): grants must not be missed —
   // fetchEvents can EOSE-resolve before the cache adapter surfaces a wrap that
@@ -217,6 +234,16 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
   )) as unknown as GiftWrap[];
 
   const coordinates = new Set<string>();
+  // Did this scan prove the SIGNER can actually read our wraps? A full-history
+  // backfill that unwrapped nothing is not evidence there was nothing to find —
+  // on a remote signer (Amber) every unwrap is two NIP-46 round trips, and a
+  // signer that was unreachable/unapproved for the whole pass fails all of them
+  // identically to "no grants here". Latching `markGrantsBackfilled` on that
+  // narrows every later scan to `giftwrapSince()` (now − 3 days), so an ECK
+  // grant from an event joined last month becomes PERMANENTLY undiscoverable on
+  // this device. Mirrors the `meaningful` guard recover.ts already has.
+  let unwrapped = 0;
+  let unwrapFailed = 0;
   // Per-wrap memo (CACHING-PLAN §2.3), owner-scoped, persisted: a wrap whose
   // processing reached a DEFINITIVE outcome never needs `signerUnwrap` again on
   // a re-scan — the #1 Amber/NIP-46 prompt/latency saver. The relay-only fetch
@@ -252,10 +279,22 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     // Already definitively processed in a prior scan/session — skip the signer
     // round-trip.
     if (memo[wrap.id]) continue;
+    // Out of time or out of prompts: stop rather than start another two-round-
+    // trip unwrap. Everything decided so far is already memoized and the
+    // full-history latch below is withheld, so the next scan resumes where this
+    // one stopped — a truncated pass costs a retry, not a lost grant.
+    if (!budget.take()) {
+      outcome.truncated = true;
+      break;
+    }
+    outcome.attempted++;
     let rumor;
     try {
       rumor = await signerUnwrap(signer, wrap);
+      unwrapped++;
+      outcome.succeeded++;
     } catch {
+      unwrapFailed++;
       continue; // transient/foreign — NOT memoized, retried next scan
     }
     if (rumor.kind === KIND_ORGANIZER_GRANT) {
@@ -364,8 +403,14 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     memoDirty = true;
   }
   // The full-history scan completed without throwing (a fetch failure would have
-  // rejected above), so later scans can safely narrow to the live-overlap window.
-  if (fullBackfill) markGrantsBackfilled(pubkey);
+  // rejected above), ran to the end of the wrap list rather than out of budget,
+  // AND was meaningful: either there was nothing addressed to us to unwrap, or
+  // the signer successfully unwrapped at least one wrap. A pass where every
+  // single unwrap failed is a signer/transport outage, not an empty inbox —
+  // leave the marker unset so the next scan re-runs the full history.
+  if (fullBackfill && !outcome.truncated && (unwrapped > 0 || unwrapFailed === 0)) {
+    markGrantsBackfilled(pubkey);
+  }
   if (memoDirty) {
     // Bound the memo (audit App-7): unlike the DM memo this had no cap, so it
     // grew one entry per gift wrap ever seen (grants AND every skipped DM/chat
@@ -379,6 +424,9 @@ export async function receiveGrants(signer: AppSigner): Promise<string[]> {
     }
     cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
   }
+  // Report only on the success path: a throw above reaches the caller as a
+  // rejection, which is a strictly more specific signal than this outcome.
+  opts.onOutcome?.(outcome);
   return [...coordinates];
 }
 

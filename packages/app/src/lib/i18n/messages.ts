@@ -85,6 +85,11 @@ export const messages = {
     "home.noEvents": "No events yet",
     "home.noEvents.body": "Open an invite link to join an event, or create your own.",
     "home.loadingEvents": "Loading your events…",
+    "home.restoringSession": "Reconnecting your signer…",
+    "home.scanFailed.body":
+      "We couldn't finish looking for your events — your signer didn't answer. Nothing is lost; they're still on your relays.",
+    "home.scanIncomplete":
+      "This list may be incomplete — the check for your events didn't finish.",
     "home.how.title": "How it works",
     "home.how.record": "Record a short intro video (and optionally a talk).",
     "home.how.matched": "Get matched with people whose skills complement yours.",
@@ -119,8 +124,13 @@ export const messages = {
     "signin.extension": "Browser extension",
     "signin.extension.button": "Log in with extension (Alby, nos2x…)",
     "signin.remote": "Remote signer",
-    "signin.remote.scan": "Scan this with Amber, or open it directly on this device:",
-    "signin.remote.openAmber": "Open in Amber",
+    "signin.remote.scan":
+      "Scan this with your signer app — on this device or on another phone — or open it directly here:",
+    // Names several signers across platforms instead of "Open in Amber": Amber is
+    // Android-only, so on an iPhone or a desktop the old label promised an app
+    // the user could not have. Whether the link opens anything depends on a
+    // signer being installed, which is equally true everywhere.
+    "signin.remote.openSigner": "Open in your signer app (Amber, Clave, Primal, Amethyst, …)",
     "signin.remote.copy": "Copy",
     "signin.remote.copied": "Copied ✓",
     "signin.remote.waiting": "Waiting for the signer to approve…",
@@ -128,7 +138,7 @@ export const messages = {
       "Didn't get the approval? Keep this tab open while approving, or retry with a fresh code.",
     "signin.remote.retry": "Retry",
     "signin.remote.cancel": "Cancel",
-    "signin.remote.hint": "such as Amber on Android, or Clave",
+    "signin.remote.hint": "such as Amber, Amethyst, Clave or Primal",
     "signin.remote.connect": "Connect with Remote Signer",
     "signin.remote.authRequired":
       "Your signer asks you to approve this request on its website:",
@@ -142,6 +152,8 @@ export const messages = {
     "signin.paste.cancel": "Cancel",
     "signin.paste.saferHint":
       "On a shared device, a signer app or extension is safer than pasting your key.",
+    "signin.superseded":
+      "Another sign-in or sign-out on this device interrupted that one. Try again.",
 
     // Create event
     "create.title": "Create an event",
@@ -739,6 +751,9 @@ export const messages = {
     "dm.empty":
       "No messages yet. Open someone's profile in an event's attendee list and tap Message to start a conversation. Messages are end-to-end encrypted and work with other Nostr messengers too.",
     "dm.youPrefix": "You: ",
+    "dm.unread": "{n} unread direct messages",
+    "dm.markAllRead": "Mark all as read",
+    "dm.encryptedActivity": "New encrypted inbox activity",
     // Unified Chat pane (group chats + DMs together)
     "chats.groupSection": "Group chats",
     "chats.dmSection": "Direct messages",
@@ -854,7 +869,9 @@ export const messages = {
     "admin.coordinator.title": "AI coordinator",
     "admin.coordinator.attached": "Attached:",
     "admin.coordinator.noActivity": "no activity yet",
-    "admin.coordinator.stale": " · looks stale — is it still running?",
+    // NOT an alarm: "last seen" is the coordinator's newest published work for
+    // this event, so a quiet event simply produces no events. See Admin.svelte.
+    "admin.coordinator.idle": " · quiet — the coordinator only publishes when there's something to do",
     "admin.coordinator.recomputing": "Recomputing…",
     "admin.coordinator.recompute": "↻ Recompute all matches",
     "admin.coordinator.attachedOk":
@@ -988,7 +1005,6 @@ export const messages = {
     "admin.overview.yes": "On",
     "admin.overview.no": "Off",
     "admin.overview.coord.ok": "Live",
-    "admin.overview.coord.stale": "Not seen recently",
     "admin.overview.coord.unknown": "Checking…",
     "admin.overview.billing.blocked": "Action needed",
     "admin.people.search": "Search people",
@@ -1029,6 +1045,11 @@ export const messages = {
     "error.followListGuard":
       "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
     "error.signerTimeout": "Your signer didn't respond — check it's online and try again.",
+    // Same failure, but we know a signer relay refused the connection — say which
+    // one. A relay outage and a closed signer app produce the identical symptom
+    // otherwise, and only one of the two is something the user can act on.
+    "error.signerRelaysUnreachable":
+      "Your signer didn't respond — couldn't reach {relays}. Check your signer is online and try again.",
     "error.badBunkerLink": "That doesn't look like a valid bunker link.",
     "error.badEventLink":
       "This event link looks invalid. Please reopen it from your invite or events list.",
@@ -1133,6 +1154,7 @@ export const messages = {
     "chat.toggle.help":
       "Adds an end-to-end-encrypted group chat for members. Requires a coordinator; the coordinator can read the chat.",
     "chat.toggle.needsCoordinator": "Add a coordinator to enable group chat.",
+    "chat.toggle.save": "Save chat setting",
 
     // Per-route document titles (A2)
     "title.home": "Nostrautica",
@@ -1195,8 +1217,14 @@ export const messages = {
     "admin.talks.body":
       "Enable talks so attendees can submit and watch them. Off keeps the event as a normal meetup.",
     "admin.talks.save": "Save talks setting",
-    "admin.talks.saving": "Saving…",
-    "admin.talks.saved": "Saved",
+    // Shared busy/done states for every save button on Event settings. These used
+    // to be `admin.talks.saving`/`admin.talks.saved`, and because they were reached
+    // for from the retention/relays/chat cards too, `admin.talks.save` came along
+    // with them — so unrelated buttons all read "Save talks setting" in production
+    // (report 2026-07-28). Only the transient states are interchangeable; every
+    // idle label must name its own setting.
+    "admin.saving": "Saving…",
+    "admin.saved": "Saved",
     "admin.retention.title": "Delete member data after the event",
     "admin.retention.body":
       "Set how long member data is kept after the event ends. Leave blank to keep it indefinitely.",
@@ -1206,6 +1234,17 @@ export const messages = {
       "The directory, matches and talks are deleted from relays {n} days after the event ends. Deletion is best-effort.",
     "admin.retention.consequenceOff": "No automatic deletion — member data is kept indefinitely.",
     "admin.retention.invalid": "Enter a whole number of days (1 or more), or leave it blank for no deletion.",
+    "admin.retention.save": "Save deletion setting",
+    "admin.relays.title": "Event relays",
+    "admin.relays.body":
+      "The relays this event publishes to and is found on. Changing this only affects this event — existing attendees keep working on the old relays until they refresh. New events use the app defaults automatically.",
+    "admin.relays.placeholder": "wss://relay.example.com",
+    "admin.relays.hint": "One relay per line. Must start with wss:// (ws:// is allowed only for localhost).",
+    "admin.relays.save": "Save relays",
+    "admin.relays.empty": "Add at least one relay.",
+    "admin.relays.invalid": "Not a valid relay URL: {url}",
+    "admin.relays.chat":
+      "Group chat also uses its own relays, kept separate because they accept chat messages only: {relays}",
     "admin.talks.mod.section": "Talks moderation",
     "admin.talks.mod.title": "Pending talks",
     "admin.talks.mod.body":
@@ -1350,6 +1389,36 @@ export const messages = {
     "admin.inviteSheet.print": "Print",
     "admin.inviteSheet.close": "Close",
     "admin.inviteSheet.scanHint": "Scan to join",
+
+    // Invite exports (organizer sold tickets off-platform and knows buyers only
+    // by email; `label` is the join key between this app and their spreadsheet).
+    "admin.invites.exports": "Exports",
+    "admin.invites.exports.intro":
+      "Two exports, with two very different lifetimes. The codes themselves only exist while this page is open — they are never saved, on your device or on a relay — so they can only be exported now. Who has joined is worked out from the invite list published for this event, so that one keeps working months later.",
+    "admin.invites.exportCodes.title": "Codes for mailing",
+    "admin.invites.exportCodes.body":
+      "One row per code you just generated, each with its label. Match the label to the buyer in your own list — the app never sees email addresses.",
+    "admin.invites.exportCodes.unavailable":
+      "Nothing to export right now. Invite codes are single-use secrets that are never stored anywhere, so they can only be exported in the same session that created them. Generate a new batch above for anyone you still need to mail.",
+    "admin.invites.exportCodes.warning":
+      "The file contains live invite codes — anyone who gets a copy can join. Handle it like a list of passwords.",
+    "admin.invites.format": "Format",
+    "admin.invites.format.csv": "CSV — label, code and link",
+    "admin.invites.format.txt": "Text — links only, one per line",
+    "admin.invites.downloadCsv": "Download as CSV",
+    "admin.invites.exportUsed.title": "Who has joined",
+    "admin.invites.exportUsed.body":
+      "One row per code ever issued for this event, and whether it has been used. Needs no codes, so it works at any time: match it to your own list by label to see who still needs a reminder.",
+    "admin.invites.exportUsed.empty":
+      "No invite codes have been published for this event yet.",
+    "admin.invites.exportUsed.download": "Download report",
+    "admin.invites.scope": "Include",
+    "admin.invites.scope.all": "All codes",
+    "admin.invites.scope.unused": "Unused codes only",
+    "admin.invites.usedCount": "{used} of {total} codes used",
+    "admin.invites.usedNote":
+      "Once a code is seen used it stays used. Old join requests eventually disappear from relays, so this can only ever count up — it will never wrongly tell you a code is still free.",
+    "admin.invites.exportBusy": "Checking for new sign-ups…",
   },
   sk: {
     // App shell / nav
@@ -1429,6 +1498,11 @@ export const messages = {
     "home.noEvents": "Zatiaľ žiadne podujatia",
     "home.noEvents.body": "Otvorte pozvánku a pripojte sa k podujatiu, alebo si vytvorte vlastné.",
     "home.loadingEvents": "Načítavajú sa vaše podujatia…",
+    "home.restoringSession": "Znovu sa pripájame k vášmu podpisovaču…",
+    "home.scanFailed.body":
+      "Nepodarilo sa dokončiť hľadanie vašich podujatí — váš podpisovač neodpovedal. Nič sa nestratilo, stále sú na vašich relayoch.",
+    "home.scanIncomplete":
+      "Tento zoznam nemusí byť úplný — hľadanie vašich podujatí sa nedokončilo.",
     "home.how.title": "Ako to funguje",
     "home.how.record": "Nahrajte krátke predstavovacie video (a voliteľne aj prednášku).",
     "home.how.matched": "Spojíme vás s ľuďmi, ktorých zručnosti dopĺňajú tie vaše.",
@@ -1463,8 +1537,10 @@ export const messages = {
     "signin.extension": "Rozšírenie prehliadača",
     "signin.extension.button": "Prihlásiť sa rozšírením (Alby, nos2x…)",
     "signin.remote": "Vzdialený podpisovač",
-    "signin.remote.scan": "Naskenujte to Amberom, alebo to otvorte priamo na tomto zariadení:",
-    "signin.remote.openAmber": "Otvoriť v Amberi",
+    "signin.remote.scan":
+      "Naskenujte to svojou podpisovacou aplikáciou — na tomto zariadení alebo na inom telefóne — alebo to otvorte priamo tu:",
+    "signin.remote.openSigner":
+      "Otvoriť v podpisovacej aplikácii (Amber, Clave, Primal, Amethyst, …)",
     "signin.remote.copy": "Kopírovať",
     "signin.remote.copied": "Skopírované ✓",
     "signin.remote.waiting": "Čaká sa na schválenie podpisovačom…",
@@ -1472,7 +1548,7 @@ export const messages = {
       "Neprišlo schválenie? Nechajte túto kartu otvorenú počas schvaľovania, alebo to skúste znova s novým kódom.",
     "signin.remote.retry": "Skúsiť znova",
     "signin.remote.cancel": "Zrušiť",
-    "signin.remote.hint": "napríklad Amber na Androide, alebo Clave",
+    "signin.remote.hint": "napríklad Amber, Amethyst, Clave alebo Primal",
     "signin.remote.connect": "Pripojiť vzdialený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žiada o schválenie tejto požiadavky na svojej stránke:",
@@ -1486,6 +1562,8 @@ export const messages = {
     "signin.paste.cancel": "Zrušiť",
     "signin.paste.saferHint":
       "Na zdieľanom zariadení je bezpečnejšie použiť podpisovaciu aplikáciu alebo rozšírenie než vkladať kľúč.",
+    "signin.superseded":
+      "Toto prihlásenie prerušilo iné prihlásenie alebo odhlásenie na tomto zariadení. Skúste to znova.",
 
     // Create event
     "create.title": "Vytvoriť podujatie",
@@ -2089,6 +2167,9 @@ export const messages = {
     "dm.empty":
       "Zatiaľ žiadne správy. Otvorte niekoho profil v zozname účastníkov podujatia a klepnite na Napísať správu, čím začnete konverzáciu. Správy sú koncovo šifrované a fungujú aj s inými Nostr aplikáciami na správy.",
     "dm.youPrefix": "Vy: ",
+    "dm.unread": "{n} neprečítaných priamych správ",
+    "dm.markAllRead": "Označiť všetky ako prečítané",
+    "dm.encryptedActivity": "Nová šifrovaná aktivita v schránke",
     "chats.groupSection": "Skupinové chaty",
     "chats.dmSection": "Priame správy",
 
@@ -2205,7 +2286,7 @@ export const messages = {
     "admin.coordinator.title": "AI koordinátor",
     "admin.coordinator.attached": "Pripojený:",
     "admin.coordinator.noActivity": "zatiaľ žiadna aktivita",
-    "admin.coordinator.stale": " · vyzerá neaktívne — beží ešte?",
+    "admin.coordinator.idle": " · ticho — koordinátor publikuje, len keď má čo robiť",
     "admin.coordinator.recomputing": "Prepočítava sa…",
     "admin.coordinator.recompute": "↻ Prepočítať všetky spojenia",
     "admin.coordinator.attachedOk":
@@ -2341,7 +2422,6 @@ export const messages = {
     "admin.overview.yes": "Zapnuté",
     "admin.overview.no": "Vypnuté",
     "admin.overview.coord.ok": "Aktívny",
-    "admin.overview.coord.stale": "Dlho nevidený",
     "admin.overview.coord.unknown": "Kontroluje sa…",
     "admin.overview.billing.blocked": "Potrebný zásah",
     "admin.people.search": "Hľadať ľudí",
@@ -2383,6 +2463,8 @@ export const messages = {
     "error.followListGuard":
       "Nepodarilo sa načítať váš zoznam sledovaných z relayov, preto je sledovanie pozastavené, aby sa neprepísal. Skúste to o chvíľu znova.",
     "error.signerTimeout": "Váš podpisovač neodpovedal — skontrolujte, či je online, a skúste znova.",
+    "error.signerRelaysUnreachable":
+      "Váš podpisovač neodpovedal — nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
     "error.badBunkerLink": "Toto nevyzerá ako platný bunker odkaz.",
     "error.badEventLink":
       "Tento odkaz na podujatie vyzerá neplatne. Otvorte ho, prosím, znova z pozvánky alebo zo zoznamu podujatí.",
@@ -2485,6 +2567,7 @@ export const messages = {
     "chat.toggle.help":
       "Pridá end-to-end šifrovaný skupinový chat pre členov. Vyžaduje koordinátora; koordinátor môže chat čítať.",
     "chat.toggle.needsCoordinator": "Pre povolenie skupinového chatu pridajte koordinátora.",
+    "chat.toggle.save": "Uložiť nastavenie chatu",
     "more.eventPrivacy.link": "Zobraziť podrobnosti o súkromí",
 
     // Per-route document titles (A2)
@@ -2548,8 +2631,8 @@ export const messages = {
     "admin.talks.body":
       "Zapnite prednášky, aby ich účastníci mohli pridávať a pozerať. Vypnuté ponechá podujatie ako bežné stretnutie.",
     "admin.talks.save": "Uložiť nastavenie prednášok",
-    "admin.talks.saving": "Ukladá sa…",
-    "admin.talks.saved": "Uložené",
+    "admin.saving": "Ukladá sa…",
+    "admin.saved": "Uložené",
     "admin.retention.title": "Zmazať údaje účastníkov po podujatí",
     "admin.retention.body":
       "Nastavte, ako dlho sa údaje účastníkov uchovávajú po skončení podujatia. Prázdne pole = uchovávať natrvalo.",
@@ -2559,6 +2642,17 @@ export const messages = {
       "Adresár, spárovania a prednášky sa z relé zmažú {n} dní po skončení podujatia. Mazanie je podľa najlepšej snahy.",
     "admin.retention.consequenceOff": "Žiadne automatické mazanie — údaje účastníkov sa uchovávajú natrvalo.",
     "admin.retention.invalid": "Zadajte celý počet dní (1 alebo viac), alebo pole nechajte prázdne pre žiadne mazanie.",
+    "admin.retention.save": "Uložiť nastavenie mazania",
+    "admin.relays.title": "Relaye udalosti",
+    "admin.relays.body":
+      "Relaye, na ktoré sa táto udalosť publikuje a kde ju možno nájsť. Zmena ovplyvní iba túto udalosť — existujúci účastníci fungujú na pôvodných relayoch, kým sa neobnovia. Nové udalosti použijú predvolené relaye aplikácie automaticky.",
+    "admin.relays.placeholder": "wss://relay.example.com",
+    "admin.relays.hint": "Jeden relay na riadok. Musí začínať wss:// (ws:// je povolené iba pre localhost).",
+    "admin.relays.save": "Uložiť relaye",
+    "admin.relays.empty": "Pridajte aspoň jeden relay.",
+    "admin.relays.invalid": "Neplatná adresa relayu: {url}",
+    "admin.relays.chat":
+      "Skupinový chat používa aj vlastné relaye, ktoré sú oddelené, lebo prijímajú iba chatové správy: {relays}",
     "admin.talks.mod.section": "Moderovanie prednášok",
     "admin.talks.mod.title": "Čakajúce prednášky",
     "admin.talks.mod.body":
@@ -2707,6 +2801,36 @@ export const messages = {
     "admin.inviteSheet.print": "Tlačiť",
     "admin.inviteSheet.close": "Zavrieť",
     "admin.inviteSheet.scanHint": "Naskenujte a pripojte sa",
+
+    // Exporty pozvánok (organizátor predal vstupenky mimo aplikácie a kupujúcich
+    // pozná len podľa e-mailu; „označenie“ je spojka medzi appkou a jeho tabuľkou).
+    "admin.invites.exports": "Exporty",
+    "admin.invites.exports.intro":
+      "Dva exporty s veľmi rozdielnou životnosťou. Samotné kódy existujú len počas toho, ako je táto stránka otvorená — nikde sa neukladajú, ani v zariadení, ani na relayi — takže sa dajú exportovať iba teraz. To, kto sa už pripojil, sa dá zistiť zo zoznamu pozvánok zverejneného pre toto podujatie, takže tento export funguje aj po mesiacoch.",
+    "admin.invites.exportCodes.title": "Kódy na rozposlanie",
+    "admin.invites.exportCodes.body":
+      "Jeden riadok na každý práve vygenerovaný kód, spolu s jeho označením. Označenie si spárujte s kupujúcim vo vlastnom zozname — aplikácia e-mailové adresy nikdy nevidí.",
+    "admin.invites.exportCodes.unavailable":
+      "Momentálne nie je čo exportovať. Pozývacie kódy sú jednorazové tajomstvá, ktoré sa nikde neukladajú, takže sa dajú exportovať len v tej istej session, v ktorej vznikli. Pre ľudí, ktorým ešte musíte napísať, vygenerujte novú dávku vyššie.",
+    "admin.invites.exportCodes.warning":
+      "Súbor obsahuje živé pozývacie kódy — kto ho získa, môže sa pripojiť. Zaobchádzajte s ním ako so zoznamom hesiel.",
+    "admin.invites.format": "Formát",
+    "admin.invites.format.csv": "CSV — označenie, kód a odkaz",
+    "admin.invites.format.txt": "Text — len odkazy, jeden na riadok",
+    "admin.invites.downloadCsv": "Stiahnuť ako CSV",
+    "admin.invites.exportUsed.title": "Kto sa už pripojil",
+    "admin.invites.exportUsed.body":
+      "Jeden riadok na každý kód, ktorý bol pre toto podujatie vydaný, a či už bol použitý. Nepotrebuje kódy, takže funguje kedykoľvek: spárujte ho s vlastným zoznamom podľa označenia a uvidíte, komu treba pripomenúť.",
+    "admin.invites.exportUsed.empty":
+      "Pre toto podujatie zatiaľ neboli zverejnené žiadne pozývacie kódy.",
+    "admin.invites.exportUsed.download": "Stiahnuť prehľad",
+    "admin.invites.scope": "Zahrnúť",
+    "admin.invites.scope.all": "Všetky kódy",
+    "admin.invites.scope.unused": "Len nepoužité kódy",
+    "admin.invites.usedCount": "Použitých {used} zo {total} kódov",
+    "admin.invites.usedNote":
+      "Keď sa kód raz zobrazí ako použitý, zostane použitý. Staré žiadosti o pripojenie z relayov postupne mizia, takže tento počet môže len rásť — nikdy vám nesprávne nepovie, že kód je ešte voľný.",
+    "admin.invites.exportBusy": "Kontrolujeme nové registrácie…",
   },
   cs: {
     // Kostra aplikace / navigace
@@ -2786,6 +2910,11 @@ export const messages = {
     "home.noEvents": "Zatím žádné akce",
     "home.noEvents.body": "Otevřete pozvánku a připojte se k akci, nebo si vytvořte vlastní.",
     "home.loadingEvents": "Načítání vašich akcí…",
+    "home.restoringSession": "Znovu se připojujeme k vašemu podepisovači…",
+    "home.scanFailed.body":
+      "Nepodařilo se dokončit hledání vašich akcí — váš podepisovač neodpověděl. Nic se neztratilo, stále jsou na vašich relayích.",
+    "home.scanIncomplete":
+      "Tento seznam nemusí být úplný — hledání vašich akcí se nedokončilo.",
     "home.how.title": "Jak to funguje",
     "home.how.record": "Nahrajte krátké představovací video (a volitelně i přednášku).",
     "home.how.matched": "Propojíme vás s lidmi, jejichž dovednosti doplňují ty vaše.",
@@ -2820,8 +2949,10 @@ export const messages = {
     "signin.extension": "Rozšíření prohlížeče",
     "signin.extension.button": "Přihlásit se rozšířením (Alby, nos2x…)",
     "signin.remote": "Vzdálený podpisovač",
-    "signin.remote.scan": "Naskenujte to Amberem, nebo to otevřete přímo na tomto zařízení:",
-    "signin.remote.openAmber": "Otevřít v Amberu",
+    "signin.remote.scan":
+      "Naskenujte to svojí podepisovací aplikací — na tomto zařízení nebo na jiném telefonu — nebo to otevřete přímo tady:",
+    "signin.remote.openSigner":
+      "Otevřít v podepisovací aplikaci (Amber, Clave, Primal, Amethyst, …)",
     "signin.remote.copy": "Kopírovat",
     "signin.remote.copied": "Zkopírováno ✓",
     "signin.remote.waiting": "Čeká se na schválení podpisovačem…",
@@ -2829,7 +2960,7 @@ export const messages = {
       "Nepřišlo schválení? Nechte tuto kartu otevřenou během schvalování, nebo to zkuste znovu s novým kódem.",
     "signin.remote.retry": "Zkusit znovu",
     "signin.remote.cancel": "Zrušit",
-    "signin.remote.hint": "například Amber na Androidu, nebo Clave",
+    "signin.remote.hint": "například Amber, Amethyst, Clave nebo Primal",
     "signin.remote.connect": "Připojit vzdálený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žádá o schválení tohoto požadavku na svém webu:",
@@ -2843,6 +2974,8 @@ export const messages = {
     "signin.paste.cancel": "Zrušit",
     "signin.paste.saferHint":
       "Na sdíleném zařízení je bezpečnější použít podpisovací aplikaci nebo rozšíření než vkládat klíč.",
+    "signin.superseded":
+      "Toto přihlášení přerušilo jiné přihlášení nebo odhlášení na tomto zařízení. Zkuste to znovu.",
 
     // Vytvoření akce
     "create.title": "Vytvořit akci",
@@ -3443,6 +3576,9 @@ export const messages = {
     "dm.empty":
       "Zatím žádné zprávy. Otevřete něčí profil v seznamu účastníků akce a klepněte na Napsat zprávu, čímž zahájíte konverzaci. Zprávy jsou koncově šifrované a fungují i s jinými Nostr aplikacemi na zprávy.",
     "dm.youPrefix": "Vy: ",
+    "dm.unread": "{n} nepřečtených přímých zpráv",
+    "dm.markAllRead": "Označit vše jako přečtené",
+    "dm.encryptedActivity": "Nová šifrovaná aktivita ve schránce",
     "chats.groupSection": "Skupinové chaty",
     "chats.dmSection": "Přímé zprávy",
 
@@ -3560,7 +3696,7 @@ export const messages = {
     "admin.coordinator.title": "AI koordinátor",
     "admin.coordinator.attached": "Připojen:",
     "admin.coordinator.noActivity": "zatím žádná aktivita",
-    "admin.coordinator.stale": " · vypadá neaktivně — běží ještě?",
+    "admin.coordinator.idle": " · ticho — koordinátor publikuje, jen když má co dělat",
     "admin.coordinator.recomputing": "Přepočítávání…",
     "admin.coordinator.recompute": "↻ Přepočítat všechna spojení",
     "admin.coordinator.attachedOk":
@@ -3696,7 +3832,6 @@ export const messages = {
     "admin.overview.yes": "Zapnuto",
     "admin.overview.no": "Vypnuto",
     "admin.overview.coord.ok": "Aktivní",
-    "admin.overview.coord.stale": "Dlouho neviděn",
     "admin.overview.coord.unknown": "Kontroluje se…",
     "admin.overview.billing.blocked": "Potřebný zásah",
     "admin.people.search": "Hledat lidi",
@@ -3738,6 +3873,8 @@ export const messages = {
     "error.followListGuard":
       "Nepodařilo se načíst váš seznam sledovaných z relayů, proto je sledování pozastaveno, aby se nepřepsal. Zkuste to za chvíli znovu.",
     "error.signerTimeout": "Váš podpisovač neodpověděl — zkontrolujte, že je online, a zkuste to znovu.",
+    "error.signerRelaysUnreachable":
+      "Váš podpisovač neodpověděl — nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
     "error.badBunkerLink": "Tohle nevypadá jako platný bunker odkaz.",
     "error.badEventLink":
       "Tento odkaz na akci vypadá neplatně. Otevřete ho prosím znovu z pozvánky nebo ze seznamu akcí.",
@@ -3844,6 +3981,7 @@ export const messages = {
     "chat.toggle.help":
       "Přidá koncově šifrovaný skupinový chat pro členy. Vyžaduje koordinátora; koordinátor může chat číst.",
     "chat.toggle.needsCoordinator": "Pro povolení skupinového chatu přidejte koordinátora.",
+    "chat.toggle.save": "Uložit nastavení chatu",
 
     // Názvy dokumentu podle trasy (A2)
     "title.home": "Nostrautica",
@@ -3906,8 +4044,8 @@ export const messages = {
     "admin.talks.body":
       "Zapněte přednášky, aby je účastníci mohli přidávat a sledovat. Vypnuto ponechá akci jako běžné setkání.",
     "admin.talks.save": "Uložit nastavení přednášek",
-    "admin.talks.saving": "Ukládání…",
-    "admin.talks.saved": "Uloženo",
+    "admin.saving": "Ukládání…",
+    "admin.saved": "Uloženo",
     "admin.retention.title": "Smazat data účastníků po akci",
     "admin.retention.body":
       "Nastavte, jak dlouho se data účastníků uchovávají po skončení akce. Prázdné pole = uchovávat trvale.",
@@ -3917,6 +4055,17 @@ export const messages = {
       "Adresář, spárování a přednášky se z relayů smažou {n} dní po skončení akce. Mazání je podle nejlepší snahy.",
     "admin.retention.consequenceOff": "Žádné automatické mazání — data účastníků se uchovávají trvale.",
     "admin.retention.invalid": "Zadejte celý počet dní (1 nebo více), nebo pole nechte prázdné pro žádné mazání.",
+    "admin.retention.save": "Uložit nastavení mazání",
+    "admin.relays.title": "Relaye události",
+    "admin.relays.body":
+      "Relaye, na které se tato událost publikuje a kde ji lze najít. Změna ovlivní pouze tuto událost — stávající účastníci fungují na původních relayích, dokud se neobnoví. Nové události použijí výchozí relaye aplikace automaticky.",
+    "admin.relays.placeholder": "wss://relay.example.com",
+    "admin.relays.hint": "Jeden relay na řádek. Musí začínat wss:// (ws:// je povoleno pouze pro localhost).",
+    "admin.relays.save": "Uložit relaye",
+    "admin.relays.empty": "Přidejte alespoň jeden relay.",
+    "admin.relays.invalid": "Neplatná adresa relaye: {url}",
+    "admin.relays.chat":
+      "Skupinový chat používá i vlastní relaye, které jsou oddělené, protože přijímají jen chatové zprávy: {relays}",
     "admin.talks.mod.section": "Moderování přednášek",
     "admin.talks.mod.title": "Čekající přednášky",
     "admin.talks.mod.body":
@@ -4068,6 +4217,36 @@ export const messages = {
     "admin.inviteSheet.print": "Tisk",
     "admin.inviteSheet.close": "Zavřít",
     "admin.inviteSheet.scanHint": "Naskenujte a připojte se",
+
+    // Exporty pozvánek (organizátor prodal vstupenky mimo aplikaci a kupující zná
+    // jen podle e-mailu; „označení“ je spojka mezi aplikací a jeho tabulkou).
+    "admin.invites.exports": "Exporty",
+    "admin.invites.exports.intro":
+      "Dva exporty s velmi odlišnou životností. Samotné kódy existují jen po dobu, kdy je tato stránka otevřená — nikde se neukládají, ani v zařízení, ani na relayi — takže je lze exportovat pouze nyní. To, kdo se už připojil, se dá zjistit ze seznamu pozvánek zveřejněného pro tuto akci, takže tento export funguje i po měsících.",
+    "admin.invites.exportCodes.title": "Kódy k rozeslání",
+    "admin.invites.exportCodes.body":
+      "Jeden řádek na každý právě vygenerovaný kód, včetně jeho označení. Označení si spárujte s kupujícím ve vlastním seznamu — aplikace e-mailové adresy nikdy nevidí.",
+    "admin.invites.exportCodes.unavailable":
+      "Momentálně není co exportovat. Pozvánkové kódy jsou jednorázová tajemství, která se nikde neukládají, takže je lze exportovat jen ve stejné session, ve které vznikly. Pro lidi, kterým ještě musíte napsat, vygenerujte novou dávku výše.",
+    "admin.invites.exportCodes.warning":
+      "Soubor obsahuje živé pozvánkové kódy — kdo ho získá, může se připojit. Zacházejte s ním jako se seznamem hesel.",
+    "admin.invites.format": "Formát",
+    "admin.invites.format.csv": "CSV — označení, kód a odkaz",
+    "admin.invites.format.txt": "Text — jen odkazy, jeden na řádek",
+    "admin.invites.downloadCsv": "Stáhnout jako CSV",
+    "admin.invites.exportUsed.title": "Kdo se už připojil",
+    "admin.invites.exportUsed.body":
+      "Jeden řádek na každý kód, který byl pro tuto akci vydán, a zda už byl použit. Nepotřebuje kódy, takže funguje kdykoli: spárujte ho s vlastním seznamem podle označení a uvidíte, komu je třeba připomenout.",
+    "admin.invites.exportUsed.empty":
+      "Pro tuto akci zatím nebyly zveřejněny žádné pozvánkové kódy.",
+    "admin.invites.exportUsed.download": "Stáhnout přehled",
+    "admin.invites.scope": "Zahrnout",
+    "admin.invites.scope.all": "Všechny kódy",
+    "admin.invites.scope.unused": "Jen nepoužité kódy",
+    "admin.invites.usedCount": "Použito {used} z {total} kódů",
+    "admin.invites.usedNote":
+      "Když se kód jednou zobrazí jako použitý, zůstane použitý. Staré žádosti o připojení z relayů postupně mizí, takže tento počet může jen růst — nikdy vám mylně neřekne, že je kód ještě volný.",
+    "admin.invites.exportBusy": "Kontrolujeme nové registrace…",
   },
 } as const;
 

@@ -1,5 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { isBenignRelayError, categorizeError, errorDetail, isStaleChunkError } from "./errors.js";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import {
+  isBenignRelayError,
+  categorizeError,
+  errorDetail,
+  isStaleChunkError,
+  noteRelayPublishFailure,
+} from "./errors.js";
 
 describe("isBenignRelayError", () => {
   it("recognizes expected relay publish rejections", () => {
@@ -32,6 +38,44 @@ describe("isBenignRelayError", () => {
     expect(isBenignRelayError("rate-limited")).toBe(true);
     expect(isBenignRelayError(undefined)).toBe(false);
     expect(isBenignRelayError({})).toBe(false);
+  });
+});
+
+describe("noteRelayPublishFailure", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  // The whitenoise relays in a chat-enabled event's relay set refuse every kind
+  // outside 0/3/445/1059/10000/10002/10050/30443, so a 31600 or kind-5 publish
+  // fails there on EVERY attempt. That has to stay findable in a console without
+  // being an error anyone should act on.
+  it("records an expected refusal at debug level, never as an error", () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    noteRelayPublishFailure(
+      "wss://relay.us.whitenoise.chat",
+      new Error("blocked: kind 5 is not accepted by this relay"),
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      "[relay] wss://relay.us.whitenoise.chat declined the event: blocked: kind 5 is not accepted by this relay",
+    );
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("warns on a failure that does NOT read like a normal relay rejection", () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    noteRelayPublishFailure("wss://relay.example", new Error("Cannot read properties of undefined"));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("publish failed"));
+    expect(debugSpy).not.toHaveBeenCalled();
+  });
+
+  it("accepts a bare string reason and a missing one", () => {
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    noteRelayPublishFailure("wss://relay.example", "Timeout: 2500ms");
+    noteRelayPublishFailure("wss://relay.example", undefined);
+    expect(debugSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledTimes(1); // "declined" isn't a known pattern
   });
 });
 

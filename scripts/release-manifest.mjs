@@ -27,10 +27,23 @@ function git(cwd, args) {
   }
 }
 
-/** Best-effort git identity for a repo checkout at `cwd`. @param {string} cwd */
+/**
+ * Best-effort git identity for a repo checkout at `cwd`.
+ *
+ * `--dirty` needs a WORK TREE. The production build runs inside the
+ * `post-receive` hook on the build host, which exports `GIT_DIR` pointing at the
+ * BARE repo — so `git describe --tags --always --dirty` there dies with "this
+ * operation must be run in a work tree" and returns "" while `rev-parse HEAD`
+ * happily succeeds. That asymmetry is what silently froze the PWA (see
+ * `computeReleaseManifest`), so fall back to the work-tree-free form.
+ *
+ * @param {string} cwd
+ */
 export function gitInfo(cwd) {
   const sha = git(cwd, ["rev-parse", "HEAD"]);
-  const describe = git(cwd, ["describe", "--tags", "--always", "--dirty"]);
+  const describe =
+    git(cwd, ["describe", "--tags", "--always", "--dirty"]) ||
+    git(cwd, ["describe", "--tags", "--always"]);
   const commitIso = git(cwd, ["show", "-s", "--format=%cI", "HEAD"]);
   return { gitSha: sha || "unknown", describe, commitIso };
 }
@@ -75,8 +88,24 @@ function wireProtocolVersion(repoRoot) {
 export function computeReleaseManifest({ repoRoot, basePath = "" }) {
   const { gitSha, describe, commitIso } = gitInfo(repoRoot);
   const appVersion = pkgVersion(repoRoot, "packages/app/package.json");
+  // The releaseId is the service-worker precache revision for the shell
+  // index.html (vite.config.ts), so it MUST change on every commit. The old
+  // chain fell straight from `describe` to `v<version>` — and because
+  // `describe` returns "" under the deploy hook's bare GIT_DIR (see gitInfo),
+  // production shipped `revision:"v0.7.0"` for every build. Nothing else in the
+  // precache manifest varies per commit, so sw.js came out BYTE-IDENTICAL each
+  // deploy, the browser's update check found no change, and the precached shell
+  // stayed frozen at whatever build first published v0.7.0. Every navigation
+  // then booted that ancient shell, whose content-hashed chunks `rsync --delete`
+  // had long since removed → 404 → "route failed to load", unrecoverable except
+  // by a hard reload (which bypasses the SW for one navigation only).
+  // The gitSha rung makes the id vary per commit even with no tags and no work
+  // tree; `v<version>` survives only as a truly last resort (no git at all).
   const releaseId =
-    process.env.NOSTRAUTICA_RELEASE_ID || describe || `v${pkgVersion(repoRoot, "package.json")}`;
+    process.env.NOSTRAUTICA_RELEASE_ID ||
+    describe ||
+    (gitSha !== "unknown" ? gitSha.slice(0, 12) : "") ||
+    `v${pkgVersion(repoRoot, "package.json")}`;
   return {
     releaseId,
     gitSha,

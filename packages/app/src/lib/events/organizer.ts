@@ -72,7 +72,8 @@ import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
-import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
+import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -333,7 +334,7 @@ export async function approveAttendee(
   const rosterEvent = buildRosterEvent(ctx, eidSk, eckBytes, eck.id, roster, rosterAt);
 
   await Promise.all([
-    publishOrQueue(grantWrap as any, ctx.config.relays),
+    publishAccountGiftWrap(grantWrap as any, req.attendeePubkey, ctx.config.relays),
     publishOrQueue(entryEvent, ctx.config.relays),
     publishOrQueue(rosterEvent, ctx.config.relays),
   ]);
@@ -438,7 +439,7 @@ export async function sendAdminCommand(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays);
 }
 
 /**
@@ -478,16 +479,8 @@ export async function addCoOrganizer(
       granted_by: getPublicKey(eidSk),
     },
   });
-  // Publish to the event's own relays UNIONED with the app defaults, because the
-  // two halves of this hand-off disagreed about where to look: this wrap went to
-  // `ctx.config.relays`, while the receiving side (attendee.receiveGrants) scans
-  // DEFAULT_RELAYS only. For an event created with a custom relay set the grant
-  // therefore landed exactly where the co-organizer's client never reads, and
-  // their Admin page waited on a grant that was published and unreachable. The
-  // union keeps the event's relays authoritative and guarantees the overlap the
-  // reader needs.
   return toOutcome(
-    await publishOrQueue(wrap as any, unionRelays(ctx.config.relays, DEFAULT_RELAYS)),
+    await publishAccountGiftWrap(wrap as any, coOrganizerPubkey, ctx.config.relays),
   );
 }
 
@@ -628,6 +621,44 @@ export interface GeneratedInvite {
 }
 
 /**
+ * Every invite ever issued for this event: the `{h, label}` set from the
+ * published 31601 (replaceable, so it accumulates across every batch the
+ * organizer generated, on any of their devices).
+ *
+ * Two callers, for two reasons. `generateInvites` needs it because labels are
+ * numbered off the merged list (`invite-${invites.length + 1}`), which is what
+ * makes them unique and monotonic across batches — and because the republish
+ * must not drop earlier codes. The "who has joined" export needs it because the
+ * labels ARE the report: the codes themselves are never stored anywhere, so this
+ * plaintext hash+label list is the only durable record that a given invite was
+ * ever handed out.
+ *
+ * Returns `[]` rather than throwing on a missing/corrupt list, exactly as the
+ * generate path always did — an unreadable list means "nothing published yet"
+ * for numbering purposes, and the export layer unions with its own cache so an
+ * empty answer can't erase labels it already knows (see invite-export.ts).
+ */
+export async function fetchPublishedInvites(
+  ctx: EventContext,
+): Promise<{ h: string; label?: string }[]> {
+  const existing = await fetchEvents(
+    {
+      kinds: [KIND_INVITE_LIST],
+      authors: [ctx.config.eidPubkey],
+      "#d": [splitCoordinate(ctx.coordinate).identifier],
+    },
+    ctx.config.relays,
+  );
+  const latest = pickLatest(existing);
+  if (!latest) return [];
+  try {
+    return inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Generate N single-use invite codes (spec §6.5). Each code IS an nsec; the
  * organizer publishes only sha256(invite-pubkey) in a replaceable 31601 (so
  * observers can't enumerate or front-run codes). The nsec rides the link's URL
@@ -644,20 +675,9 @@ export async function generateInvites(
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eidSk = hexToBytes(keys.eidNsecHex);
 
-  // Merge with any already-published invite hashes (replaceable event).
-  const existing = await fetchEvents(
-    { kinds: [KIND_INVITE_LIST], authors: [ctx.config.eidPubkey], "#d": [splitCoordinate(ctx.coordinate).identifier] },
-    ctx.config.relays,
-  );
-  const latest = pickLatest(existing);
-  let invites: { h: string; label?: string }[] = [];
-  if (latest) {
-    try {
-      invites = inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
-    } catch {
-      invites = [];
-    }
-  }
+  // Merge with any already-published invite hashes (replaceable event) — this is
+  // also what makes labels monotonic across batches (see fetchPublishedInvites).
+  const invites = await fetchPublishedInvites(ctx);
 
   const generated: GeneratedInvite[] = [];
   const base = appBaseUrl.replace(/[#/]+$/, "");
@@ -789,7 +809,7 @@ export async function revokeAttendeeClient(
         granted_by: getPublicKey(eidSk),
       },
     });
-    pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
+    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
 
   pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
@@ -866,7 +886,7 @@ async function rotateEckAndInbox(
       kind: KIND_KEY_GRANT,
       content: { v: 2, a: ctx.coordinate, role: a.role, eck: eckAll, granted_by: eidPubkey },
     });
-    pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
+    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
   pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
   await Promise.all(pubs);
@@ -900,28 +920,54 @@ async function rotateEckAndInbox(
  */
 export async function updateEventConfig(
   ctx: EventContext,
-  changes: Partial<{ talks: TalksMode; maxTalkSec: number; chat: ChatBackend[]; retentionDays: number | undefined }>,
+  changes: Partial<{
+    talks: TalksMode;
+    maxTalkSec: number;
+    chat: ChatBackend[];
+    retentionDays: number | undefined;
+    relays: string[];
+  }>,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
-  // Turning chat on for an already-published event: fold in the Whitenoise
-  // relays up front too, same as at-creation (create.ts) — the coordinator's
-  // routing self-heal (ensureChat) covers the group's own MLS state, but the
-  // event's public 31600 relay list should already advertise them.
-  const relays =
-    changes.chat?.length ? unionRelays(ctx.config.relays, WHITENOISE_RELAYS) : ctx.config.relays;
-  const built = buildEventConfig({ ...ctx.config, ...changes, relays });
+  // Relay list. An admin can rewrite it explicitly (Settings → Relays); otherwise
+  // the event keeps the relays it was published with. We NEVER silently migrate a
+  // live event onto changed app defaults — only newly created events pick those up
+  // (create.ts).
+  const chatActive = (changes.chat ?? ctx.config.chat).length > 0;
+  const relays = changes.relays ? unionRelays(changes.relays) : ctx.config.relays;
+  if (changes.relays && relays.length === 0) {
+    throw new Error("at least one relay is required");
+  }
+  // Chat relays are a SEPARATE set (`chat_relay` tags) and are never folded into
+  // the list above: the Whitenoise interop pair refuses every kind we publish
+  // except the chat ones, so having them in `relays` — as this did until
+  // 2026-07-28 — meant this very republish drew a "blocked: kind 31600 is not
+  // accepted by this relay" from two of the event's own relays.
+  //
+  // Whether chat is being turned on now or is already active, ensure the interop
+  // pair is present (same as at-creation) so a manual relay edit cannot drop what
+  // Marmot routing depends on. Turning chat OFF leaves the set as-is rather than
+  // clearing it: the group may still exist and be draining, and a re-enable must
+  // not have to rediscover the relays it was routing over.
+  const chatRelays = chatActive
+    ? unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays))
+    : chatRelaysOf(ctx.config);
+  const built = buildEventConfig({ ...ctx.config, ...changes, relays, chatRelays });
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
-  // authoritative and the setting silently doesn't take.
+  // authoritative and the setting silently doesn't take. Read + publish across the
+  // OLD and NEW relay sets together: the current version may live only on the old
+  // relays (so the tie-break must see it), and the update must reach both the
+  // relays existing subscribers watch and any newly added ones.
   await publishMonotonic({
     kind: built.kind,
     author: ctx.config.eidPubkey,
     identifier: ctx.config.d,
-    relays: ctx.config.relays,
+    relays: unionRelays(ctx.config.relays, relays),
     sign: (created_at) =>
       finalizeEvent(
         { kind: built.kind, created_at, tags: built.tags, content: built.content },
@@ -964,7 +1010,7 @@ export async function attachCoordinator(
       kind: KIND_ADMIN_COMMAND,
       content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
     });
-    await publishOrQueue(detachWrap as any, ctx.config.relays);
+    await publishAccountGiftWrap(detachWrap as any, previous!, ctx.config.relays);
     const rotated = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
     einboxNsecHex = rotated.newInboxNsecHex;
     einboxPubkey = rotated.newInboxPubkey;
@@ -1017,7 +1063,7 @@ export async function attachCoordinator(
           eidSk,
         ),
     }),
-    publishOrQueue(grantWrap as any, ctx.config.relays),
+    publishAccountGiftWrap(grantWrap as any, coordinatorPubkey, ctx.config.relays),
   ]);
 
   // 3. Persist the new gen locally and (durably) in the 30078 backup so a re-attach
@@ -1094,7 +1140,7 @@ export async function detachCoordinator(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
   });
-  await publishOrQueue(detachWrap as any, ctx.config.relays);
+  await publishAccountGiftWrap(detachWrap as any, previous, ctx.config.relays);
 
   // 2. Rotate the ECK + E_inbox (NIP §3.7): a departed coordinator may retain the
   //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to

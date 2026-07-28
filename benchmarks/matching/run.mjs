@@ -256,7 +256,9 @@ async function main() {
     ? `pairwise|${MODEL}|${subset ? "subset" : "full"}`
     : `${args.prompt}|K${args.k}|${MODEL}|seed${seed}|${subset ? "subset" : "full"}`;
 
-  const perTarget = await pool(targets, worker, 4);
+  // 16, not 4: each target's batches are keyed and shuffled per (target, seed), so
+  // concurrency changes nothing but wall-clock. Cached calls make re-runs free.
+  const perTarget = await pool(targets, worker, 16);
   const edges = perTarget.flatMap((r) => r.edges);
   const usage = perTarget.reduce(
     (a, r) => ({

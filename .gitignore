@@ -32,6 +32,13 @@ logo-prompts.txt
 # internal AI-agent audit/planning notes — point-in-time snapshots, not docs for
 # readers; kept local, never committed or deployed
 docs/internal/
+# …and the same class of file wherever it lands. CLAUDE.md has always said these
+# must never reach the public mirror, but until 2026-07-28 only `docs/internal/`
+# was actually ignored: a root-level GPT56-AUDIT.md sat untracked-and-unignored,
+# one `git add -A` away from being committed and then published. A rule enforced
+# only by whoever remembers to check `git status` is not enforced.
+*-AUDIT.md
+session-*.md
 
 # playwright artifacts
 e2e/test-results/

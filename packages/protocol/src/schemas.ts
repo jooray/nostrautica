@@ -666,8 +666,24 @@ export type DirectoryEntryContent = z.infer<typeof directoryEntryContentSchema>;
 export const MAX_CHAT_KEY_LABEL = 60;
 /** Stable per-device 30443 slot id carried in the attestation. */
 export const MAX_CHAT_KEY_CLIENT_ID = 120;
-/** Concurrent device keys one account may hold per event (NIP §10.1). */
-export const MAX_CHAT_KEYS_PER_ACCOUNT = 5;
+/**
+ * Concurrent device keys one account may hold per event (NIP §10.1).
+ *
+ * Raised 5 → 10 on 2026-07-29. Slots are consumed but never reclaimed by normal
+ * use: clearing site data (or any state wipe) makes the app mint a FRESH chat
+ * device key and attest it, while the old binding stays `active` forever because
+ * nothing revokes it. An organizer debugging a stale-PWA incident burned all
+ * five on one browser in an afternoon and was then permanently refused entry to
+ * their own event's chat — "[chat] REJECTED 21607 add: account already at the
+ * 5-device cap" — with the UI blaming an offline coordinator.
+ *
+ * 10 is headroom, not a fix: there is still no way to revoke a stale binding
+ * (the 21607 `revoke` op exists in the protocol but nothing in the app sends
+ * one), so slots still leak one per wipe and a heavy user will hit 10 eventually.
+ * The real fix is a device list with a revoke action, or evicting the
+ * least-recently-used binding when a new attestation arrives at the cap.
+ */
+export const MAX_CHAT_KEYS_PER_ACCOUNT = 10;
 
 export const chatKeyAttestationContentSchema = z
   .object({

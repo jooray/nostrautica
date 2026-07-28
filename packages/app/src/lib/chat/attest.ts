@@ -24,7 +24,7 @@ import type { Rumor } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 
 /** The attestation body a caller supplies — `v`/`a`/`proof` are filled in here. */
 export interface AttestationInput {
@@ -104,7 +104,7 @@ export async function sendChatKeyAttestation(
     tags: [["a", ctx.coordinate]],
     created_at: createdAt, // the rumor's created_at must equal what the proof signs
   });
-  await publishOrQueue(wrap as unknown as Parameters<typeof publishOrQueue>[0], ctx.config.relays);
+  await publishAccountGiftWrap(wrap as never, coordinator, ctx.config.relays);
 }
 
 /**

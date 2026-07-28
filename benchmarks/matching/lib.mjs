@@ -11,8 +11,17 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 const BASE = "https://api.venice.ai/api/v1";
+// Checked where it is USED, not at import. Importing this module is what
+// `DRY=1` (print the exact prompt bytes), `icebreaker-regrade.mjs`, and
+// `icebreaker-compare.mjs` all do, and none of them touch the network — a
+// top-level throw made every offline path require a key it never spends. That
+// matters on a machine you are setting up: the cheapest way to check a harness
+// works there is to run the parts that cost nothing.
 const KEY = process.env.VENICE_API_KEY;
-if (!KEY) throw new Error("VENICE_API_KEY not set");
+function requireKey() {
+  if (!KEY) throw new Error("VENICE_API_KEY not set (only needed for calls that hit the API)");
+  return KEY;
+}
 
 // ── seeded RNG ────────────────────────────────────────────────────────────────
 export function mulberry32(seed) {
@@ -100,11 +109,18 @@ export async function complete({ model, system, user, schema, schemaName, temper
   }
   const started = Date.now();
   let lastErr;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  // 12 attempts with the backoff capped, not 6 uncapped. Venice rejects requests
+  // beyond a model's concurrency allowance with an immediate 429 rather than
+  // queueing them, so under load a call is not slow — it is refused, repeatedly,
+  // and 6 attempts of a 1.7^n backoff give up after about a minute. A lost call is
+  // a lost BATCH of 30 graded openers, which is a hole in the sample; waiting is
+  // free by comparison. The cap keeps the tail bounded (~3 min worst case) instead
+  // of letting 1.7^11 turn one unlucky call into a four-minute sleep.
+  for (let attempt = 0; attempt < 12; attempt++) {
     try {
       const res = await fetch(`${BASE}/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${KEY}` },
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireKey()}` },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
@@ -112,7 +128,16 @@ export async function complete({ model, system, user, schema, schemaName, temper
         // Retry transient; don't retry 4xx that are our fault (except 429).
         if (res.status === 429 || res.status >= 500) {
           lastErr = new Error(`${res.status} ${txt.slice(0, 200)}`);
-          await sleep(2000 * Math.pow(1.7, attempt) + Math.random() * 800);
+          // Say so. This retry was silent, and silence here is indistinguishable
+          // from a slow model: Venice answers concurrent requests for a busy model
+          // with 429 "currently overloaded" within ~400ms, so a run with CONC well
+          // above what the model is accepting looks like it is working — every
+          // worker is simply asleep in the backoff. That cost hours before anyone
+          // probed the endpoint directly. RETRY_QUIET=1 silences it again.
+          if (!process.env.RETRY_QUIET) {
+            console.error(`  [retry ${attempt + 1}/12] ${res.status} ${txt.slice(0, 90).replace(/\s+/g, " ")}`);
+          }
+          await sleep(Math.min(20000, 2000 * Math.pow(1.7, attempt)) + Math.random() * 800);
           continue;
         }
         throw new Error(`${res.status} ${txt.slice(0, 300)}`);
