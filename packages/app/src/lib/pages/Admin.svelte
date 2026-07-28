@@ -463,9 +463,28 @@
     if (s < 86400) return t("admin.coord.hAgo", { n: Math.round(s / 3600) });
     return t("admin.coord.dAgo", { n: Math.round(s / 86400) });
   }
-  const coordStale = $derived(
+  // How long a gap before we EXPLAIN the gap. Not a health threshold — see below.
+  const COORD_QUIET_AFTER_SEC = 3600;
+  /**
+   * Purely cosmetic: whether to append "the coordinator only publishes when
+   * there's something to do" to the last-activity line.
+   *
+   * This used to be `coordStale`, painted in danger red with "looks stale — is it
+   * still running?" past one hour, and it was simply wrong (production report
+   * 2026-07-28: a healthy coordinator flagged as dying after a 20-hour overnight
+   * gap). `fetchCoordinatorLastSeen` reads the newest 31603/31604/31605/31606 the
+   * coordinator authored for THIS event — its work product, not a heartbeat. The
+   * coordinator publishes those only when someone joins or a job runs, and the
+   * protocol has no periodic liveness signal at all: kind 31611 is a discovery
+   * announcement published once per boot, and 21606 statuses are per-job. So an
+   * event where nobody joined overnight produces exactly the same silence as a
+   * dead daemon, and no threshold can separate them. Absence of work is not
+   * evidence of death, so we no longer claim it is — we just say why the number
+   * is large.
+   */
+  const coordQuiet = $derived(
     coordLastSeen !== undefined &&
-      Math.floor(Date.now() / 1000) - coordLastSeen > 3600,
+      Math.floor(Date.now() / 1000) - coordLastSeen > COORD_QUIET_AFTER_SEC,
   );
 
   // Coordinator status (kind 21606, audit Q12): poisoned/health items surfaced by
@@ -534,7 +553,6 @@
       talksAwaiting: visibleTalks.length,
       matchesAvailable: ctx?.config.matching === "on",
       hasCoordinator: !!ctx?.config.coordinator,
-      coordinatorStale: coordStale,
       coordinatorUnknown: coordLastSeen === undefined,
       billingBlocked: !!billing,
     }),
@@ -1031,18 +1049,18 @@
       <div class="field-label">{t("admin.coordinator.title")}</div>
       <p class="muted">{t("admin.coordinator.attached")} <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
       <p class="muted" style="margin:0 0 0.5rem">
-        <!-- Stale/unknown liveness is never green (§9). -->
+        <!-- Unknown liveness is never green (§9) — but a known-but-old last
+             activity is not a fault, so it stays green and gets an explanation
+             instead of a red warning (see coordQuiet). -->
         {#if !coordLivenessChecked && coordLastSeen === undefined}
           <span class="badge warn">{t("admin.checkingStatus")}</span>
         {:else if coordLastSeen === undefined}
           <span class="badge warn">{t("admin.coordinator.notSeen")}</span>
-        {:else if coordStale}
-          <span class="badge warn">{sinceLabel(coordLastSeen)}</span>
         {:else}
           <span class="badge ok">{sinceLabel(coordLastSeen)}</span>
         {/if}
-        {#if coordStale}
-          <span style="color:var(--danger)">{t("admin.coordinator.stale")}</span>
+        {#if coordQuiet}
+          <span>{t("admin.coordinator.idle")}</span>
         {/if}
       </p>
       {#if billing}

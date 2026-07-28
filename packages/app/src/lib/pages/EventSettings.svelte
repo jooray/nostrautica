@@ -1365,9 +1365,9 @@
     </select>
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveTalks} disabled={savingTalks || talksMode === ctx?.config.talks}>
-        {savingTalks ? t("admin.talks.saving") : t("admin.talks.save")}
+        {savingTalks ? t("admin.saving") : t("admin.talks.save")}
       </button>
-      {#if talksSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if talksSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 
@@ -1394,9 +1394,9 @@
     </p>
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveRetention} disabled={savingRetention || !retentionDirty}>
-        {savingRetention ? t("admin.talks.saving") : t("admin.talks.save")}
+        {savingRetention ? t("admin.saving") : t("admin.retention.save")}
       </button>
-      {#if retentionSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if retentionSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 
@@ -1415,9 +1415,9 @@
     <p class="muted" style="margin:0.4rem 0 0;font-size:0.8rem">{t("admin.relays.hint")}</p>
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveRelays} disabled={savingRelays || !relaysDirty}>
-        {savingRelays ? t("admin.talks.saving") : t("admin.relays.save")}
+        {savingRelays ? t("admin.saving") : t("admin.relays.save")}
       </button>
-      {#if relaysSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if relaysSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 
@@ -1438,9 +1438,9 @@
         onclick={saveChat}
         disabled={savingChat || !ctx?.config.coordinator || chatEnabled === (ctx?.config.chat.includes("marmot") ?? false)}
       >
-        {savingChat ? t("admin.talks.saving") : t("admin.talks.save")}
+        {savingChat ? t("admin.saving") : t("chat.toggle.save")}
       </button>
-      {#if chatSaved}<span class="muted">{t("admin.talks.saved")}</span>{/if}
+      {#if chatSaved}<span class="muted">{t("admin.saved")}</span>{/if}
     </div>
   </div>
 

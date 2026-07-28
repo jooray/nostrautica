@@ -21,8 +21,6 @@
         return t("admin.overview.no");
       case "coord.ok":
         return t("admin.overview.coord.ok");
-      case "coord.stale":
-        return t("admin.overview.coord.stale");
       case "coord.unknown":
         return t("admin.overview.coord.unknown");
       case "billing.blocked":

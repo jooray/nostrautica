@@ -85,6 +85,7 @@ export const messages = {
     "home.noEvents": "No events yet",
     "home.noEvents.body": "Open an invite link to join an event, or create your own.",
     "home.loadingEvents": "Loading your events…",
+    "home.restoringSession": "Reconnecting your signer…",
     "home.how.title": "How it works",
     "home.how.record": "Record a short intro video (and optionally a talk).",
     "home.how.matched": "Get matched with people whose skills complement yours.",
@@ -861,7 +862,9 @@ export const messages = {
     "admin.coordinator.title": "AI coordinator",
     "admin.coordinator.attached": "Attached:",
     "admin.coordinator.noActivity": "no activity yet",
-    "admin.coordinator.stale": " · looks stale — is it still running?",
+    // NOT an alarm: "last seen" is the coordinator's newest published work for
+    // this event, so a quiet event simply produces no events. See Admin.svelte.
+    "admin.coordinator.idle": " · quiet — the coordinator only publishes when there's something to do",
     "admin.coordinator.recomputing": "Recomputing…",
     "admin.coordinator.recompute": "↻ Recompute all matches",
     "admin.coordinator.attachedOk":
@@ -995,7 +998,6 @@ export const messages = {
     "admin.overview.yes": "On",
     "admin.overview.no": "Off",
     "admin.overview.coord.ok": "Live",
-    "admin.overview.coord.stale": "Not seen recently",
     "admin.overview.coord.unknown": "Checking…",
     "admin.overview.billing.blocked": "Action needed",
     "admin.people.search": "Search people",
@@ -1145,6 +1147,7 @@ export const messages = {
     "chat.toggle.help":
       "Adds an end-to-end-encrypted group chat for members. Requires a coordinator; the coordinator can read the chat.",
     "chat.toggle.needsCoordinator": "Add a coordinator to enable group chat.",
+    "chat.toggle.save": "Save chat setting",
 
     // Per-route document titles (A2)
     "title.home": "Nostrautica",
@@ -1207,8 +1210,14 @@ export const messages = {
     "admin.talks.body":
       "Enable talks so attendees can submit and watch them. Off keeps the event as a normal meetup.",
     "admin.talks.save": "Save talks setting",
-    "admin.talks.saving": "Saving…",
-    "admin.talks.saved": "Saved",
+    // Shared busy/done states for every save button on Event settings. These used
+    // to be `admin.talks.saving`/`admin.talks.saved`, and because they were reached
+    // for from the retention/relays/chat cards too, `admin.talks.save` came along
+    // with them — so unrelated buttons all read "Save talks setting" in production
+    // (report 2026-07-28). Only the transient states are interchangeable; every
+    // idle label must name its own setting.
+    "admin.saving": "Saving…",
+    "admin.saved": "Saved",
     "admin.retention.title": "Delete member data after the event",
     "admin.retention.body":
       "Set how long member data is kept after the event ends. Leave blank to keep it indefinitely.",
@@ -1218,6 +1227,7 @@ export const messages = {
       "The directory, matches and talks are deleted from relays {n} days after the event ends. Deletion is best-effort.",
     "admin.retention.consequenceOff": "No automatic deletion — member data is kept indefinitely.",
     "admin.retention.invalid": "Enter a whole number of days (1 or more), or leave it blank for no deletion.",
+    "admin.retention.save": "Save deletion setting",
     "admin.relays.title": "Event relays",
     "admin.relays.body":
       "The relays this event publishes to and is found on. Changing this only affects this event — existing attendees keep working on the old relays until they refresh. New events use the app defaults automatically.",
@@ -1479,6 +1489,7 @@ export const messages = {
     "home.noEvents": "Zatiaľ žiadne podujatia",
     "home.noEvents.body": "Otvorte pozvánku a pripojte sa k podujatiu, alebo si vytvorte vlastné.",
     "home.loadingEvents": "Načítavajú sa vaše podujatia…",
+    "home.restoringSession": "Znovu sa pripájame k vášmu podpisovaču…",
     "home.how.title": "Ako to funguje",
     "home.how.record": "Nahrajte krátke predstavovacie video (a voliteľne aj prednášku).",
     "home.how.matched": "Spojíme vás s ľuďmi, ktorých zručnosti dopĺňajú tie vaše.",
@@ -2259,7 +2270,7 @@ export const messages = {
     "admin.coordinator.title": "AI koordinátor",
     "admin.coordinator.attached": "Pripojený:",
     "admin.coordinator.noActivity": "zatiaľ žiadna aktivita",
-    "admin.coordinator.stale": " · vyzerá neaktívne — beží ešte?",
+    "admin.coordinator.idle": " · ticho — koordinátor publikuje, len keď má čo robiť",
     "admin.coordinator.recomputing": "Prepočítava sa…",
     "admin.coordinator.recompute": "↻ Prepočítať všetky spojenia",
     "admin.coordinator.attachedOk":
@@ -2395,7 +2406,6 @@ export const messages = {
     "admin.overview.yes": "Zapnuté",
     "admin.overview.no": "Vypnuté",
     "admin.overview.coord.ok": "Aktívny",
-    "admin.overview.coord.stale": "Dlho nevidený",
     "admin.overview.coord.unknown": "Kontroluje sa…",
     "admin.overview.billing.blocked": "Potrebný zásah",
     "admin.people.search": "Hľadať ľudí",
@@ -2541,6 +2551,7 @@ export const messages = {
     "chat.toggle.help":
       "Pridá end-to-end šifrovaný skupinový chat pre členov. Vyžaduje koordinátora; koordinátor môže chat čítať.",
     "chat.toggle.needsCoordinator": "Pre povolenie skupinového chatu pridajte koordinátora.",
+    "chat.toggle.save": "Uložiť nastavenie chatu",
     "more.eventPrivacy.link": "Zobraziť podrobnosti o súkromí",
 
     // Per-route document titles (A2)
@@ -2604,8 +2615,8 @@ export const messages = {
     "admin.talks.body":
       "Zapnite prednášky, aby ich účastníci mohli pridávať a pozerať. Vypnuté ponechá podujatie ako bežné stretnutie.",
     "admin.talks.save": "Uložiť nastavenie prednášok",
-    "admin.talks.saving": "Ukladá sa…",
-    "admin.talks.saved": "Uložené",
+    "admin.saving": "Ukladá sa…",
+    "admin.saved": "Uložené",
     "admin.retention.title": "Zmazať údaje účastníkov po podujatí",
     "admin.retention.body":
       "Nastavte, ako dlho sa údaje účastníkov uchovávajú po skončení podujatia. Prázdne pole = uchovávať natrvalo.",
@@ -2615,6 +2626,7 @@ export const messages = {
       "Adresár, spárovania a prednášky sa z relé zmažú {n} dní po skončení podujatia. Mazanie je podľa najlepšej snahy.",
     "admin.retention.consequenceOff": "Žiadne automatické mazanie — údaje účastníkov sa uchovávajú natrvalo.",
     "admin.retention.invalid": "Zadajte celý počet dní (1 alebo viac), alebo pole nechajte prázdne pre žiadne mazanie.",
+    "admin.retention.save": "Uložiť nastavenie mazania",
     "admin.relays.title": "Relaye udalosti",
     "admin.relays.body":
       "Relaye, na ktoré sa táto udalosť publikuje a kde ju možno nájsť. Zmena ovplyvní iba túto udalosť — existujúci účastníci fungujú na pôvodných relayoch, kým sa neobnovia. Nové udalosti použijú predvolené relaye aplikácie automaticky.",
@@ -2880,6 +2892,7 @@ export const messages = {
     "home.noEvents": "Zatím žádné akce",
     "home.noEvents.body": "Otevřete pozvánku a připojte se k akci, nebo si vytvořte vlastní.",
     "home.loadingEvents": "Načítání vašich akcí…",
+    "home.restoringSession": "Znovu se připojujeme k vašemu podepisovači…",
     "home.how.title": "Jak to funguje",
     "home.how.record": "Nahrajte krátké představovací video (a volitelně i přednášku).",
     "home.how.matched": "Propojíme vás s lidmi, jejichž dovednosti doplňují ty vaše.",
@@ -3658,7 +3671,7 @@ export const messages = {
     "admin.coordinator.title": "AI koordinátor",
     "admin.coordinator.attached": "Připojen:",
     "admin.coordinator.noActivity": "zatím žádná aktivita",
-    "admin.coordinator.stale": " · vypadá neaktivně — běží ještě?",
+    "admin.coordinator.idle": " · ticho — koordinátor publikuje, jen když má co dělat",
     "admin.coordinator.recomputing": "Přepočítávání…",
     "admin.coordinator.recompute": "↻ Přepočítat všechna spojení",
     "admin.coordinator.attachedOk":
@@ -3794,7 +3807,6 @@ export const messages = {
     "admin.overview.yes": "Zapnuto",
     "admin.overview.no": "Vypnuto",
     "admin.overview.coord.ok": "Aktivní",
-    "admin.overview.coord.stale": "Dlouho neviděn",
     "admin.overview.coord.unknown": "Kontroluje se…",
     "admin.overview.billing.blocked": "Potřebný zásah",
     "admin.people.search": "Hledat lidi",
@@ -3944,6 +3956,7 @@ export const messages = {
     "chat.toggle.help":
       "Přidá koncově šifrovaný skupinový chat pro členy. Vyžaduje koordinátora; koordinátor může chat číst.",
     "chat.toggle.needsCoordinator": "Pro povolení skupinového chatu přidejte koordinátora.",
+    "chat.toggle.save": "Uložit nastavení chatu",
 
     // Názvy dokumentu podle trasy (A2)
     "title.home": "Nostrautica",
@@ -4006,8 +4019,8 @@ export const messages = {
     "admin.talks.body":
       "Zapněte přednášky, aby je účastníci mohli přidávat a sledovat. Vypnuto ponechá akci jako běžné setkání.",
     "admin.talks.save": "Uložit nastavení přednášek",
-    "admin.talks.saving": "Ukládání…",
-    "admin.talks.saved": "Uloženo",
+    "admin.saving": "Ukládání…",
+    "admin.saved": "Uloženo",
     "admin.retention.title": "Smazat data účastníků po akci",
     "admin.retention.body":
       "Nastavte, jak dlouho se data účastníků uchovávají po skončení akce. Prázdné pole = uchovávat trvale.",
@@ -4017,6 +4030,7 @@ export const messages = {
       "Adresář, spárování a přednášky se z relayů smažou {n} dní po skončení akce. Mazání je podle nejlepší snahy.",
     "admin.retention.consequenceOff": "Žádné automatické mazání — data účastníků se uchovávají trvale.",
     "admin.retention.invalid": "Zadejte celý počet dní (1 nebo více), nebo pole nechte prázdné pro žádné mazání.",
+    "admin.retention.save": "Uložit nastavení mazání",
     "admin.relays.title": "Relaye události",
     "admin.relays.body":
       "Relaye, na které se tato událost publikuje a kde ji lze najít. Změna ovlivní pouze tuto událost — stávající účastníci fungují na původních relayích, dokud se neobnoví. Nové události použijí výchozí relaye aplikace automaticky.",
