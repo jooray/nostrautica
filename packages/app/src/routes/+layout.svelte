@@ -34,6 +34,10 @@
   import EventNav from "$lib/components/EventNav.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import { releaseSummary } from "$lib/release.js";
+  import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { cachedDms, fetchDms } from "$lib/events/dm.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
+  import { connectNdk } from "$lib/nostr/ndk.js";
 
   let { children } = $props();
   let booted = $state(false);
@@ -130,6 +134,44 @@
     if (!booted || !pubkey || !signer || prefetchedIdentity === pubkey) return;
     prefetchedIdentity = pubkey;
     untrack(() => prefetchIdentity(signer));
+  });
+
+  // Lazy ciphertext-only inbox activity poll. This exists only while the app is
+  // alive (there is no service-worker/background polling) and never asks a signer
+  // to decrypt, so Amber/NIP-46 cannot be prompted just to paint a nav badge.
+  $effect(() => {
+    void cacheHydration.version;
+    const owner = session.pubkey;
+    if (!booted || !owner) {
+      untrack(() => dmUnread.init(null));
+      return;
+    }
+    untrack(() => {
+      dmUnread.init(owner);
+      dmUnread.syncMessages(owner, cachedDms(owner));
+    });
+    let stopped = false;
+    const poll = async () => {
+      await connectNdk().catch(() => {});
+      if (stopped) return;
+      // Local keys can unwrap silently, so keep an accurate unread count warm.
+      // Remote/extension signers stay ciphertext-only to avoid surprise prompts.
+      if (session.signer?.method === "local" || session.signer?.getSecretKey?.()) {
+        const messages = await fetchDms(session.signer).catch(() => undefined);
+        if (!stopped && messages) {
+          dmUnread.syncMessages(owner, messages);
+          dmUnread.acknowledgeEncryptedActivity();
+        }
+      } else {
+        await dmUnread.pollEncryptedInbox(owner).catch(() => {});
+      }
+    };
+    void untrack(poll);
+    const timer = setInterval(() => void untrack(poll), 30_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
   });
 
   // Per-route document title, focus management, and a polite announcement (A2).

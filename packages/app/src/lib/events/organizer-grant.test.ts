@@ -18,19 +18,27 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { bytesToHex, makeCoordinate } from "@nostrautica/protocol";
+import { bytesToHex, makeCoordinate, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
   fetchEventsRelayOnly: vi.fn(),
   publishSigned: vi.fn(),
 }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly, publishSigned }));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  fetchEvents,
+  fetchEventsRelayOnly,
+  publishSigned,
+  isAcceptedRelayUrl: (value: string) => value.startsWith("wss://"),
+}));
 
 import {
   addCoOrganizer,
+  approveAttendee,
   checkForOrganizerGrant,
+  fetchPending,
   pollForOrganizerGrant,
+  sendAdminCommand,
 } from "./organizer.js";
 import {
   __setKeystoreBackend,
@@ -110,7 +118,7 @@ beforeEach(() => {
   __setKeystoreBackend(store.backend);
   setActiveOwner(OWNER);
   fetchEvents.mockReset();
-  fetchEventsRelayOnly.mockReset();
+  fetchEventsRelayOnly.mockReset().mockResolvedValue([]);
   publishSigned.mockReset();
 });
 
@@ -272,6 +280,22 @@ describe("addCoOrganizer publishes where the receiver actually reads", () => {
     for (const url of DEFAULT_RELAYS) expect(relays).toContain(url);
   });
 
+  it("includes the co-organizer's kind-10050 inbox", async () => {
+    vi.stubGlobal("navigator", { onLine: true });
+    publishSigned.mockResolvedValue(undefined);
+    fetchEvents.mockResolvedValue([{
+      kind: KIND_DM_RELAY_LIST,
+      pubkey: coOrganizer,
+      created_at: 1,
+      tags: [["relay", "wss://co-organizer-inbox.example"]],
+    }]);
+    await saveEventKeys(organizerKeys(), OWNER);
+
+    await addCoOrganizer({} as AppSigner, ctx, coOrganizer);
+
+    expect(publishSigned.mock.calls[0][1]).toContain("wss://co-organizer-inbox.example");
+  });
+
   it("reports 'queued' — not 'Sent ✓' — when the wrap only reached the outbox", async () => {
     // Venue Wi-Fi routinely blocks WSS. addCoOrganizer discarded publishOrQueue's
     // boolean and the settings page set "Sent ✓" unconditionally, so the organizer
@@ -301,5 +325,67 @@ describe("addCoOrganizer publishes where the receiver actually reads", () => {
     await expect(addCoOrganizer({} as AppSigner, ctx, coOrganizer)).rejects.toThrow(
       /organizer keys not available/,
     );
+  });
+});
+
+describe("account-addressed organizer wraps", () => {
+  const attendee = getPublicKey(generateSecretKey());
+  const coordinator = getPublicKey(generateSecretKey());
+  const ctx = {
+    coordinate: COORD,
+    config: {
+      d: "conf-2026",
+      eidPubkey: COORD.split(":")[1],
+      inbox: getPublicKey(generateSecretKey()),
+      coordinator,
+      relays: ["wss://event-relay.example"],
+    },
+  } as unknown as EventContext;
+
+  beforeEach(() => {
+    vi.stubGlobal("navigator", { onLine: true });
+    publishSigned.mockResolvedValue(undefined);
+    fetchEvents.mockImplementation(async (filter: { authors?: string[] }) => [{
+      kind: KIND_DM_RELAY_LIST,
+      pubkey: filter.authors?.[0],
+      created_at: 1,
+      tags: [["relay", `wss://${filter.authors?.[0] === attendee ? "attendee" : "coordinator"}-inbox.example`]],
+    }]);
+  });
+
+  it("routes an initial attendee ECK grant to the attendee inbox plus event/default relays", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+
+    await approveAttendee({} as AppSigner, ctx, {
+      attendeePubkey: attendee,
+      name: "Attendee",
+      message: "",
+      rsvpPublic: false,
+      rumorCreatedAt: 1,
+    });
+
+    const wrapCall = publishSigned.mock.calls.find(([event]) => event.kind === 1059)!;
+    expect(wrapCall[1]).toContain("wss://attendee-inbox.example");
+    expect(wrapCall[1]).toContain("wss://event-relay.example");
+    for (const url of DEFAULT_RELAYS) expect(wrapCall[1]).toContain(url);
+  });
+
+  it("routes coordinator admin commands to the coordinator inbox", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+
+    await sendAdminCommand(ctx, "recompute");
+
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+    expect(publishSigned.mock.calls[0][1]).toContain("wss://coordinator-inbox.example");
+    expect(publishSigned.mock.calls[0][1]).toContain("wss://event-relay.example");
+  });
+
+  it("keeps E_inbox scans exactly on the event relays", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([]);
+
+    await fetchPending(ctx, organizerKeys());
+
+    expect(fetchEventsRelayOnly).toHaveBeenCalledTimes(1);
+    expect(fetchEventsRelayOnly.mock.calls[0][1]).toBe(ctx.config.relays);
   });
 });

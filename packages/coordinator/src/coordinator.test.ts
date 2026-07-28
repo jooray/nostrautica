@@ -48,6 +48,7 @@ import { talkBlindedD } from "./nostr/publisher.js";
 
 class FakeTransport implements Transport {
   published: NostrEvent[] = [];
+  publishCalls: { event: NostrEvent; relays?: string[] }[] = [];
   seed: NostrEvent[] = [];
   /** Recorded subscriptions (COORD-8/COORD-29 tests): filter, relays, handler, closed. */
   subs: { filter: any; relays?: string[]; onEvent: (e: NostrEvent) => void; closed: boolean }[] = [];
@@ -65,7 +66,8 @@ class FakeTransport implements Transport {
    *  test can hold a command's effect chain in-flight (holding its subject mutex)
    *  while a concurrent command is dispatched. */
   onPublish?: (event: NostrEvent) => Promise<void> | void;
-  async publish(event: NostrEvent): Promise<void | { replaced?: boolean }> {
+  async publish(event: NostrEvent, relays?: string[]): Promise<void | { replaced?: boolean }> {
+    this.publishCalls.push({ event, relays });
     if (this.onPublish) await this.onPublish(event);
     if (this.failPublishes > 0) {
       this.failPublishes--;
@@ -352,6 +354,8 @@ async function setup(
      *  grant wrap (and inject a mid-install failure). */
     skipAutoInstall?: boolean;
     transcribeError?: string;
+    eventRelays?: string[];
+    defaultRelays?: string[];
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -419,7 +423,7 @@ async function setup(
     ...(opts.evaluateBilling ? { evaluateBilling: opts.evaluateBilling } : {}),
     ...(opts.billingGracePeriodSec !== undefined ? { billingGracePeriodSec: opts.billingGracePeriodSec } : {}),
     ...(opts.budgets ? { budgets: opts.budgets } : {}),
-    defaultRelays: ["wss://test"],
+    defaultRelays: opts.defaultRelays ?? ["wss://test"],
     batchSize: opts.batchSize,
     prefilter: opts.prefilter,
     chatMls: opts.chatMls,
@@ -447,7 +451,7 @@ async function setup(
   // installs — the behavior those tests assert.
   if (!opts.skipAutoInstall) {
     await coordinator.installEvent({
-      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: eckVersions, configRelays: opts.eventRelays ?? ["wss://test"], gen: 1, source: "grant", backfill: "full",
     });
   }
 
@@ -3689,6 +3693,46 @@ describe("NIP §6.3 — attendee-scoped 21606 status", () => {
       .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
     expect(toAttendee.length).toBeGreaterThan(0);
     expect(toAttendee[toAttendee.length - 1]!.pubkey).toBe(pk);
+  });
+});
+
+describe("account-addressed gift-wrap relay delivery", () => {
+  const eventRelay = "wss://event.example";
+  const defaultRelay = "wss://default.example";
+
+  it("publishes an attendee grant to custom event and coordinator default relays", async () => {
+    const h = await setup(0, { eventRelays: [eventRelay], defaultRelays: [defaultRelay] });
+    const attendeeSk = generateSecretKey();
+    await join(h, attendeeSk, "crypto");
+
+    const grantCall = h.transport.publishCalls.find(({ event }) => {
+      try {
+        return unwrapRumor(event as any, attendeeSk).kind === KIND_KEY_GRANT;
+      } catch {
+        return false;
+      }
+    });
+    expect(grantCall?.relays).toEqual([eventRelay, defaultRelay]);
+  });
+
+  it("publishes an organizer status to custom event and coordinator default relays", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, {
+      eventRelays: [eventRelay],
+      defaultRelays: [defaultRelay],
+      retentionDays: 1,
+      eventEndSec: nowSec - 2 * 86_400,
+    });
+    await h.coordinator.retentionSweep();
+
+    const statusCall = h.transport.publishCalls.find(({ event }) => {
+      try {
+        return unwrapRumor(event as any, h.eidSk).kind === KIND_COORDINATOR_STATUS;
+      } catch {
+        return false;
+      }
+    });
+    expect(statusCall?.relays).toEqual([eventRelay, defaultRelay]);
   });
 });
 

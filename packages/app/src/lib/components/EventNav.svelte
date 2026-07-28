@@ -11,6 +11,7 @@
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
+  import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -91,7 +92,14 @@
       class:active={active("chat", "dm", "dmPeer")}
       onclick={() => router.go({ name: "chat", naddr })}
     >
-      <span class="ico"><Icon name="chat" size={24} /></span><span class="lbl">{t("nav.chat")}</span>
+      <span class="ico">
+        <Icon name="chat" size={24} />
+        {#if dmUnread.confirmedCount > 0}
+          <span class="badge-count" aria-hidden="true">{dmUnread.confirmedCount > 99 ? "99+" : dmUnread.confirmedCount}</span>
+        {:else if dmUnread.hasEncryptedActivity}
+          <span class="badge-dot" aria-hidden="true"></span>
+        {/if}
+      </span><span class="lbl">{t("nav.chat")}{#if dmUnread.confirmedCount > 0}<span class="visually-hidden">{t("dm.unread", { n: dmUnread.confirmedCount })}</span>{:else if dmUnread.hasEncryptedActivity}<span class="visually-hidden">{t("dm.encryptedActivity")}</span>{/if}</span>
     </button>
   {/if}
 
@@ -193,6 +201,16 @@
     font-weight: 800;
     line-height: 1rem;
     text-align: center;
+  }
+  .badge-dot {
+    position: absolute;
+    top: -4px;
+    left: 50%;
+    width: 0.5rem;
+    height: 0.5rem;
+    transform: translate(70%, 20%);
+    border-radius: 50%;
+    background: var(--accent);
   }
   .lbl {
     font-size: 0.75rem;

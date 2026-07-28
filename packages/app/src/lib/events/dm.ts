@@ -10,7 +10,7 @@ import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST, giftwrapSince } from "@nos
 import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEvents, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
@@ -32,9 +32,16 @@ export interface DmThread {
   count: number;
 }
 
+/** Bound untrusted kind-10050 routing without crowding out the app defaults. */
+export const MAX_DM_RELAYS = 20;
+
 /** Extract the relay URLs from a NIP-17 DM relay list's (`["relay", url]`) tags. */
 export function relayUrlsFromDmList(tags: string[][]): string[] {
-  return tags.filter((t) => t[0] === "relay" && !!t[1]).map((t) => t[1]);
+  return unionRelays(
+    tags
+      .filter((t) => t[0] === "relay" && !!t[1] && isAcceptedRelayUrl(t[1]))
+      .map((t) => t[1]),
+  ).slice(0, MAX_DM_RELAYS);
 }
 
 /**
@@ -47,7 +54,15 @@ export function selectDmRelays(
   recipientDmRelays: string[],
   defaults: string[] = DEFAULT_RELAYS,
 ): string[] {
-  return unionRelays(recipientDmRelays, defaults);
+  const safeDefaults = unionRelays(defaults.filter(isAcceptedRelayUrl)).slice(0, MAX_DM_RELAYS);
+  const defaultSet = new Set(safeDefaults);
+  const safeRecipient = unionRelays(recipientDmRelays.filter(isAcceptedRelayUrl)).filter(
+    (url) => !defaultSet.has(url),
+  );
+  return unionRelays(
+    safeRecipient.slice(0, Math.max(0, MAX_DM_RELAYS - safeDefaults.length)),
+    safeDefaults,
+  );
 }
 
 /** Fetch a pubkey's kind-10050 DM relay list; [] if they've published none. */
@@ -78,6 +93,8 @@ export async function sendDm(
     kind: KIND_DM as typeof KIND_DM,
     content: text,
     tags: [["p", recipient]],
+    // Both independently encrypted copies carry one byte-identical rumor.
+    created_at: Math.floor(Date.now() / 1000),
   };
   const [recipientRelays, selfRelays] = await Promise.all([
     fetchDmRelays(recipient).catch(() => []),
@@ -112,6 +129,8 @@ let unwrapCacheOwner = "";
 const unwrapCache = new Map<string, DmMessage | null>();
 /** In-memory per-wrap failure counts (session-scoped, never persisted). */
 const unwrapAttempts = new Map<string, number>();
+/** Scanned ciphertext waiting for the single signer loop to consume it. */
+const pendingWraps = new Map<string, GiftWrap>();
 const MAX_UNWRAP_ATTEMPTS = 5;
 // Only one unwrap loop runs at a time — the 5s poll must not stack loops on top
 // of a slow signer.
@@ -124,6 +143,14 @@ let unwrapInFlight: Promise<void> | null = null;
 const DMWRAPS_KEY = "dmwraps";
 const DMSCAN_KEY = "dmscanat"; // last steady-state scan time per owner
 const MAX_DM_WRAPS = 3000;
+export const DM_HISTORY_PAGE_LIMIT = 200;
+export const DM_HISTORY_PAGES_PER_SCAN = 5;
+
+interface DmScanState {
+  lastScan?: number;
+  historyUntil?: number;
+  historyComplete?: boolean;
+}
 
 type DmMemo = Record<string, DmMessage | null>;
 
@@ -144,6 +171,7 @@ export function cachedDms(me: string): DmMessage[] {
 function hydrateUnwrapCache(me: string): void {
   unwrapCache.clear();
   unwrapAttempts.clear();
+  pendingWraps.clear();
   const memo = cacheGet<DmMemo>(DMWRAPS_KEY, me)?.data ?? {};
   for (const [id, m] of Object.entries(memo)) unwrapCache.set(id, m);
   unwrapCacheOwner = me;
@@ -171,28 +199,104 @@ function snapshotDms(): DmMessage[] {
   return [...byId.values()].sort((a, b) => a.at - b.at);
 }
 
+function dmScanState(me: string): DmScanState {
+  const saved = cacheGet<number | DmScanState>(DMSCAN_KEY, me)?.data;
+  // Numeric values were written by the old one-shot limit:500 scan. Preserve
+  // its steady cursor, but restart the resumable history walk so older wraps
+  // hidden by that limit can now be discovered.
+  return typeof saved === "number" ? { lastScan: saved } : (saved ?? {});
+}
+
+/**
+ * Scan the owner's encrypted kind-1059 inbox without invoking the signer. This
+ * is also the activity seam for callers that only need ciphertext arrival.
+ *
+ * History is walked backwards in bounded pages and resumed on later calls.
+ * Nostr `until` is inclusive, so IDs are deduped across page boundaries. A relay
+ * that repeatedly returns the same full boundary page is forced one second back
+ * after no progress, preventing an infinite loop.
+ */
+export async function scanDmGiftWraps(
+  me: string,
+  opts: { history?: boolean } = {},
+): Promise<GiftWrap[]> {
+  const now = Math.floor(Date.now() / 1000);
+  const state = dmScanState(me);
+  const ownDmRelays = await fetchDmRelays(me).catch(() => []);
+  const relays = selectDmRelays(ownDmRelays);
+  const byId = new Map<string, GiftWrap>();
+
+  // Keep the existing wide steady overlap while a separate cursor resumes old
+  // history. This catches new wraps even when backfill spans several poll ticks.
+  if (state.lastScan !== undefined || opts.history === false) {
+    const since =
+      state.lastScan === undefined
+        ? giftwrapSince(now)
+        : Math.min(giftwrapSince(now), state.lastScan - 24 * 60 * 60);
+    const recent = (await streamEvents(
+      { kinds: [KIND_GIFT_WRAP], "#p": [me], since },
+      { relays, relayOnly: true, timeoutMs: 10_000 },
+    ).ready) as unknown as GiftWrap[];
+    for (const wrap of recent) byId.set(wrap.id, wrap);
+  }
+
+  let historyUntil = state.historyUntil;
+  let historyComplete = state.historyComplete === true;
+
+  for (
+    let pageNo = 0;
+    opts.history !== false && !historyComplete && pageNo < DM_HISTORY_PAGES_PER_SCAN;
+    pageNo++
+  ) {
+    const filter = {
+      kinds: [KIND_GIFT_WRAP],
+      "#p": [me],
+      limit: DM_HISTORY_PAGE_LIMIT,
+      ...(historyUntil !== undefined ? { until: historyUntil } : {}),
+    };
+    const page = (await streamEvents(filter, {
+      relays,
+      relayOnly: true,
+      timeoutMs: 10_000,
+    }).ready) as unknown as GiftWrap[];
+
+    for (const wrap of page) {
+      byId.set(wrap.id, wrap);
+    }
+    if (page.length < DM_HISTORY_PAGE_LIMIT) {
+      historyComplete = true;
+      historyUntil = undefined;
+      break;
+    }
+
+    const oldest = Math.min(...page.map((wrap) => wrap.created_at));
+    if (!Number.isFinite(oldest)) {
+      // Malformed pages cannot provide a usable cursor; retry on a later scan.
+      break;
+    }
+    if (historyUntil !== undefined && oldest >= historyUntil) {
+      historyUntil -= 1;
+    } else {
+      historyUntil = oldest;
+    }
+  }
+
+  const nextState: DmScanState = {
+    lastScan: now,
+    historyComplete,
+    ...(historyComplete || historyUntil === undefined ? {} : { historyUntil }),
+  };
+  cacheSet(DMSCAN_KEY, nextState, now, me);
+  return [...byId.values()];
+}
+
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
   if (unwrapCacheOwner !== me) hydrateUnwrapCache(me);
-
-  // First scan for this identity does the full limit:500 history sweep; later
-  // scans narrow to since = min(giftwrapSince(), lastScan - 24h) so the steady
-  // poll is cheap while still overlapping enough to never miss a wrap (§2.6).
-  const lastScan = cacheGet<number>(DMSCAN_KEY, me)?.data;
-  const firstRun = lastScan === undefined;
-  const since = firstRun ? undefined : Math.min(giftwrapSince(), lastScan - 24 * 60 * 60);
-
-  // Streamed relay-only read: gift wraps must not be lost to the dexie
-  // cache/EOSE race (see ndk.ts), and the read must TERMINATE even when a relay
-  // never answers — first EOSE + grace, hard timeout. The 5s poll makes any
-  // single missed late event a non-issue.
-  const events = (await streamEvents(
-    firstRun
-      ? { kinds: [KIND_GIFT_WRAP], "#p": [me], limit: 500 }
-      : { kinds: [KIND_GIFT_WRAP], "#p": [me], since },
-    { relays: DEFAULT_RELAYS, relayOnly: true, timeoutMs: 10_000 },
-  ).ready) as unknown as GiftWrap[];
-  cacheSet(DMSCAN_KEY, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), me);
+  const events = await scanDmGiftWraps(me);
+  for (const wrap of events) {
+    if (!unwrapCache.has(wrap.id)) pendingWraps.set(wrap.id, wrap);
+  }
 
   // Unwrapping is a per-wrap signer round-trip; a remote signer (Amber/NIP-46)
   // with an unreachable relay makes each one hang to its timeout, so decrypting a
@@ -202,24 +306,33 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   // shows the composer), and the next 5s poll surfaces more as the cache fills.
   if (!unwrapInFlight) {
     unwrapInFlight = (async () => {
-      for (const wrap of events) {
+      // Polls may append while this loop awaits a remote signer. Map iteration
+      // visits those additions, so paged ciphertext is not lost when its scan
+      // cursor has already advanced.
+      for (const wrap of pendingWraps.values()) {
         if (unwrapCache.has(wrap.id)) continue;
         // Bounded retries for past failures (see the memo policy above).
-        if ((unwrapAttempts.get(wrap.id) ?? 0) >= MAX_UNWRAP_ATTEMPTS) continue;
+        if ((unwrapAttempts.get(wrap.id) ?? 0) >= MAX_UNWRAP_ATTEMPTS) {
+          pendingWraps.delete(wrap.id);
+          continue;
+        }
         try {
           const rumor = await signerUnwrap(signer, wrap);
           if (rumor.kind !== KIND_DM) {
             unwrapCache.set(wrap.id, null);
+            pendingWraps.delete(wrap.id);
             continue;
           }
           const recipient = rumor.tags.find((t) => t[0] === "p")?.[1];
           if (!recipient) {
             unwrapCache.set(wrap.id, null);
+            pendingWraps.delete(wrap.id);
             continue;
           }
           const peer = rumor.pubkey === me ? recipient : rumor.pubkey;
           if (peer === me && rumor.pubkey !== me) {
             unwrapCache.set(wrap.id, null); // malformed
+            pendingWraps.delete(wrap.id);
             continue;
           }
           unwrapCache.set(wrap.id, {
@@ -229,6 +342,7 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
             text: rumor.content,
             at: rumor.created_at,
           });
+          pendingWraps.delete(wrap.id);
         } catch {
           // Transient (signer timeout, offline) or foreign/corrupt — NOT
           // memoized: the next scan retries it, up to MAX_UNWRAP_ATTEMPTS per

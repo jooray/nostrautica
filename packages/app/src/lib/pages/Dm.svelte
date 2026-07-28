@@ -19,6 +19,8 @@
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+  import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { cachedEventContext } from "$lib/events/event-context.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -41,6 +43,17 @@
 
   // Muted peers drop out of the thread list (U10).
   const visibleThreads = $derived(threads.filter((th) => !mutes.isMuted(th.peer)));
+
+  $effect(() => {
+    void cacheHydration.version;
+    if (!session.pubkey) return;
+    const cached = cachedDms(session.pubkey);
+    if (cached.length === 0) return;
+    dmUnread.syncMessages(session.pubkey, cached);
+    if (threads.length > 0) return;
+    threads = threadsOf(cached);
+    loading = false;
+  });
 
   // Group chats: events already visited where the viewer isn't just a "visitor"
   // (so presumably enrolled) and chat is on — cache-only, no network fetch, so
@@ -67,6 +80,7 @@
       void mutes.load(session.signer);
       const msgs = await fetchDms(session.signer);
       threads = threadsOf(msgs);
+      if (session.pubkey) dmUnread.syncMessages(session.pubkey, msgs);
       const missing = threads.map((t) => t.peer).filter((p) => !profiles.has(p));
       if (missing.length) {
         const fetched = await fetchProfiles(missing);
@@ -78,6 +92,7 @@
     } finally {
       loading = false;
       perfMark("Dm", "network-settled");
+      dmUnread.acknowledgeEncryptedActivity();
     }
   }
 
@@ -169,6 +184,11 @@
               {thread.last.from === thread.peer ? "" : t("dm.youPrefix")}{thread.last.text}
             </span>
           </div>
+          {#if dmUnread.threadCount(thread.peer) > 0}
+            <span class="badge" aria-label={t("dm.unread", { n: dmUnread.threadCount(thread.peer) })}>
+              {dmUnread.threadCount(thread.peer) > 99 ? "99+" : dmUnread.threadCount(thread.peer)}
+            </span>
+          {/if}
         </button>
       {/each}
     </div>

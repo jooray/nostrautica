@@ -72,7 +72,8 @@ import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
-import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -333,7 +334,7 @@ export async function approveAttendee(
   const rosterEvent = buildRosterEvent(ctx, eidSk, eckBytes, eck.id, roster, rosterAt);
 
   await Promise.all([
-    publishOrQueue(grantWrap as any, ctx.config.relays),
+    publishAccountGiftWrap(grantWrap as any, req.attendeePubkey, ctx.config.relays),
     publishOrQueue(entryEvent, ctx.config.relays),
     publishOrQueue(rosterEvent, ctx.config.relays),
   ]);
@@ -438,7 +439,7 @@ export async function sendAdminCommand(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
-  await publishOrQueue(wrap as any, ctx.config.relays);
+  await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays);
 }
 
 /**
@@ -478,16 +479,8 @@ export async function addCoOrganizer(
       granted_by: getPublicKey(eidSk),
     },
   });
-  // Publish to the event's own relays UNIONED with the app defaults, because the
-  // two halves of this hand-off disagreed about where to look: this wrap went to
-  // `ctx.config.relays`, while the receiving side (attendee.receiveGrants) scans
-  // DEFAULT_RELAYS only. For an event created with a custom relay set the grant
-  // therefore landed exactly where the co-organizer's client never reads, and
-  // their Admin page waited on a grant that was published and unreachable. The
-  // union keeps the event's relays authoritative and guarantees the overlap the
-  // reader needs.
   return toOutcome(
-    await publishOrQueue(wrap as any, unionRelays(ctx.config.relays, DEFAULT_RELAYS)),
+    await publishAccountGiftWrap(wrap as any, coOrganizerPubkey, ctx.config.relays),
   );
 }
 
@@ -816,7 +809,7 @@ export async function revokeAttendeeClient(
         granted_by: getPublicKey(eidSk),
       },
     });
-    pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
+    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
 
   pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
@@ -893,7 +886,7 @@ async function rotateEckAndInbox(
       kind: KIND_KEY_GRANT,
       content: { v: 2, a: ctx.coordinate, role: a.role, eck: eckAll, granted_by: eidPubkey },
     });
-    pubs.push(publishOrQueue(grantWrap as any, ctx.config.relays));
+    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
   pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
   await Promise.all(pubs);
@@ -991,7 +984,7 @@ export async function attachCoordinator(
       kind: KIND_ADMIN_COMMAND,
       content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
     });
-    await publishOrQueue(detachWrap as any, ctx.config.relays);
+    await publishAccountGiftWrap(detachWrap as any, previous!, ctx.config.relays);
     const rotated = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
     einboxNsecHex = rotated.newInboxNsecHex;
     einboxPubkey = rotated.newInboxPubkey;
@@ -1044,7 +1037,7 @@ export async function attachCoordinator(
           eidSk,
         ),
     }),
-    publishOrQueue(grantWrap as any, ctx.config.relays),
+    publishAccountGiftWrap(grantWrap as any, coordinatorPubkey, ctx.config.relays),
   ]);
 
   // 3. Persist the new gen locally and (durably) in the 30078 backup so a re-attach
@@ -1121,7 +1114,7 @@ export async function detachCoordinator(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
   });
-  await publishOrQueue(detachWrap as any, ctx.config.relays);
+  await publishAccountGiftWrap(detachWrap as any, previous, ctx.config.relays);
 
   // 2. Rotate the ECK + E_inbox (NIP §3.7): a departed coordinator may retain the
   //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to

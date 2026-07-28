@@ -1896,10 +1896,15 @@ export class Coordinator {
     });
   }
 
+  /** Account-addressed gift wraps must reach both event-local and reader-default relays. */
+  private accountRelays(state: EventState): string[] {
+    return [...new Set([...state.configRelays, ...this.deps.defaultRelays])];
+  }
+
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
   async grantAndPublish(state: EventState, attendeePubkey: string): Promise<void> {
     const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck);
-    await this.deps.transport.publish(grant, state.configRelays);
+    await this.deps.transport.publish(grant, this.accountRelays(state));
     await this.publishDirectory(state, attendeePubkey);
     await this.publishRoster(state);
     log(`[grant] ECK granted to ${short(attendeePubkey)}; directory + roster published`);
@@ -2039,7 +2044,7 @@ export class Coordinator {
     // Republish the full record set under THIS coordinator's key.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
       const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
-      await this.deps.transport.publish(grant, state.configRelays);
+      await this.deps.transport.publish(grant, this.accountRelays(state));
       await this.publishDirectory(state, a.pubkey);
       // Rebuild matches under our authorship (the prior 31605s are undecryptable to us).
       if (state.matching === "on") this.enqueueProcess(state.coordinate, a.pubkey);
@@ -3063,7 +3068,7 @@ export class Coordinator {
     //    zero embedding/LLM provider calls.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
       const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
-      await this.deps.transport.publish(grant, state.configRelays);
+      await this.deps.transport.publish(grant, this.accountRelays(state));
       await this.publishDirectory(state, a.pubkey);
       if (state.matching === "on") {
         const list = buildMatchList(this.deps.store, state.coordinate, a.pubkey, this.topK, Math.floor(this.now() / 1000));
@@ -3162,7 +3167,7 @@ export class Coordinator {
         retryable: false,
         at: Math.floor(this.now() / 1000),
       });
-      await this.deps.transport.publish(status, state.configRelays).catch(() => {});
+      await this.deps.transport.publish(status, this.accountRelays(state)).catch(() => {});
       log(`[detach] ${coordinate}: Marmot group FROZEN — chat administration orphaned until a coordinator re-attaches`);
     }
     // Drop live state and DELETE key custody (D6).
@@ -3306,7 +3311,7 @@ export class Coordinator {
       retryable: false,
       at: nowSec,
     });
-    await this.deps.transport.publish(status, state.configRelays);
+    await this.deps.transport.publish(status, this.accountRelays(state));
     log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), purged local data, notified organizer`);
   }
 
@@ -4260,7 +4265,7 @@ export class Coordinator {
       billing: { state: "payment_required", reason: reason.slice(0, 500) },
       at: Math.floor(this.now() / 1000),
     });
-    await this.deps.transport.publish(status, state.configRelays);
+    await this.deps.transport.publish(status, this.accountRelays(state));
     log(`[budget] published 21606 budget_exceeded for ${state.coordinate}`);
   }
 
@@ -4295,7 +4300,7 @@ export class Coordinator {
       billing,
       at: Math.floor(this.now() / 1000),
     });
-    await this.deps.transport.publish(status, state.configRelays);
+    await this.deps.transport.publish(status, this.accountRelays(state));
     log(`[billing] published 21606 billing=${billing.state} for ${state.coordinate}`);
   }
 
@@ -4333,7 +4338,7 @@ export class Coordinator {
       at: Math.floor(this.now() / 1000),
     };
     const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, content);
-    await this.deps.transport.publish(status, state.configRelays);
+    await this.deps.transport.publish(status, this.accountRelays(state));
     // Attendee-scoped delivery (NIP §6.3 21606): a poison report tied to a single
     // attendee's own submission/talk pipeline is ALSO sealed to that attendee, so
     // they see "your talk failed processing — try re-recording" without waiting on
@@ -4341,7 +4346,7 @@ export class Coordinator {
     // never via surfacePoison), so every poison surfaced here is safe to mirror.
     if (pubkey) {
       const attendeeStatus = buildCoordinatorStatus(this.deps.coordSk, pubkey, content);
-      await this.deps.transport.publish(attendeeStatus, state.configRelays);
+      await this.deps.transport.publish(attendeeStatus, this.accountRelays(state));
     }
     log(`[status] surfaced poisoned ${info.type} for ${pubkey ? short(pubkey) : coordinate}${pubkey ? " to organizer + attendee" : " to organizer"}`);
   }

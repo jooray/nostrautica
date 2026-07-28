@@ -744,6 +744,8 @@ export const messages = {
     "dm.empty":
       "No messages yet. Open someone's profile in an event's attendee list and tap Message to start a conversation. Messages are end-to-end encrypted and work with other Nostr messengers too.",
     "dm.youPrefix": "You: ",
+    "dm.unread": "{n} unread direct messages",
+    "dm.encryptedActivity": "New encrypted inbox activity",
     // Unified Chat pane (group chats + DMs together)
     "chats.groupSection": "Group chats",
     "chats.dmSection": "Direct messages",
@@ -2131,6 +2133,8 @@ export const messages = {
     "dm.empty":
       "Zatiaľ žiadne správy. Otvorte niekoho profil v zozname účastníkov podujatia a klepnite na Napísať správu, čím začnete konverzáciu. Správy sú koncovo šifrované a fungujú aj s inými Nostr aplikáciami na správy.",
     "dm.youPrefix": "Vy: ",
+    "dm.unread": "{n} neprečítaných priamych správ",
+    "dm.encryptedActivity": "Nová šifrovaná aktivita v schránke",
     "chats.groupSection": "Skupinové chaty",
     "chats.dmSection": "Priame správy",
 
@@ -3519,6 +3523,8 @@ export const messages = {
     "dm.empty":
       "Zatím žádné zprávy. Otevřete něčí profil v seznamu účastníků akce a klepněte na Napsat zprávu, čímž zahájíte konverzaci. Zprávy jsou koncově šifrované a fungují i s jinými Nostr aplikacemi na zprávy.",
     "dm.youPrefix": "Vy: ",
+    "dm.unread": "{n} nepřečtených přímých zpráv",
+    "dm.encryptedActivity": "Nová šifrovaná aktivita ve schránce",
     "chats.groupSection": "Skupinové chaty",
     "chats.dmSection": "Přímé zprávy",
 
