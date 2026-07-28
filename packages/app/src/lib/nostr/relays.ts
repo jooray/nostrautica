@@ -28,6 +28,7 @@ const ENV_BLOSSOM = (import.meta.env?.VITE_NOSTRAUTICA_BLOSSOM as string | undef
  * is excluded: attendees must be able to publish without an account somewhere.
  */
 export const DEFAULT_RELAYS = ENV_RELAYS ?? [
+  "wss://nostr.cypherpunk.today",
   "wss://nos.lol",
   "wss://relay.primal.net",
   "wss://relay.nostr.net",
@@ -81,6 +82,7 @@ export const WHITENOISE_RELAYS = ENV_RELAYS
  * so it costs one more warm mobile socket for a materially wider reply surface.
  */
 export const NIP46_RELAYS = ENV_RELAYS ?? [
+  "wss://nostr.cypherpunk.today",
   "wss://relay.primal.net",
   "wss://nos.lol",
   "wss://relay.nostr.net",
@@ -135,13 +137,20 @@ export const DEFAULT_BLOSSOM_SERVERS = ENV_BLOSSOM ?? [
  * so local e2e keeps working.
  */
 export const DM_RELAY_LIST: string[] =
-  ENV_RELAYS ?? ["wss://relay.primal.net", "wss://nos.lol", "wss://relay.nostr.net"];
+  ENV_RELAYS ??
+  [
+    "wss://nostr.cypherpunk.today",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+    "wss://relay.nostr.net",
+  ];
 
 /** NIP-65 relay-list defaults published for new users (spec §5.4 item 2). */
 export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean }[] =
   ENV_RELAYS
     ? ENV_RELAYS.map((url) => ({ url, read: true, write: true }))
     : [
+        { url: "wss://nostr.cypherpunk.today", read: true, write: true },
         { url: "wss://nos.lol", read: true, write: true },
         { url: "wss://relay.primal.net", read: true, write: true },
         { url: "wss://relay.nostr.net", read: true, write: true },
