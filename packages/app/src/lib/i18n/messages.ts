@@ -86,6 +86,10 @@ export const messages = {
     "home.noEvents.body": "Open an invite link to join an event, or create your own.",
     "home.loadingEvents": "Loading your events…",
     "home.restoringSession": "Reconnecting your signer…",
+    "home.scanFailed.body":
+      "We couldn't finish looking for your events — your signer didn't answer. Nothing is lost; they're still on your relays.",
+    "home.scanIncomplete":
+      "This list may be incomplete — the check for your events didn't finish.",
     "home.how.title": "How it works",
     "home.how.record": "Record a short intro video (and optionally a talk).",
     "home.how.matched": "Get matched with people whose skills complement yours.",
@@ -148,6 +152,8 @@ export const messages = {
     "signin.paste.cancel": "Cancel",
     "signin.paste.saferHint":
       "On a shared device, a signer app or extension is safer than pasting your key.",
+    "signin.superseded":
+      "Another sign-in or sign-out on this device interrupted that one. Try again.",
 
     // Create event
     "create.title": "Create an event",
@@ -1492,6 +1498,10 @@ export const messages = {
     "home.noEvents.body": "Otvorte pozvánku a pripojte sa k podujatiu, alebo si vytvorte vlastné.",
     "home.loadingEvents": "Načítavajú sa vaše podujatia…",
     "home.restoringSession": "Znovu sa pripájame k vášmu podpisovaču…",
+    "home.scanFailed.body":
+      "Nepodarilo sa dokončiť hľadanie vašich podujatí — váš podpisovač neodpovedal. Nič sa nestratilo, stále sú na vašich relayoch.",
+    "home.scanIncomplete":
+      "Tento zoznam nemusí byť úplný — hľadanie vašich podujatí sa nedokončilo.",
     "home.how.title": "Ako to funguje",
     "home.how.record": "Nahrajte krátke predstavovacie video (a voliteľne aj prednášku).",
     "home.how.matched": "Spojíme vás s ľuďmi, ktorých zručnosti dopĺňajú tie vaše.",
@@ -1551,6 +1561,8 @@ export const messages = {
     "signin.paste.cancel": "Zrušiť",
     "signin.paste.saferHint":
       "Na zdieľanom zariadení je bezpečnejšie použiť podpisovaciu aplikáciu alebo rozšírenie než vkladať kľúč.",
+    "signin.superseded":
+      "Toto prihlásenie prerušilo iné prihlásenie alebo odhlásenie na tomto zariadení. Skúste to znova.",
 
     // Create event
     "create.title": "Vytvoriť podujatie",
@@ -2897,6 +2909,10 @@ export const messages = {
     "home.noEvents.body": "Otevřete pozvánku a připojte se k akci, nebo si vytvořte vlastní.",
     "home.loadingEvents": "Načítání vašich akcí…",
     "home.restoringSession": "Znovu se připojujeme k vašemu podepisovači…",
+    "home.scanFailed.body":
+      "Nepodařilo se dokončit hledání vašich akcí — váš podepisovač neodpověděl. Nic se neztratilo, stále jsou na vašich relayích.",
+    "home.scanIncomplete":
+      "Tento seznam nemusí být úplný — hledání vašich akcí se nedokončilo.",
     "home.how.title": "Jak to funguje",
     "home.how.record": "Nahrajte krátké představovací video (a volitelně i přednášku).",
     "home.how.matched": "Propojíme vás s lidmi, jejichž dovednosti doplňují ty vaše.",
@@ -2956,6 +2972,8 @@ export const messages = {
     "signin.paste.cancel": "Zrušit",
     "signin.paste.saferHint":
       "Na sdíleném zařízení je bezpečnější použít podpisovací aplikaci nebo rozšíření než vkládat klíč.",
+    "signin.superseded":
+      "Toto přihlášení přerušilo jiné přihlášení nebo odhlášení na tomto zařízení. Zkuste to znovu.",
 
     // Vytvoření akce
     "create.title": "Vytvořit akci",

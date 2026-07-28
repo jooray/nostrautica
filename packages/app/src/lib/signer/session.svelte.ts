@@ -101,6 +101,20 @@ class Session {
     // restore's decrypt round-trip is already run in the background at the
     // call site (`+layout.svelte`, audit UX-19) rather than gating first
     // paint, so slowness here doesn't reintroduce that regression.
+    // Both awaits stay, and the cost is real — N locked events means N serial
+    // signer decrypts before the UI moves at all, which on Amber is N round
+    // trips. It buys different things on each line, and only one of them is
+    // load-bearing. The EVENT-KEY unlock must be awaited: `custodyReady` is
+    // published in the same tick as the identity below precisely so nothing
+    // reads custody in a window where the snapshot is still encrypted, and
+    // returning early would put that window back. The CHAT unlock's ordering
+    // guarantee, by contrast, comes from `unlockInFlight` inside
+    // `unlockChatIdentityForLogin` — it is registered synchronously and
+    // `ensureChatDeviceKey` waits on it (and fails closed if a locked snapshot
+    // survives), so merely CALLING it before publishing the identity is what
+    // prevents the MLS-credential fork; the await is defence in depth. Dropping
+    // it would save exactly one round trip out of N+1, so it is not worth
+    // trading a belt-and-braces guarantee against an unrecoverable failure for.
     // Never swallow these silently: a failed unlock leaves the live store empty
     // while the real keys sit locked, and everything downstream then behaves as
     // if this user had no keys. The failure itself is non-fatal (the snapshot is
@@ -190,38 +204,51 @@ class Session {
     }
   }
 
-  async loginNip07(): Promise<void> {
+  /**
+   * Every login helper answers whether a session actually resulted (H-6). They
+   * used to return `void`, so a superseded adoption — the `adopt()` opToken
+   * check dropping this login because a newer one, or a logout, landed while it
+   * awaited the signer — was indistinguishable from success to the caller:
+   * `SignInOptions` fired `onSignedIn()` and navigated to Home while logged out,
+   * where the user was told to sign in again. `false` means "no session; do not
+   * treat this as a login".
+   */
+  async loginNip07(): Promise<boolean> {
     if (!hasNip07()) throw new Error("No NIP-07 extension found");
     const tok = this.nextOp();
-    if (!(await this.adopt(new Nip07Signer(), tok))) return;
+    if (!(await this.adopt(new Nip07Signer(), tok))) return false;
     await saveLoginMethod("nip07");
+    return true;
   }
 
-  async loginNip46(signer: Nip46Signer): Promise<void> {
+  async loginNip46(signer: Nip46Signer): Promise<boolean> {
     const tok = this.nextOp();
-    if (!(await this.adopt(signer, tok))) return;
+    if (!(await this.adopt(signer, tok))) return false;
     // Persist the bunker session (incl. the expected user pubkey — adopt()
     // just cached it) so the user stays logged in across refreshes.
     await saveNip46Session(signer.serialize());
+    return true;
   }
 
   /** Generate a brand-new local key (normie default), persist it, log in. */
-  async createLocalKey(): Promise<void> {
+  async createLocalKey(): Promise<boolean> {
     const tok = this.nextOp();
     const signer = LocalSigner.generate();
     await saveLocalKey(signer.getSecretKey());
-    if (!(await this.adopt(signer, tok))) return;
+    if (!(await this.adopt(signer, tok))) return false;
     this.freshLocalKey = true;
+    return true;
   }
 
   /** Import a pasted/URL credential (nsec / ncryptsec+pw / hex) as a local key. */
-  async importLocalKey(input: string, passphrase?: string): Promise<void> {
+  async importLocalKey(input: string, passphrase?: string): Promise<boolean> {
     const tok = this.nextOp();
     const sk = importCredential(input, passphrase);
     const signer = new LocalSigner(sk);
     await saveLocalKey(sk);
-    if (!(await this.adopt(signer, tok))) return;
+    if (!(await this.adopt(signer, tok))) return false;
     this.freshLocalKey = false;
+    return true;
   }
 
   async logout(): Promise<void> {

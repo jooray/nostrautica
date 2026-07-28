@@ -14,10 +14,19 @@
 
   let {
     error,
+    body,
     onRetry,
     retrying = false,
   }: {
     error: unknown;
+    /**
+     * Optional message key for one line of page-specific consequence under the
+     * headline. The categorized headline says what went wrong; on Home the user
+     * also has to be told what it MEANS ("this list may be missing events"),
+     * because the alternative reading — that the account is empty — is the one
+     * that made an organizer think their events had vanished.
+     */
+    body?: MessageKey;
     onRetry?: () => void;
     retrying?: boolean;
   } = $props();
@@ -29,6 +38,9 @@
 
 <div class="card warn" role="alert">
   <strong>{t(headlineKey)}</strong>
+  {#if body}
+    <p class="muted" style="margin:0.35rem 0 0">{t(body)}</p>
+  {/if}
   {#if onRetry}
     <div class="row" style="margin-top:0.6rem">
       <button class="btn inline" onclick={onRetry} disabled={retrying}>
