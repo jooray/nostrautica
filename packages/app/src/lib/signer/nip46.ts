@@ -136,28 +136,60 @@ function requirePubkey(value: unknown, context: string): string {
  */
 const makePool = () => new SimplePool({ enableReconnect: true, enablePing: true });
 
+/** A signer relay's socket either opened or dropped. */
+type RelayTransition = "up" | "down";
+
 /**
- * Names the signer relays we could not open a socket to, so a failed connect can
- * say *which* relay is down instead of only "your signer didn't respond".
- * Without this, a relay outage (measured 2026-07-25: `wss://relay.nsec.app`
- * answering the upgrade with HTTP 502, 3/3 probes) is indistinguishable from a
- * signer app that is simply closed — and the user has no way to tell which of
- * the two they should go fix.
+ * Live view of a NIP-46 pool's socket health. Owns the pool's connection hooks
+ * (plain public fields on AbstractSimplePool that `SimplePool`'s constructor type
+ * doesn't accept), so BOTH consumers below share one owner — the fields are
+ * single-assignment, so nothing else may set them for this pool.
  *
- * Assigned onto the pool rather than passed to the constructor: these hooks are
- * plain public fields on AbstractSimplePool, but `SimplePool`'s constructor type
- * only accepts `enablePing`/`enableReconnect`. They fire from both the subscribe
- * and the publish path, so inbound and outbound failures are both covered.
- * A relay that failed once and then came up is not the user's problem — the
- * success hook removes it again.
+ *  - `unreachable()` names the signer relays we currently can't open, so a failed
+ *    wait can say *which* relay is down instead of only "your signer didn't
+ *    respond". Without it a relay outage (measured 2026-07-25: `wss://relay.nsec.app`
+ *    answering the upgrade with HTTP 502, 3/3 probes) is indistinguishable from a
+ *    signer app that is simply closed. The hooks fire from both the subscribe and
+ *    the publish path, so inbound and outbound failures are both covered; a relay
+ *    that failed once and then came up is removed again.
+ *  - `subscribe()` reports socket transitions. Kind-24133 replies are EPHEMERAL:
+ *    one the signer publishes while our socket is down is gone for good, not
+ *    replayable on reconnect. The visibility-based recovery elsewhere only fires
+ *    on a mobile tab handoff; a socket that drops and returns WITHOUT one — a
+ *    relay restart, a desktop network blip, a signer running on a separate phone
+ *    while this tab stays foreground — is exactly the flaky-relay case it misses.
+ *    A consumer watches for a drop-then-recover during its pending window and
+ *    re-drives the request then, instead of riding out the full timeout.
  */
-function trackRelayHealth(pool: SimplePool): () => string[] {
+interface PoolHealth {
+  unreachable: () => string[];
+  subscribe: (listener: (event: RelayTransition) => void) => () => void;
+}
+
+function trackPoolHealth(pool: SimplePool): PoolHealth {
   const failed = new Set<string>();
-  pool.onRelayConnectionFailure = (url) => failed.add(url);
-  pool.onRelayConnectionSuccess = (url) => failed.delete(url);
-  // Hostnames, not URLs: "relay.nsec.app" is what a user can recognise and
-  // repeat back to us; "wss://relay.nsec.app/" is noise in an error banner.
-  return () => [...failed].map((u) => u.replace(/^wss?:\/\//i, "").replace(/\/+$/, ""));
+  const listeners = new Set<(event: RelayTransition) => void>();
+  // Copy before iterating: a listener may unsubscribe itself on the event it receives.
+  const emit = (event: RelayTransition) => {
+    for (const l of [...listeners]) l(event);
+  };
+  pool.onRelayConnectionFailure = (url) => {
+    failed.add(url);
+    emit("down");
+  };
+  pool.onRelayConnectionSuccess = (url) => {
+    failed.delete(url);
+    emit("up");
+  };
+  return {
+    // Hostnames, not URLs: "relay.nsec.app" is what a user can recognise and
+    // repeat back to us; "wss://relay.nsec.app/" is noise in an error banner.
+    unreachable: () => [...failed].map((u) => u.replace(/^wss?:\/\//i, "").replace(/\/+$/, "")),
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
 }
 
 /**
@@ -273,30 +305,44 @@ function withTimeout<T>(
 function connectWithRecovery(
   bunker: BunkerSigner,
   connect = () => bunker.connect(CLIENT_METADATA),
+  health?: PoolHealth,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let unsubHealth: (() => void) | undefined;
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
       if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+      unsubHealth?.();
       fn();
+    };
+    // Re-send `connect` and probe with `ping`; whichever answers first settles.
+    // Shared by the foreground-handoff and relay-reconnect recovery paths.
+    const retry = () => {
+      if (settled) return;
+      connect().then(() => settle(resolve), () => {});
+      bunker.ping().then(() => settle(resolve), () => {});
     };
     const onVisible =
       typeof document === "undefined"
         ? null
         : () => {
             if (settled || document.visibilityState !== "visible") return;
-            connect().then(
-              () => settle(resolve),
-              () => {},
-            );
-            bunker.ping().then(
-              () => settle(resolve),
-              () => {},
-            );
+            retry();
           };
     if (onVisible) document.addEventListener("visibilitychange", onVisible);
+    // A signer relay that dropped and came back may have swallowed the ack while
+    // it was down. Re-drive once a recover FOLLOWS a drop during this wait — a
+    // socket merely finishing its initial connect (an "up" with no prior "down")
+    // must not trigger a spurious re-send.
+    if (health) {
+      let dropped = false;
+      unsubHealth = health.subscribe((event) => {
+        if (event === "down") dropped = true;
+        else if (dropped) retry();
+      });
+    }
     connect().then(
       () => settle(resolve),
       (e) => {
@@ -397,6 +443,12 @@ export class Nip46Signer implements AppSigner {
      */
     private readonly bp: BunkerPointer,
     private readonly pool?: SimplePool,
+    /**
+     * Shared health view for this signer's pool. Carried onto the instance so
+     * post-connect RPCs (`rpcWithForegroundRetry`) get the same relay
+     * drop-then-recover recovery the connect handshake does.
+     */
+    private readonly health?: PoolHealth,
   ) {}
 
   /** Serialize the session so it can be restored after a refresh (spec §5.3). */
@@ -428,7 +480,7 @@ export class Nip46Signer implements AppSigner {
     // NIP46_RELAYS on every restore instead of being frozen into storage.
     const transport: BunkerPointer = { ...pointer, relays: signerRelays(pointer.relays) };
     const pool = makePool();
-    const unreachable = trackRelayHealth(pool);
+    const health = trackPoolHealth(pool);
     const bunker = BunkerSigner.fromBunker(clientSk, transport, {
       onauth: onAuth,
       pool,
@@ -440,15 +492,15 @@ export class Nip46Signer implements AppSigner {
       let authorized = false;
       try {
         await withTimeout(bunker.ping(), RESTORE_TIMEOUT_MS, undefined, () =>
-          timeoutMessage(unreachable),
+          timeoutMessage(health.unreachable),
         );
         authorized = true;
       } catch {
         // The fallback retains lost-ack foreground recovery but is independently bounded.
       }
       if (!authorized) {
-        await withTimeout(connectWithRecovery(bunker), RESTORE_TIMEOUT_MS, undefined, () =>
-          timeoutMessage(unreachable),
+        await withTimeout(connectWithRecovery(bunker, undefined, health), RESTORE_TIMEOUT_MS, undefined, () =>
+          timeoutMessage(health.unreachable),
         );
       }
       // Identity check: never trust that the reconnected bunker still answers
@@ -458,7 +510,7 @@ export class Nip46Signer implements AppSigner {
         bunker.getPublicKey(),
         RESTORE_TIMEOUT_MS,
         undefined,
-        () => timeoutMessage(unreachable),
+        () => timeoutMessage(health.unreachable),
       ), "NIP-46 restore");
       if (session.userPubkey && pk !== session.userPubkey) {
         throw new Nip46IdentityMismatchError();
@@ -469,6 +521,7 @@ export class Nip46Signer implements AppSigner {
         clientSk,
         selectedPointer(pointer, bunker, switched),
         pool,
+        health,
       );
       signer.pk = pk;
       return signer;
@@ -500,7 +553,7 @@ export class Nip46Signer implements AppSigner {
     });
     const controller = new AbortController();
     const pool = makePool();
-    const unreachable = trackRelayHealth(pool);
+    const health = trackPoolHealth(pool);
     // On return to foreground, force an immediate reconnect of any dropped
     // socket instead of waiting out the pool's backoff — the signer may be
     // about to publish (or re-publish) its ephemeral reply.
@@ -537,7 +590,7 @@ export class Nip46Signer implements AppSigner {
      * against `fromURI`. The signal is still passed along — dropping it would
      * change the library's own timeout maths (with no signal `maxWait` defaults
      * to 5 min, which stretches each relay's connect timeout from 3s to ~299s and
-     * would stop `trackRelayHealth` from ever naming a dead relay inside our
+     * would stop `trackPoolHealth` from ever naming a dead relay inside our
      * 120s budget) — but nothing depends on it working.
      */
     let outcome: "pending" | "connected" | "abandoned" = "pending";
@@ -606,7 +659,7 @@ export class Nip46Signer implements AppSigner {
     // Independent timeout: fromURI's own budget is 5 min; fail sooner + friendly.
     // The message is composed inside the callback, so it can name the relays that
     // turned out to be unreachable during the wait.
-    timer = setTimeout(() => abandon(new Error(timeoutMessage(unreachable))), timeoutMs);
+    timer = setTimeout(() => abandon(new Error(timeoutMessage(health.unreachable))), timeoutMs);
     const cancel = () => abandon(new Error("Cancelled"));
 
     const connected = Promise.race([connecting, abandoned]).then(
@@ -624,7 +677,7 @@ export class Nip46Signer implements AppSigner {
           relays: [...bunker.bp.relays],
           secret,
         };
-        return new Nip46Signer(bunker, clientSk, pointer, pool);
+        return new Nip46Signer(bunker, clientSk, pointer, pool, health);
       },
       (e: unknown) => {
         // fromURI failed on its own (e.g. every relay closed) — same teardown.
@@ -667,7 +720,7 @@ export class Nip46Signer implements AppSigner {
     // state baked into the session.
     const transport: BunkerPointer = { ...pointer, relays: signerRelays(pointer.relays) };
     const pool = makePool();
-    const unreachable = trackRelayHealth(pool);
+    const health = trackPoolHealth(pool);
     let bunker: BunkerSigner;
     try {
       // Throws "bad point: is not on curve" for a valid-hex but off-curve pubkey.
@@ -684,8 +737,8 @@ export class Nip46Signer implements AppSigner {
           DEFAULT_PERMS.join(","),
           JSON.stringify(CLIENT_METADATA),
         ]).then(() => undefined);
-      await withTimeout(connectWithRecovery(bunker, connect), CONNECT_TIMEOUT_MS, abort, () =>
-        timeoutMessage(unreachable),
+      await withTimeout(connectWithRecovery(bunker, connect, health), CONNECT_TIMEOUT_MS, abort, () =>
+        timeoutMessage(health.unreachable),
       );
     } catch (e) {
       await bunker.close().catch(() => {});
@@ -693,7 +746,7 @@ export class Nip46Signer implements AppSigner {
       throw e;
     }
     const switched = await switchRelaysBounded(bunker);
-    return new Nip46Signer(bunker, clientSk, selectedPointer(pointer, bunker, switched), pool);
+    return new Nip46Signer(bunker, clientSk, selectedPointer(pointer, bunker, switched), pool, health);
   }
 
   async getPublicKey(): Promise<string> {
@@ -713,32 +766,48 @@ export class Nip46Signer implements AppSigner {
   private static readonly RPC_TIMEOUT_MS = 60_000;
 
   /**
-   * Mobile signer handoffs background the app and can lose an ephemeral reply.
-   * If that happens, returning to the foreground wins the race against the first
-   * attempt: probe the re-established transport, then retry exactly once. Both
-   * attempts and the probe have explicit deadlines, so neither path can wedge.
+   * An ephemeral RPC reply can be lost two ways: a mobile signer handoff
+   * (the tab backgrounds while the user approves in the signer app), or a signer
+   * relay dropping and recovering mid-request without any handoff — a relay
+   * restart, a desktop network blip, or a signer on a separate phone while this
+   * tab stays foreground. Either signal wins the race against the first attempt:
+   * probe the re-established transport, then retry exactly once. Both attempts
+   * and the probe have explicit deadlines, so neither path can wedge.
+   *
+   * The relay path only fires on a recover that FOLLOWS a drop during THIS
+   * request, so a socket finishing its initial connect can't provoke a spurious
+   * duplicate — the same restraint the visibility path gets from `hiddenWhilePending`.
    */
   private async rpcWithForegroundRetry<T>(operation: () => Promise<T>): Promise<T> {
-    if (typeof document === "undefined") {
-      return withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, timeoutMessage());
+    const hasDocument = typeof document !== "undefined";
+    // Nothing to recover against: no foreground handoff signal and no relay health.
+    if (!hasDocument && !this.health) {
+      return withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, () =>
+        timeoutMessage(this.health?.unreachable),
+      );
     }
 
-    let hiddenWhilePending = document.visibilityState === "hidden";
     let resume!: () => void;
     const resumed = new Promise<symbol>((resolve) => {
       resume = () => resolve(Symbol.for("nip46-resumed"));
     });
+
+    let hiddenWhilePending = hasDocument && document.visibilityState === "hidden";
     const onVisibility = () => {
       if (document.visibilityState === "hidden") hiddenWhilePending = true;
       else if (hiddenWhilePending) resume();
     };
-    document.addEventListener("visibilitychange", onVisibility);
+    if (hasDocument) document.addEventListener("visibilitychange", onVisibility);
+
+    let droppedWhilePending = false;
+    const unsubHealth = this.health?.subscribe((event) => {
+      if (event === "down") droppedWhilePending = true;
+      else if (droppedWhilePending) resume();
+    });
+
     try {
-      const first = withTimeout(
-        operation(),
-        Nip46Signer.RPC_TIMEOUT_MS,
-        undefined,
-        timeoutMessage(),
+      const first = withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, () =>
+        timeoutMessage(this.health?.unreachable),
       );
       const result = await Promise.race([first, resumed]);
       if (typeof result !== "symbol") return result;
@@ -747,15 +816,15 @@ export class Nip46Signer implements AppSigner {
       // may still answer, but its bounded wrapper is observed to avoid an
       // unhandled rejection; the user-visible operation has one controlled retry.
       void first.catch(() => {});
-      await withTimeout(this.bunker.ping(), PROBE_TIMEOUT_MS, undefined, timeoutMessage());
-      return await withTimeout(
-        operation(),
-        Nip46Signer.RPC_TIMEOUT_MS,
-        undefined,
-        timeoutMessage(),
+      await withTimeout(this.bunker.ping(), PROBE_TIMEOUT_MS, undefined, () =>
+        timeoutMessage(this.health?.unreachable),
+      );
+      return await withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, () =>
+        timeoutMessage(this.health?.unreachable),
       );
     } finally {
-      document.removeEventListener("visibilitychange", onVisibility);
+      if (hasDocument) document.removeEventListener("visibilitychange", onVisibility);
+      unsubHealth?.();
     }
   }
 

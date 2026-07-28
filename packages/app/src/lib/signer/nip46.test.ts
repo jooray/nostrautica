@@ -286,6 +286,33 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     expect(signer.serialize().bunker.relays).toEqual(["wss://signer-selected.example"]);
   });
 
+  it("re-drives the connect wait when a signer relay drops and recovers", async () => {
+    // The desktop/flaky-relay gap: no tab handoff, so nothing signals visibility.
+    // The signer's connect ack is lost while the socket is down; only the
+    // reconnect-driven retry (a fresh connect + ping) settles the wait.
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://relay.example"],
+      secret: "s3cret",
+    });
+    const bunker = fakeBunker();
+    bunker.sendRequest.mockReturnValue(neverSettles()); // the first connect ack never arrives
+    fromBunker.mockReturnValue(bunker);
+
+    const connecting = Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`,
+    );
+    // Let fromBunkerUri reach connectWithRecovery and register the health listener.
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const pool = FakePool.last();
+    pool.onRelayConnectionFailure?.("wss://relay.example/");
+    pool.onRelayConnectionSuccess?.("wss://relay.example/");
+
+    const signer = await connecting;
+    expect(signer.serialize().bunker.pubkey).toBe(PUBKEY);
+    expect(bunker.ping).toHaveBeenCalled(); // the reconnect recovery probe answered
+  });
+
   it("accepts a capitalised link by normalizing before parsing", async () => {
     parseBunkerInput.mockResolvedValue({
       pubkey: PUBKEY,
@@ -369,6 +396,39 @@ describe("ordinary RPC validation and foreground recovery", () => {
     await expect(signer.signEvent(template)).rejects.toThrow(/different event/);
     expect(bunker.signEvent).toHaveBeenCalledWith(template);
     expect(bunker.signEvent.mock.calls[0][0]).not.toHaveProperty("pubkey");
+  });
+
+  it("retries an RPC once after a signer relay drops and recovers (no handoff)", async () => {
+    // The flaky-relay case with no visibility change at all (desktop blip, or a
+    // signer on a separate phone): a drop-then-recover during the pending request
+    // wins the race against the lost first reply and re-drives it exactly once.
+    const { signer, bunker } = await signerWith();
+    bunker.nip44Encrypt
+      .mockReturnValueOnce(new Promise(() => {})) // first reply lost on the dropped socket
+      .mockResolvedValueOnce("ciphertext");
+    const pool = FakePool.last();
+    const result = signer.nip44Encrypt(PUBKEY, "hello");
+    pool.onRelayConnectionFailure?.("wss://relay.example/");
+    pool.onRelayConnectionSuccess?.("wss://relay.example/");
+    await expect(result).resolves.toBe("ciphertext");
+    expect(bunker.ping).toHaveBeenCalledTimes(1); // the recovery probe
+    expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(2);
+  });
+
+  it("does NOT retry on a bare relay connect (an 'up' with no preceding drop)", async () => {
+    // A socket finishing its initial connect must not provoke a duplicate RPC —
+    // that would pop a second Amber approval for no reason. Only a recover that
+    // FOLLOWS a drop counts.
+    const { signer, bunker } = await signerWith();
+    let resolveFirst!: (v: string) => void;
+    bunker.nip44Encrypt.mockReturnValueOnce(new Promise<string>((r) => (resolveFirst = r)));
+    const pool = FakePool.last();
+    const result = signer.nip44Encrypt(PUBKEY, "hello");
+    pool.onRelayConnectionSuccess?.("wss://relay.example/"); // initial connect, no prior drop
+    resolveFirst("ciphertext");
+    await expect(result).resolves.toBe("ciphertext");
+    expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(1); // no duplicate send
+    expect(bunker.ping).not.toHaveBeenCalled(); // no recovery probe fired
   });
 
   it("probes and retries once after a pending RPC was backgrounded", async () => {
