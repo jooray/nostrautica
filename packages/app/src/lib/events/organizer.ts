@@ -72,7 +72,7 @@ import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
-import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
@@ -936,16 +936,27 @@ export async function updateEventConfig(
   // Relay list. An admin can rewrite it explicitly (Settings → Relays); otherwise
   // the event keeps the relays it was published with. We NEVER silently migrate a
   // live event onto changed app defaults — only newly created events pick those up
-  // (create.ts). Whether chat is being turned on now or is already active, fold in
-  // the Whitenoise relays up front (same as at-creation) so a manual relay edit
-  // cannot drop the pair Marmot routing depends on.
+  // (create.ts).
   const chatActive = (changes.chat ?? ctx.config.chat).length > 0;
-  const editedRelays = changes.relays ? unionRelays(changes.relays) : ctx.config.relays;
-  if (changes.relays && editedRelays.length === 0) {
+  const relays = changes.relays ? unionRelays(changes.relays) : ctx.config.relays;
+  if (changes.relays && relays.length === 0) {
     throw new Error("at least one relay is required");
   }
-  const relays = chatActive ? unionRelays(editedRelays, WHITENOISE_RELAYS) : editedRelays;
-  const built = buildEventConfig({ ...ctx.config, ...changes, relays });
+  // Chat relays are a SEPARATE set (`chat_relay` tags) and are never folded into
+  // the list above: the Whitenoise interop pair refuses every kind we publish
+  // except the chat ones, so having them in `relays` — as this did until
+  // 2026-07-28 — meant this very republish drew a "blocked: kind 31600 is not
+  // accepted by this relay" from two of the event's own relays.
+  //
+  // Whether chat is being turned on now or is already active, ensure the interop
+  // pair is present (same as at-creation) so a manual relay edit cannot drop what
+  // Marmot routing depends on. Turning chat OFF leaves the set as-is rather than
+  // clearing it: the group may still exist and be draining, and a re-enable must
+  // not have to rediscover the relays it was routing over.
+  const chatRelays = chatActive
+    ? unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays))
+    : chatRelaysOf(ctx.config);
+  const built = buildEventConfig({ ...ctx.config, ...changes, relays, chatRelays });
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
   // authoritative and the setting silently doesn't take. Read + publish across the

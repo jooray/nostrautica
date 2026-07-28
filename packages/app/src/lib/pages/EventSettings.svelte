@@ -4,7 +4,7 @@
   import FileButton from "$lib/components/FileButton.svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
-  import { unionRelays, WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
+  import { unionRelays, chatInteropRelays, chatRelaysOf } from "$lib/nostr/relays.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
   import { receiveGrants } from "$lib/events/attendee.js";
@@ -567,12 +567,22 @@
     error = null;
     try {
       await updateEventConfig(ctx, { relays });
-      // Mirror the effective stored set: chat-enabled events keep the Whitenoise
-      // pair folded in (same rule as updateEventConfig), so the box stays honest.
-      const effective =
-        ctx.config.chat.length > 0 ? unionRelays(relays, WHITENOISE_RELAYS) : relays;
-      ctx = { ...ctx, config: { ...ctx.config, relays: effective } };
-      relaysInput = effective.join("\n");
+      // The saved set is exactly what was typed. Chat-enabled events also carry a
+      // separate `chat_relay` set (updateEventConfig keeps the Marmot interop pair
+      // in it), which is deliberately NOT mixed back into this box: those relays
+      // accept only chat kinds, and showing them here invited an organizer to
+      // treat them as event relays — which is how they ended up rejecting every
+      // config/roster/deletion publish in the first place.
+      const chatRelays = unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays));
+      ctx = {
+        ...ctx,
+        config: {
+          ...ctx.config,
+          relays,
+          chatRelays: ctx.config.chat.length > 0 ? chatRelays : chatRelaysOf(ctx.config),
+        },
+      };
+      relaysInput = relays.join("\n");
       relaysSaved = true;
       setTimeout(() => (relaysSaved = false), 1500);
     } catch (e) {
@@ -1413,6 +1423,15 @@
       bind:value={relaysInput}
     ></textarea>
     <p class="muted" style="margin:0.4rem 0 0;font-size:0.8rem">{t("admin.relays.hint")}</p>
+    <!-- Group chat rides on its own relay set, kept out of the box above because
+         those relays accept chat kinds only. Surfaced read-only so an organizer
+         who sees the event's chat reaching Whitenoise users isn't left wondering
+         which relays that happens over. -->
+    {#if ctx && chatRelaysOf(ctx.config).length > 0}
+      <p class="muted" style="margin:0.4rem 0 0;font-size:0.8rem">
+        {t("admin.relays.chat", { relays: chatRelaysOf(ctx.config).join(", ") })}
+      </p>
+    {/if}
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveRelays} disabled={savingRelays || !relaysDirty}>
         {savingRelays ? t("admin.saving") : t("admin.relays.save")}

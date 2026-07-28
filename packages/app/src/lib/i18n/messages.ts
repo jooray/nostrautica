@@ -1236,6 +1236,8 @@ export const messages = {
     "admin.relays.save": "Save relays",
     "admin.relays.empty": "Add at least one relay.",
     "admin.relays.invalid": "Not a valid relay URL: {url}",
+    "admin.relays.chat":
+      "Group chat also uses its own relays, kept separate because they accept chat messages only: {relays}",
     "admin.talks.mod.section": "Talks moderation",
     "admin.talks.mod.title": "Pending talks",
     "admin.talks.mod.body":
@@ -2635,6 +2637,8 @@ export const messages = {
     "admin.relays.save": "Uložiť relaye",
     "admin.relays.empty": "Pridajte aspoň jeden relay.",
     "admin.relays.invalid": "Neplatná adresa relayu: {url}",
+    "admin.relays.chat":
+      "Skupinový chat používa aj vlastné relaye, ktoré sú oddelené, lebo prijímajú iba chatové správy: {relays}",
     "admin.talks.mod.section": "Moderovanie prednášok",
     "admin.talks.mod.title": "Čakajúce prednášky",
     "admin.talks.mod.body":
@@ -4039,6 +4043,8 @@ export const messages = {
     "admin.relays.save": "Uložit relaye",
     "admin.relays.empty": "Přidejte alespoň jeden relay.",
     "admin.relays.invalid": "Neplatná adresa relaye: {url}",
+    "admin.relays.chat":
+      "Skupinový chat používá i vlastní relaye, které jsou oddělené, protože přijímají jen chatové zprávy: {relays}",
     "admin.talks.mod.section": "Moderování přednášek",
     "admin.talks.mod.title": "Čekající přednášky",
     "admin.talks.mod.body":

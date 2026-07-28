@@ -287,6 +287,18 @@ silently drop them.
   - `["coordinator", <pubkey-hex>, <gen>]` — optional, three-element (§3.5). Absent =
     no coordinator.
   - `["relay", <wss-url>]` × N — relay set for the event's encrypted traffic.
+  - `["chat_relay", <wss-url>]` × N — relays used ONLY by the event's group chat
+    (Marmot/MLS interop), omitted entirely when there are none. Kept out of `relay`
+    on purpose: the Whitenoise interop relays accept only the chat kinds
+    (`0/3/445/1059/10000/10002/10050/30443`) and answer every other kind with
+    `blocked: kind N is not accepted by this relay`, so a reader MUST NOT publish
+    this protocol's own events there. Chat operations use `relay ∪ chat_relay`;
+    everything else uses `relay` alone. **Compatibility:** configs published before
+    this tag existed carry the interop relays inside their `relay` tags; a reader
+    SHOULD treat a known chat-only relay found in `relay` as if it had been in
+    `chat_relay` (move, never drop — an existing group is routing over it), and a
+    reader that does not understand `chat_relay` simply gets the general relay set,
+    which is correct for everything except chat interop.
   - `["blossom", <https-url>]` × N — allowed Blossom origins for media.
   - `["max_video_sec", <int>]` — intro-video cap, default 90; `"0"` means unlimited.
   - `["max_talk_sec", <int>]` — talk cap, default 900; `"0"` means unlimited.
@@ -1077,4 +1089,5 @@ neighboring modules — tunable per deployment, not part of interop compatibilit
   `reasoning`) word-boundary-truncated to 2000 chars with URL schemes stripped.
 - Marmot: key-package kind `30443`, group-message kind `445` (routed by `#h`); the
   Whitenoise relays (`wss://relay.us.whitenoise.chat`, `wss://relay.eu.whitenoise.chat`)
-  are folded into chat relay routing.
+  are the chat interop set — carried in the config's `chat_relay` tags and in the
+  group's own MLS routing state, never in the event's `relay` set.

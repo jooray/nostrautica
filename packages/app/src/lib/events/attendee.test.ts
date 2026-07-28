@@ -116,6 +116,7 @@ function makeConfig(
     inbox,
     coordinator,
     relays: [],
+    chatRelays: [],
     blossom: [],
     maxVideoSec: 90,
     maxTalkSec: 900,

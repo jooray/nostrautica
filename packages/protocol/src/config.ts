@@ -44,6 +44,48 @@ export type TalksMode = "off" | "on" | "prerecord-first";
 export type ChatBackend = "marmot";
 const CHAT_BACKENDS: ChatBackend[] = ["marmot"];
 
+/**
+ * Relays that exist ONLY to interoperate with the Whitenoise Marmot/MLS client:
+ * they are where it publishes its key packages and group traffic, and where it
+ * looks for ours (confirmed via its own "seen on relays" key-package screen,
+ * 2026-07-20).
+ *
+ * They are NOT general-purpose relays. Probed 2026-07-28 with `nak` (30 kinds ×
+ * 9 relays, throwaway key): both accept kinds 0, 3, 445, 1059, 10000, 10002,
+ * 10050 and 30443 — the Marmot/NIP-17 chat surface — and answer EVERY other
+ * kind with `blocked: kind N is not accepted by this relay`. That includes all
+ * of 31600-31611 (this protocol's own events), 31923, 31925, kind 5 deletions
+ * and kind 30078. Every other relay in the app's default set accepted all 30
+ * probed kinds.
+ *
+ * Kept here rather than in the app/coordinator because {@link parseEventConfig}
+ * needs it to migrate configs published before `chat_relay` existed (see the
+ * legacy split there); the app and coordinator import this list instead of
+ * keeping their own copies.
+ */
+export const CHAT_INTEROP_RELAYS = [
+  "wss://relay.us.whitenoise.chat",
+  "wss://relay.eu.whitenoise.chat",
+];
+
+const CHAT_INTEROP_HOSTS = new Set(
+  CHAT_INTEROP_RELAYS.map((url) => new URL(url).hostname),
+);
+
+/**
+ * Whether a relay URL is one of the chat-only interop relays. Compared by
+ * hostname so a trailing slash, an explicit `:443`, or a differently-cased host
+ * still matches — a config that names `wss://relay.eu.whitenoise.chat/` must not
+ * escape the legacy split below on a string mismatch.
+ */
+export function isChatInteropRelay(url: string): boolean {
+  try {
+    return CHAT_INTEROP_HOSTS.has(new URL(url).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export interface EventConfig {
   d: string;
   eidPubkey: string; // author of the config (E_id)
@@ -57,6 +99,21 @@ export interface EventConfig {
    */
   coordinatorGen?: number;
   relays: string[];
+  /**
+   * Relays used ONLY for this event's group chat (`chat_relay` tags) — the
+   * Marmot/MLS interop set, kept out of {@link relays} on purpose.
+   *
+   * These were unioned into `relays` until 2026-07-28, which meant a chat-enabled
+   * event's relay list contained two relays that refuse every kind this protocol
+   * publishes (see {@link CHAT_INTEROP_RELAYS}): each 31600 republish, 31603
+   * roster, and kind-5 deletion drew a `blocked: kind N is not accepted by this
+   * relay` from both of them. Chat traffic (30443 key packages, 445 group
+   * messages, 1059 welcomes, the chat identity's 0/10002/10050) goes to
+   * `relays ∪ chatRelays`; everything else goes to `relays` alone.
+   *
+   * Empty for a chat-off event, and then no `chat_relay` tag is emitted at all.
+   */
+  chatRelays: string[];
   blossom: string[];
   /** Seconds; 0 means unlimited (no hard cap). Defaults to 90 when the tag is absent. */
   maxVideoSec: number;
@@ -105,6 +162,11 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
     tags.push(["coordinator", cfg.coordinator, String(cfg.coordinatorGen)]);
   }
   for (const r of cfg.relays) tags.push(["relay", r]);
+  // Chat relays are a SEPARATE tag, never folded into `relay`: the interop relays
+  // they carry refuse every non-chat kind, so a reader must not send this
+  // protocol's own events there. Omitted entirely when empty, so an event without
+  // group chat stays byte-identical to what the pre-`chat_relay` build emitted.
+  for (const r of cfg.chatRelays ?? []) tags.push(["chat_relay", r]);
   for (const b of cfg.blossom) tags.push(["blossom", b]);
   tags.push(["max_video_sec", String(cfg.maxVideoSec)]);
   tags.push(["max_talk_sec", String(cfg.maxTalkSec)]);
@@ -253,13 +315,36 @@ export function parseEventConfig(
       coordinatorGen = gen;
     }
   }
+  // Relay split, incl. the compatibility migration for configs published before
+  // `chat_relay` existed. Those events have the chat-only interop relays sitting
+  // in their `relay` tags (the app unioned them in at creation until 2026-07-28),
+  // which is exactly the arrangement that makes every 31600/31603/kind-5 publish
+  // fail against two of the event's own relays. Reclassifying them here — rather
+  // than waiting for the organizer to re-save the config — fixes those events for
+  // every reader the moment it upgrades.
+  //
+  // This MOVES, it never drops: an interop relay found in `relay` reappears in
+  // `chatRelays`, and every chat operation uses `relays ∪ chatRelays`, so a group
+  // already routing over those relays keeps reaching Whitenoise clients. (The
+  // coordinator additionally bakes them into a group's MLS routing state at
+  // creation and never re-derives it from the config, so a live group's routing
+  // does not depend on this at all.) The split is unconditional — not gated on
+  // `chat` being enabled — because these relays are useless for anything else:
+  // they answer every non-chat kind with "blocked".
+  const relayTags = urlValues(tags, "relay", "wss:");
+  const relays = relayTags.filter((r) => !isChatInteropRelay(r));
+  const chatRelays: string[] = [];
+  for (const r of [...urlValues(tags, "chat_relay", "wss:"), ...relayTags.filter(isChatInteropRelay)]) {
+    if (!chatRelays.includes(r)) chatRelays.push(r);
+  }
   return {
     d,
     eidPubkey,
     inbox,
     coordinator,
     coordinatorGen,
-    relays: urlValues(tags, "relay", "wss:"),
+    relays,
+    chatRelays,
     blossom: urlValues(tags, "blossom", "https:"),
     // 0 is a valid parsed value (UNLIMITED_SEC) — intTag only falls back to the
     // default when the tag is absent/non-numeric/negative, never for 0 itself.

@@ -57,6 +57,7 @@ import {
   MAX_CHAT_KEYS_PER_ACCOUNT,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
+  CHAT_INTEROP_RELAYS,
   AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
@@ -209,15 +210,12 @@ function parseEventEndSec(evt: NostrEvent | undefined): number {
 
 /**
  * Relays the Whitenoise Marmot/MLS client publishes key packages and group
- * traffic to (confirmed via its own "seen on relays" key-package screen,
- * 2026-07-20; mirrors the app-side constant in
- * packages/app/src/lib/nostr/relays.ts). Ensured into every chat-enabled
- * event's MLS routing state in `ensureChat` — including groups created
- * before this was added — because a group's routing relays are baked in at
- * creation and never re-derived from config.relays afterward.
+ * traffic to (`CHAT_INTEROP_RELAYS`, shared with the app via the protocol
+ * package). Ensured into every chat-enabled event's MLS routing state in
+ * `ensureChat` — including groups created before this was added — because a
+ * group's routing relays are baked in at creation and never re-derived from
+ * config.relays afterward.
  */
-const WHITENOISE_RELAYS = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
-
 function chatInteropRelays(eventRelays: string[]): string[] {
   const localOnly = eventRelays.length > 0 && eventRelays.every((relay) => {
     try {
@@ -227,7 +225,23 @@ function chatInteropRelays(eventRelays: string[]): string[] {
       return false;
     }
   });
-  return localOnly ? [] : WHITENOISE_RELAYS;
+  return localOnly ? [] : [...CHAT_INTEROP_RELAYS];
+}
+
+/**
+ * The relays this event's CHAT reads and writes on: its configured relays plus
+ * the interop set. Until 2026-07-28 the app unioned the interop relays into
+ * `config.relays` itself, so `state.configRelays` happened to cover them; now
+ * they live in the config's separate `chat_relay` set (which parseEventConfig
+ * also migrates old configs into), and the chat-only subscriptions have to add
+ * them back explicitly or the 30443 watcher silently stops seeing a Whitenoise
+ * attendee's key package on the relay they publish it to.
+ *
+ * Chat-only on purpose: every other subscription and publish stays on
+ * `configRelays`, because these relays refuse every non-chat kind.
+ */
+function chatRelaysFor(state: EventState): string[] {
+  return [...new Set([...state.configRelays, ...chatInteropRelays(state.configRelays)])];
 }
 
 /** Marmot v2 wire kinds (MARMOT-GROUP-CHAT §1.2): addressable key package + group msg. */
@@ -3384,7 +3398,7 @@ export class Coordinator {
   private async fetchKeyPackages(coordinate: string, authors: string[]): Promise<NostrEvent[]> {
     const state = this.events.get(coordinate);
     if (!state || authors.length === 0) return [];
-    return discoverKeyPackages(this.deps.transport, authors, state.configRelays, this.deps.defaultRelays, this.relayPolicy);
+    return discoverKeyPackages(this.deps.transport, authors, chatRelaysFor(state), this.deps.defaultRelays, this.relayPolicy);
   }
 
   /**
@@ -3414,7 +3428,8 @@ export class Coordinator {
     // Keyed re-subscribe (audit COORD-8): relay handover (or a rotated group)
     // closes the old subs and opens new ones instead of guarding forever.
     const group = this.deps.store.getMarmotGroup(state.coordinate);
-    const key = `${group?.nostr_group_id ?? "nogroup"}|${relayKey(state.configRelays)}`;
+    const chatRelays = chatRelaysFor(state);
+    const key = `${group?.nostr_group_id ?? "nogroup"}|${relayKey(chatRelays)}`;
     this.replaceSubscription(this.chatSubs, state.coordinate, key, () => {
       const closers: Array<() => void> = [];
       // 30443 watcher: the in-handler authentication (approved attendee's authorized
@@ -3423,7 +3438,7 @@ export class Coordinator {
       const kpCloser = (this.deps.transport as any).subscribe?.(
         { kinds: [KIND_KEY_PACKAGE] },
         (e: NostrEvent) => void this.marmot!.handleKeyPackageEvent(state.coordinate, e as any).catch(() => {}),
-        state.configRelays,
+        chatRelays,
       );
       if (kpCloser) closers.push(kpCloser);
       // 445 ingest: the coordinator is a silent member; ingesting keeps its leaf
@@ -3432,7 +3447,7 @@ export class Coordinator {
         const msgCloser = (this.deps.transport as any).subscribe?.(
           { kinds: [KIND_GROUP_MESSAGE], "#h": [group.nostr_group_id] },
           (e: NostrEvent) => void this.marmot!.ingest(state.coordinate, [e as any]).catch(() => {}),
-          state.configRelays,
+          chatRelays,
         );
         if (msgCloser) closers.push(msgCloser);
       }

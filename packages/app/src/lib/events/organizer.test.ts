@@ -33,7 +33,7 @@ import {
   type InviteListContent,
   type ChatBackend,
 } from "@nostrautica/protocol";
-import { WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
@@ -251,6 +251,7 @@ describe("updateEventConfig relay editing", () => {
     eidPubkey: EID_PUBKEY,
     inbox: getPublicKey(generateSecretKey()),
     relays: ["wss://old.example", "wss://relay.damus.io"],
+    chatRelays: [] as string[],
     blossom: [] as string[],
     maxVideoSec: 90,
     maxTalkSec: 900,
@@ -270,9 +271,12 @@ describe("updateEventConfig relay editing", () => {
       config: { ...fullConfig, ...overrides },
     } as unknown as EventContext;
   }
-  function publishedRelayTags(): string[] {
+  function publishedTags(name: string): string[] {
     const ev = publishSigned.mock.calls[0][0] as { tags: string[][] };
-    return ev.tags.filter((t) => t[0] === "relay").map((t) => t[1]);
+    return ev.tags.filter((t) => t[0] === name).map((t) => t[1]);
+  }
+  function publishedRelayTags(): string[] {
+    return publishedTags("relay");
   }
 
   it("rewrites the 31600 relay tags to exactly the admin-provided set", async () => {
@@ -293,14 +297,40 @@ describe("updateEventConfig relay editing", () => {
     expect(publishedRelayTags()).toEqual(["wss://old.example", "wss://relay.damus.io"]);
   });
 
-  it("keeps the Whitenoise pair folded in when the event has chat enabled", async () => {
+  // The Whitenoise pair accepts only the Marmot/NIP-17 chat kinds and answers
+  // every 31600/31603/kind-5 with "blocked: kind N is not accepted by this
+  // relay". Folding it into the event's `relay` tags (as this did until
+  // 2026-07-28) therefore guaranteed two failed publishes on every admin save of
+  // a chat-enabled event. It belongs in the separate `chat_relay` set.
+  it("keeps the Whitenoise pair out of the relay tags and in chat_relay when chat is on", async () => {
     await saveEventKeys(organizerKeys(), OWNER);
     await updateEventConfig(ctxWith({ chat: ["marmot"] }), {
       relays: ["wss://nostr.cypherpunk.today"],
     });
-    expect(publishedRelayTags()).toEqual(
-      unionRelays(["wss://nostr.cypherpunk.today"], WHITENOISE_RELAYS),
+    expect(publishedRelayTags()).toEqual(["wss://nostr.cypherpunk.today"]);
+    expect(publishedTags("chat_relay")).toEqual(WHITENOISE_RELAYS);
+  });
+
+  it("emits no chat_relay tag at all for a chat-off event", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    await updateEventConfig(ctxWith({}), { relays: ["wss://nostr.cypherpunk.today"] });
+    expect(publishedTags("chat_relay")).toEqual([]);
+  });
+
+  // A config republished by a client that already migrated (parseEventConfig
+  // moves the legacy pair out of `relay`) must keep carrying the chat relays it
+  // was routing over, not silently narrow the set on the next unrelated save.
+  it("preserves an existing chat_relay set across an edit that isn't about relays", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    await updateEventConfig(
+      ctxWith({ chat: ["marmot"], chatRelays: ["wss://chat.example", ...WHITENOISE_RELAYS] }),
+      { retentionDays: 30 },
     );
+    expect(publishedRelayTags()).toEqual(["wss://old.example", "wss://relay.damus.io"]);
+    expect(publishedTags("chat_relay")).toEqual([
+      "wss://chat.example",
+      ...WHITENOISE_RELAYS,
+    ]);
   });
 
   it("dedupes/trims the set and rejects an all-empty relay list", async () => {

@@ -28,7 +28,7 @@ import {
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
-import { DEFAULT_RELAYS, WHITENOISE_RELAYS, unionRelays } from "$lib/nostr/relays.js";
+import { DEFAULT_RELAYS, chatInteropRelays } from "$lib/nostr/relays.js";
 import { saveEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 import { generateInvites, approveAttendee } from "./organizer.js";
@@ -129,12 +129,17 @@ export async function createEvent(
   const eck = generateEck();
   const d = slug(input.title);
   const coordinate = makeCoordinate(eidPubkey, d);
-  const baseRelays = input.relays?.length ? input.relays : DEFAULT_RELAYS;
+  const relays = input.relays?.length ? input.relays : DEFAULT_RELAYS;
   // Marmot chat groups route messages only to the relays baked into the group at
   // creation (§ MLS routing component, not re-derived from config later), so a
-  // chat-enabled event must include the Whitenoise client's relays up front or
+  // chat-enabled event must name the Whitenoise client's relays up front or
   // Whitenoise attendees never see the group's traffic (prod report 2026-07-20).
-  const relays = input.chat?.length ? unionRelays(baseRelays, WHITENOISE_RELAYS) : baseRelays;
+  // They go in the SEPARATE `chat_relay` set, not in `relays`: they refuse every
+  // kind this app publishes except the chat ones, so unioning them in (as this
+  // did until 2026-07-28) made both of them reject the 31600/31923/kind-0 this
+  // very function publishes below, and put two dead-for-reading relay hints into
+  // the event's naddr.
+  const chatRelays = input.chat?.length ? chatInteropRelays(relays) : [];
 
   // 1. kind 0 for E_id — the event's public profile (name/logo).
   const kind0 = finalizeEvent(
@@ -181,6 +186,7 @@ export async function createEvent(
     eidPubkey,
     inbox: inboxPubkey,
     relays,
+    chatRelays,
     blossom: input.blossom ?? [],
     maxVideoSec: input.maxVideoSec,
     maxTalkSec: input.maxTalkSec,

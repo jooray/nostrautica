@@ -78,6 +78,7 @@ describe("event config (kind 31600)", () => {
       coordinator: "c".repeat(64),
       coordinatorGen: 3,
       relays: ["wss://relay.a", "wss://relay.b"],
+      chatRelays: ["wss://chat.a"],
       blossom: ["https://blossom.a"],
       maxVideoSec: 90,
       maxTalkSec: 900,
@@ -95,6 +96,7 @@ describe("event config (kind 31600)", () => {
     expect(built.tags).toContainEqual(["lang", "sk"]);
     expect(built.tags).toContainEqual(["talks", "prerecord-first"]);
     expect(built.tags).toContainEqual(["chat", "marmot"]);
+    expect(built.tags).toContainEqual(["chat_relay", "wss://chat.a"]);
     const parsed = parseEventConfig(pubkey, built.tags);
     expect(parsed).toEqual(cfg);
   });
@@ -224,6 +226,128 @@ describe("event config (kind 31600)", () => {
     const onBuilt = buildEventConfig({ ...base, chat: ["marmot"] });
     expect(onBuilt.tags).toContainEqual(["chat", "marmot"]);
     expect(parseEventConfig(pubkey, onBuilt.tags).chat).toEqual(["marmot"]);
+  });
+
+  // Chat relays (`chat_relay`) — the Marmot interop set, deliberately NOT part of
+  // the event's general `relay` list: those relays accept only the chat kinds and
+  // reject everything else this protocol publishes.
+  describe("chat relays", () => {
+    const base = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: ["wss://relay.a"],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "off" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+      talks: "off" as const,
+      chat: [] as ("marmot")[],
+    };
+
+    it("emits no tag at all when there are none (chat-off event stays byte-identical)", () => {
+      const withField = buildEventConfig({ ...base, chatRelays: [] });
+      // The exact tag array a pre-`chat_relay` build produced for the same config.
+      const legacyShape = buildEventConfig({ ...base } as Parameters<typeof buildEventConfig>[0]);
+      expect(withField.tags).toEqual(legacyShape.tags);
+      expect(withField.tags.some((t) => t[0] === "chat_relay")).toBe(false);
+      expect(parseEventConfig(pubkey, withField.tags).chatRelays).toEqual([]);
+    });
+
+    it("round-trips a chat relay set separately from the event relays", () => {
+      const built = buildEventConfig({
+        ...base,
+        chat: ["marmot"],
+        relays: ["wss://relay.a", "wss://relay.b"],
+        chatRelays: ["wss://chat.a", "wss://chat.b"],
+      });
+      expect(built.tags.filter((t) => t[0] === "relay")).toEqual([
+        ["relay", "wss://relay.a"],
+        ["relay", "wss://relay.b"],
+      ]);
+      const parsed = parseEventConfig(pubkey, built.tags);
+      expect(parsed.relays).toEqual(["wss://relay.a", "wss://relay.b"]);
+      expect(parsed.chatRelays).toEqual(["wss://chat.a", "wss://chat.b"]);
+    });
+
+    it("drops a non-wss chat_relay the same way it drops a bad relay (PROTO-5)", () => {
+      const parsed = parseEventConfig(pubkey, [
+        ["d", "ev"], ["v", "2"],
+        ["inbox", "b".repeat(64)],
+        ["chat_relay", "https://not-a-relay.example"],
+        ["chat_relay", "not a url"],
+        ["chat_relay", "wss://chat.a"],
+      ]);
+      expect(parsed.chatRelays).toEqual(["wss://chat.a"]);
+    });
+
+    // BACKWARD COMPAT — configs published before `chat_relay` existed carry the
+    // interop relays inside their `relay` tags, which is precisely what made every
+    // 31600/31603/kind-5 publish fail against two of the event's own relays. The
+    // parser MOVES them (never drops them) so an already-running chat group keeps
+    // reaching Whitenoise clients while the rest of the app stops publishing there.
+    it("migrates the legacy interop relays out of `relay` and into chatRelays", () => {
+      const parsed = parseEventConfig(pubkey, [
+        ["d", "ev"], ["v", "2"],
+        ["inbox", "b".repeat(64)],
+        ["relay", "wss://relay.a"],
+        ["relay", "wss://relay.us.whitenoise.chat"],
+        ["relay", "wss://relay.eu.whitenoise.chat/"], // trailing slash, same host
+        ["relay", "wss://relay.b"],
+        ["chat", "marmot"],
+      ]);
+      expect(parsed.relays).toEqual(["wss://relay.a", "wss://relay.b"]);
+      expect(parsed.chatRelays).toEqual([
+        "wss://relay.us.whitenoise.chat",
+        "wss://relay.eu.whitenoise.chat/",
+      ]);
+    });
+
+    it("migrates even when chat is off (those relays are useless for anything else)", () => {
+      const parsed = parseEventConfig(pubkey, [
+        ["d", "ev"], ["v", "2"],
+        ["inbox", "b".repeat(64)],
+        ["relay", "wss://relay.us.whitenoise.chat"],
+        ["relay", "wss://relay.a"],
+      ]);
+      expect(parsed.chat).toEqual([]);
+      expect(parsed.relays).toEqual(["wss://relay.a"]);
+      expect(parsed.chatRelays).toEqual(["wss://relay.us.whitenoise.chat"]);
+    });
+
+    it("is idempotent: re-parsing a migrated config that names the pair in both places", () => {
+      const parsed = parseEventConfig(pubkey, [
+        ["d", "ev"], ["v", "2"],
+        ["inbox", "b".repeat(64)],
+        ["relay", "wss://relay.a"],
+        ["relay", "wss://relay.us.whitenoise.chat"],
+        ["chat_relay", "wss://relay.us.whitenoise.chat"],
+        ["chat_relay", "wss://relay.eu.whitenoise.chat"],
+      ]);
+      expect(parsed.relays).toEqual(["wss://relay.a"]);
+      expect(parsed.chatRelays).toEqual([
+        "wss://relay.us.whitenoise.chat",
+        "wss://relay.eu.whitenoise.chat",
+      ]);
+      // …and a rebuild of the parsed result parses back to itself.
+      expect(parseEventConfig(pubkey, buildEventConfig(parsed).tags)).toEqual(parsed);
+    });
+
+    it("keeps a non-interop relay in `relays` even when chat relays are present", () => {
+      const parsed = parseEventConfig(pubkey, [
+        ["d", "ev"], ["v", "2"],
+        ["inbox", "b".repeat(64)],
+        ["relay", "wss://relay.a"],
+        ["chat_relay", "wss://chat.a"],
+      ]);
+      expect(parsed.relays).toEqual(["wss://relay.a"]);
+      expect(parsed.chatRelays).toEqual(["wss://chat.a"]);
+    });
   });
 
   it("drops unknown chat values and de-duplicates known ones", () => {

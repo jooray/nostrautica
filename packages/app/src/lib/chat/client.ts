@@ -22,6 +22,7 @@ import { KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
 import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
 import {
@@ -112,9 +113,15 @@ export class MarmotChat {
     return new MarmotChat(identity, options.ctx, options.accountSigner);
   }
 
-  /** The relays this event's chat uses (the 31600 relay list). */
+  /**
+   * The relays this event's chat uses: the 31600 `relay` list PLUS its separate
+   * `chat_relay` list. Chat is the one subsystem that talks to both — the interop
+   * relays carry exactly the kinds this class publishes (30443 key packages,
+   * 0/10002/10050 identity, 445/1059 traffic) and refuse everything else, which
+   * is why they are not in `config.relays` for the rest of the app to publish to.
+   */
   private get relays(): string[] {
-    return this.ctx.config.relays;
+    return unionRelays(this.ctx.config.relays, chatRelaysOf(this.ctx.config));
   }
 
   /**

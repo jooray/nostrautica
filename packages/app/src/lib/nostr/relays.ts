@@ -2,6 +2,7 @@
  * Relay policy (spec §5.4, §10.1). The effective relay set for any operation is
  * app defaults ∪ event 31600 relays ∪ user 10002.
  */
+import { CHAT_INTEROP_RELAYS } from "@nostrautica/protocol";
 
 /**
  * Build-time overrides for local dev / e2e / screenshot runs: point the whole
@@ -46,15 +47,57 @@ export const DEFAULT_READ_RELAYS = ENV_RELAYS ? [] : ["wss://purplerelay.com"];
 /**
  * Relays the Whitenoise Marmot/MLS client publishes its key packages and group
  * traffic to (confirmed via its own "seen on relays" key-package screen,
- * 2026-07-20). Without these in a chat-enabled event's relay set, the
- * coordinator never discovers a Whitenoise attendee's key package, and even a
- * found one can't route group messages back to a Whitenoise client whose own
- * relay list doesn't overlap ours. Unioned into new chat-enabled events'
- * relays at creation (create.ts) so both directions work by default.
+ * 2026-07-20). Without these, the coordinator never discovers a Whitenoise
+ * attendee's key package, and even a found one can't route group messages back
+ * to a Whitenoise client whose own relay list doesn't overlap ours.
+ *
+ * They are a CHAT-ONLY set and live in the event config's separate `chat_relay`
+ * tags — never in its `relay` tags. They were unioned into a chat-enabled
+ * event's general relay list until 2026-07-28; because they accept only the
+ * Marmot/NIP-17 chat kinds and answer everything else with `blocked: kind N is
+ * not accepted by this relay`, that meant every 31600 config republish, 31603
+ * roster and kind-5 deletion on such an event failed against two of its own
+ * relays. See {@link CHAT_INTEROP_RELAYS} for the measured kind list.
  */
-export const WHITENOISE_RELAYS = ENV_RELAYS
-  ? []
-  : ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
+export const WHITENOISE_RELAYS = ENV_RELAYS ? [] : CHAT_INTEROP_RELAYS;
+
+/**
+ * An event config's chat relay set, tolerating a config that predates the field.
+ *
+ * `EventConfig.chatRelays` is required and `parseEventConfig` always fills it —
+ * but an EventContext deserialized from the IndexedDB cache was written by
+ * whatever app version cached it, so right after an upgrade `config.chatRelays`
+ * can genuinely be `undefined` at runtime despite the type. Every reader unions
+ * it into a relay list, and `unionRelays(undefined)` throws "list is not
+ * iterable", which would break chat startup on exactly that first load.
+ */
+export function chatRelaysOf(config: { chatRelays?: string[] }): string[] {
+  return config.chatRelays ?? [];
+}
+
+/**
+ * The chat-interop relays to attach to an event whose general relays are
+ * `eventRelays` — mirrors `chatInteropRelays` in the coordinator
+ * (packages/coordinator/src/coordinator.ts) so both sides derive the same set.
+ *
+ * An event whose relays are all loopback is a local dev/e2e event: it gets none,
+ * so a test run never dials public infrastructure. (`VITE_NOSTRAUTICA_RELAYS`
+ * already empties the list at build time; this covers a normal build pointed at
+ * a local relay, which the build-time check alone would miss.)
+ */
+export function chatInteropRelays(eventRelays: string[]): string[] {
+  const localOnly =
+    eventRelays.length > 0 &&
+    eventRelays.every((relay) => {
+      try {
+        const host = new URL(relay).hostname;
+        return host === "localhost" || host === "127.0.0.1" || host === "::1";
+      } catch {
+        return false;
+      }
+    });
+  return localOnly ? [] : [...WHITENOISE_RELAYS];
+}
 
 /**
  * Relays advertised in the `nostrconnect://` URI (NIP-46). Subscribed in

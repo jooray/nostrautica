@@ -683,3 +683,41 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     await expect(chatB.send("must not reach event A")).rejects.toThrow("no joined chat group yet");
   });
 });
+
+/**
+ * Chat is the ONE subsystem that talks to the event's chat relays: the Marmot
+ * interop pair carries exactly the kinds this class publishes (30443 key
+ * packages, the chat identity's 0/10002/10050, 445/1059 traffic) and refuses
+ * every other kind, which is why they live in the config's separate `chat_relay`
+ * set instead of `config.relays`. If this getter ever narrows back to
+ * `config.relays`, a Whitenoise attendee stops seeing our key package on the
+ * relays their client actually reads — the 2026-07-20 "never joined the group"
+ * report — with no error anywhere.
+ */
+describe("MarmotChat relay set (chat_relay)", () => {
+  it("publishes chat identity + key package to the event relays UNION the chat relays", async () => {
+    const chatCtx = {
+      config: {
+        relays: ["wss://r"],
+        chatRelays: ["wss://relay.us.whitenoise.chat"],
+        coordinator: COORD,
+      },
+      coordinate: "31923:" + "f".repeat(64) + ":my-event",
+    } as never;
+    const chat = await MarmotChat.create({ accountSigner, ctx: chatCtx });
+    await chat.ensurePublished();
+    const [arg] = lastClient.keyPackages.ensurePublished.mock.calls[0] as unknown as [
+      { relays: string[] },
+    ];
+    expect(arg.relays).toEqual(["wss://r", "wss://relay.us.whitenoise.chat"]);
+  });
+
+  it("falls back to the event relays for a context cached before chat relays existed", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.ensurePublished();
+    const [arg] = lastClient.keyPackages.ensurePublished.mock.calls[0] as unknown as [
+      { relays: string[] },
+    ];
+    expect(arg.relays).toEqual(["wss://r"]);
+  });
+});

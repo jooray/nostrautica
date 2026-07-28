@@ -39,6 +39,7 @@ const config = {
   eidPubkey: eid,
   inbox: getPublicKey(generateSecretKey()),
   relays: ["wss://relay.example"],
+  chatRelays: [],
   blossom: [],
   maxVideoSec: 90,
   maxTalkSec: 900,

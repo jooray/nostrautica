@@ -2666,6 +2666,29 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(mls.invited).toEqual([devicePk]);
   });
 
+  // The Whitenoise interop relays used to reach the chat subscriptions by
+  // accident: the app unioned them into the event's `relay` tags, so they showed
+  // up in `configRelays`. They now live in the config's separate `chat_relay`
+  // set (and parseEventConfig migrates old configs out of `relay`), so the
+  // chat-only subscriptions have to add them back explicitly — otherwise the
+  // 30443 watcher silently stops seeing a Whitenoise attendee's key package on
+  // the relay their client publishes it to (prod report 2026-07-20), while the
+  // rest of the daemon keeps publishing 31603/31606/kind-5 only to relays that
+  // accept them.
+  it("watches 30443 on the event relays PLUS the chat interop relays, and nothing else does", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const interop = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
+    const kpSub = h.transport.subs.find((s: any) => s.filter?.kinds?.includes(30443));
+    expect(kpSub).toBeDefined();
+    expect(kpSub!.relays).toEqual(["wss://test", ...interop]);
+    // Every non-chat subscription stays on the event's own relays.
+    for (const sub of h.transport.subs) {
+      if (sub.filter?.kinds?.includes(30443) || sub.filter?.kinds?.includes(445)) continue;
+      for (const url of interop) expect(sub.relays ?? []).not.toContain(url);
+    }
+  });
+
   it("a persistently failing sync poisons and surfaces a 21606 to the organizer", async () => {
     const mls = new StubMls();
     mls.failIsMember = true;

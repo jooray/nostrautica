@@ -111,9 +111,10 @@ Normative wire details in `PROTOCOL-NIP.md` §10. Summary of the moving parts:
    (fail-open restore) and App-12 (backup convergence) are deleted, not fixed. A "lost
    device" is handled by revoking its key from any other logged-in device (or by the
    fact that event chats are time-bounded anyway).
-6. **Relays**: no new relay concept. Chat traffic keeps using event relays ∪
-   `WHITENOISE_RELAYS` (`relays.ts:54`, `coordinator.ts:142`). A future dedicated
-   `["chat_relay", …]` 31600 tag is compatible but not required.
+6. **Relays**: chat traffic uses event relays ∪ the chat interop set. The
+   `["chat_relay", …]` 31600 tag anticipated here shipped on 2026-07-28 — the interop
+   relays are no longer unioned into `config.relays`, because they reject every kind
+   outside the Marmot/NIP-17 chat surface (see NIP §"Event Networking Config").
 7. **Welcome/joining**: unchanged per device — each device publishes its own 30443, the
    coordinator invites it, the Welcome arrives gift-wrapped to its 10050 relays, and the
    device joins with its own leaf. The unbound-candidate routing rule (NIP §10.4) applies
