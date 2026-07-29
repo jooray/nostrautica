@@ -91,6 +91,7 @@ import { processAttendee } from "./pipeline/process.js";
 import type { NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
+  hasProfileContent,
   pairInputsHash,
   scoreBatch,
   scoreReverseBatch,
@@ -708,7 +709,7 @@ export class Coordinator {
 
     this.jobs.register("publish_matches", async (p, { signal }) => {
       await this.runEventJob(p.coordinate, signal, async () => {
-        await this.publishMatchesJob(p.coordinate, p.pubkey);
+        await this.publishMatchesJob(p.coordinate, p.pubkey, p.allowEmpty === true);
       });
     });
 
@@ -2298,6 +2299,28 @@ export class Coordinator {
     // this attendee's stages (audit COORD-15) so the organizer view recovers.
     this.deps.store.clearPoisonStatuses(coordinate, pubkey);
     await this.publishDirectory(state, pubkey);
+    // Nothing to match on: leaving already-cached pairs in place would keep this
+    // person in other people's published lists, and any pair scored before (or,
+    // historically, DESPITE) this check is exactly the fabricated kind — a
+    // biography the model invented for an empty profile. Drop them and republish
+    // the affected lists so the invention disappears instead of waiting for each
+    // of those attendees to change their own profile.
+    if (!hasProfileContent(aiProfile)) {
+      const affected = this.deps.store.pairsFor(coordinate, pubkey).map((r) => r.other);
+      if (affected.length) {
+        this.deps.store.clearPairsInvolving(coordinate, pubkey);
+        log(`[match] ${short(pubkey)} has no profile content — dropped ${affected.length} cached pair(s)`);
+        for (const other of [...new Set([...affected, pubkey])]) {
+          this.jobs.enqueue("publish_matches", `pub:${coordinate}:${other}:nocontent:${this.now()}`, {
+            coordinate,
+            pubkey: other,
+            allowEmpty: true,
+          });
+        }
+      }
+      log(`[pipeline] ${short(pubkey)}: no ai_profile content to match on (no profile, intro, or public activity)`);
+      return true;
+    }
     log(`[pipeline] ${short(pubkey)} ai_profile ready — skills: ${aiProfile.skills.slice(0, 4).join(", ")}`);
     return true;
   }
@@ -2534,11 +2557,29 @@ export class Coordinator {
     log(`[talk] rejected "${talk.title}" for ${short(pubkey)}`);
   }
 
+  /**
+   * The attendees eligible to be matched. Presence of an ai_profile is not
+   * enough — it must have CONTENT (see `hasProfileContent`): a content-free one
+   * carries no signal, and scoring it makes the model invent a biography rather
+   * than admit there's nothing to compare. Someone with nothing to say simply
+   * isn't in the pool until they say something, at which point their commit
+   * re-enters them and the recompute scores them for real.
+   */
   private buildMatchingRoster(coordinate: string): AttendeeForMatching[] {
     return this.deps.store
       .approvedAttendees(coordinate)
-      .filter((a) => a.ai_profile_json && a.profile_hash)
+      .filter((a) => a.profile_hash && this.hasStoredProfileContent(a.ai_profile_json))
       .map((a) => ({ pubkey: a.pubkey, profileHash: a.profile_hash! }));
+  }
+
+  /** `hasProfileContent` over a stored ai_profile_json; false when absent/malformed. */
+  private hasStoredProfileContent(aiProfileJson: string | null | undefined): boolean {
+    if (!aiProfileJson) return false;
+    try {
+      return hasProfileContent(JSON.parse(aiProfileJson) as AiProfile);
+    } catch {
+      return false;
+    }
   }
 
   private async selectPairs(coordinate: string, pubkey: string, signal?: AbortSignal) {
@@ -2776,14 +2817,18 @@ export class Coordinator {
     return this.deps.store.getAttendee(coordinate, pubkey)?.display_name ?? undefined;
   }
 
-  private async publishMatchesJob(coordinate: string, pubkey: string): Promise<void> {
+  private async publishMatchesJob(coordinate: string, pubkey: string, allowEmpty = false): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state || state.matching === "off") return; // never publish lists when matching is off (H4)
     // Lifecycle recheck before publication (audit R3): a detached/expired event must
     // not publish a match list using captured state after custody was deleted.
     if (!this.eventStillLive(coordinate, state.gen)) return;
     const list = buildMatchList(this.deps.store, coordinate, pubkey, this.topK, Math.floor(this.now() / 1000));
-    if (list.matches.length === 0) return;
+    // Normally an empty list means "not scored yet" and publishing it would just
+    // churn a replaceable event. `allowEmpty` is for the one case where empty is a
+    // RESULT and has to reach the client: pairs were deliberately dropped, so the
+    // previously published list is now wrong and must be replaced, not left live.
+    if (list.matches.length === 0 && !allowEmpty) return;
     const event = buildMatchListEvent(this.publishKeys(state), coordinate, pubkey, sanitizeMatchList(list), this.nextCreatedAt);
     await this.publish(event, state.configRelays);
     log(`[match] published list for ${short(pubkey)} — ${list.matches.length} match(es)`);

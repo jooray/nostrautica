@@ -1,9 +1,10 @@
 import { describe, it, expect } from "vitest";
-import type { AiProfile } from "@nostrautica/protocol";
+import { hasAiProfileContent, type AiProfile } from "@nostrautica/protocol";
 import { MockLlm } from "../providers/mock.js";
 import {
   scoreBatch,
   scoreReverseBatch,
+  hasProfileContent,
   languageInstruction,
   BATCH_SYSTEM_PROMPT,
   REVERSE_BATCH_SYSTEM_PROMPT,
@@ -516,5 +517,20 @@ describe("name-aware reasoning (B1, TEST-REPORT-2026-07-16-MATCHING)", () => {
     expect(BATCH_SYSTEM_PROMPT).toContain('The TARGET is always "you"');
     expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain('Each TARGET is always "you" in their own entry');
     expect(REVERSE_BATCH_SYSTEM_PROMPT).toContain("an example name, not an attendee");
+  });
+});
+
+describe("hasProfileContent — the guard against scoring nothing", () => {
+  it("is the protocol's shared notion of empty, so app and coordinator cannot drift", () => {
+    expect(hasProfileContent).toBe(hasAiProfileContent);
+  });
+
+  it("rejects the empty-input profile the pipeline publishes (audit COORD-4 skip)", () => {
+    expect(hasProfileContent({ summary: "", skills: [], interests: [], offers: [], seeks: [] })).toBe(false);
+  });
+
+  it("accepts a profile carrying ANY one field — a single skill is still signal", () => {
+    const empty = { summary: "", skills: [], interests: [], offers: [], seeks: [] };
+    expect(hasProfileContent({ ...empty, skills: ["mesh networking"] })).toBe(true);
   });
 });

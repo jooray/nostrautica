@@ -6,7 +6,7 @@
  * for this event's purpose), not just similarity.
  */
 import { z } from "zod";
-import { sha256Hex, utf8ToBytes, languageName } from "@nostrautica/protocol";
+import { sha256Hex, utf8ToBytes, languageName, hasAiProfileContent } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
 
@@ -52,6 +52,20 @@ export function profileHash(profile: AiProfile): string {
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
+
+/**
+ * A profile with no content must never be scored. `profileText` renders one as a
+ * "Name: X" line over five empty fields, and the model, asked to explain how two
+ * people fit, obliges: production scored a content-free attendee at 0.85–0.90
+ * against six different targets, each time inventing a DIFFERENT plausible
+ * biography from the name alone ("he works on MeshCore and BTC L2") in flat
+ * defiance of the prompt's "never invent" rule. Confabulation is not something a
+ * better prompt fixes — the only safe input is one with something in it.
+ *
+ * Re-exported from the protocol package so the coordinator's notion of "empty"
+ * is the same one the app renders by (see `hasAiProfileContent`).
+ */
+export const hasProfileContent = hasAiProfileContent;
 
 /** inputs_hash = sha256(sorted(profileA_hash, profileB_hash)) — order-independent. */
 export function pairInputsHash(hashA: string, hashB: string): string {

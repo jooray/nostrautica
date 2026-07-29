@@ -2479,6 +2479,30 @@ describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
     expect(ai).toEqual({ summary: "", skills: [], interests: [], offers: [], seeks: [] });
   });
 
+  it("never matches a content-free profile — an empty profile invites the model to invent one", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designPk = await join(h, generateSecretKey(), "design");
+    // Joined, approved, and never said anything: no authored profile, no intro, and
+    // nostr_context=0. In production this attendee was scored 0.85–0.90 against six
+    // people, with the model inventing a different biography from the name each time.
+    const { pubkey: quietPk } = await joinOnly(h, generateSecretKey(), "Ľudo");
+    await h.coordinator.jobs.drain();
+
+    const lists = h.transport.published.filter((e) => e.kind === KIND_MATCH_LIST);
+    const cryptoD = blindedD(h.eck, h.coordinate, cryptoPk);
+    const mine = lists
+      .filter((e) => e.tags.find((t) => t[0] === "d")?.[1] === cryptoD)
+      .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(cryptoSk, getPublicKey(h.coordSk), e.content))))
+      .sort((a, b) => b.matches.length - a.matches.length)[0]!;
+    expect(mine.matches.map((m) => m.pubkey)).toContain(designPk);
+    expect(mine.matches.map((m) => m.pubkey)).not.toContain(quietPk);
+    // And nothing is published TO them either — there is no honest list to publish.
+    const quietD = blindedD(h.eck, h.coordinate, quietPk);
+    expect(lists.some((e) => e.tags.find((t) => t[0] === "d")?.[1] === quietD)).toBe(false);
+  });
+
   it("caps distinct talk submissions per speaker at 10 — editing an existing talk stays unaffected", async () => {
     const h = await setup(0, { talks: "on" });
     const speakerSk = generateSecretKey();

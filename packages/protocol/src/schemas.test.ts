@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { encryptMedia } from "./media.js";
 import {
   MAX_CHAT_KEYS_PER_ACCOUNT,
+  hasAiProfileContent,
   talkSubmissionContentSchema,
   talkContentSchema,
   mediaDescriptorSchema,
@@ -1277,5 +1278,33 @@ describe("talk sources: recording/upload (Blossom) vs external URL (NIP §8/§11
     });
     expect(parsed.media).toBeUndefined();
     expect(parsed.external_url).toContain("youtube");
+  });
+});
+
+describe("hasAiProfileContent — one shared definition of an empty AI profile", () => {
+  const empty = { summary: "", skills: [], interests: [], offers: [], seeks: [] };
+
+  it("an absent profile has no content", () => {
+    expect(hasAiProfileContent(undefined)).toBe(false);
+  });
+
+  it("the all-empty profile the coordinator publishes on an empty-input skip has none", () => {
+    expect(hasAiProfileContent(empty)).toBe(false);
+  });
+
+  it("a whitespace-only summary is not content", () => {
+    expect(hasAiProfileContent({ ...empty, summary: "  \n\t " })).toBe(false);
+  });
+
+  it("ANY single populated field is content — one skill is still something to match on", () => {
+    expect(hasAiProfileContent({ ...empty, summary: "builds mesh radios" })).toBe(true);
+    expect(hasAiProfileContent({ ...empty, skills: ["mesh networking"] })).toBe(true);
+    expect(hasAiProfileContent({ ...empty, interests: ["lightning"] })).toBe(true);
+    expect(hasAiProfileContent({ ...empty, offers: ["code review"] })).toBe(true);
+    expect(hasAiProfileContent({ ...empty, seeks: ["a co-founder"] })).toBe(true);
+  });
+
+  it("translations alone are not content — they restate authored fields, and there were none", () => {
+    expect(hasAiProfileContent({ ...empty, translations: { lang: "sk", about: "ahoj" } })).toBe(false);
   });
 });
