@@ -2260,6 +2260,7 @@ export class Coordinator {
         // a store the shutdown is about to close.
         signal,
         now: this.now,
+        log,
       },
       { pubkey, profile, media: cappedMedia, introText, extraTranscripts },
     );

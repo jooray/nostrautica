@@ -145,6 +145,8 @@ interface Counters {
   translateCalls: number;
   /** When set, every batch-scoring call throws — drives the batch FAILED log line. */
   failBatchScore?: boolean;
+  /** When set, every profile_translation call throws (the decoration stage fails). */
+  failTranslate?: boolean;
 }
 
 const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
@@ -257,6 +259,7 @@ function makeLlm(counters: Counters): MockLlm {
     }
     if (req.schemaName === "profile_translation") {
       counters.translateCalls++;
+      if (counters.failTranslate) throw new Error("translation contract: looking_for: invalid_type");
       // Fixtures are English. If the target (event) language is English too, nothing
       // to translate; otherwise return a marked translation of each supplied field.
       const targetIsEn = /TARGET LANGUAGE: English \(en\)/.test(req.user);
@@ -2402,6 +2405,54 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     });
     await expect(h.coordinator.handleCoordinatorWrap(grantWrap as any)).resolves.toBeUndefined();
     expect(h.store.getEvent(coordB)).toBeUndefined();
+  });
+});
+
+describe("the translation stage degrades instead of failing the job (2026-07-29 incident)", () => {
+  it("a failed translation still commits the ai_profile, transcript, and matches", async () => {
+    const h = await setup(0, { lang: "sk" }); // non-English event ⇒ translation runs
+    h.counters.failTranslate = true;
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    // The translation is a decoration on the entry. It failing used to unwind the
+    // whole of processAttendee, so nothing reached commitAiProfile and an attendee
+    // lost artifacts that had already succeeded — in production, one sat poisoned
+    // for a day with no AI summary on their entry and no transcript of the intro
+    // they had recorded for the event, matched off their pre-submission profile.
+    expect(h.counters.translateCalls).toBeGreaterThan(0); // it really was attempted
+    const attendee = h.store.getAttendee(h.coordinate, cryptoPk)!;
+    expect(attendee.ai_profile_json).toBeTruthy();
+    expect(JSON.parse(attendee.ai_profile_json!).summary).toContain("profile");
+    // The revision guard is satisfied, so the entry publishes WITH its ai_profile.
+    expect(attendee.ai_source_revision).toBe(attendee.source_revision);
+    expect(JSON.parse(attendee.transcripts_json!).length).toBe(1);
+    const entry = latestDirectory(h.transport, h.eck, blindedD(h.eck, h.coordinate, cryptoPk));
+    expect(entry.ai_profile).toBeTruthy();
+    expect(entry.ai_profile!.translations).toBeUndefined(); // the one thing that IS lost
+    expect(entry.transcripts?.length).toBe(1);
+    // And matching ran off the fresh profile.
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_LIST)).toBe(true);
+  });
+
+  it("a failed translation is not cached as 'nothing to translate'", async () => {
+    const h = await setup(0, { lang: "sk" });
+    h.counters.failTranslate = true;
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // A cached `null` means "asked, nothing to translate" — caching a BROKEN call
+    // under that key would freeze a permanent no-translation verdict for this
+    // revision. Nothing was stored, so a reprocess asks again: the count climbs.
+    const firstCalls = h.counters.translateCalls;
+    h.counters.failTranslate = false;
+    await resubmitIntro(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    expect(h.counters.translateCalls).toBeGreaterThan(firstCalls);
+    const entry = latestDirectory(h.transport, h.eck, blindedD(h.eck, h.coordinate, pk));
+    expect(entry.ai_profile!.translations?.lang).toBe("sk"); // recovered on its own
   });
 });
 

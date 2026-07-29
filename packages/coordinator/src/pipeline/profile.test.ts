@@ -162,4 +162,38 @@ describe("Q9 — translateProfileFields validates provider output", () => {
     expect(out?.about).toBe("hello");
     expect(out?.lang).toBe("en");
   });
+
+  // Production 2026-07-29: this exact payload shape poisoned three attendees'
+  // pipelines. The system prompt says to translate each NON-EMPTY field, and the
+  // model marks the ones it skipped with null — which `.optional()` rejected as
+  // `looking_for: invalid_type`, deterministically, so every retry re-billed a
+  // call that could never pass.
+  it("accepts null for the fields the model was told to skip (empty author fields)", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      about: "o mne",
+      looking_for: null,
+      skills: null,
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "sk", {
+      about: "about me",
+      looking_for: "", // blank, so the model had nothing to translate
+      skills: [],
+    });
+    expect(out?.about).toBe("o mne");
+    expect(out?.looking_for).toBeUndefined();
+    expect(out?.skills).toBeUndefined();
+  });
+
+  it("null on EVERY translated field yields no translation rather than an error", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      about: null,
+      looking_for: null,
+      skills: null,
+    }));
+    await expect(translateProfileFields(llm, summaryModel, "sk", fields)).resolves.toBeUndefined();
+  });
 });

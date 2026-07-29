@@ -26,12 +26,26 @@ import type { LlmProvider, ModelRef } from "../providers/types.js";
  *  types throw a ProviderContractError → retry/poison. */
 const aiProfileResponseSchema = aiProfileSchema;
 
+/**
+ * `.nullish()`, not `.optional()`, on the three translated fields (production
+ * incident 2026-07-29). The system prompt tells the model to translate each
+ * NON-EMPTY field, and it obeys by emitting `"looking_for": null` for the ones it
+ * skipped — which `.optional()` (string | undefined) rejects as `invalid_type`.
+ * Every one of the 22 contract failures on this stage was that: the field named in
+ * the error was always one the attendee had left blank, never `about`. It fails
+ * deterministically for a given profile, so all 27 retries of the poisoned job
+ * were guaranteed to fail, each one a paid provider call.
+ *
+ * Nothing downstream needed the strictness: the caller already treats a falsy
+ * value as "not translated" field by field. Null and absent mean the same thing
+ * here, so both parse.
+ */
 const translationResponseSchema = z.object({
   source_lang: z.string(),
   needs_translation: z.boolean(),
-  about: z.string().optional(),
-  looking_for: z.string().optional(),
-  skills: z.array(z.string()).optional(),
+  about: z.string().nullish(),
+  looking_for: z.string().nullish(),
+  skills: z.array(z.string()).nullish(),
 });
 
 const nostrSummaryResponseSchema = z.object({ summary: z.string() });
@@ -172,9 +186,9 @@ export const PROFILE_TRANSLATION_SCHEMA = {
 interface RawTranslation {
   source_lang?: string;
   needs_translation?: boolean;
-  about?: string;
-  looking_for?: string;
-  skills?: string[];
+  about?: string | null;
+  looking_for?: string | null;
+  skills?: string[] | null;
 }
 
 export interface TranslationInput {

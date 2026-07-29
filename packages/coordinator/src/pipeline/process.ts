@@ -64,6 +64,10 @@ export interface ProcessDeps {
    *  STT/LLM run unwinds promptly when the coordinator is shutting down. */
   signal?: AbortSignal;
   now?: () => number;
+  /** Operator log. Optional so tests can stay silent; the daemon always passes it —
+   *  a stage that degrades instead of failing must still leave a trace, or the
+   *  degradation is invisible until someone reads the database. */
+  log?: (msg: string) => void;
 }
 
 export interface ProcessInput {
@@ -254,16 +258,44 @@ export async function processAttendee(
   let translations = deps.store.getArtifact("translation", trKey) as AiProfileType["translations"] | null | undefined;
   if (translations === undefined) {
     deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11/R13)
-    translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields, deps.signal)) ?? null;
-    deps.store.putArtifact({
-      stage: "translation",
-      inputsHash: trKey,
-      provider: deps.translate.provider,
-      model: deps.translate.model,
-      output: translations,
-      now: now(),
-      owner,
-    });
+    // A failed translation must NOT fail the job (production incident
+    // 2026-07-29). The translation is a decoration on the directory entry — the
+    // author's own words are published either way — but a throw here unwound the
+    // whole of processAttendee, so nothing reached commitAiProfile and the
+    // attendee lost artifacts that had already succeeded: a good ai_profile, and
+    // a transcript of an intro they recorded for the event. One attendee sat like
+    // that for a day (poisoned after 27 attempts on a provider contract error
+    // that could never succeed), their published entry showing no AI summary at
+    // all — the Q10 freshness guard correctly omits an ai_profile derived from a
+    // superseded revision — and their matches still scored off the profile they
+    // had before the submission landed.
+    //
+    // Deliberately NOT cached on failure: putArtifact only records a real answer,
+    // so a `null` in the cache always means "asked, nothing to translate" and
+    // never "the call broke once". A later reprocess retries instead of inheriting
+    // a permanent no-translation verdict.
+    try {
+      translations = (await translateProfileFields(deps.translate.llm, deps.translate, deps.lang, trFields, deps.signal)) ?? null;
+      deps.store.putArtifact({
+        stage: "translation",
+        inputsHash: trKey,
+        provider: deps.translate.provider,
+        model: deps.translate.model,
+        output: translations,
+        now: now(),
+        owner,
+      });
+    } catch (e) {
+      // Shutdown still wins — an aborted run must unwind, not quietly continue
+      // and commit against a store the shutdown is about to close (audit C11).
+      if (deps.signal?.aborted) throw e;
+      translations = null;
+      deps.log?.(
+        `[pipeline] ${input.pubkey.slice(0, 8)}: translation failed, publishing without it — ${
+          e instanceof Error ? e.message : String(e)
+        }`,
+      );
+    }
   } else if (owner) {
     // Cache hit — a cached `null` (nothing to translate) is still a hit; record this
     // event's ownership ref (audit R11) so purge reference-counts the translation.
