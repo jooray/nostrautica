@@ -4417,6 +4417,45 @@ describe("audit C3 — public inbox is population-bounded", () => {
     expect(h.store.attendeeCount(h.coordinate)).toBe(1);
   });
 
+  it("keeps a profile submission dispatched CONCURRENTLY with its own join (2026-07-29 production incident)", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Ľudo", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: {
+        v: 2,
+        rev: 0,
+        profile: { about: "meshcore and BTC L2", skills: ["mesh networking"], looking_for: "", links: [] },
+        media: [],
+      },
+      tags: [["a", h.coordinate]],
+    });
+
+    // The app publishes join then submission back to back, so both wraps arrive
+    // together and are dispatched as independent, concurrent inbox tasks. The join
+    // handler awaits a relay fetch (the invite hashes) before writing its attendee
+    // row; the submission used to reach the enrollment gate inside that window and
+    // be dropped as "never joined", silently losing the authored profile.
+    await Promise.all([
+      h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any),
+      h.coordinator.handleInboxWrap(h.coordinate, subWrap as any),
+    ]);
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePk);
+    expect(attendee?.status).toBe("approved");
+    expect(attendee?.profile_json ?? "").toContain("meshcore and BTC L2");
+  });
+
   it("enrolls a join published BEFORE the coordinator subscribed so a later submission clears the gate (H2 backfill + join-before-submission ordering)", async () => {
     const h = await setup(0, { skipAutoInstall: true });
     const inboxPk = getPublicKey(h.einboxSk);

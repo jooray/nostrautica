@@ -1772,6 +1772,30 @@ export class Coordinator {
       ? { invitePubkey: inviteTag[1], sig: inviteTag[2] }
       : undefined;
 
+    // Enroll BEFORE the entitlement round-trip below (production incident,
+    // 2026-07-29). The app publishes a join (21600) and a profile submission
+    // (21601) back to back, so both wraps are usually delivered — and dispatched
+    // concurrently, they're independent inbox tasks — within the same second.
+    // `fetchInviteHashes` is a relay fetch, which held this handler open for
+    // hundreds of ms with NO attendee row written yet; the submission arriving in
+    // that window hit the audit-C3 enrollment gate and was dropped as "never
+    // joined". Three real attendees across two events lost their authored profile
+    // that way, one of them permanently: the dropped wrap is left unseen for the
+    // boot rescan, but recovery then depends on the daemon restarting inside the
+    // 3-day gift-wrap window, and one didn't. The row goes in as `pending` — the
+    // status this join would produce anyway if entitlement said no — and the
+    // upsert below (COALESCE, so a profile that lands in between survives) sets
+    // the real one. C3's threat model is untouched: the gate exists so an unknown
+    // sender can't create a row by SUBMITTING A PROFILE, and this row is created
+    // by an authenticated join request, which is exactly what does that.
+    this.deps.store.upsertAttendee({
+      coordinate: state.coordinate,
+      pubkey: attendeePubkey,
+      status: "pending",
+      displayName: name.trim() || null,
+      now: this.now(),
+    });
+
     const publishedInviteHashes = await this.fetchInviteHashes(state);
     let decision = evaluateEntitlement([this.inviteChecker], {
       coordinate: state.coordinate,
