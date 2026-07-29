@@ -580,6 +580,11 @@ export const messages = {
     "attendee.lookingFor": "Looking for: {value}",
     "attendee.aiSummary": "AI summary",
     "attendee.aiEdited": "Edited by attendee",
+    "attendee.yourMatch": "Why you two match",
+    "attendee.id.copyNpub": "Copy npub",
+    "attendee.id.copyNprofile": "Copy nprofile",
+    "attendee.id.copied": "Copied",
+    "attendee.id.njump": "Open on njump",
     "attendee.textIntro": "Intro",
     "attendee.following": "Following ✓",
 
@@ -1994,6 +1999,11 @@ export const messages = {
     "attendee.lookingFor": "Hľadá: {value}",
     "attendee.aiSummary": "AI zhrnutie",
     "attendee.aiEdited": "Upravené účastníkom",
+    "attendee.yourMatch": "Prečo si k sebe pasujete",
+    "attendee.id.copyNpub": "Kopírovať npub",
+    "attendee.id.copyNprofile": "Kopírovať nprofile",
+    "attendee.id.copied": "Skopírované",
+    "attendee.id.njump": "Otvoriť na njump",
     "attendee.textIntro": "Predstavenie",
 
     // Môj profil na podujatí / oprava AI profilu (F3)
@@ -3405,6 +3415,11 @@ export const messages = {
     "attendee.lookingFor": "Hledá: {value}",
     "attendee.aiSummary": "AI shrnutí",
     "attendee.aiEdited": "Upraveno účastníkem",
+    "attendee.yourMatch": "Proč se k sobě hodíte",
+    "attendee.id.copyNpub": "Kopírovat npub",
+    "attendee.id.copyNprofile": "Kopírovat nprofile",
+    "attendee.id.copied": "Zkopírováno",
+    "attendee.id.njump": "Otevřít na njump",
     "attendee.textIntro": "Představení",
     "attendee.following": "Sleduji ✓",
 
