@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { decode } from "nostr-tools/nip19";
-  import { KIND_PROFILE } from "@nostrautica/protocol";
+  import { KIND_PROFILE, hasAiProfileContent } from "@nostrautica/protocol";
   import type { DirectoryEntryContent, PerEventSettings } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -210,6 +210,25 @@
   const skillList = $derived(
     (useTranslated && translation?.skills?.length ? translation.skills : entry?.profile.skills) ?? [],
   );
+
+  // An ai_profile can exist with NOTHING in it: the coordinator publishes an
+  // all-empty one when an attendee had no inputs at all to derive from (audit
+  // COORD-4's empty-input skip). Rendering the card on mere presence showed a
+  // heading over blank space (user report 2026-07-29) — gate on real content,
+  // using the shared predicate so "empty" means the same thing here as it does
+  // where the coordinator decides not to match on it.
+  // `skills` is in the field list because it's the one ai_profile field this page
+  // never rendered at all — an AI profile carrying only skills looked empty too.
+  const aiSkills = $derived((entry?.ai_profile?.skills ?? []).filter((s) => !skillList.includes(s)));
+  const aiFields = $derived(
+    [
+      ["skills", aiSkills],
+      ["interests", entry?.ai_profile?.interests],
+      ["offers", entry?.ai_profile?.offers],
+      ["seeks", entry?.ai_profile?.seeks],
+    ] as const,
+  );
+  const aiHasContent = $derived(hasAiProfileContent(entry?.ai_profile));
 </script>
 
 <button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
@@ -296,14 +315,14 @@
     <p class="muted">{t("attendee.lookingFor", { value: lookingForText })}</p>
   {/if}
 
-  {#if entry?.ai_profile}
+  {#if aiHasContent && entry?.ai_profile}
     <div class="card" style="background:var(--bg-elev2)">
       <div class="row" style="justify-content:space-between;align-items:baseline;gap:0.4rem">
         <strong>{t("attendee.aiSummary")}</strong>
         {#if entry.ai_profile_edited}<span class="badge">{t("attendee.aiEdited")}</span>{/if}
       </div>
       {#if entry.ai_profile.summary}<p class="muted">{entry.ai_profile.summary}</p>{/if}
-      {#each [["interests", entry.ai_profile.interests], ["offers", entry.ai_profile.offers], ["seeks", entry.ai_profile.seeks]] as const as [key, items] (key)}
+      {#each aiFields as [key, items] (key)}
         {#if items?.length}
           <div class="airow">
             <span class="muted small">{t(`profile.field.${key}`)}</span>
