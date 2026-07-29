@@ -3,7 +3,11 @@ import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { Store } from "../store/db.js";
 import { MarmotAdmin } from "./admin.js";
 import type { ChatMls } from "./mls.js";
-import { makeChatDeviceProof, type ChatKeyAttestationContent } from "@nostrautica/protocol";
+import {
+  makeChatDeviceProof,
+  MAX_CHAT_KEYS_PER_ACCOUNT,
+  type ChatKeyAttestationContent,
+} from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][] };
 
@@ -510,15 +514,18 @@ describe("MarmotAdmin — 21607 v2 proof of possession & device cap (NIP §10)",
     expect(store.getChatKey(COORD, CHATKEY)).toBeUndefined();
   });
 
-  it("enforces the per-account device cap: a 6th distinct key is rejected", async () => {
+  it("enforces the per-account device cap: the key past MAX_CHAT_KEYS_PER_ACCOUNT is rejected", async () => {
     const store = freshStore();
     const mls = new FakeMls();
     const admin = makeAdmin(store, mls);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
-    // Five distinct device keys bind successfully…
-    const devices = Array.from({ length: 6 }, () => generateSecretKey());
-    for (let i = 0; i < 5; i++) {
+    // Bind exactly the cap, then one more. Driven off the constant rather than a
+    // literal 5: this test asserted "a 6th is rejected" and started failing the
+    // moment the cap was raised to 10, which is the constant's job to decide.
+    const cap = MAX_CHAT_KEYS_PER_ACCOUNT;
+    const devices = Array.from({ length: cap + 1 }, () => generateSecretKey());
+    for (let i = 0; i < cap; i++) {
       const sk = devices[i]!;
       const pk = getPublicKey(sk);
       const ok = await admin.handleAttestation(
@@ -529,17 +536,17 @@ describe("MarmotAdmin — 21607 v2 proof of possession & device cap (NIP §10)",
       );
       expect(ok).toBe(true);
     }
-    // …the sixth is over the cap.
-    const sixth = devices[5]!;
-    const sixthPk = getPublicKey(sixth);
+    // …the one past the cap is refused.
+    const overCap = devices[cap]!;
+    const overCapPk = getPublicKey(overCap);
     const ok = await admin.handleAttestation(
       COORD,
       ACCOUNT,
-      attest("add", sixthPk, { deviceSk: sixth }),
+      attest("add", overCapPk, { deviceSk: overCap }),
       CREATED_AT,
     );
     expect(ok).toBe(false);
-    expect(store.getChatKey(COORD, sixthPk)).toBeUndefined();
+    expect(store.getChatKey(COORD, overCapPk)).toBeUndefined();
     // A refresh of an already-active key is NOT counted against the cap.
     const refresh = await admin.handleAttestation(
       COORD,
