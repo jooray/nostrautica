@@ -2503,6 +2503,50 @@ describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
     expect(lists.some((e) => e.tags.find((t) => t[0] === "d")?.[1] === quietD)).toBe(false);
   });
 
+  it("clearing a profile drops its cached pairs and republishes the emptied lists", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designSk = generateSecretKey();
+    const designPk = await join(h, designSk, "design");
+    await h.coordinator.jobs.drain();
+    // They matched each other, so both have a published list and a cached pair.
+    expect(h.store.pairsFor(h.coordinate, cryptoPk).length).toBe(1);
+
+    // The designer wipes their profile: no about, no skills, no media, no intro —
+    // and nostr_context=0, so the pipeline has nothing left to derive from.
+    const before = h.transport.published.length;
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(designSk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: {
+          v: 2,
+          rev: nextSubmissionRev(designPk),
+          profile: { about: "", skills: [], looking_for: "", links: [] },
+          media: [],
+        },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+    await h.coordinator.jobs.drain();
+
+    // The pair is gone from BOTH sides, not just the person who cleared it…
+    expect(h.store.pairsFor(h.coordinate, cryptoPk).length).toBe(0);
+    expect(h.store.pairsFor(h.coordinate, designPk).length).toBe(0);
+    // …and the cryptographer's list was republished EMPTY rather than left showing
+    // reasoning about a profile that no longer says anything (the allowEmpty path:
+    // an emptied list is a result the client has to receive, not "not scored yet").
+    const cryptoD = blindedD(h.eck, h.coordinate, cryptoPk);
+    const republished = h.transport.published
+      .slice(before)
+      .filter((e) => e.kind === KIND_MATCH_LIST && e.tags.find((t) => t[0] === "d")?.[1] === cryptoD)
+      .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(cryptoSk, getPublicKey(h.coordSk), e.content))));
+    expect(republished.length).toBeGreaterThan(0);
+    expect(republished.at(-1)!.matches).toEqual([]);
+  });
+
   it("caps distinct talk submissions per speaker at 10 — editing an existing talk stays unaffected", async () => {
     const h = await setup(0, { talks: "on" });
     const speakerSk = generateSecretKey();
