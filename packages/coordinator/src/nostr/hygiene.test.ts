@@ -11,6 +11,7 @@ import {
   sanitizeAiProfile,
   MAX_LLM_TEXT_CHARS,
 } from "./hygiene.js";
+import { MAX_SKILLS, MAX_SKILL, aiProfileSchema } from "@nostrautica/protocol";
 
 describe("truncateWords", () => {
   it("keeps short text intact", () => {
@@ -56,5 +57,39 @@ describe("sanitizeAiProfile", () => {
     expect(p.summary).toBe("great person, see spam.example");
     expect(p.skills).toEqual(["rust", "bad.example"]);
     expect(p.seeks).toEqual(["collaborators"]);
+  });
+
+  it("caps translated skills at the SCHEMA limit, not this file's looser one", () => {
+    // `translations` is attached after aiProfileSchema validated the model output,
+    // so this is the only enforcement of its item count. Over-cap publishes fine
+    // and then fails directoryEntryContentSchema.parse in every reader — the
+    // attendee silently disappears from the directory (2026-07-30).
+    const p = sanitizeAiProfile({
+      summary: "s",
+      skills: [],
+      interests: [],
+      offers: [],
+      seeks: [],
+      translations: {
+        lang: "sk",
+        skills: Array.from({ length: MAX_SKILLS + 20 }, (_, i) => `skill-${i}`),
+      },
+    });
+    expect(p.translations!.skills!.length).toBe(MAX_SKILLS);
+    // Round-trips through the schema that readers actually parse with.
+    expect(() => aiProfileSchema.parse(p)).not.toThrow();
+  });
+
+  it("truncates an over-long translated skill to the schema's per-item cap", () => {
+    const p = sanitizeAiProfile({
+      summary: "s",
+      skills: [],
+      interests: [],
+      offers: [],
+      seeks: [],
+      translations: { lang: "sk", skills: ["x".repeat(MAX_SKILL + 500)] },
+    });
+    expect(p.translations!.skills![0]!.length).toBeLessThanOrEqual(MAX_SKILL);
+    expect(() => aiProfileSchema.parse(p)).not.toThrow();
   });
 });
