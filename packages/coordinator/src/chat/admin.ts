@@ -280,12 +280,19 @@ export class MarmotAdmin {
     const consumed = this.store.isKpConsumed(coordinate, kp.id);
     if (consumed && !opts?.reconcile) return;
     const member = await this.mls.isMember(mlsGroupId, kp.pubkey);
-    // Nothing to act on: they're in, and this key package is either already spent
-    // or arrived through the passive watcher (where a member needs no attention).
-    if (member && (consumed || !opts?.reconcile)) {
-      this.store.markKpConsumed(coordinate, kp.id); // already in → dedupe this event id
-      return;
-    }
+    // Passive watcher, and they're already in: nothing to do — and crucially, do
+    // NOT record this key package as consumed. A client re-enrolling publishes its
+    // rotated key package a beat BEFORE the attestation that explains it, so the
+    // watcher sees it first; consuming it here spends the one artifact the
+    // attestation's reconcile needs moments later, and the member stays stuck with
+    // both sides silent (prod 2026-07-30: 30443 f09b5d6d consumed by the watcher,
+    // the attestation one second later then found nothing to add). The id check is
+    // only a dedupe, so leaving it unrecorded costs one local membership read per
+    // relay replay and nothing else.
+    if (member && !opts?.reconcile) return;
+    // Deliberate sync, they're in, and this key package is already spent: there is
+    // nothing new to act on.
+    if (member && consumed) return;
     if (!(await this.mls.isEligible(mlsGroupId, kp))) {
       this.store.markKpConsumed(coordinate, kp.id); // ineligible (e.g. ciphersuite) → don't re-eval
       this.log(`[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible`);

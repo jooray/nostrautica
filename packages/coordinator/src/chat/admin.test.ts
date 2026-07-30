@@ -309,6 +309,32 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
     expect(store.isKpConsumed(COORD, "kp2")).toBe(true);
   });
 
+  // The two halves of the re-enrolment handshake race each other on the wire: the
+  // client publishes its rotated key package, THEN attests. The watcher therefore
+  // sees the key package first, and must leave it unspent for the attestation.
+  it("the watcher leaves a member's fresh key package unconsumed, so the attestation can still use it", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // Their rotated key package lands on the relay first — the watcher sees a
+    // member and does nothing, WITHOUT burning the event id.
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp-rotated"));
+    expect(store.isKpConsumed(COORD, "kp-rotated")).toBe(false);
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // The attestation follows a second later and the re-enrolment goes through.
+    const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp-rotated")]);
+    await admin2.syncMember(COORD, ACCOUNT);
+    expect(mls.removed).toEqual([[CHATKEY]]);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
   it("does NOT re-enrol a member off the passive watcher (a rotation for another event)", async () => {
     // One key-package slot serves every event, so a rotation driven by ANOTHER
     // event's enrolment shows up here as a fresh 30443 from a healthy member. That
