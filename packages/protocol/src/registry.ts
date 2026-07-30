@@ -390,6 +390,21 @@ contacts, \`5\` deletions, \`6\` reposts, \`13\` seals, \`14\` NIP-17 direct-mes
 \`30078\` app data, \`31923\`/\`31924\`/\`31925\` NIP-52 event/calendar/RSVP records, and
 Marmot's \`30443\` key packages / \`443\`/\`444\`/\`445\` group messaging.
 
+The \`30078\` app-data identifiers the application owns, all NIP-44 self-encrypted and
+user-private (§4.1):
+
+| \`d\` | Contents |
+|---|---|
+| \`nostrautica:ev:<blinded>\` | Per-event private settings: favorites, want-to-meet, met, notes (§7.3). |
+| \`nostrautica:eventkeys:<blinded>\` | Organizer custody backup: \`E_id\`/\`E_inbox\` nsecs and ECK versions. |
+| \`nostrautica:keybackup\` | Durable "account key was backed up" marker; existence alone is the signal. |
+| \`nostrautica:blindseed\` | The 32-byte seed the blinded-\`d\` construction derives from. |
+| \`nostrautica:dmread\` | Per-peer DM read positions, synced across the account's devices (§7.2). Replaceable, so writers must read-merge-write (per-peer maximum), never overwrite. |
+
+(\`nostrautica:\`-prefixed strings also appear as device-local \`localStorage\`/cache keys —
+theme, language, correction revisions, watch progress. Those are not relay records and are
+not listed here.)
+
 The currently used custom set is exactly \`${CUSTOM_ADDRESSABLE_RANGE.min}\` through \`${CUSTOM_ADDRESSABLE_RANGE.max}\` and \`${CUSTOM_RUMOR_RANGE.min}\` through
 \`${CUSTOM_RUMOR_RANGE.max}\`. Before a public release, re-check every custom kind against the Nostr NIPs
 registry.

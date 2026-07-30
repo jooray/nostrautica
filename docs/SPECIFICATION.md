@@ -299,6 +299,19 @@ new attendees reachable, the app **also publishes a kind-10050** for every app-g
 account identity during onboarding (check-before-publish: it never overwrites a list the
 user already has). Do not describe DMs here as "NIP-17, unmodified".
 
+**Read state syncs across the account's devices** via a NIP-44 self-encrypted kind-30078
+with `d = "nostrautica:dmread"` (§7.3 user-private tier), holding the newest incoming
+`(created_at, id)` position each thread has been read up to. Message history already
+travelled between devices through the self-wrap above; read state did not, so a second
+device showed every read conversation as unread and clearing a badge on one device left the
+other's untouched. Peer pubkeys live inside the ciphertext, so a relay learns only that the
+account wrote a read-state event. Because 30078 is replaceable, every publish is a
+**read-merge-write**: fetch the current event, take the per-peer maximum, publish the union.
+The merge is commutative and monotone, so devices converge regardless of write order and a
+thread can never revert to unread. Bounded at 200 threads (one NIP-44 payload); publishers
+keep the most recently read. This is app-private — no cross-client convention for NIP-17
+read state exists, so other NIP-17 clients simply ignore it.
+
 The app's DM inbox unwraps incoming 1059s and keeps only kind-14 rumors; wrap
 timestamps are randomized per NIP-59 so ordering uses the rumor's `created_at`.
 No event coupling: DMs are between pubkeys; the event UI is just the entry point

@@ -19,6 +19,8 @@ import {
   matchListContentSchema,
   matchMatrixContentSchema,
   perEventSettingsSchema,
+  dmReadStateSchema,
+  MAX_DM_READ_THREADS,
   eventKeysBackupSchema,
   coordinatorStatusContentSchema,
   mediaTranscriptSchema,
@@ -383,6 +385,12 @@ describe("every §7 payload round-trips through JSON", () => {
       want_to_meet: [],
       met: [],
       notes: { [hex]: "met at coffee" },
+    }));
+
+  it("30078 DM read state", () =>
+    roundTrips(dmReadStateSchema, {
+      v: 2,
+      threads: { [hex]: { at: 1_700_000_000, id: "b".repeat(64) } },
     }));
 
   it("30078 event keys backup", () =>
@@ -943,6 +951,23 @@ describe("boundary length caps (PROTO-4)", () => {
     expect(() =>
       perEventSettingsSchema.parse({ v: 2, favorites: Array(MAX_ROSTER + 1).fill(hex) }),
     ).toThrow();
+  });
+
+  it("DM read state: ≤ MAX_DM_READ_THREADS entries, hex peer keys and rumor ids", () => {
+    const full: Record<string, { at: number; id: string }> = {};
+    for (let i = 0; i < MAX_DM_READ_THREADS; i++) {
+      full[i.toString(16).padStart(64, "0")] = { at: i, id: hex };
+    }
+    roundTrips(dmReadStateSchema, { v: 2, threads: full });
+    // One past the cap: the whole map rides in a single NIP-44 payload, so an
+    // unbounded record would eventually exceed the 65535-byte plaintext ceiling
+    // and make read state unpublishable rather than merely large.
+    full[MAX_DM_READ_THREADS.toString(16).padStart(64, "0")] = { at: 0, id: hex };
+    expect(() => dmReadStateSchema.parse({ v: 2, threads: full })).toThrow();
+    // A non-pubkey key or non-event-id value is corruption, not a thread.
+    expect(() => dmReadStateSchema.parse({ v: 2, threads: { nothex: { at: 1, id: hex } } })).toThrow();
+    expect(() => dmReadStateSchema.parse({ v: 2, threads: { [hex]: { at: 1, id: "short" } } })).toThrow();
+    expect(() => dmReadStateSchema.parse({ v: 2, threads: { [hex]: { at: -1, id: hex } } })).toThrow();
   });
 
   it("terms_url / checkout_url are https-only at the schema boundary (audit APPR-1/APPR-2)", () => {

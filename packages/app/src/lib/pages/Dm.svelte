@@ -20,6 +20,7 @@
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { syncDmReadState, flushDmReadState } from "$lib/events/dm-read-state.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { cachedEventContext } from "$lib/events/event-context.js";
   import { defaultEventIcon } from "$lib/media/image.js";
@@ -87,6 +88,10 @@
         profiles = new Map([...profiles, ...fetched]);
       }
       error = null;
+      // Pull the account's published read state so badges here agree with what
+      // the user already read on another device (and push anything they read
+      // here). Throttled inside; this screen already drives the signer.
+      if (session.signer) void syncDmReadState(session.signer);
     } catch (e) {
       error = e;
     } finally {
@@ -101,7 +106,10 @@
     await refresh();
     timer = setInterval(refresh, 10_000);
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    clearInterval(timer);
+    flushDmReadState();
+  });
 
   function nameOf(pubkey: string): string {
     return profiles.get(pubkey)?.name || npubEncode(pubkey).slice(0, 12) + "…";
