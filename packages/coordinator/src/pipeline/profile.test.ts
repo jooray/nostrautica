@@ -162,4 +162,84 @@ describe("Q9 — translateProfileFields validates provider output", () => {
     expect(out?.about).toBe("hello");
     expect(out?.lang).toBe("en");
   });
+
+  // Production 2026-07-29: this exact payload shape poisoned three attendees'
+  // pipelines. The system prompt says to translate each NON-EMPTY field, and the
+  // model marks the ones it skipped with null — which `.optional()` rejected as
+  // `looking_for: invalid_type`, deterministically, so every retry re-billed a
+  // call that could never pass.
+  it("accepts null for the fields the model was told to skip (empty author fields)", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      about: "o mne",
+      looking_for: null,
+      skills: null,
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "sk", {
+      about: "about me",
+      looking_for: "", // blank, so the model had nothing to translate
+      skills: [],
+    });
+    expect(out?.about).toBe("o mne");
+    expect(out?.looking_for).toBeUndefined();
+    expect(out?.skills).toBeUndefined();
+  });
+
+  // Seen on the first real run after the null fix deployed: the model returned
+  // `skills` as one comma-joined string. Same attendee's ai_profile call returned
+  // the same terms as a proper array, so it splits an authored skill into several
+  // and then joins them back on the way out.
+  it("accepts a comma-joined skills string and splits it back into a list", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      about: "o mne",
+      skills: "krypto, AI, hackovanie, bezpečnosť",
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "sk", {
+      about: "about me",
+      looking_for: "",
+      skills: ["crypto hacking ai security"],
+    });
+    expect(out?.skills).toEqual(["krypto", "AI", "hackovanie", "bezpečnosť"]);
+    expect(out?.about).toBe("o mne");
+  });
+
+  it("drops non-string items from a skills array instead of failing the stage", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      skills: ["zk", 42, null, "  ", "rust"],
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "sk", fields);
+    expect(out?.skills).toEqual(["zk", "rust"]);
+  });
+
+  it("an unusable skills value yields no skills rather than an error", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      about: "o mne",
+      skills: { nope: true },
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "sk", {
+      about: "about me",
+      looking_for: "",
+      skills: ["zk"],
+    });
+    expect(out?.about).toBe("o mne"); // the good field still publishes
+    expect(out?.skills).toBeUndefined();
+  });
+
+  it("null on EVERY translated field yields no translation rather than an error", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "en",
+      needs_translation: true,
+      about: null,
+      looking_for: null,
+      skills: null,
+    }));
+    await expect(translateProfileFields(llm, summaryModel, "sk", fields)).resolves.toBeUndefined();
+  });
 });

@@ -12,7 +12,7 @@
  * at 65,535 bytes, so user-authored fields are bounded here as defense in
  * depth (the protocol package's schema caps are the primary control).
  */
-import type { AiProfile } from "@nostrautica/protocol";
+import { MAX_SKILLS, MAX_SKILL, type AiProfile } from "@nostrautica/protocol";
 
 /** Max chars for a single LLM-authored string (reasoning, ai_profile fields). */
 export const MAX_LLM_TEXT_CHARS = 2000;
@@ -61,8 +61,17 @@ export function sanitizeAiProfile(profile: AiProfile): AiProfile {
       ...(profile.translations.looking_for
         ? { looking_for: truncateWords(profile.translations.looking_for, MAX_PROFILE_FIELD_CHARS) }
         : {}),
+      // Sliced as well as truncated: unlike the four ai_profile lists above (bounded
+      // by aiProfileSchema when the model's output was validated), `translations` is
+      // attached AFTER that check, so this is the only place enforcing its item
+      // count. An over-cap list publishes fine and then fails every reader's
+      // directoryEntryContentSchema.parse — silently removing the attendee from the
+      // directory for everyone (2026-07-30).
+      // MAX_SKILLS (50), not this file's MAX_LIST_ITEMS (64) — a publish-time re-cap
+      // that is LOOSER than the schema enforces nothing, the same mistake already
+      // corrected for authored `profile.skills` (NIP §8).
       ...(profile.translations.skills
-        ? { skills: profile.translations.skills.map((s) => truncateWords(s, 200)) }
+        ? { skills: profile.translations.skills.slice(0, MAX_SKILLS).map((s) => truncateWords(s, MAX_SKILL)) }
         : {}),
     };
   }

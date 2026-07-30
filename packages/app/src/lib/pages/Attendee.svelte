@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { decode } from "nostr-tools/nip19";
-  import { KIND_PROFILE } from "@nostrautica/protocol";
-  import type { DirectoryEntryContent, PerEventSettings } from "@nostrautica/protocol";
+  import { decode, nprofileEncode } from "nostr-tools/nip19";
+  import { KIND_PROFILE, hasAiProfileContent } from "@nostrautica/protocol";
+  import type { DirectoryEntryContent, Match, PerEventSettings } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
+  import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { connectNdk, fetchEvents } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchDirectoryEntry, cachedDirectoryEntry } from "$lib/events/attendee.js";
+  import { fetchDirectoryEntry, cachedDirectoryEntry, fetchMatches, cachedMatches } from "$lib/events/attendee.js";
   import { followUser, fetchFollowTags } from "$lib/events/nostr-actions.js";
   import { isFollowing } from "$lib/events/onboarding.js";
   import { fetchFollowersOf, fetchRecentPosts, cachedProfiles, type RecentPost } from "$lib/events/social.js";
@@ -18,8 +19,11 @@
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import PostView from "$lib/components/PostView.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import MatchDetails from "$lib/components/MatchDetails.svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
+  import { copyText } from "$lib/util/clipboard.js";
   import Avatar from "$lib/components/Avatar.svelte";
 
   let { naddr, npub }: { naddr: string; npub: string } = $props();
@@ -44,6 +48,11 @@
   // not an interactive empty profile whose Follow would publish ["p", ""].
   let invalidNpub = $state(false);
   let followQueued = $state(false); // follow sits in the offline outbox (UX-15)
+  // The viewer's own match WITH this person, if the coordinator computed one
+  // (UX feedback 2026-07-29): Matches → profile was a one-way door, so the
+  // reasoning and icebreakers you came for vanished on arrival.
+  let myMatch = $state<Match | null>(null);
+  let copied = $state<"npub" | "nprofile" | null>(null);
   const muted = $derived(!!pubkey && mutes.isMuted(pubkey));
 
   onMount(async () => {
@@ -64,6 +73,7 @@
         // Cached per-event settings (want-to-meet/met/note) paint instantly (§2.8).
         settings = cachedPerEventSettings(cached.coordinate) ?? null;
         if (settings) noteDraft = settings.notes[pubkey] ?? "";
+        myMatch = cachedMatches(cached.coordinate)?.matches.find((m) => m.pubkey === pubkey) ?? null;
       }
       if (kind0 || entry) {
         loading = false;
@@ -114,6 +124,12 @@
 
       if (session.signer) {
         void mutes.load(session.signer);
+        // Refresh the match list in the background (SWR, like the entry above) —
+        // a match computed since the last visit must not stay invisible here.
+        // Non-members / no coordinator resolve to undefined; the section hides.
+        void fetchMatches(session.signer, eventCtx)
+          .then((list) => (myMatch = list?.matches.find((m) => m.pubkey === pubkey) ?? myMatch))
+          .catch(() => {});
         const me = await session.signer.getPublicKey();
         // Bound the follow-list fetch (audit UX-10): an unbounded fetch on a bad
         // network left the Follow button at "…" forever. On timeout we enable
@@ -210,6 +226,54 @@
   const skillList = $derived(
     (useTranslated && translation?.skills?.length ? translation.skills : entry?.profile.skills) ?? [],
   );
+
+  // An ai_profile can exist with NOTHING in it: the coordinator publishes an
+  // all-empty one when an attendee had no inputs at all to derive from (audit
+  // COORD-4's empty-input skip). Rendering the card on mere presence showed a
+  // heading over blank space (user report 2026-07-29) — gate on real content,
+  // using the shared predicate so "empty" means the same thing here as it does
+  // where the coordinator decides not to match on it.
+  // `skills` is in the field list because it's the one ai_profile field this page
+  // never rendered at all — an AI profile carrying only skills looked empty too.
+  const aiSkills = $derived((entry?.ai_profile?.skills ?? []).filter((s) => !skillList.includes(s)));
+  const aiFields = $derived(
+    [
+      ["skills", aiSkills],
+      ["interests", entry?.ai_profile?.interests],
+      ["offers", entry?.ai_profile?.offers],
+      ["seeks", entry?.ai_profile?.seeks],
+    ] as const,
+  );
+  const aiHasContent = $derived(hasAiProfileContent(entry?.ai_profile));
+
+  // Public identity, one tap away (user feedback 2026-07-29). The nprofile carries
+  // the event's own relays as hints — that's where we actually read this person's
+  // records from, so it's the honest hint to hand another client. njump resolves
+  // an nprofile, so the link gets the hints too.
+  const nprofile = $derived(
+    pubkey
+      ? nprofileEncode({ pubkey, ...(ctx?.config.relays?.length ? { relays: ctx.config.relays.slice(0, 3) } : {}) })
+      : "",
+  );
+  const njumpUrl = $derived(nprofile ? `https://njump.me/${nprofile}` : "");
+
+  async function copyId(which: "npub" | "nprofile") {
+    const value = which === "npub" ? npub : nprofile;
+    if (!value) return;
+    if ((await copyText(value)) === "copied") {
+      copied = which;
+      setTimeout(() => (copied = copied === which ? null : copied), 1500);
+    }
+  }
+
+  // "Introduce us" (§9.3), same as the Matches tab: prefill the DM composer with
+  // the coordinator's icebreaker so the introduction becomes an opening line.
+  function introduce() {
+    if (!session.loggedIn) return router.go({ name: "login" });
+    const suggestion = myMatch?.icebreakers?.[0] || myMatch?.reasoning;
+    if (suggestion) dmPrefill.set(pubkey, suggestion);
+    router.go({ name: "dmPeer", npub });
+  }
 </script>
 
 <button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
@@ -296,14 +360,14 @@
     <p class="muted">{t("attendee.lookingFor", { value: lookingForText })}</p>
   {/if}
 
-  {#if entry?.ai_profile}
+  {#if aiHasContent && entry?.ai_profile}
     <div class="card" style="background:var(--bg-elev2)">
       <div class="row" style="justify-content:space-between;align-items:baseline;gap:0.4rem">
         <strong>{t("attendee.aiSummary")}</strong>
         {#if entry.ai_profile_edited}<span class="badge">{t("attendee.aiEdited")}</span>{/if}
       </div>
       {#if entry.ai_profile.summary}<p class="muted">{entry.ai_profile.summary}</p>{/if}
-      {#each [["interests", entry.ai_profile.interests], ["offers", entry.ai_profile.offers], ["seeks", entry.ai_profile.seeks]] as const as [key, items] (key)}
+      {#each aiFields as [key, items] (key)}
         {#if items?.length}
           <div class="airow">
             <span class="muted small">{t(`profile.field.${key}`)}</span>
@@ -316,8 +380,11 @@
     </div>
   {/if}
 
-  <div class="row" style="flex-wrap:wrap">
-    <button class="btn primary" onclick={follow} disabled={busy || following || !followKnown}>
+  <!-- Follow / Message / Mute side by side: three full-width buttons owned a whole
+       screen of a phone viewport for actions you take once (user feedback
+       2026-07-29). They wrap on a narrow viewport rather than shrinking. -->
+  <div class="acts">
+    <button class="btn inline primary" onclick={follow} disabled={busy || following || !followKnown}>
       {!followKnown
         ? "…"
         : following
@@ -327,22 +394,23 @@
             : t("attendee.follow")}
     </button>
     <button
-      class="btn"
+      class="btn inline"
       onclick={() =>
         session.loggedIn ? router.go({ name: "dmPeer", npub }) : router.go({ name: "login" })}
     >
       {t("attendee.message")}
     </button>
-    {#if followQueued}
-      <p class="muted" role="status" style="width:100%;margin:0">{t("sync.queued")}</p>
-    {/if}
     {#if muted}
-      <button class="btn" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
+      <button class="btn inline" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
     {:else}
-      <button class="btn danger" onclick={() => (confirmMute = !confirmMute)} disabled={busy}>{t("attendee.mute")}</button>
+      <button class="btn inline danger" onclick={() => (confirmMute = !confirmMute)} disabled={busy}>{t("attendee.mute")}</button>
     {/if}
   </div>
+  {#if followQueued}
+    <p class="muted" role="status" style="margin:0.4rem 0 0">{t("sync.queued")}</p>
+  {/if}
 
+  <!-- Directly under the button that opened it, not below the identity chips. -->
   {#if confirmMute && !muted}
     <div class="card warn" style="margin-top:0.5rem">
       <p class="muted">{t("mute.confirm")}</p>
@@ -352,7 +420,43 @@
       </div>
     </div>
   {/if}
+
+  <!-- Public identity: copy it or open the person in any other Nostr client. The
+       values themselves stay off-screen — nobody reads an npub, they paste it. -->
+  <div class="ids">
+    <button class="chip" onclick={() => copyId("npub")}>
+      <Icon name={copied === "npub" ? "check" : "copy"} size={13} />
+      {copied === "npub" ? t("attendee.id.copied") : t("attendee.id.copyNpub")}
+    </button>
+    <button class="chip" onclick={() => copyId("nprofile")}>
+      <Icon name={copied === "nprofile" ? "check" : "copy"} size={13} />
+      {copied === "nprofile" ? t("attendee.id.copied") : t("attendee.id.copyNprofile")}
+    </button>
+    <a class="chip" href={njumpUrl} target="_blank" rel="noopener noreferrer">
+      {t("attendee.id.njump")}<Icon name="arrowUpRight" size={13} />
+    </a>
+  </div>
+  <span class="visually-hidden" role="status">{copied ? t("attendee.id.copied") : ""}</span>
 </div>
+
+<!-- Why the coordinator paired you with this person, with the same conversation
+     starters and "Introduce us" the Matches tab offers (user feedback
+     2026-07-29). Hidden when there's no match: absence is not a finding worth a
+     card, and non-members never get a list at all. -->
+{#if myMatch}
+  <div class="card match">
+    <div class="field-label" style="margin-top:0">{t("attendee.yourMatch")}</div>
+    <MatchDetails match={myMatch}>
+      {#snippet actions()}
+        <div class="mact">
+          <button class="btn inline primary" onclick={introduce}>
+            <Icon name="send" size={16} />{t("matches.introduce")}
+          </button>
+        </div>
+      {/snippet}
+    </MatchDetails>
+  </div>
+{/if}
 
 {#if settings}
   <div class="card stack">
@@ -377,6 +481,55 @@
 <style>
   .small {
     font-size: 0.8rem;
+  }
+  /* Primary actions on one row (they wrap before they squash). */
+  .acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-top: 0.75rem;
+  }
+  .acts .btn {
+    flex: 1 1 auto;
+  }
+  /* Identity affordances: deliberately lighter than the actions above — a pill,
+     not a button, but still a real 32px tap target. */
+  .ids {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin-top: 0.55rem;
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28rem;
+    min-height: 32px;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg-elev2);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 550;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .chip:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  }
+  .match {
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+  }
+  .mact {
+    display: flex;
+  }
+  .mact .btn {
+    flex: 1;
   }
   .airow {
     display: flex;

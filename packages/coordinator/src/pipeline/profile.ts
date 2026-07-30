@@ -11,6 +11,8 @@ import {
   utf8ToBytes,
   languageName,
   aiProfileSchema,
+  MAX_SKILLS,
+  MAX_SKILL,
   type AiProfile,
   type AttendeeProfile,
 } from "@nostrautica/protocol";
@@ -26,12 +28,63 @@ import type { LlmProvider, ModelRef } from "../providers/types.js";
  *  types throw a ProviderContractError → retry/poison. */
 const aiProfileResponseSchema = aiProfileSchema;
 
+/**
+ * Liberal in what it accepts, because this stage is a DECORATION and the strict
+ * reading of it cost real data (production incidents 2026-07-29 / 07-30).
+ *
+ * Two observed malformations, both `invalid_type` under the original
+ * `.optional()` typing, both from `gemini-3-flash-preview`:
+ *
+ *  1. `"looking_for": null`. The system prompt says to translate each NON-EMPTY
+ *     field, and the model marks the ones it skipped with null rather than
+ *     omitting them. Every one of the 22 failures logged before the first fix
+ *     named a field the attendee had left blank — never `about`, which nobody
+ *     leaves blank.
+ *  2. `"skills"` as a bare comma-joined STRING instead of an array. Seen on the
+ *     first real run after the null fix shipped: the same profile's `ai_profile`
+ *     call returned those terms as a proper array, so the model splits one
+ *     authored skill into several and then hands them back joined.
+ *
+ * Both are deterministic for a given profile, so retrying could never help — it
+ * just re-billed. `nullToUndefined` maps null onto "the model didn't translate
+ * this", which is exactly how the caller already treats a falsy value, and
+ * `coerceStringList` accepts the joined-string form and drops non-string items.
+ * Anything still unusable parses as undefined and the field is simply not
+ * published: an untranslated field shows the author's own words, which is a
+ * strictly better outcome than failing the stage.
+ */
+const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess((v) => (v === null ? undefined : v), schema.optional());
+
+/**
+ * Accept `["a","b"]`, `"a, b"` (the joined form), or junk → undefined.
+ *
+ * Bounded to the protocol's own caps, because splitting a string is a way to
+ * INVENT list items: `translations` is attached after `aiProfileResponseSchema`
+ * has already validated the model's output, so nothing else on this path enforces
+ * `MAX_SKILLS`/`MAX_SKILL`. An over-cap list would encrypt and publish fine and
+ * then fail `directoryEntryContentSchema.parse` in every reader — the attendee
+ * would silently vanish from the directory for everyone, which is worse than the
+ * malformed translation this coercion exists to tolerate.
+ */
+const coerceStringList = z.preprocess((v) => {
+  const bound = (items: string[]) =>
+    items.length > 0 ? items.slice(0, MAX_SKILLS).map((s) => s.slice(0, MAX_SKILL)) : undefined;
+  if (typeof v === "string") {
+    return bound(v.split(",").map((s) => s.trim()).filter(Boolean));
+  }
+  if (Array.isArray(v)) {
+    return bound(v.filter((s): s is string => typeof s === "string" && s.trim() !== ""));
+  }
+  return undefined;
+}, z.array(z.string()).optional());
+
 const translationResponseSchema = z.object({
   source_lang: z.string(),
   needs_translation: z.boolean(),
-  about: z.string().optional(),
-  looking_for: z.string().optional(),
-  skills: z.array(z.string()).optional(),
+  about: nullToUndefined(z.string()),
+  looking_for: nullToUndefined(z.string()),
+  skills: coerceStringList,
 });
 
 const nostrSummaryResponseSchema = z.object({ summary: z.string() });
@@ -172,9 +225,9 @@ export const PROFILE_TRANSLATION_SCHEMA = {
 interface RawTranslation {
   source_lang?: string;
   needs_translation?: boolean;
-  about?: string;
-  looking_for?: string;
-  skills?: string[];
+  about?: string | null;
+  looking_for?: string | null;
+  skills?: string[] | null;
 }
 
 export interface TranslationInput {

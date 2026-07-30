@@ -30,6 +30,7 @@
   import { shouldPrewarmChat } from "$lib/chat/gate.js";
   import TopBar from "$lib/components/TopBar.svelte";
   import OperationStatus from "$lib/components/OperationStatus.svelte";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
   import BottomNav from "$lib/components/BottomNav.svelte";
   import EventNav from "$lib/components/EventNav.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
@@ -174,6 +175,20 @@
     };
   });
 
+  // A finished operation's confirmation belongs to the screen it happened on
+  // (user report 2026-07-30). The status line lives in this layout, above every
+  // screen, and its documented "until the user's next edit" lifetime silently
+  // assumed the user stays on the form — so a publish confirmation followed them
+  // across the whole app until reload. Navigation ends it.
+  //
+  // Tracks ONLY the route: `clearOnNavigate` reads no state, so this effect never
+  // becomes a subscriber of the status it clears (which would wipe each new
+  // message the instant it was set).
+  $effect(() => {
+    void router.route;
+    opStatus.clearOnNavigate();
+  });
+
   // Per-route document title, focus management, and a polite announcement (A2).
   // On every navigation set the localized title, move focus to <main> (which
   // holds the page's h1) without scrolling, and announce the title once — so a
@@ -306,6 +321,16 @@
   });
 </script>
 
+<!-- The other half of the status line's documented lifetime: the user editing
+     anything means the last operation's confirmation is stale. Wired once here
+     rather than per-form because `opStatus.clearOnEdit()` was only ever called
+     from Record.svelte — every other form in the app (event settings included)
+     promised this lifetime in the store's contract and never delivered it.
+     Input events bubble to the document, so this covers every field. Safe as a
+     DOM handler: unlike an $effect, reading status state here subscribes to
+     nothing. -->
+<svelte:document oninput={() => opStatus.clearOnEdit()} />
+
 <a class="skip-link" href="#main-content">{t("a11y.skipToContent")}</a>
 
 <div class="app-shell">
@@ -380,8 +405,8 @@
       ></div>
     {/if}
   {/if}
-  <!-- Shared, persistent operation-status announcer (audit §7.3.9): Queued /
-       Published / Coordinator-acknowledged, kept until the user's next edit. -->
+  <!-- Shared operation-status announcer (audit §7.3.9): Queued / Published /
+       Coordinator-acknowledged, kept until the user navigates or edits again. -->
   <OperationStatus />
   <main id="main-content" bind:this={main} tabindex="-1">
     {#if booted}

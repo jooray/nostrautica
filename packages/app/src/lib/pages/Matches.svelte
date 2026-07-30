@@ -16,10 +16,10 @@
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
-  import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
+  import MatchDetails from "$lib/components/MatchDetails.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
-  import { t, i18n } from "$lib/i18n/i18n.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -146,21 +146,6 @@
     if (!about) return "";
     return about.length > 60 ? about.slice(0, 60) + "…" : about;
   }
-  /**
-   * Scores are 0–1 on the wire and stay that way everywhere else — this is a
-   * display concern only. "85 %" reads as a score; "0.85" reads as a debug dump.
-   * Intl gets the per-locale typography right on its own (sk/cs want the space
-   * before the sign, en does not). Clamped because the 31605 schema types these
-   * as a plain z.number() with no range bound (schemas.ts), so a future or
-   * misbehaving coordinator must not be able to render "8500 %".
-   */
-  function pct(v: number): string {
-    const clamped = Math.min(1, Math.max(0, Number.isFinite(v) ? v : 0));
-    return new Intl.NumberFormat(i18n.locale, {
-      style: "percent",
-      maximumFractionDigits: 0,
-    }).format(clamped);
-  }
 </script>
 
 <h1 class="disp">{t("matches.title")}</h1>
@@ -228,48 +213,23 @@
           </div>
         </div>
 
-        <ConfidenceBadge score={m.score} />
-
-        <!-- Reasoning is the product — full body size, no longer under a %. -->
-        <p class="reason">{m.reasoning}</p>
-
-        <!-- Icebreakers (§7.3 kind 31605): concrete conversation starters, if any. -->
-        {#if m.icebreakers && m.icebreakers.length > 0}
-          <div class="icebreakers">
-            <div class="ib-label">{t("matches.icebreakers")}</div>
-            <ul class="ib-list">
-              {#each [...new Set(m.icebreakers)] as ib (ib)}
-                <li>{ib}</li>
-              {/each}
-            </ul>
-          </div>
-        {/if}
-
-        <div class="actions">
-          {#if session.loggedIn}
-            <button class="btn inline primary" onclick={() => introduce(m)}>
-              <Icon name="send" size={16} />{t("matches.introduce")}
-            </button>
-            <button class="btn inline" onclick={() => message(m.pubkey)}>
-              {t("matches.message")}
-            </button>
-          {/if}
-          <button class="btn inline" onclick={() => open(m.pubkey)}>
-            {t("matches.openProfile")}
-          </button>
-        </div>
-
-        <details class="score">
-          <summary>
-            {t("matches.scoreDetails")}
-            <span class="chev"><Icon name="chevronDown" size={16} /></span>
-          </summary>
-          <div class="dims">
-            <div class="d"><span>{t("matches.dim.similarity")}</span><b>{pct(m.similarity)}</b></div>
-            <div class="d"><span>{t("matches.dim.complementarity")}</span><b>{pct(m.complementarity)}</b></div>
-            <div class="d"><span>{t("matches.dim.overall")}</span><b>{pct(m.score)}</b></div>
-          </div>
-        </details>
+        <MatchDetails match={m}>
+          {#snippet actions()}
+            <div class="actions">
+              {#if session.loggedIn}
+                <button class="btn inline primary" onclick={() => introduce(m)}>
+                  <Icon name="send" size={16} />{t("matches.introduce")}
+                </button>
+                <button class="btn inline" onclick={() => message(m.pubkey)}>
+                  {t("matches.message")}
+                </button>
+              {/if}
+              <button class="btn inline" onclick={() => open(m.pubkey)}>
+                {t("matches.openProfile")}
+              </button>
+            </div>
+          {/snippet}
+        </MatchDetails>
       </div>
     {/each}
   </div>
@@ -314,31 +274,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .reason {
-    margin: 0;
-    font-size: 0.95rem;
-    line-height: 1.5;
-  }
-  .icebreakers {
-    margin: 0;
-  }
-  .ib-label {
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    font-size: 0.7rem;
-    font-weight: 650;
-    color: var(--text-dim);
-    margin-bottom: 0.2rem;
-  }
-  .ib-list {
-    margin: 0;
-    padding-left: 1.1rem;
-    display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    font-size: 0.9rem;
-    line-height: 1.45;
-  }
   .actions {
     display: flex;
     gap: 0.5rem;
@@ -347,53 +282,5 @@
   .actions .btn {
     flex: 1;
     min-width: 8rem;
-  }
-  details.score {
-    border-top: 1px solid var(--border);
-    padding-top: 0.55rem;
-  }
-  details.score summary {
-    list-style: none;
-    cursor: pointer;
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: var(--text-dim);
-    display: flex;
-    align-items: center;
-    gap: 0.3rem;
-  }
-  details.score summary::-webkit-details-marker {
-    display: none;
-  }
-  details.score .chev {
-    display: inline-flex;
-    transition: transform 0.15s ease;
-  }
-  details.score[open] .chev {
-    transform: rotate(180deg);
-  }
-  .dims {
-    display: flex;
-    gap: 1.1rem;
-    margin-top: 0.5rem;
-    font-size: 0.82rem;
-  }
-  .dims .d {
-    display: flex;
-    flex-direction: column;
-    gap: 0.15rem;
-  }
-  .dims .d span {
-    color: var(--text-dim);
-    font-size: 0.72rem;
-  }
-  .dims .d b {
-    font-variant-numeric: tabular-nums;
-    font-weight: 650;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    details.score .chev {
-      transition: none;
-    }
   }
 </style>

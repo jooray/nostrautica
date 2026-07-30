@@ -298,6 +298,32 @@ export const aiProfileSchema = z.object({
 });
 export type AiProfile = z.infer<typeof aiProfileSchema>;
 
+/**
+ * Does this ai_profile say anything at all about the person?
+ *
+ * An all-empty ai_profile is a real, expected value, not a bug: the coordinator
+ * publishes one when an attendee had NO inputs to derive from — no authored
+ * profile, no intro, no readable public Nostr activity (the empty-input skip,
+ * audit COORD-4). Both sides of the protocol have to agree on what "empty" means
+ * or they contradict each other in front of the user, which is exactly what
+ * happened on 2026-07-29: the app rendered an "AI summary" heading over blank
+ * space because it only checked that the field EXISTED, while the coordinator
+ * fed that same nothing to the match model and published a confident, entirely
+ * invented reason for the two of them to meet. `translations` is deliberately
+ * not content — it restates authored fields in another language and says
+ * nothing new when there was nothing to restate.
+ */
+export function hasAiProfileContent(profile: AiProfile | undefined): boolean {
+  if (!profile) return false;
+  return (
+    profile.summary.trim().length > 0 ||
+    profile.skills.length > 0 ||
+    profile.interests.length > 0 ||
+    profile.offers.length > 0 ||
+    profile.seeks.length > 0
+  );
+}
+
 // ── 31601 Invite List content ────────────────────────────────────────────────
 export const inviteListContentSchema = z.object({
   v: version,

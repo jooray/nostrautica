@@ -145,6 +145,8 @@ interface Counters {
   translateCalls: number;
   /** When set, every batch-scoring call throws — drives the batch FAILED log line. */
   failBatchScore?: boolean;
+  /** When set, every profile_translation call throws (the decoration stage fails). */
+  failTranslate?: boolean;
 }
 
 const ROLES = ["cryptographer", "designer", "programmer", "musician"] as const;
@@ -257,6 +259,7 @@ function makeLlm(counters: Counters): MockLlm {
     }
     if (req.schemaName === "profile_translation") {
       counters.translateCalls++;
+      if (counters.failTranslate) throw new Error("translation contract: looking_for: invalid_type");
       // Fixtures are English. If the target (event) language is English too, nothing
       // to translate; otherwise return a marked translation of each supplied field.
       const targetIsEn = /TARGET LANGUAGE: English \(en\)/.test(req.user);
@@ -2405,6 +2408,54 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
   });
 });
 
+describe("the translation stage degrades instead of failing the job (2026-07-29 incident)", () => {
+  it("a failed translation still commits the ai_profile, transcript, and matches", async () => {
+    const h = await setup(0, { lang: "sk" }); // non-English event ⇒ translation runs
+    h.counters.failTranslate = true;
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    // The translation is a decoration on the entry. It failing used to unwind the
+    // whole of processAttendee, so nothing reached commitAiProfile and an attendee
+    // lost artifacts that had already succeeded — in production, one sat poisoned
+    // for a day with no AI summary on their entry and no transcript of the intro
+    // they had recorded for the event, matched off their pre-submission profile.
+    expect(h.counters.translateCalls).toBeGreaterThan(0); // it really was attempted
+    const attendee = h.store.getAttendee(h.coordinate, cryptoPk)!;
+    expect(attendee.ai_profile_json).toBeTruthy();
+    expect(JSON.parse(attendee.ai_profile_json!).summary).toContain("profile");
+    // The revision guard is satisfied, so the entry publishes WITH its ai_profile.
+    expect(attendee.ai_source_revision).toBe(attendee.source_revision);
+    expect(JSON.parse(attendee.transcripts_json!).length).toBe(1);
+    const entry = latestDirectory(h.transport, h.eck, blindedD(h.eck, h.coordinate, cryptoPk));
+    expect(entry.ai_profile).toBeTruthy();
+    expect(entry.ai_profile!.translations).toBeUndefined(); // the one thing that IS lost
+    expect(entry.transcripts?.length).toBe(1);
+    // And matching ran off the fresh profile.
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_LIST)).toBe(true);
+  });
+
+  it("a failed translation is not cached as 'nothing to translate'", async () => {
+    const h = await setup(0, { lang: "sk" });
+    h.counters.failTranslate = true;
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // A cached `null` means "asked, nothing to translate" — caching a BROKEN call
+    // under that key would freeze a permanent no-translation verdict for this
+    // revision. Nothing was stored, so a reprocess asks again: the count climbs.
+    const firstCalls = h.counters.translateCalls;
+    h.counters.failTranslate = false;
+    await resubmitIntro(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    expect(h.counters.translateCalls).toBeGreaterThan(firstCalls);
+    const entry = latestDirectory(h.transport, h.eck, blindedD(h.eck, h.coordinate, pk));
+    expect(entry.ai_profile!.translations?.lang).toBe("sk"); // recovered on its own
+  });
+});
+
 describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
   it("processes a submission at the 4-media cap", async () => {
     const h = await setup();
@@ -2477,6 +2528,74 @@ describe("audit COORD-4 — server-side media caps + empty-input skip", () => {
     const attendee = h.store.getAttendee(h.coordinate, pubkey)!;
     const ai = JSON.parse(attendee.ai_profile_json!);
     expect(ai).toEqual({ summary: "", skills: [], interests: [], offers: [], seeks: [] });
+  });
+
+  it("never matches a content-free profile — an empty profile invites the model to invent one", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designPk = await join(h, generateSecretKey(), "design");
+    // Joined, approved, and never said anything: no authored profile, no intro, and
+    // nostr_context=0. In production this attendee was scored 0.85–0.90 against six
+    // people, with the model inventing a different biography from the name each time.
+    const { pubkey: quietPk } = await joinOnly(h, generateSecretKey(), "Ľudo");
+    await h.coordinator.jobs.drain();
+
+    const lists = h.transport.published.filter((e) => e.kind === KIND_MATCH_LIST);
+    const cryptoD = blindedD(h.eck, h.coordinate, cryptoPk);
+    const mine = lists
+      .filter((e) => e.tags.find((t) => t[0] === "d")?.[1] === cryptoD)
+      .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(cryptoSk, getPublicKey(h.coordSk), e.content))))
+      .sort((a, b) => b.matches.length - a.matches.length)[0]!;
+    expect(mine.matches.map((m) => m.pubkey)).toContain(designPk);
+    expect(mine.matches.map((m) => m.pubkey)).not.toContain(quietPk);
+    // And nothing is published TO them either — there is no honest list to publish.
+    const quietD = blindedD(h.eck, h.coordinate, quietPk);
+    expect(lists.some((e) => e.tags.find((t) => t[0] === "d")?.[1] === quietD)).toBe(false);
+  });
+
+  it("clearing a profile drops its cached pairs and republishes the emptied lists", async () => {
+    const h = await setup();
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    const designSk = generateSecretKey();
+    const designPk = await join(h, designSk, "design");
+    await h.coordinator.jobs.drain();
+    // They matched each other, so both have a published list and a cached pair.
+    expect(h.store.pairsFor(h.coordinate, cryptoPk).length).toBe(1);
+
+    // The designer wipes their profile: no about, no skills, no media, no intro —
+    // and nostr_context=0, so the pipeline has nothing left to derive from.
+    const before = h.transport.published.length;
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(designSk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: {
+          v: 2,
+          rev: nextSubmissionRev(designPk),
+          profile: { about: "", skills: [], looking_for: "", links: [] },
+          media: [],
+        },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+    await h.coordinator.jobs.drain();
+
+    // The pair is gone from BOTH sides, not just the person who cleared it…
+    expect(h.store.pairsFor(h.coordinate, cryptoPk).length).toBe(0);
+    expect(h.store.pairsFor(h.coordinate, designPk).length).toBe(0);
+    // …and the cryptographer's list was republished EMPTY rather than left showing
+    // reasoning about a profile that no longer says anything (the allowEmpty path:
+    // an emptied list is a result the client has to receive, not "not scored yet").
+    const cryptoD = blindedD(h.eck, h.coordinate, cryptoPk);
+    const republished = h.transport.published
+      .slice(before)
+      .filter((e) => e.kind === KIND_MATCH_LIST && e.tags.find((t) => t[0] === "d")?.[1] === cryptoD)
+      .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(cryptoSk, getPublicKey(h.coordSk), e.content))));
+    expect(republished.length).toBeGreaterThan(0);
+    expect(republished.at(-1)!.matches).toEqual([]);
   });
 
   it("caps distinct talk submissions per speaker at 10 — editing an existing talk stays unaffected", async () => {
@@ -4415,6 +4534,45 @@ describe("audit C3 — public inbox is population-bounded", () => {
     const pk = await join(h, legitSk, "crypto");
     expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
     expect(h.store.attendeeCount(h.coordinate)).toBe(1);
+  });
+
+  it("keeps a profile submission dispatched CONCURRENTLY with its own join (2026-07-29 production incident)", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Ľudo", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: {
+        v: 2,
+        rev: 0,
+        profile: { about: "meshcore and BTC L2", skills: ["mesh networking"], looking_for: "", links: [] },
+        media: [],
+      },
+      tags: [["a", h.coordinate]],
+    });
+
+    // The app publishes join then submission back to back, so both wraps arrive
+    // together and are dispatched as independent, concurrent inbox tasks. The join
+    // handler awaits a relay fetch (the invite hashes) before writing its attendee
+    // row; the submission used to reach the enrollment gate inside that window and
+    // be dropped as "never joined", silently losing the authored profile.
+    await Promise.all([
+      h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any),
+      h.coordinator.handleInboxWrap(h.coordinate, subWrap as any),
+    ]);
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePk);
+    expect(attendee?.status).toBe("approved");
+    expect(attendee?.profile_json ?? "").toContain("meshcore and BTC L2");
   });
 
   it("enrolls a join published BEFORE the coordinator subscribed so a later submission clears the gate (H2 backfill + join-before-submission ordering)", async () => {
