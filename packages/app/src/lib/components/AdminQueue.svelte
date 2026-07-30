@@ -10,9 +10,11 @@
   import type { BulkItem } from "$lib/events/admin-people.js";
   import type { ReviewState } from "$lib/stores/review-state.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import PersonId from "$lib/components/PersonId.svelte";
 
   let {
     requests,
+    relays,
     filterActive,
     matchedPubkeys,
     deferredSet,
@@ -30,6 +32,8 @@
   }: {
     /** The full pending queue (the count/header use its length). */
     requests: PendingRequest[];
+    /** Event relays, used as nprofile hints when copying someone's id. */
+    relays: string[];
     filterActive: boolean;
     matchedPubkeys: Set<string>;
     deferredSet: Set<string>;
@@ -49,8 +53,6 @@
 
   // Owned interaction state: which request is showing its reject confirmation.
   let confirmingReject = $state<string | null>(null);
-
-  const short = (pk: string) => pk.slice(0, 8) + "…" + pk.slice(-4);
 
   function doReject(pubkey: string) {
     onReview(pubkey, "rejected");
@@ -80,8 +82,7 @@
     {@const bulk = bulkItemState(req.attendeePubkey)}
     {@const deferred = deferredSet.has(req.attendeePubkey)}
     <div class="card">
-      <strong>{req.name}</strong>
-      <span class="badge">{short(req.attendeePubkey)}</span>
+      <PersonId pubkey={req.attendeePubkey} name={req.name} {relays} />
       {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
       {#if deferred}<span class="badge">{t("admin.requests.reviewed")}</span>{/if}
       {#if req.message}<p class="muted">{req.message}</p>{/if}

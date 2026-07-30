@@ -1157,6 +1157,7 @@
 
   <AdminQueue
     requests={pendingRequests}
+    relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
     {matchedPubkeys}
     {deferredSet}
@@ -1175,6 +1176,7 @@
 
   <AdminPeople
     people={approvedPeople}
+    relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
     {matchedPubkeys}
     onRevoke={revoke}

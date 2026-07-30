@@ -786,6 +786,8 @@ export const messages = {
     "admin.yourNpub": "Your npub",
     "admin.copyNpub": "Copy npub",
     "admin.copied": "Copied ✓",
+    "admin.person.copyId": "Copy this person's Nostr id (nprofile)",
+    "admin.person.copyIdFailed": "Copying failed — select and copy it by hand:",
     "admin.grant.step1": "On the device you created the event with, open Admin → Co-organizers.",
     "admin.grant.step2": "Paste this npub and add it.",
     "admin.grant.step3":
@@ -2212,6 +2214,8 @@ export const messages = {
     "admin.yourNpub": "Váš npub",
     "admin.copyNpub": "Kopírovať npub",
     "admin.copied": "Skopírované ✓",
+    "admin.person.copyId": "Skopírovať Nostr id tejto osoby (nprofile)",
+    "admin.person.copyIdFailed": "Kopírovanie zlyhalo — označte a skopírujte ručne:",
     "admin.grant.step1":
       "Na zariadení, ktorým ste podujatie vytvorili, otvorte Administrácia → Spoluorganizátori.",
     "admin.grant.step2": "Vložte tento npub a pridajte ho.",
@@ -3633,6 +3637,8 @@ export const messages = {
     "admin.yourNpub": "Váš npub",
     "admin.copyNpub": "Kopírovat npub",
     "admin.copied": "Zkopírováno ✓",
+    "admin.person.copyId": "Zkopírovat Nostr id této osoby (nprofile)",
+    "admin.person.copyIdFailed": "Kopírování selhalo — označte a zkopírujte ručně:",
     "admin.grant.step1":
       "Na zařízení, kterým jste akci vytvořili, otevřete Administrace → Spoluorganizátoři.",
     "admin.grant.step2": "Vložte tento npub a přidejte ho.",
