@@ -56,3 +56,34 @@ The app enrolls the current device's chat key at approval time, discovers the
 group via the roster's `nostr_group_id`, and reads live kind-445 traffic forward
 from its own join epoch. A device that loses its chat key mints a new one and
 re-attests; the old leaf is removed on revoke.
+
+## Rejoining a device that fell out of the group
+
+A device can be a listed, active chat device of an approved attendee — it appears
+in the roster's `chat_keys`, so the app's "Chat devices" card shows it, badged as
+this device — while holding no group state at all: the coordinator's Welcome was
+lost, the local MLS state was cleared, or the group was recreated under a new
+routing id. Chat then looks joined but every send fails.
+
+Re-advertising the same key package does not fix that, because it is a no-op at
+three points: marmot returns the existing *unused* local key package (so the same
+addressable kind-30443 is republished under the same `d` — same event id),
+the coordinator dedupes that event id for 30 days (`marmot_consumed_kps`), and it
+skips anyone who still holds a leaf.
+
+So the app offers **Rejoin this chat** — next to a failed send, and in the
+"setting up" state once it has been slow for a while. It revokes this device's
+chat key (dropping the coordinator-held leaf), rotates the key package (a new
+event id under the same slot), and re-attests, which the coordinator handles as an
+ordinary enrolment: Add commit + Welcome. The device key, its label, its roster
+entry and its device-cap slot are all reused — unlike clearing site data, which
+mints a new identity and burns another slot.
+
+The coordinator reconciles from its side too: whenever it deliberately syncs a
+member (approval, a fresh attestation, the startup backfill) it re-adds an
+attested device that holds no leaf even if that device's key package was already
+consumed. The passive kind-30443 watcher keeps the plain consumed-id check, so a
+relay replaying old key packages cannot drive repeated Add commits.
+
+History from before the new Add stays unreadable in every case — MLS is
+forward-secret from each leaf's own join epoch.

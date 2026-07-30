@@ -246,6 +246,49 @@ describe("ChatTabCoordinator — leader→follower broadcast + send proxy", () =
     follower.dispose();
   });
 
+  it("proxies a follower's rejoin to the leader — MLS state has a single writer", async () => {
+    // The Rejoin button lives next to a failed send, and the tab the user is
+    // looking at is as likely to be a follower as the leader. Only the leader owns
+    // the client, so the request has to travel the same channel a send does.
+    let rejoins = 0;
+    const leader = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      onRejoinRequest: async () => void rejoins++,
+    });
+    await leader.whenSettled;
+    const follower = new ChatTabCoordinator({ scope: SCOPE, locks, createChannel: bus.make, onRoleChange: () => {} });
+    await follower.whenSettled;
+
+    await follower.proxyRejoin();
+    expect(rejoins).toBe(1);
+
+    // A failure on the leader surfaces to the follower rather than hanging.
+    leader.dispose();
+    follower.dispose();
+  });
+
+  it("rejects a proxied rejoin when the leader's re-enrolment throws", async () => {
+    const leader = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      onRejoinRequest: async () => {
+        throw new Error("no chat session");
+      },
+    });
+    await leader.whenSettled;
+    const follower = new ChatTabCoordinator({ scope: SCOPE, locks, createChannel: bus.make, onRoleChange: () => {} });
+    await follower.whenSettled;
+
+    await expect(follower.proxyRejoin()).rejects.toThrow("no chat session");
+    leader.dispose();
+    follower.dispose();
+  });
+
   it("rejects a proxied send when the leader's handler throws", async () => {
     const leader = new ChatTabCoordinator({
       scope: SCOPE,
