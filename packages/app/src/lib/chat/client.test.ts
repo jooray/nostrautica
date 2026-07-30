@@ -814,10 +814,27 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     await chat.ensurePublished();
     expect(shared.calls).toEqual([]);
 
-    // Removed → the bootstrap advertises again and re-attests.
+    // Removed → the bootstrap advertises again and re-attests. It also ROTATES:
+    // the key package it would otherwise re-advertise is the one already spent on
+    // the Add that created the leaf we just lost, so the coordinator has recorded
+    // its event id as consumed and would skip it (prod 2026-07-30).
     lastClient.groups.groups[0]!.state.members = [COORD];
     await chat.ensurePublished();
-    expect(shared.calls).toContain("attest:add");
+    expect(shared.calls).toEqual(["kp:rotate", "kp:ensurePublished", "attest:add"]);
+  });
+
+  it("does NOT rotate for a client that was never added — its welcome may be in flight", async () => {
+    // Never-added is not evicted: the advertised key package is unspent, and the
+    // coordinator's Welcome (if it already went out) is encrypted to exactly that
+    // key. Rotating would discard the private material needed to join with it.
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-pending", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+
+    await chat.ensurePublished();
+
+    expect(shared.calls).toEqual(["kp:ensurePublished", "kp:create", "attest:add"]);
+    expect(shared.calls).not.toContain("kp:rotate");
   });
 
   it("routes sends to the live group state after a re-add, not the dead one", async () => {
