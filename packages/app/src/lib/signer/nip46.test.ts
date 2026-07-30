@@ -21,7 +21,18 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { NIP46_RELAYS } from "$lib/nostr/relays.js";
 
 const { FakePool, fromURI, fromBunker, parseBunkerInput, createNostrConnectURI } = vi.hoisted(() => {
-  /** Only the surface signer/nip46.ts touches: destroy, ensureRelay, the health hooks. */
+  /**
+   * Only the surface signer/nip46.ts touches: destroy, ensureRelay, the health
+   * hooks, and — the one that matters for reconnect recovery —
+   * `listConnectionStatus()`.
+   *
+   * `connection` is this fake's stand-in for each AbstractRelay's `_connected`
+   * flag, and `setConnected` is the ONLY way to move it, exactly as in the real
+   * library: a mid-request drop and its later recovery both mutate that flag
+   * and fire no pool hook at all. Tests that want to simulate a socket dropping
+   * must therefore go through `setConnected`, not through the hooks — driving
+   * the hooks by hand is what let the recovery ship inert.
+   */
   class FakePool {
     static instances: FakePool[] = [];
     static last(): FakePool {
@@ -30,8 +41,40 @@ const { FakePool, fromURI, fromBunker, parseBunkerInput, createNostrConnectURI }
     destroyed = 0;
     onRelayConnectionFailure?: (url: string) => void;
     onRelayConnectionSuccess?: (url: string) => void;
+    connection = new Map<string, boolean>();
     constructor() {
       FakePool.instances.push(this);
+    }
+    /**
+     * A relay that never opened. The real pool deletes it from `relays` inside
+     * `ensureRelay`'s catch and then calls the failure hook, so the map and the
+     * hook agree — the fake must too, or tests pass on states production can't
+     * reach.
+     */
+    relayFailed(url: string) {
+      this.connection.delete(url);
+      this.onRelayConnectionFailure?.(url);
+    }
+    /** A relay that opened: present and connected, then the success hook. */
+    relayConnected(url: string) {
+      this.connection.set(url, true);
+      this.onRelayConnectionSuccess?.(url);
+    }
+    /**
+     * A mid-life socket transition — `handleHardClose` flipping `_connected` to
+     * false and reconnecting, or `ws.onopen` flipping it back. Deliberately
+     * fires NO hook, because the library fires none here. This is the drop the
+     * reconnect recovery exists for.
+     */
+    setConnected(url: string, connected: boolean) {
+      this.connection.set(url, connected);
+    }
+    /** A relay whose socket errored after connecting: dropped from the map for good. */
+    relayVanished(url: string) {
+      this.connection.delete(url);
+    }
+    listConnectionStatus() {
+      return this.connection;
     }
     destroy() {
       this.destroyed++;
@@ -83,6 +126,20 @@ const fakeBunker = () => ({
 });
 /** What the real fromURI does with >1 relay once aborted: nothing, forever. */
 const neverSettles = () => new Promise<never>(() => {});
+
+/**
+ * Let the health tracker observe the connection map once.
+ *
+ * A mid-life socket transition raises no event anywhere in nostr-tools — the
+ * relay flips its own `_connected` flag and reconnects itself — so
+ * `trackPoolHealth` polls for it, and a simulated drop is invisible until a tick
+ * of that interval. Advancing to the next timer rather than a fixed duration
+ * keeps this honest if the poll interval is ever retuned.
+ *
+ * Requires fake timers; the tests that simulate a drop opt in individually
+ * rather than globally, so the rest of the file keeps real timing.
+ */
+const advanceHealthPoll = () => vi.advanceTimersToNextTimerAsync();
 
 beforeEach(() => {
   FakePool.instances.length = 0;
@@ -184,8 +241,8 @@ describe("startNostrConnect settles on our terms, not the library's", () => {
     fromURI.mockImplementation(() => {
       // What AbstractSimplePool reports as sockets come up or fail.
       const pool = FakePool.last();
-      pool.onRelayConnectionFailure?.("wss://relay.nsec.app/");
-      pool.onRelayConnectionSuccess?.("wss://nos.lol/");
+      pool.relayFailed("wss://relay.nsec.app/");
+      pool.relayConnected("wss://nos.lol/");
       return neverSettles();
     });
     const handle = Nip46Signer.startNostrConnect(["wss://nos.lol", "wss://relay.nsec.app"], 20);
@@ -301,6 +358,7 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     // The desktop/flaky-relay gap: no tab handoff, so nothing signals visibility.
     // The signer's connect ack is lost while the socket is down; only the
     // reconnect-driven retry (a fresh connect + ping) settles the wait.
+    vi.useFakeTimers();
     parseBunkerInput.mockResolvedValue({
       pubkey: PUBKEY,
       relays: ["wss://relay.example"],
@@ -316,12 +374,19 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     // Let fromBunkerUri reach connectWithRecovery and register the health listener.
     for (let i = 0; i < 5; i++) await Promise.resolve();
     const pool = FakePool.last();
-    pool.onRelayConnectionFailure?.("wss://relay.example/");
-    pool.onRelayConnectionSuccess?.("wss://relay.example/");
+    // The socket was up, drops, and comes back — no hook fires for either, which
+    // is why this has to be observed off the connection map.
+    pool.setConnected("wss://relay.example/", true);
+    await advanceHealthPoll();
+    pool.setConnected("wss://relay.example/", false);
+    await advanceHealthPoll();
+    pool.setConnected("wss://relay.example/", true);
+    await advanceHealthPoll();
 
     const signer = await connecting;
     expect(signer.serialize().bunker.pubkey).toBe(PUBKEY);
     expect(bunker.ping).toHaveBeenCalled(); // the reconnect recovery probe answered
+    vi.useRealTimers();
   });
 
   it("accepts a capitalised link by normalizing before parsing", async () => {
@@ -414,16 +479,49 @@ describe("ordinary RPC validation and foreground recovery", () => {
     // signer on a separate phone): a drop-then-recover during the pending request
     // wins the race against the lost first reply and re-drives it exactly once.
     const { signer, bunker } = await signerWith();
+    vi.useFakeTimers();
     bunker.nip44Encrypt
       .mockReturnValueOnce(new Promise(() => {})) // first reply lost on the dropped socket
       .mockResolvedValueOnce("ciphertext");
     const pool = FakePool.last();
+    pool.setConnected("wss://relay.example/", true);
     const result = signer.nip44Encrypt(PUBKEY, "hello");
-    pool.onRelayConnectionFailure?.("wss://relay.example/");
-    pool.onRelayConnectionSuccess?.("wss://relay.example/");
+    // A mid-request drop and recovery, as the library reports them: the
+    // connection map flips, and not one pool hook is called.
+    await advanceHealthPoll();
+    pool.setConnected("wss://relay.example/", false);
+    await advanceHealthPoll();
+    pool.setConnected("wss://relay.example/", true);
+    await advanceHealthPoll();
     await expect(result).resolves.toBe("ciphertext");
     expect(bunker.ping).toHaveBeenCalledTimes(1); // the recovery probe
     expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it("treats a relay dropped from the pool entirely as a drop, not as still up", async () => {
+    // A socket that ERRORS after connecting doesn't linger disconnected: the relay
+    // sets skipReconnection (reconnectAttempts is 0 once ws.onopen has run), so the
+    // pool deletes it outright. The connection map then says nothing about that
+    // relay at all — absence is the only evidence the socket went away, and a
+    // tracker that only looked at present-and-false would never see the recovery.
+    const { signer, bunker } = await signerWith();
+    vi.useFakeTimers();
+    bunker.nip44Encrypt
+      .mockReturnValueOnce(new Promise(() => {})) // reply lost with the relay
+      .mockResolvedValueOnce("ciphertext");
+    const pool = FakePool.last();
+    pool.setConnected("wss://relay.example/", true);
+    const result = signer.nip44Encrypt(PUBKEY, "hello");
+    await advanceHealthPoll();
+    pool.relayVanished("wss://relay.example/");
+    await advanceHealthPoll();
+    // The pool re-opens it under the same url on the next use.
+    pool.setConnected("wss://relay.example/", true);
+    await advanceHealthPoll();
+    await expect(result).resolves.toBe("ciphertext");
+    expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
   });
 
   it("does NOT retry on a bare relay connect (an 'up' with no preceding drop)", async () => {
@@ -431,15 +529,18 @@ describe("ordinary RPC validation and foreground recovery", () => {
     // that would pop a second Amber approval for no reason. Only a recover that
     // FOLLOWS a drop counts.
     const { signer, bunker } = await signerWith();
+    vi.useFakeTimers();
     let resolveFirst!: (v: string) => void;
     bunker.nip44Encrypt.mockReturnValueOnce(new Promise<string>((r) => (resolveFirst = r)));
     const pool = FakePool.last();
     const result = signer.nip44Encrypt(PUBKEY, "hello");
-    pool.onRelayConnectionSuccess?.("wss://relay.example/"); // initial connect, no prior drop
+    pool.relayConnected("wss://relay.example/"); // initial connect, no prior drop
+    await advanceHealthPoll();
     resolveFirst("ciphertext");
     await expect(result).resolves.toBe("ciphertext");
     expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(1); // no duplicate send
     expect(bunker.ping).not.toHaveBeenCalled(); // no recovery probe fired
+    vi.useRealTimers();
   });
 
   it("probes and retries once after a pending RPC was backgrounded", async () => {

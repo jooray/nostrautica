@@ -145,13 +145,11 @@ type RelayTransition = "up" | "down";
  * doesn't accept), so BOTH consumers below share one owner — the fields are
  * single-assignment, so nothing else may set them for this pool.
  *
- *  - `unreachable()` names the signer relays we currently can't open, so a failed
+ *  - `unreachable()` names the signer relays we currently can't reach, so a failed
  *    wait can say *which* relay is down instead of only "your signer didn't
  *    respond". Without it a relay outage (measured 2026-07-25: `wss://relay.nsec.app`
  *    answering the upgrade with HTTP 502, 3/3 probes) is indistinguishable from a
- *    signer app that is simply closed. The hooks fire from both the subscribe and
- *    the publish path, so inbound and outbound failures are both covered; a relay
- *    that failed once and then came up is removed again.
+ *    signer app that is simply closed.
  *  - `subscribe()` reports socket transitions. Kind-24133 replies are EPHEMERAL:
  *    one the signer publishes while our socket is down is gone for good, not
  *    replayable on reconnect. The visibility-based recovery elsewhere only fires
@@ -160,34 +158,101 @@ type RelayTransition = "up" | "down";
  *    while this tab stays foreground — is exactly the flaky-relay case it misses.
  *    A consumer watches for a drop-then-recover during its pending window and
  *    re-drives the request then, instead of riding out the full timeout.
+ *
+ * WHERE THE SIGNAL COMES FROM. `onRelayConnectionFailure`/`Success` are not
+ * enough, and relying on them alone made the reconnect recovery inert for the
+ * case it was written for. In nostr-tools 2.23.9 those hooks fire from exactly
+ * three places: `subscribeMap` (once per relay, at subscription setup),
+ * `publish` (failure only — there is no success call), and `countMany` (which
+ * this app never uses). A socket that drops MID-REQUEST takes
+ * `AbstractRelay.handleHardClose`, which — because the pool is built with
+ * `enableReconnect` — calls its own `reconnect()` and never touches the pool;
+ * the later `ws.onopen` re-fires subscriptions internally and likewise never
+ * touches the pool. `BunkerSigner` subscribes once at construction, so after
+ * the handshake the hooks essentially never speak again and no drop/recover
+ * pair is ever observed.
+ *
+ * So the transitions are read from `pool.listConnectionStatus()`, which reports
+ * each relay's live `connected` flag, polled while anyone is listening. That is
+ * the same state `handleHardClose`/`ws.onopen` actually mutate. The hooks are
+ * kept as an additional, faster signal for connect-time failures.
+ *
+ * Transitions are tracked PER RELAY, and an "up" is emitted only for a relay we
+ * previously saw go down — a socket merely finishing its initial connect is not
+ * a recovery. Aggregate tracking got this wrong in the other direction: one dead
+ * relay failing while a healthy one completed setup read as drop-then-recover
+ * and could re-send a request nobody had lost.
  */
 interface PoolHealth {
   unreachable: () => string[];
   subscribe: (listener: (event: RelayTransition) => void) => () => void;
 }
 
+/**
+ * How often to re-read the pool's connection map while a request is pending.
+ * Only runs while something is listening (i.e. during a signer round trip), so
+ * it costs nothing at rest; 1s is far below the 60s RPC deadline it exists to
+ * cut short, and the read is a Map walk over four or five relays.
+ */
+const HEALTH_POLL_MS = 1_000;
+
 function trackPoolHealth(pool: SimplePool): PoolHealth {
-  const failed = new Set<string>();
+  /** Relays currently believed disconnected — drives both `unreachable` and "up". */
+  const down = new Set<string>();
+  /** Every relay the pool has ever held, so we can notice one disappearing. */
+  const seen = new Set<string>();
   const listeners = new Set<(event: RelayTransition) => void>();
+  let timer: ReturnType<typeof setInterval> | undefined;
+
   // Copy before iterating: a listener may unsubscribe itself on the event it receives.
   const emit = (event: RelayTransition) => {
     for (const l of [...listeners]) l(event);
   };
-  pool.onRelayConnectionFailure = (url) => {
-    failed.add(url);
+  const markDown = (url: string) => {
+    seen.add(url);
+    if (down.has(url)) return; // already counted; don't re-announce every poll
+    down.add(url);
     emit("down");
   };
-  pool.onRelayConnectionSuccess = (url) => {
-    failed.delete(url);
+  const markUp = (url: string) => {
+    seen.add(url);
+    if (!down.delete(url)) return; // never saw it fail → an initial connect, not a recovery
     emit("up");
   };
+
+  const poll = () => {
+    const status = pool.listConnectionStatus?.();
+    if (!status) return;
+    for (const [url, connected] of status) (connected ? markUp : markDown)(url);
+    // A relay the pool gave up on entirely is deleted from its map (`relay.onclose`
+    // → `relays.delete`), so absence is also a drop — otherwise a relay that
+    // vanished mid-request would stay silently "up" forever.
+    for (const url of seen) if (!status.has(url)) markDown(url);
+  };
+
+  pool.onRelayConnectionFailure = (url) => markDown(url);
+  pool.onRelayConnectionSuccess = (url) => markUp(url);
+
   return {
+    // Polled on demand so the message is accurate even for a wait that never
+    // registered a listener (the restore path), and so a relay that dropped
+    // without any hook firing is still named.
     // Hostnames, not URLs: "relay.nsec.app" is what a user can recognise and
     // repeat back to us; "wss://relay.nsec.app/" is noise in an error banner.
-    unreachable: () => [...failed].map((u) => u.replace(/^wss?:\/\//i, "").replace(/\/+$/, "")),
+    unreachable: () => {
+      poll();
+      return [...down].map((u) => u.replace(/^wss?:\/\//i, "").replace(/\/+$/, ""));
+    },
     subscribe: (listener) => {
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      timer ??= setInterval(poll, HEALTH_POLL_MS);
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && timer) {
+          clearInterval(timer);
+          timer = undefined;
+        }
+      };
     },
   };
 }
