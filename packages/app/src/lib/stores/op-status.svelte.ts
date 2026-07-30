@@ -52,6 +52,29 @@ class OperationStatus {
   clearOnEdit(): void {
     if (this.kind !== null) this.clear();
   }
+
+  /**
+   * Drop the status because the user navigated away (user report 2026-07-30).
+   *
+   * "Until the user's next edit" was only ever half a lifetime: it assumed the
+   * user stays on the form. The banner renders in the ROOT layout, above every
+   * screen, so a confirmation for a finished operation followed the user around
+   * the whole app — "Your event details were updated and published." sat over
+   * People, Chat, Matches and every other screen for the rest of the session.
+   * Leaving the screen the operation belonged to ends its relevance.
+   *
+   * Deliberately WRITE-ONLY — no `if (this.kind !== null)` guard like
+   * `clearOnEdit`. The caller is an `$effect` tracking the route, and in Svelte 5
+   * a `$state` READ inside an effect subscribes to it: reading `this.kind` here
+   * would make that effect depend on the status it clears, so the next
+   * `published()` would re-run the effect and wipe the message before anyone
+   * could read it. Writes create no dependency, and assigning an unchanged value
+   * notifies nothing, so this is a no-op when idle.
+   */
+  clearOnNavigate(): void {
+    this.kind = null;
+    this.message = "";
+  }
 }
 
 export const opStatus = new OperationStatus();
