@@ -36,6 +36,7 @@
   import EventHeader from "$lib/components/EventHeader.svelte";
   import { releaseSummary } from "$lib/release.js";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { syncDmReadState, resetDmReadStateSync } from "$lib/events/dm-read-state.js";
   import { cachedDms, fetchDms } from "$lib/events/dm.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -144,7 +145,13 @@
     void cacheHydration.version;
     const owner = session.pubkey;
     if (!booted || !owner) {
-      untrack(() => dmUnread.init(null));
+      untrack(() => {
+        dmUnread.init(null);
+        // Logout/account switch: drop the read-state syncer's listener, throttle
+        // and cached signer too, or a pending publish could fire under the old
+        // identity after the store has already been re-pointed at a new one.
+        resetDmReadStateSync();
+      });
       return;
     }
     untrack(() => {
@@ -162,6 +169,14 @@
         if (!stopped && messages) {
           dmUnread.syncMessages(owner, messages);
           dmUnread.acknowledgeEncryptedActivity();
+        }
+        // Same silent-signer budget: fold in what the account has already read on
+        // another device, or this nav badge keeps counting messages the user
+        // cleared on their phone until they open Chat here. Deliberately inside
+        // the local-key branch only — the remote-signer branch below must stay
+        // ciphertext-only (see lib/events/dm-read-state.ts).
+        if (!stopped && session.signer) {
+          await syncDmReadState(session.signer).catch(() => {});
         }
       } else {
         await dmUnread.pollEncryptedInbox(owner).catch(() => {});

@@ -908,6 +908,36 @@ export const perEventSettingsSchema = z.object({
 });
 export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 
+// ── 30078 DM read state (`d = nostrautica:dmread`) ───────────────────────────
+// The newest INCOMING message each DM thread has been read up to, so unread
+// badges agree across an account's devices instead of every device counting from
+// scratch. User-private: the peer pubkeys live inside the NIP-44 self-encrypted
+// content, so a relay learns only that the account wrote a read-state event.
+//
+// Bounded because the whole map rides in ONE NIP-44 payload (65535-byte plaintext
+// ceiling). An entry serializes to roughly 155 bytes, so 200 threads is ~31 KB of
+// plaintext — comfortably inside the ceiling and inside relay event-size limits.
+// Publishers prune to the most recently read MAX_DM_READ_THREADS.
+export const MAX_DM_READ_THREADS = 200;
+
+/** A read position: the rumor's `created_at` plus its id, which breaks ties. */
+export const dmReadPositionSchema = z.object({
+  at: z.number().int().nonnegative(),
+  id: hex32,
+});
+export type DmReadPosition = z.infer<typeof dmReadPositionSchema>;
+
+export const dmReadStateSchema = z.object({
+  v: version,
+  threads: z
+    .record(hex32, dmReadPositionSchema)
+    .refine((r) => Object.keys(r).length <= MAX_DM_READ_THREADS, {
+      message: `too many read threads (max ${MAX_DM_READ_THREADS})`,
+    })
+    .default({}),
+});
+export type DmReadState = z.infer<typeof dmReadStateSchema>;
+
 export const eventKeysBackupSchema = z.object({
   v: version,
   // Event coordinate (`31923:<E_id pubkey>:<d>`). Optional for backward-compat

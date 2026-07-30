@@ -23,6 +23,7 @@
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { syncDmReadState, flushDmReadState } from "$lib/events/dm-read-state.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
 
   let { npub }: { npub: string } = $props();
@@ -153,6 +154,10 @@
         scroller?.scrollTo({ top: scroller.scrollHeight });
       }
       await markVisibleRead();
+      // Reconcile this thread's read position with the account's other devices.
+      // Safe here (unlike in the app shell) because this screen already drives
+      // the signer on every poll — see lib/events/dm-read-state.ts.
+      if (session.signer) void syncDmReadState(session.signer);
     } catch (e) {
       error = e;
     } finally {
@@ -208,6 +213,10 @@
   onDestroy(() => {
     clearInterval(timer);
     document.removeEventListener("visibilitychange", markVisibleRead);
+    // Reading the last message and immediately navigating away is the common
+    // case; without this the debounced publish would be torn down before it
+    // fired and the read would never leave this device.
+    flushDmReadState();
   });
 
   let sendSlow = $state(false);

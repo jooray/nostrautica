@@ -6,7 +6,7 @@ export interface DmPosition {
   id: string;
 }
 
-type ReadWatermarks = Record<string, DmPosition>;
+export type ReadWatermarks = Record<string, DmPosition>;
 interface EncryptedActivity {
   initialized: boolean;
   known: string[];
@@ -20,6 +20,33 @@ const MAX_WRAP_IDS = 3000;
 export function compareDmPosition(a: DmPosition, b: DmPosition): number {
   if (a.at !== b.at) return a.at - b.at;
   return a.id === b.id ? 0 : a.id > b.id ? 1 : -1;
+}
+
+/**
+ * Per-peer maximum of two watermark maps — the merge rule for cross-device read
+ * state (`lib/events/dm-read-state.ts`).
+ *
+ * This exists because kind-30078 is REPLACEABLE: last-write-wins on the wire.
+ * Device A publishing `{alice: t5}` and device B (which never saw it) publishing
+ * `{bob: t3}` would leave alice's thread unread again everywhere — read state
+ * would visibly regress. Merging per peer under the §3.1-style
+ * `compareDmPosition` order makes the two devices converge on the union instead,
+ * and makes the operation commutative, so arrival order stops mattering.
+ */
+export function mergeWatermarks(a: ReadWatermarks, b: ReadWatermarks): ReadWatermarks {
+  const merged: ReadWatermarks = { ...a };
+  for (const [peer, position] of Object.entries(b)) {
+    const mine = merged[peer];
+    if (!mine || compareDmPosition(position, mine) > 0) merged[peer] = position;
+  }
+  return merged;
+}
+
+/** True when the two maps hold exactly the same position for exactly the same peers. */
+export function sameWatermarks(a: ReadWatermarks, b: ReadWatermarks): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((peer) => b[peer] && compareDmPosition(a[peer], b[peer]) === 0);
 }
 
 export function incomingUnreadCount(
@@ -52,6 +79,37 @@ export class DmUnreadStore {
   private watermarks = $state<ReadWatermarks>({});
   private activity = $state<EncryptedActivity>({ initialized: false, known: [], pending: [] });
   private polling: Promise<void> | null = null;
+  private onLocalAdvance: ((owner: string) => void) | null = null;
+
+  /**
+   * Called whenever a LOCAL action advances a watermark, so the read-state
+   * syncer can schedule a debounced publish. Kept as an injected callback rather
+   * than an import: this store is deliberately signer-free (it runs in the app
+   * shell, where touching a signer would prompt Amber/NIP-46 just to paint a nav
+   * badge), and the syncer is the piece that needs one.
+   */
+  setLocalAdvanceListener(fn: ((owner: string) => void) | null): void {
+    this.onLocalAdvance = fn;
+  }
+
+  /** The current per-peer read watermarks (the map the syncer publishes). */
+  get readWatermarks(): ReadWatermarks {
+    return this.watermarks;
+  }
+
+  /**
+   * Fold another device's published watermarks into this one's. Returns true if
+   * anything moved locally, so the caller can skip a redundant cache write.
+   * Never regresses a thread — see `mergeWatermarks`.
+   */
+  mergeRemoteWatermarks(owner: string, remote: ReadWatermarks): boolean {
+    if (this.owner !== owner) this.init(owner);
+    const merged = mergeWatermarks(this.watermarks, remote);
+    if (sameWatermarks(merged, this.watermarks)) return false;
+    this.watermarks = merged;
+    cacheSet(READ_KEY, merged, undefined, owner);
+    return true;
+  }
 
   init(owner: string | null): void {
     if (this.owner !== owner) this.messages = [];
@@ -96,6 +154,7 @@ export class DmUnreadStore {
     if (!newest || (this.watermarks[peer] && compareDmPosition(newest, this.watermarks[peer]) <= 0)) return;
     this.watermarks = { ...this.watermarks, [peer]: newest };
     cacheSet(READ_KEY, this.watermarks, undefined, this.owner);
+    this.onLocalAdvance?.(this.owner);
   }
 
   /**
@@ -130,6 +189,7 @@ export class DmUnreadStore {
     if (changed) {
       this.watermarks = next;
       cacheSet(READ_KEY, next, undefined, owner);
+      this.onLocalAdvance?.(owner);
     }
     this.acknowledgeEncryptedActivity();
   }
