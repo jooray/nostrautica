@@ -140,7 +140,9 @@ class FakeMarmotClient {
       idStr: "group-" + welcomeRumor.id,
       id: new Uint8Array([this.groups.groups.length + 1]),
       state: {
-        members: welcomeRumor.members ?? [COORD],
+        // A real Welcome always adds THIS device's leaf alongside the coordinator's
+        // — membership checks (am I still in the room?) depend on that being modelled.
+        members: welcomeRumor.members ?? [COORD, "c".repeat(64)],
         nostrGroupId: welcomeRumor.nostrGroupId ?? "gid-" + welcomeRumor.id,
       },
       on: () => {},
@@ -764,6 +766,76 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     expect(await chat.nostrGroupId()).toBe("gid-rejoined");
     await chat.send("back in the room");
     expect(lastClient.groups.send).toHaveBeenCalledOnce();
+  });
+
+  // prod 2026-07-30: pressing Rejoin reported success and published NOTHING. The
+  // guard asked "do we hold this event's group?", but an MLS Remove strips only our
+  // leaf — the local group state and its decrypted history stay exactly where they
+  // were. So a removed member (who sees the room, the history and the member count,
+  // and cannot send) took the healthy branch every time, from the button AND from
+  // the bootstrap that runs on every open.
+  it("rejoins a member whose leaf was removed even though the group state is still held", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-removed", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    // Joined with our own leaf present (members includes this device's chat key).
+    lastClient.invites.deliver({
+      id: "welcome-before-removal",
+      nostrGroupId: "gid-removed",
+      members: [COORD, "c".repeat(64)],
+    });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-before-removal"]));
+
+    // The coordinator removes us; the commit lands over 445 and our local state
+    // loses our leaf — but the group, and everything we already decrypted, remain.
+    lastClient.groups.groups[0]!.state.members = [COORD];
+    expect(await chat.nostrGroupId()).toBe("gid-removed"); // still bound, still readable
+    shared.calls.length = 0;
+
+    await chat.rejoin();
+
+    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
+  });
+
+  it("re-advertises on open for a removed member, so a reload heals without the button", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-removed2", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({
+      id: "welcome-2",
+      nostrGroupId: "gid-removed2",
+      members: [COORD, "c".repeat(64)],
+    });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-2"]));
+    shared.calls.length = 0;
+
+    // Still a member → the bootstrap stays quiet (this is the "don't re-add me on
+    // every open" guarantee that the group-presence check was protecting).
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+
+    // Removed → the bootstrap advertises again and re-attests.
+    lastClient.groups.groups[0]!.state.members = [COORD];
+    await chat.ensurePublished();
+    expect(shared.calls).toContain("attest:add");
+  });
+
+  it("routes sends to the live group state after a re-add, not the dead one", async () => {
+    // A removal + re-add leaves two local states for one nostr_group_id. groups[0]
+    // is the send target, so the one we still hold a leaf in has to come first.
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-dup", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w-old", nostrGroupId: "gid-dup", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-old"]));
+    lastClient.groups.groups[0]!.state.members = [COORD]; // removed from the old state
+    // Re-added: a second Welcome for the SAME room yields a second local state.
+    lastClient.invites.deliver({ id: "w-new", nostrGroupId: "gid-dup", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-old", "w-new"]));
+
+    await chat.send("after the re-add");
+    // group.id [2] is the second (live) join; [1] is the corpse.
+    expect(lastClient.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([2]));
   });
 
   it("is inert for a session that can still route — never tears down a working membership", async () => {

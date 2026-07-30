@@ -130,11 +130,11 @@ class ChatSessionStore {
           if (!this.chat) throw new Error("no chat session");
           await this.chat.send(text);
         },
-        onRejoinRequest: async () => {
+        onRejoinRequest: async (force) => {
           // Leader performs a follower's rejoin: MLS state has a single writer, so
           // the tab that owns the client is the only one that may re-enrol.
           if (!this.chat) throw new Error("no chat session");
-          await this.rejoin();
+          await this.rejoin({ force });
         },
         onSyncRequest: () => {
           if (tok === this.token) coordinator.broadcastState(ctx.coordinate, this.messages);
@@ -280,20 +280,20 @@ class ChatSessionStore {
    * asks the leader over the same BroadcastChannel that carries proxied sends. A
    * read-only follower has no leader to ask and throws, exactly like `send`.
    */
-  async rejoin(): Promise<void> {
+  async rejoin(opts?: { force?: boolean }): Promise<void> {
     if (this.rejoining) return;
     this.rejoining = true;
     try {
       if (this.chat) {
         this.phase = "setup";
         const tok = this.token;
-        await this.chat.rejoin();
+        await this.chat.rejoin(opts);
         await this.syncPhase(tok);
         return;
       }
       const c = this.coordinator;
       if (c && c.role === "follower" && !this.readOnly) {
-        await c.proxyRejoin();
+        await c.proxyRejoin(opts?.force ?? false);
         return;
       }
       throw new Error("no chat session");

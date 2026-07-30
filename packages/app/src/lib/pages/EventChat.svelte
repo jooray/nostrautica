@@ -204,7 +204,10 @@
     rejoinError = null;
     rejoined = false;
     try {
-      await chatSession.rejoin();
+      // Forced: this button is only reachable after a send has actually failed or
+      // setup has stalled, so the user's evidence outranks our own membership
+      // bookkeeping — which can be stale in exactly the case they're stuck in.
+      await chatSession.rejoin({ force: true });
       rejoined = true;
     } catch {
       rejoinError = t("chat.rejoinFailed");

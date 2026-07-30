@@ -55,7 +55,7 @@ type Wire =
   | { t: "state"; scope: string; coordinate: string; messages: ChatMessage[] }
   | { t: "members"; scope: string; coordinate: string; members: string[] }
   | { t: "send"; scope: string; reqId: string; text: string }
-  | { t: "rejoin"; scope: string; reqId: string }
+  | { t: "rejoin"; scope: string; reqId: string; force?: boolean }
   | { t: "ack"; scope: string; reqId: string; ok: boolean; error?: string };
 
 export interface TabCoordinatorOptions {
@@ -74,7 +74,7 @@ export interface TabCoordinatorOptions {
   /** Leader: a follower proxied a send; resolve to ack ok, throw to ack error. */
   onSendRequest?(text: string): Promise<void>;
   /** Leader: a follower asked for a chat re-enrolment; resolve/throw to ack. */
-  onRejoinRequest?(): Promise<void>;
+  onRejoinRequest?(force: boolean): Promise<void>;
   /** Leader: a freshly-joined follower asked for the current state — re-broadcast it. */
   onSyncRequest?(): void;
   /** Election ping window (ms) when Web Locks is unavailable. */
@@ -274,7 +274,7 @@ export class ChatTabCoordinator {
         return;
       case "rejoin":
         if (this.role === "leader") {
-          void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.());
+          void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.(msg.force ?? false));
         }
         return;
       case "ack": {
@@ -363,9 +363,9 @@ export class ChatTabCoordinator {
    * single-writer constraint as {@link proxySend} — only the leader owns MLS state,
    * so a read-only follower (no Web Locks) can't have one performed on its behalf.
    */
-  proxyRejoin(): Promise<void> {
+  proxyRejoin(force = false): Promise<void> {
     return this.proxy(
-      (reqId) => ({ t: "rejoin", scope: this.scope, reqId }),
+      (reqId) => ({ t: "rejoin", scope: this.scope, reqId, force }),
       this.rejoinTimeoutMs,
       "timed out waiting for the active tab to rejoin",
     );

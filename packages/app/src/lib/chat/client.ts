@@ -151,8 +151,14 @@ export class MarmotChat {
     // path (healIfEvicted, §5), both of which reach here with NO group FOR THIS
     // EVENT — a group from ANOTHER event must not suppress this event's
     // bootstrap.
-    const joined = await this.currentEventGroups();
-    if (joined.length > 0) return;
+    // "Joined" means a group of this event's in which OUR OWN leaf is still
+    // present — not merely one we hold state for. A member the coordinator has
+    // removed (revoke, admin remove) keeps its local group state and its history:
+    // it can still read what it already has and cannot send or read anything new.
+    // Checking only for the group's presence made that state permanent, because
+    // this bootstrap — the one thing that would ask to be added back — skipped
+    // itself on every open (prod 2026-07-30).
+    if (await this.isEventGroupMember()) return;
     await this.ensureRelayLists();
     // Publish (or confirm) the kind-30443 key package on the event relays under
     // this device's stable slot. This is what the coordinator's watcher adds.
@@ -384,6 +390,20 @@ export class MarmotChat {
     }
   }
 
+  /**
+   * True when we hold this event's group AND our own chat key still holds a leaf
+   * in it — i.e. we are actually a member, not just a client with leftover state.
+   *
+   * The distinction is the whole bug: an MLS Remove strips our leaf but leaves our
+   * local group state (and its decrypted history) exactly where it was, so "do we
+   * have the group?" answers yes for a member who has been removed. Every check
+   * that means "are we in the room?" has to ask this instead.
+   */
+  private async isEventGroupMember(): Promise<boolean> {
+    const groups = await this.currentEventGroups();
+    return groups.some((g) => groupHasMember(g, this.identity.pubkey));
+  }
+
   /** The nostr_group_id recorded for THIS event's verified join, if any. */
   private async recordedEventGroupId(): Promise<string | undefined> {
     return (await this.eventGroups.getItem(this.ctx.coordinate).catch(() => null)) ?? undefined;
@@ -401,8 +421,25 @@ export class MarmotChat {
    * against that id instead of guessing "the single coordinator-verified group"
    * — the old guess silently adopted another same-coordinator event's already-
    * joined group, which could misdeliver an OUTGOING message (audit APPK-3).
+   *
+   * Results are ordered so a state we still hold a leaf in comes first. Being
+   * removed and re-added leaves TWO states for one `nostr_group_id` — the dead
+   * pre-removal one and the live post-Welcome one — and `groups[0]` is what sends
+   * route to, so without this a rejoin could "succeed" and still send into the
+   * corpse. Ordering rather than filtering keeps the dead state bound, so the
+   * history it holds still replays into the room.
    */
   private async currentEventGroups(): Promise<MarmotGroupLike[]> {
+    const groups = await this.resolveEventGroups();
+    if (groups.length < 2) return groups;
+    return [
+      ...groups.filter((g) => groupHasMember(g, this.identity.pubkey)),
+      ...groups.filter((g) => !groupHasMember(g, this.identity.pubkey)),
+    ];
+  }
+
+  /** {@link currentEventGroups} without the own-leaf ordering (roster resolution only). */
+  private async resolveEventGroups(): Promise<MarmotGroupLike[]> {
     const all = (await this.client.groups.loadAll().catch(() => [])) as MarmotGroupLike[];
     const recorded = await this.recordedEventGroupId();
     // Cheap, hot-path-safe: the roster is fetched+cached by the People/event
@@ -620,11 +657,18 @@ export class MarmotChat {
    * History from before the new Add stays unreadable: MLS is forward-secret, and
    * no recovery path can change that.
    */
-  async rejoin(): Promise<void> {
-    // Never tear down a working membership: a session that CAN route is healthy,
-    // whatever prompted the caller (a transient relay failure also surfaces as a
-    // failed send).
-    if ((await this.currentEventGroups()).length > 0) return;
+  async rejoin(opts?: { force?: boolean }): Promise<void> {
+    // Don't tear down a working membership on a misclick — but "working" means our
+    // leaf is still in the group, NOT merely that we hold group state. Guarding on
+    // the latter made this a silent no-op for the one state it exists to fix: a
+    // removed member, who keeps the group and its history and can no longer send
+    // (prod 2026-07-30 — pressing Rejoin reported success and published nothing).
+    //
+    // `force` is for the UI's button, which is only reachable after a send has
+    // actually failed or setup has stalled. There, the user's evidence beats ours:
+    // a client that never processed its own removal commit still believes it holds
+    // a leaf, and refusing would strand exactly the person asking for help.
+    if (!opts?.force && (await this.isEventGroupMember())) return;
     // A previous fail-closed refusal may have memoized "the roster advertises no
     // group id" for the life of this client (see currentEventGroups). Drop it, or
     // the rejoin below succeeds and routing still refuses afterwards.
