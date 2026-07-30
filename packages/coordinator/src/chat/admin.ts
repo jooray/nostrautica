@@ -279,7 +279,10 @@ export class MarmotAdmin {
   ): Promise<void> {
     const consumed = this.store.isKpConsumed(coordinate, kp.id);
     if (consumed && !opts?.reconcile) return;
-    if (await this.mls.isMember(mlsGroupId, kp.pubkey)) {
+    const member = await this.mls.isMember(mlsGroupId, kp.pubkey);
+    // Nothing to act on: they're in, and this key package is either already spent
+    // or arrived through the passive watcher (where a member needs no attention).
+    if (member && (consumed || !opts?.reconcile)) {
       this.store.markKpConsumed(coordinate, kp.id); // already in → dedupe this event id
       return;
     }
@@ -292,6 +295,24 @@ export class MarmotAdmin {
       this.log(
         `[chat] re-adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: attested device holds no leaf despite 30443 ${kp.id.slice(0, 8)} being consumed`,
       );
+    }
+    if (member) {
+      // The two sides disagree about whether this device is in the room, and the
+      // device is the one that can tell: it only re-attests (which is what put us
+      // on this reconcile path) while it holds no membership of its own, and it
+      // only publishes a FRESH key package when re-enrolling. Our leaf says yes,
+      // its state says no — and its state is the one that has to decrypt. Trust it:
+      // drop the stale leaf, then add the new key package below.
+      //
+      // Prod 2026-07-30: without this the re-attestation hit the "already a member"
+      // short-circuit, silently consumed the new key package, and left the member
+      // unable to send with nothing logged. Deliberately NOT done for the passive
+      // 30443 watcher: one key-package slot is shared across events, so a rotation
+      // driven by ANOTHER event would otherwise churn this group's epoch.
+      this.log(
+        `[chat] re-enrolling ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} from a device we still hold a leaf for — removing it first`,
+      );
+      await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
     }
     try {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
