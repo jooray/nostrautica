@@ -3524,6 +3524,31 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     expect(roster.nostr_group_id).toBeUndefined();
   });
 
+  it("publishes chat_keys' added_at in unix SECONDS, not the store's milliseconds", async () => {
+    const h = await setup(0, { chat: true });
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+    await admin(h, "approve", { pubkey });
+    // An attested chat device of that attendee. The store stamps updated_at in ms
+    // (Date.now()); publishing it raw made the app render "added 8/15/58545".
+    h.store.upsertChatKey({
+      coordinate: h.coordinate,
+      accountPubkey: pubkey,
+      chatPubkey: "d".repeat(64),
+      label: "Firefox on macOS",
+      status: "active",
+      now: 1_760_000_000_000,
+    });
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    const device = roster.attendees.find((a) => a.pubkey === pubkey)!.chat_keys![0]!;
+    expect(device.added_at).toBe(1_760_000_000);
+    // Sanity: it lands in this decade, not the year 58545.
+    expect(new Date(device.added_at * 1000).getUTCFullYear()).toBe(2025);
+  });
+
   it("omits the id for a FROZEN group — members must no longer route there (§9 Q4)", async () => {
     const h = await setup(0, { chat: true });
     const pubkey = await join(h, generateSecretKey(), "crypto");

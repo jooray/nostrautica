@@ -65,7 +65,13 @@
   }
   function addedLabel(d: Device): string {
     try {
-      return t("chat.devices.added", { date: new Date(d.added_at * 1000).toLocaleDateString() });
+      // `added_at` is unix SECONDS. Rosters published before that was fixed carry
+      // milliseconds, which rendered as year-58xxx dates; a value that large can
+      // only be ms (seconds wouldn't reach 2001-09 until ~1e9, and 1e12 seconds is
+      // the year 33658), so read those as ms rather than showing nonsense until the
+      // coordinator republishes.
+      const at = d.added_at > 1e12 ? d.added_at : d.added_at * 1000;
+      return t("chat.devices.added", { date: new Date(at).toLocaleDateString() });
     } catch {
       return "";
     }

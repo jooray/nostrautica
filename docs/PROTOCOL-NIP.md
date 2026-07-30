@@ -427,7 +427,7 @@ silently drop them.
         d: string ≤200,               // that attendee's blinded 31603 d
         role: "attendee" | "organizer",
         chat_keys?: [
-          { pubkey: hex32, label?: string ≤60, added_at: int }
+          { pubkey: hex32, label?: string ≤60, added_at: int }  // added_at: unix SECONDS
         ] ≤5                         // per-device chat keys attested for this account
       }
     ] ≤2000

@@ -2188,7 +2188,10 @@ export class Coordinator {
           .map((k) => ({
             pubkey: k.chat_pubkey,
             ...(k.label ? { label: k.label } : {}),
-            added_at: k.updated_at,
+            // UNIX SECONDS, like every other timestamp on the wire. The store keeps
+            // `updated_at` in ms (Date.now()); publishing it raw rendered every chat
+            // device as "added 8/15/58545" in the device list.
+            added_at: Math.floor(k.updated_at / 1000),
           }));
         return {
           pubkey: a.pubkey,
