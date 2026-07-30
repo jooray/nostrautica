@@ -219,7 +219,11 @@ export class MarmotAdmin {
    * of their authorized chat identities and add every valid, unconsumed one. This
    * one routine serves approval, multi-device, and eviction-heal.
    */
-  async syncMember(coordinate: string, accountPubkey: string): Promise<void> {
+  async syncMember(
+    coordinate: string,
+    accountPubkey: string,
+    opts?: { reenrolling?: string },
+  ): Promise<void> {
     const group = this.activeGroup(coordinate);
     if (!group) return;
     const attendee = this.store.getAttendee(coordinate, accountPubkey);
@@ -232,8 +236,13 @@ export class MarmotAdmin {
       // `reconcile`: this path is a DELIBERATE "bring this member up to date" —
       // approval, a fresh attestation, or the startup backfill — so it also repairs
       // an attested device that holds no leaf despite its key package having been
-      // consumed. See tryAddKeyPackage.
-      await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, { reconcile: true });
+      // consumed. `reenrolling` is narrower: it names the ONE device that just
+      // attested for THIS event, and is the only thing that may drop a live leaf.
+      // See tryAddKeyPackage.
+      await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, {
+        reconcile: true,
+        reenrolling: opts?.reenrolling,
+      });
     }
     // An approved organizer's device landing in the group must also be an admin.
     await this.maybeSyncAdmins(coordinate, accountPubkey);
@@ -270,12 +279,18 @@ export class MarmotAdmin {
    * coordinator is deliberately syncing that member (approval, attestation,
    * startup backfill). The passive 30443 watcher keeps the cheap id check, so a
    * relay replaying old key packages can't drive repeated Add commits.
+   *
+   * `reenrolling` names the chat pubkey whose kind-21607 attestation for THIS
+   * event triggered the sync. It is the only warrant for dropping a leaf we
+   * still hold (see the `member` branch below); `reconcile` alone is not,
+   * because it is also true for the startup backfill and for a sibling device's
+   * attestation, neither of which says anything about THIS device's state.
    */
   private async tryAddKeyPackage(
     coordinate: string,
     mlsGroupId: string,
     kp: AnyEvent,
-    opts?: { reconcile?: boolean },
+    opts?: { reconcile?: boolean; reenrolling?: string },
   ): Promise<void> {
     const consumed = this.store.isKpConsumed(coordinate, kp.id);
     if (consumed && !opts?.reconcile) return;
@@ -293,6 +308,20 @@ export class MarmotAdmin {
     // Deliberate sync, they're in, and this key package is already spent: there is
     // nothing new to act on.
     if (member && consumed) return;
+    // They're in and the key package is fresh — but a fresh key package is NOT by
+    // itself evidence that this device left the room, because one 30443 slot is
+    // shared across every event the device is in. Rotating it to re-enrol in event
+    // A makes it look brand new to event B as well, and the triggers that don't
+    // come from the device (startup backfill — which runs on every coordinator
+    // restart, so every deploy — or a SIBLING device's attestation) would then
+    // evict a member of B who was never in trouble. Only the device's own
+    // attestation for THIS event speaks to this device's membership here.
+    if (member && opts?.reenrolling !== kp.pubkey) {
+      this.log(
+        `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} but no re-enrolment attestation for this event (likely rotated for another event)`,
+      );
+      return;
+    }
     if (!(await this.mls.isEligible(mlsGroupId, kp))) {
       this.store.markKpConsumed(coordinate, kp.id); // ineligible (e.g. ciphersuite) → don't re-eval
       this.log(`[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible`);
@@ -304,18 +333,20 @@ export class MarmotAdmin {
       );
     }
     if (member) {
-      // The two sides disagree about whether this device is in the room, and the
-      // device is the one that can tell: it only re-attests (which is what put us
-      // on this reconcile path) while it holds no membership of its own, and it
-      // only publishes a FRESH key package when re-enrolling. Our leaf says yes,
-      // its state says no — and its state is the one that has to decrypt. Trust it:
-      // drop the stale leaf, then add the new key package below.
+      // Reaching here means THIS device attested re-enrolment for THIS event (the
+      // guard above), so the two sides genuinely disagree about whether it is in
+      // the room — and the device is the one that can tell: it only re-attests
+      // while it holds no membership of its own, and it only publishes a FRESH key
+      // package when re-enrolling. Our leaf says yes, its state says no — and its
+      // state is the one that has to decrypt. Trust it: drop the stale leaf, then
+      // add the new key package below.
       //
       // Prod 2026-07-30: without this the re-attestation hit the "already a member"
       // short-circuit, silently consumed the new key package, and left the member
       // unable to send with nothing logged. Deliberately NOT done for the passive
-      // 30443 watcher: one key-package slot is shared across events, so a rotation
-      // driven by ANOTHER event would otherwise churn this group's epoch.
+      // 30443 watcher, nor for any sync this device didn't ask for: one key-package
+      // slot is shared across events, so a rotation driven by ANOTHER event would
+      // otherwise churn this group's epoch — or evict a healthy member outright.
       this.log(
         `[chat] re-enrolling ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} from a device we still hold a leaf for — removing it first`,
       );
@@ -425,7 +456,11 @@ export class MarmotAdmin {
       }
       this.log(`[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)}`);
       this.invalidateEligibility(coordinate);
-      if (attendee.status === "approved") await this.syncMember(coordinate, accountPubkey);
+      // The attesting device named itself, and `content.a === coordinate` was
+      // checked above — so this, and only this, authorizes dropping a leaf we
+      // still hold for that device (tryAddKeyPackage's `member` branch).
+      if (attendee.status === "approved")
+        await this.syncMember(coordinate, accountPubkey, { reenrolling: content.chat_pubkey });
       return true;
     }
     // op === "revoke": drop the key and remove its leaves (lost device, §3.3).

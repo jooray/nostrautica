@@ -87,3 +87,36 @@ relay replaying old key packages cannot drive repeated Add commits.
 
 History from before the new Add stays unreadable in every case — MLS is
 forward-secret from each leaf's own join epoch.
+
+### The add decision table
+
+Every add path funnels through one routine (`tryAddKeyPackage`), and what it does
+is a function of three things it can observe — whether this event already spent
+this key package's event id, whether the coordinator holds a leaf for the author,
+and which trigger is asking. Writing that out as a table is worth the space: five
+consecutive production incidents in this area were each a single wrong cell, and
+each fix reasoned about the trigger it had in hand rather than the whole column.
+
+| Leaf? | Key package | Passive 30443 watcher | Deliberate sync — this device attested here | Deliberate sync — backfill / sibling device |
+|---|---|---|---|---|
+| no | fresh | Add | Add | Add |
+| no | consumed | skip (dedupe) | **re-Add** (repairs a lost Welcome) | **re-Add** |
+| yes | fresh | skip | **remove leaf, then Add** (re-enrolment) | **skip** — see below |
+| yes | consumed | skip | skip | skip |
+
+The one cell that needs the trigger, not just the state, is *leaf + fresh key
+package*. A fresh key package is not evidence that the device left this group,
+because **one kind-30443 slot serves every event the device belongs to**: rotating
+it to rejoin event A makes it look brand new to event B too. Only the device's own
+kind-21607 attestation naming this event says anything about its membership *here*
+— so that is the only thing allowed to drop a live leaf. The backfill runs on every
+coordinator restart (and therefore every deploy), and a sibling device's
+attestation sweeps in every device of the account, so treating either as a
+re-enrolment signal evicts members who were never in trouble. That is not a
+recoverable hiccup: an offline client loses every message sent before its next
+open, permanently.
+
+The corresponding client-side rule: every check that means *"am I in the room?"*
+must ask about the **leaf**, not about whether a group id resolves. A removed
+member still holds the group state locally — that corpse is what makes "chat looks
+joined but every send fails" possible in the first place.
