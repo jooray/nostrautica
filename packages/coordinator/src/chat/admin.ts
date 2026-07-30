@@ -229,7 +229,11 @@ export class MarmotAdmin {
     const authorized = new Set(authors);
     for (const kp of kps) {
       if (!authorized.has(kp.pubkey)) continue; // relay returned an unrelated author
-      await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp);
+      // `reconcile`: this path is a DELIBERATE "bring this member up to date" —
+      // approval, a fresh attestation, or the startup backfill — so it also repairs
+      // an attested device that holds no leaf despite its key package having been
+      // consumed. See tryAddKeyPackage.
+      await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, { reconcile: true });
     }
     // An approved organizer's device landing in the group must also be an admin.
     await this.maybeSyncAdmins(coordinate, accountPubkey);
@@ -251,9 +255,30 @@ export class MarmotAdmin {
     await this.tryAddKeyPackage(coordinate, group.mls_group_id, event);
   }
 
-  /** Idempotent add of one authorized key package; records consumption. */
-  private async tryAddKeyPackage(coordinate: string, mlsGroupId: string, kp: AnyEvent): Promise<void> {
-    if (this.store.isKpConsumed(coordinate, kp.id)) return;
+  /**
+   * Idempotent add of one authorized key package; records consumption.
+   *
+   * `reconcile` (the {@link syncMember} paths only) additionally RETRIES a key
+   * package this event has already consumed when its author holds no leaf. That
+   * combination is the signature of a member who never actually made it into the
+   * group — the Add threw after the id was recorded, the Welcome was lost, or the
+   * member was removed and their client still advertises the same kind-30443 —
+   * and the plain consumption check turned it into a 30-day dead end: the client
+   * re-advertises an identical (addressable, same-`d`) event, so the id never
+   * changes and no later pass ever reconsiders it. Membership is the ground truth,
+   * so a device that isn't in the group gets another attempt whenever the
+   * coordinator is deliberately syncing that member (approval, attestation,
+   * startup backfill). The passive 30443 watcher keeps the cheap id check, so a
+   * relay replaying old key packages can't drive repeated Add commits.
+   */
+  private async tryAddKeyPackage(
+    coordinate: string,
+    mlsGroupId: string,
+    kp: AnyEvent,
+    opts?: { reconcile?: boolean },
+  ): Promise<void> {
+    const consumed = this.store.isKpConsumed(coordinate, kp.id);
+    if (consumed && !opts?.reconcile) return;
     if (await this.mls.isMember(mlsGroupId, kp.pubkey)) {
       this.store.markKpConsumed(coordinate, kp.id); // already in → dedupe this event id
       return;
@@ -262,6 +287,11 @@ export class MarmotAdmin {
       this.store.markKpConsumed(coordinate, kp.id); // ineligible (e.g. ciphersuite) → don't re-eval
       this.log(`[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible`);
       return;
+    }
+    if (consumed) {
+      this.log(
+        `[chat] re-adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: attested device holds no leaf despite 30443 ${kp.id.slice(0, 8)} being consumed`,
+      );
     }
     try {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)

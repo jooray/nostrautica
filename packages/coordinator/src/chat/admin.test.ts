@@ -251,6 +251,60 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
     expect(mls.invited).toEqual([CHATKEY]);
   });
 
+  // The stuck state this reconcile exists for: the device is a listed, active chat
+  // key of an approved attendee (so the roster shows it and the app's device list
+  // renders it), its key package was consumed — yet it holds no leaf, so it can
+  // neither read nor send. Before this, the consumption check returned first and
+  // the member was stuck until the row aged out (30 days): their client keeps
+  // re-advertising the SAME addressable 30443, so the event id never changes.
+  it("re-adds an attested device whose key package was consumed but which holds no leaf", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // The leaf goes away without the key package id changing — a lost Welcome the
+    // client never joined, a removal, or a restored/rolled-back group state.
+    mls.members.get("mls-1")!.delete(CHATKEY);
+
+    // Any deliberate sync of this member (approval, a fresh attestation, the
+    // startup backfill) now reconsiders it instead of skipping on the consumed id.
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+    expect(await mls.isMember("mls-1", CHATKEY)).toBe(true);
+
+    // ...and once they ARE back in, a further sync is inert again.
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
+  it("the passive 30443 watcher still skips a consumed key package (no Add per relay replay)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.syncMember(COORD, ACCOUNT);
+    mls.members.get("mls-1")!.delete(CHATKEY);
+
+    // A relay replaying the same (already consumed) key package must NOT drive a
+    // fresh Add commit — the reconcile is for the deliberate sync paths only.
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp1"));
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // A genuinely new key package (the client rotated it — what the app's rejoin
+    // does) is still added through the watcher as usual.
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp2"));
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
   it("an approved account with no attested device brings NO chat identity (P6)", async () => {
     const store = freshStore();
     const mls = new FakeMls();
