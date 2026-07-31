@@ -802,6 +802,44 @@ describe("job enqueue outcomes and the recompute memo reset", () => {
     expect(store.enqueueJob("score_batch", "other-event", { coordinate: "31923:eid:other" })).toBe("done");
   });
 
+  // Jobs 51 and 70 in production: process_attendee POISONED in July on a
+  // translation shape fixed on 2026-07-30, and no operator action could re-run
+  // them. recompute deliberately skips process_attendee (so it never re-bills
+  // STT), and reprocess's own enqueue hit the poisoned row's dedupe key and was
+  // silently discarded. Two attendees had no profile for two weeks.
+  it("clearAttendeeJobMemo frees a POISONED profile job so reprocess can revive it", () => {
+    const store = new Store();
+    const pubkey = "a".repeat(64);
+    store.enqueueJob("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
+    const j = store.claimNextJob(1000, "A", 60_000)!;
+    store.failJob(j.id, 5, 0, "translation contract", true, "A"); // poisoned
+    // The state reprocess was stuck in: pressing the button changes nothing.
+    expect(store.enqueueJob("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey })).toBe(
+      "poison",
+    );
+
+    expect(store.clearAttendeeJobMemo(coordinate, pubkey)).toBe(1);
+    expect(store.enqueueJob("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey })).toBe(
+      "enqueued",
+    );
+  });
+
+  it("clearAttendeeJobMemo touches only that attendee's terminal rows", () => {
+    const store = new Store();
+    const mine = "a".repeat(64);
+    const theirs = "b".repeat(64);
+    // Another attendee's finished row — re-running it would re-bill their STT.
+    store.enqueueJob("process_attendee", "proc:theirs", { coordinate, pubkey: theirs });
+    const other = store.claimNextJob(1000, "A", 60_000)!;
+    store.completeJob(other.id, "A");
+    // My own LIVE row must keep coalescing rather than being duplicated.
+    store.enqueueJob("process_attendee", "proc:mine-live", { coordinate, pubkey: mine });
+
+    expect(store.clearAttendeeJobMemo(coordinate, mine)).toBe(0);
+    expect(store.enqueueJob("process_attendee", "proc:theirs", { coordinate, pubkey: theirs })).toBe("done");
+    expect(store.enqueueJob("process_attendee", "proc:mine-live", { coordinate, pubkey: mine })).toBe("pending");
+  });
+
   it("jobStateCounts groups the queue by state", () => {
     const store = new Store();
     store.enqueueJob("a", "1", { coordinate });

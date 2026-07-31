@@ -13,6 +13,8 @@ import {
   aiProfileSchema,
   MAX_SKILLS,
   MAX_SKILL,
+  MAX_ABOUT,
+  MAX_LOOKING_FOR,
   type AiProfile,
   type AttendeeProfile,
 } from "@nostrautica/protocol";
@@ -45,16 +47,17 @@ const aiProfileResponseSchema = aiProfileSchema;
  *     call returned those terms as a proper array, so the model splits one
  *     authored skill into several and then hands them back joined.
  *
- * Both are deterministic for a given profile, so retrying could never help — it
- * just re-billed. `nullToUndefined` maps null onto "the model didn't translate
- * this", which is exactly how the caller already treats a falsy value, and
- * `coerceStringList` accepts the joined-string form and drops non-string items.
- * Anything still unusable parses as undefined and the field is simply not
- * published: an untranslated field shows the author's own words, which is a
- * strictly better outcome than failing the stage.
+ *  3. A LIST where a paragraph was asked for — `looking_for` as an array. This
+ *     one poisoned two attendees' whole `process_attendee` in July, because the
+ *     first fix only covered `skills` and left the prose fields strict.
+ *
+ * All are deterministic for a given profile, so retrying could never help — it
+ * just re-billed. `coerceString` and `coerceStringList` map each shape onto
+ * "here is the text" or onto undefined, which is exactly how the caller already
+ * treats a falsy value. Anything still unusable parses as undefined and the
+ * field is simply not published: an untranslated field shows the author's own
+ * words, which is a strictly better outcome than failing the stage.
  */
-const nullToUndefined = <T extends z.ZodTypeAny>(schema: T) =>
-  z.preprocess((v) => (v === null ? undefined : v), schema.optional());
 
 /**
  * Accept `["a","b"]`, `"a, b"` (the joined form), or junk → undefined.
@@ -79,11 +82,41 @@ const coerceStringList = z.preprocess((v) => {
   return undefined;
 }, z.array(z.string()).optional());
 
+/**
+ * Accept a string, a list the model split into pieces (joined back), or junk →
+ * undefined. The sibling of {@link coerceStringList}, and bounded for the same
+ * reason: `translations` is attached after validation, so nothing downstream
+ * enforces the protocol's caps, and an over-cap value publishes fine and then
+ * fails every reader's `directoryEntryContentSchema.parse` — the attendee
+ * silently vanishes from the directory.
+ *
+ * `skills` got this treatment in 10265d1; `about` and `looking_for` did not, and
+ * stayed strict strings. Two `process_attendee` jobs poisoned on exactly that
+ * gap ("looking_for: invalid_type", 2026-07-17 and 2026-07-20) — a translation
+ * model handed back a list where a paragraph was asked for, and the whole
+ * attendee's processing died with it.
+ */
+const coerceString = (max: number) =>
+  z.preprocess((v) => {
+    if (typeof v === "string") return v.slice(0, max);
+    if (v == null) return undefined;
+    if (Array.isArray(v)) {
+      const parts = v.filter((s): s is string => typeof s === "string" && s.trim() !== "");
+      return parts.length ? parts.join(", ").slice(0, max) : undefined;
+    }
+    return undefined;
+  }, z.string().optional());
+
 const translationResponseSchema = z.object({
+  // The two detection fields stay STRICT (audit Q9). They are the answer to the
+  // question that was asked, not the payload: a response missing them has not
+  // done the job, and there is no safe way to guess. Only the translated CONTENT
+  // is coerced — that is where production actually failed, and where a wrong
+  // shape still carries usable text.
   source_lang: z.string(),
   needs_translation: z.boolean(),
-  about: nullToUndefined(z.string()),
-  looking_for: nullToUndefined(z.string()),
+  about: coerceString(MAX_ABOUT),
+  looking_for: coerceString(MAX_LOOKING_FOR),
   skills: coerceStringList,
 });
 

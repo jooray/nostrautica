@@ -2273,6 +2273,37 @@ export class Store {
     return Number(info.changes);
   }
 
+  /**
+   * Drop the TERMINAL (`done`/`poison`) `process_attendee` rows for ONE attendee,
+   * so their dedupe keys stop suppressing a re-enqueue. The reprocess counterpart
+   * of {@link clearMatchJobMemo}.
+   *
+   * Without it an organizer's "reprocess" is a one-shot that silently stops
+   * working: `enqueueJob` is INSERT OR IGNORE on `dedupe_key`, so once a row for
+   * this attendee is terminal every later press is discarded — including, and
+   * most importantly, when the row is POISONED. Two attendees had their
+   * `process_attendee` poison in July on a translation shape that has since been
+   * fixed, and no operator action could re-run them: recompute deliberately
+   * leaves `process_attendee` alone (so it never re-runs STT), and reprocess's
+   * own enqueue hit the poisoned key and vanished. Their profiles were
+   * unrecoverable through the UI.
+   *
+   * Narrow on purpose: one attendee, terminal rows only. `pending`/`running`/
+   * `waiting` rows are live work that must keep coalescing.
+   */
+  clearAttendeeJobMemo(coordinate: string, pubkey: string): number {
+    const info = this.db
+      .prepare(
+        `DELETE FROM jobs
+           WHERE state IN ('done','poison')
+             AND type = 'process_attendee'
+             AND json_extract(payload, '$.coordinate') = ?
+             AND json_extract(payload, '$.pubkey') = ?`,
+      )
+      .run(coordinate, pubkey);
+    return Number(info.changes);
+  }
+
   /** Row count per job state (queue-depth reporting). Absent states are omitted. */
   jobStateCounts(): Partial<Record<JobState, number>> {
     const rows = this.db.prepare("SELECT state, COUNT(*) AS c FROM jobs GROUP BY state").all() as {

@@ -3026,7 +3026,20 @@ export class Coordinator {
       this.resumeParkedWork(coordinate);
       const pubkey = String(args.pubkey ?? "");
       if (pubkey) {
-        this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
+        // Forget this attendee's finished/poisoned processing rows first, or the
+        // enqueue below is silently dropped: the key is fixed (`:manual`), so
+        // INSERT OR IGNORE turns every press after the first into a no-op, and a
+        // POISONED row makes the attendee permanently unreprocessable — which is
+        // exactly how two attendees sat without profiles for two weeks after a
+        // translation bug that had already been fixed.
+        const forgotten = this.deps.store.clearAttendeeJobMemo(coordinate, pubkey);
+        const outcome = this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, {
+          coordinate,
+          pubkey,
+        });
+        log(
+          `[admin] reprocess ${coordinate} ${short(pubkey)}: cleared ${forgotten} finished job row(s), enqueue ${outcome}`,
+        );
       }
     } else if (cmd === "revoke") {
       const pubkey = String(args.pubkey ?? "");
