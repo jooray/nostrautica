@@ -120,6 +120,7 @@ import {
 } from "./nostr/publisher.js";
 import { transcribeMedia, MediaPolicyError } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "./providers/types.js";
+import { ProviderHttpError } from "./providers/http.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
@@ -556,6 +557,17 @@ export class Coordinator {
       // A poisoned job is surfaced to the organizer (audit Q12): persist a status
       // row and gift-wrap a 21606 status to E_id so it's visible without server logs.
       onPoison: (info) => void this.surfacePoison(info).catch(() => {}),
+      // A depleted provider account is not a bad job. Prod 2026-07-31: two
+      // attendees of a live event had `process_attendee` fail on Venice 402s and
+      // ended up with a hollow ai_profile (`{"summary":"","skills":[],…}`), which
+      // scoring correctly refuses to match on — so they silently had no matches
+      // at all while everyone around them did. The retry tail is three days long,
+      // which is generous, but running it out means the outage was long, not that
+      // the work should be thrown away.
+      poisonExempt: (err) =>
+        err instanceof ProviderHttpError && err.payment
+          ? "provider account out of credit — parked for reprocess after top-up"
+          : undefined,
     });
     this.registerJobHandlers();
   }

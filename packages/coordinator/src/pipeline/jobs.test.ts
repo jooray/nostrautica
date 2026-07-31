@@ -72,6 +72,71 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.poisonJobs()).toHaveLength(1);
   });
 
+  // Prod 2026-07-31: two attendees of a live event had process_attendee fail on
+  // Venice 402s. Their ai_profile stayed a hollow {"summary":"","skills":[],…},
+  // which scoring correctly refuses to match on, so they silently had no matches
+  // while everyone around them did. Running out of retries on a billing failure
+  // means the outage outlasted the tail — not that the work should be discarded.
+  it("parks instead of poisoning when the failure is a depleted provider account", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      maxAttempts: 2,
+      baseBackoffMs: 100,
+      poisonExempt: (err) => (String(err).includes("insufficient balance") ? "out of credit" : undefined),
+    });
+    let attempts = 0;
+    runner.register("paid", async () => {
+      attempts++;
+      throw new Error("provider billing: insufficient balance (402)");
+    });
+    runner.enqueue("paid", "k", { coordinate: "31923:abc:evt" });
+
+    await runner.drain(); // attempt 1 → ordinary retry
+    clock.advance(100);
+    await runner.drain(); // attempt 2 → would poison, parks instead
+    expect(attempts).toBe(2);
+    expect(store.poisonJobs()).toHaveLength(0);
+    expect(store.waitingJobCount()).toBe(1);
+
+    // Parked work stays put no matter how long we wait — it is not a retry.
+    clock.advance(10_000_000);
+    await runner.drain();
+    expect(attempts).toBe(2);
+
+    // An organizer reprocess revives it with a WHOLE fresh tail rather than one
+    // doomed call: attempts were reset when it parked, so this failure is an
+    // ordinary retry (still pending, still not poisoned) and the account has
+    // another three days to be topped up.
+    store.resumeWaitingJobs("31923:abc:evt");
+    await runner.drain();
+    expect(attempts).toBe(3);
+    expect(store.poisonJobs()).toHaveLength(0);
+    expect(store.waitingJobCount()).toBe(0);
+    expect(store.pendingJobCount()).toBe(1);
+  });
+
+  it("still poisons a failure that is genuinely about the job, not the account", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      maxAttempts: 2,
+      baseBackoffMs: 100,
+      poisonExempt: (err) => (String(err).includes("insufficient balance") ? "out of credit" : undefined),
+    });
+    runner.register("bad", async () => {
+      throw new Error("output failed the profile_translation contract");
+    });
+    runner.enqueue("bad", "k", {});
+    await runner.drain();
+    clock.advance(100);
+    await runner.drain();
+    expect(store.poisonJobs()).toHaveLength(1);
+    expect(store.waitingJobCount()).toBe(0);
+  });
+
   it("the DEFAULT schedule is a long tail (COORD-15): quick retries, then ~hourly, poison only after ~3 days", async () => {
     const store = new Store();
     const clock = fixedClock();

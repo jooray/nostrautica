@@ -2385,10 +2385,18 @@ export class Store {
    * billing block. `resumeWaitingJobs` re-enqueues it when the block clears. Only
    * the lease owner may park. Returns true if this worker still owned the job.
    */
-  parkJob(id: number, reason: string, workerToken?: string): boolean {
+  /**
+   * Move a job to `waiting`. `resetAttempts` additionally clears the retry
+   * counter, for a park that happens at the END of the retry tail rather than
+   * before it: `resumeWaitingJobs` puts the row back to `pending` without
+   * touching `attempts`, so a job parked with its counter already at the limit
+   * would burn one more paid call and land straight back here on every resume.
+   */
+  parkJob(id: number, reason: string, workerToken?: string, opts?: { resetAttempts?: boolean }): boolean {
     const sql =
-      "UPDATE jobs SET state = 'waiting', last_error = ?, worker_token = NULL, lease_until = NULL WHERE id = ?" +
-      (workerToken ? " AND worker_token = ?" : "");
+      `UPDATE jobs SET state = 'waiting', last_error = ?, worker_token = NULL, lease_until = NULL${
+        opts?.resetAttempts ? ", attempts = 0" : ""
+      } WHERE id = ?` + (workerToken ? " AND worker_token = ?" : "");
     const args: unknown[] = [reason, id];
     if (workerToken) args.push(workerToken);
     return this.db.prepare(sql).run(...(args as any)).changes > 0;
