@@ -20,7 +20,8 @@
  * the queue logic is unit-testable without IndexedDB; production uses IndexedDB.
  */
 import type { VerifiedEvent } from "nostr-tools/pure";
-import { publishSigned } from "./ndk.js";
+import { publishSigned, type RelayPublishOutcome } from "./ndk.js";
+import { isRetryableRelayFailure } from "./errors.js";
 import { activeCacheOwner } from "$lib/cache/persist.js";
 
 export interface QueuedItem {
@@ -43,6 +44,16 @@ export interface QueuedItem {
    * publishing them under the wrong identity.
    */
   owner?: string;
+  /**
+   * This event IS published — it reached at least one relay — and this item
+   * exists only to carry it to relays that missed it (`relays` holds exactly
+   * those). Convergence work, not a pending user action, so it stays out of the
+   * outbox UI, out of the logout warning, and is dropped rather than parked when
+   * it runs out of attempts: there is nothing for the user to decide about a
+   * straggler relay, and nagging them about one would be noise about an action
+   * that already succeeded.
+   */
+  partial?: true;
 }
 
 /** After this many failed durable flushes an item is parked as `failed`. */
@@ -192,7 +203,8 @@ export async function publishOrQueue(
     // Offline skips retries entirely (below); online gets 1 + PUBLISH_BACKOFFS_MS.length tries.
     for (let attempt = 0; ; attempt++) {
       try {
-        await publishSigned(event, relays);
+        const outcomes = await publishSigned(event, relays);
+        await queueUndelivered(event, outcomes);
         return true;
       } catch {
         if (attempt >= PUBLISH_BACKOFFS_MS.length) break; // exhausted — fall through to queue
@@ -219,6 +231,50 @@ export async function publishOrQueue(
     owner: activeCacheOwner() ?? event.pubkey,
   });
   return false;
+}
+
+/**
+ * A publish that reached at least one relay but not all of them leaves the event
+ * present on some relays and absent from others — and because success is declared
+ * at the first ack, nothing used to notice. A reader that happens to ask only the
+ * relays that missed it sees nothing at all, which for a replaceable authority
+ * event (an event's config, its roster, a directory entry) reads as "this doesn't
+ * exist" rather than "one relay is behind".
+ *
+ * So the relays that missed it are carried in the durable outbox and topped up
+ * later. Only failures that another attempt could fix are queued: a relay that
+ * refuses the kind outright, or already holds the event, is not a straggler
+ * (see isRetryableRelayFailure).
+ *
+ * Never throws — it runs inside `publishOrQueue`'s try, where an escaping error
+ * would be read as a failed publish and send the whole event again.
+ */
+async function queueUndelivered(
+  event: VerifiedEvent,
+  outcomes: RelayPublishOutcome[],
+): Promise<void> {
+  try {
+    if (!backend || !Array.isArray(outcomes)) return;
+    const missing = outcomes
+      .filter((o) => !o.ok && isRetryableRelayFailure(o.reason))
+      .map((o) => o.url);
+    if (missing.length === 0) return;
+    const existing = (await backend.getAll()).find((i) => i.event.id === event.id);
+    // An item already waiting to be sent in full outranks topping up stragglers:
+    // it targets every relay anyway, and the store is keyed by event id, so
+    // writing over it would narrow that publish to this partial relay set.
+    if (existing && !existing.partial) return;
+    await backend.put({
+      event,
+      relays: [...new Set([...(existing?.relays ?? []), ...missing])],
+      queuedAt: existing?.queuedAt ?? Date.now(),
+      attempts: existing?.attempts ?? 0,
+      partial: true,
+      owner: activeCacheOwner() ?? event.pubkey,
+    });
+  } catch {
+    /* convergence is best-effort; the event is already out on at least one relay */
+  }
 }
 
 /**
@@ -273,11 +329,19 @@ async function flushQueueCore(): Promise<FlushResult> {
     } catch (e) {
       const attempts = (item.attempts ?? 0) + 1;
       const failed = attempts >= MAX_FLUSH_ATTEMPTS;
+      // A straggler relay that stayed unreachable is given up on quietly. The
+      // event itself was published; parking it as `failed` would put an item in
+      // the outbox the user can only be confused by, since the action it
+      // describes already succeeded.
+      if (failed && item.partial) {
+        await backend.delete(item.event.id).catch(() => {});
+        continue;
+      }
       const lastError = e instanceof Error ? e.message : String(e);
       await backend.put({ ...item, attempts, failed, lastError }).catch(() => {});
     }
   }
-  const after = (await backend.getAll()).filter((i) => ownedBy(i, active));
+  const after = (await backend.getAll()).filter((i) => ownedBy(i, active) && !i.partial);
   return {
     sent,
     remaining: after.filter((i) => !i.failed).length,
@@ -295,14 +359,18 @@ export async function listQueued(): Promise<QueuedItem[]> {
   if (!backend) return [];
   const active = activeCacheOwner();
   return (await backend.getAll())
-    .filter((i) => ownedBy(i, active))
+    .filter((i) => ownedBy(i, active) && !i.partial)
     .sort((a, b) => a.queuedAt - b.queuedAt);
 }
 
-/** How many items (pending + failed) the given account has queued (U1). */
+/**
+ * How many items (pending + failed) the given account has queued (U1). Partial
+ * redeliveries don't count: this drives the logout warning about unsent actions,
+ * and those actions were sent.
+ */
 export async function countQueuedForOwner(owner: string): Promise<number> {
   if (!backend) return 0;
-  return (await backend.getAll()).filter((i) => i.owner === owner).length;
+  return (await backend.getAll()).filter((i) => i.owner === owner && !i.partial).length;
 }
 
 /**

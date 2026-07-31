@@ -31,6 +31,43 @@ const BENIGN_RELAY_PATTERNS = [
   /\bshunned\b/i,
 ];
 
+/**
+ * Relay refusals that re-sending the same event can never turn into an accept.
+ *
+ * Distinct from BENIGN above, which asks "should this alarm anyone?" — both a
+ * rate-limit and a kind-allowlist rejection are unalarming, but only one of them
+ * is worth trying again. This asks the different question the outbox needs:
+ * would another attempt at this relay plausibly change the answer?
+ *
+ * `duplicate` counts as permanent because the relay is telling us it already has
+ * the event — the convergence goal is met, and re-sending would only ask again.
+ * `pow` and `auth-required` are permanent for THIS app rather than in principle:
+ * we mine no proof of work and perform no NIP-42 handshake, so the outcome is
+ * fixed until that changes.
+ */
+const PERMANENT_RELAY_REFUSALS = [
+  /\bblocked\b/i, // kind not on the allowlist, author not permitted
+  /\binvalid\b/i,
+  /\brestricted\b/i,
+  /\bpow\b/i,
+  /auth-?required/i,
+  /\bmute[d]?\b/i,
+  /\bshunned\b/i,
+  /\bduplicate\b/i, // the relay already has it
+];
+
+/**
+ * True when re-sending this event to the relay that gave `reason` could still
+ * succeed — a timeout, a rate limit, a dropped socket, or anything unrecognised.
+ * Unknown reasons are treated as retryable on purpose: the cost of one wasted
+ * re-send is a round trip, while wrongly giving up leaves a relay permanently
+ * missing an event nobody will notice is absent.
+ */
+export function isRetryableRelayFailure(reason: string | undefined): boolean {
+  if (!reason) return true;
+  return !PERMANENT_RELAY_REFUSALS.some((re) => re.test(reason));
+}
+
 /** True if an error reads like an expected, non-fatal relay publish rejection. */
 export function isBenignRelayError(reason: unknown): boolean {
   const msg =
