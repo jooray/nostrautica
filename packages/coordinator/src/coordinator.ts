@@ -2676,7 +2676,7 @@ export class Coordinator {
     }
     if (candidates.length === 0) return { scored: [], missing: 0 };
 
-    const { scores, missing } = await scoreBatch(
+    const { scores, missing, misattributed } = await scoreBatch(
       this.roles.match.llm,
       this.roles.match.model,
       state.scoringCtx,
@@ -2686,6 +2686,13 @@ export class Coordinator {
       this.loadDisplayName(coordinate, target),
       signal,
     );
+    // Loud on purpose: an entry whose echoed name disagreed with its number means
+    // the model handed one attendee's match text to another, which is invisible in
+    // the "K scored, 0 unparsed" line and is what made the 2026-07-31 report so
+    // hard to see from the logs alone.
+    for (const note of misattributed ?? []) {
+      log(`[match] MISATTRIBUTED ${short(target)} batch: ${note}`);
+    }
     // Lifecycle recheck before any directed write (audit R3): the event may have
     // detached/expired during the scoring call; don't recreate pair rows a purge
     // just removed.
@@ -2746,7 +2753,7 @@ export class Coordinator {
     }
     if (targets.length === 0) return { scored: [], missing: 0 };
 
-    const { scores, missing } = await scoreReverseBatch(
+    const { scores, missing, misattributed } = await scoreReverseBatch(
       this.roles.match.llm,
       this.roles.match.model,
       state.scoringCtx,
@@ -2756,6 +2763,9 @@ export class Coordinator {
       this.loadDisplayName(coordinate, shared),
       signal,
     );
+    for (const note of misattributed ?? []) {
+      log(`[match] MISATTRIBUTED reverse batch for ${short(shared)}: ${note}`);
+    }
     // Lifecycle recheck before any directed write (audit R3), as in scoreBatchJob.
     if (!this.eventStillLive(coordinate)) return { scored: [], missing: 0 };
     const scored: CandidatePair[] = [];
