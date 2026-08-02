@@ -16,6 +16,8 @@
     submitProfileAndMedia,
     aggregateOutcome,
     loadSelfCopy,
+    loadAuthoredState,
+    emptyProfile,
     loadLibraryFull,
     cachedLibrary,
     cachedTextLibrary,
@@ -476,11 +478,15 @@
     try {
       const signer = session.signer;
       const bk = await deriveBlindingKey(signer);
-      const self = await loadSelfCopy(signer, ctx, bk);
+      // loadAuthoredState, not loadSelfCopy: the 21601 replaces the authored
+      // profile wholesale, so submitting an intro must carry the current fields
+      // forward. A bare self-copy read that comes back empty used to become a
+      // blank profile here, deleting what the attendee typed at join.
+      const self = await loadAuthoredState(signer, ctx, bk);
       // A text intro replaces any recorded intro of this kind (drops its media).
       const media = (self?.media ?? []).filter((m) => m.kind !== kind);
       const outcome = await submitProfileAndMedia(signer, ctx, {
-        profile: self?.profile ?? { about: "", skills: [], looking_for: "", links: [] },
+        profile: self?.profile ?? emptyProfile(),
         media,
         blindingKey: bk,
         introText: textIntro.trim(),
@@ -542,12 +548,15 @@
     }
     const signer = session.signer!;
     const bk = await deriveBlindingKey(signer);
-    const self = await loadSelfCopy(signer, ctx!, bk);
+    // See submitText: the authored fields must survive a media submission, so
+    // this resolves through the self-copy → cache → directory chain rather than
+    // degrading a failed read into an empty profile.
+    const self = await loadAuthoredState(signer, ctx!, bk);
     // Replace the existing intro of the same kind; keep other kinds (e.g. talks).
     // A recording supersedes any prior text intro (introText omitted below).
     const existingMedia = (self?.media ?? []).filter((m) => m.kind !== descriptor.kind);
     const outcome = await submitProfileAndMedia(signer, ctx!, {
-      profile: self?.profile ?? { about: "", skills: [], looking_for: "", links: [] },
+      profile: self?.profile ?? emptyProfile(),
       media: [...existingMedia, descriptor],
       blindingKey: bk,
     });

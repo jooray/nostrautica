@@ -24,7 +24,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { loadSelfCopy } from "$lib/media/submit.js";
+import { loadSelfCopy, cacheSelfCopy } from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 export interface JoinInput {
@@ -130,6 +130,17 @@ export async function sendJoinRequest(
     content: selfCipher,
   });
   wraps.push(publishOrQueue(selfEvent));
+  // Seed the local copy from the very first 31602 (both outcomes above are
+  // durable — relay or outbox). The next thing this attendee does is usually
+  // "record your intro" on the same venue Wi-Fi that just made this publish
+  // slow, and that flow builds its submission out of the self-copy: with no
+  // local copy to fall back on, an empty relay read there reads as "no profile"
+  // and blanks the fields typed on this very screen.
+  cacheSelfCopy(
+    ctx.coordinate,
+    { profile: input.profile, media: input.media ?? [], rev },
+    selfEvent.created_at,
+  );
 
   // Opt-in public RSVP (31925) — a standard, discoverable calendar RSVP.
   if (input.rsvpPublic) {
