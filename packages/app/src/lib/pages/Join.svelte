@@ -12,7 +12,7 @@
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
-  import { parseCoordinate } from "@nostrautica/protocol";
+  import { parseCoordinate, MAX_ABOUT } from "@nostrautica/protocol";
   import { fetchProfiles } from "$lib/events/social.js";
   import { uploadPublicImage, prepareAvatarImage } from "$lib/media/image.js";
   import { loadLibrary, prepareReuse, loadSelfCopy, hasIntro } from "$lib/media/submit.js";
@@ -106,7 +106,19 @@
   // Event-local display name (UX-O1): editable for logged-in users, prefilled from
   // the loaded kind-0 name. Sent with the join request; NEVER republishes kind 0.
   let eventDisplayName = $state("");
-
+  // Event-local bio, for a logged-in user whose kind-0 carries none. Until now the
+  // About textarea existed ONLY in the new-user branch, so an existing Nostr user
+  // with an empty kind-0 had nowhere to type one: `about` was read from kind-0 and
+  // stayed "". Fifteen Lunarpunk attendees submitted a profile with no about, no
+  // skills and no looking_for, which the scorer correctly refuses to match on —
+  // they were never asked. Event-local like the display name; kind 0 is still
+  // never modified for an identity we did not create (§5.4).
+  let eventAbout = $state("");
+  const hasPublicAbout = $derived(profileState === "loaded" && !!existingAbout.trim());
+  /** What will actually be submitted as `profile.about`, whichever branch we're in. */
+  const aboutValue = $derived(
+    session.loggedIn ? (hasPublicAbout ? existingAbout : eventAbout) : newAbout,
+  );
   // Field-level name validation (audit §7.3.7). The required name field differs
   // by mode: a brand-new user edits `n` (newName); a logged-in user whose public
   // profile is missing/blank must supply an event-local `edn` (eventDisplayName).
@@ -134,6 +146,16 @@
   let skills = $state("");
   let lookingFor = $state("");
   let rsvpPublic = $state(false);
+
+  /**
+   * The submission would carry nothing to match on. Not an error — joining with
+   * an empty profile is allowed and always was — but it is the single biggest
+   * reason people end up invisible to matching, and nothing used to say so at
+   * the one moment the person is looking at the fields.
+   */
+  const profileWillBeEmpty = $derived(
+    !aboutValue.trim() && !skills.trim() && !lookingFor.trim(),
+  );
 
   // Intro-video reuse (UI-SUGGESTIONS #11): a returning attendee with a library
   // entry from a previous event can reuse it here instead of re-recording. The
@@ -339,7 +361,8 @@
           return;
         }
         displayName = eventDisplayName.trim() || existingName;
-        about = existingAbout;
+        // Their kind-0 bio when they have one, otherwise whatever they typed here.
+        about = hasPublicAbout ? existingAbout : eventAbout.trim();
       }
 
       const signer = session.signer!;
@@ -566,6 +589,14 @@
           />
           {#if errName}<p id="edn-error" class="field-error">{t("join.error.nameRequired")}</p>{/if}
         </div>
+        {#if !hasPublicAbout}
+          <!-- No usable kind-0 bio: offer one for this event rather than
+               submitting a blank `about` the person was never asked for. -->
+          <div>
+            <label for="ea">{t("join.aboutYou")} <span class="muted" style="font-weight:400">{t("join.aboutEvent")}</span></label>
+            <textarea id="ea" rows="3" maxlength={MAX_ABOUT} bind:value={eventAbout} placeholder={t("join.about.placeholder")}></textarea>
+          </div>
+        {/if}
       {/if}
     {:else}
       <!-- New user: name + bio + photo become the public Nostr profile. -->
@@ -616,6 +647,15 @@
       <label for="lf">{t("join.lookingFor")}</label>
       <input id="lf" bind:value={lookingFor} placeholder={t("join.lookingFor.placeholder")} />
     </div>
+    {#if profileWillBeEmpty}
+      <!-- Non-blocking on purpose: joining with nothing is allowed, and gating
+           the door on a bio would cost more joins than it saves profiles. It
+           just must not happen SILENTLY, which is what it did. -->
+      <p class="muted" role="status" style="margin:0">
+        <span class="badge">{t("join.empty.badge")}</span>
+        {t("join.empty.hint")}
+      </p>
+    {/if}
     <label class="row" style="font-weight:400">
       <input type="checkbox" bind:checked={rsvpPublic} style="width:auto" />
       {t("join.rsvpPublic")}
