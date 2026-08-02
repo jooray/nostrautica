@@ -4600,6 +4600,72 @@ describe("audit C3 — public inbox is population-bounded", () => {
     expect(attendee?.profile_json ?? "").toContain("meshcore and BTC L2");
   });
 
+  it("keeps a submission DELIVERED AHEAD of its own join (relay/signer ordering inversion)", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: 0, profile: { about: "solar punk logistics", skills: ["ops"], looking_for: "", links: [] }, media: [] },
+      tags: [["a", h.coordinate]],
+    });
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Mira", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+
+    // 42a3ad7 covered the two arriving TOGETHER. This is the case it left open:
+    // the submission is dispatched FIRST. The app publishes both concurrently and
+    // each needs its own signer round-trips (unordered under NIP-46), so whichever
+    // relay answers first decides — and when the submission wins, the gate used to
+    // drop it with no live redelivery ever coming.
+    const submission = h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
+    const join = h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any);
+    await Promise.all([submission, join]);
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePk);
+    expect(attendee?.status).toBe("approved");
+    expect(attendee?.profile_json ?? "").toContain("solar punk logistics");
+  });
+
+  it("does not wait on a submission too old to be racing a join", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: 0, profile: { about: "replayed", skills: [], looking_for: "", links: [] }, media: [] },
+      tags: [["a", h.coordinate]],
+    });
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Late", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+
+    // Ten minutes on, these wraps are not racing each other — a replay or a
+    // backfill, and backfill dispatches joins first precisely so it need not
+    // wait. The bound is what stops a flood of unenrolled submissions from
+    // buying 2.5s of a worker each.
+    h.clock.t += 10 * 60 * 1000;
+    const submission = h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
+    const join = h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any);
+    await Promise.all([submission, join]);
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePk);
+    expect(attendee?.status).toBe("approved"); // the join still lands
+    expect(attendee?.profile_json ?? null).toBeNull(); // the stale submission did not
+  });
+
   it("enrolls a join published BEFORE the coordinator subscribed so a later submission clears the gate (H2 backfill + join-before-submission ordering)", async () => {
     const h = await setup(0, { skipAutoInstall: true });
     const inboxPk = getPublicKey(h.einboxSk);

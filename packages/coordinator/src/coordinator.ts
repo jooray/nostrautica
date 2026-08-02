@@ -186,6 +186,18 @@ const COORD_INBOX_RATE_KEY = "coordinator-inbox";
  *  Subscription callbacks are dispatched through this so a burst of gift wraps can't
  *  spawn unbounded concurrent handlers or pile unbounded closures in memory. */
 const INBOX_MAX_CONCURRENCY = 8;
+/**
+ * How old a 21601 may be and still be given time for its own 21600 to land
+ * ({@link Coordinator.awaitEnrollment}). A live delivery inversion is seconds
+ * old; anything older is not racing a join and is dropped without waiting.
+ */
+const ENROLLMENT_WAIT_MAX_AGE_SEC = 5 * 60;
+/**
+ * Concurrent enrollment waits. Half the inbound pool, so a flood of submissions
+ * from unenrolled identities can never hold every worker and starve the joins
+ * those waiters are waiting for.
+ */
+const MAX_ENROLLMENT_WAITS = Math.floor(INBOX_MAX_CONCURRENCY / 2);
 const INBOX_MAX_QUEUE = 2000;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
@@ -353,6 +365,8 @@ export interface CoordinatorDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Backoff delays between live-wrap retries (COORD-2). Default [5s, 30s]. */
   wrapRetryDelaysMs?: number[];
+  /** Re-check delays for a 21601 that arrived before its own 21600. Default [250, 750, 1500]. */
+  enrollmentWaitMs?: number[];
   /** Max simultaneously installed events (audit COORD-3). Default 50. */
   maxEvents?: number;
   /**
@@ -457,6 +471,9 @@ export class Coordinator {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly wrapRetryDelaysMs: number[];
+  private readonly enrollmentWaitMs: number[];
+  /** In-flight {@link awaitEnrollment} waits, bounded by MAX_ENROLLMENT_WAITS. */
+  private enrollmentWaits = 0;
   private readonly maxEvents: number;
   private readonly allowedEidPubkeys: Set<string>;
   /** Untrusted-relay policy (audit C4): host allowlist + dev-only insecure allowance. */
@@ -527,6 +544,7 @@ export class Coordinator {
     this.now = deps.now ?? (() => Date.now());
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.wrapRetryDelaysMs = deps.wrapRetryDelaysMs ?? [5_000, 30_000];
+    this.enrollmentWaitMs = deps.enrollmentWaitMs ?? [250, 750, 1_500];
     this.maxEvents = deps.maxEvents ?? DEFAULT_MAX_EVENTS;
     this.allowedEidPubkeys = new Set(deps.allowedEidPubkeys ?? []);
     this.relayPolicy = deps.relayPolicy ?? {};
@@ -1509,7 +1527,8 @@ export class Coordinator {
     // own join request is recovered by the next backfill rescan once the join lands.
     if (
       rumor.kind === KIND_PROFILE_SUBMISSION &&
-      !this.deps.store.getAttendee(coordinate, rumor.pubkey)
+      !this.deps.store.getAttendee(coordinate, rumor.pubkey) &&
+      !(await this.awaitEnrollment(coordinate, rumor))
     ) {
       log(`[submission] dropped from ${short(rumor.pubkey)}: no enrollment row (never joined) for ${coordinate}`);
       this.inFlightRumors.delete(rumor.id);
@@ -1559,6 +1578,53 @@ export class Coordinator {
         });
       }
     });
+  }
+
+  /**
+   * Wait, briefly, for a 21601's own 21600 to land — the delivery inversion the
+   * C3 enrollment gate cannot otherwise tell apart from a stranger's submission.
+   *
+   * 42a3ad7 moved the attendee row ahead of the entitlement round-trip, which
+   * closed the window where the join handler was blocked for hundreds of ms with
+   * no row written. What it could not close is arrival order: the app fans the
+   * two wraps out concurrently, each needing its own signer round-trips (wholly
+   * unordered under NIP-46, where every seal is a relay round-trip to Amber),
+   * and they reach us via whichever relay answers first. When the submission
+   * wins that race it is dropped, and because the live subscription never
+   * re-delivers a stored event it already sent, recovery depends on the daemon
+   * restarting inside the 3-day gift-wrap window. One attendee never got theirs
+   * back that way.
+   *
+   * The inversion is a network-ordering artifact measured in milliseconds, so a
+   * couple of seconds of re-checking resolves essentially all of it while
+   * leaving the gate's actual purpose — a stranger cannot mint an attendee row
+   * by submitting a profile — completely intact. A stranger simply waits 2.5s
+   * before being dropped exactly as before.
+   *
+   * Two bounds keep that from becoming a cost worth paying for an attacker.
+   * Only a YOUNG rumor waits: a live race is seconds old, while a replayed or
+   * backfilled wrap is not racing anything (and backfill dispatches joins first
+   * for this very reason), so those are dropped instantly. And at most
+   * MAX_ENROLLMENT_WAITS run at once, so waiters can never occupy the whole
+   * inbound worker pool and starve real work behind them.
+   */
+  private async awaitEnrollment(coordinate: string, rumor: Rumor): Promise<boolean> {
+    const ageSec = Math.floor(this.now() / 1000) - (rumor.created_at ?? 0);
+    if (ageSec > ENROLLMENT_WAIT_MAX_AGE_SEC) return false;
+    if (this.enrollmentWaits >= MAX_ENROLLMENT_WAITS) return false;
+    this.enrollmentWaits++;
+    try {
+      for (const delay of this.enrollmentWaitMs) {
+        await this.sleep(delay);
+        if (this.deps.store.getAttendee(coordinate, rumor.pubkey)) {
+          log(`[submission] from ${short(rumor.pubkey)} outran its join request — enrolled after ${delay}ms, processing`);
+          return true;
+        }
+      }
+      return false;
+    } finally {
+      this.enrollmentWaits--;
+    }
   }
 
   /**
