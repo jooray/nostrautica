@@ -4600,6 +4600,78 @@ describe("audit C3 — public inbox is population-bounded", () => {
     expect(attendee?.profile_json ?? "").toContain("meshcore and BTC L2");
   });
 
+  it("collapses a room's worth of simultaneous approvals into a few roster publishes", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    // 24 people scan the shared QR at once. Each auto-approval used to publish
+    // the whole 31604, so the room cost 24 publishes of a list growing to 24
+    // ECK-encrypted entries — to the same relays already carrying their joins.
+    // ONE shared code, as the feature intends — not 24 individually mailed ones.
+    const doorSk = generateSecretKey();
+    h.transport.seed.push({
+      kind: 31601,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "door-list",
+      tags: [["d", "cypherpunk"]],
+      content: JSON.stringify({ v: 2, invites: [{ h: inviteHash(getPublicKey(doorSk)), label: "door", uses: 0 }] }),
+      sig: "",
+    } as any);
+
+    const attendees = Array.from({ length: 24 }, () => generateSecretKey());
+    const wraps = attendees.map((sk) => {
+      const pk = getPublicKey(sk);
+      return wrapRumor(sk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "scanner", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(doorSk), makeInviteProof(doorSk, h.coordinate, pk).sig]],
+      });
+    });
+    await Promise.all(wraps.map((w) => h.coordinator.handleInboxWrap(h.coordinate, w as any)));
+
+    const rosters = h.transport.published.filter((e) => e.kind === KIND_ROSTER);
+    // 24 approvals cost 2 publishes: the one in flight, and one more carrying
+    // everybody who arrived while it was. A handful of leeway for scheduling,
+    // but nowhere near the one-per-approval this replaces.
+    expect(rosters.length).toBeLessThanOrEqual(4);
+    // The correctness requirement the coalescing must not trade away: the LAST
+    // published roster carries everyone. A snapshot is a snapshot — dropping
+    // intermediate ones is free, dropping somebody is not.
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    const listed = new Set(roster.attendees.map((a) => a.pubkey));
+    for (const sk of attendees) expect(listed.has(getPublicKey(sk))).toBe(true);
+  });
+
+  it("scales the per-event rumor budget with the crowd, so a mass join is not rate-dropped", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    // Past the flat 600 floor, but well inside the budget an enrolled population
+    // of this size earns. Seeded directly: this test is about the ceiling, not
+    // about how rows get there.
+    for (let i = 0; i < 300; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: `scanner${i}`, status: "approved", now: 1 });
+    }
+    // Burn the old flat budget on the event bucket alone.
+    for (let i = 0; i < 700; i++) {
+      h.store.bumpInboxRate(h.coordinate, "", h.clock.t, 60_000);
+    }
+
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const wrap = wrapRumor(sk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "late scanner", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+
+    // Under the flat cap this join was dropped — and left unseen, so it came
+    // back only if the daemon restarted within three days.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
   it("keeps a submission DELIVERED AHEAD of its own join (relay/signer ordering inversion)", async () => {
     const h = await setup();
     const inboxPk = getPublicKey(h.einboxSk);

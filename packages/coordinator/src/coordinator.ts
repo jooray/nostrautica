@@ -172,8 +172,17 @@ const MAX_ATTENDEES_PER_EVENT = 2000;
 const INBOX_RATE_WINDOW_MS = 60_000;
 /** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
-/** Max inbound rumors accepted for ONE event per window across all senders. */
+/**
+ * Floor on inbound rumors accepted for ONE event per window across all senders.
+ * The real ceiling scales with the event's population — see {@link eventRumorBudget}.
+ */
 const MAX_RUMORS_PER_EVENT_WINDOW = 600;
+/**
+ * Additional per-window rumor budget granted per enrolled attendee. Sized so an
+ * attendee's ordinary burst (join + submission, then an intro and an edit later)
+ * fits several times over without the event as a whole hitting its ceiling.
+ */
+const RUMORS_PER_ATTENDEE_WINDOW = 4;
 /**
  * Rate-bucket key for the coordinator's OWN inbox (audit R4): anyone can publish a
  * kind-1059 wrap to the coordinator's public pubkey, so its inbox needs the same
@@ -1425,9 +1434,34 @@ export class Coordinator {
   private inboxRateAllows(coordinate: string, senderPubkey: string): boolean {
     const now = this.now();
     const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
-    if (eventCount > MAX_RUMORS_PER_EVENT_WINDOW) return false;
+    if (eventCount > this.eventRumorBudget(coordinate)) return false;
     const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
     return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+  }
+
+  /**
+   * How many inbound rumors this event may produce in a window, floor plus a
+   * per-enrolled-attendee allowance.
+   *
+   * A flat 600 was a bound on an event of unstated size, and it is the wrong
+   * shape now that a whole room can be admitted from one QR: 300 people each
+   * sending a join and a submission is ~600 rumors in the minute the doors open,
+   * sitting exactly on the limit, and an over-budget rumor is dropped and left
+   * UNSEEN — recoverable only by a daemon restart inside the gift-wrap window.
+   * Turning away real joins to bound work is the wrong trade at precisely the
+   * moment the event most needs them.
+   *
+   * Scaling with population is self-limiting rather than merely larger. The
+   * per-SENDER cap is what actually stops abuse (one identity, 30 a minute), and
+   * enrolling costs a join request, which is itself rate-limited — so the budget
+   * can only grow as fast as genuine attendees arrive. `attendeeCount` includes
+   * pending rows, which is the point: joins create them, so the budget rises
+   * with the crowd during the burst instead of after it.
+   */
+  private eventRumorBudget(coordinate: string): number {
+    if (coordinate === COORD_INBOX_RATE_KEY) return MAX_RUMORS_PER_EVENT_WINDOW;
+    const enrolled = this.deps.store.attendeeCount(coordinate);
+    return MAX_RUMORS_PER_EVENT_WINDOW + enrolled * RUMORS_PER_ATTENDEE_WINDOW;
   }
 
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
@@ -1518,7 +1552,13 @@ export class Coordinator {
     // The in-flight claim taken by unwrapFresh is released here since we bypass
     // processRumorWithRetry (which would otherwise release it).
     if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
-      log(`[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate}`);
+      // Name the budget: "the event is over its ceiling" and "this one sender is
+      // flooding" are the same line otherwise, and they call for opposite
+      // responses from whoever is reading the log during an event.
+      log(
+        `[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate} ` +
+          `(sender cap ${MAX_RUMORS_PER_SENDER_WINDOW}, event budget ${this.eventRumorBudget(coordinate)}/${INBOX_RATE_WINDOW_MS / 1000}s)`,
+      );
       this.inFlightRumors.delete(rumor.id);
       return;
     }
@@ -2025,7 +2065,7 @@ export class Coordinator {
     const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck);
     await this.deps.transport.publish(grant, this.accountRelays(state));
     await this.publishDirectory(state, attendeePubkey);
-    await this.publishRoster(state);
+    await this.publishRosterCoalesced(state);
     log(`[grant] ECK granted to ${short(attendeePubkey)}; directory + roster published`);
     // Attendee-count change (spec §9): re-evaluate billing — this new approval may
     // push the event over its free tier. Roster/grant above always run first, so
@@ -2168,7 +2208,7 @@ export class Coordinator {
       // Rebuild matches under our authorship (the prior 31605s are undecryptable to us).
       if (state.matching === "on") this.enqueueProcess(state.coordinate, a.pubkey);
     }
-    await this.publishRoster(state);
+    await this.publishRosterCoalesced(state);
     log(`[handover] ${state.coordinate}: seeded ${seeded}, republished directory/roster/grants under this coordinator`);
   }
 
@@ -2241,6 +2281,42 @@ export class Coordinator {
       updated_at: Math.floor(this.now() / 1000),
     }, this.nextCreatedAt);
     await this.publish(entry, state.configRelays);
+  }
+
+  /**
+   * Publish the roster, collapsing a burst of approvals into as few publishes as
+   * the correctness requirement allows.
+   *
+   * The 31604 is a full snapshot of the approved set, so N approvals in the same
+   * moment do not need N publishes — the last one carries everybody. That was
+   * fine while approvals trickled in through an organizer's queue, and stopped
+   * being fine the moment a whole room could scan one QR: 300 auto-approvals
+   * meant 300 publishes of a list growing towards 300 ECK-encrypted entries, to
+   * relays already carrying the join traffic that caused them.
+   *
+   * A caller still awaits a publish that INCLUDES its own change, which is what
+   * makes this safe to drop in behind `grantAndPublish`. A caller arriving while
+   * a publish is in flight marks the roster dirty and waits on the runner; the
+   * runner loops while dirty, so a snapshot taken after that caller's write is
+   * guaranteed to be published before the promise it awaited settles.
+   */
+  private publishRosterCoalesced(state: EventState): Promise<void> {
+    const key = state.coordinate;
+    this.rosterDirty.add(key);
+    const active = this.rosterRunners.get(key);
+    if (active) return active;
+    const run = (async () => {
+      try {
+        // `delete` returns whether the flag was set — consume it, publish the
+        // snapshot that includes it, and go round again if anyone marked it
+        // dirty while that publish was in flight.
+        while (this.rosterDirty.delete(key)) await this.publishRoster(state);
+      } finally {
+        this.rosterRunners.delete(key);
+      }
+    })();
+    this.rosterRunners.set(key, run);
+    return run;
   }
 
   private async publishRoster(state: EventState): Promise<void> {
@@ -3268,7 +3344,7 @@ export class Coordinator {
         }
       }
     }
-    await this.publishRoster(state);
+    await this.publishRosterCoalesced(state);
     // 5. Republish the event matrix under the new ECK (visibility=event), excluding
     //    the removed attendee; otherwise it stays encrypted under the old ECK.
     if (state.matching === "on" && state.matchVisibility === "event") {
@@ -3724,6 +3800,11 @@ export class Coordinator {
   private chatSubs = new Map<string, { key: string; close: () => void }>();
   /** Per-event invite-hash cache (audit COORD-29); invalidated on a new 31601. */
   private inviteHashCache = new Map<string, Map<string, InvitePolicy>>();
+  /** Coordinates whose roster changed and has not been published since (see
+   *  {@link Coordinator.publishRosterCoalesced}). */
+  private rosterDirty = new Set<string>();
+  /** The in-flight roster publisher per coordinate, awaited by later callers. */
+  private rosterRunners = new Map<string, Promise<void>>();
 
   /**
    * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:
