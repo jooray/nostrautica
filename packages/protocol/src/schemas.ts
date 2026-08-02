@@ -325,6 +325,11 @@ export function hasAiProfileContent(profile: AiProfile | undefined): boolean {
 }
 
 // ── 31601 Invite List content ────────────────────────────────────────────────
+/** Upper bound on a single code's redemption cap (`uses`). */
+export const MAX_INVITE_USES = 5000;
+/** `uses: 0` means unbounded — the shared door code, capped only by `exp`. */
+export const INVITE_USES_UNLIMITED = 0;
+
 export const inviteListContentSchema = z.object({
   v: version,
   invites: z
@@ -332,11 +337,40 @@ export const inviteListContentSchema = z.object({
       z.object({
         h: hex32, // sha256(invite-pubkey) hex
         label: z.string().max(MAX_INVITE_LABEL).optional(),
+        /**
+         * How many DISTINCT attendees may redeem this code. Absent means 1 —
+         * the original single-use behaviour, and the value an older coordinator
+         * effectively assumes, since `z.object` strips a key it doesn't know.
+         * That is the whole reason this is additive rather than a new kind: an
+         * old coordinator reading a new list admits the first scanner and sends
+         * the rest to the manual queue. It under-admits; it never over-admits.
+         */
+        uses: z.number().int().min(0).max(MAX_INVITE_USES).optional(),
+        /**
+         * Unix seconds after which the code stops auto-approving (it does not
+         * disappear — later joins simply queue for the organizer). A shared code
+         * is forwardable by anyone who scanned it, so for the door-QR case this
+         * is the containment, not an optional extra.
+         */
+        exp: z.number().int().positive().optional(),
       }),
     )
     .max(MAX_INVITES),
 });
 export type InviteListContent = z.infer<typeof inviteListContentSchema>;
+export type InviteListEntry = InviteListContent["invites"][number];
+
+/** What an invite entry permits, with the defaults an omitted field implies. */
+export interface InvitePolicy {
+  /** Distinct redemptions allowed; INVITE_USES_UNLIMITED (0) for unbounded. */
+  uses: number;
+  /** Unix seconds after which the code no longer auto-approves. */
+  exp?: number;
+}
+
+export function invitePolicyOf(entry: { uses?: number; exp?: number }): InvitePolicy {
+  return { uses: entry.uses ?? 1, ...(entry.exp !== undefined ? { exp: entry.exp } : {}) };
+}
 
 // ── 21600 Join Request rumor content ─────────────────────────────────────────
 export const joinRequestContentSchema = z.object({

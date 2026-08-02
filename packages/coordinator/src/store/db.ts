@@ -37,7 +37,7 @@ const ENC_PREFIX = "nip44:";
  * boundary advances `user_version` through an ordered, transactional migration, and
  * an open refuses a database whose `user_version` exceeds this constant.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
@@ -325,10 +325,45 @@ function applyArtifactLegacyQuarantine(db: DatabaseSync): void {
  *  (applied unconditionally by {@link applyBaselineDDL}); version 2 is the audit
  *  remediation batch; version 3 unifies the membership command subject (audit R2);
  *  version 4 quarantines legacy unreferenced pipeline artifacts (audit R11). */
+/**
+ * v5: re-key `invite_usage` on (coordinate, invite_pubkey, used_by).
+ *
+ * Single-use invites only ever needed to know THAT a code was spent, so one row
+ * per code sufficed. A reusable code needs to know how many DISTINCT people have
+ * redeemed it, which the old primary key cannot represent — a second redeemer's
+ * insert simply conflicted away.
+ *
+ * SQLite cannot alter a primary key in place, so this is the copy/rename dance.
+ * Idempotent: the rebuild only runs when the old key is still in place, detected
+ * by asking the table itself rather than trusting `user_version` (a database
+ * interrupted between the DDL and its version stamp re-runs the whole thing).
+ * Existing rows carry over unchanged — every one of them is a spent single-use
+ * code, and under the new key it stays exactly that.
+ */
+function applyInviteUsagePerRedeemer(db: DatabaseSync): void {
+  const key = db.prepare("PRAGMA table_info(invite_usage)").all() as { name: string; pk: number }[];
+  // Already three-column keyed (fresh DB built from SCHEMA, or a re-run).
+  if (key.filter((c) => c.pk > 0).length === 3) return;
+  db.exec(`
+    CREATE TABLE invite_usage_v5 (
+      coordinate TEXT NOT NULL,
+      invite_pubkey TEXT NOT NULL,
+      used_by TEXT NOT NULL,
+      used_at INTEGER NOT NULL,
+      PRIMARY KEY (coordinate, invite_pubkey, used_by)
+    );
+    INSERT OR IGNORE INTO invite_usage_v5 (coordinate, invite_pubkey, used_by, used_at)
+      SELECT coordinate, invite_pubkey, used_by, used_at FROM invite_usage;
+    DROP TABLE invite_usage;
+    ALTER TABLE invite_usage_v5 RENAME TO invite_usage;
+  `);
+}
+
 const MIGRATIONS: Migration[] = [
   { version: 2, up: applyRemediationDDL },
   { version: 3, up: applyMembershipSubjectMerge },
   { version: 4, up: applyArtifactLegacyQuarantine },
+  { version: 5, up: applyInviteUsagePerRedeemer },
 ];
 
 /**
@@ -744,12 +779,15 @@ CREATE TABLE IF NOT EXISTS pairs (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, a, b)
 );
+-- One row per (code, redeemer), so a multi-use code can be counted rather than
+-- merely claimed. A pre-v5 database keys this (coordinate, invite_pubkey);
+-- applyInviteUsagePerRedeemer migrates it.
 CREATE TABLE IF NOT EXISTS invite_usage (
   coordinate TEXT NOT NULL,
   invite_pubkey TEXT NOT NULL,
   used_by TEXT NOT NULL,
   used_at INTEGER NOT NULL,
-  PRIMARY KEY (coordinate, invite_pubkey)
+  PRIMARY KEY (coordinate, invite_pubkey, used_by)
 );
 CREATE TABLE IF NOT EXISTS seen_rumors (
   rumor_id TEXT PRIMARY KEY,
@@ -2206,17 +2244,46 @@ export class Store {
    * the PRIMARY KEY serializes concurrent claimants, so two simultaneous joins
    * with the same invite can't both win the SELECT-then-INSERT race.
    */
-  claimInvite(coordinate: string, invitePubkey: string, usedBy: string, now: number): boolean {
+  /**
+   * Claim one redemption of an invite code for `usedBy`, up to `maxUses`
+   * DISTINCT redeemers (0 = unlimited). Returns whether this attendee holds a
+   * redemption afterwards.
+   *
+   * Re-claiming for the SAME attendee is idempotent and never consumes a second
+   * slot — a re-delivered join request must not be able to exhaust a shared
+   * code, and the join handler re-runs on exactly that path.
+   */
+  claimInvite(
+    coordinate: string,
+    invitePubkey: string,
+    usedBy: string,
+    now: number,
+    maxUses = 1,
+  ): boolean {
+    const held = this.db
+      .prepare("SELECT 1 FROM invite_usage WHERE coordinate = ? AND invite_pubkey = ? AND used_by = ?")
+      .get(coordinate, invitePubkey, usedBy);
+    if (held) return true; // already redeemed by this attendee
+    if (maxUses !== 0) {
+      const { n } = this.db
+        .prepare("SELECT COUNT(*) AS n FROM invite_usage WHERE coordinate = ? AND invite_pubkey = ?")
+        .get(coordinate, invitePubkey) as { n: number };
+      if (n >= maxUses) return false; // spent
+    }
     const info = this.db
       .prepare(
-        "INSERT INTO invite_usage (coordinate, invite_pubkey, used_by, used_at) VALUES (?, ?, ?, ?) ON CONFLICT(coordinate, invite_pubkey) DO NOTHING",
+        "INSERT INTO invite_usage (coordinate, invite_pubkey, used_by, used_at) VALUES (?, ?, ?, ?) ON CONFLICT(coordinate, invite_pubkey, used_by) DO NOTHING",
       )
       .run(coordinate, invitePubkey, usedBy, now);
-    if (info.changes > 0) return true; // we won the claim
-    const existing = this.db
-      .prepare("SELECT used_by FROM invite_usage WHERE coordinate = ? AND invite_pubkey = ?")
-      .get(coordinate, invitePubkey) as { used_by: string } | undefined;
-    return existing?.used_by === usedBy; // idempotent for the same attendee
+    return info.changes > 0;
+  }
+
+  /** How many distinct attendees have redeemed this code. */
+  inviteRedemptions(coordinate: string, invitePubkey: string): number {
+    const { n } = this.db
+      .prepare("SELECT COUNT(*) AS n FROM invite_usage WHERE coordinate = ? AND invite_pubkey = ?")
+      .get(coordinate, invitePubkey) as { n: number };
+    return n;
   }
 
   // ── jobs ──────────────────────────────────────────────────────────────────

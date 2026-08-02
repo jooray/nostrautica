@@ -935,6 +935,16 @@ export const messages = {
     "admin.invites.generating": "Generating…",
     "admin.invites.generate": "Generate",
     "admin.invites.copyLink": "Copy link",
+    "admin.invites.shared.title": "Shared entry code (one QR for the room)",
+    "admin.invites.shared.body":
+      "One code everyone can scan — put it on the opening slide and people join without waiting for approval. The link is the secret: knowing the event is not enough to get in.",
+    "admin.invites.shared.uses": "People",
+    "admin.invites.shared.hours": "Valid for (hours)",
+    "admin.invites.shared.generate": "Create shared code",
+    "admin.invites.shared.usesHint":
+      "0 means no limit. Anyone who scans it can forward the link, so keep the window short — after it expires, latecomers land in the approval queue instead of being turned away.",
+    "admin.invites.shared.ephemeral":
+      "This code is only in this tab — it is never saved. Show or copy it before you close the page.",
     "admin.invites.copyAll": "Copy all links (one per line)",
     "admin.invites.copiedAll": "Copied all ✓",
     "admin.invites.download": "Download as .txt",
@@ -2367,6 +2377,16 @@ export const messages = {
     "admin.invites.generating": "Generuje sa…",
     "admin.invites.generate": "Vygenerovať",
     "admin.invites.copyLink": "Kopírovať odkaz",
+    "admin.invites.shared.title": "Zdieľaný vstupný kód (jeden QR pre celú sálu)",
+    "admin.invites.shared.body":
+      "Jeden kód, ktorý naskenujú všetci — daj ho na úvodnú snímku a ľudia sa pripoja bez čakania na schválenie. Tajomstvom je odkaz: vedieť o podujatí nestačí.",
+    "admin.invites.shared.uses": "Počet ľudí",
+    "admin.invites.shared.hours": "Platnosť (hodiny)",
+    "admin.invites.shared.generate": "Vytvoriť zdieľaný kód",
+    "admin.invites.shared.usesHint":
+      "0 znamená bez limitu. Kto ho naskenuje, môže odkaz poslať ďalej, preto nechaj okno krátke — po vypršaní sa oneskorenci dostanú do frontu na schválenie, nie sú odmietnutí.",
+    "admin.invites.shared.ephemeral":
+      "Tento kód existuje len v tomto okne — nikde sa neukladá. Ukáž alebo skopíruj ho skôr, než stránku zavrieš.",
     "admin.invites.copyAll": "Kopírovať všetky odkazy (po riadkoch)",
     "admin.invites.copiedAll": "Všetky skopírované ✓",
     "admin.invites.download": "Stiahnuť ako .txt",
@@ -3794,6 +3814,16 @@ export const messages = {
     "admin.invites.generating": "Generování…",
     "admin.invites.generate": "Vygenerovat",
     "admin.invites.copyLink": "Kopírovat odkaz",
+    "admin.invites.shared.title": "Sdílený vstupní kód (jeden QR pro celý sál)",
+    "admin.invites.shared.body":
+      "Jeden kód, který naskenují všichni — dej ho na úvodní snímek a lidé se připojí bez čekání na schválení. Tajemstvím je odkaz: vědět o akci nestačí.",
+    "admin.invites.shared.uses": "Počet lidí",
+    "admin.invites.shared.hours": "Platnost (hodiny)",
+    "admin.invites.shared.generate": "Vytvořit sdílený kód",
+    "admin.invites.shared.usesHint":
+      "0 znamená bez limitu. Kdo ho naskenuje, může odkaz poslat dál, proto nech okno krátké — po vypršení se opozdilci dostanou do fronty na schválení, nejsou odmítnuti.",
+    "admin.invites.shared.ephemeral":
+      "Tento kód existuje jen v tomto okně — nikde se neukládá. Ukaž nebo zkopíruj ho dřív, než stránku zavřeš.",
     "admin.invites.copyAll": "Kopírovat všechny odkazy (po řádcích)",
     "admin.invites.copiedAll": "Vše zkopírováno ✓",
     "admin.invites.download": "Stáhnout jako .txt",

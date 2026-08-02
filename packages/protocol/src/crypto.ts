@@ -288,7 +288,9 @@ export function verifyInviteProof(
  */
 export function isInviteValid(
   proof: InviteProof,
-  publishedHashes: ReadonlySet<string>,
+  // A membership test, not a Set: the caller may hold the published entries as a
+  // Map keyed by hash when it also needs each code's uses/expiry policy.
+  publishedHashes: { has(hash: string): boolean },
   coordinate: string,
   attendeePubkey: string,
 ): boolean {

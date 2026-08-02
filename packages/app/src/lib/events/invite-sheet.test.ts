@@ -89,6 +89,17 @@ describe("redeemedInvitePubkeys", () => {
     );
   });
 
+  it("keeps a SHARED code on the sheet after it has been redeemed", () => {
+    // A door code is used by design; the used-set saying so is its steady state,
+    // not a signal to stop showing the QR everyone is still scanning.
+    const shared = makeInvite("door-1");
+    shared.invite.uses = 100;
+    const single = makeInvite("invite-1");
+    const all = [shared.invite, single.invite];
+    const used = usedSet(shared.pubkey, single.pubkey);
+    expect(invitesForSheet(all, redeemedInvitePubkeys(all, used))).toEqual([shared.invite]);
+  });
+
   it("end to end: a scanned code drops off the sheet, the rest stay", () => {
     const a = makeInvite("invite-1");
     const b = makeInvite("invite-2");

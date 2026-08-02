@@ -44,6 +44,8 @@ import {
   sha256Hex,
   utf8ToBytes,
   inviteListContentSchema,
+  invitePolicyOf,
+  type InvitePolicy,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
   coordinatorGrantContentSchema,
@@ -1875,12 +1877,12 @@ export class Coordinator {
       now: this.now(),
     });
 
-    const publishedInviteHashes = await this.fetchInviteHashes(state);
+    const publishedInvites = await this.fetchInviteHashes(state);
     let decision = evaluateEntitlement([this.inviteChecker], {
       coordinate: state.coordinate,
       attendeePubkey,
       invite,
-      publishedInviteHashes,
+      publishedInvites,
     }, this.now());
 
     // A code that fails validation against the CACHED hash set is not
@@ -1894,12 +1896,12 @@ export class Coordinator {
     // "no invite proof" or "already used", where a re-fetch changes nothing),
     // closes both without paying a relay round-trip on every join.
     if (!decision.grant && decision.reason === "invalid invite proof") {
-      const freshHashes = await this.fetchInviteHashes(state, { force: true });
+      const freshInvites = await this.fetchInviteHashes(state, { force: true });
       decision = evaluateEntitlement([this.inviteChecker], {
         coordinate: state.coordinate,
         attendeePubkey,
         invite,
-        publishedInviteHashes: freshHashes,
+        publishedInvites: freshInvites,
       }, this.now());
       if (decision.grant) {
         log(`[join] ${short(attendeePubkey)} invite hash missing from cache — bypass re-fetch found it`);
@@ -3513,7 +3515,10 @@ export class Coordinator {
    * (handleJoin's single bypass retry) — without paying a relay fetch on the
    * common case of every other join.
    */
-  private async fetchInviteHashes(state: EventState, opts: { force?: boolean } = {}): Promise<Set<string>> {
+  private async fetchInviteHashes(
+    state: EventState,
+    opts: { force?: boolean } = {},
+  ): Promise<Map<string, InvitePolicy>> {
     const cached = this.inviteHashCache.get(state.coordinate);
     if (cached && !opts.force) return cached;
     const events = await this.deps.transport.fetch(
@@ -3521,17 +3526,17 @@ export class Coordinator {
       state.configRelays,
     );
     const latest = pickLatest(events);
-    let hashes = new Set<string>();
+    let invites = new Map<string, InvitePolicy>();
     if (latest) {
       try {
         const parsed = inviteListContentSchema.parse(JSON.parse(latest.content));
-        hashes = new Set(parsed.invites.map((i) => i.h));
+        invites = new Map(parsed.invites.map((i) => [i.h, invitePolicyOf(i)]));
       } catch {
-        hashes = new Set();
+        invites = new Map();
       }
     }
-    this.inviteHashCache.set(state.coordinate, hashes);
-    return hashes;
+    this.inviteHashCache.set(state.coordinate, invites);
+    return invites;
   }
 
   /**
@@ -3718,7 +3723,7 @@ export class Coordinator {
   private configSubs = new Map<string, { key: string; close: () => void }>();
   private chatSubs = new Map<string, { key: string; close: () => void }>();
   /** Per-event invite-hash cache (audit COORD-29); invalidated on a new 31601. */
-  private inviteHashCache = new Map<string, Set<string>>();
+  private inviteHashCache = new Map<string, Map<string, InvitePolicy>>();
 
   /**
    * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:
