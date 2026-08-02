@@ -21,7 +21,10 @@ import {
   type AttendeeProfile,
   pickLatest,
   MAX_SUBMISSION_MEDIA,
+  MAX_INTRO_TEXT,
+  profileSubmissionContentSchema,
 } from "@nostrautica/protocol";
+import { normalizeAuthoredProfile } from "$lib/events/authored-profile.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
@@ -31,6 +34,7 @@ import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { t } from "$lib/i18n/i18n.svelte.js";
 
 // The self-copy (31602) and reuse library are decrypted private data, cached
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
@@ -118,6 +122,23 @@ export type ReuseLibrary = { media: MediaDescriptor[]; texts: string[] };
  */
 export function emptyProfile(): AttendeeProfile {
   return { about: "", skills: [], looking_for: "", links: [] };
+}
+
+/**
+ * Refuse to sign a 21601 the coordinator would throw away.
+ *
+ * `profileSubmissionContentSchema` is the coordinator's own intake schema, and a
+ * payload that fails it is not retried, queued or reported: the handler
+ * classifies a ZodError as permanently unprocessable, writes the rumor to the
+ * seen ledger and moves on. The attendee is told "Saved". Failing here instead
+ * costs an error message and keeps the submission.
+ */
+function assertSubmittable(submission: unknown): void {
+  const parsed = profileSubmissionContentSchema.safeParse(submission);
+  if (parsed.success) return;
+  const issue = parsed.error.issues[0];
+  const field = issue?.path.join(".") || "profile";
+  throw new Error(t("submit.error.invalid", { field, reason: issue?.message ?? "invalid" }));
 }
 
 /** Cached self-copy for a coordinate (no network), or undefined. */
@@ -274,7 +295,12 @@ export async function submitProfileAndMedia(
   },
 ): Promise<SubmitOutcome> {
   const attendeePubkey = await signer.getPublicKey();
-  const introText = args.introText?.trim() || undefined;
+  const introText = args.introText?.trim().slice(0, MAX_INTRO_TEXT) || undefined;
+  // Repair the authored fields into something the coordinator's schema accepts
+  // BEFORE anything is signed. A submission it rejects is not retried or queued
+  // — it is marked seen and discarded permanently — so the only safe place to
+  // fail is here, in front of a user who can still do something about it.
+  const { profile } = normalizeAuthoredProfile(args.profile);
 
   // Monotonic per-(coordinate) revision (NIP §3.3). The self-copy reports what the
   // last submission carried, but the counter itself is persisted locally so a
@@ -291,10 +317,15 @@ export async function submitProfileAndMedia(
   const submission = {
     v: 2,
     rev,
-    profile: args.profile,
+    profile,
     media: submissionMedia,
     ...(introText ? { intro_text: introText } : {}),
   };
+  // Parse against the coordinator's OWN schema — the backstop for whatever
+  // normalization could not foresee (an over-long media descriptor, a future
+  // field). Throwing surfaces it in the UI; publishing it would look identical
+  // to success and be gone by the time anyone noticed.
+  assertSubmittable(submission);
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_PROFILE_SUBMISSION,
     content: submission,
@@ -308,7 +339,7 @@ export async function submitProfileAndMedia(
     v: 2,
     a: ctx.coordinate,
     rev,
-    profile: args.profile,
+    profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
   };
@@ -327,7 +358,7 @@ export async function submitProfileAndMedia(
     // persisted it. Write through before navigation can re-read stale intro state.
     cacheSelfCopy(
       ctx.coordinate,
-      { profile: args.profile, media: args.media, introText, rev } satisfies SelfCopy,
+      { profile, media: args.media, introText, rev } satisfies SelfCopy,
       selfEvent.created_at,
     );
     return published;

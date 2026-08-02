@@ -32,6 +32,10 @@ export const messages = {
 
     // Background sync (audit UX-15)
     "sync.queued": "Saved — will send when you're back online.",
+    "submit.error.invalid":
+      "Your profile couldn't be sent: {field} is {reason}. Fix it and save again — nothing was lost.",
+    "profile.authored.links.dropped":
+      "Couldn't read these as links, so they weren't saved: {links}",
     "draft.restored": "Restored an unsent draft.",
     "draft.discard": "Discard draft",
     "outbox.pending.one": "{n} change waiting to send",
@@ -1455,6 +1459,10 @@ export const messages = {
 
     // Synchronizácia na pozadí (audit UX-15)
     "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
+    "submit.error.invalid":
+      "Tvoj profil sa nepodarilo odoslať: {field} — {reason}. Oprav to a ulož znova, nič sa nestratilo.",
+    "profile.authored.links.dropped":
+      "Tieto sa nepodarilo prečítať ako odkazy, takže sa neuložili: {links}",
     "draft.restored": "Obnovený neodoslaný koncept.",
     "draft.discard": "Zahodiť koncept",
     "outbox.pending.one": "{n} zmena čaká na odoslanie",
@@ -2880,6 +2888,10 @@ export const messages = {
 
     // Synchronizace na pozadí (audit UX-15)
     "sync.queued": "Uloženo — odešle se po obnovení připojení.",
+    "submit.error.invalid":
+      "Tvůj profil se nepodařilo odeslat: {field} — {reason}. Oprav to a ulož znovu, nic se neztratilo.",
+    "profile.authored.links.dropped":
+      "Tyto se nepodařilo přečíst jako odkazy, takže se neuložily: {links}",
     "draft.restored": "Obnoven neodeslaný koncept.",
     "draft.discard": "Zahodit koncept",
     "outbox.pending.one": "{n} změna čeká na odeslání",
