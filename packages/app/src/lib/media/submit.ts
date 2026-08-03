@@ -21,15 +21,20 @@ import {
   type AttendeeProfile,
   pickLatest,
   MAX_SUBMISSION_MEDIA,
+  MAX_INTRO_TEXT,
+  profileSubmissionContentSchema,
 } from "@nostrautica/protocol";
+import { normalizeAuthoredProfile } from "$lib/events/authored-profile.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { cachedDirectoryEntry, fetchDirectoryEntry } from "$lib/events/attendee.js";
+import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { t } from "$lib/i18n/i18n.svelte.js";
 
 // The self-copy (31602) and reuse library are decrypted private data, cached
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
@@ -64,16 +69,94 @@ export function hasIntro(
 function selfCopyKey(coordinate: string): string {
   return `selfcopy:${coordinate}`;
 }
+/** Persisted high-water mark of the `rev` this device has ever SENT (NIP §3.3). */
+function selfRevKey(coordinate: string): string {
+  return `selfrev:${coordinate}`;
+}
 const MEDIALIB_KEY = "medialib";
 const TEXTLIB_KEY = "textlib";
+
+/**
+ * The next submission `rev` for this event — strictly greater than both the
+ * highest we have ever sent from this device and whatever the loaded self-copy
+ * reports (another device may be further ahead).
+ *
+ * The high-water mark is PERSISTED rather than re-derived from the network on
+ * every submit, because re-deriving it made a failed relay read silently
+ * destructive. `loadSelfCopy` resolves to undefined whenever a read comes back
+ * empty — a routine outcome on venue Wi-Fi, since `fetchEvents` settles with
+ * whatever arrived after an 8s cap and never rejects — and `(undefined ?? -1) + 1`
+ * is 0. Sending rev 0 again after the counter had reached N loses the §3.3
+ * comparison against the stored key, so the coordinator discards the submission
+ * as stale ("ignored stale profile") and the attendee is told it saved. Same
+ * shape as `nextReplaceableTimestamp` above, which already keeps the OTHER half
+ * of the ordering key (created_at) monotonic across a session for this reason.
+ */
+function nextRev(coordinate: string, observed: number | undefined): number {
+  const next = revFloor(coordinate, observed) + 1;
+  cacheSet(selfRevKey(coordinate), next, next);
+  return next;
+}
+
+/** The highest rev known to have been sent for this event, or -1. */
+function revFloor(coordinate: string, observed: number | undefined): number {
+  const stored = cacheGet<number>(selfRevKey(coordinate))?.data;
+  return Math.max(typeof stored === "number" ? stored : -1, observed ?? -1);
+}
+
+/** Raise the high-water mark to `rev` without consuming one (a rev already sent). */
+function nextRevFloor(coordinate: string, rev: number): void {
+  const floor = revFloor(coordinate, rev);
+  cacheSet(selfRevKey(coordinate), floor, floor);
+}
 
 /** The cross-event reuse library: recorded intros (`media`) + authored text intros
  *  (`texts`). Both live in the SINGLE per-user `a:null` 31602 entry (§6.2). */
 export type ReuseLibrary = { media: MediaDescriptor[]; texts: string[] };
 
+/**
+ * The authored profile of someone who has genuinely never written one. A
+ * function, not a shared const: it is handed to submitters that JSON-encode it
+ * alongside caller-owned data, and one accidental mutation of a shared literal
+ * would travel to every later submission.
+ */
+export function emptyProfile(): AttendeeProfile {
+  return { about: "", skills: [], looking_for: "", links: [] };
+}
+
+/**
+ * Refuse to sign a 21601 the coordinator would throw away.
+ *
+ * `profileSubmissionContentSchema` is the coordinator's own intake schema, and a
+ * payload that fails it is not retried, queued or reported: the handler
+ * classifies a ZodError as permanently unprocessable, writes the rumor to the
+ * seen ledger and moves on. The attendee is told "Saved". Failing here instead
+ * costs an error message and keeps the submission.
+ */
+function assertSubmittable(submission: unknown): void {
+  const parsed = profileSubmissionContentSchema.safeParse(submission);
+  if (parsed.success) return;
+  const issue = parsed.error.issues[0];
+  const field = issue?.path.join(".") || "profile";
+  throw new Error(t("submit.error.invalid", { field, reason: issue?.message ?? "invalid" }));
+}
+
 /** Cached self-copy for a coordinate (no network), or undefined. */
 export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
   return cacheGet<SelfCopy>(selfCopyKey(coordinate))?.data;
+}
+
+/**
+ * Write through the self-copy a caller just published, and carry its `rev` into
+ * the persisted high-water mark. Exported for the join flow, which publishes the
+ * FIRST 31602 of an event: without this the joining device held no local copy
+ * until its next submission, so the very first "record your intro" — the one
+ * most likely to happen minutes later on the same bad venue Wi-Fi — had nothing
+ * to fall back on when the relay read came back empty.
+ */
+export function cacheSelfCopy(coordinate: string, self: SelfCopy, at: number): void {
+  cacheSet(selfCopyKey(coordinate), self, at);
+  if (typeof self.rev === "number") nextRevFloor(coordinate, self.rev);
 }
 /** Cached reuse-library media (no network), or undefined. */
 export function cachedLibrary(): MediaDescriptor[] | undefined {
@@ -212,14 +295,18 @@ export async function submitProfileAndMedia(
   },
 ): Promise<SubmitOutcome> {
   const attendeePubkey = await signer.getPublicKey();
-  const introText = args.introText?.trim() || undefined;
+  const introText = args.introText?.trim().slice(0, MAX_INTRO_TEXT) || undefined;
+  // Repair the authored fields into something the coordinator's schema accepts
+  // BEFORE anything is signed. A submission it rejects is not retried or queued
+  // — it is marked seen and discarded permanently — so the only safe place to
+  // fail is here, in front of a user who can still do something about it.
+  const { profile } = normalizeAuthoredProfile(args.profile);
 
-  // Monotonic per-(coordinate) revision (NIP §3.3): the last-sent rev lives on the
-  // per-event self-copy (the client's own durable per-event submission store), so we
-  // read it back and bump on every edit. A first submission is rev 0; nothing else
-  // in the app depends on the exact value — only that it strictly increases per edit.
+  // Monotonic per-(coordinate) revision (NIP §3.3). The self-copy reports what the
+  // last submission carried, but the counter itself is persisted locally so a
+  // failed read can only ever fail to ADVANCE it, never roll it back — see nextRev.
   const prevSelf = await loadSelfCopy(signer, ctx, args.blindingKey).catch(() => undefined);
-  const rev = (prevSelf?.rev ?? -1) + 1;
+  const rev = nextRev(ctx.coordinate, prevSelf?.rev);
 
   // v2 (NIP §8): the 21601 submission carries at most MAX_SUBMISSION_MEDIA (4)
   // descriptors, or the coordinator rejects it wholesale at the schema boundary.
@@ -230,10 +317,15 @@ export async function submitProfileAndMedia(
   const submission = {
     v: 2,
     rev,
-    profile: args.profile,
+    profile,
     media: submissionMedia,
     ...(introText ? { intro_text: introText } : {}),
   };
+  // Parse against the coordinator's OWN schema — the backstop for whatever
+  // normalization could not foresee (an over-long media descriptor, a future
+  // field). Throwing surfaces it in the UI; publishing it would look identical
+  // to success and be gone by the time anyone noticed.
+  assertSubmittable(submission);
   const wrap = await signerWrap(signer, ctx.config.inbox, {
     kind: KIND_PROFILE_SUBMISSION,
     content: submission,
@@ -247,7 +339,7 @@ export async function submitProfileAndMedia(
     v: 2,
     a: ctx.coordinate,
     rev,
-    profile: args.profile,
+    profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
   };
@@ -264,9 +356,9 @@ export async function submitProfileAndMedia(
   const publishSelfCopy = publishOrQueue(selfEvent).then((published) => {
     // Both outcomes are durable: either a relay accepted the event or the outbox
     // persisted it. Write through before navigation can re-read stale intro state.
-    cacheSet(
-      selfKey,
-      { profile: args.profile, media: args.media, introText, rev } satisfies SelfCopy,
+    cacheSelfCopy(
+      ctx.coordinate,
+      { profile, media: args.media, introText, rev } satisfies SelfCopy,
       selfEvent.created_at,
     );
     return published;
@@ -380,7 +472,21 @@ export async function prepareReuse(
   return mediaDescriptorSchema.parse({ ...descriptor, url: unionRelays(descriptor.url, extraUrls) });
 }
 
-/** Load the attendee's own 31602 self-copy for this event (profile + media). */
+/**
+ * Load the attendee's own 31602 self-copy for this event (profile + media).
+ *
+ * RELAY-ONLY fetch on purpose: this is a must-not-miss read, and with the dexie
+ * cache adapter in the loop `fetchEvents` can resolve on EOSE before surfacing a
+ * relay event that had already arrived (see fetchEventsRelayOnly's own note).
+ * Missing the self-copy here is not a benign miss — callers build the next
+ * submission out of it.
+ *
+ * Falls back to the persisted copy when the relays produce nothing. The device
+ * that is submitting is almost always the device that wrote the self-copy in the
+ * first place, so the answer is usually sitting in the local cache while the
+ * network read times out — and returning `undefined` in that state is what let a
+ * transient read failure be mistaken for "this attendee has no profile".
+ */
 export async function loadSelfCopy(
   signer: AppSigner,
   ctx: EventContext,
@@ -388,32 +494,75 @@ export async function loadSelfCopy(
 ): Promise<SelfCopy | undefined> {
   const pubkey = await signer.getPublicKey();
   const d = blindedD(blindingKey, ctx.coordinate, pubkey);
-  const events = await fetchEvents({
+  const events = await fetchEventsRelayOnly({
     kinds: [KIND_MY_PROFILE],
     authors: [pubkey],
     "#d": [d],
   });
   const latest = pickLatest(events);
-  if (!latest) return undefined;
-  try {
-    const json = await signer.nip44Decrypt(pubkey, latest.content);
-    const parsed = JSON.parse(json) as {
-      profile?: AttendeeProfile;
-      media?: MediaDescriptor[];
-      intro_text?: string;
-      rev?: number;
-    };
-    const self: SelfCopy = {
-      profile: parsed.profile,
-      media: parsed.media ?? [],
-      introText: parsed.intro_text,
-      rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
-    };
-    cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
-    return self;
-  } catch {
-    return undefined;
+  if (latest) {
+    try {
+      const json = await signer.nip44Decrypt(pubkey, latest.content);
+      const parsed = JSON.parse(json) as {
+        profile?: AttendeeProfile;
+        media?: MediaDescriptor[];
+        intro_text?: string;
+        rev?: number;
+      };
+      const self: SelfCopy = {
+        profile: parsed.profile,
+        media: parsed.media ?? [],
+        introText: parsed.intro_text,
+        rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
+      };
+      cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
+      return self;
+    } catch {
+      /* undecryptable / malformed — fall through to the persisted copy */
+    }
   }
+  return cachedSelfCopy(ctx.coordinate);
+}
+
+/**
+ * The attendee's current authored state, for building a submission that must
+ * PRESERVE what it isn't editing (a recorded intro carries the profile forward
+ * unchanged; a text intro likewise).
+ *
+ * The 21601 replaces the authored profile wholesale — that is what lets an
+ * attendee clear a field — so a caller that cannot load the current state has no
+ * safe way to express "leave it alone", and substituting a blank profile
+ * silently deletes their about/skills/looking_for at the coordinator, taking
+ * them out of matching with it (an empty profile is correctly refused by the
+ * scorer). So this widens the search rather than degrading to blank:
+ *
+ *   31602 self-copy (relays) → persisted self-copy → published 31603 entry
+ *
+ * The directory entry is the coordinator's own copy of the authored fields, so
+ * it is a faithful last resort and covers the genuinely new device with a cold
+ * cache. `undefined` now means all three said nothing, which for a joined
+ * attendee is close to unreachable and for a brand-new one is the truth.
+ */
+export async function loadAuthoredState(
+  signer: AppSigner,
+  ctx: EventContext,
+  blindingKey: Uint8Array,
+): Promise<SelfCopy | undefined> {
+  const self = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
+  if (self) return self;
+  const pubkey = await signer.getPublicKey();
+  const entry =
+    cachedDirectoryEntry(ctx.coordinate, pubkey) ??
+    (await fetchDirectoryEntry(ctx, pubkey).catch(() => undefined));
+  if (!entry) return undefined;
+  return {
+    profile: entry.profile,
+    media: entry.media ?? [],
+    introText: entry.intro_text,
+    // The 31603 carries no `rev` — it is the coordinator's projection, not the
+    // submission. nextRev's persisted high-water mark supplies the ordering.
+    rev: undefined,
+  };
 }
 
 /**

@@ -70,6 +70,7 @@
   import { fetchPendingTalks, cachedPendingTalks, type PendingTalk } from "$lib/events/talks.js";
   import { perfMark } from "$lib/perf.js";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
+  import { INVITE_USES_UNLIMITED } from "@nostrautica/protocol";
   import QrCode from "$lib/components/QrCode.svelte";
   import SecretSurface from "$lib/components/SecretSurface.svelte";
   import InviteSheet from "$lib/components/InviteSheet.svelte";
@@ -661,6 +662,36 @@
   let generating = $state(false);
   let showInviteSheet = $state(false);
 
+  // Shared entry code (§6.5 reusable invite): ONE code the whole room may
+  // redeem, for the "QR on the opening slide" case. The link is still the secret
+  // — the 31601 publishes only its hash — so the event's naddr alone gets nobody
+  // in. The hours field is what keeps a forwarded link from being a standing
+  // door key, which is the price of the code being shared at all.
+  let sharedUses = $state(100);
+  let sharedHours = $state(4);
+  let sharedInvite = $state<GeneratedInvite | null>(null);
+  let generatingShared = $state(false);
+
+  async function makeSharedInvite() {
+    if (!ctx || !session.signer) return;
+    generatingShared = true;
+    error = null;
+    try {
+      const base = window.location.origin + window.location.pathname;
+      const [code] = await generateInvites(session.signer, ctx, 1, base, "door", {
+        uses: sharedUses > 0 ? sharedUses : INVITE_USES_UNLIMITED,
+        // Unix SECONDS on the wire, like every other timestamp.
+        exp: Math.floor(Date.now() / 1000) + Math.max(1, sharedHours) * 3600,
+      });
+      sharedInvite = code ?? null;
+      void refreshInviteReport();
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      generatingShared = false;
+    }
+  }
+
   async function makeInvites() {
     if (!ctx || !session.signer) return;
     generating = true;
@@ -1157,6 +1188,7 @@
 
   <AdminQueue
     requests={pendingRequests}
+    relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
     {matchedPubkeys}
     {deferredSet}
@@ -1175,6 +1207,7 @@
 
   <AdminPeople
     people={approvedPeople}
+    relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
     {matchedPubkeys}
     onRevoke={revoke}
@@ -1210,6 +1243,42 @@
         {generating ? t("admin.invites.generating") : t("admin.invites.generate")}
       </button>
     </div>
+
+    <!-- Shared entry code: one QR for a whole room, instead of one code per
+         person. Deliberately separate from the batch above — that one is for
+         mailing individual codes to named buyers, this one is for a projector. -->
+    <details style="margin-top:0.75rem">
+      <summary class="field-label" style="cursor:pointer">{t("admin.invites.shared.title")}</summary>
+      <p class="muted" style="margin:0.5rem 0;font-size:0.85rem">{t("admin.invites.shared.body")}</p>
+      <div class="row" style="flex-wrap:wrap;align-items:flex-end;gap:0.75rem">
+        <label style="display:flex;flex-direction:column;gap:0.3rem">
+          <span class="muted" style="font-size:0.85rem">{t("admin.invites.shared.uses")}</span>
+          <input type="number" min="0" max="5000" bind:value={sharedUses} style="max-width:6rem" />
+        </label>
+        <label style="display:flex;flex-direction:column;gap:0.3rem">
+          <span class="muted" style="font-size:0.85rem">{t("admin.invites.shared.hours")}</span>
+          <input type="number" min="1" max="168" bind:value={sharedHours} style="max-width:6rem" />
+        </label>
+        <button class="btn inline" onclick={makeSharedInvite} disabled={generatingShared}>
+          {generatingShared ? t("admin.invites.generating") : t("admin.invites.shared.generate")}
+        </button>
+      </div>
+      <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">{t("admin.invites.shared.usesHint")}</p>
+      {#if sharedInvite}
+        <div class="card" style="margin-top:0.75rem;text-align:center">
+          <QrCode data={sharedInvite.link} size={512} />
+          <p class="muted" style="margin:0.5rem 0 0;font-size:0.8rem;word-break:break-all">{sharedInvite.link}</p>
+          <div class="row" style="justify-content:center;margin-top:0.5rem">
+            <button class="btn inline" onclick={() => copyLink(sharedInvite!.link)}>
+              {t("admin.invites.copyLink")}
+            </button>
+          </div>
+          <!-- The code exists only in this tab (§13.3 — codes are never
+               persisted), so say so before the organizer closes it. -->
+          <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">{t("admin.invites.shared.ephemeral")}</p>
+        </div>
+      {/if}
+    </details>
 
     <!-- "14 of 40 codes used" — the number an organizer who mailed codes to
          off-platform ticket buyers re-checks constantly. Shown whenever any

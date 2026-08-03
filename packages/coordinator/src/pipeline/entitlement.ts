@@ -8,14 +8,19 @@
  * consistent: duplicates fall back to the manual queue, never auto-reject
  * (IMPLEMENTATION_PLAN §3.12).
  */
-import { isInviteValid, type InviteProof } from "@nostrautica/protocol";
+import { inviteHash, isInviteValid, type InvitePolicy, type InviteProof } from "@nostrautica/protocol";
 import type { Store } from "../store/db.js";
 
 export interface EntitlementRequest {
   coordinate: string;
   attendeePubkey: string;
   invite?: InviteProof;
-  publishedInviteHashes: Set<string>;
+  /**
+   * The published 31601 entries, keyed by `h` — a Map rather than a Set because
+   * each code now carries its own redemption cap and expiry. Membership is still
+   * the validity test; the value decides how many may redeem and until when.
+   */
+  publishedInvites: ReadonlyMap<string, InvitePolicy>;
 }
 
 export type EntitlementDecision =
@@ -36,17 +41,26 @@ export class InviteChecker implements EntitlementChecker {
     if (!req.invite) return { grant: false, reason: "no invite proof" };
     const valid = isInviteValid(
       req.invite,
-      req.publishedInviteHashes,
+      req.publishedInvites,
       req.coordinate,
       req.attendeePubkey,
     );
     if (!valid) return { grant: false, reason: "invalid invite proof" };
-    // First-come single-use: claim the invite pubkey for this attendee.
+    // A code published without `uses` is single-use, which is both the original
+    // behaviour and what an older publisher meant by saying nothing.
+    const policy = req.publishedInvites.get(inviteHash(req.invite.invitePubkey)) ?? { uses: 1 };
+    // An expired code is not revoked — the organizer may still want these people,
+    // they just no longer walk in unattended. Same landing place as no code at all.
+    if (policy.exp !== undefined && Math.floor(now / 1000) > policy.exp) {
+      return { grant: false, reason: "invite expired → manual queue" };
+    }
+    // First-come, up to the code's cap; idempotent for a re-delivered join.
     const claimed = this.store.claimInvite(
       req.coordinate,
       req.invite.invitePubkey,
       req.attendeePubkey,
       now,
+      policy.uses,
     );
     if (!claimed) return { grant: false, reason: "invite already used → manual queue" };
     return { grant: true, reason: "valid unused invite" };

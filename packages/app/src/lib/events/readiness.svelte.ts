@@ -25,6 +25,7 @@
  */
 import {
   deriveReadiness,
+  hasAnythingToMatchOn,
   type Readiness,
   type ReadinessInput,
   type ReadinessStepId,
@@ -50,7 +51,7 @@ type Role = ReadinessInput["role"];
 /** The inputs the store gathers; everything else in ReadinessInput is from ctx. */
 type Gathered = Pick<
   ReadinessInput,
-  "role" | "backupAcked" | "hasIntro" | "processed" | "matchesAvailable"
+  "role" | "backupAcked" | "hasIntro" | "profileEmpty" | "processed" | "matchesAvailable"
 >;
 
 // Persist the last derived readiness + the monotonic latch per coordinate
@@ -276,8 +277,13 @@ class ReadinessStore {
               : parts.hasIntro
                 ? false
                 : undefined;
+            // Their published entry is the authoritative "what the coordinator
+            // holds for you". Positive evidence only: no entry read means we do
+            // not know, which must never render as an accusation of emptiness.
+            parts.profileEmpty = entry ? !hasAnythingToMatchOn(entry) : undefined;
           } catch {
             parts.processed = undefined;
+            parts.profileEmpty = undefined;
           }
           if (ctx.config.matching === "on") {
             try {

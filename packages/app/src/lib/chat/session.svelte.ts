@@ -54,6 +54,8 @@ class ChatSessionStore {
    * event. The UI shows a read-only "chat is active in another tab" notice.
    */
   readOnly = $state(false);
+  /** A re-enrolment ({@link rejoin}) is in flight — the UI disables its button. */
+  rejoining = $state(false);
   /** The multi-tab coordinator (leader election + follower proxy). */
   private coordinator?: ChatTabCoordinator;
 
@@ -127,6 +129,12 @@ class ChatSessionStore {
           // Leader executes a follower's proxied send on the real client.
           if (!this.chat) throw new Error("no chat session");
           await this.chat.send(text);
+        },
+        onRejoinRequest: async (force) => {
+          // Leader performs a follower's rejoin: MLS state has a single writer, so
+          // the tab that owns the client is the only one that may re-enrol.
+          if (!this.chat) throw new Error("no chat session");
+          await this.rejoin({ force });
         },
         onSyncRequest: () => {
           if (tok === this.token) coordinator.broadcastState(ctx.coordinate, this.messages);
@@ -235,7 +243,17 @@ class ChatSessionStore {
   async send(text: string): Promise<void> {
     // Leader owns the client and sends directly.
     if (this.chat) {
-      await this.chat.send(text);
+      try {
+        await this.chat.send(text);
+      } catch (err) {
+        // A send can only fail because this session no longer holds a routable
+        // group for the event (removed, evicted, or a binding the roster
+        // contradicts). `phase` had latched `ready` and never moved back, leaving
+        // an enabled composer over a session that cannot send — demote it so the
+        // room reads as "setting up" again and the rejoin affordance applies.
+        await this.demoteIfUnroutable();
+        throw err;
+      }
       return;
     }
     // Interactive follower proxies the send to the leader tab (Web Locks path only).
@@ -245,6 +263,43 @@ class ChatSessionStore {
       return;
     }
     throw new Error("no chat session");
+  }
+
+  /** Leader: drop back to `setup` when the client holds no routable group. */
+  private async demoteIfUnroutable(): Promise<void> {
+    const gid = await this.chat?.nostrGroupId().catch(() => undefined);
+    if (!gid && this.phase === "ready") this.phase = "setup";
+  }
+
+  /**
+   * Re-enrol this device into the event's chat (the UI's "Rejoin" action) — see
+   * `MarmotChat.rejoin`. Idempotent-ish: a session that can still route is left
+   * alone, so pressing it on a healthy room does nothing.
+   *
+   * A follower tab cannot do this itself (only the leader owns MLS state), so it
+   * asks the leader over the same BroadcastChannel that carries proxied sends. A
+   * read-only follower has no leader to ask and throws, exactly like `send`.
+   */
+  async rejoin(opts?: { force?: boolean }): Promise<void> {
+    if (this.rejoining) return;
+    this.rejoining = true;
+    try {
+      if (this.chat) {
+        this.phase = "setup";
+        const tok = this.token;
+        await this.chat.rejoin(opts);
+        await this.syncPhase(tok);
+        return;
+      }
+      const c = this.coordinator;
+      if (c && c.role === "follower" && !this.readOnly) {
+        await c.proxyRejoin(opts?.force ?? false);
+        return;
+      }
+      throw new Error("no chat session");
+    } finally {
+      this.rejoining = false;
+    }
   }
 
   /**

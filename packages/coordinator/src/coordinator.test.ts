@@ -3524,6 +3524,31 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     expect(roster.nostr_group_id).toBeUndefined();
   });
 
+  it("publishes chat_keys' added_at in unix SECONDS, not the store's milliseconds", async () => {
+    const h = await setup(0, { chat: true });
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+    await admin(h, "approve", { pubkey });
+    // An attested chat device of that attendee. The store stamps updated_at in ms
+    // (Date.now()); publishing it raw made the app render "added 8/15/58545".
+    h.store.upsertChatKey({
+      coordinate: h.coordinate,
+      accountPubkey: pubkey,
+      chatPubkey: "d".repeat(64),
+      label: "Firefox on macOS",
+      status: "active",
+      now: 1_760_000_000_000,
+    });
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    const device = roster.attendees.find((a) => a.pubkey === pubkey)!.chat_keys![0]!;
+    expect(device.added_at).toBe(1_760_000_000);
+    // Sanity: it lands in this decade, not the year 58545.
+    expect(new Date(device.added_at * 1000).getUTCFullYear()).toBe(2025);
+  });
+
   it("omits the id for a FROZEN group — members must no longer route there (§9 Q4)", async () => {
     const h = await setup(0, { chat: true });
     const pubkey = await join(h, generateSecretKey(), "crypto");
@@ -4573,6 +4598,144 @@ describe("audit C3 — public inbox is population-bounded", () => {
     const attendee = h.store.getAttendee(h.coordinate, attendeePk);
     expect(attendee?.status).toBe("approved");
     expect(attendee?.profile_json ?? "").toContain("meshcore and BTC L2");
+  });
+
+  it("collapses a room's worth of simultaneous approvals into a few roster publishes", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    // 24 people scan the shared QR at once. Each auto-approval used to publish
+    // the whole 31604, so the room cost 24 publishes of a list growing to 24
+    // ECK-encrypted entries — to the same relays already carrying their joins.
+    // ONE shared code, as the feature intends — not 24 individually mailed ones.
+    const doorSk = generateSecretKey();
+    h.transport.seed.push({
+      kind: 31601,
+      pubkey: getPublicKey(h.eidSk),
+      created_at: 2,
+      id: "door-list",
+      tags: [["d", "cypherpunk"]],
+      content: JSON.stringify({ v: 2, invites: [{ h: inviteHash(getPublicKey(doorSk)), label: "door", uses: 0 }] }),
+      sig: "",
+    } as any);
+
+    const attendees = Array.from({ length: 24 }, () => generateSecretKey());
+    const wraps = attendees.map((sk) => {
+      const pk = getPublicKey(sk);
+      return wrapRumor(sk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "scanner", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(doorSk), makeInviteProof(doorSk, h.coordinate, pk).sig]],
+      });
+    });
+    await Promise.all(wraps.map((w) => h.coordinator.handleInboxWrap(h.coordinate, w as any)));
+
+    const rosters = h.transport.published.filter((e) => e.kind === KIND_ROSTER);
+    // 24 approvals cost 2 publishes: the one in flight, and one more carrying
+    // everybody who arrived while it was. A handful of leeway for scheduling,
+    // but nowhere near the one-per-approval this replaces.
+    expect(rosters.length).toBeLessThanOrEqual(4);
+    // The correctness requirement the coalescing must not trade away: the LAST
+    // published roster carries everyone. A snapshot is a snapshot — dropping
+    // intermediate ones is free, dropping somebody is not.
+    const latest = rosters[rosters.length - 1]!;
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, latest.content)));
+    const listed = new Set(roster.attendees.map((a) => a.pubkey));
+    for (const sk of attendees) expect(listed.has(getPublicKey(sk))).toBe(true);
+  });
+
+  it("scales the per-event rumor budget with the crowd, so a mass join is not rate-dropped", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    // Past the flat 600 floor, but well inside the budget an enrolled population
+    // of this size earns. Seeded directly: this test is about the ceiling, not
+    // about how rows get there.
+    for (let i = 0; i < 300; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: `scanner${i}`, status: "approved", now: 1 });
+    }
+    // Burn the old flat budget on the event bucket alone.
+    for (let i = 0; i < 700; i++) {
+      h.store.bumpInboxRate(h.coordinate, "", h.clock.t, 60_000);
+    }
+
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const wrap = wrapRumor(sk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "late scanner", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+
+    // Under the flat cap this join was dropped — and left unseen, so it came
+    // back only if the daemon restarted within three days.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("keeps a submission DELIVERED AHEAD of its own join (relay/signer ordering inversion)", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: 0, profile: { about: "solar punk logistics", skills: ["ops"], looking_for: "", links: [] }, media: [] },
+      tags: [["a", h.coordinate]],
+    });
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Mira", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+
+    // 42a3ad7 covered the two arriving TOGETHER. This is the case it left open:
+    // the submission is dispatched FIRST. The app publishes both concurrently and
+    // each needs its own signer round-trips (unordered under NIP-46), so whichever
+    // relay answers first decides — and when the submission wins, the gate used to
+    // drop it with no live redelivery ever coming.
+    const submission = h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
+    const join = h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any);
+    await Promise.all([submission, join]);
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePk);
+    expect(attendee?.status).toBe("approved");
+    expect(attendee?.profile_json ?? "").toContain("solar punk logistics");
+  });
+
+  it("does not wait on a submission too old to be racing a join", async () => {
+    const h = await setup();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const attendeeSk = generateSecretKey();
+    const attendeePk = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePk);
+
+    const subWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: { v: 2, rev: 0, profile: { about: "replayed", skills: [], looking_for: "", links: [] }, media: [] },
+      tags: [["a", h.coordinate]],
+    });
+    const joinWrap = wrapRumor(attendeeSk, inboxPk, {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Late", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+
+    // Ten minutes on, these wraps are not racing each other — a replay or a
+    // backfill, and backfill dispatches joins first precisely so it need not
+    // wait. The bound is what stops a flood of unenrolled submissions from
+    // buying 2.5s of a worker each.
+    h.clock.t += 10 * 60 * 1000;
+    const submission = h.coordinator.handleInboxWrap(h.coordinate, subWrap as any);
+    const join = h.coordinator.handleInboxWrap(h.coordinate, joinWrap as any);
+    await Promise.all([submission, join]);
+
+    const attendee = h.store.getAttendee(h.coordinate, attendeePk);
+    expect(attendee?.status).toBe("approved"); // the join still lands
+    expect(attendee?.profile_json ?? null).toBeNull(); // the stale submission did not
   });
 
   it("enrolls a join published BEFORE the coordinator subscribed so a later submission clears the gate (H2 backfill + join-before-submission ordering)", async () => {

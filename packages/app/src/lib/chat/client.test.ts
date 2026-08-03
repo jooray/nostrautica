@@ -48,6 +48,8 @@ const shared = vi.hoisted(() => ({
   // started advertising nostr_group_id (or before this event's group existed).
   staleCache: new Set<string>(),
   liveFetchCount: new Map<string, number>(),
+  /** Ordered trace of the publish-side calls a rejoin makes (order is the point). */
+  calls: [] as string[],
 }));
 
 interface FakeRumor {
@@ -110,7 +112,24 @@ class FakeGroups {
 class FakeMarmotClient {
   invites = new FakeInvites();
   groups = new FakeGroups();
-  keyPackages = { ensurePublished: vi.fn(async () => {}), create: vi.fn(async () => ({})) };
+  /** Locally stored key packages `rotate` can target (a real one has private material). */
+  storedKeyPackages: { keyPackageRef: Uint8Array; identifier?: string }[] = [
+    { keyPackageRef: new Uint8Array([7]), identifier: "web-test" },
+  ];
+  keyPackages = {
+    ensurePublished: vi.fn(async () => {
+      shared.calls.push("kp:ensurePublished");
+    }),
+    create: vi.fn(async () => {
+      shared.calls.push("kp:create");
+      return {};
+    }),
+    list: vi.fn(async () => this.storedKeyPackages),
+    rotate: vi.fn(async () => {
+      shared.calls.push("kp:rotate");
+      return {};
+    }),
+  };
   joinedFrom: string[] = [];
   async canJoinInvite(inv: { joinable?: boolean }) {
     return inv.joinable !== false;
@@ -121,7 +140,9 @@ class FakeMarmotClient {
       idStr: "group-" + welcomeRumor.id,
       id: new Uint8Array([this.groups.groups.length + 1]),
       state: {
-        members: welcomeRumor.members ?? [COORD],
+        // A real Welcome always adds THIS device's leaf alongside the coordinator's
+        // — membership checks (am I still in the room?) depend on that being modelled.
+        members: welcomeRumor.members ?? [COORD, "c".repeat(64)],
         nostrGroupId: welcomeRumor.nostrGroupId ?? "gid-" + welcomeRumor.id,
       },
       on: () => {},
@@ -186,10 +207,19 @@ vi.mock("./stores.js", async (orig) => {
   };
 });
 vi.mock("./network.js", () => ({ createMarmotNetwork: () => ({}) }));
-vi.mock("./attest.js", () => ({ sendChatKeyAttestation: vi.fn(async () => {}) }));
+vi.mock("./attest.js", () => ({
+  sendChatKeyAttestation: vi.fn(async (_signer: unknown, _ctx: unknown, input: { op: string }) => {
+    shared.calls.push(`attest:${input.op}`);
+  }),
+}));
 vi.mock("$lib/nostr/ndk.js", () => ({
   publishSigned: vi.fn(async () => {}),
-  fetchEventsRelayOnly: vi.fn(async () => []),
+  // The Bug-2 re-verification read: "is our kind-30443 actually retrievable?".
+  // Model a relay that serves whatever this client last published, so a key
+  // package it just rotated/created is found (and not redundantly republished).
+  fetchEventsRelayOnly: vi.fn(async () =>
+    shared.calls.some((c) => c === "kp:rotate" || c === "kp:create") ? [{ id: "kp-on-relay" }] : [],
+  ),
 }));
 // The roster is the coordinator's authoritative event→group binding (APPK-3).
 // `cachedRoster` is the sync, hot-path read; `fetchRoster` the async one. Both
@@ -219,6 +249,7 @@ beforeEach(() => {
   shared.rosters.clear();
   shared.staleCache.clear();
   shared.liveFetchCount.clear();
+  shared.calls.length = 0;
 });
 
 describe("MarmotChat.start() — late welcome (G-3)", () => {
@@ -681,6 +712,203 @@ describe("MarmotChat two-events-one-coordinator group resolution (audit APPK-3)"
     const chatB = await MarmotChat.create({ accountSigner, ctx: ctxB });
     expect(await chatB.nostrGroupId()).toBeUndefined();
     await expect(chatB.send("must not reach event A")).rejects.toThrow("no joined chat group yet");
+  });
+});
+
+/**
+ * Re-enrolment (`rejoin`) — the recovery for a device that is a listed, active chat
+ * device of an approved attendee (the app's device list shows it, "TOTO ZARIADENIE")
+ * yet holds no group, so every send fails. A plain republish cannot fix that: marmot
+ * re-advertises the SAME addressable 30443 while its local copy is unused, the
+ * coordinator dedupes that event id for 30 days, and it skips anyone who still holds
+ * a leaf. So the order below — revoke (drop the leaf), rotate (new event id),
+ * re-attest — is the fix, and each step is load-bearing.
+ */
+describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the group", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+
+  it("revokes this device, rotates the key package, then re-attests — in that order", async () => {
+    // Stuck state: the roster names a group we never joined (welcome lost).
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-x", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    expect(await chat.nostrGroupId()).toBeUndefined();
+    shared.calls.length = 0;
+
+    await chat.rejoin();
+
+    // Revoke FIRST (or the re-add lands on a coordinator that still sees a leaf and
+    // skips it), rotate SECOND (or the re-advertised 30443 keeps its consumed id),
+    // attest LAST (it is what drives the coordinator's syncMember).
+    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
+    // The rotation reuses this device's slot, so the relay replaces in place rather
+    // than leaving a second key package behind.
+    const [, opts] = lastClient.keyPackages.rotate.mock.calls[0] as unknown as [
+      Uint8Array,
+      { d?: string; relays?: string[] },
+    ];
+    expect(opts.d).toBe("web-test");
+    expect(opts.relays).toEqual(["wss://r"]);
+  });
+
+  it("joins the welcome that follows and routes sends to the new group", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-rejoined", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    await chat.rejoin();
+
+    // The coordinator adds us again; the welcome lands on the listener start() left.
+    lastClient.invites.deliver({ id: "welcome-rejoin", nostrGroupId: "gid-rejoined" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-rejoin"]));
+
+    expect(await chat.nostrGroupId()).toBe("gid-rejoined");
+    await chat.send("back in the room");
+    expect(lastClient.groups.send).toHaveBeenCalledOnce();
+  });
+
+  // prod 2026-07-30: pressing Rejoin reported success and published NOTHING. The
+  // guard asked "do we hold this event's group?", but an MLS Remove strips only our
+  // leaf — the local group state and its decrypted history stay exactly where they
+  // were. So a removed member (who sees the room, the history and the member count,
+  // and cannot send) took the healthy branch every time, from the button AND from
+  // the bootstrap that runs on every open.
+  it("rejoins a member whose leaf was removed even though the group state is still held", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-removed", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    // Joined with our own leaf present (members includes this device's chat key).
+    lastClient.invites.deliver({
+      id: "welcome-before-removal",
+      nostrGroupId: "gid-removed",
+      members: [COORD, "c".repeat(64)],
+    });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-before-removal"]));
+
+    // The coordinator removes us; the commit lands over 445 and our local state
+    // loses our leaf — but the group, and everything we already decrypted, remain.
+    lastClient.groups.groups[0]!.state.members = [COORD];
+    expect(await chat.nostrGroupId()).toBe("gid-removed"); // still bound, still readable
+    shared.calls.length = 0;
+
+    await chat.rejoin();
+
+    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
+  });
+
+  it("re-advertises on open for a removed member, so a reload heals without the button", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-removed2", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({
+      id: "welcome-2",
+      nostrGroupId: "gid-removed2",
+      members: [COORD, "c".repeat(64)],
+    });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-2"]));
+    shared.calls.length = 0;
+
+    // Still a member → the bootstrap stays quiet (this is the "don't re-add me on
+    // every open" guarantee that the group-presence check was protecting).
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+
+    // Removed → the bootstrap advertises again and re-attests. It also ROTATES:
+    // the key package it would otherwise re-advertise is the one already spent on
+    // the Add that created the leaf we just lost, so the coordinator has recorded
+    // its event id as consumed and would skip it (prod 2026-07-30).
+    lastClient.groups.groups[0]!.state.members = [COORD];
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual(["kp:rotate", "kp:ensurePublished", "attest:add"]);
+  });
+
+  it("does NOT rotate for a client that was never added — its welcome may be in flight", async () => {
+    // Never-added is not evicted: the advertised key package is unspent, and the
+    // coordinator's Welcome (if it already went out) is encrypted to exactly that
+    // key. Rotating would discard the private material needed to join with it.
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-pending", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+
+    await chat.ensurePublished();
+
+    expect(shared.calls).toEqual(["kp:ensurePublished", "kp:create", "attest:add"]);
+    expect(shared.calls).not.toContain("kp:rotate");
+  });
+
+  it("routes sends to the live group state after a re-add, not the dead one", async () => {
+    // A removal + re-add leaves two local states for one nostr_group_id. groups[0]
+    // is the send target, so the one we still hold a leaf in has to come first.
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-dup", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w-old", nostrGroupId: "gid-dup", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-old"]));
+    lastClient.groups.groups[0]!.state.members = [COORD]; // removed from the old state
+    // Re-added: a second Welcome for the SAME room yields a second local state.
+    lastClient.invites.deliver({ id: "w-new", nostrGroupId: "gid-dup", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-old", "w-new"]));
+
+    await chat.send("after the re-add");
+    // group.id [2] is the second (live) join; [1] is the corpse.
+    expect(lastClient.groups.send.mock.calls[0]![0]).toEqual(new Uint8Array([2]));
+  });
+
+  it("is inert for a session that can still route — never tears down a working membership", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-healthy", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "welcome-healthy", nostrGroupId: "gid-healthy" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-healthy"]));
+    shared.calls.length = 0;
+
+    await chat.rejoin();
+
+    expect(shared.calls).toEqual([]);
+    expect(await chat.nostrGroupId()).toBe("gid-healthy");
+  });
+
+  it("drops the memoized fail-closed roster lookup, so routing recovers afterwards", async () => {
+    // A client that once found no advertised group id memoizes that for its whole
+    // life (currentEventGroups). Without clearing it, a rejoin could succeed and the
+    // very next send would still refuse to route.
+    const { InMemoryKvBackend, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => { set(k: string, v: unknown): Promise<void> };
+      MARMOT_NAMESPACES: { eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    const identity = "c".repeat(64);
+    await backend.set(`${identity}${MARMOT_NAMESPACES.eventGroups}${coord}`, "gid-old");
+
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    // No roster at all → fail-closed refusal, and the empty result is memoized.
+    expect(await chat.nostrGroupId()).toBeUndefined();
+    expect(shared.liveFetchCount.get(coord)).toBe(1);
+
+    // The coordinator's roster is readable again and names the group we now join.
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-new", attendees: [] });
+    await chat.rejoin();
+    lastClient.invites.deliver({ id: "welcome-after-rejoin", nostrGroupId: "gid-new" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-after-rejoin"]));
+
+    expect(await chat.nostrGroupId()).toBe("gid-new");
+  });
+
+  it("falls back to creating a key package when there is no local one to rotate", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-y", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.storedKeyPackages = []; // local key-package store was cleared
+    shared.calls.length = 0;
+
+    await chat.rejoin();
+
+    expect(shared.calls).toEqual(["attest:revoke", "kp:create", "kp:ensurePublished", "attest:add"]);
+    const [opts] = lastClient.keyPackages.create.mock.calls[0] as unknown as [{ identifier?: string }];
+    expect(opts.identifier).toBe("web-test");
   });
 });
 

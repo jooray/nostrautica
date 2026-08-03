@@ -320,6 +320,14 @@ the group can take a little while (or occasionally need a retry) before
 messages start flowing. If the tab is stuck on "setting up," give it a few
 minutes and reopen it.
 
+If it stays stuck — or a message won't send and you're told you may have been
+removed — use **Rejoin this chat**, which appears next to the error and under
+the "setting up" notice. Your device is listed under Chat devices but has
+somehow dropped out of the room, and rejoining asks the organizer's service to
+add it back. It usually takes under a minute, keeps the device you're on (no
+new entry in the device list), and, like any newly added device, starts your
+view of the conversation from that moment on.
+
 ## 7. Your event report
 
 Any time — before, during, or after the event — open **Event report** from

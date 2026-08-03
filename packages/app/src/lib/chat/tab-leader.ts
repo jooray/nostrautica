@@ -55,6 +55,7 @@ type Wire =
   | { t: "state"; scope: string; coordinate: string; messages: ChatMessage[] }
   | { t: "members"; scope: string; coordinate: string; members: string[] }
   | { t: "send"; scope: string; reqId: string; text: string }
+  | { t: "rejoin"; scope: string; reqId: string; force?: boolean }
   | { t: "ack"; scope: string; reqId: string; ok: boolean; error?: string };
 
 export interface TabCoordinatorOptions {
@@ -72,12 +73,16 @@ export interface TabCoordinatorOptions {
   onLeaderMembers?(coordinate: string, members: string[]): void;
   /** Leader: a follower proxied a send; resolve to ack ok, throw to ack error. */
   onSendRequest?(text: string): Promise<void>;
+  /** Leader: a follower asked for a chat re-enrolment; resolve/throw to ack. */
+  onRejoinRequest?(force: boolean): Promise<void>;
   /** Leader: a freshly-joined follower asked for the current state — re-broadcast it. */
   onSyncRequest?(): void;
   /** Election ping window (ms) when Web Locks is unavailable. */
   pingWindowMs?: number;
   /** Ack timeout (ms) for a proxied send. */
   ackTimeoutMs?: number;
+  /** Ack timeout (ms) for a proxied rejoin — a multi-publish handshake, not one send. */
+  rejoinTimeoutMs?: number;
 }
 
 function defaultLocks(): LockManagerLike | null {
@@ -120,6 +125,7 @@ export class ChatTabCoordinator {
   private readonly opts: TabCoordinatorOptions;
   private readonly pingWindowMs: number;
   private readonly ackTimeoutMs: number;
+  private readonly rejoinTimeoutMs: number;
 
   /** Resolves once the role first settles (leader or follower) — awaited by the session. */
   readonly whenSettled: Promise<void>;
@@ -142,6 +148,10 @@ export class ChatTabCoordinator {
     this.usingWebLocks = !!this.locks;
     this.pingWindowMs = opts.pingWindowMs ?? 300;
     this.ackTimeoutMs = opts.ackTimeoutMs ?? 8000;
+    // A rejoin is revoke-publish → key-package rotate+publish → attest-publish →
+    // join, i.e. several relay round-trips; the send timeout would fire mid-way and
+    // report a failure over work that is still running (and will succeed).
+    this.rejoinTimeoutMs = opts.rejoinTimeoutMs ?? 45_000;
     this.whenSettled = new Promise<void>((res) => (this.settle = res));
     this.channel?.addEventListener("message", this.onMessage);
     void this.elect();
@@ -262,6 +272,11 @@ export class ChatTabCoordinator {
       case "send":
         if (this.role === "leader") void this.handleSendRequest(msg.reqId, msg.text);
         return;
+      case "rejoin":
+        if (this.role === "leader") {
+          void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.(msg.force ?? false));
+        }
+        return;
       case "ack": {
         const p = this.pending.get(msg.reqId);
         if (!p) return;
@@ -274,11 +289,16 @@ export class ChatTabCoordinator {
     }
   }
 
-  private async handleSendRequest(reqId: string, text: string): Promise<void> {
+  private handleSendRequest(reqId: string, text: string): Promise<void> {
+    return this.runForFollower(reqId, () => this.opts.onSendRequest?.(text));
+  }
+
+  /** Leader: run one follower-proxied operation and ack its outcome. */
+  private async runForFollower(reqId: string, run: () => Promise<void> | undefined): Promise<void> {
     let ok = true;
     let error: string | undefined;
     try {
-      await this.opts.onSendRequest?.(text);
+      await run();
     } catch (e) {
       ok = false;
       error = e instanceof Error ? e.message : String(e);
@@ -331,6 +351,28 @@ export class ChatTabCoordinator {
    * the Web Locks path (single-writer guaranteed); off it, followers are read-only.
    */
   proxySend(text: string): Promise<void> {
+    return this.proxy(
+      (reqId) => ({ t: "send", scope: this.scope, reqId, text }),
+      this.ackTimeoutMs,
+      "timed out waiting for the active tab to send",
+    );
+  }
+
+  /**
+   * Follower: ask the leader to re-enrol this device into the event's chat. Same
+   * single-writer constraint as {@link proxySend} — only the leader owns MLS state,
+   * so a read-only follower (no Web Locks) can't have one performed on its behalf.
+   */
+  proxyRejoin(force = false): Promise<void> {
+    return this.proxy(
+      (reqId) => ({ t: "rejoin", scope: this.scope, reqId, force }),
+      this.rejoinTimeoutMs,
+      "timed out waiting for the active tab to rejoin",
+    );
+  }
+
+  /** Post one request to the leader and resolve/reject on its ack (or timeout). */
+  private proxy(build: (reqId: string) => Wire, timeoutMs: number, timeoutMessage: string): Promise<void> {
     if (!this.usingWebLocks || !this.channel) {
       return Promise.reject(new Error("send proxy unavailable in this tab"));
     }
@@ -338,10 +380,10 @@ export class ChatTabCoordinator {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(reqId);
-        reject(new Error("timed out waiting for the active tab to send"));
-      }, this.ackTimeoutMs);
+        reject(new Error(timeoutMessage));
+      }, timeoutMs);
       this.pending.set(reqId, { resolve, reject, timer });
-      this.channel!.postMessage({ t: "send", scope: this.scope, reqId, text } satisfies Wire);
+      this.channel!.postMessage(build(reqId) satisfies Wire);
     });
   }
 

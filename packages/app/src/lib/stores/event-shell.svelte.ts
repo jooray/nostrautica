@@ -8,7 +8,7 @@
  * navigation never clobbers the current event. Reads from cache first so tab
  * gating almost never flashes.
  */
-import { isMarmotChatEnabled } from "@nostrautica/protocol";
+import { isMarmotChatEnabled, naddrToCoordinate } from "@nostrautica/protocol";
 import {
   loadEventContext,
   cachedEventContext,
@@ -106,44 +106,58 @@ class EventShell {
       this.loading = true;
       return;
     }
-    const cached = cachedEventContext(naddr);
-    if (cached) {
-      this.ctx = cached; // no flash on inter-subpage navigation
-      // Seed the role from the persisted value before reconciliation (§2.13).
-      const cachedRole = cacheGet<EventRole>(roleKey(cached.coordinate))?.data;
-      if (cachedRole) this.role = cachedRole;
+    // The coordinate is DERIVABLE from the naddr — it is what the naddr encodes.
+    // Everything the role depends on (the persisted label, ECK custody, the
+    // join marker) is keyed by it and lives on this device, so none of it has
+    // any business waiting for a relay. It used to anyway: the whole block below
+    // sat behind `await loadEventContext(naddr)`, so opening a previously-visited
+    // event offline, or on a cold mirror, showed the visitor view until the
+    // network answered — and answered nothing the role needed.
+    let coordinate: string;
+    try {
+      coordinate = naddrToCoordinate(naddr).coordinate;
+    } catch {
+      this.loading = false;
+      return; // not a decodable event address; nothing to resolve
     }
+    const cached = cachedEventContext(naddr);
+    if (cached) this.ctx = cached; // no flash on inter-subpage navigation
+    // Seed from the persisted label before any await (§2.13) — never flash
+    // "Visitor" at an organizer.
+    const cachedRole = cacheGet<EventRole>(roleKey(coordinate))?.data;
+    if (cachedRole) this.role = cachedRole;
+
     this.loading = true;
     try {
-      const ctx = cached ?? (await loadEventContext(naddr));
-      if (tok !== this.token) return;
-      this.ctx = ctx;
-      // Context may have loaded from the network — seed role now if not already.
-      if (!cached) {
-        const cachedRole = cacheGet<EventRole>(roleKey(ctx.coordinate))?.data;
-        if (cachedRole) this.role = cachedRole;
-      }
-      const approved = await isApproved(ctx.coordinate);
-      let keys = await loadEventKeys(ctx.coordinate);
+      // Resolve the role from local custody FIRST, and independently of the
+      // context load below. `isApproved`/`loadEventKeys` are keystore reads.
+      const approved = await isApproved(coordinate);
+      let keys = await loadEventKeys(coordinate);
       // Fresh-device deep-link: no local custody for an event this identity may
       // have created — read back the 30078 eventkeys backup (once per session).
       if (!keys && session.signer) {
         await recoverEventKeys(session.signer).catch(() => {});
-        keys = await loadEventKeys(ctx.coordinate);
+        keys = await loadEventKeys(coordinate);
       }
       if (tok !== this.token) return;
-      const organizer = keys?.role === "organizer";
-      const resolved: EventRole = organizer
+      const resolved: EventRole = keys?.role === "organizer"
         ? "organizer"
         : approved
           ? "attendee"
-          : joinSentAt(ctx.coordinate) !== undefined
+          : joinSentAt(coordinate) !== undefined
             ? "pending"
             : "visitor";
       this.role = resolved;
-      // This point is reached only after successful approval + custody reads, so
-      // it is authoritative and may correct a sticky stale organizer label.
-      cacheSet(roleKey(ctx.coordinate), resolved, Math.floor(Date.now() / 1000));
+      // Reached only after successful custody reads, so it is authoritative and
+      // may correct a sticky stale organizer label.
+      cacheSet(roleKey(coordinate), resolved, Math.floor(Date.now() / 1000));
+
+      // The context is needed for the tab GATING (matching/talks/chat flags),
+      // not for the role. Load it after, so a slow or unreachable relay delays
+      // only the tabs whose visibility genuinely depends on the event's config.
+      const ctx = cached ?? (await loadEventContext(naddr));
+      if (tok !== this.token) return;
+      this.ctx = ctx;
     } catch {
       /* keep whatever context/role we already have */
     } finally {

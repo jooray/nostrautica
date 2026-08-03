@@ -216,3 +216,103 @@ describe("publish-queue owner isolation (audit U1)", () => {
     expect(store.has("legacy")).toBe(false); // migration: dropped, not published
   });
 });
+
+/**
+ * A publish succeeds at the FIRST relay that acks, which is the right call for
+ * the user's latency but leaves the event present on some relays and absent from
+ * others. Nothing used to notice: publishSigned already returned a per-relay
+ * outcome for every target and no caller read it. A reader that happens to ask
+ * only the relays that missed it sees nothing at all — for a replaceable
+ * authority event (an event's config, its roster, a directory entry) that reads
+ * as "this doesn't exist" rather than "one relay is behind".
+ */
+describe("partial publishes are carried to the relays that missed them", () => {
+  const OWNER2 = "c".repeat(64);
+  let store: Map<string, QueuedItem>;
+  const ok = (url: string) => ({ url, ok: true });
+  const bad = (url: string, reason: string) => ({ url, ok: false, reason });
+
+  beforeEach(() => {
+    __resetPersistForTests();
+    setActiveCacheOwner(OWNER2);
+    const m = memBackend();
+    store = m.store;
+    __setOutboxBackend(m.backend);
+    __setOutboxLocks(null);
+    publishSigned.mockReset();
+    vi.stubGlobal("navigator", { onLine: true });
+  });
+
+  const evt2 = (id: string) => ({ id, kind: 31600, pubkey: OWNER2 }) as unknown as QueuedItem["event"];
+
+  it("queues only the relays worth trying again, and still reports the publish as sent", async () => {
+    publishSigned.mockResolvedValue([
+      ok("wss://a.example/"),
+      bad("wss://slow.example/", "Timeout: 2500ms"),
+      bad("wss://strict.example/", "blocked: kind not allowed on this relay"),
+    ] as never);
+
+    // True: the event IS out. The straggler is convergence work, not a failed action.
+    expect(await publishOrQueue(evt2("e1") as never)).toBe(true);
+
+    const item = store.get("e1")!;
+    expect(item.partial).toBe(true);
+    // The refusing relay is not a straggler — it will answer the same way forever.
+    expect(item.relays).toEqual(["wss://slow.example/"]);
+  });
+
+  it("queues nothing when every relay either took it or will never take it", async () => {
+    publishSigned.mockResolvedValue([
+      ok("wss://a.example/"),
+      bad("wss://b.example/", "duplicate: already have this event"),
+      bad("wss://c.example/", "blocked: kind not allowed on this relay"),
+    ] as never);
+    await publishOrQueue(evt2("e2") as never);
+    expect(store.size).toBe(0);
+  });
+
+  it("keeps convergence work out of the user's outbox and the logout warning", async () => {
+    publishSigned.mockResolvedValue([ok("wss://a/"), bad("wss://b/", "Timeout: 2500ms")] as never);
+    await publishOrQueue(evt2("e3") as never);
+    // The action succeeded, so nothing here is the user's to retry, discard, or
+    // be warned about on logout.
+    expect(await listQueued()).toEqual([]);
+    expect(await countQueuedForOwner(OWNER2)).toBe(0);
+  });
+
+  it("gives up on an unreachable straggler quietly instead of parking it as failed", async () => {
+    store.set("e4", {
+      event: evt2("e4"),
+      relays: ["wss://gone/"],
+      queuedAt: 1,
+      attempts: MAX_FLUSH_ATTEMPTS - 1,
+      owner: OWNER2,
+      partial: true,
+    });
+    publishSigned.mockRejectedValue(new Error("Not enough relays received the event"));
+
+    const res = await flushQueue();
+    // Dropped, not parked: an outbox entry the user can only be confused by,
+    // since the action it describes already succeeded.
+    expect(store.has("e4")).toBe(false);
+    expect(res.failed).toBe(0);
+  });
+
+  it("never narrows a still-unsent item down to a straggler relay set", async () => {
+    // A genuinely queued event targets every relay. If a later partial write
+    // overwrote it (the store is keyed by event id) it would go out to one relay.
+    store.set("e5", {
+      event: evt2("e5"),
+      relays: ["wss://a/", "wss://b/"],
+      queuedAt: 1,
+      attempts: 0,
+      owner: OWNER2,
+    });
+    publishSigned.mockResolvedValue([ok("wss://a/"), bad("wss://b/", "Timeout: 2500ms")] as never);
+    await publishOrQueue(evt2("e5") as never);
+
+    const item = store.get("e5")!;
+    expect(item.partial).toBeUndefined();
+    expect(item.relays).toEqual(["wss://a/", "wss://b/"]);
+  });
+});

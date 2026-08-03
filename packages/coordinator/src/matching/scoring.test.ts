@@ -264,6 +264,151 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
   });
 });
 
+// prod 2026-07-31: an organizer's match list showed each person's card carrying the
+// NEXT person's match text — cotsoor's write-up under Ľudo's name and avatar, and so
+// on down the list. Nothing in the pipeline had corrupted anything: `index` is the
+// only thing tying an LLM-authored reasoning to a pubkey, and an index put on the
+// wrong block parses perfectly, so the batch logged "10 scored, 0 unparsed" while
+// every attendee was being described to the wrong person.
+describe("a batch entry has to agree about who it is about", () => {
+  /** Candidates with real display names, which is what makes the echo checkable. */
+  function named(...names: string[]): BatchCandidate[] {
+    return names.map((n) => ({ id: `id-${n}`, profile: profile(n), name: n }));
+  }
+
+  it("repairs an entry whose number and name point at different people", async () => {
+    // The reported shape: the text is about cotsoor, the number says Ľudo.
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          index: 1,
+          entry_name: "cotsoor",
+          similarity: 0.5,
+          complementarity: 0.9,
+          score: 0.9,
+          reasoning_for_target: "Cotsoor runs the Bratislava meetups and you run Brno's.",
+        },
+      ],
+    }));
+    // 0.999999 leaves the shuffle at identity order, so index 1 really is Ludo.
+    const cands = named("Ludo", "cotsoor");
+    const { scores, missing, misattributed } = await scoreBatch(
+      llm, "m", EVENT, profile("t"), cands, () => 0.999999,
+    );
+    // The write-up lands on cotsoor, who it is actually about — not on Ludo.
+    expect(scores.get("id-cotsoor")!.reasoning).toContain("Cotsoor runs");
+    expect(scores.has("id-Ludo")).toBe(false);
+    expect(missing).toEqual(["id-Ludo"]); // re-scored rather than given someone else's text
+    expect(misattributed![0]).toContain("cotsoor");
+  });
+
+  it("matches the echoed name past diacritics and casing", async () => {
+    // We print "Ľudo"; a model that copies it back as "ludo" has not made a mistake,
+    // and discarding a good score over an accent would be its own bug.
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          index: 1,
+          entry_name: "  ĽUDO ",
+          similarity: 0.5,
+          complementarity: 0.5,
+          score: 0.5,
+          reasoning_for_target: "You two should talk.",
+        },
+      ],
+    }));
+    const { scores, misattributed } = await scoreBatch(
+      llm, "m", EVENT, profile("t"), named("Ľudo"), () => 0,
+    );
+    expect(scores.get("id-Ľudo")!.reasoning).toBe("You two should talk.");
+    expect(misattributed).toBeUndefined();
+  });
+
+  it("drops an entry naming nobody in the batch instead of guessing", async () => {
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          index: 1,
+          entry_name: "Someone Else Entirely",
+          similarity: 0.5,
+          complementarity: 0.5,
+          score: 0.5,
+          reasoning_for_target: "About a person who isn't here.",
+        },
+      ],
+    }));
+    const { scores, missing, misattributed } = await scoreBatch(
+      llm, "m", EVENT, profile("t"), named("Ludo"), () => 0,
+    );
+    expect(scores.size).toBe(0);
+    expect(missing).toEqual(["id-Ludo"]);
+    expect(misattributed![0]).toContain("dropped");
+  });
+
+  it("drops rather than picks when two people in the batch share the name", async () => {
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          // Numbered as Ludo, but the echo says "Jan" — and two people are Jan.
+          index: 3,
+          entry_name: "Jan",
+          similarity: 0.5,
+          complementarity: 0.5,
+          score: 0.5,
+          reasoning_for_target: "Which Jan?",
+        },
+      ],
+    }));
+    // Two attendees called Jan: the echo cannot disambiguate, so it must not try.
+    const cands: BatchCandidate[] = [
+      { id: "jan-a", profile: profile("a"), name: "Jan" },
+      { id: "jan-b", profile: profile("b"), name: "Jan" },
+      { id: "other", profile: profile("o"), name: "Ludo" },
+    ];
+    const { scores, misattributed } = await scoreBatch(
+      llm, "m", EVENT, profile("t"), cands, () => 0.999999,
+    );
+    expect(scores.has("other")).toBe(false);
+    expect(misattributed![0]).toContain("dropped");
+  });
+
+  it("never lets two entries claim the same person", async () => {
+    const llm = new MockLlm(() => ({
+      matches: [
+        {
+          index: 1, entry_name: "cotsoor", similarity: 0.9, complementarity: 0.9, score: 0.9,
+          reasoning_for_target: "The real one.",
+        },
+        // A second entry that also resolves onto cotsoor must not overwrite the first.
+        {
+          index: 2, entry_name: "cotsoor", similarity: 0.1, complementarity: 0.1, score: 0.1,
+          reasoning_for_target: "The duplicate.",
+        },
+      ],
+    }));
+    const { scores } = await scoreBatch(
+      llm, "m", EVENT, profile("t"), named("Ludo", "cotsoor"), () => 0.999999,
+    );
+    expect(scores.get("id-cotsoor")!.reasoning).toBe("The real one.");
+    expect(scores.size).toBe(1);
+  });
+
+  it("still scores normally when the batch has no display names to check against", async () => {
+    // Pre-migration attendees have no name: there is nothing to verify, and that
+    // must not become a reason to drop every entry.
+    const llm = new MockLlm(() => ({
+      matches: [
+        { index: 1, similarity: 0.5, complementarity: 0.5, score: 0.5, reasoning_for_target: "Go say hi." },
+      ],
+    }));
+    const { scores, misattributed } = await scoreBatch(
+      llm, "m", EVENT, profile("t"), candidates(1), () => 0,
+    );
+    expect(scores.get("cand0")!.reasoning).toBe("Go say hi.");
+    expect(misattributed).toBeUndefined();
+  });
+});
+
 describe("per-event output language (spec §7.1/§9.3)", () => {
   it("en events get NO language instruction (BP3 unchanged, no default-en phrasing)", () => {
     expect(languageInstruction("en")).toBe("");

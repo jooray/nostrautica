@@ -31,8 +31,12 @@ vi.mock("$lib/nostr/publish-queue.js", () => ({
 // loadSelfCopy is the shared rev source: undefined on a first join (rev 0), or a
 // prior self-copy whose rev the join must bump past.
 const loadSelfCopy = vi.fn(async () => undefined as { rev?: number } | undefined);
+// The join seeds the local self-copy so the intro flow that follows has
+// something to fall back on when its own relay read comes back empty.
+const cacheSelfCopy = vi.fn();
 vi.mock("$lib/media/submit.js", () => ({
   loadSelfCopy: (...args: unknown[]) => loadSelfCopy(...(args as [])),
+  cacheSelfCopy: (...args: unknown[]) => cacheSelfCopy(...(args as [])),
 }));
 
 import { sendJoinRequest } from "./join.js";
@@ -67,6 +71,7 @@ describe("sendJoinRequest — 21601 profile submission carries a valid rev", () 
     wrapCalls.length = 0;
     loadSelfCopy.mockReset();
     loadSelfCopy.mockResolvedValue(undefined);
+    cacheSelfCopy.mockClear();
   });
 
   it("builds a submission that PARSES against profileSubmissionContentSchema", async () => {
@@ -90,5 +95,17 @@ describe("sendJoinRequest — 21601 profile submission carries a valid rev", () 
     await sendJoinRequest(fakeSigner, ctx, { name: "Ada", profile }, blindingKey);
     const parsed = profileSubmissionContentSchema.parse(submissionContent());
     expect(parsed.rev).toBe(0);
+  });
+
+  it("seeds the local self-copy with the fields just typed", async () => {
+    // The next screen is "record your intro", which builds its submission from
+    // the self-copy. Leaving the joining device with no local copy is what let
+    // an empty relay read there blank the profile written on the join form.
+    await sendJoinRequest(fakeSigner, ctx, { name: "Ada", profile }, blindingKey);
+    expect(cacheSelfCopy).toHaveBeenCalledTimes(1);
+    const [coordinate, self] = cacheSelfCopy.mock.calls[0] as [string, { profile: unknown; rev: number }];
+    expect(coordinate).toBe(ctx.coordinate);
+    expect(self.profile).toEqual(profile);
+    expect(self.rev).toBe(0);
   });
 });

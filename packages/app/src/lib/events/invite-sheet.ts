@@ -67,6 +67,10 @@ export function invitesForSheet(
 ): GeneratedInvite[] {
   if (usedPubkeys.size === 0) return generated;
   return generated.filter((inv) => {
+    // A multi-use code is not spent by being used — that is the entire point of
+    // it. The used-set says "somebody redeemed this", which for a shared door
+    // code is the expected steady state, not a reason to stop printing it.
+    if ((inv.uses ?? 1) !== 1) return true;
     const pk = invitePubkey(inv);
     return !pk || !usedPubkeys.has(pk);
   });

@@ -496,6 +496,36 @@ describe("schema migrations (audit O3)", () => {
     store.close();
   });
 
+  it("re-keys invite_usage per redeemer, keeping the codes already spent (v5)", async () => {
+    const path = tmpDb();
+    // A pre-v5 database: one row per CODE, so it cannot represent two redeemers.
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      `CREATE TABLE invite_usage (coordinate TEXT NOT NULL, invite_pubkey TEXT NOT NULL,
+         used_by TEXT NOT NULL, used_at INTEGER NOT NULL,
+         PRIMARY KEY (coordinate, invite_pubkey))`,
+    );
+    raw
+      .prepare("INSERT INTO invite_usage (coordinate, invite_pubkey, used_by, used_at) VALUES (?, ?, ?, ?)")
+      .run("31923:e:x", "code1", "alice", 10);
+    raw.exec("PRAGMA user_version = 4");
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    // The spent single-use code stays spent — the migration must not re-open it.
+    expect(store.inviteRedemptions("31923:e:x", "code1")).toBe(1);
+    expect(store.claimInvite("31923:e:x", "code1", "bob", 20, 1)).toBe(false);
+    expect(store.claimInvite("31923:e:x", "code1", "alice", 20, 1)).toBe(true); // idempotent
+    // And the new shape can now hold several redeemers of one code.
+    expect(store.claimInvite("31923:e:x", "code2", "alice", 20, 2)).toBe(true);
+    expect(store.claimInvite("31923:e:x", "code2", "bob", 20, 2)).toBe(true);
+    expect(store.claimInvite("31923:e:x", "code2", "carol", 20, 2)).toBe(false);
+    expect(store.inviteRedemptions("31923:e:x", "code2")).toBe(2);
+    store.close();
+  });
+
   it("REFUSES to open a database written by a newer binary", async () => {
     const path = tmpDb();
     const store = new Store(path);
@@ -800,6 +830,44 @@ describe("job enqueue outcomes and the recompute memo reset", () => {
     expect(store.clearMatchJobMemo(coordinate)).toBe(0);
     expect(store.enqueueJob("process_attendee", "proc:done", { coordinate })).toBe("done");
     expect(store.enqueueJob("score_batch", "other-event", { coordinate: "31923:eid:other" })).toBe("done");
+  });
+
+  // Jobs 51 and 70 in production: process_attendee POISONED in July on a
+  // translation shape fixed on 2026-07-30, and no operator action could re-run
+  // them. recompute deliberately skips process_attendee (so it never re-bills
+  // STT), and reprocess's own enqueue hit the poisoned row's dedupe key and was
+  // silently discarded. Two attendees had no profile for two weeks.
+  it("clearAttendeeJobMemo frees a POISONED profile job so reprocess can revive it", () => {
+    const store = new Store();
+    const pubkey = "a".repeat(64);
+    store.enqueueJob("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
+    const j = store.claimNextJob(1000, "A", 60_000)!;
+    store.failJob(j.id, 5, 0, "translation contract", true, "A"); // poisoned
+    // The state reprocess was stuck in: pressing the button changes nothing.
+    expect(store.enqueueJob("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey })).toBe(
+      "poison",
+    );
+
+    expect(store.clearAttendeeJobMemo(coordinate, pubkey)).toBe(1);
+    expect(store.enqueueJob("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey })).toBe(
+      "enqueued",
+    );
+  });
+
+  it("clearAttendeeJobMemo touches only that attendee's terminal rows", () => {
+    const store = new Store();
+    const mine = "a".repeat(64);
+    const theirs = "b".repeat(64);
+    // Another attendee's finished row — re-running it would re-bill their STT.
+    store.enqueueJob("process_attendee", "proc:theirs", { coordinate, pubkey: theirs });
+    const other = store.claimNextJob(1000, "A", 60_000)!;
+    store.completeJob(other.id, "A");
+    // My own LIVE row must keep coalescing rather than being duplicated.
+    store.enqueueJob("process_attendee", "proc:mine-live", { coordinate, pubkey: mine });
+
+    expect(store.clearAttendeeJobMemo(coordinate, mine)).toBe(0);
+    expect(store.enqueueJob("process_attendee", "proc:theirs", { coordinate, pubkey: theirs })).toBe("done");
+    expect(store.enqueueJob("process_attendee", "proc:mine-live", { coordinate, pubkey: mine })).toBe("pending");
   });
 
   it("jobStateCounts groups the queue by state", () => {

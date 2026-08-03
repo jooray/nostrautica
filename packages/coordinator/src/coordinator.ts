@@ -44,6 +44,8 @@ import {
   sha256Hex,
   utf8ToBytes,
   inviteListContentSchema,
+  invitePolicyOf,
+  type InvitePolicy,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
   coordinatorGrantContentSchema,
@@ -120,6 +122,7 @@ import {
 } from "./nostr/publisher.js";
 import { transcribeMedia, MediaPolicyError } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "./providers/types.js";
+import { ProviderHttpError } from "./providers/http.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
@@ -169,8 +172,17 @@ const MAX_ATTENDEES_PER_EVENT = 2000;
 const INBOX_RATE_WINDOW_MS = 60_000;
 /** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
-/** Max inbound rumors accepted for ONE event per window across all senders. */
+/**
+ * Floor on inbound rumors accepted for ONE event per window across all senders.
+ * The real ceiling scales with the event's population — see {@link eventRumorBudget}.
+ */
 const MAX_RUMORS_PER_EVENT_WINDOW = 600;
+/**
+ * Additional per-window rumor budget granted per enrolled attendee. Sized so an
+ * attendee's ordinary burst (join + submission, then an intro and an edit later)
+ * fits several times over without the event as a whole hitting its ceiling.
+ */
+const RUMORS_PER_ATTENDEE_WINDOW = 4;
 /**
  * Rate-bucket key for the coordinator's OWN inbox (audit R4): anyone can publish a
  * kind-1059 wrap to the coordinator's public pubkey, so its inbox needs the same
@@ -185,6 +197,18 @@ const COORD_INBOX_RATE_KEY = "coordinator-inbox";
  *  Subscription callbacks are dispatched through this so a burst of gift wraps can't
  *  spawn unbounded concurrent handlers or pile unbounded closures in memory. */
 const INBOX_MAX_CONCURRENCY = 8;
+/**
+ * How old a 21601 may be and still be given time for its own 21600 to land
+ * ({@link Coordinator.awaitEnrollment}). A live delivery inversion is seconds
+ * old; anything older is not racing a join and is dropped without waiting.
+ */
+const ENROLLMENT_WAIT_MAX_AGE_SEC = 5 * 60;
+/**
+ * Concurrent enrollment waits. Half the inbound pool, so a flood of submissions
+ * from unenrolled identities can never hold every worker and starve the joins
+ * those waiters are waiting for.
+ */
+const MAX_ENROLLMENT_WAITS = Math.floor(INBOX_MAX_CONCURRENCY / 2);
 const INBOX_MAX_QUEUE = 2000;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
@@ -352,6 +376,8 @@ export interface CoordinatorDeps {
   sleep?: (ms: number) => Promise<void>;
   /** Backoff delays between live-wrap retries (COORD-2). Default [5s, 30s]. */
   wrapRetryDelaysMs?: number[];
+  /** Re-check delays for a 21601 that arrived before its own 21600. Default [250, 750, 1500]. */
+  enrollmentWaitMs?: number[];
   /** Max simultaneously installed events (audit COORD-3). Default 50. */
   maxEvents?: number;
   /**
@@ -456,6 +482,9 @@ export class Coordinator {
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly wrapRetryDelaysMs: number[];
+  private readonly enrollmentWaitMs: number[];
+  /** In-flight {@link awaitEnrollment} waits, bounded by MAX_ENROLLMENT_WAITS. */
+  private enrollmentWaits = 0;
   private readonly maxEvents: number;
   private readonly allowedEidPubkeys: Set<string>;
   /** Untrusted-relay policy (audit C4): host allowlist + dev-only insecure allowance. */
@@ -526,6 +555,7 @@ export class Coordinator {
     this.now = deps.now ?? (() => Date.now());
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.wrapRetryDelaysMs = deps.wrapRetryDelaysMs ?? [5_000, 30_000];
+    this.enrollmentWaitMs = deps.enrollmentWaitMs ?? [250, 750, 1_500];
     this.maxEvents = deps.maxEvents ?? DEFAULT_MAX_EVENTS;
     this.allowedEidPubkeys = new Set(deps.allowedEidPubkeys ?? []);
     this.relayPolicy = deps.relayPolicy ?? {};
@@ -556,6 +586,17 @@ export class Coordinator {
       // A poisoned job is surfaced to the organizer (audit Q12): persist a status
       // row and gift-wrap a 21606 status to E_id so it's visible without server logs.
       onPoison: (info) => void this.surfacePoison(info).catch(() => {}),
+      // A depleted provider account is not a bad job. Prod 2026-07-31: two
+      // attendees of a live event had `process_attendee` fail on Venice 402s and
+      // ended up with a hollow ai_profile (`{"summary":"","skills":[],…}`), which
+      // scoring correctly refuses to match on — so they silently had no matches
+      // at all while everyone around them did. The retry tail is three days long,
+      // which is generous, but running it out means the outage was long, not that
+      // the work should be thrown away.
+      poisonExempt: (err) =>
+        err instanceof ProviderHttpError && err.payment
+          ? "provider account out of credit — parked for reprocess after top-up"
+          : undefined,
     });
     this.registerJobHandlers();
   }
@@ -1393,9 +1434,34 @@ export class Coordinator {
   private inboxRateAllows(coordinate: string, senderPubkey: string): boolean {
     const now = this.now();
     const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
-    if (eventCount > MAX_RUMORS_PER_EVENT_WINDOW) return false;
+    if (eventCount > this.eventRumorBudget(coordinate)) return false;
     const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
     return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+  }
+
+  /**
+   * How many inbound rumors this event may produce in a window, floor plus a
+   * per-enrolled-attendee allowance.
+   *
+   * A flat 600 was a bound on an event of unstated size, and it is the wrong
+   * shape now that a whole room can be admitted from one QR: 300 people each
+   * sending a join and a submission is ~600 rumors in the minute the doors open,
+   * sitting exactly on the limit, and an over-budget rumor is dropped and left
+   * UNSEEN — recoverable only by a daemon restart inside the gift-wrap window.
+   * Turning away real joins to bound work is the wrong trade at precisely the
+   * moment the event most needs them.
+   *
+   * Scaling with population is self-limiting rather than merely larger. The
+   * per-SENDER cap is what actually stops abuse (one identity, 30 a minute), and
+   * enrolling costs a join request, which is itself rate-limited — so the budget
+   * can only grow as fast as genuine attendees arrive. `attendeeCount` includes
+   * pending rows, which is the point: joins create them, so the budget rises
+   * with the crowd during the burst instead of after it.
+   */
+  private eventRumorBudget(coordinate: string): number {
+    if (coordinate === COORD_INBOX_RATE_KEY) return MAX_RUMORS_PER_EVENT_WINDOW;
+    const enrolled = this.deps.store.attendeeCount(coordinate);
+    return MAX_RUMORS_PER_EVENT_WINDOW + enrolled * RUMORS_PER_ATTENDEE_WINDOW;
   }
 
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
@@ -1486,7 +1552,13 @@ export class Coordinator {
     // The in-flight claim taken by unwrapFresh is released here since we bypass
     // processRumorWithRetry (which would otherwise release it).
     if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
-      log(`[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate}`);
+      // Name the budget: "the event is over its ceiling" and "this one sender is
+      // flooding" are the same line otherwise, and they call for opposite
+      // responses from whoever is reading the log during an event.
+      log(
+        `[inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)} for ${coordinate} ` +
+          `(sender cap ${MAX_RUMORS_PER_SENDER_WINDOW}, event budget ${this.eventRumorBudget(coordinate)}/${INBOX_RATE_WINDOW_MS / 1000}s)`,
+      );
       this.inFlightRumors.delete(rumor.id);
       return;
     }
@@ -1497,7 +1569,8 @@ export class Coordinator {
     // own join request is recovered by the next backfill rescan once the join lands.
     if (
       rumor.kind === KIND_PROFILE_SUBMISSION &&
-      !this.deps.store.getAttendee(coordinate, rumor.pubkey)
+      !this.deps.store.getAttendee(coordinate, rumor.pubkey) &&
+      !(await this.awaitEnrollment(coordinate, rumor))
     ) {
       log(`[submission] dropped from ${short(rumor.pubkey)}: no enrollment row (never joined) for ${coordinate}`);
       this.inFlightRumors.delete(rumor.id);
@@ -1547,6 +1620,53 @@ export class Coordinator {
         });
       }
     });
+  }
+
+  /**
+   * Wait, briefly, for a 21601's own 21600 to land — the delivery inversion the
+   * C3 enrollment gate cannot otherwise tell apart from a stranger's submission.
+   *
+   * 42a3ad7 moved the attendee row ahead of the entitlement round-trip, which
+   * closed the window where the join handler was blocked for hundreds of ms with
+   * no row written. What it could not close is arrival order: the app fans the
+   * two wraps out concurrently, each needing its own signer round-trips (wholly
+   * unordered under NIP-46, where every seal is a relay round-trip to Amber),
+   * and they reach us via whichever relay answers first. When the submission
+   * wins that race it is dropped, and because the live subscription never
+   * re-delivers a stored event it already sent, recovery depends on the daemon
+   * restarting inside the 3-day gift-wrap window. One attendee never got theirs
+   * back that way.
+   *
+   * The inversion is a network-ordering artifact measured in milliseconds, so a
+   * couple of seconds of re-checking resolves essentially all of it while
+   * leaving the gate's actual purpose — a stranger cannot mint an attendee row
+   * by submitting a profile — completely intact. A stranger simply waits 2.5s
+   * before being dropped exactly as before.
+   *
+   * Two bounds keep that from becoming a cost worth paying for an attacker.
+   * Only a YOUNG rumor waits: a live race is seconds old, while a replayed or
+   * backfilled wrap is not racing anything (and backfill dispatches joins first
+   * for this very reason), so those are dropped instantly. And at most
+   * MAX_ENROLLMENT_WAITS run at once, so waiters can never occupy the whole
+   * inbound worker pool and starve real work behind them.
+   */
+  private async awaitEnrollment(coordinate: string, rumor: Rumor): Promise<boolean> {
+    const ageSec = Math.floor(this.now() / 1000) - (rumor.created_at ?? 0);
+    if (ageSec > ENROLLMENT_WAIT_MAX_AGE_SEC) return false;
+    if (this.enrollmentWaits >= MAX_ENROLLMENT_WAITS) return false;
+    this.enrollmentWaits++;
+    try {
+      for (const delay of this.enrollmentWaitMs) {
+        await this.sleep(delay);
+        if (this.deps.store.getAttendee(coordinate, rumor.pubkey)) {
+          log(`[submission] from ${short(rumor.pubkey)} outran its join request — enrolled after ${delay}ms, processing`);
+          return true;
+        }
+      }
+      return false;
+    } finally {
+      this.enrollmentWaits--;
+    }
   }
 
   /**
@@ -1797,12 +1917,12 @@ export class Coordinator {
       now: this.now(),
     });
 
-    const publishedInviteHashes = await this.fetchInviteHashes(state);
+    const publishedInvites = await this.fetchInviteHashes(state);
     let decision = evaluateEntitlement([this.inviteChecker], {
       coordinate: state.coordinate,
       attendeePubkey,
       invite,
-      publishedInviteHashes,
+      publishedInvites,
     }, this.now());
 
     // A code that fails validation against the CACHED hash set is not
@@ -1816,12 +1936,12 @@ export class Coordinator {
     // "no invite proof" or "already used", where a re-fetch changes nothing),
     // closes both without paying a relay round-trip on every join.
     if (!decision.grant && decision.reason === "invalid invite proof") {
-      const freshHashes = await this.fetchInviteHashes(state, { force: true });
+      const freshInvites = await this.fetchInviteHashes(state, { force: true });
       decision = evaluateEntitlement([this.inviteChecker], {
         coordinate: state.coordinate,
         attendeePubkey,
         invite,
-        publishedInviteHashes: freshHashes,
+        publishedInvites: freshInvites,
       }, this.now());
       if (decision.grant) {
         log(`[join] ${short(attendeePubkey)} invite hash missing from cache — bypass re-fetch found it`);
@@ -1945,7 +2065,7 @@ export class Coordinator {
     const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck);
     await this.deps.transport.publish(grant, this.accountRelays(state));
     await this.publishDirectory(state, attendeePubkey);
-    await this.publishRoster(state);
+    await this.publishRosterCoalesced(state);
     log(`[grant] ECK granted to ${short(attendeePubkey)}; directory + roster published`);
     // Attendee-count change (spec §9): re-evaluate billing — this new approval may
     // push the event over its free tier. Roster/grant above always run first, so
@@ -2088,7 +2208,7 @@ export class Coordinator {
       // Rebuild matches under our authorship (the prior 31605s are undecryptable to us).
       if (state.matching === "on") this.enqueueProcess(state.coordinate, a.pubkey);
     }
-    await this.publishRoster(state);
+    await this.publishRosterCoalesced(state);
     log(`[handover] ${state.coordinate}: seeded ${seeded}, republished directory/roster/grants under this coordinator`);
   }
 
@@ -2163,6 +2283,42 @@ export class Coordinator {
     await this.publish(entry, state.configRelays);
   }
 
+  /**
+   * Publish the roster, collapsing a burst of approvals into as few publishes as
+   * the correctness requirement allows.
+   *
+   * The 31604 is a full snapshot of the approved set, so N approvals in the same
+   * moment do not need N publishes — the last one carries everybody. That was
+   * fine while approvals trickled in through an organizer's queue, and stopped
+   * being fine the moment a whole room could scan one QR: 300 auto-approvals
+   * meant 300 publishes of a list growing towards 300 ECK-encrypted entries, to
+   * relays already carrying the join traffic that caused them.
+   *
+   * A caller still awaits a publish that INCLUDES its own change, which is what
+   * makes this safe to drop in behind `grantAndPublish`. A caller arriving while
+   * a publish is in flight marks the roster dirty and waits on the runner; the
+   * runner loops while dirty, so a snapshot taken after that caller's write is
+   * guaranteed to be published before the promise it awaited settles.
+   */
+  private publishRosterCoalesced(state: EventState): Promise<void> {
+    const key = state.coordinate;
+    this.rosterDirty.add(key);
+    const active = this.rosterRunners.get(key);
+    if (active) return active;
+    const run = (async () => {
+      try {
+        // `delete` returns whether the flag was set — consume it, publish the
+        // snapshot that includes it, and go round again if anyone marked it
+        // dirty while that publish was in flight.
+        while (this.rosterDirty.delete(key)) await this.publishRoster(state);
+      } finally {
+        this.rosterRunners.delete(key);
+      }
+    })();
+    this.rosterRunners.set(key, run);
+    return run;
+  }
+
   private async publishRoster(state: EventState): Promise<void> {
     const approved = this.deps.store.approvedAttendees(state.coordinate);
     const { bytes } = this.currentEck(state);
@@ -2188,7 +2344,10 @@ export class Coordinator {
           .map((k) => ({
             pubkey: k.chat_pubkey,
             ...(k.label ? { label: k.label } : {}),
-            added_at: k.updated_at,
+            // UNIX SECONDS, like every other timestamp on the wire. The store keeps
+            // `updated_at` in ms (Date.now()); publishing it raw rendered every chat
+            // device as "added 8/15/58545" in the device list.
+            added_at: Math.floor(k.updated_at / 1000),
           }));
         return {
           pubkey: a.pubkey,
@@ -2673,7 +2832,7 @@ export class Coordinator {
     }
     if (candidates.length === 0) return { scored: [], missing: 0 };
 
-    const { scores, missing } = await scoreBatch(
+    const { scores, missing, misattributed } = await scoreBatch(
       this.roles.match.llm,
       this.roles.match.model,
       state.scoringCtx,
@@ -2683,6 +2842,13 @@ export class Coordinator {
       this.loadDisplayName(coordinate, target),
       signal,
     );
+    // Loud on purpose: an entry whose echoed name disagreed with its number means
+    // the model handed one attendee's match text to another, which is invisible in
+    // the "K scored, 0 unparsed" line and is what made the 2026-07-31 report so
+    // hard to see from the logs alone.
+    for (const note of misattributed ?? []) {
+      log(`[match] MISATTRIBUTED ${short(target)} batch: ${note}`);
+    }
     // Lifecycle recheck before any directed write (audit R3): the event may have
     // detached/expired during the scoring call; don't recreate pair rows a purge
     // just removed.
@@ -2743,7 +2909,7 @@ export class Coordinator {
     }
     if (targets.length === 0) return { scored: [], missing: 0 };
 
-    const { scores, missing } = await scoreReverseBatch(
+    const { scores, missing, misattributed } = await scoreReverseBatch(
       this.roles.match.llm,
       this.roles.match.model,
       state.scoringCtx,
@@ -2753,6 +2919,9 @@ export class Coordinator {
       this.loadDisplayName(coordinate, shared),
       signal,
     );
+    for (const note of misattributed ?? []) {
+      log(`[match] MISATTRIBUTED reverse batch for ${short(shared)}: ${note}`);
+    }
     // Lifecycle recheck before any directed write (audit R3), as in scoreBatchJob.
     if (!this.eventStillLive(coordinate)) return { scored: [], missing: 0 };
     const scored: CandidatePair[] = [];
@@ -3001,7 +3170,20 @@ export class Coordinator {
       this.resumeParkedWork(coordinate);
       const pubkey = String(args.pubkey ?? "");
       if (pubkey) {
-        this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, { coordinate, pubkey });
+        // Forget this attendee's finished/poisoned processing rows first, or the
+        // enqueue below is silently dropped: the key is fixed (`:manual`), so
+        // INSERT OR IGNORE turns every press after the first into a no-op, and a
+        // POISONED row makes the attendee permanently unreprocessable — which is
+        // exactly how two attendees sat without profiles for two weeks after a
+        // translation bug that had already been fixed.
+        const forgotten = this.deps.store.clearAttendeeJobMemo(coordinate, pubkey);
+        const outcome = this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, {
+          coordinate,
+          pubkey,
+        });
+        log(
+          `[admin] reprocess ${coordinate} ${short(pubkey)}: cleared ${forgotten} finished job row(s), enqueue ${outcome}`,
+        );
       }
     } else if (cmd === "revoke") {
       const pubkey = String(args.pubkey ?? "");
@@ -3162,7 +3344,7 @@ export class Coordinator {
         }
       }
     }
-    await this.publishRoster(state);
+    await this.publishRosterCoalesced(state);
     // 5. Republish the event matrix under the new ECK (visibility=event), excluding
     //    the removed attendee; otherwise it stays encrypted under the old ECK.
     if (state.matching === "on" && state.matchVisibility === "event") {
@@ -3409,7 +3591,10 @@ export class Coordinator {
    * (handleJoin's single bypass retry) — without paying a relay fetch on the
    * common case of every other join.
    */
-  private async fetchInviteHashes(state: EventState, opts: { force?: boolean } = {}): Promise<Set<string>> {
+  private async fetchInviteHashes(
+    state: EventState,
+    opts: { force?: boolean } = {},
+  ): Promise<Map<string, InvitePolicy>> {
     const cached = this.inviteHashCache.get(state.coordinate);
     if (cached && !opts.force) return cached;
     const events = await this.deps.transport.fetch(
@@ -3417,17 +3602,17 @@ export class Coordinator {
       state.configRelays,
     );
     const latest = pickLatest(events);
-    let hashes = new Set<string>();
+    let invites = new Map<string, InvitePolicy>();
     if (latest) {
       try {
         const parsed = inviteListContentSchema.parse(JSON.parse(latest.content));
-        hashes = new Set(parsed.invites.map((i) => i.h));
+        invites = new Map(parsed.invites.map((i) => [i.h, invitePolicyOf(i)]));
       } catch {
-        hashes = new Set();
+        invites = new Map();
       }
     }
-    this.inviteHashCache.set(state.coordinate, hashes);
-    return hashes;
+    this.inviteHashCache.set(state.coordinate, invites);
+    return invites;
   }
 
   /**
@@ -3614,7 +3799,12 @@ export class Coordinator {
   private configSubs = new Map<string, { key: string; close: () => void }>();
   private chatSubs = new Map<string, { key: string; close: () => void }>();
   /** Per-event invite-hash cache (audit COORD-29); invalidated on a new 31601. */
-  private inviteHashCache = new Map<string, Set<string>>();
+  private inviteHashCache = new Map<string, Map<string, InvitePolicy>>();
+  /** Coordinates whose roster changed and has not been published since (see
+   *  {@link Coordinator.publishRosterCoalesced}). */
+  private rosterDirty = new Set<string>();
+  /** The in-flight roster publisher per coordinate, awaited by later callers. */
+  private rosterRunners = new Map<string, Promise<void>>();
 
   /**
    * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:

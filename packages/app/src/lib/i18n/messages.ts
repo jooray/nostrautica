@@ -32,6 +32,10 @@ export const messages = {
 
     // Background sync (audit UX-15)
     "sync.queued": "Saved — will send when you're back online.",
+    "submit.error.invalid":
+      "Your profile couldn't be sent: {field} is {reason}. Fix it and save again — nothing was lost.",
+    "profile.authored.links.dropped":
+      "Couldn't read these as links, so they weren't saved: {links}",
     "draft.restored": "Restored an unsent draft.",
     "draft.discard": "Discard draft",
     "outbox.pending.one": "{n} change waiting to send",
@@ -326,6 +330,9 @@ export const messages = {
     "readiness.cta.join": "Join this event",
     "readiness.cta.backup": "Back up your key",
     "readiness.cta.record": "Record your intro",
+    "readiness.cta.profile": "Complete your profile",
+    "readiness.hint.empty":
+      "Your profile is empty, so matching has nothing to go on and you won't appear in anyone's matches. A line about yourself or a few skills is enough.",
     "readiness.cta.matches": "See your matches",
     "readiness.state.done": "Done",
     "readiness.state.current": "Current step",
@@ -477,6 +484,11 @@ export const messages = {
     "join.displayNamePublic": "(public)",
     "join.namePlaceholder": "How should people know you?",
     "join.aboutOptional": "(optional)",
+    "join.aboutEvent": "(for this event — your Nostr profile isn't changed)",
+    "join.about.placeholder": "A sentence or two about what you work on.",
+    "join.empty.badge": "Nothing to match on yet",
+    "join.empty.hint":
+      "You can join like this, but matching has nothing to go on — add a line about yourself or a few skills and you'll actually get introduced to people.",
     "join.concreteHint": "The next two pick who you should meet — be concrete.",
     "join.skills": "Skills",
     "join.skills.hint": "— separate with commas",
@@ -786,6 +798,8 @@ export const messages = {
     "admin.yourNpub": "Your npub",
     "admin.copyNpub": "Copy npub",
     "admin.copied": "Copied ✓",
+    "admin.person.copyId": "Copy this person's Nostr id (nprofile)",
+    "admin.person.copyIdFailed": "Copying failed — select and copy it by hand:",
     "admin.grant.step1": "On the device you created the event with, open Admin → Co-organizers.",
     "admin.grant.step2": "Paste this npub and add it.",
     "admin.grant.step3":
@@ -929,6 +943,16 @@ export const messages = {
     "admin.invites.generating": "Generating…",
     "admin.invites.generate": "Generate",
     "admin.invites.copyLink": "Copy link",
+    "admin.invites.shared.title": "Shared entry code (one QR for the room)",
+    "admin.invites.shared.body":
+      "One code everyone can scan — put it on the opening slide and people join without waiting for approval. The link is the secret: knowing the event is not enough to get in.",
+    "admin.invites.shared.uses": "People",
+    "admin.invites.shared.hours": "Valid for (hours)",
+    "admin.invites.shared.generate": "Create shared code",
+    "admin.invites.shared.usesHint":
+      "0 means no limit. Anyone who scans it can forward the link, so keep the window short — after it expires, latecomers land in the approval queue instead of being turned away.",
+    "admin.invites.shared.ephemeral":
+      "This code is only in this tab — it is never saved. Show or copy it before you close the page.",
     "admin.invites.copyAll": "Copy all links (one per line)",
     "admin.invites.copiedAll": "Copied all ✓",
     "admin.invites.download": "Download as .txt",
@@ -1114,6 +1138,12 @@ export const messages = {
     "chat.send": "Send",
     "chat.checking": "Checking your access…",
     "chat.sendFailed": "Couldn't send. You may have been removed from this chat, or the connection dropped.",
+    "chat.rejoin": "Rejoin this chat",
+    "chat.rejoining": "Rejoining…",
+    "chat.rejoinRequested":
+      "Asked to be added again — this usually takes under a minute. Your message stays in the box; send it once the chat is back.",
+    "chat.rejoinFailed": "Couldn't ask to rejoin. Check your connection and try again.",
+    "chat.rejoinHint": "Still nothing after trying again? Ask to be added to this chat again.",
     "chat.unavailable": "Group chat isn't available for this event, or you're not a member yet.",
     "chat.backToEvent": "Back to event",
     "chat.handoff.link.title": "Use this chat in Whitenoise (or another Marmot client)",
@@ -1447,6 +1477,10 @@ export const messages = {
 
     // Synchronizácia na pozadí (audit UX-15)
     "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
+    "submit.error.invalid":
+      "Tvoj profil sa nepodarilo odoslať: {field} — {reason}. Oprav to a ulož znova, nič sa nestratilo.",
+    "profile.authored.links.dropped":
+      "Tieto sa nepodarilo prečítať ako odkazy, takže sa neuložili: {links}",
     "draft.restored": "Obnovený neodoslaný koncept.",
     "draft.discard": "Zahodiť koncept",
     "outbox.pending.one": "{n} zmena čaká na odoslanie",
@@ -1741,6 +1775,9 @@ export const messages = {
     "readiness.cta.join": "Pripojiť sa k podujatiu",
     "readiness.cta.backup": "Zálohovať kľúč",
     "readiness.cta.record": "Nahrať predstavenie",
+    "readiness.cta.profile": "Doplniť profil",
+    "readiness.hint.empty":
+      "Tvoj profil je prázdny, párovanie nemá z čoho vychádzať a v ničích návrhoch sa neobjavíš. Stačí veta o sebe alebo pár zručností.",
     "readiness.cta.matches": "Zobraziť spojenia",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuálny krok",
@@ -1894,6 +1931,11 @@ export const messages = {
     "join.displayNamePublic": "(verejné)",
     "join.namePlaceholder": "Ako vás majú ľudia poznať?",
     "join.aboutOptional": "(voliteľné)",
+    "join.aboutEvent": "(pre toto podujatie — tvoj Nostr profil sa nemení)",
+    "join.about.placeholder": "Veta či dve o tom, čomu sa venuješ.",
+    "join.empty.badge": "Zatiaľ niet čo párovať",
+    "join.empty.hint":
+      "Takto sa pripojiť môžeš, ale párovanie nemá z čoho vychádzať — pridaj vetu o sebe alebo pár zručností a naozaj ťa s niekým spojíme.",
     "join.concreteHint": "Ďalšie dve polia určia, koho by ste mali stretnúť — buďte konkrétni.",
     "join.skills": "Zručnosti",
     "join.skills.hint": "— oddeľte čiarkami",
@@ -2206,6 +2248,8 @@ export const messages = {
     "admin.yourNpub": "Váš npub",
     "admin.copyNpub": "Kopírovať npub",
     "admin.copied": "Skopírované ✓",
+    "admin.person.copyId": "Skopírovať Nostr id tejto osoby (nprofile)",
+    "admin.person.copyIdFailed": "Kopírovanie zlyhalo — označte a skopírujte ručne:",
     "admin.grant.step1":
       "Na zariadení, ktorým ste podujatie vytvorili, otvorte Administrácia → Spoluorganizátori.",
     "admin.grant.step2": "Vložte tento npub a pridajte ho.",
@@ -2349,6 +2393,16 @@ export const messages = {
     "admin.invites.generating": "Generuje sa…",
     "admin.invites.generate": "Vygenerovať",
     "admin.invites.copyLink": "Kopírovať odkaz",
+    "admin.invites.shared.title": "Zdieľaný vstupný kód (jeden QR pre celú sálu)",
+    "admin.invites.shared.body":
+      "Jeden kód, ktorý naskenujú všetci — daj ho na úvodnú snímku a ľudia sa pripoja bez čakania na schválenie. Tajomstvom je odkaz: vedieť o podujatí nestačí.",
+    "admin.invites.shared.uses": "Počet ľudí",
+    "admin.invites.shared.hours": "Platnosť (hodiny)",
+    "admin.invites.shared.generate": "Vytvoriť zdieľaný kód",
+    "admin.invites.shared.usesHint":
+      "0 znamená bez limitu. Kto ho naskenuje, môže odkaz poslať ďalej, preto nechaj okno krátke — po vypršaní sa oneskorenci dostanú do frontu na schválenie, nie sú odmietnutí.",
+    "admin.invites.shared.ephemeral":
+      "Tento kód existuje len v tomto okne — nikde sa neukladá. Ukáž alebo skopíruj ho skôr, než stránku zavrieš.",
     "admin.invites.copyAll": "Kopírovať všetky odkazy (po riadkoch)",
     "admin.invites.copiedAll": "Všetky skopírované ✓",
     "admin.invites.download": "Stiahnuť ako .txt",
@@ -2532,6 +2586,12 @@ export const messages = {
     "chat.send": "Odoslať",
     "chat.checking": "Overujeme váš prístup…",
     "chat.sendFailed": "Správu sa nepodarilo odoslať. Možno vás z tohto chatu odstránili, alebo vypadlo spojenie.",
+    "chat.rejoin": "Znovu sa pripojiť do chatu",
+    "chat.rejoining": "Pripájame…",
+    "chat.rejoinRequested":
+      "Požiadali sme o opätovné pridanie — zvyčajne to trvá do minúty. Správa vám zostáva v okienku, odošlite ju, keď bude chat späť.",
+    "chat.rejoinFailed": "Žiadosť o opätovné pripojenie sa nepodarila. Skontrolujte spojenie a skúste to znova.",
+    "chat.rejoinHint": "Stále nič ani po opätovnom pokuse? Požiadajte o opätovné pridanie do tohto chatu.",
     "chat.unavailable": "Skupinový chat nie je pre toto podujatie dostupný, alebo ešte nie ste členom.",
     "chat.backToEvent": "Späť na podujatie",
     "chat.handoff.link.title": "Použite tento chat vo Whitenoise (alebo inom klientovi Marmot)",
@@ -2864,6 +2924,10 @@ export const messages = {
 
     // Synchronizace na pozadí (audit UX-15)
     "sync.queued": "Uloženo — odešle se po obnovení připojení.",
+    "submit.error.invalid":
+      "Tvůj profil se nepodařilo odeslat: {field} — {reason}. Oprav to a ulož znovu, nic se neztratilo.",
+    "profile.authored.links.dropped":
+      "Tyto se nepodařilo přečíst jako odkazy, takže se neuložily: {links}",
     "draft.restored": "Obnoven neodeslaný koncept.",
     "draft.discard": "Zahodit koncept",
     "outbox.pending.one": "{n} změna čeká na odeslání",
@@ -3158,6 +3222,9 @@ export const messages = {
     "readiness.cta.join": "Připojit se k akci",
     "readiness.cta.backup": "Zazálohovat klíč",
     "readiness.cta.record": "Nahrát představení",
+    "readiness.cta.profile": "Doplnit profil",
+    "readiness.hint.empty":
+      "Tvůj profil je prázdný, párování nemá z čeho vycházet a v ničích návrzích se neobjevíš. Stačí věta o sobě nebo pár dovedností.",
     "readiness.cta.matches": "Zobrazit spojení",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuální krok",
@@ -3310,6 +3377,11 @@ export const messages = {
     "join.displayNamePublic": "(veřejné)",
     "join.namePlaceholder": "Jak vás mají lidé znát?",
     "join.aboutOptional": "(volitelné)",
+    "join.aboutEvent": "(pro tuto akci — tvůj Nostr profil se nemění)",
+    "join.about.placeholder": "Věta či dvě o tom, čemu se věnuješ.",
+    "join.empty.badge": "Zatím není co párovat",
+    "join.empty.hint":
+      "Takto se připojit můžeš, ale párování nemá z čeho vycházet — přidej větu o sobě nebo pár dovedností a opravdu tě s někým spojíme.",
     "join.concreteHint": "Další dvě pole určí, koho byste měli poznat — buďte konkrétní.",
     "join.skills": "Dovednosti",
     "join.skills.hint": "— oddělte čárkami",
@@ -3621,6 +3693,8 @@ export const messages = {
     "admin.yourNpub": "Váš npub",
     "admin.copyNpub": "Kopírovat npub",
     "admin.copied": "Zkopírováno ✓",
+    "admin.person.copyId": "Zkopírovat Nostr id této osoby (nprofile)",
+    "admin.person.copyIdFailed": "Kopírování selhalo — označte a zkopírujte ručně:",
     "admin.grant.step1":
       "Na zařízení, kterým jste akci vytvořili, otevřete Administrace → Spoluorganizátoři.",
     "admin.grant.step2": "Vložte tento npub a přidejte ho.",
@@ -3764,6 +3838,16 @@ export const messages = {
     "admin.invites.generating": "Generování…",
     "admin.invites.generate": "Vygenerovat",
     "admin.invites.copyLink": "Kopírovat odkaz",
+    "admin.invites.shared.title": "Sdílený vstupní kód (jeden QR pro celý sál)",
+    "admin.invites.shared.body":
+      "Jeden kód, který naskenují všichni — dej ho na úvodní snímek a lidé se připojí bez čekání na schválení. Tajemstvím je odkaz: vědět o akci nestačí.",
+    "admin.invites.shared.uses": "Počet lidí",
+    "admin.invites.shared.hours": "Platnost (hodiny)",
+    "admin.invites.shared.generate": "Vytvořit sdílený kód",
+    "admin.invites.shared.usesHint":
+      "0 znamená bez limitu. Kdo ho naskenuje, může odkaz poslat dál, proto nech okno krátké — po vypršení se opozdilci dostanou do fronty na schválení, nejsou odmítnuti.",
+    "admin.invites.shared.ephemeral":
+      "Tento kód existuje jen v tomto okně — nikde se neukládá. Ukaž nebo zkopíruj ho dřív, než stránku zavřeš.",
     "admin.invites.copyAll": "Kopírovat všechny odkazy (po řádcích)",
     "admin.invites.copiedAll": "Vše zkopírováno ✓",
     "admin.invites.download": "Stáhnout jako .txt",
@@ -3950,6 +4034,12 @@ export const messages = {
     "chat.send": "Odeslat",
     "chat.checking": "Kontrola vašeho přístupu…",
     "chat.sendFailed": "Odeslání se nezdařilo. Možná jste byli z tohoto chatu odebráni, nebo vypadlo spojení.",
+    "chat.rejoin": "Znovu se připojit do chatu",
+    "chat.rejoining": "Připojujeme…",
+    "chat.rejoinRequested":
+      "Požádali jsme o opětovné přidání — obvykle to trvá do minuty. Zpráva vám zůstává v okénku, odešlete ji, až bude chat zpět.",
+    "chat.rejoinFailed": "Žádost o opětovné připojení se nezdařila. Zkontrolujte spojení a zkuste to znovu.",
+    "chat.rejoinHint": "Pořád nic ani po dalším pokusu? Požádejte o opětovné přidání do tohoto chatu.",
     "chat.unavailable": "Skupinový chat není pro tuto akci dostupný, nebo ještě nejste členem.",
     "chat.backToEvent": "Zpět na akci",
     "chat.handoff.link.title": "Použijte tento chat ve Whitenoise (nebo jiném klientovi Marmot)",

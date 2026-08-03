@@ -264,6 +264,9 @@ export const BATCH_SYSTEM_PROMPT = [
   "(or an empty list) when you can't ground a good one; never pad.",
   "",
   "Return one entry per candidate, using the candidate's number as `index`. Score EVERY candidate exactly once.",
+  "Also copy that candidate's Name into `entry_name`, exactly as printed under their heading. `index` and",
+  "`entry_name` must refer to the SAME candidate — the one your reasoning and icebreakers are about. If they",
+  "disagree the entry is discarded, so check the heading you actually wrote about before numbering it.",
 ].join("\n");
 
 /** Strict JSON schema: an object with a `matches` array, one entry per candidate. */
@@ -277,9 +280,14 @@ export const BATCH_SCORE_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["index", "similarity", "complementarity", "score", "reasoning_for_target"],
+        required: ["index", "entry_name", "similarity", "complementarity", "score", "reasoning_for_target"],
         properties: {
           index: { type: "number", description: "the candidate number this entry scores" },
+          entry_name: {
+            type: "string",
+            description:
+              "The Name printed in the heading block this entry scores, copied verbatim. Must agree with `index`.",
+          },
           similarity: { type: "number" },
           complementarity: { type: "number" },
           score: { type: "number" },
@@ -302,11 +310,69 @@ export const BATCH_SCORE_SCHEMA = {
 
 interface RawBatchMatch {
   index: number;
+  entry_name?: unknown;
   similarity: number;
   complementarity: number;
   score: number;
   reasoning_for_target: string;
   icebreakers?: unknown;
+}
+
+/**
+ * Fold a printed name for comparison: case, surrounding space, inner runs of
+ * space, and diacritics all vary between what we print and what a model copies
+ * back ("Ľudo" → "ludo"). Stripping accents is deliberately generous — the check
+ * exists to catch an entry written about an entirely different person, and a
+ * false mismatch would discard a perfectly good score.
+ */
+function foldName(name: unknown): string {
+  if (typeof name !== "string") return "";
+  return name
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Resolve which person a batch entry is really about.
+ *
+ * `index` is the only thing binding an LLM-authored reasoning to a pubkey, and
+ * an index the model assigns to the wrong block parses perfectly: the batch
+ * reports "K scored, 0 unparsed" and every attendee gets someone else's match
+ * text under their name and avatar (prod 2026-07-31, reported by an organizer
+ * whose top matches were each describing the NEXT person in the list). Ten
+ * same-shaped profiles per call is exactly the condition this file already
+ * documents the model confusing elsewhere.
+ *
+ * So the model also echoes the name printed in the block it scored, and the two
+ * have to agree. The echo is worth something precisely because it comes from the
+ * model's own idea of who it wrote about: if it slipped, the name follows the
+ * slip and the disagreement is visible. When the echoed name matches exactly one
+ * other person in the batch we take that as the real subject and keep the work;
+ * when it matches none or several, the entry is dropped and re-scored, because
+ * an attendee seeing no match is a delay while an attendee seeing someone else's
+ * match is a lie about a real person.
+ */
+function resolveEntry<T extends BatchCandidate>(
+  ordered: readonly T[],
+  idx: number,
+  echoed: unknown,
+): { subject: T; corrected?: string } | undefined {
+  const atIndex = ordered[idx - 1]!;
+  const echo = foldName(echoed);
+  const expected = foldName(atIndex.name);
+  // Nothing to check against: no name printed, or the model returned no echo.
+  if (!echo || !expected || echo === expected) return { subject: atIndex };
+  const named = ordered.filter((c) => foldName(c.name) === echo);
+  if (named.length === 1) {
+    return {
+      subject: named[0]!,
+      corrected: `entry ${idx} said "${atIndex.name}" but was written about "${named[0]!.name}"`,
+    };
+  }
+  return undefined;
 }
 
 /** A candidate in a batch, tagged with the caller's stable id (pubkey). */
@@ -322,6 +388,13 @@ export interface BatchScoreResult {
   scores: Map<string, DirectedScore>;
   /** Candidate ids the model did not return a valid entry for. */
   missing: string[];
+  /**
+   * Entries whose echoed name disagreed with their `index` (see resolveEntry) —
+   * one human-readable note each, for the caller to log. Non-empty means the
+   * model mislabelled at least one entry in this batch, which is worth seeing
+   * even when it was repairable.
+   */
+  misattributed?: string[];
 }
 
 /**
@@ -433,15 +506,24 @@ export async function scoreBatch(
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
-  const seen = new Set<number>();
+  // Keyed by the RESOLVED candidate, not the raw index: an entry may be repaired
+  // onto a different candidate, and two entries must never claim the same person.
+  const seen = new Set<string>();
+  const misattributed: string[] = [];
   for (const m of matches) {
     const idx = Number(m?.index);
     // 1-based index into `ordered`; ignore out-of-range / duplicate / malformed.
     if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
-    if (seen.has(idx)) continue;
     if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
-    seen.add(idx);
-    const cand = ordered[idx - 1]!;
+    const resolved = resolveEntry(ordered, idx, m.entry_name);
+    if (!resolved) {
+      misattributed.push(`entry ${idx}: name echo matched no single candidate — dropped`);
+      continue;
+    }
+    if (resolved.corrected) misattributed.push(resolved.corrected);
+    const cand = resolved.subject;
+    if (seen.has(cand.id)) continue;
+    seen.add(cand.id);
     const icebreakers = normalizeIcebreakers(m.icebreakers);
     scores.set(cand.id, {
       score: normalizeScore(m.score),
@@ -453,7 +535,7 @@ export async function scoreBatch(
   }
 
   const missing = candidates.filter((c) => !scores.has(c.id)).map((c) => c.id);
-  return { scores, missing };
+  return { scores, missing, ...(misattributed.length ? { misattributed } : {}) };
 }
 
 // ── Reverse-batch scoring (spec §16.2) ────────────────────────────────────────
@@ -557,6 +639,9 @@ export const REVERSE_BATCH_SYSTEM_PROMPT = [
   "(or none) rather than pad.",
   "",
   "Return one entry per target, using the target's number as `index`. Score EVERY target exactly once.",
+  "Also copy that target's Name into `entry_name`, exactly as printed under their heading — the WRITER of",
+  "the entry, not the shared person. `index` and `entry_name` must refer to the SAME target. If they",
+  "disagree the entry is discarded, so check whose heading you actually wrote from before numbering it.",
 ].join("\n");
 
 /**
@@ -670,14 +755,25 @@ export async function scoreReverseBatch(
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
-  const seen = new Set<number>();
+  const seen = new Set<string>();
+  const misattributed: string[] = [];
   for (const m of matches) {
     const idx = Number(m?.index);
     if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
-    if (seen.has(idx)) continue;
     if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
-    seen.add(idx);
-    const tgt = ordered[idx - 1]!;
+    // Same index/echo agreement as the forward batch. It matters at least as much
+    // here: this shape prints the recipient first and leaves each writer as item n
+    // of a numbered list, which the block comment above records as the arrangement
+    // the model already mixes up more often.
+    const resolved = resolveEntry(ordered, idx, m.entry_name);
+    if (!resolved) {
+      misattributed.push(`entry ${idx}: name echo matched no single target — dropped`);
+      continue;
+    }
+    if (resolved.corrected) misattributed.push(resolved.corrected);
+    const tgt = resolved.subject;
+    if (seen.has(tgt.id)) continue;
+    seen.add(tgt.id);
     const icebreakers = normalizeIcebreakers(m.icebreakers);
     scores.set(tgt.id, {
       score: normalizeScore(m.score),
@@ -689,7 +785,7 @@ export async function scoreReverseBatch(
   }
 
   const missing = targets.filter((t) => !scores.has(t.id)).map((t) => t.id);
-  return { scores, missing };
+  return { scores, missing, ...(misattributed.length ? { misattributed } : {}) };
 }
 
 /** Cosine similarity between two equal-length vectors. */

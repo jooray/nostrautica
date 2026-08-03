@@ -3,8 +3,16 @@ import {
   fieldsFromProfile,
   buildAuthoredSubmission,
   authoredChanged,
+  normalizeAuthoredProfile,
 } from "./authored-profile.js";
-import type { MediaDescriptor } from "@nostrautica/protocol";
+import {
+  attendeeProfileSchema,
+  MAX_ABOUT,
+  MAX_LINKS,
+  MAX_SKILLS,
+  type AttendeeProfile,
+  type MediaDescriptor,
+} from "@nostrautica/protocol";
 
 // Opaque descriptor — the model passes media through by reference; the exact
 // shape doesn't matter for these tests.
@@ -45,5 +53,73 @@ describe("authored-profile editing (UX-O3)", () => {
     expect(authoredChanged({ ...base, skills: "rust, go" }, base)).toBe(true);
     // Whitespace-only difference is not a change.
     expect(authoredChanged({ ...base, about: "hi  " }, base)).toBe(false);
+  });
+});
+
+/**
+ * The coordinator does not reject a too-long or malformed field — it rejects the
+ * SUBMISSION, permanently and silently (ZodError => "permanently unprocessable"
+ * => marked seen). So every case here is really one assertion: whatever comes
+ * out of normalization must parse against the schema the coordinator runs.
+ */
+describe("normalizeAuthoredProfile", () => {
+  const parses = (p: AttendeeProfile) => attendeeProfileSchema.safeParse(p).success;
+
+  it("repairs a scheme-less link rather than rejecting the submission", () => {
+    const { profile, dropped } = normalizeAuthoredProfile({
+      about: "",
+      skills: [],
+      looking_for: "",
+      links: ["example.com/me", "https://already.example"],
+    });
+    expect(profile.links).toEqual(["https://example.com/me", "https://already.example/"]);
+    expect(dropped).toEqual([]);
+    expect(parses(profile)).toBe(true);
+  });
+
+  it("reports a link it cannot repair instead of dropping it silently", () => {
+    const { profile, dropped } = normalizeAuthoredProfile({
+      about: "",
+      skills: [],
+      looking_for: "",
+      // A handle and a bare word are not hosts; the scheme'd ones are not links.
+      links: ["@my_handle", "my_handle", "javascript:alert(1)", "mailto:a@b.example"],
+    });
+    expect(profile.links).toEqual([]);
+    expect(dropped).toEqual(["@my_handle", "my_handle", "javascript:alert(1)", "mailto:a@b.example"]);
+  });
+
+  it("truncates an over-cap bio instead of losing the whole profile with it", () => {
+    const { profile } = normalizeAuthoredProfile({
+      about: "x".repeat(MAX_ABOUT + 500),
+      skills: [],
+      looking_for: "",
+      links: [],
+    });
+    expect(profile.about).toHaveLength(MAX_ABOUT);
+    expect(parses(profile)).toBe(true);
+  });
+
+  it("bounds and dedupes the list fields", () => {
+    const { profile } = normalizeAuthoredProfile({
+      about: "",
+      skills: [...Array(MAX_SKILLS + 10).keys()].map((i) => `skill-${i}`).concat("skill-0"),
+      looking_for: "",
+      links: [...Array(MAX_LINKS + 5).keys()].map((i) => `https://link-${i}.example`),
+    });
+    expect(profile.skills).toHaveLength(MAX_SKILLS);
+    expect(new Set(profile.skills).size).toBe(profile.skills.length);
+    expect(profile.links).toHaveLength(MAX_LINKS);
+    expect(parses(profile)).toBe(true);
+  });
+
+  it("leaves an ordinary profile alone", () => {
+    const input: AttendeeProfile = {
+      about: "Builder",
+      skills: ["rust", "go"],
+      looking_for: "co-founder",
+      links: ["https://example.com/"],
+    };
+    expect(normalizeAuthoredProfile(input)).toEqual({ profile: input, dropped: [] });
   });
 });

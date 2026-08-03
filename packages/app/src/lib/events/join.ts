@@ -16,15 +16,18 @@ import {
   makeInviteProof,
   blindedD,
   MAX_SUBMISSION_MEDIA,
+  MAX_MESSAGE,
+  MAX_NAME,
   type AttendeeProfile,
   type MediaDescriptor,
 } from "@nostrautica/protocol";
+import { normalizeAuthoredProfile } from "./authored-profile.js";
 import { decode } from "nostr-tools/nip19";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { loadSelfCopy } from "$lib/media/submit.js";
+import { loadSelfCopy, cacheSelfCopy } from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 export interface JoinInput {
@@ -65,12 +68,21 @@ export async function sendJoinRequest(
     joinTags.push(["invite", proof.invitePubkey, proof.sig]);
   }
 
+  // Bound what the join carries to what joinRequestContentSchema accepts. The
+  // penalty for overshooting is not a truncated name — the coordinator treats a
+  // ZodError as permanently unprocessable and drops the JOIN itself, so the
+  // person never appears in the queue at all. `name` reaching MAX_NAME is
+  // implausible from the form, but it is prefilled from a kind-0 nobody here
+  // controls, which is exactly the shape of input worth bounding.
   const joinContent = {
     v: 2,
-    name: input.name,
-    message: input.message ?? "",
+    name: input.name.slice(0, MAX_NAME),
+    message: (input.message ?? "").slice(0, MAX_MESSAGE),
     rsvp_public: !!input.rsvpPublic,
   };
+  // Same reasoning for the profile: `about` is copied verbatim from the joiner's
+  // kind-0 bio, and one over MAX_ABOUT would take the whole submission with it.
+  const profile = input.profile ? normalizeAuthoredProfile(input.profile).profile : undefined;
 
   // Application revision (NIP §3.3), REQUIRED on the 21601 submission — the
   // coordinator orders profile submissions by (rev, created_at, id) and drops any
@@ -94,11 +106,11 @@ export async function sendJoinRequest(
   ];
 
   // Optional profile submission (21601) — profile text + any media reused at join.
-  if (input.profile) {
+  if (profile) {
     const submission = {
       v: 2,
       rev,
-      profile: input.profile,
+      profile,
       // v2 (NIP §8): the 21601 submission caps media at MAX_SUBMISSION_MEDIA (4);
       // the 31602 self-copy below keeps the full set (MAX_MEDIA).
       media: (input.media ?? []).slice(0, MAX_SUBMISSION_MEDIA),
@@ -118,7 +130,7 @@ export async function sendJoinRequest(
     v: 2,
     a: ctx.coordinate,
     rev,
-    profile: input.profile,
+    profile,
     media: input.media ?? [],
   };
   const selfD = blindedD(blindingKey, ctx.coordinate, attendeePubkey);
@@ -130,6 +142,17 @@ export async function sendJoinRequest(
     content: selfCipher,
   });
   wraps.push(publishOrQueue(selfEvent));
+  // Seed the local copy from the very first 31602 (both outcomes above are
+  // durable — relay or outbox). The next thing this attendee does is usually
+  // "record your intro" on the same venue Wi-Fi that just made this publish
+  // slow, and that flow builds its submission out of the self-copy: with no
+  // local copy to fall back on, an empty relay read there reads as "no profile"
+  // and blanks the fields typed on this very screen.
+  cacheSelfCopy(
+    ctx.coordinate,
+    { profile, media: input.media ?? [], rev },
+    selfEvent.created_at,
+  );
 
   // Opt-in public RSVP (31925) — a standard, discoverable calendar RSVP.
   if (input.rsvpPublic) {

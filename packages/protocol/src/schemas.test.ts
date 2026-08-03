@@ -13,6 +13,8 @@ import {
   organizerGrantContentSchema,
   adminCommandContentSchema,
   inviteListContentSchema,
+  invitePolicyOf,
+  INVITE_USES_UNLIMITED,
   myProfileContentSchema,
   directoryEntryContentSchema,
   rosterContentSchema,
@@ -197,6 +199,32 @@ describe("every §7 payload round-trips through JSON", () => {
       v: 2,
       invites: [{ h: hex, label: "vip-1" }],
     }));
+
+  it("31601 invite list: reusable entries carry uses + exp", () =>
+    roundTrips(inviteListContentSchema, {
+      v: 2,
+      invites: [{ h: hex, label: "door-1", uses: 200, exp: 1_800_000_000 }],
+    }));
+
+  it("invitePolicyOf: an omitted `uses` is single-use, 0 is unlimited", () => {
+    // The whole backward-compatibility story rests on this default: an older
+    // publisher that never wrote `uses` meant one person, and an older
+    // COORDINATOR — whose z.object strips the key it doesn't know — reaches the
+    // same conclusion. It under-admits, never over-admits.
+    expect(invitePolicyOf({})).toEqual({ uses: 1 });
+    expect(invitePolicyOf({ uses: INVITE_USES_UNLIMITED })).toEqual({ uses: 0 });
+    expect(invitePolicyOf({ uses: 5, exp: 42 })).toEqual({ uses: 5, exp: 42 });
+  });
+
+  it("31601 invite list: an unknown-key entry from a NEWER publisher still parses", () => {
+    // Forward compatibility in the other direction: this build must read a list
+    // written by a future one rather than treating the whole event as garbage.
+    const parsed = inviteListContentSchema.parse({
+      v: 2,
+      invites: [{ h: hex, label: "x", uses: 3, somethingNewer: true }],
+    });
+    expect(parsed.invites[0]).toEqual({ h: hex, label: "x", uses: 3 });
+  });
 
   it("31602 my profile (event + library variants)", () => {
     roundTrips(myProfileContentSchema, {

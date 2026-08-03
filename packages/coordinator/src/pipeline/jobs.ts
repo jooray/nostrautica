@@ -59,6 +59,19 @@ export interface JobRunnerOptions {
   now?: () => number;
   /** Called when a job exhausts its retries and enters the poison state (Q12). */
   onPoison?: (info: PoisonInfo) => void;
+  /**
+   * Consulted only when a job is about to poison: return a reason to PARK it
+   * instead, or undefined to let it poison normally.
+   *
+   * For failures that are about the world rather than the work — a provider
+   * account out of credit is the case this exists for — the retry tail running
+   * out means "this outage lasted longer than three days", not "this job is
+   * bad". Poisoning discards it, and the attendee's profile is simply never
+   * built. Parked, it survives until an organizer reprocess/recompute revives
+   * it. The runner does not itself know a billing error from any other, so the
+   * classification is injected by the coordinator.
+   */
+  poisonExempt?: (err: unknown) => string | undefined;
 }
 
 /** 1s, 10s, 100s, six tries ~1h apart, then every 4h until ~3 days have elapsed. */
@@ -84,6 +97,7 @@ export class JobRunner {
   private readonly leaseMs: number;
   private readonly now: () => number;
   private readonly onPoison?: (info: PoisonInfo) => void;
+  private readonly poisonExempt?: (err: unknown) => string | undefined;
 
   constructor(private readonly store: Store, opts: JobRunnerOptions = {}) {
     this.backoffSchedule =
@@ -95,6 +109,7 @@ export class JobRunner {
     this.leaseMs = opts.leaseMs ?? 5 * 60_000;
     this.now = opts.now ?? (() => Date.now());
     this.onPoison = opts.onPoison;
+    this.poisonExempt = opts.poisonExempt;
   }
 
   /** Backoff for the Nth failed attempt (1-indexed); the last schedule entry repeats. */
@@ -290,6 +305,22 @@ export class JobRunner {
       const poison = attempts >= this.maxAttempts;
       const backoff = this.backoffForAttempt(attempts);
       const msg = err instanceof Error ? err.message : String(err);
+      // Out of retries, but the failure says the provider account is empty rather
+      // than that the job is bad. Park instead of poisoning: the work is still
+      // valid and an organizer reprocess (or a billing unblock) can run it, where
+      // poisoning would silently cost an attendee their profile for a problem
+      // that a top-up fixes. Attempts reset so the revived job gets a fresh tail
+      // rather than one doomed call.
+      if (poison) {
+        const parkReason = this.poisonExempt?.(err);
+        if (parkReason) {
+          const parked = this.store.parkJob(job.id, `${parkReason}: ${msg}`, token, { resetAttempts: true });
+          console.warn(
+            `[${stamp()}] [job] ${job.type} #${job.id} PARKED instead of poisoned after ${attempts} attempt(s)${parked ? "" : " [lease lost — not applied]"}: ${parkReason} — ${msg.slice(0, 200)}`,
+          );
+          return;
+        }
+      }
       console.warn(
         `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
       );

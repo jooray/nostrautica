@@ -18,8 +18,10 @@
     fieldsFromProfile,
     buildAuthoredSubmission,
     authoredChanged,
+    normalizeAuthoredProfile,
     type AuthoredFields,
   } from "$lib/events/authored-profile.js";
+  import { MAX_ABOUT, MAX_INTRO_TEXT, MAX_LOOKING_FOR } from "@nostrautica/protocol";
   import { loadSelfCopy, submitProfileAndMedia, aggregateOutcome } from "$lib/media/submit.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -50,6 +52,9 @@
   let authoredSaved = $state(false);
   let authoredQueued = $state(false); // save sits in the offline outbox (U2)
   let authoredError = $state<unknown>(null);
+  // Links we repaired into a URL or had to drop (see normalizeAuthoredProfile).
+  // Dropping one silently would be its own small version of the bug this guards.
+  let droppedLinks = $state<string[]>([]);
   const authoredDirty = $derived(authoredChanged(authored, authoredBaseline));
   // Durable draft of UNSENT authored-profile edits (audit U9): survives a
   // crash/eviction/reload, not just a deferred SW refresh. Owner-scoped per event.
@@ -116,9 +121,15 @@
     authoredError = null;
     authoredSaved = false;
     authoredQueued = false;
+    droppedLinks = [];
     try {
       const bk = await deriveBlindingKey(session.signer);
-      const { profile, introText, media } = buildAuthoredSubmission(authored, authoredMedia);
+      const built = buildAuthoredSubmission(authored, authoredMedia);
+      // Normalize here too, not just inside the submitter, so the editor can say
+      // which links it could not make sense of rather than quietly losing them.
+      const { profile, dropped } = normalizeAuthoredProfile(built.profile);
+      droppedLinks = dropped;
+      const { introText, media } = built;
       const outcome = await submitProfileAndMedia(session.signer, ctx, { profile, media, blindingKey: bk, introText });
       authoredSaved = true;
       // U2: don't claim it's shared if the relay publish only queued locally.
@@ -293,7 +304,7 @@
       {/if}
       <div class="editfield">
         <label for="au-about">{t("profile.authored.about")}</label>
-        <textarea id="au-about" rows="3" bind:value={authored.about}></textarea>
+        <textarea id="au-about" rows="3" maxlength={MAX_ABOUT} bind:value={authored.about}></textarea>
       </div>
       <div class="editfield">
         <label for="au-skills">{t("profile.authored.skills")}</label>
@@ -301,7 +312,7 @@
       </div>
       <div class="editfield">
         <label for="au-lf">{t("profile.authored.lookingFor")}</label>
-        <input id="au-lf" bind:value={authored.lookingFor} />
+        <input id="au-lf" maxlength={MAX_LOOKING_FOR} bind:value={authored.lookingFor} />
       </div>
       <div class="editfield">
         <label for="au-links">{t("profile.authored.links")}</label>
@@ -309,9 +320,14 @@
       </div>
       <div class="editfield">
         <label for="au-intro">{t("profile.authored.introText")}</label>
-        <textarea id="au-intro" rows="3" bind:value={authored.introText}></textarea>
+        <textarea id="au-intro" rows="3" maxlength={MAX_INTRO_TEXT} bind:value={authored.introText}></textarea>
         <span class="muted small">{t("profile.authored.introText.hint")}</span>
       </div>
+      {#if droppedLinks.length}
+        <p class="muted small" role="status">
+          {t("profile.authored.links.dropped", { links: droppedLinks.join(", ") })}
+        </p>
+      {/if}
       <div class="row" style="flex-wrap:wrap;align-items:center">
         <button class="btn primary" onclick={saveAuthored} disabled={authoredBusy || !authoredDirty}>
           {authoredBusy ? t("profile.saving") : t("profile.save")}

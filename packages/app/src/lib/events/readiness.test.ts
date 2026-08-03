@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { deriveReadiness, type ReadinessInput, type ReadinessStepId } from "./readiness.js";
+import {
+  deriveReadiness,
+  hasAnythingToMatchOn,
+  type ReadinessInput,
+  type ReadinessStepId,
+} from "./readiness.js";
 
 function base(overrides: Partial<ReadinessInput> = {}): ReadinessInput {
   return {
@@ -174,5 +179,71 @@ describe("deriveReadiness", () => {
         }
       }
     }
+  });
+});
+
+/**
+ * An attendee the matcher will refuse to score (73cb3b8) is not "mid-pipeline",
+ * and the journey must not describe them as if they were. Fifteen of one
+ * event's fifty-three joiners sat in this state, told the coordinator was
+ * building their profile, which it never would be.
+ */
+describe("hasAnythingToMatchOn", () => {
+  const blank = { about: "", skills: [], looking_for: "", links: [] };
+
+  it("is false for a joined-but-silent attendee", () => {
+    expect(hasAnythingToMatchOn({ profile: blank })).toBe(false);
+    expect(hasAnythingToMatchOn(undefined)).toBe(false);
+  });
+
+  it("accepts any one of bio, a skill, or a stated interest", () => {
+    expect(hasAnythingToMatchOn({ profile: { ...blank, about: "I build meshes" } })).toBe(true);
+    expect(hasAnythingToMatchOn({ profile: { ...blank, skills: ["rust"] } })).toBe(true);
+    expect(hasAnythingToMatchOn({ profile: { ...blank, looking_for: "a co-founder" } })).toBe(true);
+  });
+
+  it("accepts a text intro or a recording with no authored fields", () => {
+    expect(hasAnythingToMatchOn({ profile: blank, intro_text: "hello" })).toBe(true);
+    expect(
+      hasAnythingToMatchOn({ profile: blank, media: [{ kind: "intro" } as never] }),
+    ).toBe(true);
+  });
+
+  it("accepts an ai_profile the coordinator derived from public Nostr activity", () => {
+    expect(
+      hasAnythingToMatchOn({
+        profile: blank,
+        ai_profile: { summary: "builds mesh networks", skills: [], interests: [], offers: [], seeks: [] },
+      }),
+    ).toBe(true);
+    // The hollow shell the pipeline publishes for someone with no input is NOT content.
+    expect(
+      hasAnythingToMatchOn({
+        profile: blank,
+        ai_profile: { summary: "", skills: [], interests: [], offers: [], seeks: [] },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("deriveReadiness — an empty profile is its own problem", () => {
+  it("points at the profile editor, not at recording a video", () => {
+    // "Record your intro" asks for a camera and a monologue; two typed sentences
+    // would fix this. It was the only action the journey ever offered.
+    const r = deriveReadiness(base({ hasIntro: false, profileEmpty: true, latched: new Set() }));
+    expect(r.primary?.route).toEqual({ name: "myProfile", naddr: "naddr1xyz" });
+    expect(r.primary?.labelKey).toBe("readiness.cta.profile");
+    expect(r.steps.find((s) => s.id === "intro")?.hintKey).toBe("readiness.hint.empty");
+  });
+
+  it("keeps the ordinary intro nudge for someone who wrote something", () => {
+    const r = deriveReadiness(base({ hasIntro: false, profileEmpty: false, latched: new Set() }));
+    expect(r.primary?.route).toEqual({ name: "record", naddr: "naddr1xyz", talk: false });
+    expect(r.steps.find((s) => s.id === "intro")?.hintKey).toBe("readiness.hint.intro");
+  });
+
+  it("says nothing when we have not read their entry (positive evidence only)", () => {
+    const r = deriveReadiness(base({ hasIntro: false, profileEmpty: undefined, latched: new Set() }));
+    expect(r.steps.find((s) => s.id === "intro")?.hintKey).toBe("readiness.hint.intro");
   });
 });

@@ -245,10 +245,16 @@
   // shell naddr (Bug 1): on the global chat routes that resolves to the active
   // event context, so the event nav's tab gating (showChat/showPeople/role) is
   // available there without re-fetching heavy state.
+  // Also re-runs when the persistent cache finishes hydrating: boot deliberately
+  // does NOT await that (§7.4.5), so the first sync can read a cold mirror and
+  // miss the persisted role — which is precisely the case this seeding exists
+  // for, an event the user has opened before. Cache-backed pages already watch
+  // this signal for the same reason; the shell was the one that didn't.
   $effect(() => {
     if (!booted) return;
     void session.pubkey;
     void session.custodyGeneration;
+    void cacheHydration.version;
     if (session.pubkey && !session.custodyReady) return;
     void eventShell.sync(shellNaddr);
   });

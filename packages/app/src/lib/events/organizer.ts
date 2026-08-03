@@ -618,6 +618,20 @@ export interface GeneratedInvite {
   label: string;
   nsec: string; // the invite code (an nsec, spec §6.5)
   link: string; // #/e/:naddr/join?code=<nsec>
+  /**
+   * Distinct redemptions allowed; INVITE_USES_UNLIMITED (0) for unbounded.
+   * Absent means single-use — the same thing an omitted `uses` means on the
+   * wire, so a reader never has to distinguish "old code" from "one person".
+   */
+  uses?: number;
+  /** Unix seconds after which the code stops auto-approving. */
+  exp?: number;
+}
+
+/** How a batch of codes may be redeemed (§6.5). Omitted ⇒ one code, one person. */
+export interface InviteOptions {
+  uses?: number;
+  exp?: number;
 }
 
 /**
@@ -659,10 +673,17 @@ export async function fetchPublishedInvites(
 }
 
 /**
- * Generate N single-use invite codes (spec §6.5). Each code IS an nsec; the
- * organizer publishes only sha256(invite-pubkey) in a replaceable 31601 (so
- * observers can't enumerate or front-run codes). The nsec rides the link's URL
- * fragment and never touches a server.
+ * Generate N invite codes (spec §6.5). Each code IS an nsec; the organizer
+ * publishes only sha256(invite-pubkey) in a replaceable 31601, so observers
+ * can't enumerate or front-run codes. The nsec rides the link's URL fragment and
+ * never touches a server.
+ *
+ * Single-use by default. `opts.uses` raises the cap for the shared-code case —
+ * one QR on the opening slide, everyone in the room scans it — and `opts.exp`
+ * bounds how long that lasts. Both are properties of the published entry, not of
+ * the key, so the same proof mechanism carries them: the code stays a secret
+ * nobody can derive from the event's naddr, and the signature still binds each
+ * redemption to the redeemer's own pubkey.
  */
 export async function generateInvites(
   organizer: AppSigner,
@@ -670,6 +691,7 @@ export async function generateInvites(
   count: number,
   appBaseUrl: string,
   labelPrefix = "invite",
+  opts: InviteOptions = {},
 ): Promise<GeneratedInvite[]> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
@@ -681,15 +703,23 @@ export async function generateInvites(
 
   const generated: GeneratedInvite[] = [];
   const base = appBaseUrl.replace(/[#/]+$/, "");
+  // Only emit `uses`/`exp` when they differ from the implicit default, so an
+  // ordinary single-use batch publishes byte-identical entries to before.
+  const policy: { uses?: number; exp?: number } = {
+    ...(opts.uses !== undefined && opts.uses !== 1 ? { uses: opts.uses } : {}),
+    ...(opts.exp !== undefined ? { exp: opts.exp } : {}),
+  };
   for (let i = 0; i < count; i++) {
     const sk = generateSecretKey();
     const label = `${labelPrefix}-${invites.length + 1}`;
-    invites.push({ h: inviteHash(getPublicKey(sk)), label });
+    invites.push({ h: inviteHash(getPublicKey(sk)), label, ...policy });
     const nsec = nsecEncode(sk);
     generated.push({
       label,
       nsec,
       link: `${base}/#/e/${encodeURIComponent(ctx.naddr)}/join?code=${nsec}`,
+      uses: opts.uses ?? 1,
+      ...(opts.exp !== undefined ? { exp: opts.exp } : {}),
     });
   }
 

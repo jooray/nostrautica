@@ -130,7 +130,7 @@ export class MarmotChat {
    * package, and — for device-key (NIP-46/NIP-07) accounts — the 21607
    * attestation binding the chat key to the account. Idempotent.
    */
-  async ensurePublished(): Promise<void> {
+  async ensurePublished(opts?: { force?: boolean; rotate?: boolean }): Promise<void> {
     // Publish (or refresh) this device key's own kind-0 (NIP §10.3) so other
     // Marmot clients — and our chat UI, which resolves sender names by fetching
     // this exact pubkey's kind-0 — can show a name/picture instead of a bare
@@ -151,9 +151,25 @@ export class MarmotChat {
     // path (healIfEvicted, §5), both of which reach here with NO group FOR THIS
     // EVENT — a group from ANOTHER event must not suppress this event's
     // bootstrap.
-    const joined = await this.currentEventGroups();
-    if (joined.length > 0) return;
+    // "Joined" means a group of this event's in which OUR OWN leaf is still
+    // present — not merely one we hold state for. A member the coordinator has
+    // removed (revoke, admin remove) keeps its local group state and its history:
+    // it can still read what it already has and cannot send or read anything new.
+    // Checking only for the group's presence made that state permanent, because
+    // this bootstrap — the one thing that would ask to be added back — skipped
+    // itself on every open (prod 2026-07-30).
+    if (!opts?.force && (await this.isEventGroupMember())) return;
     await this.ensureRelayLists();
+    // Rotate when we are EVICTED — holding this event's group with our own leaf
+    // gone — rather than merely not-yet-added. The key package we still advertise
+    // is the one that was spent on the Add that created that leaf, so the
+    // coordinator has long since recorded its event id as consumed and skips it;
+    // re-advertising it is a no-op that leaves us stuck (prod 2026-07-30: the
+    // re-attestation landed, the coordinator matched it against the same consumed
+    // key package, and nothing happened). A not-yet-added client must NOT rotate:
+    // its key package may be the one an in-flight Welcome was encrypted to, and
+    // rotating discards the private material needed to join with it.
+    if (opts?.rotate || (await this.isEvictedFromEventGroup())) await this.rotateKeyPackage();
     // Publish (or confirm) the kind-30443 key package on the event relays under
     // this device's stable slot. This is what the coordinator's watcher adds.
     await this.client.keyPackages.ensurePublished({
@@ -384,6 +400,30 @@ export class MarmotChat {
     }
   }
 
+  /**
+   * True when we hold this event's group AND our own chat key still holds a leaf
+   * in it — i.e. we are actually a member, not just a client with leftover state.
+   *
+   * The distinction is the whole bug: an MLS Remove strips our leaf but leaves our
+   * local group state (and its decrypted history) exactly where it was, so "do we
+   * have the group?" answers yes for a member who has been removed. Every check
+   * that means "are we in the room?" has to ask this instead.
+   */
+  private async isEventGroupMember(): Promise<boolean> {
+    const groups = await this.currentEventGroups();
+    return groups.some((g) => groupHasMember(g, this.identity.pubkey));
+  }
+
+  /**
+   * True when we hold this event's group but are no longer in it — removed, as
+   * opposed to never added. The two need different treatment: a removed client's
+   * advertised key package has already been spent, a not-yet-added one's has not.
+   */
+  private async isEvictedFromEventGroup(): Promise<boolean> {
+    const groups = await this.currentEventGroups();
+    return groups.length > 0 && !groups.some((g) => groupHasMember(g, this.identity.pubkey));
+  }
+
   /** The nostr_group_id recorded for THIS event's verified join, if any. */
   private async recordedEventGroupId(): Promise<string | undefined> {
     return (await this.eventGroups.getItem(this.ctx.coordinate).catch(() => null)) ?? undefined;
@@ -401,8 +441,25 @@ export class MarmotChat {
    * against that id instead of guessing "the single coordinator-verified group"
    * — the old guess silently adopted another same-coordinator event's already-
    * joined group, which could misdeliver an OUTGOING message (audit APPK-3).
+   *
+   * Results are ordered so a state we still hold a leaf in comes first. Being
+   * removed and re-added leaves TWO states for one `nostr_group_id` — the dead
+   * pre-removal one and the live post-Welcome one — and `groups[0]` is what sends
+   * route to, so without this a rejoin could "succeed" and still send into the
+   * corpse. Ordering rather than filtering keeps the dead state bound, so the
+   * history it holds still replays into the room.
    */
   private async currentEventGroups(): Promise<MarmotGroupLike[]> {
+    const groups = await this.resolveEventGroups();
+    if (groups.length < 2) return groups;
+    return [
+      ...groups.filter((g) => groupHasMember(g, this.identity.pubkey)),
+      ...groups.filter((g) => !groupHasMember(g, this.identity.pubkey)),
+    ];
+  }
+
+  /** {@link currentEventGroups} without the own-leaf ordering (roster resolution only). */
+  private async resolveEventGroups(): Promise<MarmotGroupLike[]> {
     const all = (await this.client.groups.loadAll().catch(() => [])) as MarmotGroupLike[];
     const recorded = await this.recordedEventGroupId();
     // Cheap, hot-path-safe: the roster is fetched+cached by the People/event
@@ -573,6 +630,11 @@ export class MarmotChat {
    * 30443 watcher re-adds us; a new welcome then arrives and chat resumes from the
    * new epoch (messages in the gap are forward-secret, not recoverable). Returns
    * true when a heal republish was issued.
+   *
+   * NOTE this only covers the case where the coordinator holds NO leaf for us and
+   * has not yet consumed our advertised key package. When either is false the
+   * republish is a silent no-op on both sides — {@link rejoin} is the escalation
+   * that actually breaks that deadlock.
    */
   async healIfEvicted(): Promise<boolean> {
     const groups = await this.currentEventGroups();
@@ -581,6 +643,95 @@ export class MarmotChat {
     // to trigger a fresh add.
     await this.ensurePublished();
     return true;
+  }
+
+  /**
+   * Ask the coordinator to add this device to the event's group again — the
+   * recovery for a device that is a *listed* chat device of an approved attendee
+   * (it shows up in the roster's `chat_keys`, so ChatHandoffCard lists it) yet holds
+   * no usable group, so every send fails with "no joined chat group yet".
+   *
+   * Simply republishing (what {@link healIfEvicted} does) cannot fix that state,
+   * because a plain re-advertisement is a no-op at three separate points:
+   *
+   *  1. marmot's `keyPackages.ensurePublished` returns the existing *unused* local
+   *     key package, and "used" is only set by a successful join — so a member
+   *     whose welcome never arrived re-advertises the SAME kind-30443 event
+   *     forever (same `d` slot, same content ⇒ same event id);
+   *  2. the coordinator dedupes by that event id (`marmot_consumed_kps`, 30 days),
+   *     so the re-advertised key package is dropped before anything else runs;
+   *  3. even a fresh key package is skipped while the coordinator still holds a
+   *     leaf for us — its "already a member" check treats us as present when, from
+   *     our side, we are not.
+   *
+   * So the sequence here is deliberately: revoke this device (drops the stale leaf
+   * so 3 no longer holds), rotate the key package (a NEW event id, so 1 and 2 no
+   * longer hold), then re-attest, which lands as an ordinary first-time enrolment
+   * on the coordinator (`handleAttestation` → `syncMember` → Add + Welcome).
+   *
+   * Same-device-key throughout: the account's device slot, its label and its
+   * `chat_keys` roster entry are reused rather than burning one of the
+   * MAX_CHAT_KEYS_PER_ACCOUNT slots on a freshly-minted identity (the manual
+   * workaround this replaces — clearing site data — burns one every time).
+   *
+   * History from before the new Add stays unreadable: MLS is forward-secret, and
+   * no recovery path can change that.
+   */
+  async rejoin(opts?: { force?: boolean }): Promise<void> {
+    // Don't tear down a working membership on a misclick — but "working" means our
+    // leaf is still in the group, NOT merely that we hold group state. Guarding on
+    // the latter made this a silent no-op for the one state it exists to fix: a
+    // removed member, who keeps the group and its history and can no longer send
+    // (prod 2026-07-30 — pressing Rejoin reported success and published nothing).
+    //
+    // `force` is for the UI's button, which is only reachable after a send has
+    // actually failed or setup has stalled. There, the user's evidence beats ours:
+    // a client that never processed its own removal commit still believes it holds
+    // a leaf, and refusing would strand exactly the person asking for help.
+    if (!opts?.force && (await this.isEventGroupMember())) return;
+    // A previous fail-closed refusal may have memoized "the roster advertises no
+    // group id" for the life of this client (see currentEventGroups). Drop it, or
+    // the rejoin below succeeds and routing still refuses afterwards.
+    this.liveRosterFetch = undefined;
+    // 1. Revoke: the coordinator removes every leaf of this chat key (§3.3). Sent
+    //    FIRST so the re-add below can never be processed as "already a member".
+    await sendChatKeyAttestation(this.accountSigner, this.ctx, {
+      op: "revoke",
+      chatPubkey: this.identity.pubkey,
+    });
+    // 2. Rotate the key package (same `d` slot, so the relay replaces in place —
+    //    new event id, new init key, nothing the coordinator has consumed) and
+    //    re-attest: `ensurePublished` re-sends op:"add" with a fresh proof of
+    //    possession, re-activating the same device row and driving syncMember.
+    //    Forced past the membership check: when the caller forced this rejoin, our
+    //    own state may still (wrongly) believe we hold a leaf.
+    await this.ensurePublished({ force: true, rotate: true });
+    // 4. Pick up a welcome that is already waiting; later ones arrive through the
+    //    `decrypted` listener start() installed.
+    await this.joinPendingAndBind();
+  }
+
+  /**
+   * Publish a NEW kind-30443 under this device's existing slot, retiring the old
+   * one's private material. `rotate` needs the local ref of the package to replace;
+   * with none stored (a client that never published, or whose local key-package
+   * store was cleared) this falls back to a plain create — the same slot either
+   * way, so the relay replaces rather than accumulates.
+   */
+  private async rotateKeyPackage(): Promise<void> {
+    const opts = { relays: this.relays, client: "nostrautica-web" };
+    const stored = await this.client.keyPackages.list().catch(() => []);
+    // Prefer this device's own slot; `list()` can also hold packages tracked from
+    // relays (no private material), which cannot be rotated.
+    const mine = stored.find((k) => k.identifier === this.identity.clientId) ?? stored[0];
+    if (mine) {
+      await this.client.keyPackages.rotate(mine.keyPackageRef, {
+        ...opts,
+        d: this.identity.clientId,
+      });
+      return;
+    }
+    await this.client.keyPackages.create({ ...opts, identifier: this.identity.clientId });
   }
 
   /** Leave every joined group (self_remove) — the member's clean exit. */

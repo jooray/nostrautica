@@ -6,8 +6,48 @@
  * keeps a monotonic latch so a finished step never regresses to "checking" when
  * a later fetch fails offline.
  */
+import {
+  hasAiProfileContent,
+  type AiProfile,
+  type AttendeeProfile,
+  type MediaDescriptor,
+} from "@nostrautica/protocol";
 import type { MessageKey } from "$lib/i18n/messages.js";
 import type { Route } from "$lib/router/routes.js";
+
+/**
+ * Whether this attendee has given the coordinator anything at all to work with.
+ *
+ * The matcher refuses to score a profile with nothing in it (73cb3b8), so an
+ * attendee in this state is silently absent from everyone's matches and from
+ * their own — which is exactly what happened to roughly fifteen of one event's
+ * fifty-three joiners. The journey used to describe them the same way it
+ * describes someone mid-pipeline: "Processing — the coordinator is building
+ * your profile." It is not, and it never will, because there is nothing to
+ * build from.
+ *
+ * Deliberately generous about what counts. A bio, one skill, a stated interest,
+ * a text intro, a recording, or an ai_profile the coordinator derived from
+ * public Nostr activity — any of them and this person is matchable, so any of
+ * them and we say nothing.
+ */
+export function hasAnythingToMatchOn(
+  entry:
+    | {
+        profile?: AttendeeProfile;
+        intro_text?: string;
+        media?: MediaDescriptor[];
+        ai_profile?: AiProfile;
+      }
+    | undefined,
+): boolean {
+  if (!entry) return false;
+  const p = entry.profile;
+  if (p && (p.about.trim() || p.skills.length > 0 || p.looking_for.trim())) return true;
+  if (entry.intro_text?.trim()) return true;
+  if ((entry.media ?? []).length > 0) return true;
+  return hasAiProfileContent(entry.ai_profile);
+}
 
 export type ReadinessStepId = "joined" | "backup" | "intro" | "processing" | "matches";
 export type ReadinessStepState =
@@ -32,6 +72,12 @@ export interface ReadinessInput {
   signerMethod?: "local" | "nip07" | "nip46";
   backupAcked?: boolean; // undefined = the durable backup marker isn't known yet
   hasIntro?: boolean; // undefined = self-copy fetch failed / offline
+  /**
+   * The coordinator holds nothing matchable for this attendee (see
+   * {@link hasAnythingToMatchOn}). Positive evidence only: `undefined` means we
+   * have not read their published entry, never "probably fine".
+   */
+  profileEmpty?: boolean;
   processed?: boolean; // undefined = unknown
   matchesAvailable?: boolean; // undefined = unknown
   matchingEnabled: boolean;
@@ -73,6 +119,7 @@ const LABEL: Record<ReadinessStepId, MessageKey> = {
 function primaryFor(
   id: ReadinessStepId,
   naddr: string,
+  profileEmpty?: boolean,
 ): { labelKey: MessageKey; route: Route } | undefined {
   switch (id) {
     case "joined":
@@ -80,7 +127,13 @@ function primaryFor(
     case "backup":
       return { labelKey: "readiness.cta.backup", route: { name: "me" } };
     case "intro":
-      return { labelKey: "readiness.cta.record", route: { name: "record", naddr, talk: false } };
+      // With nothing on file at all, the cheap path is the one to offer. Sending
+      // someone whose whole profile is blank to "Record your intro" asks them for
+      // a camera, permission and a monologue when two typed sentences would fix
+      // it — and it was the only action the journey ever surfaced.
+      return profileEmpty
+        ? { labelKey: "readiness.cta.profile", route: { name: "myProfile", naddr } }
+        : { labelKey: "readiness.cta.record", route: { name: "record", naddr, talk: false } };
     default:
       return undefined;
   }
@@ -163,7 +216,10 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
       id: "intro",
       state: "action-required",
       labelKey: LABEL.intro,
-      hintKey: "readiness.hint.intro",
+      // "Optional, but you'll get much better matches" is true of someone who
+      // wrote a bio and skipped the video. It is misleading for someone with
+      // nothing at all, who is not getting worse matches — they are getting none.
+      hintKey: input.profileEmpty === true ? "readiness.hint.empty" : "readiness.hint.intro",
     };
   } else {
     intro = {
@@ -238,7 +294,9 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
   const actionStep = isMember
     ? steps.find((s) => s.state === "action-required")
     : steps.find((s) => s.id === "joined" && s.state === "action-required");
-  const primary = actionStep ? primaryFor(actionStep.id, input.naddr) : undefined;
+  const primary = actionStep
+    ? primaryFor(actionStep.id, input.naddr, input.profileEmpty)
+    : undefined;
 
   const matchesReady = steps.some((s) => s.id === "matches" && s.state === "complete");
 

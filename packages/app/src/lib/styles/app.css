@@ -17,6 +17,17 @@
   --maxw: 640px;
 
   --accent-contrast: #ffffff;
+  /* Match-strength badge fills (ConfidenceBadge). A green-only three-step
+     gradient: vivid green for strong, solid dark green for good, the neutral
+     grey chip for hello. Solid fills, so they read the same on a white or a
+     dark card — hence theme-independent, unlike the grey tier below.
+     Dark ink on the vivid stop: white on a green that bright tops out at
+     2.6:1, well under this file's 4.5:1 floor for a 700-weight 13.6px label.
+     Contrast: strong 5.7:1, good 5.0:1. */
+  --match-strong-bg: #1db954;
+  --match-strong-fg: #072b16;
+  --match-good-bg: #15803d;
+  --match-good-fg: #ffffff;
   /* Event hue pair (degrees). JS overrides these per event via the wash injector;
      defaults echo the brand purple so non-event and fallback states match. */
   --event-h1: 256;

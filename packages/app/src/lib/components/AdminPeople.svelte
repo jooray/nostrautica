@@ -7,9 +7,11 @@
    */
   import type { AdminPerson } from "$lib/events/admin-people.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import PersonId from "$lib/components/PersonId.svelte";
 
   let {
     people,
+    relays,
     filterActive,
     matchedPubkeys,
     onRevoke,
@@ -18,6 +20,8 @@
   }: {
     /** The full approved-people list (the header count uses its length). */
     people: AdminPerson[];
+    /** Event relays, used as nprofile hints when copying someone's id. */
+    relays: string[];
     /** Whether the parent's people search/filter is narrowing the visible rows. */
     filterActive: boolean;
     /** Pubkeys matching the active filter (rows outside are hidden). */
@@ -29,10 +33,6 @@
 
   // Owned interaction state: which card is showing its revoke confirmation.
   let confirmingRevoke = $state<string | null>(null);
-
-  function short(pk: string) {
-    return pk.slice(0, 8) + "…" + pk.slice(-4);
-  }
 
   function confirmRevoke(pubkey: string) {
     onRevoke(pubkey);
@@ -46,8 +46,7 @@
   <div class="stack">
     {#each people.filter((p) => !filterActive || matchedPubkeys.has(p.pubkey)) as person (person.pubkey)}
       <div class="card">
-        <strong>{person.name ?? short(person.pubkey)}</strong>
-        <span class="badge">{short(person.pubkey)}</span>
+        <PersonId pubkey={person.pubkey} name={person.name} {relays} />
         {#if person.role === "organizer"}<span class="badge">{t("admin.people.organizer")}</span>{/if}
         {#if person.media?.length}<span class="badge">{tp("admin.requests.video", person.media.length)}</span>{/if}
         {#if person.op === "failed"}<span class="badge warn">{t("admin.people.failed")}</span>{/if}

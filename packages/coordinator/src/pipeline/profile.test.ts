@@ -9,7 +9,7 @@ import { describe, it, expect } from "vitest";
 import { MockLlm } from "../providers/mock.js";
 import { ProviderContractError } from "../providers/types.js";
 import { buildAiProfile, summarizeNostr, translateProfileFields, nostrInputsHash } from "./profile.js";
-import type { AttendeeProfile } from "@nostrautica/protocol";
+import { MAX_ABOUT, MAX_LOOKING_FOR, type AttendeeProfile } from "@nostrautica/protocol";
 
 const matchModel = { provider: "mock", model: "mock-strong" };
 const summaryModel = { provider: "mock", model: "mock-cheap" };
@@ -204,6 +204,56 @@ describe("Q9 — translateProfileFields validates provider output", () => {
     });
     expect(out?.skills).toEqual(["krypto", "AI", "hackovanie", "bezpečnosť"]);
     expect(out?.about).toBe("o mne");
+  });
+
+  // Two attendees' process_attendee POISONED on this in July (jobs 51 and 70:
+  // "looking_for: invalid_type; skills: invalid_type") and stayed unprocessed for
+  // two weeks. The 2026-07-30 coercion covered `skills` and left the prose fields
+  // strict, so a model returning a LIST where a paragraph was asked for still
+  // killed the whole stage — and with it the attendee's profile, directory entry
+  // and every match they would have had.
+  it("accepts a list where prose was asked for, joining it instead of failing", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "es",
+      needs_translation: true,
+      about: ["Builds privacy tools", "runs a meetup"],
+      looking_for: ["a designer", "a co-founder"],
+      skills: ["zk"],
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "en", fields);
+    expect(out?.about).toBe("Builds privacy tools, runs a meetup");
+    expect(out?.looking_for).toBe("a designer, a co-founder");
+  });
+
+  it("drops prose the model returned as junk rather than failing the stage", async () => {
+    const llm = new MockLlm(() => ({
+      source_lang: "es",
+      needs_translation: true,
+      about: 42,
+      looking_for: { text: "nope" },
+      skills: ["zk"],
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "en", fields);
+    // Unusable prose is simply not published — the attendee sees their own words.
+    expect(out?.about).toBeUndefined();
+    expect(out?.looking_for).toBeUndefined();
+    expect(out?.skills).toEqual(["zk"]);
+  });
+
+  it("bounds translated prose to the protocol caps so readers can still parse it", async () => {
+    // An over-cap value encrypts and publishes fine, then fails every reader's
+    // directoryEntryContentSchema.parse — the attendee vanishes from the
+    // directory for everyone. Same reasoning as the skills bound.
+    const llm = new MockLlm(() => ({
+      source_lang: "es",
+      needs_translation: true,
+      about: "x".repeat(MAX_ABOUT + 500),
+      looking_for: "y".repeat(MAX_LOOKING_FOR + 500),
+      skills: ["zk"],
+    }));
+    const out = await translateProfileFields(llm, summaryModel, "en", fields);
+    expect(out!.about!.length).toBe(MAX_ABOUT);
+    expect(out!.looking_for!.length).toBe(MAX_LOOKING_FOR);
   });
 
   it("drops non-string items from a skills array instead of failing the stage", async () => {

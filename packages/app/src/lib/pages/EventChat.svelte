@@ -52,6 +52,8 @@
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let error = $state<unknown>(null);
   let sendError = $state<string | null>(null);
+  let rejoinError = $state<string | null>(null);
+  let rejoined = $state(false);
   let draft = $state("");
   let sending = $state(false);
 
@@ -194,6 +196,24 @@
     await chatSession.retry();
   }
 
+  // Re-enrol this device (chat/client.ts rejoin). Offered next to a failed send:
+  // that failure means this session holds no routable group, and no amount of
+  // retrying the send fixes it — the coordinator has to add this device again.
+  async function rejoin() {
+    sendError = null;
+    rejoinError = null;
+    rejoined = false;
+    try {
+      // Forced: this button is only reachable after a send has actually failed or
+      // setup has stalled, so the user's evidence outranks our own membership
+      // bookkeeping — which can be stale in exactly the case they're stuck in.
+      await chatSession.rejoin({ force: true });
+      rejoined = true;
+    } catch {
+      rejoinError = t("chat.rejoinFailed");
+    }
+  }
+
   async function send() {
     const text = draft.trim();
     // A leader has its own client; an interactive follower proxies through the
@@ -204,6 +224,9 @@
     try {
       await chatSession.send(text);
       draft = "";
+      // A message got through — retire any leftover recovery notice.
+      rejoined = false;
+      rejoinError = null;
     } catch {
       // Bug 5: surface the failure instead of silently swallowing it. A revoked
       // (removed) attendee's send lands here once they've lost the group locally.
@@ -417,6 +440,20 @@
             <button class="btn inline" style="margin-top:0.25rem" onclick={retryChat}>
               {t("chat.retry")}
             </button>
+            <!-- Setup that never finishes is the OTHER face of the failed send:
+                 this device is attested (it's in the device list below) but the
+                 coordinator's Add never reached it, and re-running the handshake
+                 can't fix that — re-advertising the same key package is a no-op on
+                 both sides. Offer the re-enrolment as the escalation. -->
+            <p class="muted" style="margin-top:0.6rem">{t("chat.rejoinHint")}</p>
+            <button
+              class="btn inline"
+              style="margin-top:0.25rem"
+              disabled={chatSession.rejoining}
+              onclick={() => void rejoin()}
+            >
+              {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+            </button>
           {/if}
         {:else}
           <p class="muted">{t("chat.empty")}</p>
@@ -496,8 +533,20 @@
     </form>
   {/if}
 
+  <!-- A failed send is "this device is no longer in the group", not "try again
+       later" — so the recovery offered here re-enrols the device rather than
+       re-sending. The message survives in the composer; it can be sent once the
+       coordinator's welcome lands. -->
   {#if sendError}
     <p class="send-error" role="alert">{sendError}</p>
+    <button class="btn inline" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
+      {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+    </button>
+  {/if}
+  {#if rejoinError}
+    <p class="send-error" role="alert">{rejoinError}</p>
+  {:else if rejoined}
+    <p class="muted rejoin-note" role="status">{t("chat.rejoinRequested")}</p>
   {/if}
 
   {#if ctx}
@@ -785,5 +834,9 @@
     margin: 0.25rem 0 0.5rem;
     font-size: 0.82rem;
     color: var(--danger);
+  }
+  .rejoin-note {
+    margin: 0.4rem 0 0.5rem;
+    font-size: 0.82rem;
   }
 </style>
