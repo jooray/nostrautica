@@ -2,8 +2,8 @@
   // Confidence read for a match (redesign §8, reworked 2026-07-20 — the plain-
   // text version tested unnoticeable at a glance). A pill so the eye catches
   // it before the reasoning paragraph, with three DISTINCT visual weights
-  // (solid / tinted / neutral) so "strong" doesn't have to carry the whole
-  // hierarchy alone. The band is still encoded in BOTH the label text and the
+  // (vivid fill / dark fill / neutral chip) so "strong" doesn't have to carry
+  // the whole hierarchy alone. The band is still encoded in BOTH the label and the
   // glyph SHAPE (rising curve / gentle arc / dashed line), never colour
   // alone (A6).
   import { confidenceBand } from "$lib/events/confidence.js";
@@ -70,17 +70,20 @@
   .size-sm .lab {
     font-size: 0.78rem;
   }
-  /* Strong: solid fill — the same visual weight as a primary CTA, so the best
-     matches are unmissable even skimming a long list. */
+  /* Strong: solid vivid-green fill — the brightest stop in a green-only
+     gradient, so the best matches are unmissable even skimming a long list.
+     Dark ink rather than white: see the contrast note on the tokens. */
   .band-strong {
-    background: var(--accent-bg);
-    color: var(--accent-contrast);
+    background: var(--match-strong-bg);
+    color: var(--match-strong-fg);
   }
-  /* Good: tinted, reusing the app-wide "positive status" pair (.badge.ok)
-     so it reads as a real signal, not a footnote next to the reasoning. */
+  /* Good: solid dark green — a full fill like strong, one clear step down the
+     same green ramp. A tint was tried here and failed: at 13% alpha it
+     composited to within 0.005 relative luminance of the grey hello chip on
+     dark, so the bottom two tiers read as the same pill. */
   .band-good {
-    background: var(--ok-soft);
-    color: var(--ok);
+    background: var(--match-good-bg);
+    color: var(--match-good-fg);
   }
   /* Hello: neutral chip — genuinely the lowest tier, but still a labelled
      pill rather than bare text so it doesn't get lost against the card. */
