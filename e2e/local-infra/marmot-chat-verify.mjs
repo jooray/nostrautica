@@ -50,7 +50,22 @@ const state = { steps: {} };
 const record = (step, data) => { state.steps[step] = data; writeFileSync(STATE_PATH, JSON.stringify(state, null, 2)); log("STATE", step, JSON.stringify(data)); };
 
 const fresh = (p) => async (hash) => { await p.goto("about:blank"); await p.goto(BASE + hash, { waitUntil: "load" }); };
-const setTheme = (p, mode) => p.evaluate((v) => { try { localStorage.setItem("nostrautica:theme", v); } catch {} }, mode);
+// Writes the preference AND flips `data-theme` on <html> — app.css keys every
+// colour off that attribute alone, and localStorage is only read at boot. Setting
+// storage by itself changed nothing on an already-loaded page, so every "light"
+// and "dark" pair this script produced was the same pixels twice: the guides'
+// `participant/marmot-chat-roundtrip-light.png` was byte-identical to its dark
+// sibling, and both showed the dark UI. Same failure the sibling capture script
+// hit and fixed (see `setThemeNoReload` in e2e/screenshot-refresh.mjs).
+const setTheme = (p, mode) =>
+  p.evaluate((v) => {
+    try {
+      localStorage.setItem("nostrautica:theme", v);
+    } catch {
+      /* private mode */
+    }
+    document.documentElement.setAttribute("data-theme", v);
+  }, mode);
 
 async function shot(page, stem, mode) {
   await setTheme(page, mode);
