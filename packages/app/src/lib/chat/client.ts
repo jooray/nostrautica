@@ -31,7 +31,14 @@ import {
   defaultDeviceLabel,
   type ChatIdentity,
 } from "./identity.js";
-import { makeMarmotStores, makeMarmotHistoryFactory, marmotKvBackend } from "./stores.js";
+import {
+  makeMarmotStores,
+  makeMarmotHistoryFactory,
+  marmotKvBackend,
+  namespacedStore,
+  MARMOT_NAMESPACES,
+  type MarmotKvBackend,
+} from "./stores.js";
 import { createMarmotNetwork } from "./network.js";
 import {
   buildChatSend,
@@ -74,6 +81,8 @@ export class MarmotChat {
   private readonly boundGroups = new Set<string>();
   /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
   private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
+  /** Kept so the removed-member repair can snapshot/restore a group's history namespace. */
+  private readonly kvBackend: MarmotKvBackend;
   /** Memoized at most one live roster fetch per client, to reconcile a recorded
    *  binding against a cold/stale cache (see currentEventGroups). Memoizing the
    *  RESULT (not just "did we try") matters: if the cache stays stale, every call
@@ -91,6 +100,7 @@ export class MarmotChat {
     const backend = marmotKvBackend();
     const stores = makeMarmotStores(backend, identity.pubkey);
     this.eventGroups = stores.eventGroupStore;
+    this.kvBackend = backend;
     this.client = new MarmotClient<GroupRumorHistory, undefined>({
       // Structural EventSigner (identity.ts) — checked structurally by marmot.
       signer: identity.eventSigner as unknown as MarmotClientCtorSigner,
@@ -348,7 +358,7 @@ export class MarmotChat {
         }
         const joinable = await this.client.canJoinInvite(invite);
         if (!joinable) continue;
-        const { group } = await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
+        const { group } = await this.joinAdoptingOverRemovedState(invite);
         const joined = group as unknown as MarmotGroupLike;
         // Defense in depth: the joined group's roster must actually contain the
         // coordinator's leaf — a welcome that passed the seal check but yielded
@@ -397,6 +407,75 @@ export class MarmotChat {
       } catch (err) {
         console.warn("marmot: welcome join failed", err);
       }
+    }
+  }
+
+  /**
+   * Join from a welcome, clearing our own removed-member corpse first if that is
+   * the only thing in the way.
+   *
+   * A re-add is an Add into the SAME MLS group, so the welcome carries the same
+   * `groupId` as the state we already hold — and being removed does not delete
+   * that state: marmot keeps the tombstone deliberately and leaves purging to the
+   * app (marmot-group.js "we keep the tombstone rather than auto-destroying").
+   * `adoptClientState` then refuses the perfectly good state the join just built,
+   * throwing `Group <id> already exists` against the PERSISTENT registry
+   * (groups-manager.js, group-registry.js `has()` → IndexedDB). The caller used to
+   * swallow that as a console warning, so `markAsRead` never ran and the same
+   * welcome was retried and re-thrown on every chat open, forever: the device
+   * stayed listed under "Chat devices", still held group state (so the composer
+   * was enabled), and could never send. Pressing "Rejoin this chat" changed
+   * nothing, because rejoin destroys no local state.
+   *
+   * Repair is deliberately narrow. We only discard state we have PROVEN is a
+   * corpse — same group id, and no leaf of our own chat key in it — so a working
+   * group is never destroyed by a stray error string. Decrypted history is
+   * snapshotted and written back afterwards: `groups.destroy()` is the library's
+   * only supported teardown and it purges the message history with the state,
+   * which would silently cost the user their readable backlog. The re-joined group
+   * has the same id, so the restored history lands in the same namespace and
+   * `replayHistory` paints it exactly as before.
+   *
+   * Anything unexpected falls through to the original throw — the pre-existing
+   * behaviour — rather than deleting something we do not understand.
+   */
+  private async joinAdoptingOverRemovedState(
+    invite: Parameters<MarmotClient<GroupRumorHistory, undefined>["joinGroupFromWelcome"]>[0]["welcomeRumor"],
+  ): Promise<Awaited<ReturnType<MarmotClient<GroupRumorHistory, undefined>["joinGroupFromWelcome"]>>> {
+    try {
+      return await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
+    } catch (err) {
+      // The vendored library is pinned, so matching its message is stable; the
+      // real safety comes from the corpse check below, not from this parse.
+      const message = err instanceof Error ? err.message : String(err);
+      const mlsIdHex = /^Group ([0-9a-f]+) already exists$/.exec(message)?.[1];
+      if (!mlsIdHex) throw err;
+
+      const existing = (await this.client.groups
+        .get(mlsIdHex)
+        .catch(() => undefined)) as MarmotGroupLike | undefined;
+      // No leaf of ours in it ⇒ we were removed and this is the corpse. If we DO
+      // hold a leaf, the welcome is for a group we are already in and dropping it
+      // would destroy a working room — leave it alone and rethrow.
+      if (!existing || groupHasMember(existing, this.identity.pubkey)) throw err;
+
+      const history = namespacedStore<unknown>(
+        this.kvBackend,
+        this.identity.pubkey,
+        `${MARMOT_NAMESPACES.history}:${mlsIdHex}`,
+      );
+      const saved: [string, unknown][] = [];
+      for (const key of await history.keys().catch(() => [])) {
+        const value = await history.getItem(key).catch(() => null);
+        if (value !== null) saved.push([key, value]);
+      }
+
+      console.warn("marmot: discarding removed-member state to adopt the re-invite", mlsIdHex);
+      await this.client.groups.destroy(mlsIdHex);
+      const joined = await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
+
+      for (const [key, value] of saved) await history.setItem(key, value).catch(() => undefined);
+      return joined;
     }
   }
 
