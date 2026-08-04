@@ -43,7 +43,11 @@
 {#if people.length}
   <h2 class="section-head">{t("admin.section.people")}</h2>
   <h2>{t("admin.approved.title", { n: people.length })}</h2>
-  <div class="stack">
+  <!-- Stable, non-translated anchor for tooling (e2e/screenshot-refresh.mjs
+       organizer/08-revoke): mirrors the id="join-requests" hook AdminQueue
+       already carries for the same reason — a translated button label is not
+       a safe cross-locale selector, but this id is. -->
+  <div class="stack" id="approved-people">
     {#each people.filter((p) => !filterActive || matchedPubkeys.has(p.pubkey)) as person (person.pubkey)}
       <div class="card">
         <PersonId pubkey={person.pubkey} name={person.name} {relays} />

@@ -66,6 +66,7 @@ const COPY = {
     eventLocation: "Bratislava",
     ninaIntro: "Rust developer working on privacy tooling. Looking for a co-founder who cares about usability.",
     nadiaIntro: "Product designer who loves making cryptography approachable. Looking for engineers to collaborate with.",
+    ninaAbout: "New to Nostr, excited to meet people.",
     dm: "Hey! Looking forward to the event.",
     chatWelcome: "Welcome everyone! Excited to see you all here.",
     chatReply: "Thanks for organizing this, looking forward to it!",
@@ -80,6 +81,7 @@ const COPY = {
     eventLocation: "Bratislava",
     ninaIntro: "Rust vývojárka, pracujem na nástrojoch pre súkromie. Hľadám spoluzakladateľa, ktorému záleží na použiteľnosti.",
     nadiaIntro: "Produktová dizajnérka, ktorá rada robí kryptografiu zrozumiteľnou. Hľadám vývojárov na spoluprácu.",
+    ninaAbout: "Som nová na Nostri, teším sa, že spoznám nových ľudí.",
     dm: "Ahoj! Teším sa na podujatie.",
     chatWelcome: "Vitajte všetci! Teším sa, že vás tu vidím.",
     chatReply: "Ďakujem za organizáciu, teším sa na to!",
@@ -94,6 +96,7 @@ const COPY = {
     eventLocation: "Bratislava",
     ninaIntro: "Rust vývojářka, pracuji na nástrojích pro soukromí. Hledám spoluzakladatele, kterému záleží na použitelnosti.",
     nadiaIntro: "Produktová designérka, která ráda dělá kryptografii srozumitelnou. Hledám vývojáře ke spolupráci.",
+    ninaAbout: "Jsem nová na Nostru, těším se, že poznám nové lidi.",
     dm: "Ahoj! Těším se na akci.",
     chatWelcome: "Vítejte všichni! Těším se, že vás tu vidím.",
     chatReply: "Děkuji za organizaci, těším se na to!",
@@ -111,9 +114,51 @@ function stemPath(dir, stem, theme) {
   return `${DOCS}/${dir}/${stem}-${theme}.png`;
 }
 
+/**
+ * A durable-queue item that exhausts its retries surfaces as a red "N
+ * couldn't be sent" pill (`.chip.failed`) in TopBar's OutboxIndicator —
+ * global chrome rendered on every route, not scoped to any one page — and it
+ * stays lit for the rest of the run once something fails: nothing clears a
+ * `failed` item except an explicit user retry (a plain reload deliberately
+ * skips terminal items — publish-queue.ts flushQueueCore, `if (item.failed)
+ * continue`). That's how eight Slovak files ended up carrying "1 sa
+ * nepodarilo odoslať" — some earlier publish under this multi-persona load
+ * failed all its attempts and the banner rode along into every later shot.
+ * Called from shoot() before every capture: if the pill is up, open it and
+ * click Retry on each failed item against the (already healthy, still-
+ * running) local relay rather than let it silently ship. Structural only —
+ * outbox.retry's own button carries translated text (outbox.retry), so it's
+ * targeted by position: the non-danger .btn.inline in each item's action
+ * pair (discard is .btn.inline.ghost.danger).
+ */
+async function clearOutboxErrors(page) {
+  const chip = page.locator(".chip.failed");
+  if (!(await chip.count().catch(() => 0))) return;
+  console.warn("  [outbox] red error pill present before a shot — retrying failed item(s)...");
+  for (let i = 0; i < 6; i++) {
+    if (!(await chip.count().catch(() => 0))) break;
+    const expanded = await chip.first().getAttribute("aria-expanded").catch(() => null);
+    if (expanded !== "true") await chip.first().click().catch(() => {});
+    await page.waitForTimeout(300);
+    const retryBtns = page.locator(".panel .acts button.inline:not(.danger)");
+    const n = await retryBtns.count().catch(() => 0);
+    for (let j = 0; j < n; j++) {
+      await retryBtns.first().click().catch(() => {});
+      await page.waitForTimeout(400);
+    }
+    await page.waitForTimeout(1500);
+  }
+  if (await chip.count().catch(() => 0)) {
+    console.warn("  [outbox] FAILED to clear the red error pill after retries — this shot may still carry it.");
+  } else {
+    console.log("  [outbox] error pill cleared.");
+  }
+}
+
 async function shoot(page, dir, stem, theme) {
   mkdirSync(`${DOCS}/${dir}`, { recursive: true });
   const path = stemPath(dir, stem, theme);
+  await clearOutboxErrors(page);
   await page.waitForTimeout(350);
   await page.screenshot({ path });
   shots.push(`${dir}/${stem}-${theme}.png`);
@@ -294,6 +339,29 @@ async function submitTextIntro(page, text) {
   return true;
 }
 
+/**
+ * Structural mirror of the 09-record video-path selectors below (same DOM
+ * shape in Record.svelte ~886-930, just the audio branch of the same {#if
+ * mode === "audio"} conditionals) — this used to select by the buttons'
+ * accessible NAME ("enable microphone" / "record" / "stop" / "use this"),
+ * which is translated per locale (record.audio.enableMic /
+ * record.audio.record / record.stop / record.useThis in messages.ts) and
+ * matched nothing in sk/cs, so the whole function silently no-opped there
+ * (logged "SKIP audio-intro: no record button found") and the sk/cs
+ * 21-transcript / 23-my-profile-edited stems never captured at all — the
+ * files sitting in docs/images for those locales were stale English
+ * captures. None of the selectors below depend on translated text:
+ *  - enableMic renders as a plain, unclassed "btn" (no .inline/.primary/
+ *    .danger) — same shape as enableCamera's button, and it's simply absent
+ *    once a stream is already granted.
+ *  - the Record button is the only button.primary without aria-pressed (the
+ *    mode-toggle buttons reuse .primary for their pressed state, but do
+ *    carry aria-pressed).
+ *  - Stop is the only button.danger while recording.
+ *  - "Use this" is the only button.primary once `recorded` is set — the
+ *    Record button from the branch above no longer exists in that mutually
+ *    exclusive template branch.
+ */
 async function recordAudioIntro(page) {
   const tabs = page.locator('[role="group"][aria-labelledby="mode-label"] button');
   await tabs.first().waitFor({ timeout: 15000 }).catch(() => {});
@@ -303,24 +371,24 @@ async function recordAudioIntro(page) {
   }
   await tabs.nth(1).click(); // [video, audio, text] — audio is index 1
   await page.waitForTimeout(300);
-  const enableMic = page.getByRole("button", { name: /^enable microphone$/i });
+  const enableMic = page.locator(".btn:not(.inline):not(.primary):not(.danger)").first();
   if (await enableMic.count()) {
     await enableMic.click();
     await page.waitForTimeout(500);
   }
   const ack = page.locator('input[type="checkbox"]');
   if (await ack.count()) await ack.first().check();
-  const btns = page.getByRole("button", { name: /record/i });
-  if (!(await btns.count())) {
+  const recordBtn = page.locator("button.primary:not([aria-pressed])").first();
+  if (!(await recordBtn.count())) {
     skip("audio-intro", "no record button found");
     return false;
   }
-  await btns.first().click();
+  await recordBtn.click();
   await page.waitForTimeout(2500); // let MediaRecorder collect a couple chunks
-  const stopBtn = page.getByRole("button", { name: /stop/i });
+  const stopBtn = page.locator("button.danger").first();
   if (await stopBtn.count()) await stopBtn.first().click();
   await page.waitForTimeout(500);
-  const useBtn = page.getByRole("button", { name: /use this/i });
+  const useBtn = page.locator("button.primary:not([aria-pressed])").first();
   if (await useBtn.count()) {
     await useBtn.first().click();
     await page.waitForTimeout(2000);
@@ -710,7 +778,7 @@ async function main() {
   const ninaNameField = nina.locator("#n");
   if (await ninaNameField.count()) await ninaNameField.fill("Nina Newcomer");
   const aboutField = nina.locator("#a");
-  if (await aboutField.count()) await aboutField.fill("New to Nostr, excited to meet people.");
+  if (await aboutField.count()) await aboutField.fill(COPY.ninaAbout);
   await nina.waitForTimeout(300);
   await shoot(nina, partDir, "04-join-form", "light");
   await setThemeNoReload(nina, "dark");
@@ -897,10 +965,42 @@ async function main() {
   await nina.waitForTimeout(1500);
   await shoot(nina, partDir, "08-attendees", "light");
   mirrorToWeb(partDir, "08-attendees", "light");
-  await setTheme(nina, "dark");
+  // setThemeNoReload, not setTheme: this roster reflects Nina's own live
+  // approval/role state, which keeps resolving in the background right
+  // around here (pending → approved, bottom-nav item count changing) — a
+  // real reload re-fetched it and landed the dark shot at a LATER point in
+  // that same flow than light (pending+3 nav items vs. approved+6). Flipping
+  // data-theme in place needs no refetch, so both shots land on one moment.
+  await setThemeNoReload(nina, "dark");
   await shoot(nina, partDir, "08-attendees", "dark");
   mirrorToWeb(partDir, "08-attendees", "dark");
-  await setTheme(nina, "light");
+  await setThemeNoReload(nina, "light");
+
+  // ---- participant/10-attendee-detail: the guides reference this stem
+  // (E2E-TESTING-GUIDE.md) but no step in this generator ever produced it —
+  // the files sitting in docs/images were stale, non-refreshed captures
+  // (hence light/dark being byte-identical: nothing here ever re-shot them).
+  // button.open is PersonCard's own click target (packages/app/src/lib/
+  // components/PersonCard.svelte) — the same structural hook 21-transcript
+  // already uses for the roster — never translated text.
+  try {
+    clearStem(partDir, "10-attendee-detail");
+    const openBtn = nina.locator(".roster button.open").first();
+    await openBtn.waitFor({ timeout: 10000 });
+    await openBtn.click();
+    // Attendee.svelte renders a skeleton (.sk-avatar/.sk-line, no h1) while
+    // loading — wait for the real h1 so this never captures the placeholder.
+    await nina.locator(".card h1").first().waitFor({ timeout: 15000 });
+    await nina.waitForTimeout(400);
+    await shoot(nina, partDir, "10-attendee-detail", "light");
+    await setThemeNoReload(nina, "dark");
+    await shoot(nina, partDir, "10-attendee-detail", "dark");
+    await setThemeNoReload(nina, "light");
+    await nina.goBack();
+    await nina.waitForTimeout(500);
+  } catch (e) {
+    skip("10-attendee-detail", String(e).slice(0, 150));
+  }
 
   // ---- participant/09-record (item 5, optional): mid-recording UI. All
   // structural selectors (class/attribute, never translated button text) so
@@ -1076,7 +1176,13 @@ async function main() {
           await olga.waitForTimeout(500);
         }
         if (found) {
-          const transcriptBtn = olga.getByRole("button", { name: /transcript/i });
+          // Structural, not translated text (media.showTranscript is "Show
+          // transcript" in en but "Zobraziť prepis" / "Zobrazit přepis" in
+          // sk/cs — neither contains "transcript" at all, so the old
+          // getByRole name-match never fired there). MediaPlayer.svelte's
+          // toggle is the only button.linklike inside its own .transcript
+          // wrapper.
+          const transcriptBtn = olga.locator(".transcript button.linklike").first();
           if (await transcriptBtn.count()) {
             await transcriptBtn.first().click();
             await olga.waitForTimeout(400);
@@ -1104,7 +1210,15 @@ async function main() {
     }
 
     // ---- participant/23-my-profile-edited ----
+    // clearStem BEFORE the attempt, not only on success: this stem's mock-
+    // coordinator dependency (the AI profile field only appears once the
+    // text intro has actually processed) makes it fail here often enough
+    // that a stale file from some earlier, unrelated successful run was
+    // sitting in docs/images untouched for weeks — exactly the silent-
+    // substitution failure mode this file's clearStem() docstring warns
+    // about, just not yet applied to this particular stem.
     try {
+      clearStem(partDir, "23-my-profile-edited");
       await nina.goto(`/#/e/${naddr}/profile`);
       await nina.waitForTimeout(1200);
       const gotProfile = await pollReload(nina, async () =>
@@ -1112,7 +1226,6 @@ async function main() {
       );
       const hideToggle = nina.locator(".editfield input[type=checkbox]").first();
       if (gotProfile) {
-        clearStem(partDir, "23-my-profile-edited");
         await hideToggle.check();
         const saveBtn = nina.locator("button.primary");
         await saveBtn.first().click();
@@ -1129,10 +1242,20 @@ async function main() {
     }
 
     // ---- participant/11-matches ----
+    // clearStem BEFORE the attempt, matching 21-transcript / 15-dm-chat above:
+    // this stem is coordinator-dependent and the mock coordinator's documented
+    // stall means gotMatches below can legitimately come back false, in which
+    // case there must be no file at all here rather than a stale one from an
+    // earlier, unrelated successful run standing in for it unnoticed.
     try {
+      clearStem(partDir, "11-matches");
       await olga.goto(`/#/e/${naddr}/admin`);
       await olga.waitForTimeout(800);
-      const recomputeBtn = olga.getByRole("button", { name: /recompute/i });
+      // id, not translated text (admin.coordinator.recompute is "↻ Recompute
+      // all matches" in en but "↻ Prepočítať všetky spojenia" / "↻ Přepočítat
+      // všechna spojení" in sk/cs — none share the English word "recompute").
+      // Admin.svelte gave this button a stable id for exactly this reason.
+      const recomputeBtn = olga.locator("#recompute-matches");
       if (await recomputeBtn.count()) await recomputeBtn.first().click();
       await nina.goto(`/#/e/${naddr}/matches`);
       await nina.waitForTimeout(1500);
@@ -1149,7 +1272,6 @@ async function main() {
         { maxMs: 90000, stepMs: 5000 },
       );
       if (gotMatches) {
-        clearStem(partDir, "11-matches");
         await nina.waitForTimeout(400);
         await shoot(nina, partDir, "11-matches", "light");
         await setTheme(nina, "dark");
@@ -1231,10 +1353,27 @@ async function main() {
         await setThemeNoReload(nina, "light");
 
         // mute-confirm: toggle mute, capture the inline confirmation line.
-        const muteBtn = nina.locator(".row button.inline").first();
+        // Scoped to <main> (+layout.svelte:432, the routed page's own
+        // content) — the previous unscoped ".row button.inline" matched
+        // TopBar's OWN "back" button first (TopBar.svelte: also a
+        // `.row > button.btn.inline`, rendered in the global layout chrome
+        // BEFORE <main> in DOM order, so .first() found it ahead of DmChat's
+        // mute toggle). Clicking it fired router.up() instead of muting —
+        // silently navigating to /#/dm — which is exactly why
+        // 18-mute-confirm shipped byte-identical to 14-messages: both ended
+        // up screenshotting the same messages-list route.
+        const muteBtn = nina.locator("main .row button.inline").first();
         if (await muteBtn.count()) {
           await muteBtn.click();
-          await nina.waitForTimeout(500);
+          // toggleMute disables the button (muteBusy) for the duration of the
+          // publish — wait for it to re-enable rather than guess a fixed
+          // delay, so the shot never lands mid-toggle, before the
+          // confirmation line has actually rendered.
+          for (let i = 0; i < 20; i++) {
+            if (!(await muteBtn.isDisabled().catch(() => false))) break;
+            await nina.waitForTimeout(300);
+          }
+          await nina.waitForTimeout(300);
           await shoot(nina, partDir, "18-mute-confirm", "light");
           await setThemeNoReload(nina, "dark");
           await shoot(nina, partDir, "18-mute-confirm", "dark");
@@ -1260,17 +1399,47 @@ async function main() {
   }
 
   // ---- organizer/08-revoke ----
+  // The old `hasText: /revoke|odvolať|odvolat/i` filter assumed Slovak/Czech
+  // words that aren't the real translation (admin.revoke.revoke is "Odobrať"
+  // in sk and "Odebrat" in cs — neither contains "odvolať"/"odvolat"), so it
+  // matched zero buttons there. Nothing then clicked, and the shot just
+  // captured whatever was already on screen: this same #/e/<naddr>/admin
+  // route had been visited moments earlier for 09-posts-editor, and because
+  // this SPA's `goto` to an unchanged hash URL is a no-op (no navigation, no
+  // reset scroll), the leftover scrolled-to-post-editor state rode straight
+  // into the sk/cs 08-revoke files. #approved-people is AdminPeople's own
+  // stable, non-translated anchor (added alongside this fix, packages/app/
+  // src/lib/components/AdminPeople.svelte) — but the currently-served
+  // preview build predates that change (vite preview serves a static dist/
+  // bundle; a Svelte source edit needs a rebuild to appear there, which
+  // wasn't done for this pass), so also fall back to a page-wide
+  // `.btn.inline.danger` when the scoped one isn't present yet. That fallback
+  // is unambiguous on its own merits, not just luck: by this point in the
+  // flow every pending request has been resolved (AdminQueue's reject-danger
+  // buttons render per pending row, and there are none left) and no talk has
+  // been submitted yet (AdminTalks' danger button is per-submitted-talk, and
+  // the Talks section runs after this step) — so AdminPeople's per-person
+  // revoke buttons (Nina + Nadia, both approved) are the ONLY
+  // .btn.inline.danger buttons anywhere on the page at this moment.
   await olga.goto(`/#/e/${naddr}/admin`);
   await olga.waitForTimeout(1500);
-  const revokeButtons = olga.locator("button").filter({ hasText: /revoke|odvolať|odvolat/i });
-  if (await revokeButtons.count()) {
-    await revokeButtons.first().click();
+  try {
+    clearStem(orgDir, "08-revoke");
+    let revokeBtn = olga.locator("#approved-people .card button.btn.inline.danger").first();
+    if (!(await revokeBtn.count().catch(() => 0))) {
+      revokeBtn = olga.locator("button.btn.inline.danger").first();
+    }
+    await revokeBtn.waitFor({ timeout: 15000 });
+    await revokeBtn.scrollIntoViewIfNeeded();
+    await revokeBtn.click();
     await olga.waitForTimeout(500);
+    await shoot(olga, orgDir, "08-revoke", "light");
+    await setThemeNoReload(olga, "dark");
+    await shoot(olga, orgDir, "08-revoke", "dark");
+    await setThemeNoReload(olga, "light");
+  } catch (e) {
+    skip("08-revoke", String(e).slice(0, 150));
   }
-  await shoot(olga, orgDir, "08-revoke", "light");
-  await setThemeNoReload(olga, "dark");
-  await shoot(olga, orgDir, "08-revoke", "dark");
-  await setThemeNoReload(olga, "light");
 
   // ---- organizer/13-admin-overview + -desktop: the operational dashboard
   // atop Admin (AdminOverview.svelte) had NO producer anywhere in e2e/ until
@@ -1284,23 +1453,36 @@ async function main() {
   // state — reproduces it cleanly instead of by hand. Desktop reuses the
   // 1280x900 convention from audit-ux-verify.mjs / marmot-chat-verify.mjs;
   // resizing Olga's OWN page keeps her logged-in organizer session instead of
-  // needing a fresh, empty context just for one wide shot. Only -light is
-  // referenced by the guides for either stem, so that's all that's captured.
+  // needing a fresh, empty context just for one wide shot. Dark added for
+  // both viewports (previously light-only, leaving 6 dark files missing
+  // across the three locales) — setThemeNoReload since nothing here is
+  // route-derived and a real reload would just risk re-fetching the metrics
+  // mid-shot.
   try {
-    clearStem(orgDir, "13-admin-overview", ["light"]);
-    clearStem(orgDir, "13-admin-overview-desktop", ["light"]);
+    clearStem(orgDir, "13-admin-overview");
+    clearStem(orgDir, "13-admin-overview-desktop");
     await olga.goto(`/#/e/${naddr}/admin`);
     const overviewMetric = olga.locator(".grid .metric").first();
     await overviewMetric.waitFor({ timeout: 15000 });
     await overviewMetric.scrollIntoViewIfNeeded();
     await olga.waitForTimeout(300);
     await shoot(olga, orgDir, "13-admin-overview", "light");
+    await setThemeNoReload(olga, "dark");
+    await overviewMetric.scrollIntoViewIfNeeded();
+    await olga.waitForTimeout(200);
+    await shoot(olga, orgDir, "13-admin-overview", "dark");
+    await setThemeNoReload(olga, "light");
 
     await olga.setViewportSize({ width: 1280, height: 900 });
     await olga.waitForTimeout(300);
     await overviewMetric.scrollIntoViewIfNeeded();
     await olga.waitForTimeout(200);
     await shoot(olga, orgDir, "13-admin-overview-desktop", "light");
+    await setThemeNoReload(olga, "dark");
+    await overviewMetric.scrollIntoViewIfNeeded();
+    await olga.waitForTimeout(200);
+    await shoot(olga, orgDir, "13-admin-overview-desktop", "dark");
+    await setThemeNoReload(olga, "light");
     await olga.setViewportSize({ width: 390, height: 844 });
   } catch (e) {
     skip("13-admin-overview / 13-admin-overview-desktop", String(e).slice(0, 150));
