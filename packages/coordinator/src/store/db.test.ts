@@ -880,3 +880,101 @@ describe("job enqueue outcomes and the recompute memo reset", () => {
     expect(store.jobStateCounts()).toEqual({ pending: 1, done: 1 });
   });
 });
+
+/**
+ * prod 2026-08-04: the coordinator's serialized MLS client state is a protected
+ * value that grows ~2.5 KB per device. At 25 devices it crossed NIP-44's
+ * 65,535-byte plaintext ceiling, and from then on every invite to that group died
+ * inside GroupSession.save() — AFTER the Add commit had already been published to
+ * the group relays. The coordinator republished commits it could not remember and
+ * rolled back to the stale on-disk epoch on each restart; 13 devices were locked
+ * out of a chat that looked healthy to everyone already in it.
+ */
+describe("Store at-rest values larger than one NIP-44 plaintext", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  /** Shaped like serialized MLS state: repeated framing around random key material. */
+  function mlsLikeState(devices: number): string {
+    let out = "";
+    for (let i = 0; i < devices; i++) {
+      out += JSON.stringify({
+        leaf: i,
+        capabilities: { versions: [1], ciphersuites: [1], extensions: [1, 2, 3], proposals: [] },
+        extensions: [{ type: 62193, critical: true }],
+        signaturePublicKey: bytesToHex(generateSecretKey()),
+        encryptionKey: bytesToHex(generateSecretKey()),
+        pathSecret: bytesToHex(generateSecretKey()),
+      });
+    }
+    return out;
+  }
+
+  function rawKv(store: Store, namespace: string, key: string): string {
+    return (store as any).db
+      .prepare("SELECT v FROM marmot_kv WHERE namespace = ? AND k = ?")
+      .get(namespace, key).v;
+  }
+
+  it("round-trips a value well past the 65,535-byte ceiling that used to throw", () => {
+    const store = new Store(":memory:", generateSecretKey());
+    // ~50 devices' worth: comfortably over the ceiling, where every write threw.
+    const state = mlsLikeState(400);
+    expect(Buffer.byteLength(state, "utf8")).toBeGreaterThan(65535);
+
+    store.marmotKvSet("group-state", "gid", state);
+    expect(store.marmotKvGet("group-state", "gid")).toBe(state);
+  });
+
+  it("keeps growing past the point where even the packed form needs several chunks", () => {
+    const store = new Store(":memory:", generateSecretKey());
+    // DISTINCT random keys, not one repeated: a repeated string brotli-compresses
+    // to a single chunk and would quietly prove nothing. This forces the
+    // multi-chunk path, so the ceiling is gone rather than merely deferred by
+    // compression.
+    let huge = "";
+    for (let i = 0; i < 8_000; i++) huge += bytesToHex(generateSecretKey());
+    expect(Buffer.byteLength(huge, "utf8")).toBeGreaterThan(500_000);
+
+    store.marmotKvSet("group-state", "huge", huge);
+    expect(store.marmotKvGet("group-state", "huge")).toBe(huge);
+    expect(rawKv(store, "group-state", "huge").split(".").length).toBeGreaterThan(1);
+  });
+
+  it("stores the oversized value encrypted, compressed, and under its own prefix", () => {
+    const store = new Store(":memory:", generateSecretKey());
+    const state = mlsLikeState(400);
+    store.marmotKvSet("group-state", "gid", state);
+
+    const raw = rawKv(store, "group-state", "gid");
+    expect(raw.startsWith("nip44z:")).toBe(true);
+    // Not a prefix of the classic marker, so old rows can never be misread.
+    expect(raw.startsWith("nip44:")).toBe(false);
+    // Secrets are not sitting in the column.
+    expect(raw).not.toContain(state.slice(0, 64));
+    // Brotli earns its place: the row is smaller than the plaintext it holds,
+    // which single-shot NIP-44 (base64 + padding) could never be.
+    expect(raw.length).toBeLessThan(state.length);
+  });
+
+  it("leaves small values on the classic single-shot format", () => {
+    const store = new Store(":memory:", generateSecretKey());
+    store.marmotKvSet("key-package", "kp", "a small value");
+
+    const raw = rawKv(store, "key-package", "kp");
+    expect(raw.startsWith(ENC_PREFIX)).toBe(true);
+    expect(raw.startsWith("nip44z:")).toBe(false);
+    expect(store.marmotKvGet("key-package", "kp")).toBe("a small value");
+  });
+
+  it("still reads rows written before the packed format existed", () => {
+    // The fix must need no migration: every row already on disk is classic.
+    const sk = generateSecretKey();
+    const store = new Store(":memory:", sk);
+    store.marmotKvSet("group-state", "legacy", "written by the old binary");
+    expect(rawKv(store, "group-state", "legacy").startsWith(ENC_PREFIX)).toBe(true);
+    expect(store.marmotKvGet("group-state", "legacy")).toBe("written by the old binary");
+  });
+});

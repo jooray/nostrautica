@@ -17,10 +17,45 @@
  * one-way, idempotent, logged.
  */
 import { DatabaseSync } from "node:sqlite";
+import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from "node:zlib";
 import { selfEncrypt, selfDecrypt, sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 
 /** Prefix marking a column value as NIP-44-encrypted under the identity key. */
 const ENC_PREFIX = "nip44:";
+
+/**
+ * Prefix for the packed at-rest format: brotli, then base64, then NIP-44 in
+ * chunks joined by `.` (base64 never contains a dot, so the split is exact).
+ * Distinct from {@link ENC_PREFIX} and not a prefix of it — `"nip44z:"` does not
+ * start with `"nip44:"` — so detection stays unambiguous and old rows are read
+ * unchanged with no migration.
+ *
+ * This exists because of a production incident (2026-08-04). The coordinator's
+ * serialized MLS client state is a `protect()`ed value that grows ~2.5 KB per
+ * device, and at 25 devices it crossed the 65,535-byte NIP-44 plaintext ceiling
+ * that `selfEncrypt` asserts. From then on EVERY invite to that group died in
+ * `GroupSession.save()` — after `publishCommit` had already put the Add commit
+ * on the group relays. The coordinator kept publishing commits it then failed to
+ * remember, reverting to the stale on-disk epoch at each restart, while 13
+ * devices sat permanently locked out of a chat that looked fine to everyone
+ * already in it.
+ *
+ * The ceiling itself is right and stays: it is NIP-44's interop limit and it
+ * guards every payload that goes on the wire. It was simply never meant for a
+ * blob this process writes and reads back with its own key, which no other
+ * implementation ever parses.
+ */
+const ENC_PACKED_PREFIX = "nip44z:";
+
+/**
+ * Largest plaintext handed to one `selfEncrypt` call. Under NIP-44's 65,535
+ * ceiling with room to spare — the packed payload is base64, so the exact
+ * boundary is not worth shaving.
+ */
+const AT_REST_CHUNK = 60_000;
+
+/** Values at or under this (in UTF-8 bytes) keep the classic single-shot format. */
+const AT_REST_PACK_THRESHOLD = AT_REST_CHUNK;
 
 /**
  * The store's logical schema version, written to SQLite's `PRAGMA user_version`
@@ -1050,19 +1085,47 @@ export class Store {
   }
 
   // ── at-rest protection of event-key columns (F1) ──────────────────────────
-  /** Encrypt a sensitive column value for storage (no-op without an identity key). */
+  /**
+   * Encrypt a sensitive column value for storage (no-op without an identity key).
+   *
+   * Small values keep the classic single-shot `nip44:` form, so every existing
+   * row and every small column is written exactly as before. Only a value too
+   * large for one NIP-44 plaintext takes the packed path — see
+   * {@link ENC_PACKED_PREFIX} for why that path has to exist at all.
+   */
   private protect(value: string): string {
     if (!this.identitySk) return value;
-    return ENC_PREFIX + selfEncrypt(this.identitySk, value);
+    if (utf8ToBytes(value).length <= AT_REST_PACK_THRESHOLD) {
+      return ENC_PREFIX + selfEncrypt(this.identitySk, value);
+    }
+    // Brotli first: MLS client state is dominated by repeated framing (capability
+    // lists, extension headers, blank tree regions), not by the key material it
+    // looks like, and compresses to about a fifth. Chunking is what actually
+    // removes the ceiling; compression is what keeps the row count at one.
+    const packed = brotliCompressSync(Buffer.from(value, "utf8"), {
+      params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 5 },
+    }).toString("base64");
+    const chunks: string[] = [];
+    for (let i = 0; i < packed.length; i += AT_REST_CHUNK) {
+      chunks.push(selfEncrypt(this.identitySk, packed.slice(i, i + AT_REST_CHUNK)));
+    }
+    return ENC_PACKED_PREFIX + chunks.join(".");
   }
 
   /** Decrypt a sensitive column value read from storage (plaintext passes through). */
   private reveal(value: string): string {
-    if (!value.startsWith(ENC_PREFIX)) return value; // legacy plaintext row
+    const packed = value.startsWith(ENC_PACKED_PREFIX);
+    if (!packed && !value.startsWith(ENC_PREFIX)) return value; // legacy plaintext row
     if (!this.identitySk) {
       throw new Error("store holds encrypted event keys but no identity key was provided");
     }
-    return selfDecrypt(this.identitySk, value.slice(ENC_PREFIX.length));
+    if (!packed) return selfDecrypt(this.identitySk, value.slice(ENC_PREFIX.length));
+    const joined = value
+      .slice(ENC_PACKED_PREFIX.length)
+      .split(".")
+      .map((chunk) => selfDecrypt(this.identitySk!, chunk))
+      .join("");
+    return brotliDecompressSync(Buffer.from(joined, "base64")).toString("utf8");
   }
 
   /**
