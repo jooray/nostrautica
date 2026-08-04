@@ -37,6 +37,7 @@
     cachedOfflinePack,
     packComplete,
     formatBytes,
+    PACK_STEP_KEYS,
     type OfflinePack,
     type PackStep,
   } from "$lib/events/offline-pack.js";
@@ -769,7 +770,10 @@
           <strong>{t("event.offline.title")}</strong>
           <p class="muted" style="margin:0.2rem 0 0;font-size:0.85rem">
             {#if packing}
-              {t("event.offline.downloading", { n: packSteps.length })}
+              {t("event.offline.downloading", {
+                n: Math.min(packSteps.length, PACK_STEP_KEYS.length),
+                total: PACK_STEP_KEYS.length,
+              })}
             {:else if packDone}
               {t("event.offline.ready")}
             {:else if offlinePack && offlinePack.swControlled === false}

@@ -195,3 +195,18 @@ describe("i18n plural resolution", () => {
     i18n.set("en");
   });
 });
+
+describe("counter totals are never hard-coded in message text", () => {
+  // Regression: "event.offline.downloading" read "Downloading… ({n} of 6)" in
+  // all three locales while the offline pack had grown to eight steps, so the
+  // card rendered "Downloading… (8 of 6)". A total that lives in the string
+  // cannot be kept in sync with the code that counts; it must be a parameter.
+  it("the offline download counter takes its total as a parameter", () => {
+    for (const locale of ["en", "sk", "cs"] as const) {
+      const text = messages[locale]["event.offline.downloading"] as string;
+      expect(text, locale).toContain("{n}");
+      expect(text, locale).toContain("{total}");
+      expect(text, locale).not.toMatch(/\d/);
+    }
+  });
+});
