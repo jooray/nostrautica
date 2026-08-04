@@ -35,16 +35,24 @@ model = "qwen3-4b"                # cheap: nostr-context summaries
 
 [models.match]
 provider = "venice"
-model = "deepseek-v4-flash"       # matching-benchmark winner (docs/MATCHING-BENCHMARK.md):
-                                  # best recall@1 + separation, judge 4.53, ~45× cheaper than
-                                  # glm-5-2 pairwise ($0.22/100 attendees, batched K=10).
-# TRADE-OFF: deepseek-v4-flash is NOT a Venice private/TEE-tier model — attendee
-# ai_profiles sent for match scoring leave the TEE boundary (Venice still doesn't
-# log/train on API traffic, but the hardware-attestation guarantee is gone).
-# require_private = false accepts that for THIS role only; summary/embed/STT keep
-# the provider default above. For a no-policy-change alternative, use the private
-# tier: model = "zai-org-glm-5-2" (judge 4.63, $2.64/100) with require_private
-# left unset, or budget "zai-org-glm-4.7-flash" ($0.32/100, softer separation).
+model = "deepseek-v4-flash-0731"  # successor to the matching-benchmark winner
+                                  # (docs/MATCHING-BENCHMARK.md): best recall@1 + separation,
+                                  # judge 4.53, ~45× cheaper than glm-5-2 pairwise
+                                  # (~$0.28/100 attendees at 0731 pricing, batched K=10).
+# Venice deprecated the benchmarked `deepseek-v4-flash` (0423) on 2026-08-14 with
+# autoRemap:false — i.e. it does not silently redirect, the id just stops existing —
+# naming `deepseek-v4-flash-0731` as the replacement. Re-benchmarked before the swap
+# (BP3/K=10/subset, 2 seeds): recall@1 0.75, zero format failures, separation 0.59-0.62
+# vs 0.64-0.65 — weak pairs score ~5 points higher, which only softens the margin, not
+# the ranking (o>W 0.98-0.99 unchanged, and matches are rank-based via top_k).
+# TRADE-OFF: 0423 was NOT private-tier, which is what require_private = false below is
+# for. 0731 reports privacy = "private" in GET /models (though supportsTeeAttestation is
+# still false), so this override is now a compatibility valve rather than a live policy
+# relaxation — it is kept because a Venice-side reclassification would otherwise turn
+# into a hard startup error for the whole daemon. summary/embed/STT keep the provider
+# default above. Private-tier alternatives if you drop this role's override entirely:
+# "zai-org-glm-5-2" (judge 4.63, $2.64/100) or budget "zai-org-glm-4.7-flash"
+# ($0.32/100, softer separation).
 require_private = false
 
 [models.embed]

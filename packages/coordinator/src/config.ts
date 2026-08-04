@@ -17,8 +17,11 @@ import {
 } from "@nostrautica/protocol";
 
 // A model role may opt out of the provider's private-tier restriction (spec §16.2):
-// the matching-benchmark winner (deepseek-v4-flash) is not a Venice private model,
+// the matching-benchmark winner (deepseek-v4-flash) was not a Venice private model,
 // so `models.match.require_private = false` relaxes the filter for THAT role only.
+// Its replacement after Venice's 2026-08-14 deprecation, deepseek-v4-flash-0731,
+// does report privacy = "private", so the override now only guards against a
+// Venice-side reclassification (which would otherwise be a hard startup error).
 // Summary/STT keep the provider default (private). Omitting the field = provider default.
 const modelRefSchema = z.object({
   provider: z.string(),
