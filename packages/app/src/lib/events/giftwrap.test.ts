@@ -148,8 +148,14 @@ describe("signer-based gift wrap ↔ protocol raw-key gift wrap", () => {
     );
 
     const unwrapped = await signerUnwrap(recipient, wrap as never);
+    // Ceiling read AFTER the unwrap, not from the `now` captured at the top: the
+    // clamp calls Date.now() itself, so a single second ticking over between the
+    // two made this fail with an off-by-one-second — the 15-minute skew cancels
+    // on both sides and leaves a bare `now + 1 > now` comparison. Sampling the
+    // ceiling once the clamp has already run makes the bound unbeatable.
+    const clampCeiling = Math.floor(Date.now() / 1000) + RUMOR_MAX_CLOCK_SKEW_SEC;
     // Clamped to at most now + skew — the 3-day head start is gone.
-    expect(unwrapped.created_at).toBeLessThanOrEqual(now + RUMOR_MAX_CLOCK_SKEW_SEC);
+    expect(unwrapped.created_at).toBeLessThanOrEqual(clampCeiling);
     expect(unwrapped.created_at).toBeLessThan(future);
   });
 });
