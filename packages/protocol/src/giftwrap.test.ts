@@ -117,7 +117,12 @@ describe("gift wrap (NIP-59)", () => {
       kind: KIND_JOIN_REQUEST,
       content: { v: 2, name: "x" },
     });
-    expect(wrap.created_at).toBeLessThanOrEqual(now + 5);
+    // Bounds straddle the call: the upper one is sampled AFTER `wrapRumor` (which
+    // reads its own clock), the lower one before it. Deriving both from a single
+    // `now` captured up front is the same off-by-a-tick flake this suite has hit
+    // elsewhere — it just needs a slower machine to show, since ±5s hides it.
+    const after = Math.floor(Date.now() / 1000);
+    expect(wrap.created_at).toBeLessThanOrEqual(after + 5);
     expect(wrap.created_at).toBeGreaterThanOrEqual(now - 2 * 24 * 60 * 60 - 5);
   });
 

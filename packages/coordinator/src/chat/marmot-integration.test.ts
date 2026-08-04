@@ -161,4 +161,48 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
     },
     30_000,
   );
+
+  // prod 2026-08-04. The serialized client state grows ~2.5 KB per device, so at
+  // ~25 devices it crossed NIP-44's 65,535-byte plaintext ceiling and every
+  // subsequent GroupSession.save() threw — but only AFTER publishCommit had put
+  // the Add commit on the relays. So the group advanced for everyone else while
+  // the coordinator's on-disk state stayed frozen at the last epoch that fit, and
+  // reverted to it on every restart. This drives real MLS invites past that point
+  // and checks the state that survives a reload, which is exactly what broke.
+  it(
+    "keeps persisting group state past the device count where the at-rest ceiling used to break every invite",
+    async () => {
+      const network = new FakeNetwork();
+      const coordSk = generateSecretKey();
+      const coordStore = new Store(":memory:", coordSk);
+      const { mls } = createMarmotClientMls({ store: coordStore, coordSk, network });
+      const ids = await mls.createGroup({ name: "big room", description: "", relays: RELAYS });
+
+      const members: string[] = [];
+      for (let i = 0; i < 30; i++) {
+        const memberSk = generateSecretKey();
+        const memberPub = getPublicKey(memberSk);
+        const member = makeMemberClient(memberSk, network);
+        await member.keyPackages.ensurePublished({ relays: RELAYS });
+        const [kpEvent] = await network.request(RELAYS, { kinds: [30443], authors: [memberPub] });
+        // Before the fix this threw "NIP-44 plaintext is NNNNN bytes — the
+        // ceiling is 65535" from roughly the 25th iteration onward.
+        await mls.invite(ids.mlsGroupIdHex, kpEvent as never);
+        members.push(memberPub);
+      }
+
+      const stateKey = coordStore.marmotKvKeys("group-state")[0]!;
+      const stored = coordStore.marmotKvGet("group-state", stateKey)!;
+      // Genuinely past the old ceiling — otherwise this test proves nothing.
+      expect(Buffer.byteLength(stored, "utf8")).toBeGreaterThan(65535);
+
+      // A FRESH client over the SAME store: this is the restart that used to roll
+      // the coordinator back to a stale epoch and orphan every commit since.
+      const reloaded = createMarmotClientMls({ store: coordStore, coordSk, network });
+      for (const pub of members) {
+        expect(await reloaded.mls.isMember(ids.mlsGroupIdHex, pub)).toBe(true);
+      }
+    },
+    180_000,
+  );
 });

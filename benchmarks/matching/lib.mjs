@@ -208,6 +208,9 @@ export const PRICING = {
   "z-ai-glm-5-turbo": { in: 1.2, out: 4.0 },
   "gemini-3-flash-preview": { in: 0.7, out: 3.75 },
   "deepseek-v4-flash": { in: 0.138, out: 0.275 },
+  // 0423 is deprecated (removed 2026-08-14, autoRemap:false); 0731 is Venice's
+  // named replacement — same 284B/13B-active MoE, ~27% dearer per token.
+  "deepseek-v4-flash-0731": { in: 0.175, out: 0.35 },
   "deepseek-v4-pro": { in: 1.65, out: 3.301 },
   "mistral-small-3-2-24b-instruct": { in: 0.09375, out: 0.25 },
   "qwen3-235b-a22b-instruct-2507": { in: 0.15, out: 0.75 },

@@ -35,7 +35,9 @@ Tap **Join this event** and fill in how people should know you:
   else stays inside the event."*
 - **Skills** and **What are you looking for?** — this is what the matching runs
   on. Be concrete: "rust developer, looking for a co-founder" beats "tech
-  enthusiast". It's worth the extra minute.
+  enthusiast". It's worth the extra minute. Skip both, and the bio too, and
+  you can still join — the form just flags, gently, that there's nothing yet
+  for matching to work with.
 - There's a checkbox to **publish a public RSVP** if you want others to see
   you're attending. Leave it off to keep your attendance inside the event.
 
@@ -46,10 +48,17 @@ it's a nice bonus).
 > **Already use one of these?** If you tap **Already on Nostr? Sign in**, you
 > can sign in with your existing key, a browser extension, or a phone signer
 > app (like Amber or Clave) instead. Your existing profile carries over and is
-> shown read-only — the app never changes it — and only the event-specific
-> fields (skills, looking-for) are yours to fill in.
+> shown read-only — the app never changes it.
 >
 > ![Welcome screen — sign in or create your identity](images/participant/07-signin-options-light.png)
+
+If your Nostr profile already has a bio, it's used as-is here. If it doesn't,
+the join form gives you an **"About you"** box of your own — text for this
+event only, never written back to your Nostr profile. Either way, **skills**
+and **looking-for** are always yours to fill in fresh; they're specific to
+this event.
+
+![Join form, signed in](images/participant/04b-join-form-signedin-light.png)
 
 If the organizer set a limit on how long the event keeps your data, you'll see
 a line saying so right on the join form — something like *"This event's data
@@ -87,6 +96,8 @@ screen like Talks offline; now the screens come down with it. It still doesn't
 pre-download the videos and audio themselves (just everything else), and you
 can tap **Update offline copy** any time to refresh it. If a piece couldn't be
 fetched, the card says so rather than pretending it's complete.
+
+![Download for offline card](images/participant/31-offline-card-light.png)
 
 ### Save your key (30 seconds — actually do it)
 
@@ -132,14 +143,11 @@ outside this event's attendees can ever see the intro itself.
 
 ![Recording your intro — video, audio, and text modes](images/participant/09-record-light.png)
 
-The app checks for new versions of itself in the background and updates
-automatically — but never at a moment that would cost you work. It holds the
-update back while you're recording, while you have a finished take you haven't
-submitted yet, while a file you picked or a talk URL you pasted is still unsent,
-and while you've got a draft intro typed. It waits until you've submitted or
-discarded before it reloads, so an update landing at the wrong moment can't lose a
-take. (It does this by *deferring* the reload — your recording isn't written to
-disk, so don't leave a finished-but-unsent take sitting for days; submit it.)
+The app updates itself automatically in the background, but never at a
+moment that would cost you work — it waits until you've submitted or
+discarded before it reloads, so an update can't land mid-recording and lose
+a take. (See Troubleshooting if you're wondering why an update seems to be
+waiting.)
 
 **Already recorded one for a different event?** If you have, this screen
 shows a **reuse gallery** above the recorder — every video, audio, or text
@@ -147,11 +155,10 @@ intro you've made at any past event, each with a quick preview so you can
 tell them apart. Reuse a video or audio clip as-is, or **Fresh copy** to
 re-encrypt it for this event without re-recording; for text, **Use this
 text** drops it into the composer so you can send it as-is or tweak it
-first. The local library does not store or show the source event. Ordinary
-video/audio reuse keeps the same encrypted blob, however, so its public
-ciphertext hash can link your presence across events. **Fresh copy** re-encrypts
-the media with a new key and IV, producing a new hash and avoiding that specific
-linkage. It cannot erase other metadata or copies already published.
+first. The local library does not store or show the source event, and if
+you'd rather this event's copy not be linkable back to that one, **Fresh
+copy** takes care of it (Troubleshooting has the mechanism, if you're
+curious).
 
 Video and audio intros get an automatic transcript once the organizer's
 matchmaking service has processed them — on your own or anyone else's page,
@@ -182,7 +189,6 @@ yourself. Save, and other attendees see your correction immediately — their
 view of you shows a small **"Edited by attendee"** badge so they know it's not
 purely automated.
 
-![My event profile — edit, hide, or report a generated field](images/participant/23-my-profile-edited-light.png)
 
 ## 4. People
 
@@ -252,11 +258,13 @@ their talk into processing.
 
 Shortly after you record your intro, tap **Matches**: a ranked list of people to
 meet. Each one leads with how strong the match is — **Strong match** or **Good
-match** — and, most importantly, a plain-language explanation of *why you two
-should talk*, right up front. If you want the mechanics (how similar vs. how
-complementary you are), they're one tap away under "score details" — but the
-reason comes first. The list updates as more people join. Tap a match to open
-their full page.
+match**, colour-graded on a single green ramp so the stronger badge is
+visibly brighter and you can tell them apart before reading a word — and,
+most importantly, a plain-language explanation of *why you two should talk*,
+right up front. If you want the mechanics (how similar vs. how complementary
+you are), they're one tap away under "score details" — but the reason comes
+first. The list updates as more people join. Tap a match to open their full
+page.
 
 ![Matches](images/participant/11-matches-light.png)
 
@@ -302,31 +310,17 @@ tells you this up front, every time you open the tab.
 
 **It works across all your devices, automatically.** Open the Chat tab on a
 second phone or another browser and it joins the group on its own — no code
-to scan, no pairing step. From **Chat → Chat devices** you can see every
-device attached to your account for this event, rename the one you're on, and
-remove any you no longer use (an old phone, a browser you cleared). One catch
-is inherent to how the underlying protocol works, not a bug: a device only
-ever sees messages sent *after* it joined — there's no syncing history onto a
-freshly added device.
+to scan, no pairing step. One catch is inherent to how the underlying
+protocol works, not a bug: a device only ever sees messages sent *after* it
+joined — there's no syncing history onto a freshly added device.
 
 ![The group chat, with a message sent](images/participant/marmot-chat-roundtrip-light.png)
 
-Marmot is an open protocol, and the same conversation is meant to eventually
-be reachable from other Marmot-compatible chat apps, not just this one — that
-interop is planned but isn't something to rely on today.
-
-This feature is marked **Experimental** for a reason: it's new, and joining
-the group can take a little while (or occasionally need a retry) before
-messages start flowing. If the tab is stuck on "setting up," give it a few
-minutes and reopen it.
-
-If it stays stuck — or a message won't send and you're told you may have been
-removed — use **Rejoin this chat**, which appears next to the error and under
-the "setting up" notice. Your device is listed under Chat devices but has
-somehow dropped out of the room, and rejoining asks the organizer's service to
-add it back. It usually takes under a minute, keeps the device you're on (no
-new entry in the device list), and, like any newly added device, starts your
-view of the conversation from that moment on.
+This feature is marked **Experimental** for a reason: it's new (interop with
+other Marmot-compatible apps is planned but not something to rely on yet),
+and joining the group can take a little while, or occasionally need a retry,
+before messages start flowing. If the tab is stuck on "setting up," give it a
+few minutes and reopen it.
 
 ## 7. Your event report
 
@@ -387,14 +381,10 @@ One more thing: **More → Settings** has a dark mode and a language switch
 ## If you need to leave
 
 Joined the wrong event, or just changed your mind? Open the event, scroll to
-the bottom, and tap **Leave event**. Confirm, and the app **sends a withdrawal
-request** — it doesn't claim you've instantly vanished, because it can't. Removing
-your directory entry, rotating the event key, and deleting your intro media all
-happen on the coordinator's (or organizer's) side once they receive the request, so
-the screen shows a pending state rather than pretending it's already done. If you're
-offline when you tap it, the request is queued and the app tells you plainly you
-haven't left yet — it'll send when you reconnect. Once it's acknowledged you're out;
-you can rejoin later, treated as a brand-new join request, not a resurrection of the
+the bottom, and tap **Leave event**. Confirm, and the app sends a withdrawal
+request — your directory entry, matches, and intro media get cleaned up on
+the coordinator's (or organizer's) side, and you're out. You can rejoin
+later; it's treated as a brand-new join request, not a resurrection of the
 old one.
 
 ## Privacy, in one paragraph
@@ -433,3 +423,33 @@ they open the attendee list — nothing:
 
 - **I don't see the attendee list / videos.** You have to be approved first. If
   you were just approved, reopen the event and give it a moment.
+
+- **I tapped Leave event but it still shows pending.** If you were offline
+  when you tapped it, the request is queued and the app tells you plainly you
+  haven't left yet — it sends as soon as you reconnect.
+
+- **Why does the app seem to be waiting to update itself?** It defers
+  reloading while you're recording, while you have a finished-but-unsent
+  take, a file or talk URL that's still unsent, or a draft intro typed — so
+  an update can't land at a moment that would cost you work. Nothing is
+  written to disk while it waits, so don't leave a finished take sitting for
+  days; submit or discard it and the update lands right after.
+
+- **Does reusing an old intro link me across events?** Reusing a video or
+  audio clip as-is keeps the same encrypted blob, so its public ciphertext
+  hash can tie your presence at two events together. **Fresh copy**
+  re-encrypts the media with a new key and IV, giving it a new hash and
+  avoiding that specific link — though it can't erase other metadata or
+  copies already published elsewhere.
+
+- **I want to manage my chat devices.** Open **Chat → Chat devices** to see
+  every device attached to your account for this event, rename the one
+  you're on, or remove any you no longer use (an old phone, a browser you
+  cleared).
+
+- **Group chat is stuck, or won't send and says I may have been removed.**
+  Tap **Rejoin this chat** (it appears next to the error, or under the
+  "setting up" notice) — it asks the organizer's service to add your device
+  back. It usually takes under a minute and keeps the device you're on; like
+  any newly added device, your view of the conversation continues from that
+  point on.

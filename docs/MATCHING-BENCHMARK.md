@@ -18,6 +18,42 @@
 \* prefiltered ≈2k pairs/100 attendees ⇒ 4k directional scorings = 400 K=10 calls (pairwise: 2k calls). Judge = blind 15-sample mean.
 Ruled out: **deepseek-v4-pro** on latency (maintainer call: ~16 s p50 / 23 s p95; partial subset numbers above for context). **z-ai-glm-5-turbo** disqualified for pairwise P0 (116/120 format failures under strict `json_schema`); worked batched but slow (13–25 s p50).
 
+### Deprecation follow-up — `deepseek-v4-flash` → `deepseek-v4-flash-0731` (2026-08-04)
+
+Venice deprecated the winning id: `GET /models` carries
+`deprecation: {date: 2026-08-14, autoRemap: false, replacementModelId: "deepseek-v4-flash-0731"}`.
+`autoRemap: false` means nothing silently redirects — on 2026-08-14 the old id
+simply stops resolving, which for this coordinator is a startup model-verification
+failure, not a degraded match. Production moved to 0731 before that date.
+
+Re-ran BP3 / K=10 / eval subset on both ids, two seeds each (paired, so the
+comparison isn't reading seed noise as a regression):
+
+| id | recall@1 | recall@3 | sep S–W | strong | weak | posBias | fail | p50 lat |
+|---|---|---|---|---|---|---|---|---|
+| `deepseek-v4-flash` (0423) | 0.80 / 0.75 | 0.95 / 0.95 | 0.65 / 0.64 | 0.89 / 0.88 | 0.25 / 0.24 | 0.04 / 0.10 | 0 | 16.1 s / 6.6 s |
+| `deepseek-v4-flash-0731` | 0.75 / 0.75 | 0.95 / 0.90 | 0.62 / 0.59 | 0.91 / 0.89 | 0.29 / 0.31 | 0.09 / 0.19 | 0 | 11.2 s / 6.2 s |
+
+Like-for-like within noise on the metrics that decide what attendees see. The one
+consistent (both seeds) difference is weak pairs scoring ~5 points higher, which
+narrows the strong–weak margin without reordering: ordering-above-weak stays
+0.98–0.99 and matches are selected by rank (`top_k`), not by an absolute score
+floor. Zero format failures under strict `json_schema` across 84 calls.
+
+Two things changed besides the id:
+- **Price is ~27% higher** — $0.175/$0.35 per Mtok vs $0.138/$0.275 ⇒ roughly
+  **$0.28 per 100 attendees**, still ~35× cheaper than glm-5-2 pairwise.
+- **Venice now reports `privacy: "private"`** for 0731 where 0423 was
+  `"anonymized"` (`supportsTeeAttestation` is still `false` on both). The
+  `models.match.require_private = false` override was kept anyway — see
+  `coordinator.example.toml` for why — but the ⚠ in the Recommendation below no
+  longer describes the deployed model.
+- 0731 also advertises `reasoning_effort` (`none|low|high|max`, default **high**),
+  which 0423 did not. Irrelevant in practice here: the coordinator sends
+  `venice_parameters.disable_thinking`, verified to still zero reasoning on 0731
+  (probe returned `reasoning_content: null`, 82 completion tokens for an 82-token
+  answer).
+
 ## What actually moved quality
 
 - **Rubric anchors beat everything else.** Adding explicit score bands ("0.9–1.0 = near-perfect mutual fit … 0.0–0.1 = no reason to meet") + "most candidates should NOT score high" (BP1) roughly **doubled strong-vs-weak separation** on every model (e.g. glm-5-2: 0.34→0.62; glm-4.7-flash: 0.06→0.50). The production P0 prompt compresses scores badly — weak pairs average 0.6–0.86, so top-K lists are ranked noise even when recall looks fine.

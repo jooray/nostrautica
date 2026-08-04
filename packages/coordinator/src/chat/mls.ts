@@ -41,6 +41,11 @@ export interface ChatMls {
   }): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }>;
   /** Whether a candidate's kind-30443 key package can be added to the group. */
   isEligible(mlsGroupIdHex: string, keyPackageEvent: AnyEvent): Promise<boolean>;
+  /** Eligibility WITH the library's reasons, for logging a refusal that can be acted on. */
+  evaluateKeyPackage?(
+    mlsGroupIdHex: string,
+    keyPackageEvent: AnyEvent,
+  ): Promise<{ eligible: boolean; reasons: string[] }>;
   /** Whether `pubkey` already holds at least one leaf in the group. */
   isMember(mlsGroupIdHex: string, pubkey: string): Promise<boolean>;
   /** Add a candidate from their key package (Add commit + Welcome delivery). */
@@ -143,8 +148,26 @@ export class MarmotClientMls implements ChatMls {
   }
 
   async isEligible(mlsGroupIdHex: string, keyPackageEvent: AnyEvent): Promise<boolean> {
+    return (await this.evaluateKeyPackage(mlsGroupIdHex, keyPackageEvent)).eligible;
+  }
+
+  /**
+   * Eligibility plus WHY. The library computes a list of reasons ("already a
+   * member", a ciphersuite mismatch, a missing required extension) and the old
+   * boolean threw them away, so a refused device produced one unactionable log
+   * line. During the 2026-08-04 chat incident that was the difference between
+   * seeing the problem and guessing at it.
+   */
+  async evaluateKeyPackage(
+    mlsGroupIdHex: string,
+    keyPackageEvent: AnyEvent,
+  ): Promise<{ eligible: boolean; reasons: string[] }> {
     const group = await this.client.groups.get(mlsGroupIdHex);
-    return group.evaluateKeyPackage(keyPackageEvent as never).eligible;
+    const result = group.evaluateKeyPackage(keyPackageEvent as never) as {
+      eligible: boolean;
+      reasons?: string[];
+    };
+    return { eligible: result.eligible, reasons: result.reasons ?? [] };
   }
 
   async isMember(mlsGroupIdHex: string, pubkey: string): Promise<boolean> {

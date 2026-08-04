@@ -53,22 +53,7 @@ Jazyk dělá tři věci. Nastavuje **výchozí jazyk rozhraní** pro účastník
 
 (Kvůli tomu nikdy nic nemusíte spouštět znovu: když účastník aktualizuje své představení, systém automaticky přepočítá jen spojení, jejichž je součástí.)
 
-Všimněte si poznámky pod formulářem: **rotace klíčů funguje jen dopředu** — kdokoli někdy držel dešifrovací klíč, dokáže dešifrovat obsah zveřejněný, dokud byl tento klíč platný. Odebrání někoho (§4) chrání *budoucí* obsah, ne minulý.
-
-**Retenční období** nastavíte v **Administrace → Nastavení → Smazat data
-účastníků po akci**. Zadejte kladný počet dní nebo nechte pole prázdné pro
-neomezené uchování. Účastníci období vidí při připojení i na stránce akce. Když
-období uplyne (a stejně tak když někdo akci opustí), koordinátor teď smaže **i své
-vlastní kopie** — profily, AI profily, přepisy, zdůvodnění párů, přednášky a shrnutí,
-které má u sebe, nejen zveřejněné záznamy — a odstraní záznamy z relayů napříč všemi
-verzemi klíče, které akce kdy použila, nejen ty aktuální. Dvě poctivá omezení
-zůstávají: smazání na relayích (NIP-09) je jen nejlepší snaha a relay si kopii může
-ponechat; a obsahově adresovaná položka, kterou stále sdílí *jiná* akce, přežije,
-dokud ji neopustí i ta poslední. Zálohy jsou samostatná věc — záloha, kterou
-provozovatel koordinátoru pořídil před smazáním, data drží, dokud ji nevymění
-([příručka provozovatele](COORDINATOR-OPERATOR-GUIDE.md) to popisuje). Jde tedy o
-skutečný úklid, jen ne o kryptografickou záruku, že každá poslední kopie je všude
-pryč.
+Všimněte si poznámky pod formulářem: **rotace klíčů funguje jen dopředu** — odebrání někoho (§4) chrání *budoucí* obsah, ne to, co už viděl. Retenční období nastavíte v **Administrace → Nastavení → Smazat data účastníků po akci** (počet dní, nebo prázdné pole pro neomezené uchování) — účastníci vidí deklarované období při připojení, a jakmile uplyne, koordinátor smaže i své vlastní kopie, nejen zveřejněné záznamy. Jde o skutečný úklid, ne o absolutní záruku, že každá poslední kopie je všude pryč (smazání na relayích je jen nejlepší snaha a zálohy jsou samostatná věc) — přesné limity popisuje [Šifrování a soukromí](ENCRYPTION-AND-PRIVACY.md).
 
 Po vytvoření dostanete **odkaz ke sdílení**, kontrolní seznam dalších kroků
 a **potvrzenku** — každý zveřejňovací krok se hlásí samostatně, takže
@@ -121,10 +106,11 @@ Klepnutím na řádek kohokoli otevřete **detailní panel** — jeho odeslaný
 profil, média a provozní historii (stav koordinátora, odeslané přednášky) —
 aniž byste opustili seznam.
 
-Ke sdílení máte dva druhy odkazů:
+Ke sdílení máte tři druhy odkazů:
 
 - **Otevřený odkaz na akci** (`…#/e/<akce>/join`, zobrazený blíž ke spodku s tlačítkem **Kopírovat pozvánkový odkaz**) — kdokoli si může prohlédnout veřejnou stránku akce a požádat o připojení. Dejte ho na svůj web nebo sociální sítě.
 - **Pozvánkové kódy** — jednorázové odkazy, které držitele automaticky schválí *je-li připojen koordinátor*. Nastavte počet a klepněte na **Vygenerovat**; dostanete jeden odkaz + QR kód na kód. Pošlete jeden na osobu, nebo QR kódy vytiskněte. Kód se veze ve fragmentu URL a nikdy se nedostane na server — s každým odkazem zacházejte jako s lístkem.
+- **Sdílený vstupní kód** — jeden QR kód, který naskenuje celý sál najednou, místo jednoho odkazu na osobu. Nastavte počet lidí (0 znamená bez limitu) a na kolik hodin má kód platit, pak klepněte na **Vytvořit sdílený kód** a dostanete jeden odkaz + QR na úvodní snímek. Existuje jen v tomto okně prohlížeče — zkopírujte ho nebo ukažte, než stránku zavřete, protože se pak už nedá znovu získat. Platnost držte krátkou: jakmile vyprší, opozdilci prostě skončí ve frontě na schválení, místo aby byli odmítnuti.
 
 ![Vygenerované pozvánkové kódy s QR](images/organizer-cs/04-invites-light.png)
 
@@ -133,6 +119,8 @@ vše** / **Stáhnout** vezmou všechny vygenerované odkazy jako obyčejný text
 pro hromadnou korespondenci a **Vytisknout pozvánkový list** rozloží po
 jednom QR kódu na kód, víc na stránku, připravené k rozstříhání a rozdání u
 dveří.
+
+![Sdílený vstupní kód — jeden QR pro celý sál](images/organizer-cs/04b-shared-code-light.png)
 
 ## 4. Schvalování účastníků
 
@@ -165,11 +153,6 @@ koordinátor; jeho připojení (§5) se pořád vyplatí kvůli automatickému
 schvalování a spojením, už ale není nutné jen k tomu, aby fungovalo ruční
 schvalování.
 
-Jedna drobnost bez připojeného koordinátora: pokud si účastník po schválení
-upraví vlastní napsaný text představení, ostatní účastníci ho uvidí, až
-jeho záznam tady v seznamu Lidé **zpracujete znovu** — v tomhle konkrétním
-případě se to nešíří samo.
-
 ### Odebrání někoho
 
 Klepněte na **Odebrat** u schválené karty. Dostanete potvrzení vysvětlující důsledek:
@@ -194,7 +177,7 @@ Chcete provozovat vlastního, nebo vám byl dán konkrétní? Rozbalte **Nebo vl
 
 > **Placení koordinátoři.** Koordinátor může být zpoplatněný (náklady na AI párování rostou s počtem účastníků), takže záznam může ukazovat cenu nebo bezplatnou úroveň (např. „do 20 účastníků zdarma"). Je-li kdy potřeba platba, obrazovka Nastavení zobrazí banner **Vyžaduje se platba** s odkazem na platbu — současný referenční koordinátor je zdarma.
 
-Koordinátor nemůže podepisovat jako akce ani měnit veřejné záznamy akce, konfigurace či pozvánek, protože nikdy nedostane `E_id`. Po připojení však drží `E_inbox` a ECK: čte přihlášky a média, při platných pozvánkách může vydat delegované granty `21602`, publikuje adresář, seznam účastníků, spojení, přednášky a stav a spravuje experimentální Marmot chat. Vyberte si operátora, kterému s touto pravomocí důvěřujete. Na záložce **Administrace** se objeví tlačítko **↻ Přepočítat všechna spojení** (je to opakovaná akce, ne nastavení); použijte ho po náporu nových účastníků.
+Koordinátor umí číst přihlášky a zveřejňovat jménem akce — záznamy v adresáři, seznam účastníků, spojení, přednášky — ale nikdy nedokáže vydávat se za vás ani měnit nastavení vaší akce. Vyberte si operátora, kterému s touto pravomocí důvěřujete. Na záložce **Administrace** se objeví tlačítko **↻ Přepočítat všechna spojení** (je to opakovaná akce, ne nastavení); použijte ho po náporu nových účastníků.
 
 ### Výměna nebo odpojení koordinátora
 
@@ -204,11 +187,7 @@ seznam k výběru (nebo pole na npub) pro přepnutí na jiného koordinátora �
 otočí se tím klíč akce a novému koordinátorovi se udělí grant; starý od té
 chvíle ztrácí přístup. **Odpojit** ho odstraní úplně, bez náhrady.
 
-Obojí je pro koordinátora, kterého opouštíte, nevratné: při každém
-připojení, výměně nebo odpojení aplikace zvýší interní číslo instalační
-generace a koordinátoři (včetně poctivých, kteří si kontrolují vlastní stav)
-důvěřují vždy jen *aktuální* generaci — starý grant se už nedá přehrát zpět
-do platnosti. Odpojení konkrétně znamená:
+Obojí je pro koordinátora, kterého opouštíte, nevratné — jakmile je vyměněný nebo odpojený, nemůže už nad akcí později znovu získat pravomoc. Odpojení konkrétně znamená:
 
 - **Párování se zastaví**, dokud nepřipojíte jiného koordinátora.
 - **Správa chatu zůstane bez majitele**, pokud jste měli zapnutý skupinový
@@ -265,11 +244,11 @@ pro návštěvníka.
 
 **Přednatočené přednášky.** V **Administrace → Nastavení → Přednatočené přednášky** to přepněte na *Zapnuto* (nebo *Nejprve nahrávka*, což v navigaci účastníků posune Přednášky před Lidi — vhodné pro formát „podívejte se předem, setkejte se na místě") a **Uložte**. Schválení účastníci pak mohou přidávat krátké přednášky — nahrané v prohlížeči, nahrané jako soubor, nebo zadané jako neveřejná **YouTube / .mp4 URL** (vhodné pro přednášky příliš velké na nahrání; koordinátor tyto nikdy nestahuje, takže URL přednášky jsou jen ke sledování).
 
-![Odesílání přednášky — výběr zdroje videa a volitelné zapnutí párování](images/participant/27-talks-submit-light.png)
+![Odesílání přednášky — výběr zdroje videa a volitelné zapnutí párování](images/participant-cs/27-talks-submit-light.png)
 
 Všimněte si, že **přednášky už ve výchozím stavu nevstupují do párování**: řečník u každé přednášky zvolí, zda zaškrtne *„Zpracovat tuto přednášku pro párování?"*. Mějte to na paměti, pokud se odeslaná přednáška neobjeví ve zdůvodnění něčích spojení — to je očekávané, pokud se řečník nepřihlásil (a u URL přednášek se to nestane nikdy). Šetří to náklady na přepis přednášek, které nikdo nechtěl párovat.
 
-![Pole s URL videa a rozpoznaným YouTube odkazem](images/participant/27b-talks-url-light.png)
+![Pole s URL videa a rozpoznaným YouTube odkazem](images/participant-cs/27b-talks-url-light.png)
 
 Odeslané přednášky se samy nezveřejní. Karta **Moderování přednášek** níž v **Administraci** zobrazuje všechno, co čeká na kontrolu — u každé klepněte na **Ukázka**, pak ji buď **Zveřejněte**, aby si ji účastníci mohli pustit, nebo **Zamítněte**. Dokud to tady neuděláte, nikdo kromě vás nic, co účastník pošle, neuvidí (zveřejnění navíc potřebuje připojeného koordinátora, stejně jako zbytek administrace). Vyhledávání/filtr v Lidech (§3) má filtr **Poslaná přednáška**, takže se na rušné akci můžete přesunout rovnou k těm, co na vás čekají, bez rolování celým seznamem.
 
@@ -298,13 +277,39 @@ záchranná síť pro případ, že tento plán selže.
 - **Spoluorganizátoři** — v **Administrace → Nastavení → Spoluorganizátoři** přidejte někoho podle jeho npub a sdílejte plnou organizátorskou kontrolu (úprava akce, schvalování, správa koordinátora). Jejich klíče jsou jim zabaleny jako dárek; přístup získají, až příště otevřou akci. Tohle je zároveň vaše záchranná síť, pokud vám spadne prohlížeč.
 - **Podporujte představení včas.** Spojení existují jen pro lidi, kteří nahráli představení — nejlepší, co můžete pro kvalitu spojení udělat, je dostat všechny k nahrání ještě před začátkem akce. Nahrání je pro účastníky volitelné a aplikace jim to i říká, ale vyplatí se na to tlačit: nahrané představení dá AI víc na práci, umožní ostatním účastníkům předem zjistit, jestli by si s daným člověkem opravdu sedli, ještě než k němu přijdou — párování není jen o projektech a dovednostech, je to i pocit, který AI sama o sobě nedokáže zachytit — a jde-li o video, pomůže lidem poznat svá spojení naživo.
 
-## 8. Sledování pozvánkových kódů po jejich rozeslání
+## Řešení problémů a časté dotazy
 
-Pokud prodáváte vstupenky mimo Nostrautiku — přes Eventbrite, vlastní
-e-shop, nebo v hotovosti u dveří — o kupujícím víte jedinou věc: jeho
-e-mailovou adresu. Každému pošlete jeden pozvánkový odkaz; někteří se
-připojí hned, jiní se k tomu nikdy nedostanou, a pár dní před akcí chcete
-připomenout přesně těm, kdo se ještě nezaregistrovali.
+- **Co vidí účastníci, dokud nejsou schválení?** Jen veřejnou stránku akce — název, shrnutí, data, místo a vaše zveřejněné novinky. Seznam účastníků, videa a spojení jsou zašifrované pro schválené účastníky.
+
+- **Otevřel(a) jsem akci na jiném zařízení a není tam tlačítko administrace.** Přihlaste se se stejnou identitou (vložte tajný klíč, který jste si zazálohovali při vytváření účtu) a znovu otevřete akci — organizátorský přístup ke každé akci, kterou jste vytvořili, se automaticky obnoví z tohoto jediného klíče, žádná samostatná záloha akce není potřeba. Vaše klíče akce se načtou z relayů ve chvíli přihlášení, takže na novém zařízení dejte aplikaci pár vteřin, než usoudíte, že to nefunguje. (Přidání **spoluorganizátora** z původního zařízení, s npub nového zařízení, je pořád nejrychlejší možnost, pokud máte původní zařízení po ruce.)
+
+- **Pozvánkový odkaz někoho automaticky neschválil.** Automatické schvalování potřebuje připojeného *a běžícího* koordinátora. Bez něj žádosti z pozvánek stále přijdou do vašeho seznamu **Žádosti o připojení** — schvalte je tam. (Budou mít značku **pozvánka**.)
+
+- **Žádost o připojení se nezobrazuje.** Klepněte na **Obnovit** v hlavičce administrace — žádosti se načítají na vyžádání. Pokud se pořád neobjeví, účastník může mít nestabilní připojení; požádejte ho, ať znovu otevře odkaz na akci a žádost odešle znovu.
+
+- **Jak promítnu seznam účastníků / tabuli spojení / přehled administrace na
+  místě konání?** Otevřete příslušnou stránku v prohlížeči promítacího
+  počítače, přihlášení jako schválená identita (vy sami). Jsou to normální
+  stránky — dejte je na celou obrazovku:
+
+  ![Přehled administrace organizátora na celou šířku](images/organizer-cs/13-admin-overview-desktop-light.png)
+
+- **Můžu akci po vytvoření upravit?** Ano. V **Administrace → Nastavení → Podrobnosti akce** upravíte základní pole — název, shrnutí, začátek/konec, místo i ikonu/banner — a znovu je zveřejníte. (Opětovné zveřejnění se řídí monotónním pravidlem pořadí protokolu, takže úprava nikdy neprohraje souběh ve stejné sekundě.) Novinky můžete zveřejňovat a upravovat volně a akci mohou spravovat i spoluorganizátoři. Při změně programu nebo místa se stejně vyplatí zveřejnit novinku, aby účastníci dostali upozornění, ne jen tiše změněné pole.
+
+- **Kolik mě to bude stát?** Ve výchozím stavu nic — referenční koordinátor
+  je zdarma a všechno, co koordinátora nepotřebuje (seznam účastníků,
+  videa, příspěvky, ruční schvalování), nemá náklady nikdy. Pokud připojíte
+  koordinátora, jehož operátor si účtuje poplatek, uvidíte to jasně na jeho
+  záznamu a — pokud se někdy spustí fakturace — banner **Vyžaduje se
+  platba** s odkazem na platbu v Nastavení, nikdy překvapivý poplatek.
+
+- **Účastník upravil své představení, ale nikdo jiný změnu nevidí.** Bez připojeného koordinátora se úpravy napsaného textu představení samy nešíří — klepněte na **Zpracovat znovu** na jeho kartě v seznamu Schváleno (§4), aby se úprava projevila.
+
+- **Proč se odpojený nebo vyměněný koordinátor nemůže vrátit k pravomoci?** Každé připojení, výměna nebo odpojení zvýší interní číslo instalační generace a koordinátoři důvěřují vždy jen té aktuální, takže starý grant se už nedá přehrát zpátky do platnosti. Není tu nic, co byste museli dělat — je to prostě důvod, proč je odpojení nebo výměna pro opouštěného koordinátora nevratná.
+
+## Příloha: sledování pozvánkových kódů, když prodáváte vstupenky jinde (volitelné)
+
+Všechno výše je pro většinu organizátorů celý příběh. Tahle část je jen pro konkrétní případ, kdy prodáváte vstupenky mimo Nostrautiku — přes Eventbrite, vlastní e-shop, nebo v hotovosti u dveří — kde o kupujícím víte jedinou věc: jeho e-mailovou adresu. Každému pošlete jeden pozvánkový odkaz; někteří se připojí hned, jiní se k tomu nikdy nedostanou, a pár dní před akcí chcete připomenout přesně těm, kdo se ještě nezaregistrovali.
 
 **Tohle si ujasněte hned na začátku: aplikace se nikdy nedozví ničí
 e-mailovou adresu a sama nikomu neposílá žádný e-mail.** Rozeslání kódů i
@@ -381,29 +386,3 @@ zaskočilo.
 Pozvánkový list (§3) sám o sobě vynechává každý už použitý kód, takže když
 si ho vytisknete znovu blíž k akci, každý, kdo se mezitím připojil online,
 na něm už prostě nebude.
-
-## Řešení problémů a časté dotazy
-
-- **Co vidí účastníci, dokud nejsou schválení?** Jen veřejnou stránku akce — název, shrnutí, data, místo a vaše zveřejněné novinky. Seznam účastníků, videa a spojení jsou zašifrované pro schválené účastníky.
-
-- **Otevřel(a) jsem akci na jiném zařízení a není tam tlačítko administrace.** Přihlaste se se stejnou identitou (vložte tajný klíč, který jste si zazálohovali při vytváření účtu) a znovu otevřete akci — organizátorský přístup ke každé akci, kterou jste vytvořili, se automaticky obnoví z tohoto jediného klíče, žádná samostatná záloha akce není potřeba. Vaše klíče akce se načtou z relayů ve chvíli přihlášení, takže na novém zařízení dejte aplikaci pár vteřin, než usoudíte, že to nefunguje. (Přidání **spoluorganizátora** z původního zařízení, s npub nového zařízení, je pořád nejrychlejší možnost, pokud máte původní zařízení po ruce.)
-
-- **Pozvánkový odkaz někoho automaticky neschválil.** Automatické schvalování potřebuje připojeného *a běžícího* koordinátora. Bez něj žádosti z pozvánek stále přijdou do vašeho seznamu **Žádosti o připojení** — schvalte je tam. (Budou mít značku **pozvánka**.)
-
-- **Žádost o připojení se nezobrazuje.** Klepněte na **Obnovit** v hlavičce administrace — žádosti se načítají na vyžádání. Pokud se pořád neobjeví, účastník může mít nestabilní připojení; požádejte ho, ať znovu otevře odkaz na akci a žádost odešle znovu.
-
-- **Jak promítnu seznam účastníků / tabuli spojení / přehled administrace na
-  místě konání?** Otevřete příslušnou stránku v prohlížeči promítacího
-  počítače, přihlášení jako schválená identita (vy sami). Jsou to normální
-  stránky — dejte je na celou obrazovku:
-
-  ![Přehled administrace organizátora na celou šířku](images/organizer/13-admin-overview-desktop-light.png)
-
-- **Můžu akci po vytvoření upravit?** Ano. V **Administrace → Nastavení → Podrobnosti akce** upravíte základní pole — název, shrnutí, začátek/konec, místo i ikonu/banner — a znovu je zveřejníte. (Opětovné zveřejnění se řídí monotónním pravidlem pořadí protokolu, takže úprava nikdy neprohraje souběh ve stejné sekundě.) Novinky můžete zveřejňovat a upravovat volně a akci mohou spravovat i spoluorganizátoři. Při změně programu nebo místa se stejně vyplatí zveřejnit novinku, aby účastníci dostali upozornění, ne jen tiše změněné pole.
-
-- **Kolik mě to bude stát?** Ve výchozím stavu nic — referenční koordinátor
-  je zdarma a všechno, co koordinátora nepotřebuje (seznam účastníků,
-  videa, příspěvky, ruční schvalování), nemá náklady nikdy. Pokud připojíte
-  koordinátora, jehož operátor si účtuje poplatek, uvidíte to jasně na jeho
-  záznamu a — pokud se někdy spustí fakturace — banner **Vyžaduje se
-  platba** s odkazem na platbu v Nastavení, nikdy překvapivý poplatek.

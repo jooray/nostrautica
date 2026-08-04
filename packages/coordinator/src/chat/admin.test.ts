@@ -42,8 +42,13 @@ class FakeMls implements ChatMls {
     if (opts?.adminPubkeys) this.admins.set(id, opts.adminPubkeys);
     return { mlsGroupIdHex: id, nostrGroupIdHex: "ng-" + this.created };
   }
+  /** Reasons the library would give for a refusal; drives the ineligible log line. */
+  ineligibleReasons: string[] = [];
   async isEligible(): Promise<boolean> {
     return this.eligible;
+  }
+  async evaluateKeyPackage(): Promise<{ eligible: boolean; reasons: string[] }> {
+    return { eligible: this.eligible, reasons: this.eligible ? [] : this.ineligibleReasons };
   }
   async isMember(group: string, pubkey: string): Promise<boolean> {
     return this.members.get(group)?.has(pubkey) ?? false;
@@ -88,12 +93,13 @@ function kpEvent(pubkey: string, id: string): AnyEvent {
 const COORDINATOR = "c".repeat(64);
 
 /** Build an admin whose key-package fetch returns the pre-seeded events per author. */
-function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = []) {
+function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = [], log?: (m: string) => void) {
   const now = () => 1000;
   return new MarmotAdmin({
     store,
     mls,
     now,
+    log,
     coordinatorPubkey: COORDINATOR,
     fetchKeyPackages: async (_coordinate, authors) =>
       kps.filter((e) => authors.includes(e.pubkey)),
@@ -493,6 +499,30 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
     // silently skipping it forever.
     await admin.syncMember(COORD, ACCOUNT2);
     expect(mls.invited).toEqual([CHATKEY]);
+  });
+
+  // prod 2026-08-04: with the group-state write finally succeeding, refused
+  // devices started logging a bare "ineligible" — one line with no way to tell
+  // "already a member" from a ciphersuite mismatch. The library computes the
+  // reasons; the old boolean threw them away at the door.
+  it("says WHY a key package is ineligible instead of just that it is", async () => {
+    const logs: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.eligible = false;
+    mls.ineligibleReasons = ["already a member", "cipher suite 0x0002 ≠ group 0x0001"];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp-refused")], (m) => logs.push(m));
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.backfillApproved(COORD);
+
+    const line = logs.find((l) => l.includes("ineligible"));
+    expect(line).toBeDefined();
+    expect(line).toContain("already a member");
+    expect(line).toContain("cipher suite 0x0002 ≠ group 0x0001");
+    expect(mls.invited).toEqual([]);
   });
 
   it("the 30443 watcher adds an authorized author and ignores an unauthorized one", async () => {

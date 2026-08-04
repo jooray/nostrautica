@@ -37,6 +37,7 @@
     cachedOfflinePack,
     packComplete,
     formatBytes,
+    PACK_STEP_KEYS,
     type OfflinePack,
     type PackStep,
   } from "$lib/events/offline-pack.js";
@@ -583,10 +584,26 @@
   let packing = $state(false);
   let packSteps = $state<PackStep[]>([]);
   let packPersisted = $state<boolean | null>(null);
-  let packEstimate = $state<StorageEstimate | undefined>(undefined);
   const packDone = $derived(offlinePack ? packComplete(offlinePack) : false);
-  const packUsage = $derived(
-    packEstimate?.usage !== undefined ? formatBytes(packEstimate.usage) : null,
+  // What THIS pack added, not the browser's origin-wide (on Firefox: whole
+  // eTLD+1 group) usage figure this line used to show. Omitted below 100 KB so a
+  // re-download that changed nothing doesn't claim a footprint it didn't add.
+  const packAdded = $derived(
+    offlinePack?.bytesAdded !== undefined && offlinePack.bytesAdded >= 100_000
+      ? formatBytes(offlinePack.bytesAdded)
+      : null,
+  );
+  // Joined here rather than in the markup so a missing leading clause can't
+  // leave the line starting with a stray separator.
+  const packNotes = $derived(
+    [
+      packAdded ? t("event.offline.stored", { size: packAdded }) : null,
+      packPersisted ? t("event.offline.persisted") : null,
+      packDone ? t("event.offline.routesReady") : null,
+      packDone ? t("event.offline.mediaNote") : null,
+    ]
+      .filter((s) => s !== null)
+      .join(" · "),
   );
 
   async function downloadPack() {
@@ -597,7 +614,6 @@
       const res = await buildOfflinePack(ctx, session.signer, (steps) => (packSteps = steps));
       offlinePack = res.pack;
       packPersisted = res.persisted;
-      packEstimate = res.estimate;
     } catch {
       /* partial packs are recorded per-step; nothing more to surface here */
     } finally {
@@ -769,7 +785,10 @@
           <strong>{t("event.offline.title")}</strong>
           <p class="muted" style="margin:0.2rem 0 0;font-size:0.85rem">
             {#if packing}
-              {t("event.offline.downloading", { n: packSteps.length })}
+              {t("event.offline.downloading", {
+                n: Math.min(packSteps.length, PACK_STEP_KEYS.length),
+                total: PACK_STEP_KEYS.length,
+              })}
             {:else if packDone}
               {t("event.offline.ready")}
             {:else if offlinePack && offlinePack.swControlled === false}
@@ -789,11 +808,11 @@
           {:else}{t("event.offline.download")}{/if}
         </button>
       </div>
-      <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
-        {#if packUsage}{t("event.offline.stored", { size: packUsage })}{/if}
-        {#if packPersisted}· {t("event.offline.persisted")}{/if}
-        {#if packDone}· {t("event.offline.routesReady")} · {t("event.offline.mediaNote")}{/if}
-      </p>
+      {#if packNotes}
+        <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
+          {packNotes}
+        </p>
+      {/if}
     </div>
   {/if}
 

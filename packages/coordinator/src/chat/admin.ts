@@ -322,9 +322,15 @@ export class MarmotAdmin {
       );
       return;
     }
-    if (!(await this.mls.isEligible(mlsGroupId, kp))) {
+    const evaluation = this.mls.evaluateKeyPackage
+      ? await this.mls.evaluateKeyPackage(mlsGroupId, kp)
+      : { eligible: await this.mls.isEligible(mlsGroupId, kp), reasons: [] };
+    if (!evaluation.eligible) {
       this.store.markKpConsumed(coordinate, kp.id); // ineligible (e.g. ciphersuite) → don't re-eval
-      this.log(`[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible`);
+      const why = evaluation.reasons.length ? `: ${evaluation.reasons.join(", ")}` : "";
+      this.log(
+        `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible${why}`,
+      );
       return;
     }
     if (consumed) {

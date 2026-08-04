@@ -400,7 +400,7 @@ export interface BatchScoreResult {
 /**
  * Deterministic Fisher–Yates shuffle driven by an injectable rng. Batches shuffle
  * candidate order to spread residual position bias (benchmark: corr 0.0–0.16 at
- * K=10; deepseek-v4-flash −0.01).
+ * K=10; deepseek-v4-flash −0.01, its 0731 successor 0.09–0.19 on the subset).
  */
 function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
   const a = [...arr];

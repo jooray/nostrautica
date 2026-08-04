@@ -20,15 +20,24 @@ import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 import { warmRouteModules, PARTICIPANT_OFFLINE_ROUTES } from "$lib/router/route-modules.js";
 import { ensureEntryShellCached, hasServiceWorkerControl } from "$lib/pwa/offline-shell.js";
 
-export type PackStepKey =
-  | "roster"
-  | "directory"
-  | "matches"
-  | "talks"
-  | "profiles"
-  | "page"
-  | "shell"
-  | "modules";
+/**
+ * Every step the pack runs, in order. The UI's "{n} of {total}" counter derives
+ * its total from this list — it used to be a literal baked into the translated
+ * string, which silently desynced twice as steps were added (the counter read
+ * "8 of 6"). Adding a `run()` call without adding its key here is a type error.
+ */
+export const PACK_STEP_KEYS = [
+  "roster",
+  "directory",
+  "matches",
+  "talks",
+  "profiles",
+  "page",
+  "shell",
+  "modules",
+] as const;
+
+export type PackStepKey = (typeof PACK_STEP_KEYS)[number];
 
 export interface PackStep {
   key: PackStepKey;
@@ -52,6 +61,20 @@ export interface OfflinePack {
    * screens themselves may not open offline even though the data was cached.
    */
   swControlled?: boolean;
+  /**
+   * Bytes this build added to on-device storage: `estimate().usage` after the
+   * steps minus before them. Absent when the browser has no StorageManager, and
+   * omitted (rather than shown as 0) when a re-download added nothing.
+   *
+   * A DELTA, deliberately, not the raw `usage`: that figure is origin-wide —
+   * every event, every page of this app, every earlier session — and on Firefox
+   * it is worse still, reporting the whole eTLD+1 GROUP's usage rather than this
+   * origin's (Mozilla bug 1374970, still open). Rendering it in this card had it
+   * read "Using 9.3 GB of storage" directly beneath "audio/video isn't
+   * pre-downloaded", blaming the offline pack for every byte any sibling
+   * subdomain had ever written.
+   */
+  bytesAdded?: number;
 }
 
 export interface PackOutcome {
@@ -80,21 +103,38 @@ export function packComplete(pack: OfflinePack): boolean {
   return pack.steps.filter((s) => !s.skipped).every((s) => s.ok);
 }
 
-/** Human-readable byte size (KB/MB/GB), for the storage estimate line. */
+/**
+ * Human-readable byte size for the storage line. Decimal units (1 KB = 1000 B),
+ * matching what macOS/Android surface to the same user elsewhere — this used to
+ * divide by 1024 while labelling the result "KB/MB/GB", understating every
+ * figure by 2.4% per unit step (a 7% error by GB).
+ */
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
-  const v = bytes / 1024 ** i;
+  const i = Math.min(units.length - 1, Math.floor(Math.log10(bytes) / 3));
+  const v = bytes / 1000 ** i;
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
 }
 
-/** Best-effort persistent-storage request (once). False when unsupported. */
+/**
+ * Best-effort persistent-storage request (once). False when unsupported.
+ *
+ * Time-boxed: `persist()` shows a permission prompt on Firefox (desktop and
+ * Android) and its promise does not settle until that prompt is answered. It is
+ * awaited on the pack's tail, after the last step records, so a user who never
+ * notices the prompt used to sit forever on a maxed-out progress counter and a
+ * disabled "Downloading…" button with all the work already done. Timing out
+ * only loses the eviction hint — the data is cached either way.
+ */
 export async function requestPersistentStorage(): Promise<boolean> {
   try {
     if (!navigator.storage?.persist) return false;
     if (await navigator.storage.persisted?.()) return true;
-    return await navigator.storage.persist();
+    return await Promise.race([
+      navigator.storage.persist(),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
+    ]);
   } catch {
     return false;
   }
@@ -119,6 +159,7 @@ export async function buildOfflinePack(
   signer: AppSigner | null,
   onProgress?: (steps: PackStep[]) => void,
 ): Promise<PackOutcome> {
+  const usageBefore = (await storageEstimate())?.usage;
   const steps: PackStep[] = [];
   const record = (s: PackStep) => {
     steps.push(s);
@@ -192,15 +233,24 @@ export async function buildOfflinePack(
     return warmed;
   });
 
+  // Measure BEFORE asking for persistence: the permission prompt can sit for a
+  // while, and Firefox reports a stale estimate right after a grant (bug
+  // 1629200), either of which would corrupt the delta.
+  const estimate = await storageEstimate();
+  const bytesAdded =
+    usageBefore !== undefined && estimate?.usage !== undefined
+      ? Math.max(0, estimate.usage - usageBefore)
+      : undefined;
+
   const pack: OfflinePack = {
     at: Math.floor(Date.now() / 1000),
     steps,
     mediaSkipped: true,
     swControlled: controlled,
+    bytesAdded,
   };
   cacheSet(packKey(ctx.coordinate), pack, pack.at);
 
   const persisted = await requestPersistentStorage();
-  const estimate = await storageEstimate();
   return { pack, persisted, estimate };
 }

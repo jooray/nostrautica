@@ -60,6 +60,9 @@ interface FakeRumor {
   members?: string[];
   /** nostr_group_id the joined group reports (defaults to gid-<id>). */
   nostrGroupId?: string;
+  /** MLS group id the welcome resolves to (defaults to group-<id>). A re-add
+   *  carries the SAME id as the state we already hold — see joinGroupFromWelcome. */
+  mlsId?: string;
 }
 
 interface FakeGroup {
@@ -99,7 +102,19 @@ class FakeGroups {
   groups: FakeGroup[] = (shared.groups as FakeGroup[] | null) ?? [];
   connectAllCalls = 0;
   send = vi.fn(async (_groupId: Uint8Array, _intent: unknown) => {});
-  destroy = vi.fn(async (_groupId: Uint8Array) => {});
+  destroy = vi.fn(async (groupId: Uint8Array | string) => {
+    // Drop the state for real, so a retried join after a purge can succeed the
+    // way it does against the library (destroy is its only teardown).
+    if (typeof groupId !== "string") return;
+    const i = this.groups.findIndex((g) => g.idStr === groupId);
+    if (i >= 0) this.groups.splice(i, 1);
+  });
+  async get(groupId: Uint8Array | string) {
+    const found =
+      typeof groupId === "string" ? this.groups.find((g) => g.idStr === groupId) : undefined;
+    if (!found) throw new Error("group not found");
+    return found;
+  }
   connectAll() {
     this.connectAllCalls++;
     return { unsubscribe() {} };
@@ -135,9 +150,18 @@ class FakeMarmotClient {
     return inv.joinable !== false;
   }
   async joinGroupFromWelcome({ welcomeRumor }: { welcomeRumor: FakeRumor }) {
+    const idStr = welcomeRumor.mlsId ?? "group-" + welcomeRumor.id;
+    // marmot refuses to adopt a state whose group id it already holds —
+    // groups-manager.js `adoptClientState`, checked against the PERSISTENT
+    // registry. A re-add is an Add into the same group, so this is exactly what
+    // a removed-then-re-added device hits. Modelling it is the point: the old
+    // fake pushed a second state per welcome, a shape the library forbids.
+    if (this.groups.groups.some((g) => g.idStr === idStr)) {
+      throw new Error(`Group ${idStr} already exists`);
+    }
     this.joinedFrom.push(welcomeRumor.id);
     this.groups.groups.push({
-      idStr: "group-" + welcomeRumor.id,
+      idStr,
       id: new Uint8Array([this.groups.groups.length + 1]),
       state: {
         // A real Welcome always adds THIS device's leaf alongside the coordinator's
@@ -909,6 +933,90 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     expect(shared.calls).toEqual(["attest:revoke", "kp:create", "kp:ensurePublished", "attest:add"]);
     const [opts] = lastClient.keyPackages.create.mock.calls[0] as unknown as [{ identifier?: string }];
     expect(opts.identifier).toBe("web-test");
+  });
+
+  // The state that made "Rejoin this chat" useless. A re-add is an Add into the
+  // SAME MLS group, so its Welcome carries the group id we already hold — and a
+  // removal does not delete that state (marmot keeps the tombstone by design).
+  // adoptClientState then threw "Group <id> already exists", the caller swallowed
+  // it as a console warning, the invite was never marked read, and the device
+  // retried and re-threw on every open: listed under Chat devices, holding group
+  // state, permanently unable to send.
+  it("adopts a re-invite for a group it still holds the removed state for", async () => {
+    const { InMemoryKvBackend, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => {
+        set(k: string, v: unknown): Promise<void>;
+        get(k: string): Promise<unknown>;
+      };
+      MARMOT_NAMESPACES: { history: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    const identity = "c".repeat(64);
+    const MLS_ID = "abcdef0123456789";
+    // The corpse: this event's group with our leaf stripped, exactly as an MLS
+    // Remove leaves it — plus the decrypted backlog we can still read.
+    shared.groups = [
+      {
+        idStr: MLS_ID,
+        id: new Uint8Array([1]),
+        state: { members: [COORD], nostrGroupId: "gid-readd" },
+        on: () => {},
+      },
+    ];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-readd", attendees: [] });
+    const historyKey = `${identity}\u001f${MARMOT_NAMESPACES.history}:${MLS_ID}\u001fmsg-1`;
+    await backend.set(historyKey, { id: "msg-1", content: "said before the removal" });
+
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+
+    // The coordinator re-adds us: same MLS group, same id.
+    lastClient.invites.deliver({
+      id: "welcome-readd",
+      mlsId: MLS_ID,
+      nostrGroupId: "gid-readd",
+      members: [COORD, identity],
+    });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-readd"]));
+
+    // Adopted: the room resolves and a send routes to the freshly joined state.
+    expect(await chat.nostrGroupId()).toBe("gid-readd");
+    await chat.send("back after the re-add");
+    expect(lastClient.groups.send).toHaveBeenCalledOnce();
+    // The welcome is consumed, so it is not re-thrown on every later open.
+    expect(lastClient.invites.unread.map((u) => u.id)).not.toContain("welcome-readd");
+    // Purging the corpse must not cost the user their readable backlog:
+    // groups.destroy() takes the history with the state, so it is put back.
+    expect(await backend.get(historyKey)).toEqual({
+      id: "msg-1",
+      content: "said before the removal",
+    });
+  });
+
+  it("never discards a group we still hold a leaf in", async () => {
+    // Same collision, but we are a LIVE member — a duplicate/replayed welcome for
+    // a working room must not destroy it. The error propagates as before.
+    const MLS_ID = "beefcafe00112233";
+    const identity = "c".repeat(64);
+    shared.groups = [
+      {
+        idStr: MLS_ID,
+        id: new Uint8Array([2]),
+        state: { members: [COORD, identity], nostrGroupId: "gid-live" },
+        on: () => {},
+      },
+    ];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-live", attendees: [] });
+
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "dup-welcome", mlsId: MLS_ID, nostrGroupId: "gid-live" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(lastClient.groups.destroy).not.toHaveBeenCalled();
+    expect(lastClient.groups.groups.map((g) => g.idStr)).toEqual([MLS_ID]);
+    expect(await chat.nostrGroupId()).toBe("gid-live");
   });
 });
 
