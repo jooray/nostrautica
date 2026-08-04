@@ -128,7 +128,6 @@ ste to opravovali sami. Uložte, a ostatní účastníci vašu opravu uvidia
 okamžite — ich pohľad na vás dostane malú značku **„Upravené účastníkom"**,
 aby vedeli, že to nie je čisto automatické.
 
-![Môj profil na podujatí — úprava, skrytie alebo nahlásenie vygenerovaného poľa](images/participant-sk/23-my-profile-edited-light.png)
 
 ## 4. Ľudia
 

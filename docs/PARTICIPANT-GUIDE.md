@@ -189,7 +189,6 @@ yourself. Save, and other attendees see your correction immediately — their
 view of you shows a small **"Edited by attendee"** badge so they know it's not
 purely automated.
 
-![My event profile — edit, hide, or report a generated field](images/participant/23-my-profile-edited-light.png)
 
 ## 4. People
 

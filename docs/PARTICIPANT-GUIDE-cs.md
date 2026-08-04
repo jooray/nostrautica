@@ -120,7 +120,6 @@ než abyste to opravovali sami. Uložte, a ostatní účastníci vaši opravu uv
 okamžitě — jejich pohled na vás dostane malou značku **„Upraveno
 účastníkem"**, aby věděli, že to není čistě automatické.
 
-![Můj profil na akci — úprava, skrytí nebo nahlášení vygenerovaného pole](images/participant-cs/23-my-profile-edited-light.png)
 
 ## 4. Lidé
 
