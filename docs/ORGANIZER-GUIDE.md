@@ -104,24 +104,15 @@ it as-is for an English event.
 (You never have to re-run anything for this: when an attendee updates their intro,
 the system automatically recomputes only the matches that person is part of.)
 
-Note the copy under the form: **key rotation is forward-only** — anyone who
-ever held a decryption key can decrypt content that was published while that
-key was current. Revoking someone (§4) protects *future* content, not past.
-
+Note the copy under the form: **key rotation is forward-only** — revoking
+someone (§4) protects *future* content, not what they've already seen.
 Configure a **retention window** in **Admin → Settings → Delete member data
-after the event**. Enter a positive number of days, or leave it blank for
-indefinite retention. Attendees see the declared period at join and on the
-event page. When the window passes (and likewise when someone leaves the event),
-the coordinator now deletes **its own copies too** — the profiles, AI profiles,
-transcripts, pair reasoning, talks and summaries it holds, not just the published
-records — and removes the relay entries across every key version the event ever used,
-not only the current ones. Two honest limits remain: relay deletion (NIP-09) is
-best-effort and a relay may keep a copy; and a content-addressed item that a
-*different* event still shares survives until that last event also drops it. Backups
-are separate — a backup the coordinator's operator took before the deletion still
-holds the data until they rotate it out (their [operator
-guide](COORDINATOR-OPERATOR-GUIDE.md) covers this). So this is a real cleanup, just
-not a cryptographic guarantee that every last copy is gone everywhere.
+after the event** (a number of days, or blank to keep it indefinitely) —
+attendees see the declared period at join, and once it passes the coordinator
+cleans up its own copies too, not just the published records. It's a real
+cleanup, not an absolute guarantee that every last copy is gone everywhere
+(relay deletion is best-effort, and backups are a separate matter) — see
+[Encryption & Privacy](ENCRYPTION-AND-PRIVACY.md) for the exact limits.
 
 After creating, you get a **shareable link**, a next-steps checklist, and a
 **receipt** — each publishing step reported independently, so a partial
@@ -180,7 +171,7 @@ Tap anyone's row to open a **detail drawer** — their submitted profile, media,
 and operational history (coordinator status, submitted talks) — without
 leaving the list.
 
-You have two kinds of links to share:
+You have three kinds of links to share:
 
 - **The open event link** (`…#/e/<event>/join`, shown near the bottom with a
   **Copy invite link** button) — anyone can view the public event page and
@@ -189,6 +180,13 @@ You have two kinds of links to share:
   coordinator is attached*. Set a count and tap **Generate**; you get one link
   + QR per code. Send one per person, or print the QR codes. The code rides the
   URL fragment and never touches a server — treat each link like a ticket.
+- **Shared entry code** — one QR the whole room scans at once, instead of one
+  link per person. Set a headcount (0 for unlimited) and how many hours the
+  code stays valid, then tap **Create shared code** for a single link + QR to
+  put on the opening slide. It only exists in this browser tab — copy or show
+  it before you close the page, because it can't be retrieved again. Keep the
+  validity window short: once it expires, latecomers simply land in the
+  approval queue instead of being turned away.
 
 ![Generated invite codes with QR](images/organizer/04-invites-light.png)
 
@@ -196,6 +194,8 @@ More than a handful of codes gets tedious to hand out one link at a time —
 **Copy all** / **Download** grab every generated link as plain text for a
 mail-merge, and **Print invite sheet** lays out one QR per code, several to a
 page, ready to cut up and hand out at the door.
+
+![Shared entry code — one QR for the room](images/organizer/04b-shared-code-light.png)
 
 ## 4. Approve attendees
 
@@ -230,11 +230,6 @@ videos, and (with a coordinator) their matches. Approving someone works the
 same whether or not a coordinator is attached; attaching one (§5) is still
 worthwhile for auto-approval and matches, just no longer required to make
 manual approval work.
-
-One rough edge without a coordinator attached: if an attendee updates their
-typed intro text after you've already approved them, other attendees only
-pick up the change once you **re-process** their entry from the People list
-here — it doesn't propagate on its own in that specific case.
 
 ### Removing someone
 
@@ -280,14 +275,12 @@ see it confirmed:
 > shows a **Payment required** banner with a checkout link — the current
 > reference coordinator is free.
 
-The coordinator cannot sign as the event or change public event/config/invite
-records because it never receives `E_id`. Once attached, however, it receives
-`E_inbox` and ECK custody: it reads submissions and media, can issue delegated
-`21602` attendee grants for valid invite flow, publishes directory entries,
-rosters, matches, talks, and status, and administers experimental Marmot chat.
-Choose an operator you trust with that authority. An **↻ Recompute all matches**
-button appears on the **Administration** tab (it's a recurring action, not setup);
-use it after a burst of new attendees.
+The coordinator can read submissions and publish on the event's behalf —
+directory entries, rosters, matches, talks — but it can never impersonate you
+or change your event's settings. Choose an operator you trust with that
+authority. An **↻ Recompute all matches** button appears on the
+**Administration** tab (it's a recurring action, not setup); use it after a
+burst of new attendees.
 
 ### Replacing or detaching a coordinator
 
@@ -297,11 +290,9 @@ the npub field) to switch to a different coordinator — this rotates the
 event's keys and re-grants the new coordinator, and the old one loses access
 from that point on. **Detach** removes it entirely, with no replacement.
 
-Both are one-way for the coordinator you're leaving: every time you
-attach, replace, or detach, the app bumps an internal install generation
-number, and coordinators (including honest ones checking their own state)
-only ever trust the *current* generation — an old grant can't be replayed
-back into authority later. Detaching specifically means:
+Both are one-way for the coordinator you're leaving — once replaced or
+detached, it can't regain authority over the event later. Detaching
+specifically means:
 
 - **Matching stops** until you attach another coordinator.
 - **Chat administration is orphaned** if you had group chat on — nobody is
@@ -460,13 +451,71 @@ plan fails.
   it's also a feeling AI can't capture on its own — and if it's a video, it
   helps people recognize their matches in person.
 
-## 8. Tracking invite codes after you mail them out
+## Troubleshooting & FAQ
 
-If you sell tickets somewhere other than Nostrautica — Eventbrite, your own
-webshop, cash at the door — the only thing you have on a buyer is their email
-address. You send each of them one invite link; some join right away, some
-never get around to it, and a few days before the event you want to nudge
-exactly the people who haven't shown up yet.
+- **What do attendees see before they're approved?** Only the public event page
+  — title, summary, dates, location, and your posted updates. The roster,
+  videos, and matches are encrypted to approved attendees.
+
+- **I opened the event on another device and there's no admin button.** Sign in
+  with the same identity (paste the secret key you backed up when you created
+  the account) and reopen the event — organizer access to every event you
+  created is automatically recovered from that one key alone, no separate
+  event backup needed. It reads back your event keys from relays the moment
+  you sign in, so give it a few seconds on a fresh device before concluding
+  it didn't work. (Adding a **co-organizer** from the original device, using
+  the new device's npub, is still the fastest option if you still have the
+  original device handy.)
+
+- **An invite link didn't auto-approve someone.** Auto-approval needs a
+  coordinator attached *and running*. Without one, invite requests still arrive
+  in your **Join requests** list — approve them there. (They'll carry an
+  **invite** badge.)
+
+- **A join request isn't showing up.** Tap **Refresh** in the admin header —
+  requests are fetched on demand. If it still doesn't appear, the attendee may
+  be on a flaky connection; ask them to reopen the event link and resubmit.
+
+- **How do I project the roster / match board / admin overview at the venue?**
+  Open the relevant page on the projector's browser while logged in as an
+  approved identity (yourself). These are normal pages — full-screen them:
+
+  ![Organizer admin overview, full-width](images/organizer/13-admin-overview-desktop-light.png)
+
+- **Can I edit an event after creating it?** Yes. **Admin → Settings → Event
+  details** lets you edit the core fields — title, summary, start/end, location, and
+  the icon/banner — and republish them. (The republish follows the protocol's
+  monotonic ordering rule, so an edit never loses to a same-second race.) You can also
+  post updates and edit those freely, and co-organizers can manage the event too. For
+  a schedule or venue change it's still worth posting an update as well, so attendees
+  get a notification rather than only a quietly-changed field.
+
+- **What does this cost me?** Nothing, by default — the reference coordinator
+  is free, and everything that doesn't involve a coordinator (roster, videos,
+  posts, manual approval) never has a cost regardless. If you attach a
+  coordinator whose operator charges, you'll see that plainly on its listing
+  and, if billing ever kicks in, a **Payment required** banner with a
+  checkout link in Settings — never a surprise charge.
+
+- **An attendee edited their intro but nobody else sees the change.** Without
+  a coordinator attached, edits to typed intro text don't propagate on their
+  own — tap **Re-process** on their card in the Approved list (§4) to pick up
+  the update.
+
+- **Why can't a coordinator I replaced or detached come back into
+  authority?** Every attach/replace/detach bumps an internal generation
+  number, and coordinators only ever trust the current one, so an old grant
+  can't be replayed back later. Nothing for you to do here — it's just why
+  detaching or replacing is final for the coordinator you're leaving.
+
+## Appendix: tracking invite codes when you sell tickets elsewhere (optional)
+
+Everything above is the whole story for most organizers. This section is only
+for the specific case of selling tickets somewhere other than Nostrautica —
+Eventbrite, your own webshop, cash at the door — where the only thing you have
+on a buyer is their email address. You send each of them one invite link; some
+join right away, some never get around to it, and a few days before the event
+you want to nudge exactly the people who haven't shown up yet.
 
 **Set this expectation early: the app never learns anyone's email address,
 and it never sends anyone an email.** Mailing codes out, and matching a code
@@ -538,49 +587,3 @@ can happen rather than being caught off guard by it.
 The invite sheet (§3) already leaves out any code that's been used, so if
 you print it again close to the event, everyone who joined online in the
 meantime simply won't be on the page anymore.
-
-## Troubleshooting & FAQ
-
-- **What do attendees see before they're approved?** Only the public event page
-  — title, summary, dates, location, and your posted updates. The roster,
-  videos, and matches are encrypted to approved attendees.
-
-- **I opened the event on another device and there's no admin button.** Sign in
-  with the same identity (paste the secret key you backed up when you created
-  the account) and reopen the event — organizer access to every event you
-  created is automatically recovered from that one key alone, no separate
-  event backup needed. It reads back your event keys from relays the moment
-  you sign in, so give it a few seconds on a fresh device before concluding
-  it didn't work. (Adding a **co-organizer** from the original device, using
-  the new device's npub, is still the fastest option if you still have the
-  original device handy.)
-
-- **An invite link didn't auto-approve someone.** Auto-approval needs a
-  coordinator attached *and running*. Without one, invite requests still arrive
-  in your **Join requests** list — approve them there. (They'll carry an
-  **invite** badge.)
-
-- **A join request isn't showing up.** Tap **Refresh** in the admin header —
-  requests are fetched on demand. If it still doesn't appear, the attendee may
-  be on a flaky connection; ask them to reopen the event link and resubmit.
-
-- **How do I project the roster / match board / admin overview at the venue?**
-  Open the relevant page on the projector's browser while logged in as an
-  approved identity (yourself). These are normal pages — full-screen them:
-
-  ![Organizer admin overview, full-width](images/organizer/13-admin-overview-desktop-light.png)
-
-- **Can I edit an event after creating it?** Yes. **Admin → Settings → Event
-  details** lets you edit the core fields — title, summary, start/end, location, and
-  the icon/banner — and republish them. (The republish follows the protocol's
-  monotonic ordering rule, so an edit never loses to a same-second race.) You can also
-  post updates and edit those freely, and co-organizers can manage the event too. For
-  a schedule or venue change it's still worth posting an update as well, so attendees
-  get a notification rather than only a quietly-changed field.
-
-- **What does this cost me?** Nothing, by default — the reference coordinator
-  is free, and everything that doesn't involve a coordinator (roster, videos,
-  posts, manual approval) never has a cost regardless. If you attach a
-  coordinator whose operator charges, you'll see that plainly on its listing
-  and, if billing ever kicks in, a **Payment required** banner with a
-  checkout link in Settings — never a surprise charge.

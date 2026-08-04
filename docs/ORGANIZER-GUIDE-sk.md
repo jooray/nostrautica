@@ -53,22 +53,9 @@ Jazyk robí tri veci. Nastavuje **predvolený jazyk rozhrania** pre účastníko
 
 (Nič kvôli tomu nikdy nemusíte spúšťať znova: keď účastník aktualizuje svoje predstavenie, systém automaticky prepočíta iba spojenia, ktorých je súčasťou.)
 
-Všimnite si poznámku pod formulárom: **rotácia kľúčov funguje len dopredu** — ktokoľvek niekedy držal dešifrovací kľúč, dokáže dešifrovať obsah zverejnený, kým bol tento kľúč platný. Odobratie niekoho (§4) chráni *budúci* obsah, nie minulý.
+Všimnite si poznámku pod formulárom: **rotácia kľúčov funguje len dopredu** — odobratie niekoho (§4) chráni *budúci* obsah, nie ten, ktorý už videli.
 
-**Retenčné obdobie** nastavíte v **Administrácia → Nastavenia → Zmazať údaje
-účastníkov po podujatí**. Zadajte kladný počet dní alebo nechajte pole
-prázdne pre neobmedzené uchovávanie. Účastníci obdobie vidia pri pripojení
-aj na stránke podujatia. Keď obdobie uplynie (a takisto keď niekto podujatie
-opustí), koordinátor teraz zmaže **aj svoje vlastné kópie** — profily, AI profily,
-prepisy, zdôvodnenia párov, prednášky a zhrnutia, ktoré má u seba, nielen zverejnené
-záznamy — a odstráni záznamy z relayov naprieč všetkými verziami kľúča, ktoré
-podujatie kedy použilo, nielen tie aktuálne. Dve poctivé obmedzenia zostávajú:
-zmazanie na relayoch (NIP-09) je najlepšia snaha a relay si kópiu môže ponechať; a
-obsahovo adresovaná položka, ktorú stále zdieľa *iné* podujatie, prežije, kým ju
-neopustí aj to posledné. Zálohy sú samostatná vec — záloha, ktorú prevádzkovateľ
-koordinátora urobil pred zmazaním, dáta drží, kým ju nevymení ([príručka
-prevádzkovateľa](COORDINATOR-OPERATOR-GUIDE.md) to popisuje). Ide teda o skutočné
-upratovanie, len nie o kryptografickú záruku, že každá posledná kópia je všade preč.
+**Retenčné obdobie** nastavíte v **Administrácia → Nastavenia → Zmazať údaje účastníkov po podujatí** (počet dní, alebo prázdne pole pre neobmedzené uchovávanie) — účastníci deklarované obdobie vidia pri pripojení, a keď uplynie, koordinátor upratá aj svoje vlastné kópie, nielen zverejnené záznamy. Ide o skutočné upratovanie, nie o absolútnu záruku, že každá posledná kópia je všade preč (zmazanie na relayoch je najlepšia snaha a zálohy sú samostatná vec) — presné hranice popisuje [Šifrovanie a súkromie](ENCRYPTION-AND-PRIVACY.md).
 
 Po vytvorení dostanete **odkaz na zdieľanie**, kontrolný zoznam ďalších
 krokov a **potvrdenku** — každý zverejňovací krok sa hlási samostatne, takže
@@ -121,10 +108,11 @@ Klepnutím na riadok ktoréhokoľvek človeka otvoríte **detailný panel** — 
 odoslaný profil, médiá a prevádzkovú históriu (stav koordinátora, odoslané
 prednášky) — bez opustenia zoznamu.
 
-Na zdieľanie máte dva druhy odkazov:
+Na zdieľanie máte tri druhy odkazov:
 
 - **Otvorený odkaz na podujatie** (`…#/e/<podujatie>/join`, zobrazený bližšie k spodku s tlačidlom **Kopírovať pozývací odkaz**) — ktokoľvek si môže pozrieť verejnú stránku podujatia a požiadať o pripojenie. Dajte ho na svoj web alebo sociálne siete.
 - **Pozývacie kódy** — jednorazové odkazy, ktoré držiteľa automaticky schvália *keď je pripojený koordinátor*. Nastavte počet a klepnite na **Vygenerovať**; dostanete jeden odkaz + QR kód na kód. Pošlite jeden na osobu, alebo vytlačte QR kódy. Kód sa nesie vo fragmente URL a nikdy sa nedostane na server — s každým odkazom zaobchádzajte ako s lístkom.
+- **Zdieľaný vstupný kód** — jeden QR kód, ktorý naskenuje naraz celá miestnosť, namiesto odkazu pre každého zvlášť. Nastavte **počet ľudí** (0 pre neobmedzený) a **platnosť** v hodinách, potom klepnite na **Vytvoriť zdieľaný kód** a dostanete jeden odkaz + QR na úvodnú snímku. Existuje len v tejto karte prehliadača — skopírujte ho alebo ho ukážte skôr, než stránku zavriete, pretože sa už nedá znova získať. Platnosť držte krátku: keď kód vyprší, oneskorenci jednoducho skončia vo fronte na schválenie namiesto toho, aby ich to odmietlo.
 
 ![Vygenerované pozývacie kódy s QR](images/organizer-sk/04-invites-light.png)
 
@@ -133,6 +121,8 @@ všetko** / **Stiahnuť** vezmú všetky vygenerované odkazy ako obyčajný tex
 pre hromadnú korešpondenciu a **Vytlačiť pozývací hárok** rozloží po jednom
 QR kóde na kód, viac na stránku, pripravené na rozstrihanie a rozdanie pri
 dverách.
+
+![Zdieľaný vstupný kód — jeden QR pre celú miestnosť](images/organizer-sk/04b-shared-code-light.png)
 
 ## 4. Schvaľovanie účastníkov
 
@@ -166,11 +156,6 @@ koordinátor; jeho pripojenie (§5) sa stále oplatí kvôli automatickému
 schvaľovaniu a spojeniam, už však nie je nutné len na to, aby fungovalo
 manuálne schvaľovanie.
 
-Jedna drobnosť bez pripojeného koordinátora: ak si účastník po schválení
-upraví vlastný napísaný text predstavenia, ostatní účastníci ho uvidia až
-vtedy, keď jeho záznam tu v zozname Ľudia **spracujete znova** — v tomto
-konkrétnom prípade sa to nešíri samo.
-
 ### Odobratie niekoho
 
 Klepnite na **Odobrať** pri schválenej karte. Dostanete potvrdenie vysvetľujúce dôsledok:
@@ -195,7 +180,7 @@ Chcete prevádzkovať vlastného, alebo vám bol daný konkrétny? Rozbaľte **A
 
 > **Platení koordinátori.** Koordinátor môže byť spoplatnený (náklady na AI párovanie rastú s počtom účastníkov), takže záznam môže zobrazovať cenu alebo bezplatnú úroveň (napr. „do 20 účastníkov zadarmo"). Ak je niekedy potrebná platba, obrazovka Nastavení zobrazí banner **Vyžaduje sa platba** s odkazom na platbu — súčasný referenčný koordinátor je zdarma.
 
-Koordinátor nemôže podpisovať ako podujatie ani meniť verejné záznamy podujatia, konfigurácie či pozvánok, pretože nikdy nedostane `E_id`. Po pripojení však drží `E_inbox` a ECK: číta prihlášky a médiá, pri platných pozvánkach môže vydať delegované granty `21602`, publikuje adresár, zoznam účastníkov, spojenia, prednášky a stav a spravuje experimentálny Marmot chat. Vyberte si operátora, ktorému dôverujete s touto právomocou. Na karte **Administrácia** sa objaví tlačidlo **↻ Prepočítať všetky spojenia** (je to opakovaná akcia, nie nastavenie); použite ho po nápore nových účastníkov.
+Koordinátor vie čítať prihlášky a zverejňovať v mene podujatia — záznamy v adresári, zoznam účastníkov, spojenia, prednášky —, no nikdy sa nedokáže vydávať za vás ani meniť nastavenia vášho podujatia. Vyberte si operátora, ktorému dôverujete s touto právomocou. Na karte **Administrácia** sa objaví tlačidlo **↻ Prepočítať všetky spojenia** (je to opakovaná akcia, nie nastavenie); použite ho po nápore nových účastníkov.
 
 ### Výmena alebo odpojenie koordinátora
 
@@ -205,11 +190,7 @@ zoznam na výber (alebo pole na npub) na prepnutie na iného koordinátora —
 otočí sa tým kľúč podujatia a novému koordinátorovi sa udelí grant; starý
 odvtedy stráca prístup. **Odpojiť** ho odstráni úplne, bez náhrady.
 
-Oboje je pre koordinátora, ktorého opúšťate, nezvratné: pri každom pripojení,
-výmene alebo odpojení aplikácia zvýši interné číslo inštalačnej generácie a
-koordinátori (vrátane poctivých, ktorí si kontrolujú vlastný stav) dôverujú
-vždy len *aktuálnej* generácii — starý grant sa už nedá prehrať späť do
-platnosti. Odpojenie konkrétne znamená:
+Oboje je pre koordinátora, ktorého opúšťate, nezvratné — po výmene alebo odpojení sa už nikdy nedostane naspäť do právomoci nad podujatím. Odpojenie konkrétne znamená:
 
 - **Párovanie sa zastaví**, kým nepripojíte iného koordinátora.
 - **Správa chatu ostane bez majiteľa**, ak ste mali zapnutý skupinový chat —
@@ -267,11 +248,11 @@ pre návštevníka.
 
 **Prednahraté prednášky.** V **Administrácia → Nastavenia → Prednahraté prednášky** to prepnite na *Zapnuté* (alebo *Najprv prednahraté*, čo v navigácii účastníkov posunie Prednášky pred Ľudí — vhodné pre formát „pozrite si vopred, stretnite sa na mieste") a **Uložte**. Schválení účastníci potom môžu posielať krátke prednášky — nahraté v prehliadači, nahraté ako súbor, alebo zadané ako neverejná **YouTube / .mp4 URL** (vhodné pre prednášky príliš veľké na nahranie; koordinátor tieto nikdy nesťahuje, takže URL prednášky sú len na sledovanie).
 
-![Odosielanie prednášky — výber zdroja videa a voliteľné zapnutie spájania](images/participant/27-talks-submit-light.png)
+![Odosielanie prednášky — výber zdroja videa a voliteľné zapnutie spájania](images/participant-sk/27-talks-submit-light.png)
 
 Všimnite si, že **prednášky už štandardne nevstupujú do spájania**: rečník pri každej prednáške zvolí, či zaškrtne *„Spracovať túto prednášku pre spájanie?"*. Majte to na pamäti, ak sa odoslaná prednáška neobjaví v zdôvodnení niečích spojení — to je očakávané, pokiaľ sa rečník neprihlásil (a pri URL prednáškach sa to nestane nikdy). Šetrí to náklady na prepis prednášok, ktoré nikto nechcel spájať.
 
-![Pole s URL videa a rozpoznaným YouTube odkazom](images/participant/27b-talks-url-light.png)
+![Pole s URL videa a rozpoznaným YouTube odkazom](images/participant-sk/27b-talks-url-light.png)
 
 Odoslané prednášky sa samé nezverejnia. Karta **Moderovanie prednášok** nižšie v **Administrácii** zobrazuje všetko, čo čaká na kontrolu — pri každej klepnite na **Ukážka**, potom ju buď **Zverejnite**, aby si ju účastníci mohli pozrieť, alebo **Zamietnite**. Kým to tu neurobíte, nikto okrem vás nič, čo účastník pošle, neuvidí (zverejnenie navyše potrebuje pripojeného koordinátora, rovnako ako zvyšok administrácie). Vyhľadávanie/filter v Ľuďoch (§3) má filter **Poslaná prednáška**, takže sa na rušnom podujatí viete presunúť rovno k tým, čo na vás čakajú, bez rolovania celým zoznamom.
 
@@ -300,12 +281,51 @@ obnovy; toto je záchranná sieť pre prípad, že tento plán zlyhá.
 - **Spoluorganizátori** — v **Administrácia → Nastavenia → Spoluorganizátori** pridajte niekoho podľa jeho npub a zdieľajte plnú organizátorskú kontrolu (úprava podujatia, schvaľovanie, správa koordinátora). Ich kľúče sú im zabalené ako darček; prístup získajú, keď nabudúce otvoria podujatie. Toto je zároveň vaša záchranná sieť, ak vám padne prehliadač.
 - **Podnecujte predstavenia včas.** Spojenia existujú len pre ľudí, ktorí nahrali predstavenie — najlepšie, čo môžete pre kvalitu spojení urobiť, je dostať všetkých k nahratiu ešte pred začiatkom podujatia. Nahratie je pre účastníkov voliteľné a aplikácia im to aj hovorí, no oplatí sa na to tlačiť: nahraté predstavenie dá AI viac na prácu, umožní ostatným účastníkom vopred zistiť, či by si s daným človekom naozaj sadli, ešte skôr než k nemu podídu — párovanie nie je len o projektoch a zručnostiach, je to aj pocit, ktorý AI sama o sebe nedokáže zachytiť — a ak ide o video, pomôže ľuďom spoznať svoje spojenia naživo.
 
-## 8. Sledovanie pozývacích kódov po ich rozoslaní
+## Riešenie problémov a časté otázky
 
-Ak predávate vstupenky mimo Nostrautiky — cez Eventbrite, vlastný e-shop,
-alebo v hotovosti pri dverách — o kupujúcom viete jedinú vec: jeho
-e-mailovú adresu. Každému pošlete jeden pozývací odkaz; niektorí sa pripoja
-hneď, iní sa k tomu nikdy nedostanú, a pár dní pred podujatím chcete
+- **Čo vidia účastníci, kým nie sú schválení?** Iba verejnú stránku podujatia — názov, zhrnutie, dátumy, miesto a vaše zverejnené novinky. Zoznam účastníkov, videá a spojenia sú zašifrované pre schválených účastníkov.
+
+- **Otvoril(a) som podujatie na inom zariadení a nie je tam tlačidlo administrácie.** Prihláste sa s tou istou identitou (vložte tajný kľúč, ktorý ste si zálohovali pri vytváraní účtu) a znova otvorte podujatie — organizátorský prístup ku každému podujatiu, ktoré ste vytvorili, sa automaticky obnoví z tohto jediného kľúča, žiadna samostatná záloha podujatia netreba. Vaše kľúče podujatia sa načítajú z relayov v okamihu prihlásenia, takže na novom zariadení dajte aplikácii pár sekúnd, kým usúdite, že to nefunguje. (Pridanie **spoluorganizátora** z pôvodného zariadenia, s npub nového zariadenia, je stále najrýchlejšia možnosť, ak máte pôvodné zariadenie poruke.)
+
+- **Pozývací odkaz niekoho automaticky neschválil.** Automatické schvaľovanie potrebuje pripojeného *a bežiaceho* koordinátora. Bez neho žiadosti z pozvánok stále prídu do vášho zoznamu **Žiadosti o pripojenie** — schváľte ich tam. (Budú mať značku **pozvánka**.)
+
+- **Žiadosť o pripojenie sa nezobrazuje.** Klepnite na **Obnoviť** v hlavičke administrácie — žiadosti sa načítavajú na požiadanie. Ak sa stále neobjaví, účastník môže mať nestabilné pripojenie; požiadajte ho, nech znova otvorí odkaz na podujatie a žiadosť odošle znova.
+
+- **Ako premietnem zoznam účastníkov / tabuľu spojení / prehľad administrácie
+  na mieste konania?** Otvorte príslušnú stránku v prehliadači premietacieho
+  počítača, prihlásení ako schválená identita (vy sami). Sú to bežné
+  stránky — dajte ich na celú obrazovku:
+
+  ![Prehľad administrácie organizátora na celú šírku](images/organizer-sk/13-admin-overview-desktop-light.png)
+
+- **Môžem podujatie po vytvorení upraviť?** Áno. V **Administrácia → Nastavenia → Podrobnosti podujatia** upravíte základné polia — názov, zhrnutie, začiatok/koniec, miesto aj ikonu/banner — a znova ich zverejníte. (Opätovné zverejnenie sa riadi monotónnym pravidlom poradia protokolu, takže úprava nikdy neprehrá súbeh v tej istej sekunde.) Novinky môžete zverejňovať a upravovať voľne a podujatie môžu spravovať aj spoluorganizátori. Pri zmene programu alebo miesta sa aj tak oplatí zverejniť novinku, aby účastníci dostali upozornenie, nielen ticho zmenené pole.
+
+- **Koľko ma to bude stáť?** Štandardne nič — referenčný koordinátor je
+  zadarmo a všetko, čo koordinátora nepotrebuje (zoznam účastníkov, videá,
+  príspevky, manuálne schvaľovanie), nemá náklady nikdy. Ak pripojíte
+  koordinátora, ktorého operátor si účtuje poplatok, uvidíte to jasne na
+  jeho zázname a — ak sa niekedy spustí fakturácia — banner **Vyžaduje sa
+  platba** s odkazom na platbu v Nastaveniach, nikdy prekvapivý poplatok.
+
+- **Účastník si upravil predstavenie, no nikto iný zmenu nevidí.** Bez
+  pripojeného koordinátora sa úpravy napísaného textu predstavenia samy
+  nešíria — klepnite na **Spracovať znova** na jeho karte v zozname
+  Schválených (§4), aby sa aktualizácia prejavila.
+
+- **Prečo sa koordinátor, ktorého som vymenil(a) alebo odpojil(a), už
+  nemôže vrátiť k právomoci?** Každé pripojenie, výmena alebo odpojenie
+  zvýši interné číslo generácie a koordinátori dôverujú vždy len tej
+  aktuálnej, takže starý grant sa už nedá prehrať späť do platnosti.
+  Netreba tu nič robiť — je to len dôvod, prečo je odpojenie alebo výmena
+  pre opúšťaného koordinátora konečné.
+
+## Príloha: sledovanie pozývacích kódov, keď predávate vstupenky inde (voliteľné)
+
+Všetko vyššie je celý príbeh pre väčšinu organizátorov. Táto časť je len pre
+konkrétny prípad, že vstupenky predávate mimo Nostrautiky — cez Eventbrite,
+vlastný e-shop, alebo v hotovosti pri dverách — kde o kupujúcom viete jedinú
+vec: jeho e-mailovú adresu. Každému pošlete jeden pozývací odkaz; niektorí sa
+pripoja hneď, iní sa k tomu nikdy nedostanú, a pár dní pred podujatím chcete
 pripomenúť presne tým, ktorí sa ešte nezaregistrovali.
 
 **Toto si ujasnite hneď na začiatku: aplikácia sa nikdy nedozvie ničiu
@@ -384,29 +404,3 @@ aby vás to prekvapilo.
 Pozývací hárok (§3) sám osebe vynecháva každý už použitý kód, takže ak si
 ho pred podujatím vytlačíte znova, každý, kto sa medzitým pripojil online,
 na ňom už jednoducho nebude.
-
-## Riešenie problémov a časté otázky
-
-- **Čo vidia účastníci, kým nie sú schválení?** Iba verejnú stránku podujatia — názov, zhrnutie, dátumy, miesto a vaše zverejnené novinky. Zoznam účastníkov, videá a spojenia sú zašifrované pre schválených účastníkov.
-
-- **Otvoril(a) som podujatie na inom zariadení a nie je tam tlačidlo administrácie.** Prihláste sa s tou istou identitou (vložte tajný kľúč, ktorý ste si zálohovali pri vytváraní účtu) a znova otvorte podujatie — organizátorský prístup ku každému podujatiu, ktoré ste vytvorili, sa automaticky obnoví z tohto jediného kľúča, žiadna samostatná záloha podujatia netreba. Vaše kľúče podujatia sa načítajú z relayov v okamihu prihlásenia, takže na novom zariadení dajte aplikácii pár sekúnd, kým usúdite, že to nefunguje. (Pridanie **spoluorganizátora** z pôvodného zariadenia, s npub nového zariadenia, je stále najrýchlejšia možnosť, ak máte pôvodné zariadenie poruke.)
-
-- **Pozývací odkaz niekoho automaticky neschválil.** Automatické schvaľovanie potrebuje pripojeného *a bežiaceho* koordinátora. Bez neho žiadosti z pozvánok stále prídu do vášho zoznamu **Žiadosti o pripojenie** — schváľte ich tam. (Budú mať značku **pozvánka**.)
-
-- **Žiadosť o pripojenie sa nezobrazuje.** Klepnite na **Obnoviť** v hlavičke administrácie — žiadosti sa načítavajú na požiadanie. Ak sa stále neobjaví, účastník môže mať nestabilné pripojenie; požiadajte ho, nech znova otvorí odkaz na podujatie a žiadosť odošle znova.
-
-- **Ako premietnem zoznam účastníkov / tabuľu spojení / prehľad administrácie
-  na mieste konania?** Otvorte príslušnú stránku v prehliadači premietacieho
-  počítača, prihlásení ako schválená identita (vy sami). Sú to bežné
-  stránky — dajte ich na celú obrazovku:
-
-  ![Prehľad administrácie organizátora na celú šírku](images/organizer/13-admin-overview-desktop-light.png)
-
-- **Môžem podujatie po vytvorení upraviť?** Áno. V **Administrácia → Nastavenia → Podrobnosti podujatia** upravíte základné polia — názov, zhrnutie, začiatok/koniec, miesto aj ikonu/banner — a znova ich zverejníte. (Opätovné zverejnenie sa riadi monotónnym pravidlom poradia protokolu, takže úprava nikdy neprehrá súbeh v tej istej sekunde.) Novinky môžete zverejňovať a upravovať voľne a podujatie môžu spravovať aj spoluorganizátori. Pri zmene programu alebo miesta sa aj tak oplatí zverejniť novinku, aby účastníci dostali upozornenie, nielen ticho zmenené pole.
-
-- **Koľko ma to bude stáť?** Štandardne nič — referenčný koordinátor je
-  zadarmo a všetko, čo koordinátora nepotrebuje (zoznam účastníkov, videá,
-  príspevky, manuálne schvaľovanie), nemá náklady nikdy. Ak pripojíte
-  koordinátora, ktorého operátor si účtuje poplatok, uvidíte to jasne na
-  jeho zázname a — ak sa niekedy spustí fakturácia — banner **Vyžaduje sa
-  platba** s odkazom na platbu v Nastaveniach, nikdy prekvapivý poplatok.
