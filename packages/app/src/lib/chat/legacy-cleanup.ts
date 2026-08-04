@@ -12,7 +12,7 @@
 import { KIND_DELETION, KIND_MY_PROFILE, blindedDLiteral } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { deriveBlindingKey } from "$lib/events/blinding.js";
-import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { publishSigned } from "$lib/nostr/ndk.js";
 
 /** The literal the v1 backup's `d` tag was blinded over (device-key-backup.ts). */
 const DEVICE_KEY_LITERAL = "chat-device-key";
@@ -40,6 +40,16 @@ function markDeleted(account: string): void {
  * addressable-deletion `a` tag (`31602:<account>:<blinded-d>`) targets exactly that
  * self-copy; nothing else this account authored under 31602 shares the blinded d.
  * Any failure is swallowed — this is hygiene, never a gate.
+ *
+ * Deliberately `publishSigned`, NOT `publishOrQueue`: this deletion's target may
+ * never have existed at all (most accounts never had a v1 backup to retire), so a
+ * failed attempt is not lost user data — nothing to durably retry or nag anyone
+ * about. `publishOrQueue`'s fallback queues into the persistent outbox and surfaces
+ * a user-facing "N couldn't be sent" indicator once retries are exhausted, which
+ * turned a housekeeping no-op into a permanent, confusing red pill for anyone whose
+ * first chat session hit an ordinary transient publish hiccup (confirmed 2026-08-04:
+ * a multi-persona e2e run reproduced exactly this — a stuck kind-5 item nagging the
+ * DM screens indefinitely, contradicting this function's own "swallowed" contract).
  */
 export async function deleteLegacyChatDeviceKeyBackup(
   signer: AppSigner,
@@ -59,9 +69,9 @@ export async function deleteLegacyChatDeviceKeyBackup(
       ],
       content: "retired chat device-key backup (wire v2)",
     });
-    await publishOrQueue(deletion as unknown as Parameters<typeof publishOrQueue>[0], relays);
-    // Only mark done once the deletion was actually accepted/queued — a throw above
-    // leaves the marker unset so the next session retries.
+    await publishSigned(deletion as unknown as Parameters<typeof publishSigned>[0], relays);
+    // Only mark done once the deletion was actually accepted — a throw above
+    // (signing OR publish) leaves the marker unset so the next session retries.
     markDeleted(account);
   } catch {
     /* best-effort — retried next session */

@@ -8,8 +8,8 @@ import { KIND_DELETION, KIND_MY_PROFILE, blindedDLiteral } from "@nostrautica/pr
 
 const BLIND_KEY = new Uint8Array(32).fill(7);
 vi.mock("$lib/events/blinding.js", () => ({ deriveBlindingKey: vi.fn(async () => BLIND_KEY) }));
-const publishOrQueue = vi.fn(async () => {});
-vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue: (...a: unknown[]) => publishOrQueue(...(a as [])) }));
+const publishSigned = vi.fn(async () => []);
+vi.mock("$lib/nostr/ndk.js", () => ({ publishSigned: (...a: unknown[]) => publishSigned(...(a as [])) }));
 
 import { deleteLegacyChatDeviceKeyBackup } from "./legacy-cleanup.js";
 
@@ -34,15 +34,15 @@ function fakeLocalStorage() {
 }
 
 beforeEach(() => {
-  publishOrQueue.mockClear();
+  publishSigned.mockClear();
   vi.stubGlobal("localStorage", fakeLocalStorage());
 });
 
 describe("deleteLegacyChatDeviceKeyBackup", () => {
   it("publishes a NIP-09 deletion addressed to the legacy 31602 backup", async () => {
     await deleteLegacyChatDeviceKeyBackup(signer, ["wss://r"]);
-    expect(publishOrQueue).toHaveBeenCalledOnce();
-    const [event, relays] = publishOrQueue.mock.calls[0] as unknown as [
+    expect(publishSigned).toHaveBeenCalledOnce();
+    const [event, relays] = publishSigned.mock.calls[0] as unknown as [
       { kind: number; tags: string[][] },
       string[],
     ];
@@ -56,14 +56,14 @@ describe("deleteLegacyChatDeviceKeyBackup", () => {
   it("runs at most once per account (marker-gated)", async () => {
     await deleteLegacyChatDeviceKeyBackup(signer);
     await deleteLegacyChatDeviceKeyBackup(signer);
-    expect(publishOrQueue).toHaveBeenCalledOnce();
+    expect(publishSigned).toHaveBeenCalledOnce();
   });
 
-  it("does not set the marker when publishing throws (retries next session)", async () => {
-    publishOrQueue.mockRejectedValueOnce(new Error("relay down"));
+  it("does not set the marker when publishing throws (retries next session), and never durably queues (fire-and-forget hygiene, not user data)", async () => {
+    publishSigned.mockRejectedValueOnce(new Error("relay down"));
     await deleteLegacyChatDeviceKeyBackup(signer);
     await deleteLegacyChatDeviceKeyBackup(signer);
     // First threw (marker unset), second succeeded → two attempts total.
-    expect(publishOrQueue).toHaveBeenCalledTimes(2);
+    expect(publishSigned).toHaveBeenCalledTimes(2);
   });
 });
