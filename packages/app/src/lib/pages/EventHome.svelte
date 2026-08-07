@@ -36,11 +36,11 @@
     buildOfflinePack,
     cachedOfflinePack,
     packComplete,
-    formatBytes,
     PACK_STEP_KEYS,
     type OfflinePack,
     type PackStep,
   } from "$lib/events/offline-pack.js";
+  import { formatBytes } from "$lib/util/bytes.js";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
