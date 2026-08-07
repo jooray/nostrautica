@@ -8,6 +8,7 @@ import {
   UPLOAD_TIMEOUT_MS,
   MIRROR_TIMEOUT_MS,
   DOWNLOAD_TIMEOUT_MS,
+  DOWNLOAD_STALL_TIMEOUT_MS,
 } from "./client.js";
 import { sha256Hex } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
@@ -193,6 +194,100 @@ describe("Blossom timeouts (UX-7)", () => {
     // The hung mirror burns exactly its timeout, then the healthy one answers.
     await vi.advanceTimersByTimeAsync(DOWNLOAD_TIMEOUT_MS);
     await expect(p).resolves.toEqual(bytes);
+  });
+
+  it("downloadBlob keeps going past the header timeout while bytes keep arriving", async () => {
+    // Regression (prod 2026-08-07): the old budget covered headers AND body, so a
+    // video that simply took longer than 20s to transfer on a slow link failed
+    // with "timed out after 20000ms" on every mirror.
+    vi.useFakeTimers();
+    const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4]), new Uint8Array([5, 6])];
+    const whole = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    // Each chunk lands well inside the stall budget, but the transfer as a whole
+    // runs far past DOWNLOAD_TIMEOUT_MS.
+    const gap = DOWNLOAD_STALL_TIMEOUT_MS / 2;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream({
+              async pull(c) {
+                const next = chunks.shift();
+                if (!next) return c.close();
+                await new Promise((r) => setTimeout(r, gap));
+                c.enqueue(next);
+              },
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+
+    const p = downloadBlob(["https://slow.example/blob"], sha256Hex(whole));
+    await vi.advanceTimersByTimeAsync(gap * chunks.length + 1);
+    expect(gap * 3).toBeGreaterThan(DOWNLOAD_TIMEOUT_MS); // the old budget would have fired
+    await expect(p).resolves.toEqual(whole);
+  });
+
+  it("downloadBlob gives up on a mirror that goes silent mid-body", async () => {
+    vi.useFakeTimers();
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("stalls")) {
+          return new Response(
+            new ReadableStream({
+              start(c) {
+                c.enqueue(new Uint8Array([9])); // one chunk, then silence forever
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(bytes, { status: 200 });
+      }),
+    );
+
+    const p = downloadBlob(
+      ["https://stalls.example/blob", "https://good.example/blob"],
+      sha256Hex(bytes),
+    );
+    await vi.advanceTimersByTimeAsync(DOWNLOAD_STALL_TIMEOUT_MS);
+    await expect(p).resolves.toEqual(bytes);
+  });
+
+  it("downloadBlob reports byte progress against the descriptor's size", async () => {
+    const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])];
+    const whole = new Uint8Array([1, 2, 3, 4, 5]);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream({
+              start(c) {
+                for (const chunk of chunks) c.enqueue(chunk);
+                c.close();
+              },
+            }),
+            { status: 200 }, // no Content-Length — the descriptor's size is the denominator
+          ),
+      ),
+    );
+
+    const seen: Array<{ received: number; total?: number }> = [];
+    await downloadBlob(["https://x.example/blob"], sha256Hex(whole), {
+      expectedSize: whole.length,
+      onProgress: (p) => seen.push(p),
+    });
+
+    expect(seen).toEqual([
+      { received: 0, total: 5 },
+      { received: 2, total: 5 },
+      { received: 5, total: 5 },
+    ]);
   });
 
   it("uploadAndMirror starts every mirror in parallel (a hung mirror doesn't serialize)", async () => {

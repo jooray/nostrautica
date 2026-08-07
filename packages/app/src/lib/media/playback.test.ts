@@ -109,6 +109,46 @@ describe("playback object-URL cache (APPR-4/UX-28)", () => {
     expect(downloadBlob).toHaveBeenCalledTimes(1);
   });
 
+  it("broadcasts download progress to coalesced followers, not just the leader", async () => {
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    downloadBlob.mockImplementation(
+      async (urls: string[], _x: string, opts: { onProgress?: (p: unknown) => void }) => {
+        await gate;
+        opts.onProgress?.({ received: 0, total: 3 });
+        opts.onProgress?.({ received: 3, total: 3 });
+        return new TextEncoder().encode(urls[0]);
+      },
+    );
+
+    const d = descriptor("progress");
+    const seenA: unknown[] = [];
+    const seenB: unknown[] = [];
+    const pA = resolveMediaUrl(d, { onProgress: (p) => seenA.push(p) });
+    const pB = resolveMediaUrl(d, { onProgress: (p) => seenB.push(p) });
+    open();
+    await Promise.all([pA, pB]);
+
+    // B rode A's single download — it must still have seen the bytes move, or its
+    // progress bar sits at 0% for the whole transfer.
+    expect(downloadBlob).toHaveBeenCalledTimes(1);
+    expect(seenA).toEqual([
+      { received: 0, total: 3 },
+      { received: 3, total: 3 },
+    ]);
+    expect(seenB).toEqual(seenA);
+
+    // Listeners are dropped once the resolve settles — no growth across replays.
+    seenA.length = 0;
+    seenB.length = 0;
+    releaseMediaUrl(d);
+    releaseMediaUrl(d);
+    await resolveMediaUrl(d); // cache hit: no download, no progress
+    expect(seenA).toEqual([]);
+    expect(seenB).toEqual([]);
+  });
+
   it("never evicts an entry that is still referenced", async () => {
     const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
     // 9 LIVE players at once: the bound goes soft rather than revoking in-use URLs.
