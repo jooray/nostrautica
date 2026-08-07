@@ -2,7 +2,9 @@
   import { onDestroy } from "svelte";
   import type { MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
   import { resolveMediaUrl, releaseMediaUrl } from "$lib/media/playback.js";
+  import type { DownloadProgress } from "$lib/blossom/client.js";
   import { vttObjectUrl } from "$lib/media/vtt.js";
+  import { formatBytes } from "$lib/util/bytes.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -22,6 +24,7 @@
   let url = $state<string | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
+  let progress = $state<DownloadProgress | null>(null);
   let showTranscript = $state(false);
   let mediaEl = $state<HTMLMediaElement | null>(null);
   let lastReport = 0;
@@ -91,15 +94,40 @@
     return () => URL.revokeObjectURL(u);
   });
 
+  // Loading is two phases the user experiences very differently: a download whose
+  // length is set by their connection (a talk video on hotel wifi is minutes, and
+  // used to look identical to a broken server), then a decrypt with nothing to
+  // report. `progress` covers the first; reaching `total` marks the handover.
+  const pct = $derived(
+    progress?.total ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : null,
+  );
+  // Rounding, not `pct === 100`: 99.6% rounds to 100 and would claim "Decrypting"
+  // while bytes are still arriving.
+  const downloaded = $derived(!!progress?.total && progress.received >= progress.total);
+  const stage = $derived(
+    progress === null
+      ? t("media.connecting") // no response headers yet — nothing to count
+      : downloaded
+        ? t("media.decrypting")
+        : progress.total
+          ? t("media.downloadingOf", {
+              done: formatBytes(progress.received),
+              total: formatBytes(progress.total),
+            })
+          : t("media.downloading", { done: formatBytes(progress.received) }),
+  );
+
   async function load() {
     loading = true;
     error = null;
+    progress = null;
     try {
-      url = await resolveMediaUrl(descriptor);
+      url = await resolveMediaUrl(descriptor, { onProgress: (p) => (progress = p) });
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+      progress = null;
     }
   }
 
@@ -156,11 +184,34 @@
       </button>
     {/each}
   </div>
+{:else if loading}
+  <!-- A progressbar, not a live region: `stage` changes on every chunk, and a
+       polite live region would read the byte counter aloud dozens of times. The
+       visible text says the same thing as aria-valuetext, so it's hidden from
+       assistive tech rather than announced twice. -->
+  <div class="loading">
+    <div
+      class="track"
+      role="progressbar"
+      aria-label={t("media.loading")}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={pct ?? undefined}
+      aria-valuetext={stage}
+    >
+      <div
+        class="fill"
+        class:indeterminate={pct === null}
+        style={pct === null ? "" : `width:${pct}%`}
+      ></div>
+    </div>
+    <span class="stage" aria-hidden="true">{stage}</span>
+  </div>
 {:else if error}
   <div class="card warn">{t("media.playError", { reason: error })}</div>
 {:else}
-  <button class="btn" onclick={load} disabled={loading}>
-    {loading ? t("media.decrypting") : isAudio ? t("media.playAudio") : t("media.playIntro")}
+  <button class="btn" onclick={load}>
+    {isAudio ? t("media.playAudio") : t("media.playIntro")}
   </button>
 {/if}
 
@@ -217,6 +268,55 @@
     min-height: 30px;
     padding: 0.2rem 0.5rem;
     font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .loading {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    /* Same box the Play button occupied, so the card doesn't jump on click. */
+    padding: 0.35rem 0;
+  }
+  .track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-elev2);
+    overflow: hidden;
+  }
+  .fill {
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    background: var(--accent-bg);
+    transition: width 0.2s linear;
+  }
+  /* Before the first byte lands there is no percentage to show — sweep instead
+     of sitting at 0%, which reads as "stuck". */
+  .fill.indeterminate {
+    width: 35%;
+    animation: sweep 1.4s ease-in-out infinite;
+  }
+  @keyframes sweep {
+    0% {
+      margin-left: -35%;
+    }
+    100% {
+      margin-left: 100%;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .fill {
+      transition: none;
+    }
+    .fill.indeterminate {
+      animation: none;
+      width: 100%;
+      opacity: 0.4;
+    }
+  }
+  .stage {
+    font-size: 0.8rem;
+    color: var(--text-dim);
     font-variant-numeric: tabular-nums;
   }
 </style>

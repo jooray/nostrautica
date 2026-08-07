@@ -12,38 +12,84 @@ import { buildAuthEvent, authHeader } from "./auth.js";
 /**
  * Operation timeouts (UX-7): a hung Blossom server must never wedge Record's
  * "Uploading…" or MediaPlayer's "Decrypting…" forever. Uploads get the biggest
- * budget — videos can be large on slow links; downloads and preflights are
- * small/fast, so a server that can't answer promptly is simply skipped.
+ * budget — videos can be large on slow links; preflights are small/fast, so a
+ * server that can't answer promptly is simply skipped.
  */
 export const PREFLIGHT_TIMEOUT_MS = 10_000;
 export const UPLOAD_TIMEOUT_MS = 60_000;
 export const MIRROR_TIMEOUT_MS = 30_000;
-export const DOWNLOAD_TIMEOUT_MS = 20_000;
 
 /**
- * Run `work` bounded by an AbortController timeout (UX-7). The timer both
- * aborts the underlying fetch and rejects with a plain Error (never a bare
- * AbortError), so callers' existing catch paths work and even a fetch
- * implementation that ignores the signal still settles.
+ * Downloads are bounded by PROGRESS, not by total wall clock.
+ *
+ * Prod report 2026-08-07: a video intro failed with "Download from … timed out
+ * after 20000ms" on a slow connection. The old single budget covered the
+ * response headers AND the whole streamed body, so a blob that was arriving
+ * perfectly well but needed more than 20s of transfer was indistinguishable
+ * from a dead server — and every mirror failed the same way, since the limit was
+ * the link, not the host. A 12 MB intro needs ~96s on a 1 Mbit/s phone link.
+ *
+ *  - {@link DOWNLOAD_TIMEOUT_MS} now bounds only the response headers, so a
+ *    server that never answers at all is still skipped in 20s as before.
+ *  - {@link DOWNLOAD_STALL_TIMEOUT_MS} bounds the SILENCE between body chunks
+ *    and resets on every chunk, so a slow-but-moving download runs to
+ *    completion however long that takes.
+ *
+ * A server dribbling one byte per stall window can hold a download open for a
+ * long time; MAX_MEDIA_DOWNLOAD_BYTES bounds what that can cost, and with
+ * `onProgress` wired to the player the user can see it crawling and leave.
  */
+export const DOWNLOAD_TIMEOUT_MS = 20_000;
+export const DOWNLOAD_STALL_TIMEOUT_MS = 30_000;
+
+/**
+ * Wall-clock budget for the no-ReadableStream fallback (old webviews). Nothing
+ * there exposes chunk boundaries to measure a stall against, so this is a plain
+ * total — generous enough that a legitimately slow download still finishes.
+ */
+export const DOWNLOAD_WHOLE_BODY_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Reject with `message` — and abort `controller` — if `promise` doesn't settle
+ * in time. The rejection is always a plain Error (never a bare AbortError), so
+ * callers' existing catch paths work and even a fetch implementation that
+ * ignores the signal still settles.
+ *
+ * The controller comes from the caller so one request can spend several
+ * independent budgets on a single fetch (headers, then per-chunk) rather than
+ * one budget for all of it.
+ */
+function raceTimeout<T>(
+  message: string,
+  timeoutMs: number,
+  controller: AbortController,
+  promise: Promise<T>,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/** Run `work` under a single all-in timeout (UX-7). */
 async function withTimeout<T>(
   label: string,
   timeoutMs: number,
   work: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
   const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([work(controller.signal), timeout]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
+  return raceTimeout(
+    `${label} timed out after ${timeoutMs}ms`,
+    timeoutMs,
+    controller,
+    work(controller.signal),
+  );
 }
 
 function fetchWithTimeout(
@@ -266,48 +312,96 @@ export async function deleteBlob(
  */
 export const MAX_MEDIA_DOWNLOAD_BYTES = 250 * 1024 * 1024;
 
+/** How much of a blob's ciphertext has arrived, for a progress indicator. */
+export interface DownloadProgress {
+  /** Ciphertext bytes received so far from the mirror currently being read. */
+  received: number;
+  /**
+   * Total ciphertext bytes, when known — the response's Content-Length, else the
+   * descriptor's claimed size. Undefined only when neither is available, in
+   * which case a caller can show bytes-so-far but no percentage.
+   */
+  total?: number;
+}
+
 export interface DownloadOptions {
   /** Abort past this many bytes (default {@link MAX_MEDIA_DOWNLOAD_BYTES}). */
   maxBytes?: number;
   /**
    * The descriptor's claimed ciphertext size, when known — a claim already past
-   * the cap is rejected without any network traffic.
+   * the cap is rejected without any network traffic, and it gives the progress
+   * indicator a denominator even when the server sends no Content-Length.
    */
   expectedSize?: number;
+  /**
+   * Called once the response headers land (with `received: 0`) and then after
+   * every body chunk. Restarts from 0 if a mirror fails and the next is tried.
+   */
+  onProgress?: (progress: DownloadProgress) => void;
 }
 
 /**
  * Read a response body with a running byte counter, aborting past `maxBytes`.
  * Content-Length is checked up front when present; the streamed count is the
  * real guard (a lying/chunked endpoint is caught mid-stream).
+ *
+ * Each `read()` is bounded by {@link DOWNLOAD_STALL_TIMEOUT_MS} — the budget is
+ * per chunk, not for the whole body, so only an actually-silent server fails.
  */
-async function readCapped(res: Response, maxBytes: number, url: string): Promise<Uint8Array> {
+async function readCapped(
+  res: Response,
+  maxBytes: number,
+  url: string,
+  controller: AbortController,
+  opts: Pick<DownloadOptions, "expectedSize" | "onProgress">,
+): Promise<Uint8Array> {
   const contentLength = Number(res.headers.get("content-length") ?? 0);
   if (contentLength > maxBytes) {
     throw new Error(`blob is ${contentLength} bytes — over the ${maxBytes}-byte cap (${url})`);
   }
+  // Content-Length first; a cross-origin response that doesn't expose it still
+  // has the descriptor's own ciphertext size to show a real percentage against.
+  const total = contentLength > 0 ? contentLength : opts.expectedSize;
+  const stalled = `Download from ${url} stalled — no data for ${DOWNLOAD_STALL_TIMEOUT_MS}ms`;
+
   const reader = res.body?.getReader();
   if (!reader) {
-    // No stream API (old webview): whole-read, then enforce the cap on the result.
-    const bytes = new Uint8Array(await res.arrayBuffer());
+    // No stream API (old webview): whole-read under one generous budget, then
+    // enforce the cap on the result. No chunk boundaries, so no progress either.
+    const bytes = new Uint8Array(
+      await raceTimeout(
+        `Download from ${url} timed out after ${DOWNLOAD_WHOLE_BODY_TIMEOUT_MS}ms`,
+        DOWNLOAD_WHOLE_BODY_TIMEOUT_MS,
+        controller,
+        res.arrayBuffer(),
+      ),
+    );
     if (bytes.length > maxBytes) {
       throw new Error(`blob is ${bytes.length} bytes — over the ${maxBytes}-byte cap (${url})`);
     }
     return bytes;
   }
+
+  opts.onProgress?.({ received: 0, total });
   const chunks: Uint8Array[] = [];
-  let total = 0;
+  let received = 0;
   for (;;) {
-    const { done, value } = await reader.read();
+    const { done, value } = await raceTimeout(
+      stalled,
+      DOWNLOAD_STALL_TIMEOUT_MS,
+      controller,
+      reader.read(),
+    );
     if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
+    received += value.byteLength;
+    if (received > maxBytes) {
       await reader.cancel().catch(() => {});
       throw new Error(`blob passed the ${maxBytes}-byte download cap — aborted (${url})`);
     }
     chunks.push(value);
+    opts.onProgress?.({ received, total });
   }
-  const out = new Uint8Array(total);
+  const out = new Uint8Array(received);
   let offset = 0;
   for (const chunk of chunks) {
     out.set(chunk, offset);
@@ -334,19 +428,24 @@ export async function downloadBlob(
   }
   let lastErr: unknown;
   for (const url of urls) {
+    // One controller, two budgets (see DOWNLOAD_STALL_TIMEOUT_MS): the headers
+    // have to arrive promptly, the body only has to keep moving.
+    const controller = new AbortController();
     try {
-      // The timeout spans headers AND the streamed body (UX-7) — a server that
-      // stalls mid-stream is skipped like any other failure.
-      const bytes = await withTimeout(`Download from ${url}`, DOWNLOAD_TIMEOUT_MS, async (signal) => {
-        const res = await fetch(url, { signal });
-        if (!res.ok) throw new Error(`${res.status} from ${url}`);
-        const bytes = await readCapped(res, maxBytes, url);
-        if (sha256Hex(bytes) !== expectedSha256) throw new Error(`hash mismatch from ${url}`);
-        return bytes;
-      });
+      const res = await raceTimeout(
+        `Download from ${url} timed out after ${DOWNLOAD_TIMEOUT_MS}ms`,
+        DOWNLOAD_TIMEOUT_MS,
+        controller,
+        fetch(url, { signal: controller.signal }),
+      );
+      if (!res.ok) throw new Error(`${res.status} from ${url}`);
+      const bytes = await readCapped(res, maxBytes, url, controller, opts);
+      if (sha256Hex(bytes) !== expectedSha256) throw new Error(`hash mismatch from ${url}`);
       return bytes;
     } catch (e) {
       lastErr = e;
+      // Release any body still streaming from the mirror we're giving up on.
+      controller.abort();
     }
   }
   throw new Error(`Could not fetch blob: ${lastErr}`);

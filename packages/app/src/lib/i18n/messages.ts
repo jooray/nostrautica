@@ -745,6 +745,10 @@ export const messages = {
 
     // Media player
     "media.playError": "Couldn't play video: {reason}",
+    "media.loading": "Loading media",
+    "media.connecting": "Connecting…",
+    "media.downloading": "Downloading… {done}",
+    "media.downloadingOf": "Downloading… {done} of {total}",
     "media.decrypting": "Decrypting…",
     "media.playIntro": "▶ Play intro",
     "media.playAudio": "▶ Play audio intro",
@@ -2196,6 +2200,10 @@ export const messages = {
 
     // Media player
     "media.playError": "Video sa nepodarilo prehrať: {reason}",
+    "media.loading": "Načítava sa médium",
+    "media.connecting": "Pripája sa…",
+    "media.downloading": "Sťahuje sa… {done}",
+    "media.downloadingOf": "Sťahuje sa… {done} z {total}",
     "media.decrypting": "Dešifruje sa…",
     "media.playIntro": "▶ Prehrať predstavenie",
     "media.playAudio": "▶ Prehrať zvukové predstavenie",
@@ -3640,6 +3648,10 @@ export const messages = {
 
     // Přehrávač médií
     "media.playError": "Video se nepodařilo přehrát: {reason}",
+    "media.loading": "Načítání média",
+    "media.connecting": "Připojování…",
+    "media.downloading": "Stahování… {done}",
+    "media.downloadingOf": "Stahování… {done} z {total}",
     "media.decrypting": "Dešifrování…",
     "media.playIntro": "▶ Přehrát představení",
     "media.playAudio": "▶ Přehrát zvukové představení",
