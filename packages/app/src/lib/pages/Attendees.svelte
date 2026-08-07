@@ -16,6 +16,7 @@
   import { directoryEntryFields, searchRank } from "$lib/events/search.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
+  import FollowButton from "$lib/components/FollowButton.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
@@ -47,7 +48,14 @@
   let profiles = $state<Map<string, ProfileMeta>>(
     cachedProfiles(cachedEntries.map((e) => e.pubkey)),
   );
-  let followSet = $state<Set<string>>(cachedFollowSet() ?? new Set());
+  // svelte-ignore state_referenced_locally -- read once for the initial paint
+  const cachedFollows = cachedFollowSet();
+  let followSet = $state<Set<string>>(cachedFollows ?? new Set());
+  // Whether the follow set is actually KNOWN. An unfetched set is all-absent,
+  // which is indistinguishable from "follows nobody here" — fine for hiding a
+  // badge, a lie for a button that would then read "not following" and offer to
+  // follow someone the user already follows. Until we know, no button.
+  let followsKnown = $state(cachedFollows !== undefined);
   let scores = $state<Map<string, number>>(new Map());
   let settings = $state<PerEventSettings | null>(
     cachedCtx ? (cachedPerEventSettings(cachedCtx.coordinate) ?? null) : null,
@@ -73,7 +81,11 @@
     if (de.length === 0) return;
     entries = de;
     profiles = cachedProfiles(de.map((e) => e.pubkey));
-    followSet = cachedFollowSet() ?? followSet;
+    const cf = cachedFollowSet();
+    if (cf) {
+      followSet = cf;
+      followsKnown = true;
+    }
     settings ??= cachedPerEventSettings(c.coordinate) ?? null;
     loading = false;
     perfMark("Attendees", "cache-paint");
@@ -97,6 +109,14 @@
   }
   const wantToMeet = (pubkey: string) => !!settings?.want_to_meet?.includes(pubkey);
 
+  /** FollowButton published a change — keep this page's set authoritative. */
+  function noteFollow(pubkey: string, following: boolean) {
+    const next = new Set(followSet);
+    if (following) next.add(pubkey);
+    else next.delete(pubkey);
+    followSet = next;
+  }
+
   // Social overlay (follows, per-event settings, match scores) loads in
   // parallel with the roster stream — none of it blocks the first paint.
   async function loadSocial(c: EventContext) {
@@ -105,7 +125,10 @@
     void mutes.load(signer);
     const jobs: Promise<unknown>[] = [
       fetchFollowSet(signer)
-        .then((s) => (followSet = s))
+        .then((s) => {
+          followSet = s;
+          followsKnown = true;
+        })
         .catch(() => {}),
       deriveBlindingKey(signer)
         .then((bk) => {
@@ -316,10 +339,20 @@
             >
               {#snippet trailing()}
                 {#if scores.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}
-                {#if followSet.has(e.pubkey)}<span class="badge ok">{t("attendees.following")}</span>{/if}
               {/snippet}
               {#snippet actions()}
                 {#if session.loggedIn && e.pubkey !== session.pubkey}
+                  <!-- The follow state lives here, not in `trailing` — that slot
+                       renders INSIDE PersonCard's open-button, and a button
+                       inside a button is invalid HTML. -->
+                  {#if followsKnown}
+                    <FollowButton
+                      pubkey={e.pubkey}
+                      name={nameOf(e.pubkey, e.profile.about)}
+                      following={followSet.has(e.pubkey)}
+                      onChange={(f) => noteFollow(e.pubkey, f)}
+                    />
+                  {/if}
                   <button
                     class="btn inline icon-btn"
                     aria-pressed={wantToMeet(e.pubkey)}

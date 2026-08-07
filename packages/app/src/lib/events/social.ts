@@ -138,6 +138,24 @@ export async function fetchFollowSet(
   return new Set(fresh ?? []);
 }
 
+/**
+ * Reflect a just-published follow/unfollow in the CACHED set (paint layer only).
+ *
+ * Without this the SWR entry keeps the pre-toggle list until the next
+ * `fetchFollowSet`, so leaving People and coming back repaints the badge the
+ * user just changed — the toggle looks like it silently reverted.
+ *
+ * Cache-only on purpose. The authoritative write is the kind-3 publish in
+ * `followUser`/`unfollowUser`, which re-fetches from relays first and must never
+ * merge into this copy (§2.2, HARD CONSTRAINT 4).
+ */
+export function noteFollowChange(pubkey: string, following: boolean): void {
+  const current = new Set(cacheGet<string[]>(FOLLOWS_KEY)?.data ?? []);
+  if (following) current.add(pubkey);
+  else current.delete(pubkey);
+  cacheSet(FOLLOWS_KEY, [...current]);
+}
+
 /** The set of pubkeys (among `candidates`) who follow `me` (kind-3 p-tagging me). */
 export async function fetchFollowersOf(
   me: string,

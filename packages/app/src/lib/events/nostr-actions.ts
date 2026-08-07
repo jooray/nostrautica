@@ -15,7 +15,7 @@ import { fetchEvents } from "$lib/nostr/ndk.js";
 import { onlyVerified } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { ONBOARDING_RELAY_LIST, DM_RELAY_LIST } from "$lib/nostr/relays.js";
-import { mergeProfileContent, mergeFollowTags, type Tag } from "./onboarding.js";
+import { mergeProfileContent, mergeFollowTags, removeFollowTag, type Tag } from "./onboarding.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 async function latest(kind: number, pubkey: string) {
@@ -114,10 +114,18 @@ export async function fetchFollowTags(signer: AppSigner): Promise<Tag[]> {
  * Follow a pubkey via a kind-3 fetch-merge-APPEND (spec §5.4 item 3). Always
  * fetches the current list first so pre-existing follows are never wiped.
  *
- * Empty-list guard: if the fetched list has zero follows we REFUSE to publish —
- * an empty fetch is indistinguishable from a failed fetch, and publishing
+ * Empty-list guard: if NO kind-3 came back we REFUSE to publish — a fetch that
+ * returns nothing is indistinguishable from a failed fetch, and publishing
  * "just the new target" would look exactly like a wiped follow list. Keys the
  * app generates are seeded via `seedFollows` so they never hit this.
+ *
+ * The guard keys on whether a kind-3 EVENT exists, not on whether that event
+ * carries any `p` tags (which is what it tested until 2026-08-07). A real,
+ * successfully-fetched kind-3 with zero follows is a legitimate state — you land
+ * in it by unfollowing your last remaining follow, which `unfollowUser` now
+ * makes reachable — and refusing to append to it left that user permanently
+ * unable to follow anyone again from this app. Both readings reject the case the
+ * guard exists for (nothing came back at all) identically.
  *
  * Returns true when the kind-3 went out immediately, false when it was queued
  * for the offline flush (audit UX-15).
@@ -125,10 +133,8 @@ export async function fetchFollowTags(signer: AppSigner): Promise<Tag[]> {
 export async function followUser(signer: AppSigner, target: string): Promise<boolean> {
   const pubkey = await signer.getPublicKey();
   const existing = await latest(KIND_CONTACTS, pubkey);
-  const existingTags = (existing?.tags as Tag[]) ?? [];
-  if (!existingTags.some((tag) => tag[0] === "p")) {
-    throw new Error(t("error.followListGuard"));
-  }
+  if (!existing) throw new Error(t("error.followListGuard"));
+  const existingTags = existing.tags as Tag[];
   const merged = mergeFollowTags(existingTags, [target]);
   // Monotonic (R6): kind-3 is replaceable; a follow right after another edit must
   // win the §3.1 tie-break rather than tie-and-lose (which would drop the follow).
@@ -143,7 +149,45 @@ export async function followUser(signer: AppSigner, target: string): Promise<boo
         tags: merged,
         // Carry the existing content through (audit UX-16): kind-3 content is legacy
         // relay-metadata JSON other clients still read — republishing "" wiped it.
-        content: existing?.content ?? "",
+        content: existing.content,
+      }) as Promise<VerifiedEvent>,
+  });
+  return published;
+}
+
+/**
+ * Unfollow a pubkey: kind-3 fetch → drop the `p` tag → publish (user request
+ * 2026-08-07 — the roster's "following" badge became a real toggle, and until
+ * now nothing anywhere in the app could undo a follow).
+ *
+ * Deliberately the mirror image of `followUser` — same fetch-first read, same
+ * empty-list guard, same monotonic publish, same legacy-content carry-through —
+ * so the pair can't drift apart. Unfollowing someone who isn't in the list
+ * publishes nothing and reports success: the state the caller asked for already
+ * holds, and republishing an unchanged list would be pure relay noise.
+ *
+ * Returns true when the kind-3 went out immediately, false when it was queued
+ * for the offline flush (audit UX-15).
+ */
+export async function unfollowUser(signer: AppSigner, target: string): Promise<boolean> {
+  const pubkey = await signer.getPublicKey();
+  const existing = await latest(KIND_CONTACTS, pubkey);
+  // Same reasoning as followUser, and it matters more here: a failed fetch read
+  // as "empty" would publish a list built from nothing over a real one.
+  if (!existing) throw new Error(t("error.followListGuard"));
+  const existingTags = existing.tags as Tag[];
+  const remaining = removeFollowTag(existingTags, target);
+  if (remaining.length === existingTags.length) return true; // wasn't following
+  const { published } = await publishMonotonic({
+    kind: KIND_CONTACTS,
+    author: pubkey,
+    owner: pubkey,
+    sign: (created_at) =>
+      signer.signEvent({
+        kind: KIND_CONTACTS,
+        created_at,
+        tags: remaining,
+        content: existing.content,
       }) as Promise<VerifiedEvent>,
   });
   return published;
