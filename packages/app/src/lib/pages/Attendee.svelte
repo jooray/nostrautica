@@ -9,7 +9,7 @@
   import { connectNdk, fetchEvents } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchDirectoryEntry, cachedDirectoryEntry, fetchMatches, cachedMatches } from "$lib/events/attendee.js";
-  import { followUser, fetchFollowTags } from "$lib/events/nostr-actions.js";
+  import { fetchFollowTags } from "$lib/events/nostr-actions.js";
   import { isFollowing } from "$lib/events/onboarding.js";
   import { fetchFollowersOf, fetchRecentPosts, cachedProfiles, type RecentPost } from "$lib/events/social.js";
   import { loadPerEventSettings, toggleSetting, setNote, cachedPerEventSettings } from "$lib/events/settings.js";
@@ -19,10 +19,10 @@
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import PostView from "$lib/components/PostView.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
+  import FollowButton from "$lib/components/FollowButton.svelte";
   import MatchDetails from "$lib/components/MatchDetails.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
-  import { outbox } from "$lib/stores/outbox.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
   import Avatar from "$lib/components/Avatar.svelte";
 
@@ -47,7 +47,6 @@
   // Hard route failure (audit UX-23): an undecodable npub must render an error,
   // not an interactive empty profile whose Follow would publish ["p", ""].
   let invalidNpub = $state(false);
-  let followQueued = $state(false); // follow sits in the offline outbox (UX-15)
   // The viewer's own match WITH this person, if the coordinator computed one
   // (UX feedback 2026-07-29): Matches → profile was a one-way door, so the
   // reasoning and icebreakers you came for vanished on arrival.
@@ -159,25 +158,6 @@
       followKnown = true;
     }
   });
-
-  async function follow() {
-    if (!session.signer) return router.go({ name: "login" });
-    if (!pubkey) return; // never publish a ["p", ""] tag (audit UX-23)
-    busy = true;
-    try {
-      const published = await followUser(session.signer, pubkey);
-      following = true;
-      // Queued for the offline flush, not published yet (audit UX-15).
-      if (!published) {
-        followQueued = true;
-        outbox.noteQueued();
-      }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      busy = false;
-    }
-  }
 
   async function toggle(list: "favorites" | "want_to_meet" | "met") {
     if (!session.signer || !ctx || !blindingKey) return;
@@ -384,15 +364,20 @@
        screen of a phone viewport for actions you take once (user feedback
        2026-07-29). They wrap on a narrow viewport rather than shrinking. -->
   <div class="acts">
-    <button class="btn inline primary" onclick={follow} disabled={busy || following || !followKnown}>
-      {!followKnown
-        ? "…"
-        : following
-          ? t("attendee.following")
-          : busy
-            ? t("attendee.followingBusy")
-            : t("attendee.follow")}
-    </button>
+    {#if followKnown && pubkey}
+      <!-- Same control as the roster row (`cta` skin): follow AND unfollow, with
+           the action named in the tooltip. `pubkey` gates it because an
+           undecodable npub must never publish a ["p", ""] tag (audit UX-23). -->
+      <FollowButton
+        variant="cta"
+        {pubkey}
+        name={displayName}
+        {following}
+        onChange={(f) => (following = f)}
+      />
+    {:else}
+      <button class="btn inline primary" disabled>…</button>
+    {/if}
     <button
       class="btn inline"
       onclick={() =>
@@ -406,9 +391,6 @@
       <button class="btn inline danger" onclick={() => (confirmMute = !confirmMute)} disabled={busy}>{t("attendee.mute")}</button>
     {/if}
   </div>
-  {#if followQueued}
-    <p class="muted" role="status" style="margin:0.4rem 0 0">{t("sync.queued")}</p>
-  {/if}
 
   <!-- Directly under the button that opened it, not below the identity chips. -->
   {#if confirmMute && !muted}
@@ -489,7 +471,10 @@
     gap: 0.4rem;
     margin-top: 0.75rem;
   }
-  .acts .btn {
+  /* `:global` because FollowButton's root element is in another component, so
+     Svelte's scoping class never lands on it. */
+  .acts .btn,
+  .acts :global(.follow) {
     flex: 1 1 auto;
   }
   /* Identity affordances: deliberately lighter than the actions above — a pill,

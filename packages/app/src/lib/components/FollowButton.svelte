@@ -14,8 +14,16 @@
    * Hover is decoration, not the mechanism: the accessible name and the tooltip
    * always name the action, and `aria-pressed` carries the state, so a touch or
    * screen-reader user gets the same information without ever hovering.
+   *
+   * Two skins, one behaviour. `pill` is the roster row's compact badge-sized
+   * control. `cta` is the profile page's full-size action button, which differs
+   * in one more way than size: a lone primary button should read as the thing it
+   * does, so when you are NOT following it says "Follow" at rest rather than
+   * "not following" — the state/action swap only happens in the direction where
+   * the state is the interesting half.
    */
   import { session } from "$lib/signer/session.svelte.js";
+  import { router } from "$lib/router/router.svelte.js";
   import { followUser, unfollowUser } from "$lib/events/nostr-actions.js";
   import { noteFollowChange } from "$lib/events/social.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
@@ -27,12 +35,15 @@
     name,
     following,
     onChange,
+    variant = "pill",
   }: {
     pubkey: string;
     name: string;
     following: boolean;
     /** Report the new state so the owner of the follow set stays authoritative. */
     onChange: (following: boolean) => void;
+    /** `pill` = roster row badge; `cta` = the profile page's primary action. */
+    variant?: "pill" | "cta";
   } = $props();
 
   let busy = $state(false);
@@ -41,8 +52,31 @@
     following ? t("follow.unfollowName", { name }) : t("follow.followName", { name }),
   );
 
+  /** What the button says at rest. */
+  const rest = $derived(
+    variant === "cta"
+      ? following
+        ? t("follow.followingCta")
+        : t("follow.cta")
+      : following
+        ? t("follow.following")
+        : t("follow.notFollowing"),
+  );
+  /**
+   * What it says under the pointer. On the CTA's not-following side that is
+   * already what it says at rest, so the label deliberately doesn't move —
+   * swapping "Follow" for "Follow!" would just be a flicker.
+   */
+  const action = $derived(
+    following ? t("follow.unfollow") : variant === "cta" ? t("follow.cta") : t("follow.follow"),
+  );
+
   async function toggle() {
-    if (!session.signer || busy) return;
+    if (busy) return;
+    // The profile page renders this to signed-out visitors too (the roster
+    // doesn't), and sending them to sign in is what its old Follow button did —
+    // silently doing nothing on tap would be the regression.
+    if (!session.signer) return router.go({ name: "login" });
     const next = !following;
     busy = true;
     try {
@@ -68,7 +102,7 @@
 </script>
 
 <button
-  class="follow"
+  class="follow {variant}"
   class:on={following}
   aria-pressed={following}
   aria-busy={busy}
@@ -78,8 +112,8 @@
   onclick={toggle}
 >
   <span class="labels">
-    <span class="state">{following ? t("follow.following") : t("follow.notFollowing")}</span>
-    <span class="action">{following ? t("follow.unfollow") : t("follow.follow")}</span>
+    <span class="state">{rest}</span>
+    <span class="action">{action}</span>
     <span class="busy" aria-hidden="true">…</span>
   </span>
 </button>
@@ -88,27 +122,50 @@
   .follow {
     display: inline-flex;
     align-items: center;
-    /* Reads as a sibling of the badges it sits beside, but bordered so it is
-       visibly a control rather than another piece of status text. */
-    min-height: 30px;
-    padding: 0.18rem 0.55rem;
-    border-radius: 999px;
+    justify-content: center;
     border: 1px solid var(--border);
-    background: var(--bg-elev2);
-    color: var(--text-dim);
     font: inherit;
-    font-size: 0.72rem;
     font-weight: 500;
     letter-spacing: 0.01em;
     cursor: pointer;
+  }
+  /* Roster row: reads as a sibling of the badges beside it, but bordered so it
+     is visibly a control rather than another piece of status text. */
+  .follow.pill {
+    min-height: 30px;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    background: var(--bg-elev2);
+    color: var(--text-dim);
+    font-size: 0.72rem;
+  }
+  /* Profile page: sized and weighted like the Message / Mute buttons beside it. */
+  .follow.cta {
+    min-height: 36px;
+    padding: 0.35rem 0.75rem;
+    border-radius: var(--radius-sm);
+    font-size: 0.9rem;
+    font-weight: 600;
+    background: var(--accent-bg);
+    color: var(--accent-contrast);
+    border-color: transparent;
   }
   .follow.on {
     background: var(--ok-soft);
     color: var(--ok);
     border-color: color-mix(in srgb, var(--ok) 30%, transparent);
   }
-  .follow:hover:not(:disabled),
-  .follow:focus-visible {
+  /* Hovering a not-yet-followed CTA only brightens the fill: its label is not
+     changing there, so nothing should look like it is. */
+  .follow.cta:not(.on):hover:not(:disabled),
+  .follow.cta:not(.on):focus-visible {
+    background: var(--accent-bg-hover);
+  }
+  /* Everywhere the label DOES swap to the action, the fill swaps with it. */
+  .follow.pill:hover:not(:disabled),
+  .follow.pill:focus-visible,
+  .follow.on:hover:not(:disabled),
+  .follow.on:focus-visible {
     border-color: var(--accent);
     color: var(--accent);
     background: var(--accent-soft);
