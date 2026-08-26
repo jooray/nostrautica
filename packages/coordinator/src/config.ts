@@ -27,6 +27,22 @@ const modelRefSchema = z.object({
   provider: z.string(),
   model: z.string(),
   require_private: z.boolean().optional(),
+  /**
+   * Whether to send `venice_parameters.disable_thinking` for this model.
+   * Omitted = true, which is what the adapter always sent and what every model
+   * benchmarked before 2026-08-26 wanted.
+   *
+   * Set false for a model that reasons unconditionally: `z-ai-glm-5-3-flash`
+   * answers ANY request carrying the parameter with HTTP 400 "Reasoning is
+   * mandatory for this endpoint and cannot be disabled", which makes the role
+   * fail every call rather than degrade. The adapter detects that on the first
+   * refusal and remembers it, so this is an optimisation (one wasted call at
+   * startup) and a way to be explicit — not a requirement.
+   *
+   * Reasoning tokens are BILLED for such a model even though
+   * `strip_thinking_response` keeps them out of the content; budget for it.
+   */
+  disable_thinking: z.boolean().optional(),
 });
 
 export const configSchema = z.object({

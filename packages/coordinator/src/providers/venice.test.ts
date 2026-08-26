@@ -128,3 +128,104 @@ describe("payment preparation is bounded (unbounded await audit)", () => {
     await expect(llm.completeStructured(req)).resolves.toMatchObject({ value: { ok: true } });
   });
 });
+
+/**
+ * Per-model `disable_thinking` (2026-08-26).
+ *
+ * The adapter sent `venice_parameters.disable_thinking: true` on every call
+ * because every model it had ever been pointed at accepted it. `z-ai-glm-5-3-flash`
+ * does not: it answers ANY request carrying the parameter with HTTP 400 "Reasoning
+ * is mandatory for this endpoint and cannot be disabled". That is not a degraded
+ * match — it is every scoring call failing, for a model the matching bake-off found
+ * to be better and cheaper than the deployed one.
+ *
+ * `reasoning_effort: "none"` is refused the same way, and GET /models advertises
+ * "none" as a supported effort for that model, so the catalogue cannot be trusted
+ * here (it IS trustworthy for supportsResponseSchema). Hence: config override,
+ * plus detection on the model's own refusal.
+ */
+describe("per-model disable_thinking", () => {
+  const bodyOf = (call: unknown) => JSON.parse((call as RequestInit).body as string);
+  const ok = JSON.stringify({
+    choices: [{ message: { content: '{"a":1}' } }],
+    usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+  });
+
+  it("sends disable_thinking by default — the behaviour every deployed model wants", async () => {
+    const fetchMock = vi.fn(async () => new Response(ok, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await llm.completeStructured({ ...req, model: "deepseek-v4-flash-0731" });
+    expect(bodyOf(fetchMock.mock.calls[0][1]).venice_parameters).toMatchObject({
+      include_venice_system_prompt: false,
+      disable_thinking: true,
+      strip_thinking_response: true,
+    });
+  });
+
+  it("omits it — not sends false — when configured off for that model id", async () => {
+    // Omitted rather than `false`, because a provider that rejects the parameter
+    // may reject it whatever its value; the only safe request is one without it.
+    const fetchMock = vi.fn(async () => new Response(ok, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({
+      payment: apiKey,
+      net,
+      disableThinking: { "z-ai-glm-5-3-flash": false },
+    });
+    await llm.completeStructured({ ...req, model: "z-ai-glm-5-3-flash" });
+    const vp = bodyOf(fetchMock.mock.calls[0][1]).venice_parameters;
+    expect(vp).not.toHaveProperty("disable_thinking");
+    expect(vp.strip_thinking_response).toBe(true);
+  });
+
+  it("keeps the setting per MODEL, not per adapter", async () => {
+    const fetchMock = vi.fn(async () => new Response(ok, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({
+      payment: apiKey,
+      net,
+      disableThinking: { "z-ai-glm-5-3-flash": false },
+    });
+    await llm.completeStructured({ ...req, model: "z-ai-glm-5-3-flash" });
+    await llm.completeStructured({ ...req, model: "deepseek-v4-flash-0731" });
+    expect(bodyOf(fetchMock.mock.calls[0][1]).venice_parameters).not.toHaveProperty("disable_thinking");
+    expect(bodyOf(fetchMock.mock.calls[1][1]).venice_parameters.disable_thinking).toBe(true);
+  });
+
+  it("learns the refusal from the model itself, retries, and does not ask again", async () => {
+    // Without this the role is a total outage: the parameter goes out on every
+    // call, so every call 400s, and no amount of job retrying helps.
+    const REFUSAL = JSON.stringify({
+      error: "Reasoning is mandatory for this endpoint and cannot be disabled.",
+    });
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) =>
+      JSON.parse(init.body as string).venice_parameters.disable_thinking
+        ? new Response(REFUSAL, { status: 400 })
+        : new Response(ok, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const llm = new VeniceLlm({ payment: apiKey, net });
+
+    const first = await llm.completeStructured({ ...req, model: "z-ai-glm-5-3-flash" });
+    expect(first.value).toEqual({ a: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2); // refused, then retried without it
+
+    // Remembered: the second call must not spend another request rediscovering it.
+    await llm.completeStructured({ ...req, model: "z-ai-glm-5-3-flash" });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(bodyOf(fetchMock.mock.calls[2][1]).venice_parameters).not.toHaveProperty("disable_thinking");
+  });
+
+  it("does NOT swallow an unrelated 400", async () => {
+    // 400 covers every malformed request. Retrying a schema error with different
+    // parameters would turn a loud bug into a quiet one.
+    const fetchMock = vi.fn(async () => new Response('{"error":"bad schema"}', { status: 400 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await expect(llm.completeStructured({ ...req, model: "m" })).rejects.toThrow(ProviderHttpError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});

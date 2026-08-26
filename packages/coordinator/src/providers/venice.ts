@@ -15,6 +15,7 @@ import type {
 import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
   PROVIDER_TIMEOUTS,
+  ProviderHttpError,
   providerHttpError,
   withProviderTimeout,
   withUncancellableDeadline,
@@ -42,6 +43,21 @@ async function httpError(res: Response, label: string, tag: "llm" | "stt" = "llm
   return providerHttpError(res, label, tag);
 }
 
+/**
+ * Venice's refusal when a model reasons unconditionally.
+ *
+ * Matched on the message rather than the status alone: 400 covers every
+ * malformed request, and turning an unrelated 400 into a silent retry with
+ * different parameters would hide real bugs.
+ */
+function isReasoningMandatory(err: unknown): boolean {
+  return (
+    err instanceof ProviderHttpError &&
+    err.status === 400 &&
+    /reasoning is mandatory|cannot be disabled/i.test(err.bodyExcerpt)
+  );
+}
+
 export interface VeniceOptions {
   baseUrl?: string;
   payment: PaymentStrategy;
@@ -49,13 +65,39 @@ export interface VeniceOptions {
   requirePrivate?: boolean;
   /** DNS-pinning policy for outbound requests (audit R22). Default: pin + public-only. */
   net?: ProviderNetPolicy;
+  /**
+   * Per-model-id override for `venice_parameters.disable_thinking`, from
+   * `models.<role>.disable_thinking`. Absent = true, which is what every model
+   * benchmarked before 2026-08-26 wanted and what this adapter always sent.
+   *
+   * Keyed by model id rather than by role because it is a property of the MODEL,
+   * and one adapter instance serves every role that routes to Venice —
+   * `completeStructured` only knows which model it was handed.
+   */
+  disableThinking?: Readonly<Record<string, boolean>>;
 }
 
 export class VeniceLlm implements LlmProvider {
   readonly id = "venice";
   private readonly base: string;
+  /**
+   * Whether to send `disable_thinking` for a given model id. Seeded from config
+   * and corrected at runtime the first time a model refuses it (see
+   * {@link isReasoningMandatory}) — the catalogue cannot be trusted for this:
+   * `z-ai-glm-5-3-flash` advertises `reasoningEffortOptions` including "none"
+   * and then rejects both that and `disable_thinking` on every request.
+   */
+  private readonly thinking = new Map<string, boolean>();
   constructor(private readonly opts: VeniceOptions) {
     this.base = opts.baseUrl ?? DEFAULT_BASE;
+    for (const [model, disable] of Object.entries(opts.disableThinking ?? {})) {
+      this.thinking.set(model, disable);
+    }
+  }
+
+  /** Default true: today's behaviour, and correct for every model but the odd one. */
+  private disablesThinking(model: string): boolean {
+    return this.thinking.get(model) ?? true;
   }
 
   /**
@@ -113,6 +155,43 @@ export class VeniceLlm implements LlmProvider {
     validate?: (raw: unknown) => T;
     signal?: AbortSignal;
   }): Promise<{ value: T; usage: TokenUsage }> {
+    try {
+      return await this.chat<T>(req, this.disablesThinking(req.model));
+    } catch (err) {
+      // A model that reasons unconditionally refuses `disable_thinking` on EVERY
+      // request, so this is not a transient failure to back off from — it is a
+      // fact about the model, learned once and remembered for the process. Left
+      // undetected it is a total outage for that model: with the parameter sent
+      // unconditionally, pointing `models.match` at such a model scores nothing
+      // at all, and the operator sees provider errors rather than a bad match.
+      // Operators can also set it ahead of time (`models.<role>.disable_thinking
+      // = false`) and skip the wasted call entirely.
+      if (!isReasoningMandatory(err) || !this.disablesThinking(req.model)) throw err;
+      this.thinking.set(req.model, false);
+      console.warn(
+        `[llm] ${req.model} rejects venice_parameters.disable_thinking ("reasoning is mandatory ` +
+          `for this endpoint") — retrying without it and sending it no more this run. Set ` +
+          `models.<role>.disable_thinking = false in coordinator.toml to skip this probe. ` +
+          `Note that reasoning tokens are billed even though strip_thinking_response hides them.`,
+      );
+      return await this.chat<T>(req, false);
+    }
+  }
+
+  private async chat<T>(
+    req: {
+      system: string;
+      user: string;
+      schema: object;
+      schemaName: string;
+      model: string;
+      temperature?: number;
+      maxTokens?: number;
+      validate?: (raw: unknown) => T;
+      signal?: AbortSignal;
+    },
+    disableThinking: boolean,
+  ): Promise<{ value: T; usage: TokenUsage }> {
     const headers = await this.headers(req.maxTokens);
     const body = await withProviderTimeout(
       "Venice chat/completions",
@@ -139,10 +218,13 @@ export class VeniceLlm implements LlmProvider {
                 json_schema: { name: req.schemaName, strict: true, schema: req.schema },
               },
               // Our system prompt is authoritative (no Venice persona), and we don't want
-              // reasoning tokens between us and the JSON.
+              // reasoning tokens between us and the JSON. `disable_thinking` is omitted
+              // — not sent as false — for models that reject it outright; see
+              // {@link VeniceOptions.disableThinking}. `strip_thinking_response` is safe
+              // on both kinds and keeps chain-of-thought out of the parsed content.
               venice_parameters: {
                 include_venice_system_prompt: false,
-                disable_thinking: true,
+                ...(disableThinking ? { disable_thinking: true } : {}),
                 strip_thinking_response: true,
               },
             }),
