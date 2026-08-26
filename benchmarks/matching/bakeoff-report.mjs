@@ -95,6 +95,15 @@ function blockers(c) {
   if ((c.icebreakers?.failedCalls ?? 0) > 0) {
     out.push(`${c.icebreakers.failedCalls} icebreaker call(s) returned no parseable JSON at all`);
   }
+  // A model that answers a Slovak event in Czech is not a quality gradation, it
+  // is a wrong answer that every attendee sees. 5% is the threshold at which the
+  // deployed model's own regression would have been caught.
+  for (const [lang, l] of Object.entries(c.icebreakers?.language ?? {})) {
+    if (l.inLanguagePct < 95) {
+      out.push(`only ${l.inLanguagePct}% of ${lang} openers were actually in ${lang} ` +
+        `(${l.english} English, ${l.czech} Czech, n=${l.n})`);
+    }
+  }
   return out;
 }
 
@@ -115,7 +124,7 @@ const rows = cards.map((c) => ({
 })).sort((a, b) => (b.full.recall3 - a.full.recall3) || (b.full.sepStrongWeak - a.full.sepStrongWeak));
 
 const H = ["model", "$/Mtok", "r@1 sub", "r@3 sub", "r@1 190", "r@3 190", "sep", "ord>W", "posB",
-  "strictJSON", "attr-err", "brief", "judge R", "judge IB", "p50 s", "tok/s", "$/100"];
+  "strictJSON", "sk-in-lang", "attr-err", "brief", "judge R", "judge IB", "p50 s", "tok/s", "$/100"];
 const cells = rows.map((r) => [
   r.model,
   r.price,
@@ -123,6 +132,7 @@ const cells = rows.map((r) => [
   fmt(r.full.recall1), fmt(r.full.recall3),
   fmt(r.full.sepStrongWeak), fmt(r.full.orderSW), fmt(r.full.posBias),
   r.strict.known ? `${r.strict.pct}%` : "–",
+  r.ice?.language?.sk ? `${r.ice.language.sk.inLanguagePct}%` : "–",
   r.ice ? `${r.ice.pooled.attributionErrorPct}% (${r.ice.pooled.attributionErrors}/${r.ice.pooled.total})` : "–",
   r.ice ? `${r.ice.pooled.briefingPct}%` : "–",
   fmt(mean(r.judge?.reasoning), 2), fmt(mean(r.judge?.icebreaker), 2),

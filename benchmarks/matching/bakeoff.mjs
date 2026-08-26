@@ -41,6 +41,7 @@ import { costUsd, priceOf } from "./lib.mjs";
 import { modelProfile, snapshotSpec } from "./model-profiles.mjs";
 import { promptFingerprint } from "./suite-prompts.mjs";
 import { latencyProbe } from "./latency-probe.mjs";
+import { detectLanguage } from "./language-adherence.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -337,6 +338,20 @@ const card = {
             cleanPct: pct(rows.filter((r) => r.violations.length === 0).length),
           };
         })(),
+        // Did it write in the event's language at all? Added 2026-08-26 after
+        // blind judging turned up Slovak-event openers written in English and in
+        // CZECH. Nothing else in this suite looks at output language, which is
+        // how the DEPLOYED model shipped a regression from 0/3372 to 90/1391
+        // English openers unnoticed. String-match decidable, like attribution.
+        language: Object.fromEntries(
+          ice.runs.map((r) => {
+            const c = { target: 0, english: 0, czech: 0, slovak: 0, undecided: 0 };
+            for (const row of r.rows) c[detectLanguage(row.text, r.lang)]++;
+            const n = r.rows.length;
+            const wrong = r.lang === "sk" ? c.english + c.czech : c.czech + c.slovak;
+            return [r.lang, { n, ...c, wrong, inLanguagePct: n ? Math.round(((n - wrong - c.undecided) / n) * 1000) / 10 : 0 }];
+          }),
+        ),
         // Per CALL, not per opener — the unit the permutation test shuffles.
         // Keyed on the `callId` the run stamps on every row: deriving it from
         // (target, candidate, rep) is wrong for the reverse shape, where one
@@ -394,6 +409,11 @@ console.log(`scoring full-190  r@1 ${f.recall1.toFixed(2)}  r@3 ${f.recall3.toFi
 if (card.icebreakers) {
   const p = card.icebreakers.pooled;
   console.log(`icebreakers       n=${p.total}  attribution-errors ${p.attributionErrors} (${p.attributionErrorPct}%)  briefing ${p.briefingPct}%  clean ${p.cleanPct}%`);
+  for (const [lang, l] of Object.entries(card.icebreakers.language ?? {})) {
+    const bad = l.inLanguagePct < 98 ? "  ⚠ WROTE THE WRONG LANGUAGE" : "";
+    console.log(`  lang ${lang}          ${l.inLanguagePct}% in-language (n=${l.n})` +
+      (lang === "sk" ? `  english ${l.english}  czech ${l.czech}` : "") + bad);
+  }
 }
 console.log(`cost              $${card.cost.benchmarkUsd} this run  →  $${card.cost.per100AttendeesUsd?.toFixed(3)} per 100 attendees (projected)`);
 console.log(`speed             p50 ${card.speed.serialLatencyP50Ms}ms / p95 ${card.speed.serialLatencyP95Ms}ms per K=10 call (serial), ` +

@@ -52,6 +52,14 @@ const SEED = 20260826;
 
 const itemId = (text) => createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
 
+/** Grades recorded so far, read BEFORE sampling — see `keepGraded` below. */
+const GRADES_PATH = join(here, "judging", "grades.json");
+const existingGrades = existsSync(GRADES_PATH)
+  ? JSON.parse(readFileSync(GRADES_PATH, "utf8"))
+  : {};
+
+
+
 /**
  * Compact, judge-facing view of a persona — enough to catch invented facts.
  *
@@ -107,7 +115,24 @@ function stratifiedSample(items, n, keyOf, rng) {
   }
   const keys = [...groups.keys()].sort();
   const out = [];
-  const shuffled = new Map(keys.map((k) => [k, shuffle(groups.get(k), rng)]));
+  // Already-graded items are drawn FIRST within their stratum. A grade is
+  // otherwise only kept while its item happens to be redrawn, so anything that
+  // moves the draw — a new model, a different --per-model, a fix to the sampler
+  // — silently orphans work the judge already did. Seeding the sampler per model
+  // (so adding a card stops resampling the others) did exactly that on its own:
+  // 60 carried grades became 5.
+  //
+  // Preferring them keeps the pack the same SIZE while making judging effort
+  // accumulate: an existing model contributes the items it was already judged
+  // on, and only genuinely new work is ungraded. `--regrade-all` still re-judges
+  // everything when the rubric or the judge changes.
+  const shuffled = new Map(
+    keys.map((k) => {
+      const g = shuffle(groups.get(k), rng);
+      const wasGraded = (x) => (existingGrades[itemId(x.text)] ? 0 : 1);
+      return [k, [...g].sort((a, b) => wasGraded(a) - wasGraded(b))];
+    }),
+  );
   for (let i = 0; out.length < n; i++) {
     let progressed = false;
     for (const k of keys) {
@@ -123,7 +148,22 @@ function stratifiedSample(items, n, keyOf, rng) {
   return out;
 }
 
-const rng = mulberry32(SEED);
+/**
+ * A sampling stream per (model, kind), NOT one shared stream.
+ *
+ * With a single stream, the models are sampled in directory order and each one
+ * advances the RNG for the next — so adding a fourth card silently RESAMPLED
+ * every model that sorts after it, and grades recorded against the old sample
+ * stopped matching. That defeats the whole point of content-addressed ids:
+ * adding a model is supposed to leave existing grades attached. Observed
+ * directly — adding the two Qwen cards carried only 25 of 60 existing grades
+ * forward; with per-stream seeding it is all of them.
+ */
+function streamFor(model, kind) {
+  let h = SEED >>> 0;
+  for (const c of `${model}|${kind}`) h = (Math.imul(h, 31) + c.charCodeAt(0)) >>> 0;
+  return mulberry32(h);
+}
 const items = [];
 
 for (const card of cards) {
@@ -141,7 +181,7 @@ for (const card of cards) {
         goldLabel: labelOf(e.target, e.candidate),
         score: e.score, text: e.reasoning,
       }));
-    items.push(...stratifiedSample(pool, perModel, (x) => x.goldLabel, rng));
+    items.push(...stratifiedSample(pool, perModel, (x) => x.goldLabel, streamFor(card.model, "reasoning")));
   }
 
   // ── icebreakers, from the attribution arm (both languages) ────────────────
@@ -161,7 +201,7 @@ for (const card of cards) {
           text: row.text,
         })),
       );
-      items.push(...stratifiedSample(pool, perModel, (x) => `${x.lang}`, rng));
+      items.push(...stratifiedSample(pool, perModel, (x) => `${x.lang}`, streamFor(card.model, "icebreaker")));
     }
   }
 }
@@ -210,9 +250,7 @@ writeFileSync(
 );
 
 // A readable pack, because the judge here is a language model reading a file.
-const graded = existsSync(join(JUDGING, "grades.json"))
-  ? JSON.parse(readFileSync(join(JUDGING, "grades.json"), "utf8"))
-  : {};
+const graded = existingGrades;
 const regradeAll = argv.includes("--regrade-all");
 const todo = pack.filter((it) => regradeAll || !graded[it.id]);
 

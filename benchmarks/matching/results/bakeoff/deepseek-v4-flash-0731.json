@@ -1,7 +1,7 @@
 {
   "suiteVersion": 1,
   "model": "deepseek-v4-flash-0731",
-  "ranAt": "2026-08-26T19:04:00.752Z",
+  "ranAt": "2026-08-26T19:47:25.432Z",
   "spec": {
     "name": "DeepSeek V4 Flash 0731",
     "contextTokens": 1000000,
@@ -243,6 +243,28 @@
       "briefingPct": 0,
       "clean": 2804,
       "cleanPct": 99.4
+    },
+    "language": {
+      "sk": {
+        "n": 1391,
+        "target": 1298,
+        "english": 90,
+        "czech": 0,
+        "slovak": 0,
+        "undecided": 3,
+        "wrong": 90,
+        "inLanguagePct": 93.3
+      },
+      "en": {
+        "n": 1430,
+        "target": 1425,
+        "english": 0,
+        "czech": 0,
+        "slovak": 5,
+        "undecided": 0,
+        "wrong": 5,
+        "inLanguagePct": 99.7
+      }
     },
     "clusters": [
       {

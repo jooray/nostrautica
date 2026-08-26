@@ -321,6 +321,78 @@ it still holds.
 
 ---
 
+## Round 2 (same day): two Qwen models, Minimax — and a live production defect
+
+`minimax-m3-preview` and `openai-gpt-oss-120b` are **out before the first arm**:
+both answer `400 "response_format is not supported by this model"`, and
+`GET /models` says so honestly (`supportsResponseSchema: false`). That is now a
+pre-flight check. Two Qwen models passed the probe and got the full suite.
+
+| model | $/Mtok | r@1 190 | sep | strictJSON | sk in-language | attr-err | judge R | judge IB | p50 s | $/100 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| z-ai-glm-5-3-flash | $0.094/$0.313 | **0.80** | **0.64** | 3.7% | **96.7%** | 0.3% | **4.60** | **3.93** | 16.1 | **$0.249** |
+| deepseek-v4-flash-0731 | $0.175/$0.35 | 0.65 | 0.55 | **100%** | 93.3% | 0.6% | 4.13 | 3.47 | 22.1 | $0.281 |
+| qwen-3-8-27b | $0.45/$3.20 | 0.65 | 0.52 | **100%** | 62.5% | **0.1%** | 4.00 | 3.20 | 11.3 | $1.734 |
+| qwen3-6-35b-a3b | $0.10/$1.00 | 0.60 | 0.57 | **100%** | 31.2% | 5.4% | 3.73 | 2.87 | **4.4** | $0.475 |
+
+Neither Qwen is adoptable. `qwen3-6-35b-a3b` is the most instructive failure in
+the whole exercise: it is the fastest thing tested by a factor of three (4.4 s,
+205 output tok/s), perfectly behaved on format (100% strict JSON, declared shape
+every time), and it **hands people each other's work 5.4% of the time** — nine
+times the deployed model's rate — while producing the only non-zero briefing rate
+anything has recorded here. Every cheap metric said yes; the one arm that costs
+real calls to run said no.
+
+### The output-language metric, and what it found
+
+Blind judging kept turning up Slovak-event openers written in **English**, or in
+**Czech**. A 15-item sample cannot tell 20% from 47%, so this became a measured
+column: `language-adherence.mjs` classifies every saved opener by exclusive
+markers — letters and function words that exist in one language and not the other
+(`ř/ě/ů` and `jsem/který/tvůj` for Czech; `ľ/ĺ/ŕ/ô/ä` and `som/ktorý/tvoj` for
+Slovak) — and anything with no marker either way is reported as `undecided`
+rather than folded into the pass rate. It is pinned against messages a human
+already graded.
+
+Like-for-like (R3 prompt, `reverse-dense` bucket, Slovak):
+
+| model | in Slovak | wrote English | wrote Czech |
+|---|---|---|---|
+| `deepseek-v4-flash` (the **previous** id) | **99.4%** (n=3372) | 0.0% | 0.4% |
+| `z-ai-glm-5-3-flash` | 96.7% | 0.0% | 1.7% |
+| **`deepseek-v4-flash-0731` (DEPLOYED)** | **93.3%** | **6.5%** | 0.0% |
+| `qwen-3-8-27b` | 62.5% | 29.6% | 7.4% |
+| `qwen3-6-35b-a3b` | **31.2%** | 9.4% | **58.9%** |
+
+Two things fall out.
+
+**`qwen3-6-35b-a3b` answers a Slovak event in Czech 59% of the time.** For a
+Slovak audience that is not a subtle quality gradation; it is the wrong language,
+visible in the first word, on the majority of messages.
+
+**And the currently deployed model has a regression nobody measured.**
+`deepseek-v4-flash-0731` writes English in **90 of 1391** Slovak openers. The id
+it replaced on 2026-08-04 wrote English in **0 of 3372** on the same prompt,
+same bucket, same fixture. Fisher exact **p = 9.5 × 10⁻⁵⁰**. Samples:
+
+> Yusuf — I founded Ironwood Assembly and I'm thrilled you did its branding. I'm scouting early freedom-tech teams to back; what's the most promising one you've seen?
+
+> Hi Yusuf — I run Petrichor Fund and I'm curious how you'd grow a grant programme's reach. What's the ethical way to get the word out?
+
+The 2026-08-04 deprecation swap was re-benchmarked before it shipped, and the
+comparison was fair on every axis that existed at the time — recall, separation,
+position bias, format failures. Output language was not one of them, because
+nothing had ever needed it. It is a column now, and `bakeoff-report.mjs` flags
+any model below 95% as a blocker.
+
+**This is a live defect, not a benchmark curiosity**: roughly one Slovak attendee
+in fifteen gets an opener they cannot send as-is. Worth fixing before any
+model swap, and it is plausibly promptable — `languageInstruction(lang)` already
+exists as the hook, and it can be tested against this arm without touching
+production.
+
+---
+
 ## Adding the next model
 
 ```sh

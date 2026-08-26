@@ -1,7 +1,7 @@
 {
   "suiteVersion": 1,
   "model": "z-ai-glm-5-3-flash",
-  "ranAt": "2026-08-26T19:04:01.714Z",
+  "ranAt": "2026-08-26T19:47:26.502Z",
   "spec": {
     "name": "GLM 5.3 Flash",
     "contextTokens": 1048576,
@@ -248,6 +248,28 @@
       "briefingPct": 0,
       "clean": 2613,
       "cleanPct": 99.7
+    },
+    "language": {
+      "sk": {
+        "n": 1369,
+        "target": 1324,
+        "english": 0,
+        "czech": 23,
+        "slovak": 0,
+        "undecided": 22,
+        "wrong": 23,
+        "inLanguagePct": 96.7
+      },
+      "en": {
+        "n": 1252,
+        "target": 1249,
+        "english": 0,
+        "czech": 0,
+        "slovak": 3,
+        "undecided": 0,
+        "wrong": 3,
+        "inLanguagePct": 99.8
+      }
     },
     "clusters": [
       {
