@@ -275,7 +275,23 @@ next model that ships.
 
 ---
 
-## Verdict
+## Verdict (revised after rounds 2 and 3 — see below)
+
+The short version, in priority order:
+
+1. **Fix the Slovak-English leak in the deployed model.** It is live, it affects
+   ~1 attendee in 15 at a Slovak event, and it is the only finding here that is
+   hurting anyone today.
+2. **Rolling back to `deepseek-v4-flash` (0423) fixes it**, and is cheaper and
+   twice as fast. It costs the private-tier badge. Try one prompt experiment
+   against 0731 first — the harness makes it ~$0.20 — but 0423 is the fallback
+   that is already measured.
+3. **GLM 5.3 Flash wins on quality and is still not adoptable**: 68% of its
+   icebreaker calls return a shape the schema forbids, and tolerating that in
+   `venice.ts` costs more than the model is worth.
+4. **No Qwen. No Minimax.**
+
+The original round-1 reasoning follows.
 
 **Do not switch today.** Not because GLM 5.3 Flash is worse — on the thing this
 benchmark actually measures it is clearly better, and cheaper, and faster — but
@@ -390,6 +406,38 @@ in fifteen gets an opener they cannot send as-is. Worth fixing before any
 model swap, and it is plausibly promptable — `languageInstruction(lang)` already
 exists as the hook, and it can be tested against this arm without touching
 production.
+
+---
+
+## Round 3: the id we rolled off is still there, and it is better
+
+`deepseek-v4-flash` (0423) was replaced on 2026-08-04 because `GET /models`
+carried `deprecation: {date: 2026-08-14, autoRemap: false}`. As of 2026-08-26 it
+is **still in the catalogue, carries no deprecation field, and answers 200**.
+So it went through the same suite:
+
+| | `deepseek-v4-flash` (0423) | `deepseek-v4-flash-0731` (deployed) |
+|---|---|---|
+| r@1 subset (2 seeds) | **0.80** | 0.75 |
+| r@1 / r@3 full-190 | **0.75 / 0.90** | 0.65 / 0.85 |
+| strong–weak separation | 0.56 | 0.55 |
+| position bias | **0.01** | 0.11 |
+| strict `JSON.parse` | 100% | 100% |
+| **Slovak in-language** | **99.6%** | 93.3% |
+| attribution errors (sk) | 1.6% | **1.0%** (n.s., p=0.47) |
+| p50 latency / output tok/s | **10.5 s / 88.6** | 22.1 s / 41.6 |
+| $/100 attendees | **$0.224** | $0.281 |
+| Venice privacy tier | anonymized | **private** |
+
+Read carefully, because two of these rows are noise and the rest are not. The
+recall difference is 15 vs 13 hits out of 20 on a single seed — do not spend it.
+Separation is a tie. Attribution genuinely favours 0731 and does not survive a
+test either.
+
+What is real: **99.6% vs 93.3% output language** (p = 9.5 × 10⁻⁵⁰), **2× the
+throughput**, and **20% cheaper**. The August swap bought a statistically
+invisible attribution improvement and a private-tier badge, and paid for it with
+a language regression nobody was measuring and half the speed.
 
 ---
 
