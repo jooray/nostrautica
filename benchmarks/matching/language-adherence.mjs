@@ -56,6 +56,12 @@ export function detectLanguage(text, expected) {
   return "undecided";
 }
 
+// ── CLI ──────────────────────────────────────────────────────────────────────
+// Guarded: bakeoff.mjs imports detectLanguage(), and an import that prints a
+// 50-row table into the middle of someone else's output is its own small bug.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main();
+
+function main() {
 // Grouped by (model, variant, bucket, lang), because those are the axes that make
 // two arms comparable. Pooling a model's R1 sparse run with another's R3 dense one
 // and calling the difference a model difference is exactly the mistake this
@@ -96,4 +102,54 @@ for (const r of rows.sort(
       `${r.undecided} (${pct(r.undecided, r.n)})`,
     ].join("\t"),
   );
+}
+
+// Per CALL as well as per opener, because the two say different things and only
+// one of them is a valid unit for a significance test.
+//
+// deepseek-v4-flash-0731's English openers are not drift: of 48 Slovak calls, 3
+// came back with ALL 30 openers in English and 45 with none — zero partial
+// calls. Counting 1391 openers as 1391 independent observations turned a
+// 3-versus-0 result into p = 9.5e-50; at the call level, where the openers
+// actually are correlated, it is p = 0.0094. Same conclusion, honest size.
+console.log("\nper CALL (the unit a significance test may use):");
+console.log(["model", "lang", "calls", "fully-wrong", "partially-wrong"].join("\t"));
+const callGroups = new Map();
+for (const f of files) {
+  const j = JSON.parse(readFileSync(join(here, "results", f), "utf8"));
+  for (const run of j.runs ?? []) {
+    for (const r of run.rows ?? []) {
+      if (ONLY_BUCKET && r.bucket !== ONLY_BUCKET) continue;
+      const gk = [j.model, run.label, r.bucket, run.lang].join("|");
+      if (!callGroups.has(gk)) callGroups.set(gk, new Map());
+      const calls = callGroups.get(gk);
+      // Rows recorded before callId existed have to be clustered by inference,
+      // and the right key depends on the SHAPE: a reverse call has one fixed
+      // recipient (`candidate`) and ten varying senders, a forward call has one
+      // fixed sender (`target`) and ten varying recipients. Using both fields
+      // splits every call into ten, which is what made the 0423 arm report 1005
+      // calls instead of 176 and would have made its clean record look thinner
+      // than it is.
+      const id =
+        r.callId ??
+        (r.bucket.startsWith("reverse-")
+          ? `legacy|${f}|${r.candidate}|${r.rep}`
+          : `legacy|${f}|${r.target}|${r.rep}`);
+      if (!calls.has(id)) calls.set(id, { n: 0, wrong: 0 });
+      const c = calls.get(id);
+      c.n++;
+      const d = detectLanguage(r.text, run.lang);
+      if (run.lang === "sk" ? d === "english" || d === "czech" : d === "czech" || d === "slovak") c.wrong++;
+    }
+  }
+}
+for (const [gk, calls] of [...callGroups.entries()].sort()) {
+  const [model, variant, bucket, lang] = gk.split("|");
+  const all = [...calls.values()];
+  const full = all.filter((c) => c.wrong === c.n).length;
+  const part = all.filter((c) => c.wrong > 0 && c.wrong < c.n).length;
+  if (!full && !part) continue;
+  console.log([model.slice(0, 24), `${variant}/${bucket}/${lang}`, all.length,
+    `${full} (${pct(full, all.length)})`, `${part} (${pct(part, all.length)})`].join("\t"));
+}
 }

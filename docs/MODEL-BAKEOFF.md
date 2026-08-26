@@ -387,9 +387,32 @@ Slovak audience that is not a subtle quality gradation; it is the wrong language
 visible in the first word, on the majority of messages.
 
 **And the currently deployed model has a regression nobody measured.**
-`deepseek-v4-flash-0731` writes English in **90 of 1391** Slovak openers. The id
-it replaced on 2026-08-04 wrote English in **0 of 3372** on the same prompt,
-same bucket, same fixture. Fisher exact **p = 9.5 × 10⁻⁵⁰**. Samples:
+`deepseek-v4-flash-0731` writes English in **90 of 1391** Slovak openers, where
+the id it replaced wrote English in **0 of 3372** on the same prompt, bucket and
+fixture.
+
+Those opener counts are the wrong unit for a test, and the first version of this
+section used them anyway — reporting p = 9.5 × 10⁻⁵⁰. That number was inflated by
+about forty-eight orders of magnitude, and the reason is written on the tin of
+`stats.mjs`: **openers inside one call are not independent.** They are especially
+not independent here, because the failure turns out to be *entirely whole-call*:
+
+| | calls | all 30 openers English | some but not all |
+|---|---|---|---|
+| `deepseek-v4-flash` (previous) | 176 | **0** | 0 |
+| `deepseek-v4-flash-0731` (deployed) | 48 | **3 (6.3%)** | **0** |
+
+Three responses out of forty-eight came back with every single opener in English,
+and forty-five with none. Nothing in between. At the call level — the unit the
+correlation permits — that is **3/48 vs 0/176, Fisher exact p = 0.0094**, with a
+95% interval on the deployed rate of **[1.3%, 17.2%]**. Real, and much less
+precisely located than the opener count pretended.
+
+The whole-call shape matters for more than the arithmetic. This is not a model
+drifting out of Slovak word by word; it is a model ignoring the OUTPUT LANGUAGE
+block outright on a whole response, which is a far more promptable defect — and,
+for the reader, a worse one: when it fires, every icebreaker that person receives
+in that batch is unusable, not one in fifteen. Samples:
 
 > Yusuf — I founded Ironwood Assembly and I'm thrilled you did its branding. I'm scouting early freedom-tech teams to back; what's the most promising one you've seen?
 
@@ -401,11 +424,19 @@ position bias, format failures. Output language was not one of them, because
 nothing had ever needed it. It is a column now, and `bakeoff-report.mjs` flags
 any model below 95% as a blocker.
 
-**This is a live defect, not a benchmark curiosity**: roughly one Slovak attendee
-in fifteen gets an opener they cannot send as-is. Worth fixing before any
-model swap, and it is plausibly promptable — `languageInstruction(lang)` already
-exists as the hook, and it can be tested against this arm without touching
-production.
+**This is a live defect, not a benchmark curiosity**, though state it carefully:
+about **6% of reverse batches** come back entirely in English, so the people
+affected get *all* of their openers in the wrong language rather than an
+occasional one. The confidence interval is wide (1.3–17.2%) — 48 calls is a small
+denominator, and the honest next step is more repeats, not a bigger claim.
+
+It is also plausibly promptable. `languageInstruction(lang)` already names
+icebreakers explicitly ("write every reasoning string **and every icebreaker**"),
+so this is a model disobeying an instruction rather than a gap in one — but a
+whole-response failure usually responds to placement and salience, and the
+previous model id hitting 0/176 on the identical prompt proves the target is
+reachable on this fixture. Testable against this arm for about $0.20 without
+touching production.
 
 ---
 
@@ -434,8 +465,10 @@ recall difference is 15 vs 13 hits out of 20 on a single seed — do not spend i
 Separation is a tie. Attribution genuinely favours 0731 and does not survive a
 test either.
 
-What is real: **99.6% vs 93.3% output language** (p = 9.5 × 10⁻⁵⁰), **2× the
-throughput**, and **20% cheaper**. The August swap bought a statistically
+What is real: **output language** — 0/176 calls fully English versus 3/48, Fisher
+exact p = 0.0094 at the call level (see the correction above; the opener-level
+p-value this document first reported was not a valid test) — plus **2× the
+throughput** and **20% cheaper**. The August swap bought a statistically
 invisible attribution improvement and a private-tier badge, and paid for it with
 a language regression nobody was measuring and half the speed.
 
