@@ -87,6 +87,33 @@ if (!priceOf(MODEL) && !args.includes("--allow-unpriced")) {
   process.exit(1);
 }
 
+// The whole suite sends strict `response_format: json_schema`. A model whose
+// catalogue entry says it cannot take one answers every call with
+// 400 "response_format is not supported by this model" — minimax-m3-preview
+// does, and the catalogue says so honestly. Checking costs nothing and saves
+// ~25 minutes of a run that was never going to produce a row.
+//
+// Note the asymmetry with the reasoning capability: the catalogue is RELIABLE
+// about response schema and NOT reliable about reasoning effort (GLM 5.3 Flash
+// advertises `"none"` and rejects it), which is why one is a pre-flight check
+// and the other is detected on the model's own 400.
+{
+  const spec = snapshotSpec(MODEL);
+  if (spec && spec.supportsResponseSchema === false && !args.includes("--allow-no-schema")) {
+    console.error(
+      `\n✗ ${MODEL} reports supportsResponseSchema: false.\n` +
+      `  Every arm of this suite sends a strict json_schema; this model 400s on all of them.\n` +
+      `  Override with --allow-no-schema only if you have changed the harness to send\n` +
+      `  prompt-instructed JSON instead (run.mjs has a NO_SCHEMA hook for exactly that).\n`,
+    );
+    process.exit(1);
+  }
+  if (!spec) {
+    console.error(`  ⚠ ${MODEL} is not in venice-models.json — capabilities unknown. ` +
+      `Run \`node refresh-models.mjs\` if it shipped recently.`);
+  }
+}
+
 function sh(cmd, argv, env = {}) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, argv, { cwd: here, stdio: "inherit", env: { ...process.env, ...env } });
