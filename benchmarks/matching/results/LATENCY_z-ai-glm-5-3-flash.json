@@ -1,0 +1,73 @@
+{
+  "model": "z-ai-glm-5-3-flash",
+  "calls": 6,
+  "measuredAt": "2026-08-26T18:48:47.890Z",
+  "concurrency": 1,
+  "k": 10,
+  "latencyP50": 16098,
+  "latencyP95": 18553,
+  "latencyMin": 12036,
+  "latencyMax": 18553,
+  "meanCompletionTokens": 1116,
+  "meanReasoningTokens": 285,
+  "outputTokensPerSec": 71.4,
+  "strictJsonOk": 6,
+  "truncated": 0,
+  "costUsd": 0.00329125,
+  "rows": [
+    {
+      "latencyMs": 16098,
+      "promptTokens": 2130,
+      "completionTokens": 1108,
+      "reasoningTokens": 303,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 18553,
+      "promptTokens": 2130,
+      "completionTokens": 1369,
+      "reasoningTokens": 432,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 15644,
+      "promptTokens": 2130,
+      "completionTokens": 1128,
+      "reasoningTokens": 239,
+      "cachedTokens": 704,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 14244,
+      "promptTokens": 2130,
+      "completionTokens": 1026,
+      "reasoningTokens": 222,
+      "cachedTokens": 704,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 12036,
+      "promptTokens": 2130,
+      "completionTokens": 874,
+      "reasoningTokens": 149,
+      "cachedTokens": 704,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 17183,
+      "promptTokens": 2130,
+      "completionTokens": 1193,
+      "reasoningTokens": 362,
+      "cachedTokens": 704,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    }
+  ]
+}

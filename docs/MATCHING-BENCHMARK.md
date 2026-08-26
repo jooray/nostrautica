@@ -18,6 +18,11 @@
 \* prefiltered ≈2k pairs/100 attendees ⇒ 4k directional scorings = 400 K=10 calls (pairwise: 2k calls). Judge = blind 15-sample mean.
 Ruled out: **deepseek-v4-pro** on latency (maintainer call: ~16 s p50 / 23 s p95; partial subset numbers above for context). **z-ai-glm-5-turbo** disqualified for pairwise P0 (116/120 format failures under strict `json_schema`); worked batched but slow (13–25 s p50).
 
+> **Later rounds live in [`MODEL-BAKEOFF.md`](MODEL-BAKEOFF.md)** (from 2026-08-26).
+> The procedure below was run by hand; it is now frozen in `benchmarks/matching/bakeoff.mjs`
+> so that a model benchmarked next month is measured against exactly what these rows were.
+> This document stays as the record of how the deployed prompt and model were chosen.
+
 ### Deprecation follow-up — `deepseek-v4-flash` → `deepseek-v4-flash-0731` (2026-08-04)
 
 Venice deprecated the winning id: `GET /models` carries

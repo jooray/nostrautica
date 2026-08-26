@@ -1,0 +1,73 @@
+{
+  "model": "deepseek-v4-flash-0731",
+  "calls": 6,
+  "measuredAt": "2026-08-26T18:39:22.432Z",
+  "concurrency": 1,
+  "k": 10,
+  "latencyP50": 22098,
+  "latencyP95": 35121,
+  "latencyMin": 14079,
+  "latencyMax": 35121,
+  "meanCompletionTokens": 905,
+  "meanReasoningTokens": 0,
+  "outputTokensPerSec": 41.6,
+  "strictJsonOk": 6,
+  "truncated": 0,
+  "costUsd": 0.0041481999999999995,
+  "rows": [
+    {
+      "latencyMs": 16497,
+      "promptTokens": 2140,
+      "completionTokens": 955,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 23092,
+      "promptTokens": 2140,
+      "completionTokens": 929,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 14079,
+      "promptTokens": 2140,
+      "completionTokens": 857,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 22098,
+      "promptTokens": 2140,
+      "completionTokens": 893,
+      "reasoningTokens": 0,
+      "cachedTokens": 512,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 19729,
+      "promptTokens": 2140,
+      "completionTokens": 846,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 35121,
+      "promptTokens": 2140,
+      "completionTokens": 952,
+      "reasoningTokens": 0,
+      "cachedTokens": 512,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    }
+  ]
+}
