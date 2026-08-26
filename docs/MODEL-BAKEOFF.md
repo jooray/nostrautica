@@ -275,20 +275,21 @@ next model that ships.
 
 ---
 
-## Verdict (revised after rounds 2 and 3 — see below)
+## Verdict (final — the language leak is fixed in the prompt; no model change)
 
-The short version, in priority order:
-
-1. **Fix the Slovak-English leak in the deployed model.** It is live, it affects
-   ~1 attendee in 15 at a Slovak event, and it is the only finding here that is
-   hurting anyone today.
-2. **Rolling back to `deepseek-v4-flash` (0423) fixes it**, and is cheaper and
-   twice as fast. It costs the private-tier badge. Try one prompt experiment
-   against 0731 first — the harness makes it ~$0.20 — but 0423 is the fallback
-   that is already measured.
+1. **The Slovak-English leak is fixed and shipped.** One sentence, repeating the
+   output language inside the icebreaker block: **15/144 → 1/96 calls fully
+   English, p = 0.0032**, attribution unchanged. See
+   [the experiment](#fixing-it-placement-beats-wording-and-not-in-the-direction-you-would-guess).
+   No model change, no privacy trade, English events untouched.
+2. **Keep `deepseek-v4-flash-0731`.** The rollback to 0423 was the fallback if
+   the prompt could not be fixed. It could. 0423 remains the better model on
+   speed and cost and is still live if that ever matters, but there is no longer
+   a defect forcing the choice.
 3. **GLM 5.3 Flash wins on quality and is still not adoptable**: 68% of its
    icebreaker calls return a shape the schema forbids, and tolerating that in
-   `venice.ts` costs more than the model is worth.
+   `venice.ts` costs more than the model is worth. Revisit if z.ai fixes it — it
+   is one command.
 4. **No Qwen. No Minimax.**
 
 The original round-1 reasoning follows.
@@ -471,6 +472,47 @@ p-value this document first reported was not a valid test) — plus **2× the
 throughput** and **20% cheaper**. The August swap bought a statistically
 invisible attribution improvement and a private-tier badge, and paid for it with
 a language regression nobody was measuring and half the speed.
+
+---
+
+## Fixing it: placement beats wording, and not in the direction you would guess
+
+The trailing OUTPUT LANGUAGE block was never missing the point — it already says
+"write every reasoning string **and every icebreaker**" in the target language,
+and the previous model id obeyed it 176 times out of 176 on the identical prompt.
+So the target was known to be reachable and the question was placement.
+
+Four arms, 48 Slovak calls each, run together against a control byte-identical to
+the live prompt (verified by hash against `dist`):
+
+| arm | change | calls fully English |
+|---|---|---|
+| **L0** | control — the live prompt | 9/48 (18.8%) |
+| **L1** | requirement hoisted to the TOP, as a pass/fail condition | 16/48 (33.3%) |
+| **L2** | requirement repeated **inside the icebreaker block** | **1/48 (2.1%)** |
+| **L3** | both | 14/48 (29.2%) |
+
+Hoisting it to the top made it **worse**, and did so twice independently.
+Repeating it next to the field it governs fixed it. Whatever the mechanism, the
+intuitive move was the wrong one, which is a good argument for measuring prompt
+changes rather than reasoning about them.
+
+**The control also disagreed with itself.** L0 scored 9/48 here and the same
+bytes scored 3/48 in the earlier run — a 3× swing hours apart. That is why this
+went to a confirmation round rather than straight to production: at 96 calls per
+arm the control settles at 12/96 and L2 at 1/96, **Fisher exact p = 0.0025**.
+Pooling every draw of the live prompt ever taken: **15/144 (10.4%) vs 1/96
+(1.0%), p = 0.0032**.
+
+Attribution errors are unchanged across all four arms (0.4–0.7%, 99.4% clean),
+which is the thing that had to not regress — a language fix that traded away
+attribution accuracy would not be a fix.
+
+Shipped as `reverseSystemPrompt(lang)` in `packages/coordinator/src/matching/
+scoring.ts`. English events get byte-identical output to before. The function
+throws rather than silently returning the un-reminded prompt if its anchor ever
+moves, because a reworded block quietly reverting a measured fix is precisely how
+the regression it repairs got in.
 
 ---
 
