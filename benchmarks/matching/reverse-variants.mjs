@@ -23,8 +23,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
-export const { REVERSE_BATCH_SYSTEM_PROMPT, buildReverseBatchUserBlock, languageInstruction } =
-  await import(join(here, "../../packages/coordinator/dist/matching/scoring.js"));
+export const {
+  REVERSE_BATCH_SYSTEM_PROMPT,
+  reverseSystemPrompt,
+  buildReverseBatchUserBlock,
+  languageInstruction,
+} = await import(join(here, "../../packages/coordinator/dist/matching/scoring.js"));
 
 /** Start of the icebreaker block in either system prompt; ends at the return line. */
 export const START = "icebreakers —";
@@ -277,10 +281,28 @@ export const REVERSE_VARIANTS = {
       return out;
     },
   },
+  // R3 was "the live prompt" from 2026-07-27 until 2026-08-26, when the language
+  // reminder landed (see L2 in icebreaker-run.mjs). It is now the PRE-FIX
+  // control: same bytes it always had, no longer what production sends. Every
+  // R3 row already on disk stays comparable with every other R3 row, which is
+  // the property that matters — do not repoint this at the new builder. The
+  // current deployed prompt is R6 below.
   R3: {
     label: "R3-order",
     shape: "reverse",
     system: (lang) => REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // R6: what production sends today — R3 plus one sentence repeating the output
+  // language inside the icebreaker block. Measured as L2 over 96 calls per arm
+  // against a byte-identical control: 1/96 Slovak batches fully English against
+  // 15/144 for R3, Fisher exact p = 0.0032, attribution unchanged at 0.6%.
+  // Built from the coordinator's own function, so it follows production rather
+  // than reproducing it.
+  R6: {
+    label: "R6-live",
+    shape: "reverse",
+    system: (lang) => reverseSystemPrompt(lang),
     user: (u) => u,
   },
   // R4 = R3 plus the self-labelling fields. R3 is its control, and the only

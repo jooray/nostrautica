@@ -11,8 +11,8 @@ makes the icebreaker arm benchmark the PREVIOUS release's prompt.
 |---|---|---|
 | `scoring.system.BP3` | `dcba8e29111395ac` | prompts.mjs |
 | `scoring.user.sample` | `8d086a8902af2f6b` | run.mjs (K=10 batch) |
-| `icebreaker.system.R3.sk` | `63e056b48b6c6e8c` | packages/coordinator/dist/matching/scoring.js (LIVE) |
-| `icebreaker.system.R3.en` | `b141415e3e195e32` | packages/coordinator/dist/matching/scoring.js (LIVE) |
+| `icebreaker.system.sk` | `bcaafa9ba20b8560` | packages/coordinator/dist/matching/scoring.js reverseSystemPrompt() (LIVE) |
+| `icebreaker.system.en` | `b141415e3e195e32` | packages/coordinator/dist/matching/scoring.js reverseSystemPrompt() (LIVE) |
 | `icebreaker.user.sample` | `1327678f2837383e` | buildReverseBatchUserBlock (LIVE) |
 
 ## `scoring.system.BP3`
@@ -146,9 +146,9 @@ Seeks: community organizers and educators, help reaching non-technical, underser
 Return a JSON object {"matches": [...]} with exactly 10 entries, one per candidate index 0..9.
 ```
 
-## `icebreaker.system.R3.sk`
+## `icebreaker.system.sk`
 
-sha256/16 `63e056b48b6c6e8c` — packages/coordinator/dist/matching/scoring.js (LIVE)
+sha256/16 `bcaafa9ba20b8560` — packages/coordinator/dist/matching/scoring.js reverseSystemPrompt() (LIVE)
 
 ```text
 You are a conference matchmaker for the event described below. You are given ONE shared person
@@ -229,6 +229,7 @@ they designed its cover. "What style did you have in mind for your novel?" is WR
 wrote the novel, so it is "my novel"; only the cover is "your" work.
 Each ≤ 280 chars, concrete, grounded in both profiles, and different from one another. Return fewer
 (or none) rather than pad.
+Every icebreaker above must be written in Slovak (sk) — not English, whatever language the profiles are in.
 
 Return one entry per target, using the target's number as `index`. Score EVERY target exactly once.
 Also copy that target's Name into `entry_name`, exactly as printed under their heading — the WRITER of
@@ -246,9 +247,9 @@ person). Use Slovak's own forms for that distinction, and never attach a second-
 possessive to anything that appears in the SENDER's own profile block.
 ```
 
-## `icebreaker.system.R3.en`
+## `icebreaker.system.en`
 
-sha256/16 `b141415e3e195e32` — packages/coordinator/dist/matching/scoring.js (LIVE)
+sha256/16 `b141415e3e195e32` — packages/coordinator/dist/matching/scoring.js reverseSystemPrompt() (LIVE)
 
 ```text
 You are a conference matchmaker for the event described below. You are given ONE shared person

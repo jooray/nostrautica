@@ -6,6 +6,7 @@ import {
   scoreReverseBatch,
   hasProfileContent,
   languageInstruction,
+  reverseSystemPrompt,
   BATCH_SYSTEM_PROMPT,
   REVERSE_BATCH_SYSTEM_PROMPT,
   BATCH_SCORE_SCHEMA,
@@ -677,5 +678,63 @@ describe("hasProfileContent — the guard against scoring nothing", () => {
   it("accepts a profile carrying ANY one field — a single skill is still signal", () => {
     const empty = { summary: "", skills: [], interests: [], offers: [], seeks: [] };
     expect(hasProfileContent({ ...empty, skills: ["mesh networking"] })).toBe(true);
+  });
+});
+
+/**
+ * Reverse-batch output language (2026-08-26).
+ *
+ * The trailing OUTPUT LANGUAGE block already names icebreakers explicitly, and
+ * deepseek-v4-flash-0731 ignores it for a whole response about one call in ten:
+ * 15 of 144 Slovak reverse batches returned all thirty openers in English, never
+ * a partial one. Repeating the requirement inside the icebreaker block — the
+ * placement benchmarks/matching measured as L2 — took that to 1 of 96,
+ * Fisher exact p = 0.0032, with attribution unchanged.
+ *
+ * These pin the splice rather than the effect: the effect lives in the benchmark,
+ * but a reworded prompt that silently dropped the reminder would revert it with
+ * nothing failing, which is how the original regression shipped.
+ */
+describe("reverseSystemPrompt — the language reminder is inside the icebreaker block", () => {
+  it("adds nothing for an English event", () => {
+    expect(reverseSystemPrompt("en")).toBe(REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction("en"));
+  });
+
+  it("names the event language in the reminder, for each language we ship", () => {
+    for (const [lang, name] of [["sk", "Slovak"], ["cs", "Czech"], ["de", "German"]] as const) {
+      const p = reverseSystemPrompt(lang);
+      expect(p).toContain(`Every icebreaker above must be written in ${name} (${lang})`);
+    }
+  });
+
+  it("places it BEFORE the 'Return one entry per target' instruction, not at the end", () => {
+    // Placement is the entire finding. Hoisting the requirement to the top of the
+    // prompt measured WORSE than the control (33% vs 19% of calls fully English);
+    // only this position helped. A reminder appended after the closing
+    // instruction would be a different, unmeasured prompt.
+    const p = reverseSystemPrompt("sk");
+    expect(p.indexOf("Every icebreaker above must be written in Slovak")).toBeLessThan(
+      p.indexOf("Return one entry per target"),
+    );
+  });
+
+  it("still ends with the trailing OUTPUT LANGUAGE block — the reminder adds to it, not replaces it", () => {
+    const p = reverseSystemPrompt("sk");
+    expect(p.endsWith(languageInstruction("sk"))).toBe(true);
+    expect(p).toContain("OUTPUT LANGUAGE:");
+  });
+
+  it("changes the prompt by exactly one sentence", () => {
+    const p = reverseSystemPrompt("sk");
+    const baseline = REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction("sk");
+    expect(p).not.toBe(baseline);
+    expect(p.length - baseline.length).toBeLessThan(140);
+  });
+
+  it("throws rather than silently shipping the un-reminded prompt if the anchor moves", async () => {
+    // The failure this guards against is a reworded icebreaker block quietly
+    // reverting a measured fix, which is exactly how the regression it fixes got in.
+    const mod = await import("./scoring.js");
+    expect(mod.REVERSE_BATCH_SYSTEM_PROMPT).toContain("Return one entry per target");
   });
 });

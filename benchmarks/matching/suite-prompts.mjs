@@ -56,9 +56,13 @@ export async function suitePrompts(langs = ["sk", "en"]) {
     const dist = await import(join(here, "../../packages/coordinator/dist/matching/scoring.js"));
     for (const lang of langs) {
       out.push({
-        name: `icebreaker.system.R3.${lang}`,
-        source: "packages/coordinator/dist/matching/scoring.js (LIVE)",
-        text: dist.REVERSE_BATCH_SYSTEM_PROMPT + dist.languageInstruction(lang),
+        name: `icebreaker.system.${lang}`,
+        source: "packages/coordinator/dist/matching/scoring.js reverseSystemPrompt() (LIVE)",
+        // Through the coordinator's own builder, not by re-concatenating its
+        // parts. Reconstructing it here meant the fingerprint kept reporting the
+        // pre-2026-08-26 hash after the language reminder shipped — a drift
+        // detector that cannot see the drift it exists for.
+        text: dist.reverseSystemPrompt(lang),
       });
     }
     const shared = PERSONAS[0];

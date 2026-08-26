@@ -126,6 +126,81 @@ const IB1_BLOCK = [
   "(or an empty list) when you can't ground a good one; never pad.",
 ].join("\n");
 
+// ── output-language variants (2026-08-26) ────────────────────────────────────
+// deepseek-v4-flash-0731, the deployed model, returns 3 of 48 Slovak reverse
+// batches with ALL THIRTY openers in English — never a partial one. The id it
+// replaced did that 0 times in 176 calls on this same prompt, so the target is
+// reachable and this is the model ignoring an instruction rather than the
+// instruction being absent: languageInstruction() already says "write every
+// reasoning string AND EVERY ICEBREAKER in <language>".
+//
+// A whole-response failure points at salience and placement rather than wording,
+// so each variant moves or repeats the requirement instead of rephrasing it.
+// L0 is the live prompt (R3) under a different label, so the control is measured
+// in the same run as the arms rather than compared against yesterday's number.
+const LANG_LEAD = (lang) =>
+  lang === "en"
+    ? ""
+    : [
+        "",
+        `OUTPUT LANGUAGE — READ FIRST: every human-readable string you return must be written in ${
+          LANG_NAMES[lang]
+        } (${lang}). This applies to reasoning_for_target AND to every entry of icebreakers.`,
+        `An English sentence anywhere in the output is a failed response, even if everything else is correct.`,
+      ].join("\n");
+
+/**
+ * Restate the requirement inside the icebreaker block, where the openers are
+ * specified. The REVERSE prompt ends that block with "Return one entry per
+ * target"; `END` above is the FORWARD prompt's marker ("...per candidate") and
+ * does not appear here at all — which is what the first version of this got
+ * wrong, loudly, in a DRY run before it cost anything.
+ */
+const REVERSE_END = "\n\nReturn one entry per target";
+function spliceLanguageReminder(prompt, lang) {
+  if (lang === "en") return prompt;
+  const i = prompt.indexOf(REVERSE_END);
+  if (i === -1) throw new Error("could not locate the end of the reverse icebreaker block");
+  const reminder =
+    `\nEvery icebreaker above must be written in ${LANG_NAMES[lang]} (${lang}) — not English, ` +
+    `whatever language the profiles are in.`;
+  return prompt.slice(0, i) + reminder + prompt.slice(i);
+}
+
+const LANGUAGE_VARIANTS = {
+  // Control: byte-identical to R3, the live prompt.
+  L0: {
+    label: "L0-control",
+    shape: "reverse",
+    system: (lang) => REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // The requirement moved to the TOP, before the role rules, and stated as a
+  // pass/fail condition rather than a description.
+  L1: {
+    label: "L1-lead",
+    shape: "reverse",
+    system: (lang) => LANG_LEAD(lang) + "\n" + REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // Kept where it is, but repeated once inside the icebreaker block itself.
+  L2: {
+    label: "L2-inline",
+    shape: "reverse",
+    system: (lang) => spliceLanguageReminder(REVERSE_BATCH_SYSTEM_PROMPT, lang) + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // Both. If neither alone moves it, this says whether the defect is promptable
+  // at all before anyone concludes it is not.
+  L3: {
+    label: "L3-lead+inline",
+    shape: "reverse",
+    system: (lang) =>
+      LANG_LEAD(lang) + "\n" + spliceLanguageReminder(REVERSE_BATCH_SYSTEM_PROMPT, lang) + languageInstruction(lang),
+    user: (u) => u,
+  },
+};
+
 /** START (shared with the reverse variants) is where the icebreaker block begins. */
 const END = "\n\nReturn one entry per candidate";
 
@@ -258,6 +333,7 @@ const VARIANTS = {
   // R2 (2026-07-25 roles wording) and R3 (live, block-order restructure) come from
   // reverse-variants.mjs — reverse-score-run.mjs measures the same two prompts.
   ...REVERSE_VARIANTS,
+  ...LANGUAGE_VARIANTS,
 };
 
 // Self-check: the control language block must differ from the live one for a
