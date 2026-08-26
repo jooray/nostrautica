@@ -1,0 +1,7 @@
+{
+  "z-ai-glm-5-3-flash": {
+    "disableThinking": false,
+    "reason": "Venice 400: reasoning is mandatory for this endpoint",
+    "detectedAt": "2026-08-26"
+  }
+}

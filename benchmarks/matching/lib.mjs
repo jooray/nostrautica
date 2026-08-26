@@ -9,6 +9,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import {
+  modelProfile, recordProfile, isReasoningMandatory, snapshotPricing,
+} from "./model-profiles.mjs";
 
 const BASE = "https://api.venice.ai/api/v1";
 // Checked where it is USED, not at import. Importing this module is what
@@ -87,7 +90,10 @@ async function sleep(ms) {
  * response_format and rely on prompt-instructed JSON (parsed leniently).
  */
 export async function complete({ model, system, user, schema, schemaName, temperature = 0.3, maxTokens = 4096, useSchema = true }) {
-  const body = {
+  // Production's shape by default. A model that refuses it is downgraded once,
+  // on Venice's own 400, and the fact is persisted — see model-profiles.mjs.
+  let profile = modelProfile(model);
+  const buildBody = () => ({
     model,
     temperature,
     max_tokens: maxTokens,
@@ -97,10 +103,11 @@ export async function complete({ model, system, user, schema, schemaName, temper
     ],
     venice_parameters: {
       include_venice_system_prompt: false,
-      disable_thinking: true,
+      ...(profile.disableThinking ? { disable_thinking: true } : {}),
       strip_thinking_response: true,
     },
-  };
+  });
+  const body = buildBody();
   if (schema && useSchema) {
     body.response_format = {
       type: "json_schema",
@@ -118,13 +125,38 @@ export async function complete({ model, system, user, schema, schemaName, temper
   // of letting 1.7^11 turn one unlucky call into a four-minute sleep.
   for (let attempt = 0; attempt < 12; attempt++) {
     try {
+      // A per-attempt deadline. `fetch` has none by default, so a connection
+      // Venice never answers stalls that worker forever — and with the pool at
+      // CONC=8 a bake-off can sit at "→ R3-order / sk" indefinitely with no
+      // error and no progress, which is indistinguishable from a slow model.
+      // 240s is ~2.5× the slowest honest call observed (a K=10 Slovak reverse
+      // batch at ~95s), so it never fires on a working request.
       const res = await fetch(`${BASE}/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${requireKey()}` },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(Number(process.env.REQUEST_TIMEOUT_MS || 240000)),
       });
       if (!res.ok) {
         const txt = await res.text();
+        // "Reasoning is mandatory for this endpoint and cannot be disabled."
+        // Not our fault and not transient — it means this model cannot be driven
+        // the way production drives every other one. Downgrade, remember, retry
+        // WITHOUT consuming an attempt: twelve backoffs on a deterministic 400
+        // is two wasted minutes per call.
+        if (isReasoningMandatory(res.status, txt) && profile.disableThinking) {
+          recordProfile(model, { disableThinking: false }, "Venice 400: reasoning is mandatory for this endpoint");
+          profile = modelProfile(model);
+          Object.assign(body, buildBody());
+          if (schema && useSchema) {
+            body.response_format = {
+              type: "json_schema",
+              json_schema: { name: schemaName ?? "out", strict: true, schema },
+            };
+          }
+          attempt--;
+          continue;
+        }
         // Retry transient; don't retry 4xx that are our fault (except 429).
         if (res.status === 429 || res.status >= 500) {
           lastErr = new Error(`${res.status} ${txt.slice(0, 200)}`);
@@ -149,8 +181,26 @@ export async function complete({ model, system, user, schema, schemaName, temper
         promptTokens: j.usage?.prompt_tokens ?? 0,
         completionTokens: j.usage?.completion_tokens ?? 0,
         totalTokens: j.usage?.total_tokens ?? 0,
+        // Billed even when `strip_thinking_response` hides them, and the whole
+        // reason a "cheap per token" reasoning model can be dearer per call.
+        reasoningTokens: j.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
+        cachedTokens: j.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       };
-      return { content, usage, latencyMs, raw: j };
+      // Does the raw body survive `JSON.parse` — which is what
+      // providers/venice.ts does — or only parseJsonLoose? A model that wraps
+      // strict-schema output in a ```json fence parses fine here and throws
+      // ProviderContractError on every call in production. That difference is
+      // invisible to every other metric, so it is measured.
+      let strictParseOk = false;
+      try {
+        JSON.parse(content);
+        strictParseOk = true;
+      } catch {}
+      return {
+        content, usage, latencyMs, raw: j, strictParseOk,
+        finishReason: j.choices?.[0]?.finish_reason ?? null,
+        disableThinkingSent: !!profile.disableThinking,
+      };
     } catch (e) {
       lastErr = e;
       await sleep(800 * (attempt + 1) + Math.random() * 400);
@@ -215,8 +265,20 @@ export const PRICING = {
   "mistral-small-3-2-24b-instruct": { in: 0.09375, out: 0.25 },
   "qwen3-235b-a22b-instruct-2507": { in: 0.15, out: 0.75 },
 };
+/**
+ * Pinned prices win; the `GET /models` snapshot fills the gaps.
+ *
+ * Pinned-wins is deliberate: every cost figure already published in
+ * MATCHING-BENCHMARK.md was computed from this table, and a Venice reprice must
+ * not silently rewrite a historical result. The snapshot is what makes a model
+ * nobody has priced by hand cost something other than $0.0000 — which is how a
+ * missing entry used to read.
+ */
+export function priceOf(model) {
+  return PRICING[model] ?? snapshotPricing()[model] ?? null;
+}
 export function costUsd(model, usage) {
-  const p = PRICING[model];
+  const p = priceOf(model);
   if (!p) return 0;
   return (usage.promptTokens / 1e6) * p.in + (usage.completionTokens / 1e6) * p.out;
 }

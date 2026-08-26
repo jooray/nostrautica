@@ -141,6 +141,8 @@ function fmt(n, d = 2) {
   return typeof n === "number" && isFinite(n) ? n.toFixed(d) : "-";
 }
 
+/** Only when run directly — bakeoff.mjs imports evalRun() and must not trigger
+ *  a full table print (and a full results/ read) as an import side effect. */
 function main() {
   const runs = loadRuns().filter((r) => r.edges);
   const rows = runs.map(evalRun).sort((a, b) =>
@@ -161,4 +163,5 @@ function main() {
     ].join("\t"));
   }
 }
-main();
+import { fileURLToPath as __fileURLToPath } from "node:url";
+if (process.argv[1] && __fileURLToPath(import.meta.url) === process.argv[1]) main();

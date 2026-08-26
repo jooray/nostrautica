@@ -97,11 +97,13 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
   const schema = batchedSchema();
 
   const edges = [];
-  let usageAcc = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+  let usageAcc = { promptTokens: 0, completionTokens: 0, totalTokens: 0, reasoningTokens: 0 };
   let latencies = [];
   let formatFails = 0;
   let missingCandidates = 0;
   let calls = 0;
+  let strictOkCalls = 0;
+  let strictKnownCalls = 0;
 
   const batches = [];
   for (let i = 0; i < ordered.length; i += K) batches.push(ordered.slice(i, i + K));
@@ -121,9 +123,9 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
         "",
         `Return a JSON object {"matches": [...]} with exactly ${batch.length} entries, one per candidate index 0..${batch.length - 1}.`,
       ].join("\n");
-      let content, usage, latencyMs;
+      let content, usage, latencyMs, strictParseOk;
       try {
-        ({ content, usage, latencyMs } = await complete({
+        ({ content, usage, latencyMs, strictParseOk } = await complete({
           model: MODEL, system, user, schema, schemaName: "batch_scores",
           temperature: 0.3, maxTokens: Math.min(8000, 500 + batch.length * 350),
           useSchema: !NO_SCHEMA.has(MODEL),
@@ -145,7 +147,10 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
           fail = true;
           parsed = [];
         }
-        cached = { batch, usage, latencyMs, formatFail: fail, entries: parsed };
+        // strictOk: did the RAW body survive JSON.parse — which is what
+        // providers/venice.ts does — or only parseJsonLoose? Undefined on runs
+        // recorded before 2026-08-26, hence `?? null` at the aggregate.
+        cached = { batch, usage, latencyMs, formatFail: fail, strictOk: strictParseOk, entries: parsed };
         writeCache(CACHE_DIR, ck, cached);
       }
     }
@@ -153,6 +158,11 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
     usageAcc.promptTokens += cached.usage.promptTokens;
     usageAcc.completionTokens += cached.usage.completionTokens;
     usageAcc.totalTokens += cached.usage.totalTokens;
+    usageAcc.reasoningTokens += cached.usage.reasoningTokens ?? 0;
+    if (typeof cached.strictOk === "boolean") {
+      strictKnownCalls++;
+      if (cached.strictOk) strictOkCalls++;
+    }
     if (cached.latencyMs) latencies.push(cached.latencyMs);
     if (cached.error || cached.formatFail) {
       formatFails++;
@@ -183,7 +193,7 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
       });
     }
   }
-  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates, calls };
+  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates, calls, strictOkCalls, strictKnownCalls };
 }
 
 // ── pairwise reference (K=1, P0 prompt) ───────────────────────────────────────
@@ -235,7 +245,7 @@ async function scoreTargetPairwise(targetId, subset) {
       reasoning: String(forTarget ?? "").trim(),
     });
   }
-  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates: 0, calls };
+  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates: 0, calls, strictOkCalls: 0, strictKnownCalls: 0 };
 }
 
 function hashId(id) {
@@ -265,14 +275,17 @@ async function main() {
       promptTokens: a.promptTokens + r.usage.promptTokens,
       completionTokens: a.completionTokens + r.usage.completionTokens,
       totalTokens: a.totalTokens + r.usage.totalTokens,
+      reasoningTokens: a.reasoningTokens + (r.usage.reasoningTokens ?? 0),
     }),
-    { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    { promptTokens: 0, completionTokens: 0, totalTokens: 0, reasoningTokens: 0 },
   );
   const latencies = perTarget.flatMap((r) => r.latencies).sort((a, b) => a - b);
   const p = (q) => (latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(q * latencies.length))] : 0);
   const formatFails = perTarget.reduce((a, r) => a + r.formatFails, 0);
   const missingCandidates = perTarget.reduce((a, r) => a + r.missingCandidates, 0);
   const calls = perTarget.reduce((a, r) => a + r.calls, 0);
+  const strictOkCalls = perTarget.reduce((a, r) => a + (r.strictOkCalls ?? 0), 0);
+  const strictKnownCalls = perTarget.reduce((a, r) => a + (r.strictKnownCalls ?? 0), 0);
 
   const out = {
     label: runLabel, model: MODEL, prompt: args.pairwise ? "P0" : args.prompt,
@@ -280,6 +293,9 @@ async function main() {
     edges,
     stats: {
       calls, formatFails, missingCandidates,
+      // Production parses with JSON.parse, not leniently. A model at 0/N here is
+      // a model providers/venice.ts rejects on every call, whatever its recall is.
+      strictOkCalls, strictKnownCalls,
       latencyP50: p(0.5), latencyP95: p(0.95),
       usage, costUsd: costUsd(MODEL, usage),
     },
