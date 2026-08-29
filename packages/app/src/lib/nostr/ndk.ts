@@ -33,6 +33,7 @@ export interface Filter {
   "#d"?: string[];
   "#a"?: string[];
   "#e"?: string[];
+  "#t"?: string[]; // NIP-12 hashtags — external long-form feeds (§7.4 `sources`)
 }
 
 let ndk: NDK | null = null;

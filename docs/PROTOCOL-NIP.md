@@ -515,6 +515,7 @@ silently drop them.
   {
     v: 2,
     sections: EventPageSection[] (default []),   // PUBLIC layout
+    sources: ExternalFeed[] (default []),        // PUBLIC curated feeds
     private?: string                             // ECK ciphertext (below)
   }
   ```
@@ -523,6 +524,33 @@ silently drop them.
     "public"|"members"|"both" }`
   - `{ type: "pinned", refs: string[] }` — naddr references.
   - `{ type: "attendees" }` — roster preview; renders only for members.
+
+  `ExternalFeed = { pubkey: hex32, tags?: string[≤100] ≤10, since?: int ≥0,
+  until?: int ≥0, relays?: string[≤2048] ≤30, label?: string ≤200 }`, at most 10
+  per page. Each entry is a standing query for **public `30023` written by
+  someone other than `E_id`** that a reader folds into the event's OFFICIAL
+  posts — the organization's own Nostr account alongside the per-event `E_id`,
+  where `pinned` names individual articles and this names a rule. Fields AND
+  together into `{kinds:[30023], authors:[pubkey], "#t": tags, since}`; an entry
+  carrying only a `pubkey` means "everything this npub writes", so readers MUST
+  bound the result (the reference client uses `limit: 100` per feed).
+
+  Readers MUST re-apply the whole entry client-side rather than trusting the
+  relay to have honoured the filter — in particular that `pubkey` matches, since
+  nothing else stops a relay from answering with an article by someone the
+  organizer never named. `since`/`until` bound the article's **`published_at`**,
+  not its `created_at`: a NIP-23 edit bumps `created_at` without moving
+  `published_at`, and `created_at ≥ published_at` always holds for an article, so
+  a relay-side `since` is a valid prefilter while `until` MUST NOT be sent (it
+  would drop an in-window article that was edited later). A source naming `E_id`
+  is ignored — those posts are already the official feed.
+
+  `sources` is public and cleartext by design: every event it can name is a
+  public `30023` anyway, so encrypting the query would hide nothing while making
+  the curation invisible to other NIP-23 clients reading this page. It is
+  additive and defaulted — a `31608` published before it existed parses
+  unchanged and simply declares no feeds — and a writer that has none SHOULD omit
+  the key entirely.
 
   The ECK-decrypted `private` payload:
   ```

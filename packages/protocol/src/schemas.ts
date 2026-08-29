@@ -879,6 +879,54 @@ export const pinnedSectionSchema = z.object({
 export const attendeesSectionSchema = z.object({
   type: z.literal("attendees"), // roster preview — renders only for members
 });
+
+// ── External long-form feeds folded into the official posts (31608 `sources`) ─
+export const MAX_FEED_SOURCES = 10; // declared feeds per event
+export const MAX_FEED_TAGS = 10; // `t` hashtags per feed
+export const MAX_FEED_TAG = 100; // chars per hashtag
+
+/**
+ * A long-form feed by SOMEONE ELSE that the organizer folds into this event's
+ * official posts.
+ *
+ * The case it exists for: a conference's own announcements are written from the
+ * organization's established npub, not from the per-event `E_id` this app mints
+ * — so "our updates" genuinely live under two keys, and readers should see one
+ * feed. `pinned` already covers naming individual articles by naddr; this is the
+ * standing query for "and everything they publish that matches."
+ *
+ * Every field but `pubkey` narrows the query, and they AND together:
+ * `{kinds:[30023], authors:[pubkey], "#t": tags, since, until}`. An entry with
+ * only a `pubkey` therefore means "everything this npub writes", which is a
+ * choice the organizer can make but rarely wants — readers cap it (see
+ * MAX_EXTERNAL_PER_FEED in the app) rather than trusting it to be small.
+ *
+ * `since`/`until` bound the article's `published_at`, not its `created_at`: an
+ * organizer saying "since 1 August" means articles published since then, and a
+ * NIP-23 edit bumps `created_at` without moving `published_at`. Relays can only
+ * filter on `created_at`, which for an article is always ≥ `published_at`, so
+ * the relay-side bound is a cheap PREFILTER and the reader re-applies the real
+ * one (see the app's `fetchExternalPosts`).
+ *
+ * `relays` matters more than it looks: the other npub's articles are usually
+ * nowhere near the event's own relays, and without a hint the feed silently
+ * comes back empty — which reads as a broken feature, not a missing setting.
+ * Omitted ⇒ the event's relays.
+ *
+ * Public and cleartext, deliberately: every event this can name is a public
+ * kind-30023 anyway, so encrypting the query would hide nothing while making
+ * the curation invisible to other NIP-23 clients reading this page.
+ */
+export const externalFeedSchema = z.object({
+  pubkey: hex32,
+  tags: z.array(z.string().max(MAX_FEED_TAG)).max(MAX_FEED_TAGS).optional(),
+  since: z.number().int().nonnegative().optional(),
+  until: z.number().int().nonnegative().optional(),
+  relays: z.array(z.string().max(MAX_URL)).max(MAX_RELAYS).optional(),
+  /** Organizer's own name for the feed, shown as attribution. */
+  label: z.string().max(MAX_NAME).optional(),
+});
+export type ExternalFeed = z.infer<typeof externalFeedSchema>;
 export const eventPageSectionSchema = z.discriminatedUnion("type", [
   postsSectionSchema,
   pinnedSectionSchema,
@@ -912,6 +960,11 @@ export type EventPagePrivate = z.infer<typeof eventPagePrivateSchema>;
 export const eventPageContentSchema = z.object({
   v: version,
   sections: z.array(eventPageSectionSchema).default([]),
+  // Additive and defaulted: every 31608 published before external feeds existed
+  // parses unchanged, and a writer that doesn't know the field omits it. Not
+  // mirrored into the ECK `private` payload — see externalFeedSchema on why the
+  // curation is public.
+  sources: z.array(externalFeedSchema).max(MAX_FEED_SOURCES).default([]),
   private: z.string().optional(), // ECK ciphertext of eventPagePrivateSchema
 });
 export type EventPageContent = z.infer<typeof eventPageContentSchema>;

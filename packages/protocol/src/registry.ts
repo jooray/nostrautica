@@ -174,7 +174,8 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     sealing: "public",
     author: "`E_id`",
     protection: "Public sections + optional ECK-encrypted `private`; `d` = event `d`",
-    notes: "Official menu and layout. Latest valid page wins.",
+    notes:
+      "Official menu and layout, plus `sources` — long-form feeds by other npubs the organizer folds into this event's official posts. Latest valid page wins.",
   },
   {
     constant: "KIND_EVENT_THEME",

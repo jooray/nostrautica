@@ -32,7 +32,7 @@ public event whose `v` is not exactly `2` (§2).
 | 31605 | Match List | Coordinator | NIP-44 coordinator→recipient; ECK-blinded `d` | Directional match reasoning (+ optional icebreakers) for one recipient. Replaced after scoring or ECK rotation. |
 | 31606 | Match Matrix | Coordinator | ECK-encrypted; `d` = event `d` | Event-wide score-only matrix; published only when `match_visibility: event`. Deleted when visibility changes away from it. |
 | 31607 | Members-only Event Post | `E_id` | ECK-encrypted; random stable `d` | Official members-only post. Same `d` on edit; old ciphertext stays readable to whoever held the ECK version it was published under. |
-| 31608 | Event Page | `E_id` | Public sections + optional ECK-encrypted `private`; `d` = event `d` | Official menu and layout. Latest valid page wins. |
+| 31608 | Event Page | `E_id` | Public sections + optional ECK-encrypted `private`; `d` = event `d` | Official menu and layout, plus `sources` — long-form feeds by other npubs the organizer folds into this event's official posts. Latest valid page wins. |
 | 31609 | Event Theme | `E_id` | Public raw CSS; `d` = event `d` | Organizer-controlled presentation. Not a secret-safe rendering boundary — clients must not render it on routes carrying secrets. |
 | 31610 | Talk | Coordinator, or `E_id` without one | ECK-encrypted; talk/ECK-blinded `d` | Moderated prerecorded talk, transcript, language, revision, status. Republished under a new address on ECK rotation; old address NIP-09-deleted. |
 | 31611 | Coordinator Announcement | Coordinator | Public; `d = nostrautica:coordinator` | Discovery name, capabilities, resolved-route privacy disclosure, relays, optional pricing. Latest announcement per coordinator wins. |

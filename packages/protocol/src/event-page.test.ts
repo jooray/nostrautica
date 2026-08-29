@@ -97,6 +97,32 @@ describe("31608 event page content", () => {
     roundTrips(eventPageContentSchema, { v: 2, sections: [] });
   });
 
+  it("external feeds round-trip, and a page published before they existed still parses", () => {
+    const sources = [
+      {
+        pubkey: "a".repeat(64),
+        tags: ["kosice"],
+        since: 1_754_006_400,
+        relays: ["wss://relay.example"],
+        label: "Lunarpunk",
+      },
+      { pubkey: "b".repeat(64) }, // every narrowing field is optional
+    ];
+    roundTrips(eventPageContentSchema, { v: 2, sections, sources });
+
+    // The migration property: `sources` is additive and defaulted, so every
+    // 31608 already on a relay parses unchanged and simply declares no feeds.
+    expect(eventPageContentSchema.parse({ v: 2, sections: [] }).sources).toEqual([]);
+  });
+
+  it("rejects a source that isn't a 32-byte hex pubkey", () => {
+    // The editor accepts an npub and decodes it; anything reaching the wire as
+    // an npub (or a display name) would silently match nothing.
+    expect(() =>
+      eventPageContentSchema.parse({ v: 2, sections: [], sources: [{ pubkey: "npub1abc" }] }),
+    ).toThrow();
+  });
+
   it("private payload schema round-trips", () => {
     roundTrips(eventPagePrivateSchema, {
       v: 2,

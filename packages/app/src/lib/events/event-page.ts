@@ -26,6 +26,7 @@ import {
   encryptEventPagePrivate,
   decryptEventPagePrivate,
   type EventPagePrivate,
+  type ExternalFeed,
   type MergedMenuItem,
   type MergedSection,
 } from "@nostrautica/protocol";
@@ -39,6 +40,11 @@ import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.j
 export interface EventPageModel {
   menu: MergedMenuItem[]; // merged, in display order; membersOnly flags kept
   sections: MergedSection[];
+  /**
+   * Long-form feeds by other npubs folded into this event's official posts
+   * (31608 `sources`). Public and unencrypted — see externalFeedSchema.
+   */
+  sources: ExternalFeed[];
 }
 
 // The merged event page may contain decrypted private menu/sections, so it's
@@ -54,7 +60,12 @@ function pageScope(): string {
 
 /** Cached merged event page for a coordinate (no network), or undefined. */
 export function cachedEventPage(coordinate: string): EventPageModel | undefined {
-  return cacheGet<EventPageModel>(pageKey(coordinate), pageScope())?.data;
+  const hit = cacheGet<EventPageModel>(pageKey(coordinate), pageScope())?.data;
+  if (!hit) return undefined;
+  // Entries written by a build that predates external feeds have no `sources`.
+  // Normalised here rather than at every call site, so consumers can treat the
+  // field as always-present.
+  return { ...hit, sources: hit.sources ?? [] };
 }
 
 function tag(tags: string[][], name: string): string | undefined {
@@ -100,6 +111,7 @@ export async function fetchEventPage(
   const model: EventPageModel = {
     menu: mergeMenu(publicMenu, priv.menu),
     sections: mergeSections(content.sections, priv.sections),
+    sources: content.sources,
   };
   cacheSet(pageKey(ctx.coordinate), model, latest.created_at ?? 0, pageScope());
   return model;
@@ -143,6 +155,9 @@ export async function publishEventPage(
   const content = JSON.stringify({
     v: 2,
     sections: sections.publicItems,
+    // Omitted when empty so an event that declares no external feed publishes
+    // byte-identical content to what pre-`sources` builds emitted.
+    ...(model.sources.length ? { sources: model.sources } : {}),
     ...(privateCiphertext ? { private: privateCiphertext } : {}),
   });
   // Monotonic republish (audit P3): a same-second re-save of the page must win

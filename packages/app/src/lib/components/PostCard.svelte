@@ -9,6 +9,7 @@
   import { router } from "$lib/router/router.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import { npubEncode } from "nostr-tools/nip19";
 
   let {
     post,
@@ -28,6 +29,12 @@
   function open() {
     router.go({ name: "post", naddr, d: post.d });
   }
+
+  /** Attribution for an external post: the organizer's name for the feed, or a
+   *  truncated npub when they didn't give it one. */
+  const feedName = $derived(
+    post.feedLabel?.trim() || `${npubEncode(post.authorPubkey).slice(0, 12)}…`,
+  );
 </script>
 
 <article class="card">
@@ -53,6 +60,11 @@
     <div class="row" style="flex-wrap:wrap;gap:0.25rem">
       {#if post.membersOnly}<span class="badge">{t("post.membersBadge")}</span>{/if}
       {#if post.source === "attendees"}<span class="badge">{t("post.attendeeBadge")}</span>{/if}
+      {#if post.source === "external"}
+        <!-- Curated in from another npub (31608 `sources`) — say so, or it reads
+             as something the event itself wrote. -->
+        <span class="badge">{t("post.fromFeed", { name: feedName })}</span>
+      {/if}
     </div>
     {#if post.image && full}
       <img class="header-img" src={post.image} alt="" loading="lazy" />
