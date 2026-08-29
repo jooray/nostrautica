@@ -158,3 +158,28 @@ export async function uploadPublicImage(
   const { urls } = await uploadAndMirror(signer, servers, bytes, blob.type || "image/jpeg");
   return urls[0]!;
 }
+
+/**
+ * Normalize an image URL the organizer pasted instead of uploading a file
+ * (organizer feedback 2026-08-29). Event artwork usually already lives
+ * somewhere — a CDN, the organizer's own site, an earlier Blossom upload — and
+ * re-uploading it to Blossom just to reference it wastes bytes and creates a
+ * second copy that can rot independently of the original.
+ *
+ * Returns the normalized URL, or null if it isn't usable. https only and no
+ * embedded credentials, the same rule external talk URLs follow
+ * (media/external.ts) and the media descriptor's C3 SSRF hardening: an
+ * `https://user:pass@host/banner.png` icon is never legitimate, and since the
+ * icon/banner ship in the PUBLIC kind-0/31923 tags it would hand those
+ * credentials to everyone who renders the event, not just attendees.
+ */
+export function externalImageUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== "https:") return null;
+    if (u.username || u.password) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
