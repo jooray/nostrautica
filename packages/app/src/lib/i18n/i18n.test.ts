@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { i18n, pluralCategory } from "./i18n.svelte.js";
+import { i18n, pluralCategory, langFromHash } from "./i18n.svelte.js";
 import { messages } from "./messages.js";
 
 describe("i18n interpolation", () => {
@@ -176,6 +176,94 @@ describe("init() (a returning visitor reloading the app)", () => {
   it("also sets <html lang> on the browser-detected (non-explicit) path", () => {
     i18n.init(); // no stored choice — falls through to detect()
     expect(document.documentElement.lang).toBe(i18n.locale);
+  });
+});
+
+describe("invite-link language (?lang=)", () => {
+  const originalDocument = (globalThis as { document?: unknown }).document;
+  const originalLocalStorage = (globalThis as { localStorage?: unknown }).localStorage;
+  const originalLocation = (globalThis as { location?: unknown }).location;
+  const store = new Map<string, string>();
+
+  function arriveAt(hash: string): void {
+    (globalThis as { location?: unknown }).location = { hash };
+  }
+
+  beforeEach(() => {
+    (globalThis as { document?: unknown }).document = { documentElement: { lang: "en" } };
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+    arriveAt("");
+  });
+  afterEach(() => {
+    store.clear();
+    i18n.explicit = false;
+    i18n.locale = "en";
+    (globalThis as { document?: unknown }).document = originalDocument;
+    (globalThis as { localStorage?: unknown }).localStorage = originalLocalStorage;
+    (globalThis as { location?: unknown }).location = originalLocation;
+  });
+
+  it("parses the param out of a real invite link, and only for catalog locales", () => {
+    const naddr = "naddr1abc";
+    expect(langFromHash(`#/e/${naddr}/join?code=nsec1xyz&lang=sk`)).toBe("sk");
+    // Region subtags are normalized away; the code is ISO 639-1.
+    expect(langFromHash(`#/e/${naddr}/join?code=nsec1xyz&lang=cs-CZ`)).toBe("cs");
+    // A language with no catalog (the 31600 `lang` tag is any ISO 639-1) must
+    // fall through to detection rather than pick a wrong catalog.
+    expect(langFromHash(`#/e/${naddr}/join?code=nsec1xyz&lang=hu`)).toBeUndefined();
+    // Attacker-supplied: never anything but one of the three shipped locales.
+    expect(langFromHash("#/e/x/join?lang=../../etc/passwd")).toBeUndefined();
+    expect(langFromHash(`#/e/${naddr}/join?code=nsec1xyz`)).toBeUndefined();
+    expect(langFromHash("#/e/naddr1abc/join")).toBeUndefined();
+  });
+
+  it("switches a first-time visitor before any relay fetch, and remembers it", () => {
+    // The whole point of putting the language on the LINK: this runs at boot,
+    // with no event config in hand.
+    arriveAt("#/e/naddr1abc/join?code=nsec1xyz&lang=sk");
+    i18n.init();
+    expect(i18n.locale).toBe("sk");
+    expect(document.documentElement.lang).toBe("sk");
+    // Not an explicit choice — a later Settings pick and the event-config path
+    // both still work.
+    expect(i18n.explicit).toBe(false);
+
+    // Second visit, no param (the code was stripped from the URL after join):
+    // the invitee stays in Slovak instead of falling back to navigator.language.
+    i18n.locale = "en";
+    arriveAt("#/e/naddr1abc");
+    i18n.init();
+    expect(i18n.locale).toBe("sk");
+    expect(i18n.explicit).toBe(false);
+  });
+
+  it("never overrides a language the user picked in Settings", () => {
+    // The requirement that makes this safe to ship: someone who has been here
+    // before and chose Czech stays in Czech, even arriving on a Slovak event's
+    // invite link.
+    store.set("nostrautica:lang", "cs");
+    arriveAt("#/e/naddr1abc/join?code=nsec1xyz&lang=sk");
+    i18n.init();
+    expect(i18n.locale).toBe("cs");
+    expect(i18n.explicit).toBe(true);
+    // ...and the soft default was not written behind their back.
+    expect(store.get("nostrautica:lang:default")).toBeUndefined();
+  });
+
+  it("an explicit choice made later wins over a remembered invite language", () => {
+    arriveAt("#/e/naddr1abc/join?code=nsec1xyz&lang=sk");
+    i18n.init();
+    expect(i18n.locale).toBe("sk");
+    i18n.set("en"); // the invitee opens Settings and picks English
+    i18n.locale = "sk"; // ...reload
+    arriveAt("#/e/naddr1abc/join?code=nsec1abc&lang=sk");
+    i18n.init();
+    expect(i18n.locale).toBe("en");
+    expect(i18n.explicit).toBe(true);
   });
 });
 

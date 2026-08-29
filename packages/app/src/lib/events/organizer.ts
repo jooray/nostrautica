@@ -703,6 +703,16 @@ export async function generateInvites(
 
   const generated: GeneratedInvite[] = [];
   const base = appBaseUrl.replace(/[#/]+$/, "");
+  // The link states the event's LANGUAGE as well as the code. `adoptEventLang`
+  // can only fire once the 31600 has come back from relays, so an invitee
+  // arriving cold off this link watches the splash, the join skeleton and every
+  // error state on the way paint in whatever their browser claims, and then flip
+  // — and nothing survives the reload. The param is read before the first paint
+  // (i18n.init) and remembered as a soft default; it never outranks a language
+  // the person picked in Settings themselves. Omitted for English so an ordinary
+  // event's links stay byte-identical to what earlier builds emitted.
+  const lang = ctx.config.lang;
+  const langQuery = lang && lang !== "en" ? `&lang=${encodeURIComponent(lang)}` : "";
   // Only emit `uses`/`exp` when they differ from the implicit default, so an
   // ordinary single-use batch publishes byte-identical entries to before.
   const policy: { uses?: number; exp?: number } = {
@@ -717,7 +727,7 @@ export async function generateInvites(
     generated.push({
       label,
       nsec,
-      link: `${base}/#/e/${encodeURIComponent(ctx.naddr)}/join?code=${nsec}`,
+      link: `${base}/#/e/${encodeURIComponent(ctx.naddr)}/join?code=${nsec}${langQuery}`,
       uses: opts.uses ?? 1,
       ...(opts.exp !== undefined ? { exp: opts.exp } : {}),
     });
