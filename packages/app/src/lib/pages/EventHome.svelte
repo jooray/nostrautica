@@ -482,6 +482,20 @@
     return s;
   });
 
+  /**
+   * Does this post expand INLINE in a home feed, or render as a teaser with a
+   * "read" link?
+   *
+   * Only the event's own posts expand. An event update is an announcement —
+   * "schedule posted", "venue change" — and reading it inline is the whole
+   * point of the home page. A post curated in from another npub (31608
+   * `sources`) is a blog article someone wrote for their own feed, routinely
+   * thousands of words, and expanding it turns the event home into an endless
+   * scroll of one article (prod feedback 2026-08-29). Attendee posts were
+   * already teasers for the same reason; external ones simply join them.
+   */
+  const expandsInFeed = (p: EventPost) => p.source === "event";
+
   /** Posts for a `posts` section, filtered by its source × visibility config. */
   function sectionPosts(section: Extract<MergedSection, { type: "posts" }>): EventPost[] {
     let list: EventPost[] = [];
@@ -847,7 +861,7 @@
   {#if latestPost}
     <!-- "Latest" highlight — newest update, links through to the Updates tab. -->
     <p class="kicker">{t("event.latest")}</p>
-    <PostCard post={latestPost} {naddr} full />
+    <PostCard post={latestPost} {naddr} full={expandsInFeed(latestPost)} />
   {/if}
 
   {#if effApproved && installHint}
@@ -894,7 +908,7 @@
         {#if list.length}
           <h2>{t("event.posts")}</h2>
           {#each list as post (post.source + post.authorPubkey + post.d)}
-            <PostCard {post} {naddr} full={post.source === "event"} />
+            <PostCard {post} {naddr} full={expandsInFeed(post)} />
           {/each}
         {/if}
       {:else if section.type === "pinned"}
@@ -930,7 +944,7 @@
       <!-- Default layout (no 31608): the official feed, minus the highlighted post. -->
       <h2>{t("event.updates")}</h2>
       {#each rest as post (post.d)}
-        <PostCard {post} {naddr} full />
+        <PostCard {post} {naddr} full={expandsInFeed(post)} />
       {/each}
     {/if}
   {/if}

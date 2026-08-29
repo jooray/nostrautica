@@ -22,6 +22,7 @@ import {
   cachedEventPosts,
   fetchExternalPosts,
   cachedExternalPosts,
+  fetchPostByD,
   externalFeedFilter,
   matchesFeed,
   MAX_EXTERNAL_PER_FEED,
@@ -410,5 +411,54 @@ describe("fetchExternalPosts", () => {
     const posts = await fetchExternalPosts(ctx, [{ pubkey: OFFICIAL }]);
     expect(posts).toEqual([]);
     expect(cachedExternalPosts(ctx.coordinate)).toHaveLength(1);
+  });
+});
+
+describe("fetchPostByD with declared external feeds", () => {
+  const ctx = {
+    coordinate: `31923:${EID}:ev`,
+    config: { relays: ["wss://event.example"] },
+  } as unknown as EventContext;
+
+  beforeEach(() => {
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    setActiveCacheOwner("1".repeat(64));
+    fetchEvents.mockReset();
+  });
+
+  it("resolves a curated article, so its 'read' link survives a cold open", () => {
+    // The feed cache carries these on a warm device; a shared link or a fresh
+    // browser has nothing, and an E_id-only query would 404 the article the
+    // reader just tapped.
+    fetchEvents.mockResolvedValue([ext(OFFICIAL, "kosice-1", 1500, { title: "Venue" })]);
+    return fetchPostByD(ctx, "kosice-1", [
+      { pubkey: OFFICIAL, relays: ["wss://org.example"], label: "Lunarpunk" },
+    ]).then((post) => {
+      expect(post).toMatchObject({ title: "Venue", source: "external", feedLabel: "Lunarpunk" });
+      // Queried on the union of the event's relays and the feed's own — the
+      // article is usually only on the latter.
+      expect(fetchEvents.mock.calls[0][1]).toEqual(["wss://event.example", "wss://org.example"]);
+      expect(fetchEvents.mock.calls[0][0].authors).toEqual([EID, OFFICIAL]);
+    });
+  });
+
+  it("the event's own post wins the address when an external feed reuses the same d", async () => {
+    // `d` is unique per author, not per event, so a multi-author query can
+    // return two winners. E_id must not be shadowed at its own address.
+    fetchEvents.mockResolvedValue([
+      ext(OFFICIAL, "update-1", 9000, { title: "Someone else's" }),
+      pub("update-1", 100, "Ours"),
+    ]);
+    const post = await fetchPostByD(ctx, "update-1", [{ pubkey: OFFICIAL }]);
+    expect(post).toMatchObject({ title: "Ours", source: "event" });
+  });
+
+  it("without declared feeds it queries E_id alone, exactly as before", async () => {
+    fetchEvents.mockResolvedValue([pub("x", 100, "Hello")]);
+    const post = await fetchPostByD(ctx, "x");
+    expect(post).toMatchObject({ title: "Hello", source: "event" });
+    expect(fetchEvents.mock.calls[0][0].authors).toEqual([EID]);
+    expect(fetchEvents.mock.calls[0][1]).toEqual(["wss://event.example"]);
   });
 });

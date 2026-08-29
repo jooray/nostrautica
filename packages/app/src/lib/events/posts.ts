@@ -394,14 +394,32 @@ export function cachedPostByD(coordinate: string, d: string): EventPost | undefi
 export async function fetchPostByD(
   ctx: EventContext,
   d: string,
+  sources: readonly ExternalFeed[] = [],
 ): Promise<EventPost | undefined> {
-  const { pubkey } = parseCoordinate(ctx.coordinate);
+  const { pubkey: eid } = parseCoordinate(ctx.coordinate);
+  // The declared external feeds are resolvable here too, or the "read" link on a
+  // curated article would 404 on any device that hasn't cached the feed — a
+  // shared link, a fresh browser, or just an evicted cache. Their articles are
+  // usually on the feed's own relays, so those are unioned in for this read.
+  const authors = [eid, ...sources.map((f) => f.pubkey).filter((p) => p !== eid)];
+  const relays = [
+    ...new Set([...ctx.config.relays, ...sources.flatMap((f) => f.relays ?? [])]),
+  ];
   const events = await fetchEvents(
-    { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors: [pubkey], "#d": [d] },
-    ctx.config.relays,
+    { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors, "#d": [d] },
+    relays,
   );
-  const [winner] = dedupePostsByD(events as unknown as RawPostEvent[]);
+  // `d` is only unique per AUTHOR, so a multi-author query can return more than
+  // one winner. The event's own post takes the address — an external feed can
+  // never shadow what E_id published at the same `d`.
+  const winners = dedupePostsByD(events as unknown as RawPostEvent[]);
+  const winner = winners.find((e) => e.pubkey === eid) ?? winners[0];
   if (!winner) return undefined;
+  if (winner.pubkey !== eid) {
+    const label = sources.find((f) => f.pubkey === winner.pubkey)?.label?.trim();
+    const post = toEventPost(winner, [], "external");
+    return label ? { ...post, feedLabel: label } : post;
+  }
   const keys = await loadEventKeys(ctx.coordinate);
   return toEventPost(winner, keys?.eck ?? [], "event");
 }
