@@ -1,0 +1,684 @@
+{
+  "_rubric": "1-5. reasoning: grounded in BOTH profiles, concrete hook, second person, no analytics. icebreaker: sendable verbatim, concrete, correct ownership (my=sender, your=recipient), natural in its language.",
+  "_gradedBy": "claude-opus-5 (Claude Code session), 2026-08-26 — blind: judging/key.json not read before grading. Round 2 added qwen-3-8-27b and qwen3-6-35b-a3b.",
+  "_note": "Small-model grades. Re-run with `node judge-pack.mjs --regrade-all` when a stronger judge is available; item ids are content hashes so the whole dataset can be regraded at once.",
+  "e35dbb83b8041053": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded, concrete ask; slight drift — Elena's stated gap is usability, not distribution"
+  },
+  "86d64c5adeae666b": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "honest about a weak pair but no concrete hook; 'the fit is indirect' is analytical"
+  },
+  "cf263bf2faaafb0b": {
+    "score": 5,
+    "flags": [],
+    "note": "names the co-design of a specific workshop for a specific community"
+  },
+  "6516b673dd194258": {
+    "score": 5,
+    "flags": [],
+    "note": "'that's you, almost word for word' + a concrete first action"
+  },
+  "3408f5f4c36f466e": {
+    "score": 5,
+    "flags": [],
+    "note": "grounded in Bao's leak and Gideon's before-not-after principle"
+  },
+  "ced7513e0f0e3abc": {
+    "score": 4,
+    "flags": [],
+    "note": "correct weak-pair call in second person; 'Skip.' is blunt for user-facing text"
+  },
+  "a33d024470ff1b88": {
+    "score": 4,
+    "flags": [],
+    "note": "good medium-pair bridge; hook is soft ('plenty to think about')"
+  },
+  "6832dcda2a06796c": {
+    "score": 5,
+    "flags": [],
+    "note": "transfers traffic-analysis skill onto transaction data — specific and correct"
+  },
+  "ccfff3bf6eda970b": {
+    "score": 5,
+    "flags": [],
+    "note": "two concrete actions, both grounded in Nadia's actual role"
+  },
+  "5ccbc7480c711ebf": {
+    "score": 5,
+    "flags": [],
+    "note": "pitch + fundraising ask, both from stated details"
+  },
+  "96586263a3056556": {
+    "score": 5,
+    "flags": [],
+    "note": "ties Yusuf's distribution skill to Casimir's stated insider-only problem"
+  },
+  "b2c9862f8d08f5b9": {
+    "score": 4,
+    "flags": [],
+    "note": "accurate and honest about what she can't do; slightly analytical"
+  },
+  "b69a55de9deab340": {
+    "score": 4,
+    "flags": [],
+    "note": "appropriately hedged for a medium pair, ends on a concrete question"
+  },
+  "1d525f7aa5d1fb27": {
+    "score": 4,
+    "flags": [],
+    "note": "honest about the mismatch while still offering a hallway hook"
+  },
+  "c959c1266f1d4aca": {
+    "score": 5,
+    "flags": [],
+    "note": "specific and useful in both directions"
+  },
+  "20e2831d2c85a7ee": {
+    "score": 5,
+    "flags": [],
+    "note": "'ask her to demo her worst interface' — the best hook in the sample"
+  },
+  "933f69ee72609c5f": {
+    "score": 4,
+    "flags": [],
+    "note": "correct skip with a genuine escape hatch (synth hardware)"
+  },
+  "bfc09c1391447cd1": {
+    "score": 5,
+    "flags": [],
+    "note": "quotes her own stated need back at her, then names an action"
+  },
+  "2926631ecbdddff8": {
+    "score": 4,
+    "flags": [],
+    "note": "strong framing but no concrete conversation opener"
+  },
+  "8cd260ebf9375c83": {
+    "score": 4,
+    "flags": [],
+    "note": "warm, honest weak-pair call; no hook, correctly"
+  },
+  "4e9c903c16825186": {
+    "score": 5,
+    "flags": [],
+    "note": "'pitch her your vision for financial inclusion tools' — concrete"
+  },
+  "d9e1e2b570e3774d": {
+    "score": 4,
+    "flags": [],
+    "note": "concrete, but routes through a third attendee (Fatima) the reader may not know"
+  },
+  "9c5e271371122859": {
+    "score": 4,
+    "flags": [],
+    "note": "honest indirect fit with a usable question"
+  },
+  "7f14f6644fb14a8c": {
+    "score": 5,
+    "flags": [],
+    "note": "the setlist hook; grounded in both sides of the gold-strong pair"
+  },
+  "f9cb593b20b4dfdd": {
+    "score": 4,
+    "flags": [],
+    "note": "correct skip, second person, mild useful caveat"
+  },
+  "fd36a0aa6d91889f": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and concrete but thin next to the other Mara/Nadia entry"
+  },
+  "c37b02d42b14ba53": {
+    "score": 5,
+    "flags": [],
+    "note": "names what to ask and why her filming would change"
+  },
+  "241af3ced5037b1d": {
+    "score": 5,
+    "flags": [],
+    "note": "notices the gap is engineering not marketing and still finds the real move"
+  },
+  "71ecc479e9155482": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "'his software needs love' — vague, no hook, no mention of his actual stated need"
+  },
+  "14f9149f591f5685": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "hinges on a hypothetical co-founding with a third attendee; speculative"
+  },
+  "59a805e21cd7882b": {
+    "score": 1,
+    "flags": [
+      "ownership",
+      "unsendable"
+    ],
+    "note": "full role inversion — addressed to the SENDER, and claims the recipient's identity and Copperwake"
+  },
+  "392518d50b49ab4e": {
+    "score": 5,
+    "flags": [],
+    "note": "Salt & Signal is genuinely Elena's; Dmitri branded it. Correct on the hardest case, natural Slovak"
+  },
+  "048dce79018d4f67": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership and a real ask; mixes ty and vy in one message"
+  },
+  "9ad28c6c48708930": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "sendable but nothing in it is about Yusuf specifically"
+  },
+  "147fdf9922daad89": {
+    "score": 5,
+    "flags": [],
+    "note": "opens from his own casework, asks Dmitri an engineer's question. Natural Slovak"
+  },
+  "5cba9c68d642e48a": {
+    "score": 4,
+    "flags": [],
+    "note": "correct, sendable, decent question; slightly flat opening"
+  },
+  "39d659bc092e9b8c": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and natural; asks for contacts rather than engaging his work"
+  },
+  "843922700ac73802": {
+    "score": 3,
+    "flags": [
+      "awkward-lang",
+      "invented"
+    ],
+    "note": "'počul som' — masculine form for a female sender; and 'môjho ďalšieho freedom-tech projektu' is a project she does not have"
+  },
+  "e0ae6cb47e1518b7": {
+    "score": 1,
+    "flags": [
+      "invented",
+      "ownership"
+    ],
+    "note": "sender given someone else's persona entirely — Casimir is not a data scientist and has no leaked dataset"
+  },
+  "76df0d1d86529e6c": {
+    "score": 5,
+    "flags": [],
+    "note": "correct ownership, specific, ends with a real invitation"
+  },
+  "872ae4df4dab027a": {
+    "score": 5,
+    "flags": [],
+    "note": "Nightjar Ledger is Tomás's and Dmitri branded it — both sides right, and it lands on his band goal"
+  },
+  "1457b300fbee3149": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership; 'you write defensive C' overstates what Sunny's profile says"
+  },
+  "7c9b9f85f0ede6db": {
+    "score": 4,
+    "flags": [],
+    "note": "ownership correct on both sides; opener ignores his actual goal (a bassist)"
+  },
+  "4e6a7e45d718d74f": {
+    "score": 5,
+    "flags": [],
+    "note": "Copperwake correctly credited to Sunny; clean and sendable"
+  },
+  "2226c83c24255c9b": {
+    "score": 4,
+    "flags": [],
+    "note": "correct attribution, real ask; leads with branding rather than his self-custody work"
+  },
+  "0594277e1ccd1b35": {
+    "score": 5,
+    "flags": [],
+    "note": "'môjmu Quillfeather Press' — his own imprint, her branding. Exactly the distinction under test, and natural Slovak"
+  },
+  "d2c35f81d767a4fd": {
+    "score": 5,
+    "flags": [],
+    "note": "reads like a real message; specific and immediately sendable"
+  },
+  "aa33abf5e3e68994": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct but contentless — no greeting, no name, no detail from either profile"
+  },
+  "7cd9806a905a8ec1": {
+    "score": 5,
+    "flags": [],
+    "note": "Handbasket Rails is hers, the branding is his — both right, and the question is good"
+  },
+  "146af0d5db4d5a32": {
+    "score": 5,
+    "flags": [],
+    "note": "'someone who's never held a seed phrase' — concrete, correct, sendable"
+  },
+  "7c03c4cdf4df62ae": {
+    "score": 4,
+    "flags": [],
+    "note": "uses his photography and her jam correctly; no greeting or name"
+  },
+  "21b5e7773e0bc70a": {
+    "score": 2,
+    "flags": [
+      "invented"
+    ],
+    "note": "claims a huge transaction dataset she is looking FOR, not one she has"
+  },
+  "70704eb0a96ce79d": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct content, poor Slovak: 'dôchodca z network inžiniering', doubled 'si si', untranslated 'hallway'"
+  },
+  "832ae6de84b6e027": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct and sendable but uses nothing specific about Yusuf"
+  },
+  "6d6b42a4cf35c45f": {
+    "score": 5,
+    "flags": [],
+    "note": "correct ownership, real question, idiomatic Slovak"
+  },
+  "d5d8b1c250668906": {
+    "score": 5,
+    "flags": [],
+    "note": "both stated needs matched, ends with a natural invitation"
+  },
+  "9a78690688384098": {
+    "score": 4,
+    "flags": [],
+    "note": "correct, sendable; asking for a referral is weaker than engaging him"
+  },
+  "33581ac1c480d0b4": {
+    "score": 3,
+    "flags": [
+      "ownership"
+    ],
+    "note": "credits Yusuf with 'a supper club' that is the sender's own, then corrects itself — muddled"
+  },
+  "67d3dc3c8b233ed9": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and grounded in her band goal; a bit thin on his specifics"
+  },
+  "da40e79a2b471f51": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "'v súkromí scéne' is broken, 'vypotím' is the wrong verb, and it switches ty→vy mid-message"
+  },
+  "1b8e0fc5d3fe6e35": {
+    "score": 5,
+    "flags": [],
+    "note": "grounded, second person, ends on a specific operational question"
+  },
+  "207147f7ffcd5c3f": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct skip but analytical — 'no clear overlap in your needs or his offers' is scoresplaining"
+  },
+  "55e4d62f2f1f868b": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate and nuanced but reads as a briefing about her, no hook"
+  },
+  "d1c3b047cc624066": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "honest weak-pair call, no hook, analytical framing"
+  },
+  "7ba8914aa4a624c5": {
+    "score": 4,
+    "flags": [],
+    "note": "strong and concrete; tail slips into 'makes him a perfect fit' rating-talk"
+  },
+  "e13d4564e5fc8424": {
+    "score": 2,
+    "flags": [
+      "generic"
+    ],
+    "note": "gold-strong pair spent entirely on who-seeks-whom meta; no hook at all"
+  },
+  "f0c9b1c228720c96": {
+    "score": 4,
+    "flags": [],
+    "note": "correct skip with a genuine escape hatch"
+  },
+  "e3879f8fe03542b7": {
+    "score": 4,
+    "flags": [],
+    "note": "concrete ask; opens by reciting the reader's own profile back at them"
+  },
+  "68099a8fcb50290c": {
+    "score": 5,
+    "flags": [],
+    "note": "'ask him how he would design the onboarding flow for your mutual-aid community'"
+  },
+  "18d5e2f11bf18dc2": {
+    "score": 5,
+    "flags": [],
+    "note": "both sides' stated needs matched, ends with an action"
+  },
+  "f79fac3f39e3fc53": {
+    "score": 4,
+    "flags": [],
+    "note": "correct skip, offers a referral angle instead of nothing"
+  },
+  "ca830def5eb502a4": {
+    "score": 5,
+    "flags": [],
+    "note": "ZK proofs on constrained embedded hardware — inventive and specific"
+  },
+  "e3fb6e23a8756bb6": {
+    "score": 4,
+    "flags": [],
+    "note": "honest about the weaker fit and still finds a real thing to discuss"
+  },
+  "b6476181ffccffbc": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct but limp; no reason to actually go and talk to him"
+  },
+  "313febfa9314ddda": {
+    "score": 2,
+    "flags": [
+      "invented"
+    ],
+    "note": "'your secure device' — she is a firmware engineer SEEKING a hardware builder, she has no device"
+  },
+  "72bf3934ab45acd2": {
+    "score": 4,
+    "flags": [],
+    "note": "right substance and a real question; 'the dataset you crave' misreads a lawyer"
+  },
+  "52229e2f9140886e": {
+    "score": 5,
+    "flags": [],
+    "note": "concrete, mutual, second person"
+  },
+  "c0d8a66757753b3e": {
+    "score": 5,
+    "flags": [],
+    "note": "names a specific action for each side — sit in, be a friendly face"
+  },
+  "f10f21c17d90f5ef": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct skip, no hook, analytical"
+  },
+  "b8fd3d9cc81fae0d": {
+    "score": 3,
+    "flags": [],
+    "note": "honest and correctly hedged but nothing to do about it now"
+  },
+  "61235e69a8173baa": {
+    "score": 4,
+    "flags": [],
+    "note": "finds the real angle despite the stated mismatch"
+  },
+  "1bc6ffa286695b6e": {
+    "score": 4,
+    "flags": [],
+    "note": "concrete ask; 'aligns perfectly' oversells a medium pair"
+  },
+  "a9bb424a9805ef09": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and specific about the complementarity; no conversational opener"
+  },
+  "45e8342179c227b1": {
+    "score": 4,
+    "flags": [],
+    "note": "tight and correct; 'grab Casimir' is the action, no question offered"
+  },
+  "108191ceb083fe84": {
+    "score": 5,
+    "flags": [],
+    "note": "asks about the architecture — exactly what these two would actually discuss"
+  },
+  "70a287453b1de3d5": {
+    "score": 4,
+    "flags": [],
+    "note": "useful and honest about her real bottleneck; slightly lecturing"
+  },
+  "239087437b99eefe": {
+    "score": 3,
+    "flags": [],
+    "note": "opens on a false premise (Ingrid is not a journalist) then recovers with a real hook"
+  },
+  "bcd5b701feea7c03": {
+    "score": 4,
+    "flags": [],
+    "note": "concrete question; casts an organizer as a fundraising founder, which is a stretch"
+  },
+  "7aa4e26aa2df71c9": {
+    "score": 5,
+    "flags": [],
+    "note": "'before she hits record' — specific, vivid, correct"
+  },
+  "c74a34387c8ba3dc": {
+    "score": 3,
+    "flags": [],
+    "note": "correct and appropriately hedged, but 'might eventually help' is not a reason to meet"
+  },
+  "7889d2a7b42e8148": {
+    "score": 1,
+    "flags": [
+      "wrong-language",
+      "generic"
+    ],
+    "note": "Slovak event, English message — and nothing in it is about Yusuf"
+  },
+  "a4ffa0d3fc6f98f3": {
+    "score": 5,
+    "flags": [],
+    "note": "supper club is genuinely his; warm, sendable, asks a real question"
+  },
+  "c095683a020306fc": {
+    "score": 2,
+    "flags": [
+      "invented",
+      "awkward-lang"
+    ],
+    "note": "'chýba ti business model' — he never says that; 'Pozdrav' is not a greeting anyone uses"
+  },
+  "9f4887f78348ad8b": {
+    "score": 4,
+    "flags": [],
+    "note": "Halcyon Index correctly his own; sendable, slightly salesy"
+  },
+  "4af2e0863131acfa": {
+    "score": 4,
+    "flags": [],
+    "note": "Brambleway his, branding hers — correct on the hard case; 'documentary' is an embellishment"
+  },
+  "1493cedab6d0925d": {
+    "score": 4,
+    "flags": [],
+    "note": "attribution correct; 'you worked on Quillfeather Press' could say 'my' and be unambiguous"
+  },
+  "54d467d8242902a4": {
+    "score": 5,
+    "flags": [],
+    "note": "'my Brambleway documentary' — states the ownership explicitly, which is the whole trap"
+  },
+  "9c35b98b4da9fe2e": {
+    "score": 3,
+    "flags": [],
+    "note": "ownership right, but asks a Rust engineer about branding and ignores his own actual need"
+  },
+  "b9ca180904db17f9": {
+    "score": 5,
+    "flags": [],
+    "note": "both stated needs, one clear question, immediately sendable"
+  },
+  "0f1d3c44fc956eff": {
+    "score": 2,
+    "flags": [],
+    "note": "ownership fine but incoherent — asks how a dataset will find her a bassist"
+  },
+  "4155639af89ddbc8": {
+    "score": 1,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "Czech, not Slovak ('Hledám', 'pro přinesení'), and formal 'Vaše' to a peer"
+  },
+  "16f97e891f92fa70": {
+    "score": 1,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "Slovak event, English message; content is otherwise fine"
+  },
+  "08b33aa3d3a826b9": {
+    "score": 5,
+    "flags": [],
+    "note": "his stated need, her stated skill, one question — textbook"
+  },
+  "b8946ee365159b5e": {
+    "score": 5,
+    "flags": [],
+    "note": "Handbasket Rails correctly hers, and it respects his low-stakes posture"
+  },
+  "3c0a81163823c18d": {
+    "score": 1,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "Czech ('Hledám', 'jsi chránil', 'mém článku'); 'Dobré, Gideon' is not a greeting"
+  },
+  "ea31ae02823d8a61": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "repetitive, and casts a bassist as a hardware builder"
+  },
+  "2de1d876df96ca69": {
+    "score": 1,
+    "flags": [
+      "ownership",
+      "unsendable",
+      "wrong-language"
+    ],
+    "note": "addressed to its own sender, speaks as the recipient ('mých workshopov', 'môj Quillfeather Press'), and in Czech"
+  },
+  "94f8ae49edd618aa": {
+    "score": 4,
+    "flags": [],
+    "note": "Copperwake correctly hers; a reasonable ask of a well-connected stranger"
+  },
+  "834da3af4f401e36": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct and sendable but formulaic — the third message this run opening 'Vidím, že máš...'"
+  },
+  "5879868f7ba37163": {
+    "score": 1,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "Czech; and 'přesný protiklad' (exact opposite) is a strange thing to open with"
+  },
+  "a86e15a0d630cec7": {
+    "score": 5,
+    "flags": [],
+    "note": "Tessellate Bay hers, branding his — correct, and the question follows from it"
+  },
+  "3c0b08550f725ae5": {
+    "score": 1,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "Czech, masculine 'Rád' for a female sender, and asks a human-rights lawyer for branding help"
+  },
+  "f06b39b36b4fb7f9": {
+    "score": 2,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "ownership correct (Copperwake hers, branding his) but the sentence is Czech"
+  },
+  "07d1750e2a187f78": {
+    "score": 4,
+    "flags": [],
+    "note": "supper club correctly his; warm and sendable, ask is a little thin"
+  },
+  "06f7ff6a4f9e9005": {
+    "score": 5,
+    "flags": [],
+    "note": "proper Slovak, correct ownership, both needs named, one clear question"
+  },
+  "b0746fdafcf4cdbe": {
+    "score": 1,
+    "flags": [
+      "ownership",
+      "wrong-language"
+    ],
+    "note": "addressed to its own sender and calls his own Ferrous Tideline 'tvůj'; Czech too"
+  },
+  "ec2dee28b05f3e83": {
+    "score": 5,
+    "flags": [],
+    "note": "'I founded Tessellate Bay. Since you did the branding for it' — both halves right"
+  },
+  "e38c1ea4b309858b": {
+    "score": 2,
+    "flags": [
+      "invented",
+      "generic"
+    ],
+    "note": "same 'chýba ti business model' template, same invented deficiency, different recipient"
+  },
+  "99f7dd00f7cd6807": {
+    "score": 1,
+    "flags": [
+      "wrong-language"
+    ],
+    "note": "Slovak event, English message; ownership is correct underneath"
+  },
+  "b2261ee028d2635a": {
+    "score": 5,
+    "flags": [],
+    "note": "Petrichor Fund correctly his, and offers something concrete rather than asking"
+  }
+}

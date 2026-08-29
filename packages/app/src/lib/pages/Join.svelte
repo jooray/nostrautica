@@ -54,18 +54,22 @@
   $effect(() => {
     if (codeParam) {
       code = codeParam;
-      stripInviteCodeFromUrl();
+      stripInviteParamsFromUrl();
     }
   });
 
-  function stripInviteCodeFromUrl(): void {
+  function stripInviteParamsFromUrl(): void {
     if (typeof window === "undefined") return;
     const hash = window.location.hash;
     const qIndex = hash.indexOf("?");
     if (qIndex < 0) return;
     const params = new URLSearchParams(hash.slice(qIndex + 1));
-    if (params.get("code") === null) return;
+    if (params.get("code") === null && params.get("lang") === null) return;
     params.delete("code");
+    // `lang` rides the same link (organizer.ts) and was already consumed at boot
+    // by i18n.init(), which persisted it as a soft default — leaving it in the
+    // URL would only make a shared/bookmarked link carry a stale one.
+    params.delete("lang");
     const path = hash.slice(0, qIndex);
     const rest = params.toString();
     window.history.replaceState(null, "", rest ? `${path}?${rest}` : path);

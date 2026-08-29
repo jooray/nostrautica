@@ -526,3 +526,125 @@ A lost call is a lost *batch* of ~30 graded openers; waiting is free by comparis
 Diagnose it directly rather than inferring it from throughput — fire eight small
 parallel completions and look at the status codes. If they come back 429 in
 milliseconds, lower `CONC`; if they come back 200, raise it.
+
+## Model bake-off — adding a model in one command (added 2026-08-26)
+
+Everything above answered "which model?" by hand: a matrix drive, an evaluator, a
+separate icebreaker harness, a hand-built blind pack, and a writeup that stitched
+them together. Fine once. Not fine at the rate flash-tier models now ship — and
+the cost of re-deriving the procedure from a README is that the second run is
+never quite the first run, so the two are not comparable.
+
+`bakeoff.mjs` freezes the suite in code. Every arm calls the scripts above rather
+than reimplementing them, so a model measured in December is measured against
+exactly what `deepseek-v4-flash-0731` was measured against in August.
+
+```sh
+export VENICE_API_KEY=...
+pnpm --filter @nostrautica/coordinator build   # the icebreaker arm imports dist
+node refresh-models.mjs                        # prices + capabilities snapshot
+node bakeoff.mjs <venice-model-id>             # ~10 min, ~$0.10, fully cached
+node bakeoff-report.mjs                        # the cross-model table
+node judge-pack.mjs && $EDITOR judging/pack.md # blind-grade the new items
+node judge-report.mjs
+```
+
+The suite (`SUITE` in `bakeoff.mjs`, version-stamped into every card):
+
+| arm | what it answers |
+|---|---|
+| BP3 / K=10 / eval subset / seeds 1+2 | scoring quality, matched to every historical row |
+| BP3 / K=10 / full 190 / seed 1 | the harder ranking, and the cost basis |
+| R3 / K=10 / `reverse-dense` / sk+en ×6 | attribution errors, graded by string match |
+| 6 serial K=10 calls | latency and output tok/s, uncontaminated by concurrency |
+
+### Three things this adds that the earlier rounds did by hand or not at all
+
+**Deployability is a column, not a footnote.** A model is BLOCKED in the report
+if `providers/venice.ts` could not drive it as coded today. Two checks, both
+learned the hard way on 2026-08-26 (see `docs/MODEL-BAKEOFF.md`):
+
+- `venice_parameters.disable_thinking` — sent unconditionally by the coordinator
+  and by `lib.mjs`. `z-ai-glm-5-3-flash` answers a request carrying it with
+  **HTTP 400 "Reasoning is mandatory for this endpoint and cannot be disabled."**
+  `complete()` now detects that specific 400, downgrades the model, persists the
+  fact to `model-profiles.json`, and retries — so the next model that refuses
+  costs one wasted call instead of twelve retries × every call in the run.
+- **strict `JSON.parse`, not `parseJsonLoose`.** The harness has always parsed
+  leniently; `venice.ts` does `JSON.parse(content)` and throws
+  `ProviderContractError` on anything else. A model that wraps strict-schema
+  output in a ` ```json ` fence therefore benchmarks at zero format failures and
+  fails 100% of production calls. Every call now records whether the RAW body
+  survived `JSON.parse`, and the report prints the rate.
+
+**Cost is measured, not looked up.** `PRICING` in `lib.mjs` is hand-copied, so a
+model missing from it cost exactly `$0.0000` — which reads as free, not as
+unknown. `refresh-models.mjs` snapshots `GET /models` to `venice-models.json` and
+`costUsd()` falls back to it. The pinned table still wins where it has an entry,
+so cost figures already published in `docs/MATCHING-BENCHMARK.md` stay
+reproducible after Venice reprices (it has: `zai-org-glm-4.7-flash` is now
+$0.06/$0.40, not the pinned $0.125/$0.50 — `refresh-models.mjs` reports the drift).
+
+**Latency has its own arm.** The scoring arms run 16 calls in flight, and Venice
+refuses concurrency rather than queueing it, so their "p50" is partly a retry
+schedule: the same model, same prompt, same day measured 6.2s on one arm and
+28.9s on another. `latency-probe.mjs` fires six calls one at a time and reports
+p50/p95 and output tok/s. Only that number belongs in a cross-model table.
+
+### Judging: content-addressed, so grades survive the next model
+
+`judge-pack.mjs` builds a blind pack from every card. An item's id is the SHA-256
+of its text, which is what makes the whole thing repeatable:
+
+- grading is append-only — regenerating the pack with a fourth model in it leaves
+  every existing grade attached to the text it was given for, and only genuinely
+  new items appear as ungraded;
+- a full re-grade over the WHOLE dataset (better judge, changed rubric) is
+  `node judge-pack.mjs --regrade-all` — which is the only way to compare prose
+  across models fairly, since it puts every model in front of the same judge on
+  the same day;
+- `pack.json` / `pack.md` carry no model attribution and are shuffled with a
+  fixed seed; `key.json` holds the mapping and is joined only by
+  `judge-report.mjs`, after grading.
+
+Samples are stratified — reasoning by gold label, icebreakers by language —
+because a judge shown twenty gold-strong pairs grades every model 5/5. The
+interesting text is what a model writes about two people with little to say to
+each other.
+
+### Adding the next model
+
+Nothing in `bakeoff.mjs` names a model. `node bakeoff.mjs <id>` is the whole
+procedure; request quirks are discovered and persisted, prices come from the
+snapshot, and `bakeoff-report.mjs` refuses to print a table whose cards span
+suite versions or prompt fingerprints (a stale `dist/` silently benchmarks the
+previous release's icebreaker prompt — `record-prompts.mjs` writes the exact
+bytes and their hashes to `results/bakeoff/PROMPTS.md`).
+
+### Two traps this suite fell into, now guarded
+
+Both were found while benchmarking `z-ai-glm-5-3-flash` on 2026-08-26, and both
+produced a *result* rather than an error — which is the dangerous kind.
+
+**A model that ignores the response schema was silently excused from the sample.**
+`icebreaker-run.mjs` read `value.matches`. GLM 5.3 Flash answers the reverse batch
+with a bare array or `{entries: [...]}` about two-thirds of the time, and on those
+calls `.matches` is `undefined` — so they contributed zero graded openers. Its
+first card showed n=799 against DeepSeek's n=2821 and a near-perfect attribution
+rate on the sample it had been excused from. The run now takes the entries
+wherever the model put them and counts the deviation separately, because
+production's `validateProviderValue` rejects the undeclared shapes outright.
+
+**The permutation test was clustering by pair, not by call.** `stats.mjs` shuffles
+clusters because openers inside one LLM call are correlated. The cluster was being
+reconstructed downstream from `(target, candidate, rep)` — which is right for the
+forward shape and wrong for the reverse one, where a single call carries ten
+different targets. Each call became ten clusters, the correlation was discarded,
+and the p-values came out too small (the Slovak comparison read p=0.0008 where it
+is actually p=0.016 — same conclusion, unearned confidence). Every row now carries
+a `callId` stamped by the run that produced it, so the cluster is recorded rather
+than inferred. Rows without one make `bakeoff.mjs` say so.
+
+**And one reporting habit:** `bakeoff-report.mjs` prints per-language attribution
+rows unconditionally. Pooling hid this run's only significant result — the two
+models fail in opposite languages and cancelled to nothing.

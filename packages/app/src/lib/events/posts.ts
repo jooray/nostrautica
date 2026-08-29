@@ -25,17 +25,18 @@ import {
   decryptMembersPost,
   encryptMembersPost,
   type EckVersion,
+  type ExternalFeed,
   supersedes,
 } from "@nostrautica/protocol";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEvents, type Filter } from "$lib/nostr/ndk.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import { fetchRoster } from "./attendee.js";
 import type { EventContext } from "./event-context.js";
-import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, cacheDelete, activeCacheOwner, ANON } from "$lib/cache/persist.js";
 
-export type PostSource = "event" | "attendees";
+export type PostSource = "event" | "attendees" | "external";
 export type PostVisibility = "public" | "members";
 
 export interface EventPost {
@@ -54,6 +55,12 @@ export interface EventPost {
   authorPubkey: string; // signer: E_id for event posts, attendee otherwise
   author?: string; // optional organizer attribution inside a 31607
   eckVersion?: number; // key version named by the 31607 `eck` tag
+  /**
+   * `source === "external"` only: the organizer's own name for the feed this
+   * came from (31608 `sources[].label`). Attribution, so a reader can tell an
+   * article pulled in from another npub from one the event itself wrote.
+   */
+  feedLabel?: string;
 }
 
 /** The slice of a Nostr event this module needs (pure/testable). */
@@ -166,7 +173,8 @@ function newestFirst(posts: EventPost[]): EventPost[] {
 // content, so we owner-scope whenever logged in (wiped on logout) and fall back
 // to anon for logged-out visitors (public 30023 only). `at` = newest post's edit
 // time, so latest-wins never regresses a feed to an older snapshot.
-function postsKey(coordinate: string, slot: "event" | "attendees"): string {
+type PostSlot = "event" | "attendees" | "external";
+function postsKey(coordinate: string, slot: PostSlot): string {
   return `posts:${coordinate}:${slot}`;
 }
 function postsScope(): string {
@@ -183,11 +191,14 @@ export function cachedEventPosts(coordinate: string): EventPost[] | undefined {
 export function cachedAttendeePosts(coordinate: string): EventPost[] | undefined {
   return cacheGet<EventPost[]>(postsKey(coordinate, "attendees"), postsScope())?.data;
 }
+export function cachedExternalPosts(coordinate: string): EventPost[] | undefined {
+  return cacheGet<EventPost[]>(postsKey(coordinate, "external"), postsScope())?.data;
+}
 // Bound the persisted feed at 300/coordinate (§3.5); posts are newest-first.
 const MAX_CACHED_POSTS = 300;
-function cachePosts(coordinate: string, key: "event" | "attendees", posts: EventPost[]): void {
+function cachePosts(coordinate: string, key: PostSlot, posts: EventPost[], at?: number): void {
   const capped = posts.length > MAX_CACHED_POSTS ? posts.slice(0, MAX_CACHED_POSTS) : posts;
-  cacheSet(postsKey(coordinate, key), capped, newestEditedAt(posts), postsScope());
+  cacheSet(postsKey(coordinate, key), capped, at ?? newestEditedAt(posts), postsScope());
 }
 
 export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
@@ -230,6 +241,140 @@ export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]
   return posts;
 }
 
+// ── External feeds (31608 `sources`) ─────────────────────────────────────────
+
+/**
+ * Per declared feed. An entry that narrows nothing but the author means "every
+ * article this npub has ever written", so the reader caps it rather than
+ * trusting the organizer's query to be small — a curated feed that shows the
+ * newest 100 is a feed; one that pulls a decade of articles into the event page
+ * is an outage.
+ */
+export const MAX_EXTERNAL_PER_FEED = 100;
+
+/** The relay-side query for one declared feed. */
+export function externalFeedFilter(src: ExternalFeed): Filter {
+  return {
+    kinds: [KIND_LONGFORM],
+    authors: [src.pubkey],
+    limit: MAX_EXTERNAL_PER_FEED,
+    ...(src.tags?.length ? { "#t": src.tags } : {}),
+    // `created_at`, not `published_at` — see matchesFeed for why this is only a
+    // prefilter. `until` is deliberately NOT sent: an article published before
+    // `until` may have been edited after it, and dropping it relay-side would
+    // make it unrecoverable client-side.
+    ...(src.since !== undefined ? { since: src.since } : {}),
+  };
+}
+
+/**
+ * Does this article actually satisfy what the organizer declared?
+ *
+ * Re-applied client-side because a filter is a request, not a guarantee: a relay
+ * that ignores `#t` or `since` would quietly widen the organizer's curation, and
+ * `authors` is the one that matters most — nothing else stops a relay from
+ * answering with an article by someone the organizer never named. (Signatures
+ * are verified upstream by NDK, so `pubkey` here is genuine; what is unverified
+ * is whether it is the pubkey we ASKED for.)
+ *
+ * The date bounds are checked against `published_at`, which is what an organizer
+ * means by "since 1 August" — a NIP-23 edit bumps `created_at` without moving
+ * `published_at`, so relay-side `since` alone would admit a July article edited
+ * in August.
+ */
+export function matchesFeed(e: RawPostEvent, src: ExternalFeed): boolean {
+  if (e.pubkey !== src.pubkey) return false;
+  if (src.tags?.length) {
+    const hashtags = new Set(
+      e.tags.filter((t) => t[0] === "t" && t[1]).map((t) => t[1]!.toLowerCase()),
+    );
+    if (!src.tags.some((want) => hashtags.has(want.trim().toLowerCase()))) return false;
+  }
+  const publishedAt = Number(tag(e.tags, "published_at")) || e.created_at;
+  if (src.since !== undefined && publishedAt < src.since) return false;
+  if (src.until !== undefined && publishedAt > src.until) return false;
+  return true;
+}
+
+/**
+ * Public 30023 by the npubs the organizer declared in the 31608 `sources`,
+ * folded into the official feed (spec §7.4).
+ *
+ * One fetch per distinct relay set, not per source: several feeds usually share
+ * the organization's relays, and `fetchEvents` takes a filter ARRAY, so they
+ * ride one subscription. A source without its own `relays` uses the event's.
+ *
+ * E_id's own articles are excluded — those are already the official feed, and a
+ * source naming E_id would otherwise duplicate every post on the page.
+ */
+export async function fetchExternalPosts(
+  ctx: EventContext,
+  sources: readonly ExternalFeed[],
+): Promise<EventPost[]> {
+  const { pubkey: eid } = parseCoordinate(ctx.coordinate);
+  const feeds = sources.filter((s) => s.pubkey !== eid);
+  if (!feeds.length) {
+    // DELETE, not "cache an empty list": the organizer removing their last feed
+    // has to make those articles disappear, and an empty write would be stamped
+    // older than the entry it needs to replace and silently dropped by
+    // latest-wins — leaving the removed feed on the page forever.
+    cacheDelete(postsKey(ctx.coordinate, "external"), postsScope());
+    return [];
+  }
+
+  const byRelaySet = new Map<string, ExternalFeed[]>();
+  for (const src of feeds) {
+    const relays = src.relays?.length ? src.relays : ctx.config.relays;
+    const key = [...relays].sort().join(",");
+    byRelaySet.set(key, [...(byRelaySet.get(key) ?? []), src]);
+  }
+
+  const batches = await Promise.all(
+    [...byRelaySet.entries()].map(async ([key, group]) => {
+      const relays = key ? key.split(",") : ctx.config.relays;
+      try {
+        const events = await fetchEvents(group.map(externalFeedFilter), relays);
+        // A relay answering one filter of the batch can return events matching a
+        // DIFFERENT source in the same group, so each event is kept only if some
+        // source in this group actually wanted it.
+        return {
+          ok: true,
+          events: (events as unknown as RawPostEvent[]).filter((e) =>
+            group.some((src) => matchesFeed(e, src)),
+          ),
+        };
+      } catch {
+        return { ok: false, events: [] as RawPostEvent[] };
+      }
+    }),
+  );
+
+  const labelOf = new Map(
+    feeds.filter((f) => f.label?.trim()).map((f) => [f.pubkey, f.label!.trim()]),
+  );
+  const posts = newestFirst(
+    dedupePostsByD(batches.flatMap((b) => b.events)).map((e) => {
+      const post = toEventPost(e, [], "external");
+      const label = labelOf.get(post.authorPubkey);
+      return label ? { ...post, feedLabel: label } : post;
+    }),
+  );
+  // Stamped with NOW, not the newest article's time — unlike the event's own
+  // feed, the query behind this one can change under it. Narrowing a source (a
+  // hashtag removed, a later `since`) legitimately produces a SHORTER feed whose
+  // newest post is older than what is cached, and post-time stamping would
+  // discard that write and keep showing articles the organizer just excluded.
+  //
+  // The protection that stamping bought is kept in a form that doesn't confuse
+  // the two cases: a feed is only persisted when EVERY relay group answered.
+  // A shrunk feed is then always a real config change, never an unreachable
+  // relay, and a failed read leaves the previous snapshot painting.
+  if (batches.every((b) => b.ok)) {
+    cachePosts(ctx.coordinate, "external", posts, Math.floor(Date.now() / 1000));
+  }
+  return posts;
+}
+
 /**
  * Resolve one post at `d`: 30023-by-d, then 31607-by-d, keeping the highest
  * created_at across both kinds (spec §10.1 `#/e/:naddr/posts/:d`).
@@ -241,21 +386,40 @@ export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]
 export function cachedPostByD(coordinate: string, d: string): EventPost | undefined {
   return (
     cachedEventPosts(coordinate)?.find((p) => p.d === d) ??
-    cachedAttendeePosts(coordinate)?.find((p) => p.d === d)
+    cachedAttendeePosts(coordinate)?.find((p) => p.d === d) ??
+    cachedExternalPosts(coordinate)?.find((p) => p.d === d)
   );
 }
 
 export async function fetchPostByD(
   ctx: EventContext,
   d: string,
+  sources: readonly ExternalFeed[] = [],
 ): Promise<EventPost | undefined> {
-  const { pubkey } = parseCoordinate(ctx.coordinate);
+  const { pubkey: eid } = parseCoordinate(ctx.coordinate);
+  // The declared external feeds are resolvable here too, or the "read" link on a
+  // curated article would 404 on any device that hasn't cached the feed — a
+  // shared link, a fresh browser, or just an evicted cache. Their articles are
+  // usually on the feed's own relays, so those are unioned in for this read.
+  const authors = [eid, ...sources.map((f) => f.pubkey).filter((p) => p !== eid)];
+  const relays = [
+    ...new Set([...ctx.config.relays, ...sources.flatMap((f) => f.relays ?? [])]),
+  ];
   const events = await fetchEvents(
-    { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors: [pubkey], "#d": [d] },
-    ctx.config.relays,
+    { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors, "#d": [d] },
+    relays,
   );
-  const [winner] = dedupePostsByD(events as unknown as RawPostEvent[]);
+  // `d` is only unique per AUTHOR, so a multi-author query can return more than
+  // one winner. The event's own post takes the address — an external feed can
+  // never shadow what E_id published at the same `d`.
+  const winners = dedupePostsByD(events as unknown as RawPostEvent[]);
+  const winner = winners.find((e) => e.pubkey === eid) ?? winners[0];
   if (!winner) return undefined;
+  if (winner.pubkey !== eid) {
+    const label = sources.find((f) => f.pubkey === winner.pubkey)?.label?.trim();
+    const post = toEventPost(winner, [], "external");
+    return label ? { ...post, feedLabel: label } : post;
+  }
   const keys = await loadEventKeys(ctx.coordinate);
   return toEventPost(winner, keys?.eck ?? [], "event");
 }

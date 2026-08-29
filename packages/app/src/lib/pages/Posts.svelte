@@ -17,10 +17,13 @@
   import {
     fetchEventPosts,
     fetchAttendeePosts,
+    fetchExternalPosts,
     cachedEventPosts,
     cachedAttendeePosts,
+    cachedExternalPosts,
     type EventPost,
   } from "$lib/events/posts.js";
+  import { fetchEventPage, cachedEventPage } from "$lib/events/event-page.js";
   import PostCard from "$lib/components/PostCard.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -39,8 +42,16 @@
   let attendeePosts = $state<EventPost[]>(
     (cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? [],
   );
+  // Long-form by other npubs the organizer folded in (31608 `sources`). Shown
+  // under "the event": the organizer curated them as part of its official
+  // channel, and PostCard attributes each one to the feed it came from.
+  let externalPosts = $state<EventPost[]>(
+    (cachedCtx && cachedExternalPosts(cachedCtx.coordinate)) ?? [],
+  );
   // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted values
-  let loading = $state(eventPosts.length === 0 && attendeePosts.length === 0);
+  let loading = $state(
+    eventPosts.length === 0 && attendeePosts.length === 0 && externalPosts.length === 0,
+  );
   // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (!loading) perfMark("Posts", "cache-paint");
 
@@ -49,7 +60,7 @@
 
   const posts = $derived.by(() => {
     let list: EventPost[] = [];
-    if (source !== "attendees") list = list.concat(eventPosts);
+    if (source !== "attendees") list = list.concat(eventPosts, externalPosts);
     if (source !== "event") list = list.concat(attendeePosts);
     if (visibility === "public") list = list.filter((p) => !p.membersOnly);
     if (visibility === "members") list = list.filter((p) => p.membersOnly);
@@ -64,17 +75,27 @@
       // returns (covers the cold-context case where cachedCtx was null above).
       if (eventPosts.length === 0) eventPosts = cachedEventPosts(ctx.coordinate) ?? [];
       if (attendeePosts.length === 0) attendeePosts = cachedAttendeePosts(ctx.coordinate) ?? [];
-      if (eventPosts.length || attendeePosts.length) loading = false;
+      if (externalPosts.length === 0) externalPosts = cachedExternalPosts(ctx.coordinate) ?? [];
+      if (eventPosts.length || attendeePosts.length || externalPosts.length) loading = false;
       // Fold in any pending ECK grants so members-only posts decrypt.
       if (session.signer) await receiveGrants(session.signer).catch(() => {});
-      const [ev, att] = await Promise.all([
+      // The declared external feeds live on the 31608, so that read gates only
+      // the external fetch — the two own feeds start immediately alongside it.
+      const page = cachedEventPage(ctx.coordinate);
+      const external = (async () => {
+        const sources = (await fetchEventPage(ctx).catch(() => page))?.sources ?? [];
+        return fetchExternalPosts(ctx!, sources).catch(() => externalPosts);
+      })();
+      const [ev, att, ext] = await Promise.all([
         fetchEventPosts(ctx).catch(() => eventPosts),
         fetchAttendeePosts(ctx).catch(() => attendeePosts),
+        external,
       ]);
       eventPosts = ev;
       attendeePosts = att;
+      externalPosts = ext;
     } catch (e) {
-      if (eventPosts.length === 0 && attendeePosts.length === 0)
+      if (eventPosts.length === 0 && attendeePosts.length === 0 && externalPosts.length === 0)
         error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;

@@ -97,6 +97,7 @@ const SECTIONS = [
     docs: [
       { file: "E2E-TESTING-GUIDE.md", title: "End-to-End Testing Guide" },
       { file: "MATCHING-BENCHMARK.md", title: "Matching Benchmark (models & prompts)" },
+      { file: "MODEL-BAKEOFF.md", title: "Model Bake-off (newer models vs production)" },
     ],
   },
 ];

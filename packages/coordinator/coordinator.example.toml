@@ -29,6 +29,21 @@ provider = "venice-stt"           # only implemented STT provider
 model = "openai/whisper-large-v3"
 
 # Resolve these against GET /models at runtime — never hardcode volatile ids.
+#
+# Any [models.*] block also accepts `disable_thinking = false`, for a model that
+# reasons unconditionally. The adapter otherwise sends
+# `venice_parameters.disable_thinking: true` on every call, and a model that
+# refuses it answers HTTP 400 "Reasoning is mandatory for this endpoint and
+# cannot be disabled" to EVERY request — a total outage for that role, not a
+# degraded result. `z-ai-glm-5-3-flash` is the first model to do this (and it
+# refuses `reasoning_effort = "none"` as well, despite GET /models advertising
+# "none" as supported — so the catalogue cannot be trusted for this one field).
+#
+# Setting it is optional: the adapter detects the refusal on the first call,
+# remembers it for the process and retries without the parameter. Setting it
+# explicitly just skips that one wasted call at startup. Budget for the reasoning
+# tokens either way — they are billed even though `strip_thinking_response` keeps
+# them out of the content. See docs/MODEL-BAKEOFF.md.
 [models.summary]
 provider = "venice"
 model = "qwen3-4b"                # cheap: nostr-context summaries

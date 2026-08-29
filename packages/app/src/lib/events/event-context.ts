@@ -131,6 +131,12 @@ export async function loadEventContext(
   // switch the UI language mid-page. Logged-in accounts are excluded too — this
   // is an onboarding nicety for someone arriving cold off an invite link, not a
   // standing rule that browsing any event retunes an established account's UI.
+  //
+  // This is now the FALLBACK path, not the main one: an invite link carries the
+  // language itself (`&lang=`, organizer.ts) and i18n.init() applies it before
+  // the first paint and remembers it. What is left for this call is the case
+  // where no link was involved — a bare nsec pasted into the join form, or
+  // simply opening an event — which is exactly why it stays session-only.
   if (opts.adoptLang !== false && !session.loggedIn) i18n.adoptEventLang(config.lang);
 
   // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.

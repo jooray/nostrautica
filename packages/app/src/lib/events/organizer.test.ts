@@ -236,6 +236,29 @@ describe("generateInvites label numbering", () => {
       inviteHash(getPublicKey(nip19Decode(generated[1].nsec).data as Uint8Array)),
     ]);
   });
+
+  it("carries the event language on the link, and omits it for English", async () => {
+    // Why the link and not just the 31600: `adoptEventLang` cannot run until the
+    // config comes back from relays, so an invitee arriving cold watches the
+    // whole boot paint in their browser's language and then flip. i18n.init()
+    // reads this param before the first paint (see i18n.test.ts).
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+
+    const skCtx = { ...ctx, config: { ...ctx.config, lang: "sk" } } as EventContext;
+    const [sk] = await generateInvites({} as AppSigner, skCtx, 1, "https://app.example/");
+    expect(sk.link).toContain("&lang=sk");
+    // The code still parses out of the link unchanged — `&` terminates the nsec.
+    expect(pubkeyFromLink(sk.link)).toBe(
+      getPublicKey(nip19Decode(sk.nsec).data as Uint8Array),
+    );
+
+    // English is the implicit default (the 31600 omits the tag too), so an
+    // ordinary event's links stay byte-identical to what earlier builds emitted.
+    const enCtx = { ...ctx, config: { ...ctx.config, lang: "en" } } as EventContext;
+    const [en] = await generateInvites({} as AppSigner, enCtx, 1, "https://app.example/");
+    expect(en.link).not.toContain("lang=");
+  });
 });
 
 /**

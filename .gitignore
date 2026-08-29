@@ -46,3 +46,12 @@ RELEASE_ID
 
 # Local Tier-2 test stack config (see docs/E2E-TESTING-GUIDE.md) — machine-specific
 packages/coordinator/local-test.toml
+
+# The model watcher's rolling baseline — mutable state, not a pinned snapshot
+# (that's venice-models.json, which IS committed because published cost figures
+# are computed against it). Tracking this would dirty the tree on every hourly
+# run; `node watch-new-models.mjs --init` seeds a fresh one.
+benchmarks/matching/.model-watch.json
+
+# Local verification output (e.g. a docs-site build rendered to eyeball links)
+tmp/

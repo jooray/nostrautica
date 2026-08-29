@@ -29,7 +29,7 @@
     type DiscoveredCoordinator,
   } from "$lib/events/coordinators.js";
   import { perfMark } from "$lib/perf.js";
-  import { decode } from "nostr-tools/nip19";
+  import { decode, npubEncode } from "nostr-tools/nip19";
   import { router } from "$lib/router/router.svelte.js";
   import {
     fetchEventPosts,
@@ -46,6 +46,9 @@
   import {
     utf8ByteLength,
     MAX_THEME_CSS_BYTES,
+    MAX_FEED_SOURCES,
+    MAX_FEED_TAGS,
+    type ExternalFeed,
     type MergedMenuItem,
     type MergedSection,
   } from "@nostrautica/protocol";
@@ -685,12 +688,93 @@
   let menuTarget = $state(""); // https URL, or nostr:naddr from the post picker
   let menuMembers = $state(false);
 
+  // External long-form feeds folded into the official posts (31608 `sources`).
+  let pageSources = $state<ExternalFeed[]>([]);
+  let feedNpub = $state("");
+  let feedTags = $state(""); // comma-separated hashtags
+  let feedSince = $state(""); // yyyy-mm-dd from a date input
+  let feedRelays = $state(""); // comma/space separated wss:// URLs
+  let feedLabel = $state("");
+  let feedError = $state<string | null>(null);
+
   async function loadEventPage() {
     if (!ctx) return;
     const page = await fetchEventPage(ctx).catch(() => undefined);
     pageMenu = page?.menu ?? [];
     pageSections = page?.sections ?? [];
+    pageSources = page?.sources ?? [];
     pageLoaded = true;
+  }
+
+  /** Split a comma/whitespace separated field into trimmed, non-empty items. */
+  function splitList(raw: string): string[] {
+    return raw
+      .split(/[,\s]+/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+
+  function addFeedSource() {
+    feedError = null;
+    const entry = feedNpub.trim();
+    if (!entry) return;
+    // Accept an npub (what an organizer actually has) or raw hex.
+    let pubkey: string;
+    try {
+      if (/^[0-9a-f]{64}$/i.test(entry)) {
+        pubkey = entry.toLowerCase();
+      } else {
+        const decoded = decode(entry);
+        if (decoded.type !== "npub") throw new Error("not an npub");
+        pubkey = decoded.data;
+      }
+    } catch {
+      feedError = t("admin.page.feeds.badNpub");
+      return;
+    }
+    if (pageSources.some((f) => f.pubkey === pubkey)) {
+      feedError = t("admin.page.feeds.duplicate");
+      return;
+    }
+    if (pageSources.length >= MAX_FEED_SOURCES) {
+      feedError = t("admin.page.feeds.tooMany", { n: MAX_FEED_SOURCES });
+      return;
+    }
+    // A date input gives local midnight; the field means "articles published on
+    // or after this day", so local midnight is the right instant to compare
+    // published_at against.
+    const sinceMs = feedSince ? new Date(`${feedSince}T00:00:00`).getTime() : NaN;
+    const tags = splitList(feedTags).map((h) => h.replace(/^#/, ""));
+    const relays = splitList(feedRelays);
+    pageSources = [
+      ...pageSources,
+      {
+        pubkey,
+        ...(tags.length ? { tags: tags.slice(0, MAX_FEED_TAGS) } : {}),
+        ...(Number.isFinite(sinceMs) ? { since: Math.floor(sinceMs / 1000) } : {}),
+        ...(relays.length ? { relays } : {}),
+        ...(feedLabel.trim() ? { label: feedLabel.trim() } : {}),
+      },
+    ];
+    feedNpub = "";
+    feedTags = "";
+    feedSince = "";
+    feedRelays = "";
+    feedLabel = "";
+  }
+
+  /** Short, recognisable rendering of a declared feed for the list. */
+  function feedSummary(f: ExternalFeed): string {
+    const parts: string[] = [f.label?.trim() || npubEncode(f.pubkey).slice(0, 16) + "…"];
+    if (f.tags?.length) parts.push(f.tags.map((h) => `#${h}`).join(" "));
+    if (f.since !== undefined) {
+      parts.push(
+        t("admin.page.feeds.sinceLabel", {
+          date: new Date(f.since * 1000).toLocaleDateString(),
+        }),
+      );
+    }
+    return parts.join(" · ");
   }
 
   function addMenuItem() {
@@ -747,7 +831,11 @@
     pageSaved = false;
     error = null;
     try {
-      const outcome = await publishEventPage(ctx, { menu: pageMenu, sections: pageSections });
+      const outcome = await publishEventPage(ctx, {
+        menu: pageMenu,
+        sections: pageSections,
+        sources: pageSources,
+      });
       // R9: only claim "saved ✓" / published on a real relay publish; a queued
       // save is honest about attendees still seeing the old page.
       if (outcome === "queued") {
@@ -1172,6 +1260,80 @@
       <button class="btn inline" onclick={() => addSection("pinned")}><Icon name="plus" size={15} /> {t("admin.page.type.pinned")}</button>
       <button class="btn inline" onclick={() => addSection("attendees")}><Icon name="plus" size={15} /> {t("admin.page.type.attendees")}</button>
     </div>
+
+    <!-- External long-form feeds (31608 `sources`): other npubs' 30023 folded
+         into this event's official posts. -->
+    <div class="field-label" style="margin-top:1rem">{t("admin.page.feeds")}</div>
+    <p class="muted" style="margin:0 0 0.5rem">{t("admin.page.feeds.body")}</p>
+    {#if pageSources.length}
+      <div class="stack" style="margin-bottom:0.5rem">
+        {#each pageSources as feed, i (feed.pubkey)}
+          <div class="card" style="background:var(--bg-elev2)">
+            <div class="row" style="justify-content:space-between;align-items:center">
+              <span style="overflow:hidden;text-overflow:ellipsis">{feedSummary(feed)}</span>
+              <button
+                class="btn inline danger"
+                style="flex:none"
+                aria-label={t("admin.page.feeds.remove")}
+                onclick={() => (pageSources = pageSources.filter((_, j) => j !== i))}
+              >
+                ✕
+              </button>
+            </div>
+            <p class="mono muted" style="margin:0.25rem 0 0;font-size:0.7rem;overflow-wrap:anywhere">
+              {npubEncode(feed.pubkey)}
+            </p>
+            {#if feed.relays?.length}
+              <p class="mono muted" style="margin:0.15rem 0 0;font-size:0.7rem;overflow-wrap:anywhere">
+                {feed.relays.join(" ")}
+              </p>
+            {/if}
+          </div>
+        {/each}
+      </div>
+    {/if}
+    <input
+      placeholder={t("admin.page.feeds.npubPlaceholder")}
+      bind:value={feedNpub}
+      aria-label={t("admin.page.feeds.npubPlaceholder")}
+    />
+    <input
+      placeholder={t("admin.page.feeds.tagsPlaceholder")}
+      bind:value={feedTags}
+      aria-label={t("admin.page.feeds.tagsPlaceholder")}
+      style="margin-top:0.5rem"
+    />
+    <label class="stack" style="gap:0.25rem;margin-top:0.5rem">
+      <span class="muted">{t("admin.page.feeds.since")}</span>
+      <input type="date" bind:value={feedSince} />
+    </label>
+    <input
+      placeholder={t("admin.page.feeds.relaysPlaceholder")}
+      bind:value={feedRelays}
+      aria-label={t("admin.page.feeds.relaysPlaceholder")}
+      style="margin-top:0.5rem"
+    />
+    <p class="muted" style="margin:0.25rem 0 0;font-size:0.8rem">
+      {t("admin.page.feeds.relaysHint")}
+    </p>
+    <input
+      placeholder={t("admin.page.feeds.labelPlaceholder")}
+      bind:value={feedLabel}
+      aria-label={t("admin.page.feeds.labelPlaceholder")}
+      style="margin-top:0.5rem"
+    />
+    {#if feedError}
+      <p class="field-error" role="alert" style="margin:0.5rem 0 0">{feedError}</p>
+    {/if}
+    <button
+      class="btn inline"
+      style="margin-top:0.5rem"
+      onclick={addFeedSource}
+      disabled={!feedNpub.trim()}
+    >
+      {t("admin.page.feeds.add")}
+    </button>
+
     <div class="row" style="margin-top:0.75rem">
       <button class="btn inline primary" onclick={savePage} disabled={pageBusy || !pageLoaded}>
         {pageBusy ? t("admin.page.saving") : t("admin.page.save")}

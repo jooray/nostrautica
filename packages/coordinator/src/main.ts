@@ -114,7 +114,18 @@ async function runDaemon(): Promise<void> {
 
   if (referencedProviders.has("venice")) {
     if (!veniceOpts) throw new Error("a role routes to Venice but no Venice API key is configured");
-    providers.venice = new VeniceLlm(veniceOpts);
+    // Per-model `disable_thinking`, keyed by model id: one adapter instance serves
+    // every role that routes to Venice, and it only knows which MODEL it was
+    // handed. Roles sharing a model id must agree — the last one wins, which is
+    // the only sane reading since the flag describes the model, not the role.
+    const disableThinking: Record<string, boolean> = {};
+    for (const role of ["summary", "match", "embed", "translate"] as const) {
+      const ref = config.models[role];
+      if (ref.provider === "venice" && ref.disable_thinking !== undefined) {
+        disableThinking[ref.model] = ref.disable_thinking;
+      }
+    }
+    providers.venice = new VeniceLlm({ ...veniceOpts, disableThinking });
   }
   if (referencedProviders.has("routstr")) {
     const nodeUrl = config.providers.routstr?.node_url;

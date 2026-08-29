@@ -14,6 +14,7 @@
   } from "$lib/events/event-context.js";
   import { receiveGrants } from "$lib/events/attendee.js";
   import { fetchPostByD, cachedPostByD, type EventPost } from "$lib/events/posts.js";
+  import { fetchEventPage, cachedEventPage } from "$lib/events/event-page.js";
   import PostCard from "$lib/components/PostCard.svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { perfMark } from "$lib/perf.js";
@@ -42,7 +43,14 @@
       ctx = await loadEventContext(naddr);
       if (post === undefined) post = cachedPostByD(ctx.coordinate, d);
       if (session.signer) await receiveGrants(session.signer).catch(() => {});
-      const fresh = await fetchPostByD(ctx, d);
+      // A curated article (31608 `sources`) isn't authored by E_id, so resolving
+      // it by `d` needs the declared feeds. Cheap when they're already cached,
+      // and the read still works — from the event's own posts — if the page
+      // fetch fails.
+      const sources =
+        (await fetchEventPage(ctx).catch(() => cachedEventPage(ctx!.coordinate)))?.sources ??
+        [];
+      const fresh = await fetchPostByD(ctx, d, sources);
       if (fresh) post = fresh;
     } catch (e) {
       if (!post) error = e instanceof Error ? e.message : String(e);

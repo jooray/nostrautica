@@ -14,7 +14,7 @@ vi.mock("$lib/blossom/client.js", async (orig) => ({
   uploadAndMirror,
 }));
 
-import { uploadPublicImage, prepareAvatarImage, AVATAR_SIZE } from "./image.js";
+import { uploadPublicImage, prepareAvatarImage, externalImageUrl, AVATAR_SIZE } from "./image.js";
 
 const signer = {
   method: "local" as const,
@@ -150,5 +150,27 @@ describe("prepareAvatarImage (audit APPR-3)", () => {
     const raw = new Blob(["x"], { type: "image/png" });
 
     await expect(prepareAvatarImage(raw)).rejects.toThrow(/couldn't be processed/);
+  });
+});
+
+describe("externalImageUrl (paste-a-URL instead of uploading)", () => {
+  it("accepts and normalizes an https URL, trimming stray whitespace", () => {
+    expect(externalImageUrl("  https://cdn.example/banner.png  ")).toBe(
+      "https://cdn.example/banner.png",
+    );
+    expect(externalImageUrl("https://cdn.example/a.jpg?v=2")).toBe("https://cdn.example/a.jpg?v=2");
+  });
+
+  it("rejects anything that isn't https — the tags are public and mixed content breaks", () => {
+    expect(externalImageUrl("http://cdn.example/banner.png")).toBeNull();
+    expect(externalImageUrl("data:image/png;base64,AAAA")).toBeNull();
+    expect(externalImageUrl("javascript:alert(1)")).toBeNull();
+    expect(externalImageUrl("cdn.example/banner.png")).toBeNull();
+    expect(externalImageUrl("")).toBeNull();
+  });
+
+  it("rejects embedded credentials — the icon/banner tags are world-readable", () => {
+    expect(externalImageUrl("https://user:pass@cdn.example/banner.png")).toBeNull();
+    expect(externalImageUrl("https://user@cdn.example/banner.png")).toBeNull();
   });
 });

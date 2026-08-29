@@ -13,6 +13,7 @@
   import {
     defaultEventBanner,
     defaultEventIcon,
+    externalImageUrl,
     uploadPublicImage,
   } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
@@ -148,6 +149,40 @@
   // The chosen file opens the crop/zoom picker; upload (or hold) happens on confirm.
   let cropFile = $state<File | null>(null);
   let cropWhich = $state<"icon" | "banner">("icon");
+
+  // Paste-a-URL alternative to picking a file (organizer feedback 2026-08-29):
+  // the artwork is often already hosted somewhere, so uploading a second copy to
+  // Blossom is wasted bytes. One editor serves both slots — it needs the full
+  // width of the images block, which the 64px icon column can't give it.
+  let linkWhich = $state<"icon" | "banner" | null>(null);
+  let linkUrl = $state("");
+  let linkInput = $state<HTMLInputElement | null>(null);
+  const linkNormalized = $derived(linkWhich ? externalImageUrl(linkUrl) : null);
+  const linkInvalid = $derived(linkUrl.trim().length > 0 && linkNormalized === null);
+  $effect(() => {
+    // Focus (and select, so a prefilled URL is replaced by typing) on open.
+    if (linkWhich && linkInput) linkInput.select();
+  });
+
+  function openLink(which: "icon" | "banner") {
+    linkWhich = which;
+    linkUrl = which === "icon" ? iconUrl : bannerUrl;
+  }
+  function closeLink() {
+    linkWhich = null;
+    linkUrl = "";
+  }
+  /** Point a slot at a remote image: no upload, so the preview IS the fetch. */
+  function applyLink() {
+    const url = linkNormalized;
+    if (!url || !linkWhich) return;
+    // Drop any held crop for this slot, else uploadHeldBranding() would upload it
+    // on submit and overwrite the URL the organizer just chose.
+    clearPending(linkWhich);
+    if (linkWhich === "icon") iconUrl = url;
+    else bannerUrl = url;
+    closeLink();
+  }
 
   function onImageFile(e: Event, which: "icon" | "banner") {
     const input = e.target as HTMLInputElement;
@@ -614,7 +649,7 @@
       <div class="row" style="align-items:flex-start;gap:0.75rem">
         <div style="flex:none;text-align:center">
           <img src={previewIcon} alt={t("create.iconAlt")} style="width:64px;height:64px;border-radius:14px;object-fit:cover" />
-          <div style="margin-top:0.35rem">
+          <div class="stack" style="gap:0.35rem;margin-top:0.35rem">
             <FileButton
               class="btn inline"
               style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
@@ -624,6 +659,16 @@
             >
               {uploading === "icon" ? "…" : t("create.icon")}
             </FileButton>
+            <button
+              type="button"
+              class="btn inline"
+              style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
+              aria-label={t("create.imageUrl.pickIcon")}
+              aria-expanded={linkWhich === "icon"}
+              onclick={() => openLink("icon")}
+            >
+              {t("create.imageUrl")}
+            </button>
           </div>
         </div>
         <div style="flex:1">
@@ -638,12 +683,55 @@
             >
               {uploading === "banner" ? "…" : t("create.banner")}
             </FileButton>
+            <button
+              type="button"
+              class="btn inline"
+              style="font-size:0.8rem;padding:0.3rem 0.6rem"
+              aria-label={t("create.imageUrl.pickBanner")}
+              aria-expanded={linkWhich === "banner"}
+              onclick={() => openLink("banner")}
+            >
+              {t("create.imageUrl")}
+            </button>
             {#if iconUrl || bannerUrl || pendingIcon || pendingBanner}
-              <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; clearPending("icon"); clearPending("banner"); }}>{t("create.reset")}</button>
+              <button class="btn inline" style="font-size:0.8rem;padding:0.3rem 0.6rem" onclick={() => { iconUrl = ""; bannerUrl = ""; clearPending("icon"); clearPending("banner"); closeLink(); }}>{t("create.reset")}</button>
             {/if}
           </div>
         </div>
       </div>
+      {#if linkWhich}
+        <div>
+          <label for="img-url">
+            {linkWhich === "icon" ? t("create.imageUrl.labelIcon") : t("create.imageUrl.labelBanner")}
+          </label>
+          <div class="row" style="align-items:flex-start;flex-wrap:wrap">
+            <input
+              bind:this={linkInput}
+              id="img-url"
+              type="url"
+              inputmode="url"
+              style="flex:1;min-width:180px"
+              bind:value={linkUrl}
+              placeholder={t("create.imageUrl.placeholder")}
+              aria-invalid={linkInvalid}
+              aria-describedby={describedBy("img-url", linkInvalid)}
+              onkeydown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  applyLink();
+                } else if (e.key === "Escape") {
+                  closeLink();
+                }
+              }}
+            />
+            <button class="btn inline" style="flex:none" disabled={!linkNormalized} onclick={applyLink}>
+              {t("create.imageUrl.use")}
+            </button>
+            <button class="btn inline" style="flex:none" onclick={closeLink}>{t("create.imageUrl.cancel")}</button>
+          </div>
+          {#if linkInvalid}<p id="img-url-error" class="field-error">{t("create.imageUrl.invalid")}</p>{/if}
+        </div>
+      {/if}
       <p class="muted">{t("create.images.body")}</p>
     </div>
     <div>

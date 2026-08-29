@@ -38,7 +38,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { complete, pool, parseJsonLoose, cacheKey, readCache, writeCache } from "./lib.mjs";
+import { complete, pool, parseJsonLoose, cacheKey, readCache, writeCache, costUsd } from "./lib.mjs";
 import { EVENT } from "./personas.mjs";
 import {
   buildCases,
@@ -125,6 +125,81 @@ const IB1_BLOCK = [
   "Each ≤ 280 chars, concrete, grounded in both profiles, and different from one another. Return fewer",
   "(or an empty list) when you can't ground a good one; never pad.",
 ].join("\n");
+
+// ── output-language variants (2026-08-26) ────────────────────────────────────
+// deepseek-v4-flash-0731, the deployed model, returns 3 of 48 Slovak reverse
+// batches with ALL THIRTY openers in English — never a partial one. The id it
+// replaced did that 0 times in 176 calls on this same prompt, so the target is
+// reachable and this is the model ignoring an instruction rather than the
+// instruction being absent: languageInstruction() already says "write every
+// reasoning string AND EVERY ICEBREAKER in <language>".
+//
+// A whole-response failure points at salience and placement rather than wording,
+// so each variant moves or repeats the requirement instead of rephrasing it.
+// L0 is the live prompt (R3) under a different label, so the control is measured
+// in the same run as the arms rather than compared against yesterday's number.
+const LANG_LEAD = (lang) =>
+  lang === "en"
+    ? ""
+    : [
+        "",
+        `OUTPUT LANGUAGE — READ FIRST: every human-readable string you return must be written in ${
+          LANG_NAMES[lang]
+        } (${lang}). This applies to reasoning_for_target AND to every entry of icebreakers.`,
+        `An English sentence anywhere in the output is a failed response, even if everything else is correct.`,
+      ].join("\n");
+
+/**
+ * Restate the requirement inside the icebreaker block, where the openers are
+ * specified. The REVERSE prompt ends that block with "Return one entry per
+ * target"; `END` above is the FORWARD prompt's marker ("...per candidate") and
+ * does not appear here at all — which is what the first version of this got
+ * wrong, loudly, in a DRY run before it cost anything.
+ */
+const REVERSE_END = "\n\nReturn one entry per target";
+function spliceLanguageReminder(prompt, lang) {
+  if (lang === "en") return prompt;
+  const i = prompt.indexOf(REVERSE_END);
+  if (i === -1) throw new Error("could not locate the end of the reverse icebreaker block");
+  const reminder =
+    `\nEvery icebreaker above must be written in ${LANG_NAMES[lang]} (${lang}) — not English, ` +
+    `whatever language the profiles are in.`;
+  return prompt.slice(0, i) + reminder + prompt.slice(i);
+}
+
+const LANGUAGE_VARIANTS = {
+  // Control: byte-identical to R3, the live prompt.
+  L0: {
+    label: "L0-control",
+    shape: "reverse",
+    system: (lang) => REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // The requirement moved to the TOP, before the role rules, and stated as a
+  // pass/fail condition rather than a description.
+  L1: {
+    label: "L1-lead",
+    shape: "reverse",
+    system: (lang) => LANG_LEAD(lang) + "\n" + REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // Kept where it is, but repeated once inside the icebreaker block itself.
+  L2: {
+    label: "L2-inline",
+    shape: "reverse",
+    system: (lang) => spliceLanguageReminder(REVERSE_BATCH_SYSTEM_PROMPT, lang) + languageInstruction(lang),
+    user: (u) => u,
+  },
+  // Both. If neither alone moves it, this says whether the defect is promptable
+  // at all before anyone concludes it is not.
+  L3: {
+    label: "L3-lead+inline",
+    shape: "reverse",
+    system: (lang) =>
+      LANG_LEAD(lang) + "\n" + spliceLanguageReminder(REVERSE_BATCH_SYSTEM_PROMPT, lang) + languageInstruction(lang),
+    user: (u) => u,
+  },
+};
 
 /** START (shared with the reverse variants) is where the icebreaker block begins. */
 const END = "\n\nReturn one entry per candidate";
@@ -258,6 +333,7 @@ const VARIANTS = {
   // R2 (2026-07-25 roles wording) and R3 (live, block-order restructure) come from
   // reverse-variants.mjs — reverse-score-run.mjs measures the same two prompts.
   ...REVERSE_VARIANTS,
+  ...LANGUAGE_VARIANTS,
 };
 
 // Self-check: the control language block must differ from the live one for a
@@ -334,6 +410,20 @@ function liveReverseUserBlock(shared, targets) {
   );
 }
 
+/**
+ * The declared schema is `{matches: [...]}`. Return the entries whatever the
+ * model actually sent, plus a label for how it deviated (null when it complied).
+ */
+function entriesOf(value) {
+  if (Array.isArray(value)) return { entries: value, deviation: "bare-array" };
+  if (value && typeof value === "object") {
+    if (Array.isArray(value.matches)) return { entries: value.matches, deviation: null };
+    const k = Object.keys(value).find((x) => Array.isArray(value[x]));
+    if (k) return { entries: value[k], deviation: `renamed-key:${k}` };
+  }
+  return { entries: [], deviation: "no-entries" };
+}
+
 /** Reverse variants take reverse cases and vice versa; mixing them is a bug. */
 const isReverse = (c) => c.bucket.startsWith("reverse-");
 
@@ -406,7 +496,10 @@ async function runVariant(key, lang) {
   // which no variant may remove, so grading is unaffected.
   const schema = v.schema ? v.schema(SCHEMA) : SCHEMA;
   const rows = [];
+  const tele = [];
   let failed = 0;
+  let shapeDeviations = 0;
+  const shapeKinds = {};
   const reverse = v.shape === "reverse";
   // REPEATS re-asks the same case, which is the only honest way to get the sample
   // size this failure needs: attribution errors run at ~0.5% of openers, so 17
@@ -435,10 +528,19 @@ async function runVariant(key, lang) {
       const ck = cacheKey([
         "icebreaker", MODEL, K, v.label, lang, kase.bucket, fixed.id, listed.map((x) => x.id), rep,
       ]);
-      let value = readCache(CACHE_DIR, ck);
+      let fresh = null;
+      // Cache shape v2 wraps the parsed value alongside its telemetry, because
+      // "cost and speed" are now reported for icebreakers too and a cache that
+      // stored only the answer could never report them for a replayed run. v1
+      // entries (the bare parsed object) are still read — they simply contribute
+      // no telemetry, which `telemetryCalls` below makes visible rather than
+      // averaging into a lie.
+      const cachedEntry = readCache(CACHE_DIR, ck);
+      let value = cachedEntry?.__v === 2 ? cachedEntry.value : cachedEntry;
+      if (cachedEntry?.__v === 2 && cachedEntry.telemetry) tele.push(cachedEntry.telemetry);
       if (!value) {
         try {
-          const { content } = await complete({
+          const { content, usage, latencyMs, strictParseOk } = await complete({
             model: MODEL,
             system,
             user: v.user(
@@ -453,6 +555,11 @@ async function runVariant(key, lang) {
             maxTokens: 12000,
           });
           value = parseJsonLoose(content);
+          fresh = {
+            promptTokens: usage.promptTokens, completionTokens: usage.completionTokens,
+            reasoningTokens: usage.reasoningTokens ?? 0, latencyMs, strictParseOk,
+          };
+          tele.push(fresh);
         } catch (e) {
           // Deliberately NOT cached: a rate-limit or a truncated response is a
           // transient loss, and caching it would make the gap permanent.
@@ -460,9 +567,27 @@ async function runVariant(key, lang) {
           console.error(`  [${v.label}/${lang}] ${fixed.id} call failed: ${e.message}`);
           return;
         }
-        writeCache(CACHE_DIR, ck, value);
+        writeCache(CACHE_DIR, ck, { __v: 2, value, telemetry: fresh });
       }
-      for (const m of value?.matches ?? []) {
+      // Venice's strict `json_schema` is not honoured by every model, and this
+      // is where that stops being a footnote. z-ai-glm-5-3-flash answers the
+      // reverse batch with at least THREE different top-level shapes — the
+      // declared `{matches: [...]}`, a bare array, and `{entries: [...]}` — plus
+      // an `entry_name` property `additionalProperties: false` forbids.
+      //
+      // This read `value.matches` only, so the two undeclared shapes produced
+      // zero graded rows: the model would have scored a perfect attribution rate
+      // on a sample it had quietly been excused from, which is worse than a
+      // failure because it looks like a result. Take the entries wherever they
+      // are, so quality is measured on everything the model wrote, and COUNT the
+      // deviation separately — in production `validateProviderValue` rejects it
+      // outright, so this is a blocker, not a parsing preference.
+      const { entries, deviation } = entriesOf(value);
+      if (deviation) {
+        shapeDeviations++;
+        shapeKinds[deviation] = (shapeKinds[deviation] ?? 0) + 1;
+      }
+      for (const m of entries) {
         const entry = listed[Number(m.index) - 1];
         if (!entry || !Array.isArray(m.icebreakers)) continue;
         // Grading is always (sender, recipient) — the shape decides which is which.
@@ -475,6 +600,16 @@ async function runVariant(key, lang) {
             lang,
             bucket,
             rep,
+            // Which CALL this opener came out of. The permutation test in
+            // stats.mjs shuffles CLUSTERS because openers inside one call are
+            // correlated — a batch that inverts roles tends to invert several
+            // entries at once. Reconstructing that cluster downstream from
+            // (target, candidate, rep) silently got it wrong for the reverse
+            // shape, where ONE call contains ten different `target`s: each call
+            // became ten clusters, the correlation the test exists to respect
+            // was discarded, and the p-values came out too small. So the call
+            // stamps its own identity here instead of being guessed at later.
+            callId: `${v.label}|${lang}|${bucket}|${fixed.id}|${rep}`,
             // The candidate whose own profile advertises the target's artifact —
             // the prod 2026-07-25 shape, reported separately below.
             sharer: cand.sharesTargetArtifact === true,
@@ -492,12 +627,35 @@ async function runVariant(key, lang) {
     },
     CONC,
   );
+  const lat = tele.map((t) => t.latencyMs).filter((x) => typeof x === "number").sort((a, b) => a - b);
+  const q = (f) => (lat.length ? lat[Math.min(lat.length - 1, Math.floor(f * lat.length))] : 0);
+  const sum = (k) => tele.reduce((a, t) => a + (t[k] ?? 0), 0);
+  const usage = {
+    promptTokens: sum("promptTokens"), completionTokens: sum("completionTokens"),
+    reasoningTokens: sum("reasoningTokens"),
+  };
   return {
     key,
     label: v.label,
     lang,
     failed,
+    // Responses whose top-level SHAPE contradicted the strict schema, and which
+    // shapes they were — a model that renames the key is a different problem
+    // from one that drops the wrapper.
+    shapeDeviations,
+    shapeKinds,
     rows,
+    // Telemetry covers only the calls this process saw a response for — replayed
+    // v1 cache entries have none. `telemetryCalls` vs the case count says how much.
+    telemetry: {
+      telemetryCalls: tele.length,
+      latencyP50: q(0.5),
+      latencyP95: q(0.95),
+      usage,
+      costUsd: costUsd(MODEL, usage),
+      strictJsonOk: tele.filter((t) => t.strictParseOk === true).length,
+      strictJsonKnown: tele.filter((t) => typeof t.strictParseOk === "boolean").length,
+    },
     summary: summarize(rows),
     byBucket: Object.fromEntries(
       [...new Set(rows.map((r) => r.bucket))].map((b) => [b, summarize(rows.filter((r) => r.bucket === b))]),
@@ -551,6 +709,10 @@ const fmt = (r, s, tag) =>
 
 console.log("");
 for (const r of runs) {
+  if (r.shapeDeviations) {
+    console.log(`${(r.label + "/" + r.lang).padEnd(18)} ⚠ ${r.shapeDeviations} response(s) ignored the strict schema's ` +
+      `top-level shape: ${Object.entries(r.shapeKinds ?? {}).map(([k, n]) => `${k}×${n}`).join(", ")}`);
+  }
   console.log(fmt(r, r.summary, "all"));
   for (const [bucket, s] of Object.entries(r.byBucket)) console.log(fmt(r, s, bucket));
   console.log(fmt(r, r.sharerSummary, "sharers"));

@@ -173,7 +173,7 @@ Pairwise reasoning ("you should meet her because your startup lacks exactly her 
 An invite code **is an nsec** (the *invite key*):
 
 - The organizer generates N invite keypairs and publishes kind 31601 (signed by `E_id`) containing **`sha256(invite-pubkey)`** per code — hashes, so observers can't enumerate valid codes or front-run them.
-- Invite link: `https://<app>/#/join?event=<naddr>&code=<invite-nsec>` — the code rides the URL **fragment**, never sent to any server (also nsite-compatible: there is no server).
+- Invite link: `https://<app>/#/e/<naddr>/join?code=<invite-nsec>[&lang=<iso639-1>]` — the code rides the URL **fragment**, never sent to any server (also nsite-compatible: there is no server). `lang` is the event's own language (§7.1), appended only when it isn't the implicit `"en"`, and is what lets someone arriving cold off this link see the app in that language on the FIRST paint: the 31600 `lang` tag can only be adopted once the config has come back from relays, so without it the whole boot — splash, join form, every error state on the way — renders in the browser's language and then flips, and nothing survives a reload. It is applied before any network read and remembered as a soft default, and it never overrides a language the person chose in Settings themselves (§10.5). Both parameters are consumed into memory and stripped from the URL on arrival.
 - The attendee's join request carries proof: `["invite", <invite-pubkey-hex>, <schnorr-sig-hex>]`, where the signature is a BIP-340 signature by the invite key over a domain-separated, injectively-encoded challenge:
   ```
   challenge = sha256(utf8(JSON.stringify(["nostrautica-invite-v2", <event-coordinate>, <attendee-pubkey-hex>])))
@@ -452,6 +452,8 @@ Three further addressable kinds complete the reserved block (31607–31609). **E
 
 **kind 30023 — public event posts** — unchanged (§7.1 "Event updates"): cleartext `title`/`summary`/`image`/`published_at` tags, markdown content, same-`d` republish = edit.
 
+**External long-form feeds (31608 `sources`).** An organization's announcements usually come from its own established npub, not from the per-event `E_id` this app mints — so "our updates" genuinely live under two keys and readers should still see one feed. The 31608 therefore carries an optional list of standing queries for public 30023 by *other* pubkeys (`{pubkey, tags?, since?, until?, relays?, label?}`, ≤10), which readers fold into the event's official posts and attribute to the named feed. `pinned` names individual articles; this names a rule — "everything that npub tags `#kosice` from 1 August on". The `relays` hint is the field that decides whether the feature works at all: the other account's articles are usually nowhere near the event's own relays, and without it the feed silently comes back empty. Wire details, including why the date bounds are re-applied client-side against `published_at`, are in [PROTOCOL-NIP.md](PROTOCOL-NIP.md) §31608.
+
 **kind 31607 — Members-only Event Post**
 ```
 tags: ["d", <random-32-hex, chosen at creation, stable across edits>], ["v","2"], ["eck", <version>]
@@ -544,7 +546,7 @@ NIP-17 and dual-backend ideas are intentionally deferred and may change before i
 
 **Publish event post (§7.4).** Admin composer: title/summary/image + markdown with preview → visibility chosen at creation: **public** → 30023 (as above); **members-only** → 31607 (all metadata inside the ECK ciphertext, random stable `d`, `eck` tag = current version). Edit = republish same `d` (members-only re-encrypted under the current ECK). The editor enforces the 60 KB members-only ceiling.
 
-**Customize event page (§7.4).** Admin → *Appearance*: CSS editor with live preview → publish 31609. Admin → *Menu & layout*: manage menu items (label + target via the post-aware picker or a URL field; per-item public/members-only toggle) and home sections (type + filters + order, per-section visibility) → publish 31608 (public parts in tags/cleartext JSON, members-only parts ECK-encrypted in `private`). All signed `E_id`.
+**Customize event page (§7.4).** Admin → *Appearance*: CSS editor with live preview → publish 31609. Admin → *Menu & layout*: manage menu items (label + target via the post-aware picker or a URL field; per-item public/members-only toggle) home sections (type + filters + order, per-section visibility), and external long-form feeds (npub + optional hashtags / published-since / relays / display name) → publish 31608 (public parts in tags/cleartext JSON, members-only parts ECK-encrypted in `private`). All signed `E_id`.
 
 **Read posts.** `#/e/<naddr>/posts` lists posts with filter controls mirroring the section config — source: event-official / attendees / both; visibility: public / members-only / both. Members-only posts decrypt with the granted ECK (version per the `eck` tag); an naddr link to a 31607 without the key renders a lock + join prompt. Attendees put their own writing in the feed by tagging a public 30023 with `["a", <coordinate>]` from any NIP-23 client.
 

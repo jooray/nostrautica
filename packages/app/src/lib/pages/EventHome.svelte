@@ -15,8 +15,10 @@
   import {
     fetchEventPosts,
     fetchAttendeePosts,
+    fetchExternalPosts,
     fetchPostByD,
     cachedEventPosts,
+    cachedExternalPosts,
     cachedAttendeePosts,
     type EventPost,
   } from "$lib/events/posts.js";
@@ -88,10 +90,17 @@
   // Cache-first: returning to the event page paints its feed instantly.
   let eventPosts = $state<EventPost[]>((cachedCtx && cachedEventPosts(cachedCtx.coordinate)) ?? []);
   let attendeePosts = $state<EventPost[]>((cachedCtx && cachedAttendeePosts(cachedCtx.coordinate)) ?? []);
+  // Long-form by other npubs the organizer folded into the official feed
+  // (31608 `sources`). Treated as part of `eventPosts` everywhere below — the
+  // organizer curated them as this event's own channel — and attributed on the
+  // card so a reader can still see whose npub wrote each one.
+  let externalPosts = $state<EventPost[]>((cachedCtx && cachedExternalPosts(cachedCtx.coordinate)) ?? []);
+  /** The official feed as the page shows it: the event's own posts plus curated ones. */
+  const officialPosts = $derived([...eventPosts, ...externalPosts]);
   // The body below the header is still fetching — show a skeleton only on a cold
   // open (no cached posts/page to paint).
   // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
-  let bodyLoading = $state(eventPosts.length === 0 && !page);
+  let bodyLoading = $state(eventPosts.length === 0 && externalPosts.length === 0 && !page);
   let pinnedPosts = $state<Map<string, EventPost>>(new Map());
   // Seed the attendees-section count from the cached roster (§2.4) so the widget
   // paints instantly on revisit rather than after a fresh roster decrypt.
@@ -131,8 +140,9 @@
     page ??= cachedEventPage(c.coordinate);
     if (eventPosts.length === 0) eventPosts = cachedEventPosts(c.coordinate) ?? [];
     if (attendeePosts.length === 0) attendeePosts = cachedAttendeePosts(c.coordinate) ?? [];
+    if (externalPosts.length === 0) externalPosts = cachedExternalPosts(c.coordinate) ?? [];
     rosterCount ??= cachedRoster(c.coordinate)?.attendees.length;
-    if (page || eventPosts.length) {
+    if (page || eventPosts.length || externalPosts.length) {
       bodyLoading = false;
       perfMark("EventHome", "cache-paint");
     }
@@ -353,7 +363,7 @@
       // Fresh device whose ECK arrived during this visit: the public pass ran
       // keyless — re-fetch so members-only page sections and posts decrypt.
       if (approved && !hadEck) await refetchAfterEck(ctx);
-      if (page) await loadSectionData(page.sections);
+      if (page) await loadSectionData(page);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -398,9 +408,27 @@
     });
   });
 
-  async function loadSectionData(sections: MergedSection[]) {
+  /**
+   * Everything the 31608 declares but doesn't carry: the attendee feed, the
+   * roster count, pinned articles, and the external long-form feeds.
+   *
+   * Takes the whole page model, not just its sections, because `sources` is not
+   * a section — the curated feeds fold into the OFFICIAL posts wherever those
+   * are shown, including the default layout an event with no sections gets.
+   */
+  async function loadSectionData(model: EventPageModel) {
     if (!ctx) return;
+    const sections = model.sections;
     const jobs: Promise<void>[] = [];
+    if (model.sources.length) {
+      jobs.push(
+        fetchExternalPosts(ctx, model.sources)
+          .then((p) => {
+            externalPosts = p;
+          })
+          .catch(() => undefined) as Promise<void>,
+      );
+    }
     if (sections.some((s) => s.type === "posts" && s.source !== "event")) {
       jobs.push(
         fetchAttendeePosts(ctx).then((p) => {
@@ -454,10 +482,24 @@
     return s;
   });
 
+  /**
+   * Does this post expand INLINE in a home feed, or render as a teaser with a
+   * "read" link?
+   *
+   * Only the event's own posts expand. An event update is an announcement —
+   * "schedule posted", "venue change" — and reading it inline is the whole
+   * point of the home page. A post curated in from another npub (31608
+   * `sources`) is a blog article someone wrote for their own feed, routinely
+   * thousands of words, and expanding it turns the event home into an endless
+   * scroll of one article (prod feedback 2026-08-29). Attendee posts were
+   * already teasers for the same reason; external ones simply join them.
+   */
+  const expandsInFeed = (p: EventPost) => p.source === "event";
+
   /** Posts for a `posts` section, filtered by its source × visibility config. */
   function sectionPosts(section: Extract<MergedSection, { type: "posts" }>): EventPost[] {
     let list: EventPost[] = [];
-    if (section.source !== "attendees") list = list.concat(eventPosts);
+    if (section.source !== "attendees") list = list.concat(officialPosts);
     if (section.source !== "event") list = list.concat(attendeePosts);
     if (section.visibility === "public") list = list.filter((p) => !p.membersOnly);
     if (section.visibility === "members") list = list.filter((p) => p.membersOnly);
@@ -498,7 +540,7 @@
   });
 
   const latestPost = $derived(
-    [...eventPosts].sort((a, b) => b.publishedAt - a.publishedAt)[0],
+    [...officialPosts].sort((a, b) => b.publishedAt - a.publishedAt)[0],
   );
 
   // The event has ended: its end time is in the past (spec §13 — the report
@@ -819,7 +861,7 @@
   {#if latestPost}
     <!-- "Latest" highlight — newest update, links through to the Updates tab. -->
     <p class="kicker">{t("event.latest")}</p>
-    <PostCard post={latestPost} {naddr} full />
+    <PostCard post={latestPost} {naddr} full={expandsInFeed(latestPost)} />
   {/if}
 
   {#if effApproved && installHint}
@@ -854,15 +896,19 @@
     </div>
   {/if}
 
-  {#if page}
-    <!-- Custom layout (31608): sections compose the home below the header. -->
+  {#if page && page.sections.length}
+    <!-- Custom layout (31608): sections compose the home below the header.
+         Gated on SECTIONS, not on the 31608 existing: a page can now be
+         published carrying only a menu or only external feeds, and treating
+         that as "custom layout" would render a header above nothing at all
+         instead of the default feed the organizer never chose to replace. -->
     {#each page.sections as section, i (i)}
       {#if section.type === "posts"}
         {@const list = sectionPosts(section)}
         {#if list.length}
           <h2>{t("event.posts")}</h2>
           {#each list as post (post.source + post.authorPubkey + post.d)}
-            <PostCard {post} {naddr} full={post.source === "event"} />
+            <PostCard {post} {naddr} full={expandsInFeed(post)} />
           {/each}
         {/if}
       {:else if section.type === "pinned"}
@@ -890,13 +936,15 @@
         </div>
       {/if}
     {/each}
-  {:else if eventPosts.length}
-    {@const rest = eventPosts.filter((p) => !featuredKeys.has(postKey(p)))}
+  {:else if officialPosts.length}
+    {@const rest = officialPosts
+      .filter((p) => !featuredKeys.has(postKey(p)))
+      .sort((a, b) => b.publishedAt - a.publishedAt)}
     {#if rest.length}
       <!-- Default layout (no 31608): the official feed, minus the highlighted post. -->
       <h2>{t("event.updates")}</h2>
       {#each rest as post (post.d)}
-        <PostCard {post} {naddr} full />
+        <PostCard {post} {naddr} full={expandsInFeed(post)} />
       {/each}
     {/if}
   {/if}

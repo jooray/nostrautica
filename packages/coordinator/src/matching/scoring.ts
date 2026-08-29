@@ -549,6 +549,58 @@ export async function scoreBatch(
 // to that target ("you").
 
 /** BP3 mirror: score K targets against ONE shared candidate, per-target reasoning. */
+/**
+ * Where the reverse batch's language reminder goes. The trailing OUTPUT LANGUAGE
+ * block (see {@link languageInstruction}) already names icebreakers explicitly —
+ * "write every reasoning string AND EVERY ICEBREAKER in <language>" — and
+ * deepseek-v4-flash-0731 ignores it for a WHOLE response about one call in ten:
+ * 15 of 144 Slovak reverse batches came back with all thirty openers in English,
+ * and never a partial one. The id it replaced did that 0 times in 176 calls on
+ * the identical prompt, so the target is reachable and this is disobedience, not
+ * an omission.
+ *
+ * Measured, four arms of 48 calls each against a byte-identical control
+ * (benchmarks/matching, variants L0-L3). The result is not the one you would
+ * guess: HOISTING the requirement to the top of the prompt made it WORSE
+ * (33% and 29% of calls fully English for lead-only and lead+inline, against
+ * 19% for the control in that run), while repeating it here — inside the
+ * icebreaker block, next to the field it governs — took it to 1 of 96 calls.
+ *
+ *   live prompt   15/144 calls fully English = 10.4%  CI [5.9%, 16.6%]
+ *   with this      1/96  calls fully English =  1.0%  CI [0.0%,  5.7%]
+ *   Fisher exact p = 0.0032, whole-call unit
+ *
+ * Attribution is unaffected (0.6% either way, 99.4% clean both), which is the
+ * thing that had to not regress.
+ */
+const REVERSE_LANGUAGE_REMINDER = "\n\nReturn one entry per target";
+
+/**
+ * The reverse system prompt for an event in `lang`.
+ *
+ * English events get the constant unchanged. Everything else gets one sentence
+ * spliced in at the end of the icebreaker block, because that placement is what
+ * the experiment above found to work and the trailing block alone does not.
+ */
+export function reverseSystemPrompt(lang: string): string {
+  const base = (lang || "en").toLowerCase();
+  const trailing = languageInstruction(base);
+  if (base === "en") return REVERSE_BATCH_SYSTEM_PROMPT + trailing;
+  const name = languageName(base);
+  const i = REVERSE_BATCH_SYSTEM_PROMPT.indexOf(REVERSE_LANGUAGE_REMINDER);
+  // Fail loud rather than silently shipping the un-reminded prompt: a reworded
+  // block that loses this anchor would quietly revert a measured fix.
+  if (i === -1) {
+    throw new Error("reverseSystemPrompt: could not find the end of the icebreaker block");
+  }
+  const reminder =
+    `\nEvery icebreaker above must be written in ${name} (${base}) — not English, ` +
+    `whatever language the profiles are in.`;
+  return (
+    REVERSE_BATCH_SYSTEM_PROMPT.slice(0, i) + reminder + REVERSE_BATCH_SYSTEM_PROMPT.slice(i) + trailing
+  );
+}
+
 export const REVERSE_BATCH_SYSTEM_PROMPT = [
   "You are a conference matchmaker for the event described below. You are given ONE shared person",
   "and a numbered list of target attendees. For EACH target, judge how valuable it would be",
@@ -744,7 +796,7 @@ export async function scoreReverseBatch(
   const user = buildReverseBatchUserBlock(event, shared, sharedName, ordered);
 
   const { value } = await llm.completeStructured<{ matches?: RawBatchMatch[] }>({
-    system: REVERSE_BATCH_SYSTEM_PROMPT + languageInstruction(event.lang),
+    system: reverseSystemPrompt(event.lang),
     user,
     schema: BATCH_SCORE_SCHEMA,
     schemaName: "reverse_batch_score",
