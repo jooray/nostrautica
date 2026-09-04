@@ -58,6 +58,41 @@ services. Note that `restart-coordinator.sh` greps this exact path for the
 daemon's readiness marker, so the path must stay stable, and a rotation landing
 inside a deploy's readiness window can make that grep miss.
 
+### Startup time
+
+`restart-coordinator.sh` waits for the daemon's own readiness line
+(`watching for installs, submissions, admin commands`) and reports how long it
+took. Two thresholds, doing different jobs:
+
+| | default | override | on breach |
+|---|---|---|---|
+| soft | 60 s | `COORDINATOR_READY_WARN` | prints a warning, deploy still succeeds |
+| hard | 240 s | `COORDINATOR_READY_TIMEOUT` | fails the deploy step |
+
+The hard limit is deliberately far above anything normal. It does **not** bound a
+crash — the readiness loop fails within a second when the unit goes inactive,
+whatever the limit is — it bounds a daemon that is alive and never becomes ready.
+A limit set too *short* is the worse failure: the script does not kill anything,
+so the daemon starts normally while the deploy prints "coordinator is NOT
+running" and sends whoever pushed into an incident that is not happening.
+
+The soft threshold is the part worth watching. Startup resolves each provider
+route over the network and then backfills every event's `E_inbox` plus the
+coordinator's own inbox, and that last one grows with every wrap the daemon has
+ever been sent — 98 wraps on one boot, 153 two months later. It does not come
+back down on its own. The limit was 45 s until a 2026-09-04 deploy came in at
+44 s, which is not a margin.
+
+If the warning starts firing, look at the boot log's `[boot] … backfill`
+lines before raising anything:
+
+```sh
+ssh <coordinator-host> 'grep -a "\[boot\]" ~/log/nostrautica-coordinator.log | tail -20'
+```
+
+Growing wrap counts there mean the fix is bounding the backfill window, not
+buying more seconds.
+
 ### Runtime
 
 The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.5+, ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.

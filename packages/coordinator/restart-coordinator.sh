@@ -38,11 +38,47 @@ NODE_ARGV="node dist/main.js coordinator.toml"
 # The daemon logs this once startup is complete and the lock is held (src/main.ts).
 READY_MARK="watching for installs, submissions, admin commands"
 STOP_TIMEOUT=45   # > the 30s drain, so a normally-draining daemon is given time to exit
-READY_TIMEOUT=45  # startup: identity, announce publish, subscriptions, first drain
+
+# Startup budget. Generous on purpose, and the two thresholds do different jobs.
+#
+# What the hard timeout does NOT bound is a crash: the readiness loops below fail
+# within a second when the unit goes inactive (or, on the legacy path, when the
+# process disappears), whatever this is set to. What it bounds is a daemon that is
+# alive and never becomes ready — a genuine hang — which is rare and can afford to
+# be waited on. A timeout set too SHORT, by contrast, is a pure false alarm: this
+# script does not kill anything on the systemd path, so the daemon goes on to
+# start normally while the deploy prints "coordinator is NOT running" and sends
+# whoever pushed into an incident that is not happening. The asymmetry is the
+# whole argument for a large number.
+#
+# The old 45s was measured against a much emptier relay. Startup resolves each
+# provider route over the network, then backfills every event's E_inbox and the
+# coordinator's own inbox — and that last one grows with every wrap the daemon has
+# ever been sent (98 wraps on one boot, 153 on a later one). The 2026-09-04 deploy
+# came in at 44s against a 45s limit. That is not a margin, it is a coin flip.
+#
+# So: a hard fail far above anything normal, plus a SOFT threshold that warns
+# without failing. The warning is the part that matters — a bigger limit alone
+# would have hidden today's 44s, and the drift would have crept silently up to the
+# new number too. Both are overridable for a one-off slow start (a cold relay, a
+# provider having a bad day) without editing this file.
+READY_TIMEOUT="${COORDINATOR_READY_TIMEOUT:-240}"
+READY_WARN="${COORDINATOR_READY_WARN:-60}"
 
 running_pids() { pgrep -f "$NODE_ARGV" 2>/dev/null || true; }
 
 fail() { echo "!!! $* — coordinator is NOT running $(date -Is)"; exit 1; }
+
+# Say so when a start was slow but fine. Startup time is the one signal that this
+# daemon is accumulating work it does at boot, and nothing else reports it — the
+# deploy output is where an operator actually looks.
+warn_if_slow() {
+  [ "$1" -ge "$READY_WARN" ] || return 0
+  echo "!!! WARNING: startup took ${1}s (soft threshold ${READY_WARN}s, hard limit ${READY_TIMEOUT}s)."
+  echo "!!! Boot time here is dominated by relay backfill, which grows with the daemon's"
+  echo "!!! history — it does not come back down on its own. Look into it before it"
+  echo "!!! reaches the hard limit; see the rollback/verification notes in docs/DEPLOYMENT.md."
+}
 
 # --- Preferred path: systemd owns the lifecycle ---------------------------------
 # Installed unit ⇒ this script must NOT launch anything itself. A setsid-started
@@ -94,6 +130,7 @@ if systemctl --user cat "$UNIT" >/dev/null 2>&1; then
   # "active" here, so assert the unit has not been restarting under us.
   sleep 2
   systemctl --user is-active --quiet "$UNIT" || fail "coordinator became ready then went inactive"
+  warn_if_slow "$waited"
   echo "=== coordinator restarted OK $(date -Is) (ready in ${waited}s, systemd unit $UNIT, log: $LOG) ==="
   exit 0
 fi
@@ -165,4 +202,5 @@ if { ! kill -0 "$new_pid" 2>/dev/null; } && [ -z "$(running_pids)" ]; then
 fi
 [ -n "$(running_pids)" ] || fail "coordinator process not found after startup"
 
+warn_if_slow "$waited"
 echo "=== coordinator restarted OK $(date -Is) (ready in ${waited}s, log: $LOG) ==="
