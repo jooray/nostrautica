@@ -19,7 +19,46 @@ Serve `packages/app/build/` from a configured static host such as nginx, Cloudfl
 - Send CSP and `frame-ancestors` as HTTP headers where supported. A meta CSP cannot enforce anti-framing.
 - Verify the service worker update path after every deploy; users must not need a hard refresh.
 
+Three nginx specifics, each of which bit the reference deployment:
+
+- **`manifest.webmanifest` needs an explicit content type.** nginx's stock
+  `mime.types` has no `webmanifest` entry, so it goes out as
+  `application/octet-stream`, which is a documented cause of a PWA refusing to
+  install. Force it per-location with an EMPTY `types { }` block plus
+  `default_type application/manifest+json` — an empty block avoids replacing the
+  inherited type map for anything else.
+- **Never use `add_header` in one of these locations.** nginx drops every
+  INHERITED `add_header` at any level that defines its own, so a single
+  `add_header Cache-Control …` silently strips HSTS, `X-Frame-Options`,
+  `X-Content-Type-Options` and `Referrer-Policy` from the site-wide security
+  snippet for those responses. Use the `expires` directive, which does not have
+  this effect. The cost is that you cannot add the `immutable` cache hint; a long
+  `max-age` on content-hashed filenames is the right trade.
+- **An exact-match location outranks a regex one** regardless of file order,
+  which is what keeps a generic `\.(js|css|…)$` rule from putting `expires 1d` on
+  `sw.js` and letting browsers answer their own update checks from cache.
+
 ## Coordinator
+
+### Log rotation
+
+`packages/coordinator/nostrautica-coordinator.logrotate` is the reference
+logrotate fragment; install it as `/etc/logrotate.d/nostrautica-coordinator`.
+
+It uses `copytruncate`, and that is not optional: the systemd unit writes with
+`StandardOutput=append:`, which holds the file open for the life of the process
+and never reopens it, so a rename-based rotation would leave the daemon writing
+to an unlinked inode and the live log would silently stop growing. The daemon's
+stdout descriptor carries `O_APPEND`, so after truncation its next write goes to
+offset 0 rather than leaving a large sparse hole.
+
+Without this the log simply grows forever — the reference deployment reached
+~37 MB over seven weeks before anyone looked, on a filesystem shared with other
+services. Note that `restart-coordinator.sh` greps this exact path for the
+daemon's readiness marker, so the path must stay stable, and a rotation landing
+inside a deploy's readiness window can make that grep miss.
+
+### Runtime
 
 The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.5+, ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.
 
