@@ -85,6 +85,19 @@
       <PersonId pubkey={req.attendeePubkey} name={req.name} {relays} />
       {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
       {#if deferred}<span class="badge">{t("admin.requests.reviewed")}</span>{/if}
+      <!-- A 21610 withdrawal newer than this person's join. Only the coordinator
+           consumes that kind, so on a coordinator-less event nothing acted on it
+           and the request sat unread: the attendee was told they had left and
+           stayed in the roster indefinitely. Surface it where the organizer can
+           act, and say plainly that approving now would re-admit someone who
+           asked to go. -->
+      {#if req.withdrawn}
+        <p class="muted" style="color:var(--danger);margin:0.25rem 0 0">
+          {req.withdrawalRequestedPurge
+            ? t("admin.requests.withdrew.purge")
+            : t("admin.requests.withdrew")}
+        </p>
+      {/if}
       {#if req.message}<p class="muted">{req.message}</p>{/if}
       {#if req.profile?.skills?.length}
         <div class="row" style="flex-wrap:wrap">
