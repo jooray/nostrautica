@@ -904,6 +904,13 @@ export async function revokeAttendeeClient(
   organizer: AppSigner,
   ctx: EventContext,
   removedPubkey: string,
+  /**
+   * The organizer's blinding key, so the rotated ECK reaches the durable 30078
+   * backup. Optional only so an existing caller cannot break; a caller that
+   * omits it gets a loud warning rather than silent key loss — see the write
+   * below.
+   */
+  blindingKey?: Uint8Array,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
@@ -966,6 +973,26 @@ export async function revokeAttendeeClient(
   const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
   keys.eck = [...keys.eck, newEck];
   await saveEventKeys(keys);
+  // The new ECK must reach the DURABLE backup, not just this device.
+  //
+  // Every other path that mints an ECK writes the 30078 backup;  this one never
+  // did. So a coordinator-less organizer who revoked someone re-encrypted the
+  // roster and every directory entry under a key that existed only in this
+  // browser. Clear site data, or move to a new phone, and `recoverEventKeys`
+  // restores a backup still holding only ECK v1 — leaving the event's own owner
+  // permanently unable to read their own roster and directory. Forward-only
+  // rotation means there is no way back from that.
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
+      (e) => {
+        console.warn("[organizer] revoke rotated the ECK but its backup did not publish:", e);
+      },
+    );
+  } else {
+    console.warn(
+      "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
+    );
+  }
   const newEckBytes = base64ToBytes(newEck.key);
   const publisher = directoryPublisher(ctx);
   const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };

@@ -529,6 +529,66 @@ describe("roster read-modify-write safety", () => {
     ) as RosterContent;
     expect(content.attendees.map((a) => a.pubkey)).toEqual([ALICE]);
   });
+
+  /**
+   * Revoke mints ECK v(n+1) and re-encrypts the roster and every directory entry
+   * under it — and used to persist that key ONLY on this device. Every other path
+   * that mints an ECK writes the durable 30078 backup; this one never did. So a
+   * coordinator-less organizer who revoked someone and later cleared site data (or
+   * moved to a new phone) restored a backup holding only ECK v1, leaving the
+   * event's own owner permanently unable to read their own roster and directory.
+   * Rotation is forward-only, so there is no way back from that.
+   */
+  it("writes the rotated ECK to the organizer's durable backup", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+
+    // `writeEventKeysBackup` correctly does nothing without BOTH event secrets, so
+    // seed a complete custody record — the shared fixture carries no E_inbox key.
+    const withInbox = await loadEventKeys(COORD);
+    await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64) }, OWNER);
+
+    // The backup is self-encrypted through the SIGNER and published monotonically,
+    // so this needs a signer that can actually do both.
+    const encrypted: string[] = [];
+    const signer = {
+      getPublicKey: async () => ALICE,
+      nip44Encrypt: async (_pk: string, plaintext: string) => {
+        encrypted.push(plaintext);
+        return `enc:${plaintext}`;
+      },
+      signEvent: async (e: unknown) => e,
+    } as unknown as AppSigner;
+
+    await revokeAttendeeClient(signer, ctx, BOB, new Uint8Array(32).fill(7));
+
+    const keys = await loadEventKeys(COORD);
+    const newEck = keys!.eck.find((v) => v.id === 2)!;
+    // The backup payload carries the NEW key, not just the old one.
+    expect(encrypted.join(" ")).toContain(newEck.key);
+  });
+
+  it("still revokes, loudly, when no blinding key is available", async () => {
+    // Better a rotation the organizer is warned about than a refusal that leaves a
+    // revoked attendee holding a live key.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    expect((await loadEventKeys(COORD))?.eck).toHaveLength(2);
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/only on this device/i);
+    warn.mockRestore();
+  });
 });
 
 /**

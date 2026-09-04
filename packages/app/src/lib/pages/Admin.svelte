@@ -940,7 +940,9 @@
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "revoke", { pubkey });
       } else {
-        await revokeAttendeeClient(session.signer, ctx, pubkey);
+        // Pass the blinding key: revoke mints a new ECK, and without this the
+        // rotated key never reaches the organizer's own 30078 backup.
+        await revokeAttendeeClient(session.signer, ctx, pubkey, await deriveBlindingKey(session.signer));
       }
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
