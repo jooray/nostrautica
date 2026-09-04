@@ -11,6 +11,7 @@
  */
 import type { AiProfile, AttendeeProfile, MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
 import type { SttProvider, RoleRoute } from "../providers/types.js";
+import { ProviderContractError } from "../providers/types.js";
 import type { Store } from "../store/db.js";
 import { transcribeMedia, MediaPolicyError, type TranscriptResult } from "./transcribe.js";
 import {
@@ -47,8 +48,8 @@ export interface ProcessDeps {
   maxMediaBytes?: number;
   /** Real decoded-duration limit for intro media (audit H-3); 0/undefined ⇒ none. */
   maxDurationSec?: number;
-  /** Injectable duration probe (tests). */
-  probeDuration?: (media: Uint8Array, mime: string) => Promise<number>;
+  /** Injectable duration probe (tests). `undefined` = "could not probe" (audit H-3). */
+  probeDuration?: (media: Uint8Array, mime: string) => Promise<number | undefined>;
   /** Account actual downloaded bytes + probed duration into the usage budgets (H-2/H-3). */
   onMediaUsage?: (usage: { bytes: number; durationSec: number }) => void;
   /** Fetch the attendee's kind-0 + last N public posts (resolved reposts). */
@@ -68,6 +69,28 @@ export interface ProcessDeps {
    *  a stage that degrades instead of failing must still leave a trace, or the
    *  degradation is invisible until someone reads the database. */
   log?: (msg: string) => void;
+  /**
+   * "This stage degraded on a failure that could plausibly succeed later — queue
+   * the work again."
+   *
+   * Degrading a stage instead of failing the job (translation, and now the nostr
+   * summary) keeps the attendee's profile, directory entry and matches, which is
+   * the right trade. But until now that was ALL it did: the failed artifact is
+   * deliberately not cached, and nothing re-ran it, so a transient provider blip
+   * left the profile permanently untranslated — recovered only if the attendee
+   * happened to edit their profile, which most never do. There was a log line and
+   * no other consequence.
+   *
+   * The job runner is the mechanism (backoff, attempt cap, poison), and this hook
+   * is how a stage that has already decided to degrade asks for one. Injected
+   * rather than called directly so this module keeps knowing nothing about jobs,
+   * and so a test can assert the request without a runner.
+   *
+   * Only called for a plausibly-TRANSIENT failure: a `ProviderContractError` is
+   * deterministic for a given prompt and model, so re-queueing it only re-bills
+   * (the lesson of the 27-attempt translation poison in July).
+   */
+  retryLater?: (req: { stage: "translation" | "nostr_summary"; pubkey: string; reason: string }) => void;
 }
 
 export interface ProcessInput {
@@ -89,6 +112,27 @@ export interface ProcessResult {
   aiProfile: AiProfile;
   /** One per STT-transcribed media blob, tied to the blob by `x` (audit A1). */
   transcripts: MediaTranscript[];
+  /**
+   * Optional stages that failed and were skipped, with the reason. Present so a
+   * caller that would rather read a return value than take the {@link
+   * ProcessDeps.retryLater} callback can see what degraded — and so a test can
+   * assert it. `retryable` is false for a deterministic provider-contract failure,
+   * where asking again only re-bills the same wrong answer.
+   */
+  degraded?: { stage: "translation" | "nostr_summary"; reason: string; retryable: boolean }[];
+}
+
+/**
+ * Is re-running this stage later worth the money?
+ *
+ * A {@link ProviderContractError} means the model answered in a shape we cannot
+ * use. That is a property of (prompt, model), not of the moment: the July
+ * translation poison spent 27 fully-billed attempts on a response shape that could
+ * never pass. Everything else — a timeout, a 5xx, a depleted balance, a dropped
+ * socket — is about the world at that instant and is worth asking again.
+ */
+function isRetryableStageFailure(e: unknown): boolean {
+  return !(e instanceof ProviderContractError);
 }
 
 /** Run the full profile pipeline for one attendee (spec §9.2, F1 branch).
@@ -105,6 +149,7 @@ export async function processAttendee(
   input: ProcessInput,
 ): Promise<ProcessResult> {
   const now = deps.now ?? (() => Date.now());
+  const degraded: NonNullable<ProcessResult["degraded"]> = [];
 
   // 1. Transcribe each media blob (cached by blob sha256). Text intros carry no
   //    blob, so they never reach this loop — the authored text is appended below.
@@ -190,16 +235,43 @@ export async function processAttendee(
         // per-account summary so a purge reference-counts it correctly.
         if (owner) deps.store.recordSummaryRef(input.pubkey, inputsHash, owner.coordinate, now());
       } else {
-        nostrSummary = await summarizeNostr(
-          deps.summary.llm,
-          deps.summary,
-          input.pubkey,
-          posts,
-          deps.lang,
-          deps.signal,
-        );
-        if (nostrSummary)
-          deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now(), owner ? { coordinate: owner.coordinate } : undefined);
+        // The nostr summary is ENRICHMENT, and until now it could take the whole
+        // attendee down with it. `nostrSummaryResponseSchema` is `{summary: string}`,
+        // so a `{"summary": null}` — the same malformation that cost three
+        // attendees their translations in July, from the same model family — threw a
+        // ProviderContractError that unwound ALL of processAttendee. The attendee
+        // lost their ai_profile, their directory entry and every match they would
+        // have had, over an optional paragraph summarizing their public posts.
+        //
+        // Same shape as the translation stage below: log, continue without it, and
+        // do NOT cache the failure (putSummary only ever records a real answer, so a
+        // cache hit always means "asked and answered"). A transient failure asks the
+        // job runner for another go; a deterministic one does not, because it would
+        // only re-bill the identical wrong answer.
+        try {
+          nostrSummary = await summarizeNostr(
+            deps.summary.llm,
+            deps.summary,
+            input.pubkey,
+            posts,
+            deps.lang,
+            deps.signal,
+          );
+          if (nostrSummary)
+            deps.store.putSummary(input.pubkey, inputsHash, nostrSummary, now(), owner ? { coordinate: owner.coordinate } : undefined);
+        } catch (e) {
+          // Shutdown still wins — an aborted run must unwind, not quietly continue
+          // and commit against a store the shutdown is about to close (audit C11).
+          if (deps.signal?.aborted) throw e;
+          nostrSummary = undefined;
+          const reason = e instanceof Error ? e.message : String(e);
+          const retryable = isRetryableStageFailure(e);
+          degraded.push({ stage: "nostr_summary", reason, retryable });
+          deps.log?.(
+            `[pipeline] ${input.pubkey.slice(0, 8)}: nostr summary failed, building the profile without it — ${reason}`,
+          );
+          if (retryable) deps.retryLater?.({ stage: "nostr_summary", pubkey: input.pubkey, reason });
+        }
       }
     }
   }
@@ -290,11 +362,19 @@ export async function processAttendee(
       // and commit against a store the shutdown is about to close (audit C11).
       if (deps.signal?.aborted) throw e;
       translations = null;
+      const reason = e instanceof Error ? e.message : String(e);
+      const retryable = isRetryableStageFailure(e);
+      degraded.push({ stage: "translation", reason, retryable });
       deps.log?.(
-        `[pipeline] ${input.pubkey.slice(0, 8)}: translation failed, publishing without it — ${
-          e instanceof Error ? e.message : String(e)
-        }`,
+        `[pipeline] ${input.pubkey.slice(0, 8)}: translation failed, publishing without it — ${reason}`,
       );
+      // Not caching the failure was only HALF the fix (2026-09-04 audit). Nothing
+      // re-ran the stage either, so the uncached retry only ever happened if the
+      // attendee edited their profile — which most never do. The profile stayed
+      // untranslated for the life of the event, and the sole trace was the line
+      // above. Ask the job runner for another attempt, unless the failure is the
+      // deterministic kind that re-billing cannot fix.
+      if (retryable) deps.retryLater?.({ stage: "translation", pubkey: input.pubkey, reason });
     }
   } else if (owner) {
     // Cache hit — a cached `null` (nothing to translate) is still a hit; record this
@@ -302,5 +382,5 @@ export async function processAttendee(
     deps.store.recordArtifactRef("translation", trKey, owner, now());
   }
   if (translations) aiProfile.translations = translations;
-  return { aiProfile, transcripts: published };
+  return { aiProfile, transcripts: published, ...(degraded.length ? { degraded } : {}) };
 }

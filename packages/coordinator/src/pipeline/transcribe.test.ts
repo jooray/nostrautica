@@ -4,10 +4,10 @@
  * and MUST probe the real decoded duration and reject over-limit media before STT.
  * Actual bytes/duration are accounted into the usage budgets, never declared values.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { encryptMedia } from "@nostrautica/protocol";
 import { Store } from "../store/db.js";
-import { transcribeMedia, MediaPolicyError } from "./transcribe.js";
+import { transcribeMedia, MediaPolicyError, MIN_AUDIO_BYTES_TO_EXPECT_SPEECH } from "./transcribe.js";
 import { MockStt } from "../providers/mock.js";
 
 async function fixture(durationDeclared = 30) {
@@ -116,5 +116,168 @@ describe("H-3 — real decoded-duration enforcement", () => {
     expect(r.text).toBe("ok");
     expect(stt.calls).toBe(1);
     expect(usage.at(-1)).toEqual({ bytes: ciphertext.length, durationSec: 45 });
+  });
+});
+
+/**
+ * "Could not probe" is not "zero seconds" (2026-09-04 audit).
+ *
+ * `probeDurationSec` returned 0 on ANY ffprobe failure — a timeout, a killed
+ * process, an unparseable container, an "N/A" duration — and audio.ts's own
+ * comment claimed the caller treated that as "unknown". The caller did not. So a
+ * media file whose header ffprobe cannot parse but ffmpeg CAN decode passed the
+ * `realDurationSec > maxDurationSec` guard AND booked 0 seconds against the usage
+ * budget, while the STT bill for the full-length audio was entirely real. Both
+ * halves of H-3's enforcement, defeated by one unparseable header.
+ */
+describe("H-3 — an UNPROBEABLE duration is a rejection, not a pass", () => {
+  it("rejects unprobeable media before STT when a duration limit is configured", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "should never run" });
+    const usage: { bytes: number; durationSec: number }[] = [];
+    await expect(
+      transcribeMedia(
+        {
+          store,
+          stt,
+          sttModel: "m",
+          fetchBlob: async () => ciphertext,
+          maxDurationSec: 60,
+          probeDuration: async () => undefined, // ffprobe gave no usable answer
+          onUsage: (u) => usage.push(u),
+          extractAudio: async () => [{ data: new Uint8Array(8), mime: "audio/ogg" }],
+        },
+        descriptor as any,
+      ),
+    ).rejects.toThrow(/could not determine the decoded duration/);
+    expect(stt.calls).toBe(0); // never paid for
+    // Still a MediaPolicyError, so processAttendee skips THIS media and carries on
+    // with the attendee rather than poisoning their whole pipeline.
+    await expect(
+      transcribeMedia(
+        {
+          store: new Store(),
+          stt: new MockStt(),
+          sttModel: "m",
+          fetchBlob: async () => ciphertext,
+          maxDurationSec: 60,
+          probeDuration: async () => undefined,
+        },
+        descriptor as any,
+      ),
+    ).rejects.toBeInstanceOf(MediaPolicyError);
+    // Bytes actually downloaded are still metered on rejection.
+    expect(usage.at(-1)!.bytes).toBe(ciphertext.length);
+  });
+
+  it("still transcribes unprobeable media when NO duration limit is configured", async () => {
+    // With no limit there is nothing to enforce, so an unknown duration is just an
+    // unknown duration — rejecting here would break every event that sets no cap.
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "ok" });
+    const usage: { bytes: number; durationSec: number }[] = [];
+    const r = await transcribeMedia(
+      {
+        store,
+        stt,
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => undefined,
+        onUsage: (u) => usage.push(u),
+        extractAudio: async () => [{ data: new Uint8Array(8), mime: "audio/ogg" }],
+      },
+      descriptor as any,
+    );
+    expect(r.text).toBe("ok");
+    expect(usage.at(-1)).toEqual({ bytes: ciphertext.length, durationSec: 0 });
+  });
+
+  it("a probed 0 is still a real measurement and passes", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "ok" });
+    const r = await transcribeMedia(
+      {
+        store,
+        stt,
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        maxDurationSec: 60,
+        probeDuration: async () => 0,
+        extractAudio: async () => [{ data: new Uint8Array(8), mime: "audio/ogg" }],
+      },
+      descriptor as any,
+    );
+    expect(r.text).toBe("ok");
+  });
+});
+
+/**
+ * An empty transcript over real audio is not cached (2026-09-04 audit).
+ *
+ * The transcript cache is keyed by blob sha256 and is permanent, and the cache hit
+ * short-circuits before the download — so caching "" spends one provider hiccup to
+ * discard an intro the attendee recorded, forever, indistinguishably from silence.
+ */
+describe("an empty transcript over non-trivial audio is not cached", () => {
+  const bigSegment = { data: new Uint8Array(MIN_AUDIO_BYTES_TO_EXPECT_SPEECH), mime: "audio/ogg" };
+
+  it("leaves the cache empty so a reprocess can try again", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await transcribeMedia(
+      {
+        store,
+        stt,
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => 30,
+        extractAudio: async () => [bigSegment],
+      },
+      descriptor as any,
+    );
+    expect(r.text).toBe("");
+    expect(store.getTranscript(descriptor.x)).toBeUndefined(); // NOT cached
+    expect(warn.mock.calls.map((c) => c.join(" ")).join("\n")).toMatch(/empty transcript/);
+    warn.mockRestore();
+  });
+
+  it("still caches an empty transcript for a genuinely tiny clip (real silence costs one call)", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const r = await transcribeMedia(
+      {
+        store,
+        stt: new MockStt({ default: "" }),
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => 1,
+        extractAudio: async () => [{ data: new Uint8Array(64), mime: "audio/ogg" }],
+      },
+      descriptor as any,
+    );
+    expect(r.text).toBe("");
+    expect(store.getTranscript(descriptor.x)).toBe("");
+  });
+
+  it("a real transcript is cached as before", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    await transcribeMedia(
+      {
+        store,
+        stt: new MockStt({ default: "hello" }),
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => 30,
+        extractAudio: async () => [bigSegment],
+      },
+      descriptor as any,
+    );
+    expect(store.getTranscript(descriptor.x)).toBe("hello");
   });
 });

@@ -231,27 +231,61 @@ export async function extractAudioSegments(
   }
 }
 
-async function probeDurationSec(path: string, signal?: AbortSignal): Promise<number> {
+/**
+ * Probed duration in seconds, or `undefined` for "could not probe" (2026-09-04
+ * audit).
+ *
+ * This used to return 0 for BOTH — a zero-length input and a container ffprobe
+ * could not parse, a timeout, a killed process, an "N/A" duration — and the
+ * caller (transcribe.ts) treated 0 as a real measurement despite the comment here
+ * claiming otherwise. Consequences of the conflation, for a container ffprobe
+ * cannot parse but ffmpeg CAN decode: `realDurationSec > maxDurationSec` is false,
+ * so the event's per-media duration cap is bypassed entirely, and `onUsage` books
+ * 0 seconds against the budget that is supposed to bound the spend — while the STT
+ * bill for the full-length audio is real. Those two are the whole of the H-3
+ * enforcement, defeated by one unparseable header.
+ *
+ * `undefined` forces every caller to decide, and TypeScript makes them.
+ */
+async function probeDurationSec(path: string, signal?: AbortSignal): Promise<number | undefined> {
+  let stdout: Buffer;
   try {
-    const { stdout } = await run("ffprobe", [
+    ({ stdout } = await run("ffprobe", [
       "-v", "error", ...FFMPEG_INPUT_GUARD,
       "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1", path,
-    ], { signal });
-    return Math.ceil(parseFloat(stdout.toString()) || 0);
-  } catch {
-    return 0;
+    ], { signal }));
+  } catch (e) {
+    // Logged, because "could not probe" now has a policy consequence and an
+    // operator staring at a rejected intro needs to see WHY (a timeout and a
+    // malformed container want different responses).
+    console.warn(`[audio] ffprobe failed: ${e instanceof Error ? e.message : String(e)}`);
+    return undefined;
   }
+  // ffprobe exits 0 and prints "N/A" for a stream whose duration it cannot
+  // determine; `parseFloat("N/A") || 0` silently made that a confident zero.
+  const sec = parseFloat(stdout.toString().trim());
+  if (!Number.isFinite(sec) || sec < 0) {
+    console.warn(`[audio] ffprobe reported no usable duration (${JSON.stringify(stdout.toString().trim().slice(0, 40))})`);
+    return undefined;
+  }
+  return Math.ceil(sec);
 }
 
 /**
  * Probe the REAL decoded duration (seconds) of a media blob (audit H-3). The
  * coordinator enforces the event's duration limit against this, not the
- * attendee-declared `duration`, before spending on STT. Returns 0 if ffprobe
- * can't parse the container (treated as "unknown" by the caller). Writes to a
- * temp file (ffprobe needs a seekable input) and always cleans it up.
+ * attendee-declared `duration`, before spending on STT. Returns `undefined` when
+ * ffprobe could not determine a duration at all — which is NOT the same as 0, and
+ * is a rejection rather than a pass wherever a limit is configured (see
+ * transcribe.ts). Writes to a temp file (ffprobe needs a seekable input) and
+ * always cleans it up.
  */
-export async function probeDurationFromBytes(media: Uint8Array, mime: string, signal?: AbortSignal): Promise<number> {
+export async function probeDurationFromBytes(
+  media: Uint8Array,
+  mime: string,
+  signal?: AbortSignal,
+): Promise<number | undefined> {
   const dir = await mkdtemp(join(tmpdir(), "nostrautica-probe-"));
   try {
     const ext = mime.includes("mp4") ? "mp4" : mime.includes("webm") ? "webm" : "bin";

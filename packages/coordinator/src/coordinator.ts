@@ -2547,6 +2547,24 @@ export class Coordinator {
         // boundaries so an in-flight STT/LLM run unwinds instead of writing against
         // a store the shutdown is about to close.
         signal,
+        // A stage that degraded for a plausibly-TRANSIENT reason asks for exactly
+        // one more go. Without this a failed translation or nostr summary was
+        // simply logged, and the attendee kept an untranslated profile until they
+        // happened to edit it — the failure was correctly left uncached, and then
+        // nothing ever re-ran it.
+        //
+        // The dedupe key pins one retry per (attendee revision, stage): a second
+        // failure's enqueue collides with the now-terminal row, so this cannot
+        // loop. It is cheap because transcripts and the ai_profile are
+        // content-addressed — only the uncached stage actually re-runs. Deterministic
+        // failures are excluded upstream (`isRetryableStageFailure`), since
+        // re-asking a model the same question only re-bills.
+        retryLater: ({ stage }) =>
+          this.jobs.enqueue(
+            "process_attendee",
+            `proc:${coordinate}:${pubkey}:retry:${stage}:${sourceRevision}`,
+            { coordinate, pubkey, sourceRevision },
+          ),
         now: this.now,
         log,
       },
@@ -3801,7 +3819,7 @@ export class Coordinator {
     // Self-heal: additively fold the Whitenoise relays into the group's own
     // routing state, even for a group that already existed before this was
     // added — a no-op once they're present, so safe to run on every install.
-    await this.marmot.ensureRelays(state.coordinate, chatInteropRelays(state.configRelays));
+await this.marmot.ensureRelays(state.coordinate, chatInteropRelays(state.configRelays));
     await this.marmot.backfillApproved(state.coordinate);
     this.subscribeChat(state);
   }

@@ -14,6 +14,16 @@ import { safeFetch, SafeFetchError } from "../net/safe-fetch.js";
 export const DEFAULT_MAX_MEDIA_BYTES = 200 * 1024 * 1024;
 
 /**
+ * Above this many bytes of EXTRACTED audio, an empty transcript is treated as a
+ * provider failure rather than as silence, and is not cached (see the end of
+ * {@link transcribeMedia}). The extraction pipeline emits 16 kbit/s mono Opus, so
+ * ~2 KB per second of audio: 8 KB is roughly four seconds — long enough that a
+ * person who bothered to record it said something, short enough that a genuinely
+ * blank clip still caches on the first try.
+ */
+export const MIN_AUDIO_BYTES_TO_EXPECT_SPEECH = 8 * 1024;
+
+/**
  * The media violates the coordinator's declared policy (audit H-3): the actual
  * downloaded ciphertext length doesn't match the descriptor's `size`, or the real
  * decoded duration exceeds the event limit. The media is REJECTED (marked
@@ -86,8 +96,10 @@ export interface TranscribeDeps {
    * passed distinctly by the caller. 0/undefined ⇒ no duration enforcement.
    */
   maxDurationSec?: number;
-  /** Injectable duration probe (tests); defaults to ffprobe on the decrypted bytes. */
-  probeDuration?: (media: Uint8Array, mime: string) => Promise<number>;
+  /** Injectable duration probe (tests); defaults to ffprobe on the decrypted bytes.
+   *  `undefined` means "could not probe" — NOT zero seconds; see the enforcement
+   *  below, which rejects an unprobeable input wherever a limit is configured. */
+  probeDuration?: (media: Uint8Array, mime: string) => Promise<number | undefined>;
   /** Injectable audio extraction (tests); defaults to the real ffmpeg pipeline. */
   extractAudio?: (media: Uint8Array, mime: string, maxBytes: number) => Promise<AudioSegment[]>;
   /**
@@ -147,12 +159,35 @@ export async function transcribeMedia(
   // regardless of the declared `duration`. Account the actual bytes + duration.
   const probe = deps.probeDuration ?? ((m, mime) => probeDurationFromBytes(m, mime, deps.signal));
   const realDurationSec = await probe(plaintext, descriptor.m);
-  deps.onUsage?.({ bytes: ciphertext.length, durationSec: realDurationSec });
-  if (deps.maxDurationSec && realDurationSec > deps.maxDurationSec) {
-    deps.store.putTranscript(descriptor.x, "", now());
-    throw new MediaPolicyError(
-      `decoded duration ${realDurationSec}s exceeds the ${deps.maxDurationSec}s event limit`,
-    );
+  // Unknown is booked as 0 against the usage budget because there is nothing else
+  // to book — which is precisely why an unknown duration must not also be allowed
+  // to PASS the cap below (2026-09-04 audit).
+  deps.onUsage?.({ bytes: ciphertext.length, durationSec: realDurationSec ?? 0 });
+  if (deps.maxDurationSec) {
+    // "Could not probe" used to read as 0 seconds and sail through this comparison.
+    // ffprobe failing does not mean ffmpeg will: a container whose header ffprobe
+    // cannot parse can still be DECODED, so the attacker's move was a media file
+    // that defeats the probe — which bypassed the event's duration cap AND booked
+    // 0 seconds against the budget meant to bound the spend, while the STT bill for
+    // the full-length audio was entirely real. Both halves of H-3's enforcement,
+    // undone by one unparseable header.
+    //
+    // MediaPolicyError (not a throw that poisons the attendee): this rejects THIS
+    // media only — an empty transcript is cached, no STT — and processAttendee
+    // carries on with the attendee's other media and their authored profile.
+    if (realDurationSec === undefined) {
+      deps.store.putTranscript(descriptor.x, "", now());
+      throw new MediaPolicyError(
+        `could not determine the decoded duration (ffprobe gave no usable answer) and a ` +
+          `${deps.maxDurationSec}s event limit is enforced — unprobeable media is rejected, not waved through`,
+      );
+    }
+    if (realDurationSec > deps.maxDurationSec) {
+      deps.store.putTranscript(descriptor.x, "", now());
+      throw new MediaPolicyError(
+        `decoded duration ${realDurationSec}s exceeds the ${deps.maxDurationSec}s event limit`,
+      );
+    }
   }
 
   const caps = await deps.stt.capabilities();
@@ -172,6 +207,27 @@ export async function transcribeMedia(
     if (!lang && language) lang = language; // first segment that reports a language
   }
   const transcript = parts.join(" ").trim();
+  // An EMPTY transcript from audio that plainly had something in it is not cached
+  // (2026-09-04 audit). The transcript cache is keyed by blob sha256 and is
+  // permanent, so caching "" here spends one provider hiccup to discard an intro
+  // the attendee recorded — forever, indistinguishably from silence, and no
+  // reprocess can recover it because the cache hit short-circuits before the
+  // download. Venice's adapter now refuses an absent `text` outright; this covers
+  // the rest of the class (a provider that answers `{"text": ""}`, a segment that
+  // came back blank).
+  //
+  // Genuinely silent or near-empty audio is left cacheable, so a truly blank
+  // recording still costs exactly one STT call: the threshold is total EXTRACTED
+  // audio bytes, which at the 16 kbit/s mono Opus this pipeline produces is ~2 KB
+  // per second.
+  const audioBytes = segments.reduce((n, s) => n + s.data.length, 0);
+  if (transcript === "" && audioBytes >= MIN_AUDIO_BYTES_TO_EXPECT_SPEECH) {
+    console.warn(
+      `[stt] empty transcript for ${audioBytes} bytes of extracted audio (blob ${descriptor.x.slice(0, 12)}…) — ` +
+        `NOT caching it, so a reprocess can try again rather than inheriting a permanent silence`,
+    );
+    return { text: transcript, lang };
+  }
   deps.store.putTranscript(descriptor.x, transcript, now(), lang);
   return { text: transcript, lang };
 }

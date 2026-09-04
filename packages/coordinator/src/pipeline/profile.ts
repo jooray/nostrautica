@@ -10,7 +10,6 @@ import {
   sha256Hex,
   utf8ToBytes,
   languageName,
-  aiProfileSchema,
   MAX_SKILLS,
   MAX_SKILL,
   MAX_ABOUT,
@@ -25,10 +24,44 @@ import type { LlmProvider, ModelRef } from "../providers/types.js";
 // storage or publication. The AI profile reuses the shared protocol schema; the
 // translation/summary responses have their own local shapes.
 
-/** The AI never emits `translations` itself (the caller adds it), so validate the
- *  core fields with the shared schema — extra keys are stripped, missing/wrong
- *  types throw a ProviderContractError → retry/poison. */
-const aiProfileResponseSchema = aiProfileSchema;
+/**
+ * The AI never emits `translations` itself (the caller adds it), so only the core
+ * fields are validated — extra keys are stripped, and a MISSING or WRONG-TYPED
+ * field still throws a ProviderContractError, because a stage that did not return
+ * a `skills` array has not done its job and there is nothing safe to guess.
+ *
+ * What is no longer a rejection is being over the protocol's SIZE caps
+ * (2026-09-04 audit). This used to be `aiProfileSchema` itself, whose caps are
+ * hard `.max()`s — so one 201-character skill, or a 51st list item, threw away the
+ * attendee's whole ai_profile and with it their directory entry and every match
+ * they would have had. Three things made that indefensible:
+ *
+ *  - `AI_PROFILE_SCHEMA`, the JSON schema we actually SEND the provider, carried no
+ *    `maxLength`/`maxItems` at all, so the model was never told the bounds it was
+ *    being punished for missing. It is told now.
+ *  - `sanitizeAiProfile` truncates every one of these strings to 200 chars anyway,
+ *    immediately after validation — so the reject only ever prevented work that was
+ *    about to be undone.
+ *  - The failure is deterministic for a given (prompt, model): every retry re-bills
+ *    the same over-long skill, all the way to poison.
+ *
+ * Truncating instead is the same trade `coerceStringList` already makes for
+ * translations, and for the same reason: an over-cap value fails every reader's
+ * `directoryEntryContentSchema.parse`, silently removing the attendee from the
+ * directory for EVERYONE, so the bound has to be enforced somewhere — just not by
+ * discarding the answer.
+ */
+const boundedList = z
+  .array(z.string())
+  .transform((items) => items.slice(0, MAX_SKILLS).map((s) => s.slice(0, MAX_SKILL)));
+
+const aiProfileResponseSchema = z.object({
+  summary: z.string().transform((t) => t.slice(0, MAX_ABOUT)),
+  skills: boundedList,
+  interests: boundedList,
+  offers: boundedList,
+  seeks: boundedList,
+});
 
 /**
  * Liberal in what it accepts, because this stage is a DECORATION and the strict
@@ -122,16 +155,46 @@ const translationResponseSchema = z.object({
 
 const nostrSummaryResponseSchema = z.object({ summary: z.string() });
 
+/**
+ * The JSON schema sent to the provider. The `maxLength`/`maxItems` bounds are the
+ * protocol's own caps (2026-09-04 audit): they were absent, so the model was never
+ * told the limits its output was then validated against — and a model that is told
+ * "≤ 200 characters" in a strict `json_schema` mostly obeys, which is far cheaper
+ * than truncating after the fact. The truncation in `aiProfileResponseSchema`
+ * stays as the backstop for the models that do not.
+ */
 export const AI_PROFILE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["summary", "skills", "interests", "offers", "seeks"],
   properties: {
-    summary: { type: "string", description: "2-3 sentence portrait of this person" },
-    skills: { type: "array", items: { type: "string" } },
-    interests: { type: "array", items: { type: "string" } },
-    offers: { type: "array", items: { type: "string" }, description: "what they can give others" },
-    seeks: { type: "array", items: { type: "string" }, description: "what they're looking for" },
+    summary: {
+      type: "string",
+      maxLength: MAX_ABOUT,
+      description: "2-3 sentence portrait of this person",
+    },
+    skills: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+    },
+    interests: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+    },
+    offers: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+      description: "what they can give others",
+    },
+    seeks: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+      description: "what they're looking for",
+    },
   },
 } as const;
 
