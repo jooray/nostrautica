@@ -24,6 +24,7 @@
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import type { MessageKey } from "$lib/i18n/messages.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -31,6 +32,7 @@
   import type { ChatMessage } from "$lib/chat/messages.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
+  import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -90,7 +92,18 @@
   // one person show as one member and one name/colour (NIP §10.1 dedupe).
   let roster = $state<RosterContent | undefined>(undefined);
   const deviceAccountMap = $derived(buildDeviceAccountMap(roster));
-  const members = $derived(chatMembers(roster));
+  // Real MLS membership when the session can see the group, roster `chat_keys`
+  // (i.e. who ATTESTED) when it can't — the two disagree in both directions, so
+  // the header says which one is on screen rather than passing one off as the
+  // other. The coordinator's own admin leaf is in the group too and is excluded:
+  // it is disclosed above ("coordinator-read"), not a person in the room.
+  const memberList = $derived(
+    chatMembers(roster, {
+      groupDevices: chatSession.memberDevices,
+      exclude: ctx?.config.coordinator ? [ctx.config.coordinator] : [],
+    }),
+  );
+  const members = $derived(memberList.members);
   function accountOf(pubkey: string): string {
     return deviceAccountMap.get(pubkey) ?? pubkey;
   }
@@ -346,6 +359,34 @@
   function devicesLabel(n: number): string {
     return tp("chat.members.devices", n);
   }
+
+  // ── why setup is stuck, when the coordinator actually told us ───────────────
+  // A refused 21607 (device cap, a chat key bound to someone else, a bad proof of
+  // possession, an unusable key package) used to be a line in the coordinator's
+  // log and nothing else: this device sat in "setting up your secure chat" with a
+  // generic "it may be offline, check with the organizer" hint that pointed at the
+  // wrong thing entirely. The coordinator now seals the reason to the affected
+  // attendee over the same 21606 channel a failed talk/submission already uses
+  // (`stage: "chat_attestation"`), and the grant scan records it here.
+  const CHAT_STAGE = "chat_attestation";
+  const refusal = $derived.by(() => {
+    if (!ctx) return undefined;
+    const notice = ownStatusStore
+      .poison(ctx.coordinate)
+      .filter((s) => s.stage === CHAT_STAGE)
+      .sort((a, b) => b.at - a.at)[0];
+    if (!notice) return undefined;
+    // The category is a stable sanitized class, never free text — an unknown one
+    // (a newer coordinator) falls back to a generic line rather than rendering a
+    // raw identifier at the user.
+    const known: Record<string, MessageKey> = {
+      chat_device_cap_reached: "chat.refused.deviceCap",
+      chat_key_bound_to_other_account: "chat.refused.boundElsewhere",
+      chat_proof_invalid: "chat.refused.proof",
+      chat_key_package_ineligible: "chat.refused.keyPackage",
+    };
+    return t(known[notice.error_category ?? ""] ?? "chat.refused.other");
+  });
 </script>
 
 <div class="chat-head">
@@ -404,7 +445,11 @@
        collapse into one member, with a subtle "N devices" affix. -->
   {#if members.length > 0}
     <details class="members" bind:open={showMembers}>
-      <summary>{t("chat.members.title")} · {members.length}</summary>
+      <summary>
+        {t("chat.members.title")} · {members.length}{#if memberList.source === "attested"}
+          <span class="msource">{t("chat.members.attested")}</span>
+        {/if}
+      </summary>
       <ul>
         {#each members as mem (mem.account)}
           <li>
@@ -435,8 +480,14 @@
       <div class="empty">
         {#if phase === "setup"}
           <p class="muted">{t("chat.setup")}</p>
+          {#if refusal}
+            <!-- We know exactly why, so say it instead of the generic hint. -->
+            <p class="muted" style="margin-top:0.5rem" role="status">{refusal}</p>
+          {/if}
           {#if setupSlow}
-            <p class="muted" style="margin-top:0.5rem">{t("chat.setupSlow")}</p>
+            {#if !refusal}
+              <p class="muted" style="margin-top:0.5rem">{t("chat.setupSlow")}</p>
+            {/if}
             <button class="btn inline" style="margin-top:0.25rem" onclick={retryChat}>
               {t("chat.retry")}
             </button>
@@ -644,6 +695,11 @@
   .members .mname {
     font-weight: 600;
     overflow-wrap: anywhere;
+  }
+  .members .msource {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--text-dim);
   }
   .members .devcount {
     font-size: 0.72rem;

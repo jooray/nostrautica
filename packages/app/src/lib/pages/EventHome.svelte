@@ -770,12 +770,18 @@
 
   <!-- Own-pipeline failure notices (21606 → attendee, NIP §6.3): modest, per stage. -->
   {#each ownPoison as st (st.stage)}
+    <!-- The stage decides the sentence. A chat-device refusal ("chat_attestation")
+         used to fall through to "your profile couldn't be processed", which sent
+         the reader to re-submit a profile that was never the problem — the whole
+         explanation lives on the Chat page, which is where this points them. -->
     <div class="card warn" role="status">
       <strong>{t("event.ownStatus.title")}</strong>
       <span class="muted"
         >{st.stage === "process_talk"
           ? t("event.ownStatus.talk")
-          : t("event.ownStatus.submission")}</span
+          : st.stage === "chat_attestation"
+            ? t("event.ownStatus.chat")
+            : t("event.ownStatus.submission")}</span
       >
     </div>
   {/each}

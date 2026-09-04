@@ -51,6 +51,18 @@ class ChatSessionStore {
   error = $state<unknown>(null);
   /** Every decoded message, de-duped by rumor id and chronologically sorted. */
   messages = $state<ChatMessage[]>([]);
+  /**
+   * Device pubkeys that actually hold a leaf in this event's MLS group, or
+   * `undefined` while that is genuinely unknown (no group yet; a follower tab
+   * before the leader's first broadcast).
+   *
+   * The member list was derived purely from the roster's `chat_keys` — from who
+   * ATTESTED — which lists devices whose Add never landed and keeps listing
+   * members whose leaf has been removed. This is the group's own answer. Only the
+   * leader tab can compute it (it owns the client); followers receive it over the
+   * same BroadcastChannel that carries messages.
+   */
+  memberDevices = $state<string[] | undefined>(undefined);
   /** Our own chat identity pubkey (marks "my" bubbles); set once the client exists. */
   chatPubkey = $state<string | undefined>(undefined);
   /** Reactive by reference only — never deep-proxy the marmot client. */
@@ -162,6 +174,14 @@ class ChatSessionStore {
           this.recomputeReadOnly();
           if (this.phase !== "ready") this.phase = "ready";
         },
+        onLeaderMembers: (coordinate, members) => {
+          // Real MLS membership, computed by the tab that holds the client. A
+          // follower has no group state of its own, so without this its member
+          // list would silently fall back to the roster — the very thing this
+          // whole path replaces.
+          if (tok !== this.token || coordinate !== ctx.coordinate) return;
+          this.memberDevices = members;
+        },
         onSendRequest: async (text) => {
           // Leader executes a follower's proxied send on the real client.
           if (!this.chat) throw new Error("no chat session");
@@ -174,7 +194,13 @@ class ChatSessionStore {
           await this.rejoin({ force });
         },
         onSyncRequest: () => {
-          if (tok === this.token) coordinator.broadcastState(ctx.coordinate, this.messages);
+          if (tok !== this.token) return;
+          coordinator.broadcastState(ctx.coordinate, this.messages);
+          // A freshly-joined follower asks for a snapshot; membership is part of
+          // that snapshot, or the new tab renders an empty/roster-only member list
+          // until the next MLS state change (which may be minutes away in a quiet
+          // room).
+          if (this.memberDevices) coordinator.broadcastMembers(ctx.coordinate, this.memberDevices);
         },
       });
       this.coordinator = coordinator;
@@ -248,7 +274,12 @@ class ChatSessionStore {
       coordinator.broadcastState(ctx.coordinate, this.messages);
     };
     chat.onStateChange = () => {
-      if (tok === this.token) void this.syncPhase(tok);
+      if (tok !== this.token) return;
+      void this.syncPhase(tok);
+      // Membership changes ARE state changes — an Add, a Remove, or our own
+      // eviction all arrive here as a new epoch. Re-read the group rather than
+      // trusting the roster, which the coordinator republishes on its own schedule.
+      void this.syncMembers(tok, coordinator, ctx.coordinate);
     };
     // First v2 chat session: best-effort retire the account's legacy 31602
     // chat-device-key backup (NIP §7.5). Leader-only + once-per-account gated, so
@@ -263,6 +294,30 @@ class ChatSessionStore {
     await chat.ensurePublished();
     await chat.start();
     await this.syncPhase(tok);
+    await this.syncMembers(tok, coordinator, ctx.coordinate);
+  }
+
+  /**
+   * Leader: re-read who actually holds a leaf in this event's group and mirror it
+   * to follower tabs. `undefined` (no group state, or a state we can't walk) is
+   * left as-is rather than published as "nobody" — an empty room is a claim, and
+   * the wrong one during setup.
+   */
+  private async syncMembers(
+    tok: number,
+    coordinator: ChatTabCoordinator,
+    coordinate: string,
+  ): Promise<void> {
+    // Wrapped rather than `?.groupMemberPubkeys().catch(…)`: a client that throws
+    // SYNCHRONOUSLY (an older/partial double, a torn-down client) would otherwise
+    // escape as an unhandled rejection out of a listener nobody awaits. Membership
+    // is decoration; it must never be able to take the session down.
+    const devices = await Promise.resolve()
+      .then(() => this.chat?.groupMemberPubkeys())
+      .catch(() => undefined);
+    if (tok !== this.token || !devices) return;
+    this.memberDevices = devices;
+    coordinator.broadcastMembers(coordinate, devices);
   }
 
   /** De-dupe by inner rumor id, keep chronological order (Bug 4 echo-safe). */
@@ -295,6 +350,7 @@ class ChatSessionStore {
     this.chat = undefined;
     this.chatPubkey = undefined;
     this.messages = [];
+    this.memberDevices = undefined;
     await this.begin();
   }
 
@@ -384,6 +440,7 @@ class ChatSessionStore {
     this.chat = undefined;
     this.chatPubkey = undefined;
     this.messages = [];
+    this.memberDevices = undefined;
     this.phase = "idle";
     this.error = null;
     this.naddr = undefined;

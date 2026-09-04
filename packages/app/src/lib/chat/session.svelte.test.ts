@@ -98,6 +98,9 @@ const ctx = {
 } as never;
 const signer = { getPublicKey: async () => OWNER } as never;
 
+/** MLS members the fake client reports, so a test can drive membership sync. */
+const groupMembers = ["c".repeat(64), "d".repeat(64)];
+
 function fakeChat() {
   return {
     identity: { pubkey: "c".repeat(64) },
@@ -105,6 +108,9 @@ function fakeChat() {
     ensurePublished: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
     nostrGroupId: vi.fn().mockResolvedValue("gid"),
+    // Real MLS membership. The member list is derived from this now, not from the
+    // roster's attested `chat_keys`, so the double has to answer it.
+    groupMemberPubkeys: vi.fn().mockResolvedValue(groupMembers),
     onMessage: undefined,
     onStateChange: undefined,
   };
@@ -188,5 +194,105 @@ describe("chat session — promotion keeps the lock it was promoted into", () =>
     // must not drop it back to "setting up" for the duration of a client build.
     expect(seen).not.toContain("setup");
     expect(chatSession.phase).toBe("ready");
+  });
+});
+
+/**
+ * Who is actually in the room.
+ *
+ * The member list was derived from the ECK roster's `chat_keys` — from who
+ * ATTESTED — which is a different set from MLS membership in both directions: a
+ * device whose Add never landed is listed and cannot read a word, and a member
+ * whose leaf was removed stays listed until the coordinator's next 31604. Only the
+ * leader tab holds a client and can ask the group itself; followers hold no MLS
+ * state at all, so they need it broadcast or they silently fall back to the roster.
+ *
+ * `broadcastMembers`/`onLeaderMembers` existed on the tab coordinator with no
+ * production caller on either side. This is that caller.
+ */
+describe("chat session — real MLS membership, and its handoff to follower tabs", () => {
+  let locks: FakeLockManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    FakeChannel.buses.clear();
+    locks = new FakeLockManager();
+    resolveChatIdentity.mockResolvedValue({ pubkey: "c".repeat(64) });
+    chatCreate.mockImplementation(async () => fakeChat());
+    __setChatCoordinatorFactoryForTests(
+      (opts: TabCoordinatorOptions) =>
+        new ChatTabCoordinator({
+          ...opts,
+          locks: locks as never,
+          createChannel: (n: string) => new FakeChannel(n) as never,
+        }),
+    );
+  });
+
+  afterEach(() => {
+    chatSession.dispose();
+    __setChatCoordinatorFactoryForTests(null);
+  });
+
+  it("the leader reads membership from the group once its client is up", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.memberDevices).toEqual(groupMembers));
+  });
+
+  it("re-reads membership on every MLS state change — an Add or a Remove IS one", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.memberDevices).toBeDefined());
+
+    const chat = chatSession.chat as unknown as {
+      groupMemberPubkeys: ReturnType<typeof vi.fn>;
+      onStateChange?: () => void;
+    };
+    chat.groupMemberPubkeys.mockResolvedValue(["c".repeat(64)]); // the other device left
+    chat.onStateChange?.();
+
+    await vi.waitFor(() => expect(chatSession.memberDevices).toEqual(["c".repeat(64)]));
+  });
+
+  it("a follower tab receives the leader's membership over the channel", async () => {
+    // A leader tab from another "window", sharing this test's lock table + channel.
+    const leaderTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+    });
+    await leaderTab.whenSettled;
+    expect(leaderTab.role).toBe("leader");
+
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    expect(chatSession.tabRole).toBe("follower");
+    // A follower holds NO client, so without the broadcast it has no membership
+    // at all — which is exactly the state that used to fall back to the roster.
+    expect(chatSession.memberDevices).toBeUndefined();
+
+    leaderTab.broadcastMembers(
+      (ctx as unknown as { coordinate: string }).coordinate,
+      ["c".repeat(64), "d".repeat(64)],
+    );
+    await vi.waitFor(() =>
+      expect(chatSession.memberDevices).toEqual(["c".repeat(64), "d".repeat(64)]),
+    );
+  });
+
+  it("ignores a membership broadcast for a DIFFERENT event", async () => {
+    // Two chat-enabled events share one per-account channel; adopting the other
+    // event's membership would render its people in this room.
+    const leaderTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+    });
+    await leaderTab.whenSettled;
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+
+    leaderTab.broadcastMembers("31923:" + "e".repeat(64) + ":other", ["9".repeat(64)]);
+    await Promise.resolve();
+    expect(chatSession.memberDevices).toBeUndefined();
   });
 });
