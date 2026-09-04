@@ -37,9 +37,19 @@
   const SPEEDS = [1, 1.5, 2] as const;
   const RATE_KEY = "nostrautica:playbackRate";
   function initialRate(): number {
-    if (typeof localStorage === "undefined") return 1;
-    const stored = Number(localStorage.getItem(RATE_KEY));
-    return SPEEDS.includes(stored as (typeof SPEEDS)[number]) ? stored : 1;
+    // try/catch, not a `typeof localStorage === "undefined"` guard: in a
+    // sandboxed iframe, or with "block third-party cookies / site data" on, the
+    // PROPERTY ACCESS itself throws SecurityError — localStorage is defined,
+    // reading it is what fails. This runs during component init, so that throw
+    // took the whole player down: a viewer with site data blocked got no video
+    // at all, not merely a forgotten playback speed. `setRate` already had the
+    // guard; this is the same protection on the read side.
+    try {
+      const stored = Number(localStorage.getItem(RATE_KEY));
+      return SPEEDS.includes(stored as (typeof SPEEDS)[number]) ? stored : 1;
+    } catch {
+      return 1;
+    }
   }
   let rate = $state(initialRate());
   function setRate(r: number) {
@@ -77,19 +87,26 @@
   const isAudio = $derived(descriptor.m.startsWith("audio/"));
 
   // Captions track (audit §7.3.6). The transcript wire format carries plain text
-  // only (no per-segment timing), so we synthesize a single whole-duration cue —
-  // a real, browser-native `<track kind="captions">` the caption UI + screen
-  // readers surface, not merely the offscreen transcript block below. A properly
-  // time-aligned track needs segment timing the schema does not yet carry.
+  // only (no per-segment timing), so vtt.ts spreads it over the media's declared
+  // duration as several pseudo-cues — a real, browser-native
+  // `<track kind="captions">` the caption UI + screen readers surface, not
+  // merely the offscreen transcript block below. Passing `descriptor.duration`
+  // is what makes that possible: without it the track was ONE cue running to
+  // 24:00:00, and since the track was also marked `default`, pressing play on a
+  // 15-minute talk painted the entire transcript over the video and left it
+  // there for the whole talk. The `default` attribute is gone below for the same
+  // reason — captions now appear when the viewer turns them on.
   let captionsUrl = $state<string | null>(null);
   $effect(() => {
-    // Rebuild whenever the transcript text changes; revoke the prior blob URL.
+    // Rebuild whenever the transcript text (or the clip) changes; revoke the
+    // prior blob URL.
     const text = transcript?.text?.trim();
+    const durationSec = descriptor.duration;
     if (!text) {
       captionsUrl = null;
       return;
     }
-    const u = vttObjectUrl(text);
+    const u = vttObjectUrl(text, durationSec);
     captionsUrl = u;
     return () => URL.revokeObjectURL(u);
   });
@@ -117,12 +134,54 @@
           : t("media.downloading", { done: formatBytes(progress.received) }),
   );
 
+  // The descriptor we actually hold a playback.ts reference for — NOT the
+  // `descriptor` prop, which can change under us (a gallery row re-keyed onto a
+  // different clip). Releasing the prop in that case decremented the NEW clip's
+  // ref count, which we never took, while the OLD clip's decrypted blob stayed
+  // pinned for the life of the tab.
+  let held: MediaDescriptor | null = null;
+  // Set in onDestroy so an in-flight load() can tell it has been unmounted. The
+  // old `onDestroy(() => { if (url) … })` released nothing when the component
+  // went away DURING the download — `url` is only assigned after resolveMediaUrl
+  // resolves — so playback.ts kept the finished entry at `{refs: 1}`, which
+  // trimCache is never allowed to evict. On a roster of intros, scrolling
+  // through a few of them mid-download leaked every one of them.
+  let disposed = false;
+
+  function releaseHeld() {
+    if (held) releaseMediaUrl(held);
+    held = null;
+    url = null;
+  }
+
+  $effect(() => {
+    const next = descriptor;
+    // Prop swapped to a different clip: drop the previous clip's reference and
+    // fall back to the "play" affordance for the new one.
+    if (held && held.x !== next.x) {
+      releaseHeld();
+      error = null;
+      progress = null;
+    }
+  });
+
   async function load() {
+    // Capture the descriptor this load is FOR: `descriptor` may be a different
+    // clip by the time the download finishes.
+    const target = descriptor;
     loading = true;
     error = null;
     progress = null;
     try {
-      url = await resolveMediaUrl(descriptor, { onProgress: (p) => (progress = p) });
+      const resolved = await resolveMediaUrl(target, { onProgress: (p) => (progress = p) });
+      if (disposed || descriptor.x !== target.x) {
+        // Unmounted (or swapped) while the bytes were arriving: hand the
+        // reference we just took straight back, or it is never released at all.
+        releaseMediaUrl(target);
+        return;
+      }
+      held = target;
+      url = resolved;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -132,7 +191,8 @@
   }
 
   onDestroy(() => {
-    if (url) releaseMediaUrl(descriptor);
+    disposed = true;
+    releaseHeld();
   });
 </script>
 
@@ -160,13 +220,15 @@
       onloadedmetadata={onLoadedMeta}
       ontimeupdate={onTimeUpdate}
     >
+      <!-- No `default`: see the captionsUrl effect. An always-on track of
+           pseudo-timed cues covers the speaker's face uninvited; the viewer
+           turns captions on from the native control when they want them. -->
       {#if captionsUrl}
         <track
           kind="captions"
           src={captionsUrl}
           srclang={transcript?.lang}
           label={t("media.captionsLabel")}
-          default
         />
       {/if}
     </video>
@@ -208,7 +270,14 @@
     <span class="stage" aria-hidden="true">{stage}</span>
   </div>
 {:else if error}
-  <div class="card warn">{t("media.playError", { reason: error })}</div>
+  <!-- Retry, not a dead end. Every mirror failing is the NORMAL outcome on
+       conference Wi-Fi (a captive portal blip, a mirror that 502s once), and
+       without this the only way back was a full page reload — which on the
+       matches/roster screens throws away the surrounding state too. -->
+  <div class="card warn">
+    <p style="margin:0 0 0.5rem">{t("media.playError", { reason: error })}</p>
+    <button class="btn inline" onclick={load}>{t("error.state.retry")}</button>
+  </div>
 {:else}
   <button class="btn" onclick={load}>
     {isAudio ? t("media.playAudio") : t("media.playIntro")}
