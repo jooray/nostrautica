@@ -84,10 +84,16 @@ import {
   compareLatest,
   supersedes,
   revisionSupersedes,
+  rumorEffectiveCreatedAt,
+  RUMOR_MAX_CLOCK_SKEW_SEC,
+  RUMOR_MAX_FUTURE_SEC,
+  EVENT_INBOX_RUMOR_KINDS,
+  COORDINATOR_RUMOR_KINDS,
   MAX_SKILLS,
   MAX_MEDIA_FILE_BYTES as PROTOCOL_MAX_MEDIA_FILE_BYTES,
 } from "@nostrautica/protocol";
-import type { GiftWrap, Rumor } from "@nostrautica/protocol";
+import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
+
 import { Store, DAEMON_PARK_REASON, type BillingStateRow } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
@@ -137,6 +143,19 @@ import {
   MAX_NAME_CHARS,
 } from "./nostr/hygiene.js";
 import { MAX_INPUT_DURATION_SEC } from "./pipeline/audio.js";
+
+/**
+ * A rumor that passed dedupe + the future-date bound, paired with the timestamp
+ * LOCAL ORDERING POLICY should use. `rumor` stays exactly as the seal author
+ * signed it (R19) — `rumor.id` hashes its contents, and anything that treats the
+ * timestamp as authenticated data (the §10.2 chat proof-of-possession challenge)
+ * must read it from there. `effectiveCreatedAt` is that value clamped into the
+ * clock-skew allowance and is what first-come / latest-wins comparisons take.
+ */
+interface FreshRumor {
+  rumor: Rumor;
+  effectiveCreatedAt: number;
+}
 
 /** Default cap on simultaneously installed events (audit COORD-3). */
 const DEFAULT_MAX_EVENTS = 50;
@@ -1237,29 +1256,53 @@ export class Coordinator {
     this.undecryptableWraps.add(wrapId);
   }
 
-  private unwrapFresh(wrap: GiftWrap, recipientSk: Uint8Array): Rumor | undefined {
+  private unwrapFresh(
+    wrap: GiftWrap,
+    recipientSk: Uint8Array,
+    allowedKinds: readonly RumorKind[],
+  ): FreshRumor | undefined {
     if (this.deps.store.isRumorSeen(wrap.id)) return undefined;
     if (this.undecryptableWraps.has(wrap.id)) return undefined;
     let rumor: Rumor;
     try {
       // R19: take the UNTOUCHED authenticated rumor (its created_at is exactly
       // what the seal author signed, so rumor.id still hashes its contents and
-      // durable command ordering is not processing-time-dependent). The protocol
-      // no longer clamps in place; this handler enforces the future-date bound
-      // itself (below), dropping — not silently clamping — a future-dated rumor.
-      rumor = unwrapRumorEnvelope(wrap, recipientSk).rumor;
+      // durable command ordering is not processing-time-dependent). The clamped
+      // value for ordering is computed below against THIS daemon's clock.
+      //
+      // `allowedKinds` (NIP §5/§6.1) is the per-recipient allowlist for the key we
+      // just decrypted with: the coordinator's own key never accepts a 21600 join,
+      // an event's E_inbox never accepts a 21603 install grant. Previously the two
+      // were separated only by which dispatch if/else the rumor fell into.
+      rumor = unwrapRumorEnvelope(wrap, recipientSk, allowedKinds).rumor;
     } catch {
       this.rememberUndecryptable(wrap.id); // can never decrypt — drop, in memory only
       return undefined;
     }
-    // Freshness (COORD-11): drop rumors future-dated > 15 min (clock-skew guard
-    // against replay-with-shifted-timestamp). With R19 the rumor is unmutated, so
-    // this bound now acts on the authenticated created_at.
-    if (typeof rumor.created_at === "number" && rumor.created_at > Math.floor(this.now() / 1000) + 15 * 60) {
-      log(`[wrap] dropped future-dated rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}, created_at ${rumor.created_at})`);
+    const nowSec = Math.floor(this.now() / 1000);
+    // Future-dating (COORD-11 / NIP §3.1). The spec's remedy inside the skew
+    // allowance is CLAMP, not drop, and this handler used to drop — marking both
+    // the rumor and its wrap permanently seen. Two consequences, both real:
+    //
+    //  - The protocol library (`finalizeUnwrappedRumor`, used by the app) clamps
+    //    the identical input, so the two conforming implementations disagreed
+    //    about whether the very same rumor exists.
+    //  - An attendee whose phone clock is 20 minutes fast had every join request
+    //    silently discarded FOREVER — the seen-marking made it unrecoverable even
+    //    by a rescan — with no error, and nothing in the organizer's pending list.
+    //
+    // So: clamp for ordering purposes (the clamped value gains no first-come or
+    // latest-wins advantage, which was the whole point of the bound), and reserve
+    // outright rejection for a horizon no clock explains.
+    if (rumor.created_at > nowSec + RUMOR_MAX_FUTURE_SEC) {
+      log(`[wrap] dropped absurdly future-dated rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}, created_at ${rumor.created_at}, ${rumor.created_at - nowSec}s ahead)`);
       this.deps.store.markRumorSeen(rumor.id, this.now());
       this.deps.store.markRumorSeen(wrap.id, this.now());
       return undefined;
+    }
+    const effectiveCreatedAt = rumorEffectiveCreatedAt(rumor.created_at, nowSec);
+    if (effectiveCreatedAt !== rumor.created_at) {
+      log(`[wrap] clamped future-dated rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) from ${rumor.created_at} to ${effectiveCreatedAt} for ordering (${rumor.created_at - nowSec}s ahead, skew allowance ${RUMOR_MAX_CLOCK_SKEW_SEC}s)`);
     }
     if (this.deps.store.isRumorSeen(rumor.id)) {
       this.deps.store.markRumorSeen(wrap.id, this.now()); // same rumor, new wrap
@@ -1270,7 +1313,7 @@ export class Coordinator {
     // twice. Synchronous check-and-add, so the two callbacks cannot interleave.
     if (this.inFlightRumors.has(rumor.id)) return undefined;
     this.inFlightRumors.add(rumor.id);
-    return rumor;
+    return { rumor, effectiveCreatedAt };
   }
 
   /**
@@ -1535,8 +1578,12 @@ export class Coordinator {
 
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
   async handleCoordinatorWrap(wrap: GiftWrap): Promise<void> {
-    const rumor = this.unwrapFresh(wrap, this.deps.coordSk);
-    if (!rumor) return;
+    // COORDINATOR_RUMOR_KINDS, not the global registry: this key installs events
+    // and executes admin commands, so it must never even parse an attendee-facing
+    // rumor addressed to it.
+    const fresh = this.unwrapFresh(wrap, this.deps.coordSk, COORDINATOR_RUMOR_KINDS);
+    if (!fresh) return;
+    const { rumor, effectiveCreatedAt } = fresh;
     // Rate-limit the coordinator's OWN inbox BEFORE any durable dispatch (audit R4):
     // the inbox is publicly addressable, so gate per-sender / per-inbox exactly like
     // an event inbox. A rate-rejected wrap is left UNSEEN (not written to the durable
@@ -1589,7 +1636,10 @@ export class Coordinator {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
         log(`[admin] "${cmd.cmd}" from organizer ${short(rumor.pubkey)}`);
         await this.handleAdmin(rumor.pubkey, cmd.a, cmd.cmd, cmd.args, {
-          createdAt: rumor.created_at ?? 0,
+          // The §3.4 per-subject watermark is ORDERING, so it takes the clamped
+          // value — a command dated into the future must not outrank every later
+          // one on the same subject.
+          createdAt: effectiveCreatedAt,
           rumorId: rumor.id,
           expires: cmd.expires,
         });
@@ -1613,7 +1663,9 @@ export class Coordinator {
         // route. Sharing the subject with approve/revoke also means an organizer
         // revoking someone mid-rejoin can no longer interleave with it.
         //
-        // The rumor's created_at is part of the §10.2 proof-of-possession challenge.
+        // The rumor's created_at is part of the §10.2 proof-of-possession challenge,
+        // so this one takes the AUTHENTICATED value, never the ordering clamp — the
+        // attendee signed the challenge over what they actually wrote.
         await this.withSubjectLock(content.a, `member:${rumor.pubkey}`, () =>
           this.marmot!.handleAttestation(content.a, rumor.pubkey, content, rumor.created_at ?? 0),
         );
@@ -1625,8 +1677,12 @@ export class Coordinator {
   async handleInboxWrap(coordinate: string, wrap: GiftWrap): Promise<void> {
     const state = this.events.get(coordinate);
     if (!state) return;
-    const rumor = this.unwrapFresh(wrap, state.inboxSk);
-    if (!rumor) return;
+    // EVENT_INBOX_RUMOR_KINDS, not the global registry: E_inbox is a PUBLIC address
+    // any attendee seals to, so a grant or an admin command must not get as far as
+    // the dispatcher on this key.
+    const fresh = this.unwrapFresh(wrap, state.inboxSk, EVENT_INBOX_RUMOR_KINDS);
+    if (!fresh) return;
+    const { rumor, effectiveCreatedAt } = fresh;
     // Durable per-sender / per-event rate accounting (audit C3). A sender or event
     // flooding the inbox is DROPPED but left UNSEEN (audit R4): marking rate-rejected
     // wraps seen permanently grew the seen ledger with attacker-chosen ids AND
@@ -1677,7 +1733,7 @@ export class Coordinator {
         log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
         await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
           rev: content.rev,
-          createdAt: rumor.created_at ?? 0,
+          createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
           rumorId: rumor.id,
         });
       } else if (rumor.kind === KIND_PROFILE_CORRECTION) {
@@ -1687,7 +1743,7 @@ export class Coordinator {
         // field to spoof: a correction always applies to the sender's own entry.
         await this.handleCorrection(state, rumor.pubkey, content, {
           rev: content.rev,
-          createdAt: rumor.created_at ?? 0,
+          createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
           rumorId: rumor.id,
         });
       } else if (rumor.kind === KIND_TALK_SUBMISSION) {
@@ -1699,7 +1755,7 @@ export class Coordinator {
         // The withdrawing attendee is the SEAL AUTHOR (rumor.pubkey), bound by
         // unwrapRumor — an attendee can only withdraw THEMSELVES (NIP §6.3 21610).
         await this.handleWithdrawal(state, rumor.pubkey, content, {
-          createdAt: rumor.created_at ?? 0,
+          createdAt: effectiveCreatedAt, // §3.4 per-subject watermark → the clamped value
           rumorId: rumor.id,
         });
       }
@@ -4323,7 +4379,11 @@ export class Coordinator {
       .map((w) => {
         let joinFirst = 1;
         try {
-          if (unwrapRumor(w as unknown as GiftWrap, state.inboxSk).kind === KIND_JOIN_REQUEST) joinFirst = 0;
+          if (
+            unwrapRumor(w as unknown as GiftWrap, state.inboxSk, EVENT_INBOX_RUMOR_KINDS).kind ===
+            KIND_JOIN_REQUEST
+          )
+            joinFirst = 0;
         } catch {
           /* undecryptable — leave last; handleInboxWrap marks it seen and drops it */
         }
@@ -4718,7 +4778,7 @@ export class Coordinator {
       }
       throw new ParkJobError(`budget exceeded for ${coordinate}: ${over}`);
     }
-    // 3. Account one provider spend attempt (per-attendee + per-event `calls`).
+    // 4. Account one provider spend attempt (per-attendee + per-event `calls`).
     if (this.deps.budgets) {
       const now = this.now();
       if (pubkey) this.deps.store.addUsage(coordinate, pubkey, { calls: 1 }, now);

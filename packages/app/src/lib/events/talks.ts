@@ -236,11 +236,12 @@ export async function fetchPendingTalks(
   for (const wrap of wraps) {
     let rumor;
     try {
-      rumor = unwrapRumor(wrap, einboxSk);
+      // NIP §5/§6.1 per-recipient allowlist: the only kind this read wants off
+      // E_inbox is a talk submission — enforce it at the unwrap, not after it.
+      rumor = unwrapRumor(wrap, einboxSk, [KIND_TALK_SUBMISSION]);
     } catch {
-      continue; // not ours / malformed
+      continue; // not ours / malformed / not a talk submission
     }
-    if (rumor.kind !== KIND_TALK_SUBMISSION) continue;
     try {
       const content = talkSubmissionContentSchema.parse(JSON.parse(rumor.content));
       if (content.a !== ctx.coordinate) continue;

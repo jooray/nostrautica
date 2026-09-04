@@ -37,6 +37,7 @@ import {
   keyGrantContentSchema,
   coordinatorStatusContentSchema,
   unwrapRumor,
+  RUMOR_MAX_CLOCK_SKEW_SEC,
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
@@ -2878,16 +2879,139 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
 });
 
 describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () => {
-  it("drops a rumor future-dated > 15 min past the coordinator's clock", async () => {
+  it("CLAMPS a rumor future-dated past the skew allowance instead of dropping it", async () => {
+    // This used to assert the opposite, and the opposite was wrong. The spec's
+    // remedy for a future-dated rumor inside the reasonable horizon is to CLAMP
+    // it for ordering (§3.1 / PROTO-8) — which is exactly what the protocol
+    // library does to the identical input (`finalizeUnwrappedRumor`). The
+    // coordinator instead DROPPED it and marked both the rumor and its wrap
+    // permanently seen, so:
+    //
+    //  - the two conforming implementations disagreed about whether the same
+    //    rumor exists at all, and
+    //  - an attendee whose phone clock is 20 minutes fast had every join request
+    //    silently discarded forever — unrecoverable even by a rescan, with no
+    //    error and nothing in the organizer's pending list.
+    //
+    // Here the daemon clock runs 1h BEHIND the wall clock, so a freshly stamped
+    // join is ~1h "in the future" from the daemon's point of view: the shape of
+    // a real skewed-clock attendee. It must be admitted.
     const h = await setup();
     const sk = generateSecretKey();
-    // The protocol layer clamps a future-dated rumor to wall-now+15min (PROTO-8);
-    // the coordinator re-checks against its OWN clock at ingestion (defense in
-    // depth). With the daemon clock 1h behind the wall clock, a fresh rumor
-    // (real-time stamped) is >15 min ahead of it → dropped with a log.
     h.clock.t = Date.now() - 60 * 60_000;
     const { pubkey } = await joinOnly(h, sk, "future");
-    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined(); // dropped
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeDefined();
+  });
+
+  it("still drops a rumor dated past the unreasonable-horizon bound, and marks it seen", async () => {
+    // Past a full day ahead no honest clock explains it, so the rumor is rejected
+    // outright — and THIS is the case where marking it seen is right, since it can
+    // never become valid and a rescan would only re-drop it.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const { pubkey, wrap } = await joinOnly(h, sk, "way-future", {
+      created_at: Math.floor(h.clock.t / 1000) + 3 * 86400,
+    });
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined();
+    expect(h.store.isRumorSeen(wrap.id)).toBe(true);
+  });
+
+  it("a clamped rumor's ORDERING uses the clamped timestamp, not the sender's", async () => {
+    // Clamping must still do the job dropping was meant to do: a future-dated
+    // submission must not win the §3.3 (rev, created_at, id) order against a later
+    // honest one purely because the sender wrote a bigger number. Same rev, so
+    // created_at decides — and the future-dated one's is clamped down to
+    // now + the skew allowance, which a submission sent 30 minutes later then
+    // still beats. Under the old drop-everything behavior the first submission
+    // never existed at all, so this ordering was untested and untestable.
+    const h = await setup({ matching: "off" });
+    const sk = generateSecretKey();
+    const pubkey = getPublicKey(sk);
+    const inboxPk = getPublicKey(h.einboxSk);
+    await joinOnly(h, sk, "skewed");
+    const submitAt = (created_at: number, about: string) =>
+      h.coordinator.handleInboxWrap(
+        h.coordinate,
+        wrapRumor(sk, inboxPk, {
+          kind: KIND_PROFILE_SUBMISSION,
+          content: {
+            v: 2,
+            rev: 1,
+            profile: { about, skills: [], looking_for: "", links: [] },
+            media: [],
+            intro_text: about,
+          },
+          tags: [["a", h.coordinate]],
+          created_at,
+        }) as any,
+      );
+
+    const nowSec = Math.floor(h.clock.t / 1000);
+    await submitAt(nowSec + 6 * 3600, "from-the-future");
+    const skewed = h.store.getAttendee(h.coordinate, pubkey)!;
+    // Accepted (not dropped), but stored under the CLAMPED ordering key.
+    expect(skewed.profile_json).toContain("from-the-future");
+    expect(skewed.profile_created_at).toBeLessThanOrEqual(nowSec + RUMOR_MAX_CLOCK_SKEW_SEC);
+    // A later honest submission at the same rev now supersedes it.
+    h.clock.t += 30 * 60_000;
+    await submitAt(Math.floor(h.clock.t / 1000), "honest-and-later");
+    expect(h.store.getAttendee(h.coordinate, pubkey)!.profile_json).toContain("honest-and-later");
+  });
+
+  /**
+   * Per-recipient rumor allowlist (NIP §5/§6.1).
+   *
+   * The two dispatch chains happen to have disjoint `if/else` branches today, so
+   * a misdirected rumor already ends up doing nothing — but "nothing happens
+   * because no branch matched" is handler layout, not a boundary: adding one
+   * `else if` to the wrong dispatcher silently widens what a key accepts, and
+   * E_inbox is a PUBLIC address any attendee can seal to while the coordinator's
+   * own key is what installs events and executes admin commands.
+   *
+   * What these assert is therefore where the rejection HAPPENS. A rumor of a kind
+   * this key does not accept is refused at the unwrap, so it is treated exactly
+   * like a wrap addressed to someone else: no rate accounting, no dispatch, and
+   * nothing written to the durable seen ledger. Previously it crossed the unwrap
+   * intact, was rate-accounted, ran through processRumorWithRetry, and — because
+   * a no-op dispatch "succeeds" — was recorded as a HANDLED rumor.
+   */
+  it("refuses a 21603 install grant sealed to an event's E_inbox (§6.1)", async () => {
+    const h = await setup();
+    const attackerSk = generateSecretKey();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const evilCoordinate = makeCoordinate(getPublicKey(attackerSk), "evil");
+    const wrap = wrapRumor(attackerSk, inboxPk, {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2,
+        a: evilCoordinate,
+        gen: 1,
+        inbox_nsec: bytesToHex(generateSecretKey()),
+        eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        config_relays: [],
+      },
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.getEvent(evilCoordinate)).toBeUndefined();
+    // Rejected AT THE UNWRAP: never acknowledged in the durable ledger.
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    // …while a kind this key DOES accept, on the same inbox, is acknowledged —
+    // so the difference above is the allowlist and not some unrelated early exit.
+    const { wrap: joinWrap } = await joinOnly(h, generateSecretKey(), "legit");
+    expect(h.store.isRumorSeen(joinWrap.id)).toBe(true);
+  });
+
+  it("refuses a 21600 join request sealed to the coordinator's own key (§6.1)", async () => {
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const wrap = wrapRumor(attendeeSk, getPublicKey(h.coordSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "wrong door", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.getAttendee(h.coordinate, getPublicKey(attendeeSk))).toBeUndefined();
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
   });
 
   it("startup backfills the coordinator inbox's FULL history (since=0)", async () => {

@@ -53,6 +53,7 @@ import {
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
+  EVENT_INBOX_RUMOR_KINDS,
   ADMIN_COMMAND_TTL_SEC,
   type EventKeysBackup,
   type InviteProof,
@@ -207,7 +208,10 @@ export async function fetchPending(
   const unwrapAny = (wrap: GiftWrap) => {
     for (const sk of inboxSks) {
       try {
-        return unwrapRumor(wrap, sk);
+        // NIP §5/§6.1: E_inbox is a PUBLIC address anyone can seal to, so the
+        // organizer's read of it accepts only the attendee-authored kinds. A
+        // grant or an admin command sealed here is not an inbox rumor.
+        return unwrapRumor(wrap, sk, EVENT_INBOX_RUMOR_KINDS);
       } catch {
         /* try the next inbox secret */
       }
