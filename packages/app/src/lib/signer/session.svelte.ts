@@ -37,6 +37,43 @@ import { clearAllJoinSent } from "$lib/stores/join-sent.svelte.js";
 import { router } from "$lib/router/router.svelte.js";
 import { broadcastLogout } from "./session-broadcast.js";
 
+/**
+ * How long ONE logout custody-lock step may take before the local teardown goes
+ * ahead without it.
+ *
+ * Each step is an encrypt through the active signer, and for NIP-46 that means
+ * `rpcWithForegroundRetry`: a 60 s deadline, or up to ~132 s if a visibility
+ * flip triggers the retry path. Two of them serially is up to ~4.4 minutes
+ * during which the UI still says the user is logged in — on a SHARED DEVICE,
+ * where "log out" is the one action that must be immediate and trustworthy. The
+ * person handing the phone over cannot know the wait is a dead signer relay
+ * rather than a broken button, and the natural response is to hand it over
+ * anyway.
+ *
+ * So each step gets a short budget of its own. A step that misses it leaves that
+ * custody record in plaintext — which is precisely the pre-existing best-effort
+ * policy for an unreachable signer — and sets `logoutError`, the banner that
+ * already exists to say the on-device wipe was partial.
+ */
+const LOGOUT_LOCK_TIMEOUT_MS = 12_000;
+
+/** Reject after `ms` if `p` hasn't settled. The work is left running. */
+function withDeadline<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 class Session {
   signer = $state<AppSigner | null>(null);
   pubkey = $state<string | null>(null);
@@ -55,6 +92,25 @@ class Session {
    * knows the on-device wipe was incomplete.
    */
   logoutError = $state(false);
+  /**
+   * A persisted session was found but could not be re-established (chiefly a
+   * NIP-46 bunker that didn't answer inside the restore budget).
+   *
+   * This used to be `return false` with no log, no state and no retry: the user
+   * landed on the sign-in CTA as though they had never logged in, and the only
+   * way forward that the UI offered was a fresh QR pairing — a new client key
+   * and a new approval in the signer, discarding a session that would very
+   * likely have worked on a second attempt (the usual cause is one signer relay
+   * being slow at exactly the wrong moment). Support had nothing to go on
+   * either, because nothing was written anywhere.
+   *
+   * The persisted session is deliberately NOT cleared for a transient failure
+   * (only an identity mismatch clears it), so retrying is a real option — this
+   * flag is what lets the shell offer it.
+   */
+  restoreError = $state(false);
+  /** Human-readable reason for the failed restore, for the retry surface. */
+  restoreErrorMessage = $state<string | null>(null);
 
   /**
    * Monotonic session-operation token (H-6). Every restore / login / logout
@@ -136,12 +192,29 @@ class Session {
       await Promise.resolve(signer.close?.()).catch(() => {});
       return false;
     }
+    // Close the signer we are REPLACING (audit 2026-09-04). Dropping the
+    // reference was never enough for NIP-46: its SimplePool is built with
+    // `enableReconnect` + `enablePing`, so the orphan keeps re-opening sockets to
+    // the signer relays and pinging them for the rest of the page's life — and
+    // the bearer capability it holds stays live and usable. An account switch
+    // that goes login→login (no logout in between: an imported nsec, a second
+    // bunker paste, an `#/login?nsec=` deep link while already signed in) hit
+    // exactly this. Fire-and-forget: `close()` is bounded and never throws, and
+    // making the new login wait on the old signer's courtesy logout RPC would be
+    // the wrong trade.
+    const replaced = this.signer;
+    if (replaced && replaced !== signer) {
+      void Promise.resolve(replaced.close?.()).catch(() => {});
+    }
     this.pubkey = pubkey;
     this.signer = signer;
     this.custodyReady = custodyReady;
     if (custodyReady) this.custodyGeneration += 1;
-    // A fresh login clears any stale "logout couldn't self-encrypt" warning.
+    // A fresh login clears any stale "logout couldn't self-encrypt" warning, and
+    // any "we couldn't bring your session back" banner — we just did.
     this.logoutError = false;
+    this.restoreError = false;
+    this.restoreErrorMessage = null;
     // Scope owner-backed stores only after custody has settled, matching the
     // reactive session publication above.
     setActiveOwner(pubkey);
@@ -156,13 +229,19 @@ class Session {
     return true;
   }
 
-  /** Try to restore a previous session (local key) from IndexedDB. */
+  /**
+   * Try to restore a previous session (local key / NIP-07 / persisted bunker)
+   * from IndexedDB. A transient failure sets `restoreError` rather than
+   * disappearing — see that field and {@link retryRestore}.
+   */
   async restore(): Promise<boolean> {
     // Capture the token FIRST (H-6): if an explicit login or a logout lands while
     // this restore is still resolving its persisted signer, the adoption below is
     // dropped rather than clobbering the newer session or undoing the logout.
     const tok = this.nextOp();
     this.restoring = true;
+    this.restoreError = false;
+    this.restoreErrorMessage = null;
     try {
       const method = await loadLoginMethod();
       if (method === "local") {
@@ -192,8 +271,19 @@ class Session {
             // offline) keep the session for the next boot.
             if (e instanceof Nip46IdentityMismatchError) {
               await clearKeystore().catch(() => {});
+              console.warn("[session] persisted bunker answered for a different user; cleared", e);
+              return false;
             }
-            // Fall back to logged-out.
+            // Everything else is transient by assumption, and the persisted
+            // session is still on disk. Leave a trace (support had none) and a
+            // state the shell can offer a retry from, instead of silently
+            // dropping the user on the sign-in CTA where the only visible way
+            // forward is a fresh pairing.
+            console.warn("[session] NIP-46 restore failed; session kept for retry", e);
+            if (tok === this.opToken) {
+              this.restoreError = true;
+              this.restoreErrorMessage = e instanceof Error ? e.message : String(e);
+            }
             return false;
           }
         }
@@ -202,6 +292,17 @@ class Session {
     } finally {
       if (tok === this.opToken) this.restoring = false;
     }
+  }
+
+  /**
+   * User-driven second attempt at the persisted session (the Retry beside the
+   * failed-restore banner). Just `restore()` — the persisted bunker session was
+   * deliberately left on disk — but named so a caller doesn't have to know that,
+   * and a no-op when a session is already live.
+   */
+  async retryRestore(): Promise<boolean> {
+    if (this.loggedIn) return true;
+    return this.restore();
   }
 
   /**
@@ -258,6 +359,10 @@ class Session {
     this.restoring = false;
     this.custodyReady = false;
     this.logoutError = false;
+    // An explicit logout answers the failed-restore banner: there is no session
+    // left to bring back, so offering a retry would be nonsense.
+    this.restoreError = false;
+    this.restoreErrorMessage = null;
     // Self-encrypt event-key custody (E_id/E_inbox nsecs, ECKs) into an
     // on-device backup BEFORE tearing down the signer or clearing anything
     // (audit UX-6). These keys were deliberately left in plaintext forever so
@@ -270,21 +375,36 @@ class Session {
     if (this.signer && this.pubkey) {
       const signer = this.signer;
       const pubkey = this.pubkey;
-      await lockEventKeysForLogout(
-        (pt) => signer.nip44Encrypt(pubkey, pt),
-        // Decrypt too: locking must MERGE with any existing snapshot rather than
-        // overwrite it, or a logout following a failed unlock destroys the keys.
-        (ct) => signer.nip44Decrypt(pubkey, ct),
-        pubkey,
+      // Both steps are BOUNDED (see LOGOUT_LOCK_TIMEOUT_MS). An unreachable
+      // remote signer used to be able to hold the whole logout for minutes with
+      // the UI still showing a live session; the wipe is best-effort by design,
+      // so a step that can't finish in time is recorded and skipped rather than
+      // waited on.
+      await withDeadline(
+        lockEventKeysForLogout(
+          (pt) => signer.nip44Encrypt(pubkey, pt),
+          // Decrypt too: locking must MERGE with any existing snapshot rather than
+          // overwrite it, or a logout following a failed unlock destroys the keys.
+          (ct) => signer.nip44Decrypt(pubkey, ct),
+          pubkey,
+        ),
+        LOGOUT_LOCK_TIMEOUT_MS,
+        "logout: event-key custody lock",
         // H-5: surface, rather than swallow, a self-encrypt failure (e.g. an
         // unreachable NIP-46 signer) — the keys were left in plaintext rather
         // than risked, and the user must be told the on-device wipe was partial.
-      ).catch(() => {
+      ).catch((e: unknown) => {
+        console.warn("[session] logout could not lock event-key custody", e);
         this.logoutError = true;
       });
       // Same for MLS/chat state — device key, group state, key packages,
       // decrypted history (audit UX-6).
-      await lockChatIdentityForLogout(pubkey, (pt) => signer.nip44Encrypt(pubkey, pt)).catch(() => {
+      await withDeadline(
+        lockChatIdentityForLogout(pubkey, (pt) => signer.nip44Encrypt(pubkey, pt)),
+        LOGOUT_LOCK_TIMEOUT_MS,
+        "logout: chat-identity lock",
+      ).catch((e: unknown) => {
+        console.warn("[session] logout could not lock chat identity", e);
         this.logoutError = true;
       });
     }
@@ -350,6 +470,8 @@ class Session {
     this.nextOp();
     this.restoring = false;
     this.custodyReady = false;
+    this.restoreError = false;
+    this.restoreErrorMessage = null;
     // R21: the originating tab already discarded this owner's queued items from
     // shared IndexedDB; drop this tab's reactive outbox view synchronously so it
     // doesn't keep showing them until its next poll.

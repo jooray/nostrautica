@@ -73,6 +73,21 @@ export class Nip46IdentityMismatchError extends Error {
  * ephemeral key, so it is not listed; the seal, kind 13, is signed by the user).
  * Attendee flows are the common case; a couple of organizer kinds are included
  * so an organizer on a remote signer isn't re-prompted mid-create.
+ *
+ * AUDITED 2026-09-04 against every `AppSigner.signEvent` call site in the app:
+ * 0 (nostr-actions), 3 (contacts), 5 (deletion/withdraw/legacy-cleanup), 13
+ * (giftwrap seal), 10000 (mutes), 10002 + 10050 (nostr-actions), 24242 (blossom
+ * auth), 30078 (settings, key-backup, blinding, create, dm-read-state), 31602
+ * (join, media/submit), 31925 (join). All present.
+ *
+ * Deliberately NOT added, despite looking like organizer kinds that belong here:
+ * 30023 (long-form updates), 31603 (directory entries), 31604 (roster), 31605/6,
+ * 31607, 31608, 31923, and 31600/31601 as published by the organizer flows.
+ * Every one of those is signed with the EVENT key (E_id) via `finalizeEvent`,
+ * held locally in the event keystore — the remote signer never sees them, so it
+ * cannot prompt for them and asking for the authority would be an over-request.
+ * (31600/31601/31923 remain listed only because removing a permission from an
+ * already-granted connection is not free; they cost nothing to keep.)
  */
 const DEFAULT_PERMS = [
   "sign_event:0", // profile (kind-0 metadata)
@@ -356,6 +371,108 @@ function withTimeout<T>(
 }
 
 /**
+ * Like `withTimeout`, but the clock only runs while the tab is VISIBLE.
+ *
+ * A NIP-46 request's wall-clock deadline is the wrong measure of "the signer
+ * didn't respond", because the whole point of the handoff is that the user
+ * leaves this tab: they switch to Amber, read the request, maybe unlock the
+ * phone, maybe find the approval buried under a notification, and come back.
+ * Spending more than RPC_TIMEOUT_MS in the signer app is normal — and reporting
+ * "your signer didn't respond" to someone who just pressed Approve is both wrong
+ * and unfixable from their side. Time spent hidden is time the user is doing
+ * exactly what we asked, so it doesn't count.
+ *
+ * Falls back to plain wall-clock where there is no document (SSR, tests).
+ */
+function withForegroundDeadline<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: () => string,
+  /**
+   * Wall-clock backstop. A tab that goes hidden and never comes back would
+   * otherwise pause the deadline forever — and this wrapper owns a
+   * `visibilitychange` listener, so "forever" would mean a leaked listener per
+   * request, which is precisely the class of bug this pass exists to remove.
+   * Generous (8× the foreground budget) so it only ever catches the pathological
+   * case, never a human taking their time in the signer app.
+   */
+  absoluteMs = ms * 8,
+): Promise<T> {
+  if (typeof document === "undefined") return withTimeout(promise, ms, undefined, message);
+  return new Promise<T>((resolve, reject) => {
+    let remaining = ms;
+    let startedAt = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let done = false;
+    const ceiling = setTimeout(() => finish(() => reject(new Error(message()))), absoluteMs);
+    const pause = () => {
+      if (timer === undefined) return;
+      clearTimeout(timer);
+      timer = undefined;
+      remaining = Math.max(0, remaining - (Date.now() - startedAt));
+    };
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      pause();
+      clearTimeout(ceiling);
+      document.removeEventListener("visibilitychange", onVisibility);
+      fn();
+    };
+    const resume = () => {
+      if (done || timer !== undefined) return;
+      startedAt = Date.now();
+      timer = setTimeout(() => finish(() => reject(new Error(message()))), remaining);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") resume();
+      else pause();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    if (document.visibilityState === "visible") resume();
+    promise.then(
+      (v) => finish(() => resolve(v)),
+      (e) => finish(() => reject(e)),
+    );
+  });
+}
+
+/**
+ * Resolve with the FIRST promise to fulfil; reject only once every one of them
+ * has rejected, with the last rejection.
+ *
+ * `Promise.race` is wrong for racing signer attempts (a fast rejection would
+ * beat a slow success) and `Promise.any` is wrong too (it reports an
+ * AggregateError, which erases the relay-naming message the UI shows). Every
+ * input is observed, so an abandoned attempt rejecting later can never surface
+ * as an unhandled rejection.
+ */
+function firstFulfilled<T>(promises: Promise<T>[]): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let pending = promises.length;
+    let lastError: unknown = new Error("no attempts");
+    for (const p of promises) {
+      p.then(resolve, (e: unknown) => {
+        lastError = e;
+        if (--pending === 0) reject(lastError);
+      });
+    }
+  });
+}
+
+/** Sentinel resolved by the resume signal (a handoff or a relay recovery). */
+const RESUMED = Symbol("nip46-resumed");
+
+/**
+ * How many times a resume signal may re-drive a pending RPC. The resume used to
+ * be a one-shot promise, so a SECOND handoff (glance at the signer, come back,
+ * realise the approval needs a PIN, go again — routine on Android) produced no
+ * signal at all and the request simply sat there. Each re-drive costs one extra
+ * request to the signer, so it is bounded rather than unlimited.
+ */
+const MAX_RPC_RESUMES = 3;
+
+/**
  * `connect` with lost-ack recovery. If the tab was backgrounded (user approving
  * in the signer app) when the signer published its ack, the ephemeral reply is
  * gone for good — it can't be re-fetched after reconnecting. On return to
@@ -371,14 +488,32 @@ function connectWithRecovery(
   bunker: BunkerSigner,
   connect = () => bunker.connect(CLIENT_METADATA),
   health?: PoolHealth,
+  /**
+   * This wait's OWN deadline and cancellation. Not optional in spirit: every
+   * caller has always bounded this, but until 2026-09-04 they did it from the
+   * OUTSIDE with `withTimeout`, which rejects the wrapper and leaves the inner
+   * promise pending forever. `settle()` — the only thing that removes the
+   * `visibilitychange` listener and unsubscribes from `trackPoolHealth` — was
+   * therefore never reached on a timeout or a cancel. Each failed connect or
+   * restore left behind a listener that calls `connect()`/`ping()` on a closed
+   * bunker every time the tab is foregrounded, plus a 1 Hz `setInterval` polling
+   * a destroyed pool, for the rest of the page's life. They accumulate: a user
+   * retrying a flaky signer five times ends up with five of each.
+   */
+  bound?: { timeoutMs: number; abort?: AbortSignal; message?: () => string },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let unsubHealth: (() => void) | undefined;
+    // Forward-declared (same shape as startNostrConnect's `timer`): `settle` has
+    // to clear it, and the timer's own callback is one of the paths into settle.
+    let deadline: ReturnType<typeof setTimeout> | undefined = undefined;
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
       if (onVisible) document.removeEventListener("visibilitychange", onVisible);
+      abortSignal?.removeEventListener("abort", onAbort);
       unsubHealth?.();
       fn();
     };
@@ -397,6 +532,22 @@ function connectWithRecovery(
             retry();
           };
     if (onVisible) document.addEventListener("visibilitychange", onVisible);
+    // Own the deadline and the cancel, so this promise ALWAYS settles and always
+    // through `settle()` — the one path that tears the listener and the health
+    // poll down.
+    const abortSignal = bound?.abort;
+    const onAbort = () => settle(() => reject(new Error("Cancelled")));
+    deadline = setTimeout(
+      () =>
+        settle(() =>
+          reject(new Error((bound?.message ?? (() => timeoutMessage(health?.unreachable)))())),
+        ),
+      bound?.timeoutMs ?? CONNECT_TIMEOUT_MS,
+    );
+    if (abortSignal) {
+      if (abortSignal.aborted) onAbort();
+      else abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
     // A signer relay that dropped and came back may have swallowed the ack while
     // it was down. Re-drive once a recover FOLLOWS a drop during this wait — a
     // socket merely finishing its initial connect (an "up" with no prior "down")
@@ -581,9 +732,14 @@ export class Nip46Signer implements AppSigner {
         // The fallback retains lost-ack foreground recovery but is independently bounded.
       }
       if (!authorized) {
-        await withTimeout(connectWithRecovery(bunker, undefined, health), RESTORE_TIMEOUT_MS, undefined, () =>
-          timeoutMessage(health.unreachable),
-        );
+        // The deadline is handed INSIDE rather than wrapped around: a
+        // `withTimeout` here rejects its own wrapper while the recovery wait
+        // stays pending forever, leaking its visibilitychange listener and the
+        // pool-health poll for the page's lifetime.
+        await connectWithRecovery(bunker, undefined, health, {
+          timeoutMs: RESTORE_TIMEOUT_MS,
+          message: () => timeoutMessage(health.unreachable),
+        });
       }
       // Identity check: never trust that the reconnected bunker still answers
       // for the same user. A session without `userPubkey` is pre-upgrade —
@@ -744,7 +900,7 @@ export class Nip46Signer implements AppSigner {
     const cancel = () => abandon(new Error("Cancelled"));
 
     const connected = Promise.race([connecting, abandoned]).then(
-      (bunker) => {
+      async (bunker) => {
         outcome = "connected";
         release(false);
         // Capture the pointer into our own field NOW. The remote-signer pubkey
@@ -760,7 +916,22 @@ export class Nip46Signer implements AppSigner {
           relays: [...bunker.bp.relays],
           secret,
         };
-        return new Nip46Signer(bunker, clientSk, pointer, pool, health);
+        const signer = new Nip46Signer(bunker, clientSk, pointer, pool, health);
+        // Seed the USER pubkey here, the way `fromPersisted` does. The connect
+        // reply only proves the secret round-tripped — it carries no pubkey —
+        // so a signer handed out with `pk` still null forces whoever adopts it
+        // to discover the identity later, where a failure surfaces as a broken
+        // session rather than a failed sign-in the user can retry. Failing here
+        // must destroy the transport we just took ownership of (`release(false)`
+        // above deliberately did not), or a failed handshake leaks a
+        // reconnecting pool.
+        try {
+          await signer.getPublicKey();
+        } catch (e) {
+          await signer.close().catch(() => {});
+          throw e instanceof Error ? e : new Error(String(e));
+        }
+        return signer;
       },
       (e: unknown) => {
         // fromURI failed on its own (e.g. every relay closed) — same teardown.
@@ -824,9 +995,14 @@ export class Nip46Signer implements AppSigner {
           DEFAULT_PERMS.join(","),
           JSON.stringify(CLIENT_METADATA),
         ]).then(() => undefined);
-      await withTimeout(connectWithRecovery(bunker, connect, health), CONNECT_TIMEOUT_MS, abort, () =>
-        timeoutMessage(health.unreachable),
-      );
+      // Deadline AND cancel go inside (see connectWithRecovery's `bound`): an
+      // outer `withTimeout` rejects the wrapper and leaves the recovery wait
+      // pending, so its listener and health poll outlive every failed paste.
+      await connectWithRecovery(bunker, connect, health, {
+        timeoutMs: CONNECT_TIMEOUT_MS,
+        abort,
+        message: () => timeoutMessage(health.unreachable),
+      });
     } catch (e) {
       await bunker.close().catch(() => {});
       pool.destroy();
@@ -841,14 +1017,31 @@ export class Nip46Signer implements AppSigner {
     );
   }
 
+  /**
+   * In-flight `get_public_key`, so concurrent first-time callers share ONE RPC.
+   *
+   * The cache was checked but never claimed: `if (!this.pk) { this.pk = await … }`
+   * leaves the whole round trip open for anyone else who asks meanwhile, and on
+   * first use several things ask at once (adopt(), signEvent's own pubkey check,
+   * the identity warmers). Each fired its own `get_public_key`, and a signer
+   * that prompts per request — Amber, when the permission wasn't pre-granted —
+   * showed the user two or three approval dialogs for one login.
+   */
+  private pkInFlight: Promise<string> | null = null;
+
   async getPublicKey(): Promise<string> {
-    if (!this.pk) {
-      this.pk = requirePubkey(
-        await this.rpcWithForegroundRetry(() => this.bunker.getPublicKey()),
-        "NIP-46 get_public_key",
-      );
-    }
-    return this.pk;
+    if (this.pk) return this.pk;
+    this.pkInFlight ??= this.rpcWithForegroundRetry(() => this.bunker.getPublicKey())
+      .then((value) => {
+        this.pk = requirePubkey(value, "NIP-46 get_public_key");
+        return this.pk;
+      })
+      // Cleared either way: a FAILED lookup must be retryable, and a successful
+      // one is answered from `this.pk` above from now on.
+      .finally(() => {
+        this.pkInFlight = null;
+      });
+    return this.pkInFlight;
   }
 
   // Every bunker RPC is time-bounded: with the signer relay unreachable, an
@@ -872,51 +1065,99 @@ export class Nip46Signer implements AppSigner {
    */
   private async rpcWithForegroundRetry<T>(operation: () => Promise<T>): Promise<T> {
     const hasDocument = typeof document !== "undefined";
+    const message = () => timeoutMessage(this.health?.unreachable);
     // Nothing to recover against: no foreground handoff signal and no relay health.
     if (!hasDocument && !this.health) {
-      return withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, () =>
-        timeoutMessage(this.health?.unreachable),
-      );
+      return withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, message);
     }
 
-    let resume!: () => void;
-    const resumed = new Promise<symbol>((resolve) => {
-      resume = () => resolve(Symbol.for("nip46-resumed"));
-    });
+    /**
+     * One bounded attempt at the operation.
+     *
+     * The deadline counts FOREGROUND time only (see withForegroundDeadline):
+     * more than sixty wall-clock seconds spent approving in Amber is normal and
+     * used to report "your signer didn't respond" to a user who had just
+     * approved.
+     *
+     * And a rejection that arrives while the tab is HIDDEN does not settle the
+     * attempt. `connectWithRecovery` has had this guard since it was written —
+     * a failure while backgrounded is nearly always the throttled socket rather
+     * than the signer refusing — but the RPC path never did, so a mobile browser
+     * killing the WebSocket mid-publish rejected immediately, i.e. the request
+     * failed while the user was still inside the signer app looking at it. The
+     * resume path below is what then decides.
+     */
+    const attempt = (): Promise<T> =>
+      withForegroundDeadline(
+        Promise.resolve()
+          .then(operation)
+          .catch((e: unknown) => {
+            if (hasDocument && document.visibilityState === "hidden") {
+              return new Promise<T>(() => {}); // stay pending; the resume path decides
+            }
+            throw e;
+          }),
+        Nip46Signer.RPC_TIMEOUT_MS,
+        message,
+      );
+
+    // Re-armable resume signal. It used to be a single promise created once, so
+    // the SECOND handoff of a request produced nothing at all and a user who
+    // bounced to the signer twice waited out the full deadline with no progress.
+    let fireResume: () => void = () => {};
+    let resumed!: Promise<symbol>;
+    const armResume = () => {
+      resumed = new Promise<symbol>((resolve) => {
+        fireResume = () => resolve(RESUMED);
+      });
+    };
+    armResume();
 
     let hiddenWhilePending = hasDocument && document.visibilityState === "hidden";
     const onVisibility = () => {
       if (document.visibilityState === "hidden") hiddenWhilePending = true;
-      else if (hiddenWhilePending) resume();
+      else if (hiddenWhilePending) {
+        hiddenWhilePending = false; // consumed: the next resume needs a fresh handoff
+        fireResume();
+      }
     };
     if (hasDocument) document.addEventListener("visibilitychange", onVisibility);
 
     let droppedWhilePending = false;
     const unsubHealth = this.health?.subscribe((event) => {
       if (event === "down") droppedWhilePending = true;
-      else if (droppedWhilePending) resume();
+      else if (droppedWhilePending) {
+        droppedWhilePending = false;
+        fireResume();
+      }
     });
 
+    // Every attempt made stays in the race. The library has no request
+    // cancellation API, so the earlier attempt is still live — and NIP-46
+    // replies are keyed by request id, so a late reply to attempt 1 is
+    // unambiguously attempt 1's and is safe to accept. Abandoning it (which is
+    // what `void first.catch(…)` did) threw away the common Amber case — the
+    // reply is merely DELAYED, not lost — and made us prompt the signer a second
+    // time for an approval that had already been given.
+    const live: Promise<T>[] = [attempt()];
     try {
-      const first = withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, () =>
-        timeoutMessage(this.health?.unreachable),
-      );
-      const result = await Promise.race([first, resumed]);
-      if (typeof result !== "symbol") return result;
-
-      // The library has no request cancellation API. The abandoned first request
-      // may still answer, but its bounded wrapper is observed to avoid an
-      // unhandled rejection; the user-visible operation has one controlled retry.
-      void first.catch(() => {});
-      await withTimeout(this.bunker.ping(), PROBE_TIMEOUT_MS, undefined, () =>
-        timeoutMessage(this.health?.unreachable),
-      );
-      return await withTimeout(operation(), Nip46Signer.RPC_TIMEOUT_MS, undefined, () =>
-        timeoutMessage(this.health?.unreachable),
-      );
+      for (let resumes = 0; resumes < MAX_RPC_RESUMES; resumes++) {
+        const result = await Promise.race<T | symbol>([firstFulfilled(live), resumed]);
+        if (result !== RESUMED) return result as T;
+        armResume();
+        // Probe the re-established transport before spending another signer
+        // prompt on it. Bounded; a probe that fails means the socket is
+        // genuinely unusable and there is nothing to retry onto.
+        await withTimeout(this.bunker.ping(), PROBE_TIMEOUT_MS, undefined, message);
+        live.push(attempt());
+      }
+      return await firstFulfilled(live);
     } finally {
       if (hasDocument) document.removeEventListener("visibilitychange", onVisibility);
       unsubHealth?.();
+      // Observe every abandoned attempt so a late rejection can't surface as an
+      // unhandled promise rejection in the console.
+      for (const p of live) void p.catch(() => {});
     }
   }
 
