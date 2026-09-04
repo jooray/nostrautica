@@ -13,6 +13,7 @@ import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
   PROVIDER_TIMEOUTS,
   providerHttpError,
+  readJsonCapped,
   withProviderTimeout,
   withUncancellableDeadline,
 } from "./http.js";
@@ -38,9 +39,14 @@ export class RoutstrLlm implements LlmProvider {
       "Routstr GET /models",
       PROVIDER_TIMEOUTS.metadata,
       (signal) =>
+        // Byte-capped body reads throughout this adapter, not just deadline-bounded
+        // ones: a Routstr node is DISCOVERED from an untrusted kind-38421
+        // announcement, so the operator never chose the host these bytes come from,
+        // and an unbounded `res.json()` inside the 120s completion deadline is an
+        // OOM of the single-threaded daemon (see PROVIDER_BODY_LIMITS).
         guardedProviderFetch(`${this.base()}/models`, { signal }, this.opts.net ?? {}, async (res) => {
           if (!res.ok) throw await providerHttpError(res, "Routstr GET /models");
-          return (await res.json()) as { data?: any[] };
+          return await readJsonCapped<{ data?: any[] }>(res, "Routstr GET /models");
         }),
     );
     return (body.data ?? []).map((m) => ({
@@ -55,7 +61,7 @@ export class RoutstrLlm implements LlmProvider {
   async info(): Promise<any> {
     return withProviderTimeout("Routstr GET /info", PROVIDER_TIMEOUTS.metadata, (signal) =>
       guardedProviderFetch(`${this.base()}/info`, { signal }, this.opts.net ?? {}, async (res) =>
-        res.ok ? await res.json() : {},
+        res.ok ? await readJsonCapped(res, "Routstr GET /info") : {},
       ),
     );
   }
@@ -111,7 +117,7 @@ export class RoutstrLlm implements LlmProvider {
               if (!res.ok) {
                 throw await providerHttpError(res, "Routstr chat/completions");
               }
-              const parsed = (await res.json()) as any;
+              const parsed = await readJsonCapped<any>(res, "Routstr chat/completions");
               // Change proofs (if any) come back in response headers — settle the wallet.
               await this.opts.payment.settle(res.headers);
               return parsed;
