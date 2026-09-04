@@ -2026,11 +2026,29 @@ export class Coordinator {
     });
     const attendee = this.deps.store.getAttendee(state.coordinate, pubkey);
     if (attendee?.status === "approved") {
+      // ENQUEUE BEFORE PUBLISHING. Both calls below can throw — `publish` is
+      // `Promise.any`, which rejects when every relay rejects — and a throw here
+      // unwinds into `processRumorWithRetry`, which retries the whole handler. But
+      // the attendee row has already been written with this revision, so the retry
+      // hits the strict stale-revision guard at the top of this method and returns
+      // EARLY, before ever reaching the enqueue. The wrapper then records success
+      // and marks the rumor seen forever.
+      //
+      // Net effect of a ten-second relay outage landing on one submission: the
+      // profile is stored, the directory entry is never republished from this path,
+      // `process_attendee` is never created, and the attendee silently has no AI
+      // profile and no matches while everyone around them does — with nothing in
+      // the log. That is the shape of the 2026-07-31 incident, reachable with no
+      // provider failure involved at all.
+      //
+      // The enqueue is idempotent (content-addressed dedupe key) and the job
+      // re-reads state at execution, including the billing gate, so running it
+      // first costs nothing and cannot spend money the gate would refuse.
+      this.enqueueProcess(state.coordinate, pubkey);
       await this.publishDirectory(state, pubkey);
       // Re-evaluate billing on a submission revision (spec §9): the enqueued paid
       // pipeline is gated at execution, but this refreshes state + emits on change.
       await this.reevaluateBilling(state.coordinate);
-      this.enqueueProcess(state.coordinate, pubkey);
     }
   }
 
