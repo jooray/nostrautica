@@ -45,6 +45,11 @@ class FakeLockManager implements LockManagerLike {
   }
 
   private async hold(name: string, callback: (lock: unknown | null) => Promise<unknown>): Promise<unknown> {
+    // Real Web Locks invoke the callback asynchronously — the browser grants the
+    // lock on its own schedule. Modelling that matters: a synchronous fake cannot
+    // express "disposed before the grant arrived", which is exactly the window in
+    // which the lock used to be held for the lifetime of the tab.
+    await Promise.resolve();
     this.held.add(name);
     try {
       return await callback({});
@@ -146,6 +151,41 @@ describe("ChatTabCoordinator — Web Locks leader election", () => {
     leader.dispose();
     await vi.waitFor(() => expect(follower.role).toBe("leader"));
     follower.dispose();
+  });
+
+  /**
+   * Disposing before the lock callback runs used to hold the lock forever
+   * (2026-09-04 audit).
+   *
+   * `electWithLocks` requests with `ifAvailable` and the callback fires whenever
+   * the browser gets to it — by which time `dispose()` may already have run.
+   * `becomeLeader()` returns early when disposed, but the hold after it did not,
+   * and `dispose()` had already called and cleared `stopHolding`, so nothing was
+   * left to resolve it. Every later coordinator in that tab then probed, got null,
+   * became a follower, and its takeover request blocked forever: chat went
+   * permanently leaderless in the whole browser profile until the tab closed.
+   * Reachable from `chatSession.retry()`, which disposes and rebuilds.
+   */
+  it("releases the lock when disposed before its callback runs", async () => {
+    const first = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+    });
+    first.dispose(); // synchronously, before the lock callback is reached
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The lock must be free, so a fresh coordinator in the same tab can lead.
+    const second = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+    });
+    await second.whenSettled;
+    expect(second.role).toBe("leader");
+    second.dispose();
   });
 });
 

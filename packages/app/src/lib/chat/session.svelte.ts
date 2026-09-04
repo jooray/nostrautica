@@ -115,8 +115,19 @@ class ChatSessionStore {
         scope,
         onRoleChange: (role) => {
           if (tok !== this.token) return;
+          const wasFollower = this.tabRole === "follower";
           this.tabRole = role;
           this.recomputeReadOnly();
+          // Promotion needs a CLIENT, not just a role. The follower branch of
+          // begin() returns having constructed none, so when the leader tab closed
+          // and this one inherited the lock, nothing re-ran it: the composer was
+          // re-enabled and phase stayed "ready", `send()` threw "no chat session",
+          // and — worse than the visible error — no live client existed anywhere in
+          // this browser profile, so no 445 traffic was ingested and no Welcome was
+          // joined until a manual reload.
+          if (role === "leader" && wasFollower && !this.chat) {
+            void this.begin();
+          }
         },
         onLeaderState: (coordinate, messages) => {
           // Follower render: adopt the leader's de-duped, sorted list wholesale.

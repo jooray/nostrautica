@@ -171,6 +171,20 @@ export class ChatTabCoordinator {
     // a non-null lock ⇒ we won it ⇒ leader, held until we release.
     void this.locks!
       .request(name, { mode: "exclusive", ifAvailable: true }, async (lock) => {
+        // `dispose()` may already have run while this request was queued — the
+        // callback is async and fires whenever the browser gets to it. Without this
+        // guard the lock was held for the LIFETIME OF THE TAB with no leader behind
+        // it: `becomeLeader()` returns early when disposed, but the hold below is
+        // unconditional, and `dispose()` had already called (and cleared)
+        // `stopHolding`, so nothing was left to resolve it. Every later coordinator
+        // in that tab then probed `ifAvailable`, got null, became a follower, and
+        // its `queueTakeover` blocked forever — chat went permanently leaderless in
+        // the whole browser profile until the tab was closed. Reachable from
+        // `chatSession.retry()`, which disposes and rebuilds, and from a route
+        // change that disposes before this callback fires.
+        //
+        // `queueTakeover`'s own callback has always had this check; this one did not.
+        if (this.disposed) return;
         if (lock === null) {
           this.becomeFollower();
           this.queueTakeover(name);
