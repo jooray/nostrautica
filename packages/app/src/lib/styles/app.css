@@ -378,6 +378,14 @@ label,
   background: var(--accent-soft);
   color: var(--accent);
 }
+/* The fourth semantic tone. AdminPersonDrawer has emitted `badge danger` for a
+   revoked/rejected member since it shipped, but only ok/warn/accent existed
+   here, so the one status an organizer most needs to spot rendered as the
+   neutral grey chip — visually identical to the plain "organizer" badge. */
+.badge.danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
 
 .warn {
   border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--border));
@@ -427,7 +435,11 @@ h2 {
 
 @media (prefers-reduced-motion: reduce) {
   * {
+    /* `transition` alone left every keyframe ANIMATION running — the spinners,
+       the skeleton shimmer, the toast slide-ins — which is the half of motion a
+       vestibular-sensitive user is actually asking us to stop. */
     transition: none !important;
+    animation: none !important;
   }
   .btn:active {
     transform: none;

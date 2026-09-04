@@ -98,7 +98,16 @@
 
   <div class="or-divider">{t("login.or")}</div>
 
-  <div class="card">
+  <!-- The card IS the form (see Join.svelte for the same change): Enter on the
+       name field creates the identity, and the on-screen keyboard shows a "go"
+       key instead of a newline. -->
+  <form
+    class="card"
+    onsubmit={(e) => {
+      e.preventDefault();
+      createNew();
+    }}
+  >
     <h2>{t("login.createHeading")}</h2>
     <p class="muted">{t("login.createSub")}</p>
     <div class="row" style="gap:0.75rem;align-items:center;margin-bottom:0.5rem">
@@ -118,10 +127,16 @@
       <div class="muted" style="font-size:0.85rem">{t("login.photoAdd")} <span class="badge">{t("login.photoPublic")}</span><br />{t("login.photoTap")}</div>
     </div>
     <label for="nm">{t("login.yourName")}</label>
-    <input id="nm" bind:value={newName} placeholder={t("login.namePlaceholder")} />
-    <button class="btn primary" style="margin-top:0.75rem" onclick={createNew} disabled={busy}>
+    <input
+      id="nm"
+      bind:value={newName}
+      placeholder={t("login.namePlaceholder")}
+      autocomplete="name"
+      enterkeyhint="go"
+    />
+    <button class="btn primary" type="submit" style="margin-top:0.75rem" disabled={busy}>
       {busy ? t("login.creating") : t("login.createMyIdentity")}
     </button>
-  </div>
+  </form>
 
 {/if}

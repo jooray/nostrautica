@@ -43,6 +43,7 @@
     type PackStep,
   } from "$lib/events/offline-pack.js";
   import { formatBytes } from "$lib/util/bytes.js";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
@@ -51,7 +52,7 @@
   import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import { visitorPreview } from "$lib/stores/visitor-preview.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -65,7 +66,16 @@
   // render below additionally refuses to show a card belonging to another
   // coordinate, so neither a slow load nor a future caller can reintroduce it.
   if (readinessStore.coordinate !== cachedCtx?.coordinate) readinessStore.reset();
-  let error = $state<string | null>(null);
+  // Raw thrown value, not a pre-stringified message: ErrorState categorizes it
+  // into a plain-language headline and hides the technical text behind a
+  // disclosure, which is what every other page in the app already does.
+  let error = $state<unknown>(null);
+  /** A load pass is in flight (drives the retry button's disabled state). */
+  let loadingPage = $state(false);
+  /** Backstop for a first load that never returns — mirrors Home's SCAN_GUARD_MS. */
+  const LOAD_GUARD_MS = 12_000;
+  /** Monotonic pass token so a stalled load can't clobber the retry that replaced it. */
+  let loadToken = 0;
   let approved = $state(false);
   let organizer = $state(false);
   let requestPending = $state(false); // join request sent, approval not landed yet (P2)
@@ -326,7 +336,33 @@
     if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
   }
 
-  onMount(async () => {
+  /**
+   * The whole first-paint pass, extracted from onMount so the error state can
+   * actually retry it (spec: this is the FIRST screen a newcomer sees after
+   * tapping an invite link — "Loading event…" with no way forward is the worst
+   * possible first impression, and it was reachable simply by opening the link
+   * on venue Wi-Fi that blocks WSS).
+   */
+  async function loadEventPage() {
+    // Token-guarded (same idea as event-shell.svelte.ts): when the 12s guard
+    // fires, the ORIGINAL pass is still out there — it was never cancellable, it
+    // just stopped being believed. If it later settles it must not re-raise its
+    // error over a retry the user has already started, nor clear the retry's
+    // in-flight flag. Only the newest pass owns `error` / `loadingPage`.
+    const token = ++loadToken;
+    loadingPage = true;
+    error = null;
+    // Backstop for a `loadEventContext` that never settles at all — same shape
+    // and budget as Home.svelte's SCAN_GUARD_MS. `loadEventContext` awaits relay
+    // reads with no timeout of their own, so a silently-dropped socket parked the
+    // page on "Loading event…" indefinitely with no retry and nothing announced.
+    // Timeout-shaped message on purpose: `categorizeError` then classifies it as
+    // `timeout`, reusing ErrorState's existing vocabulary (see ScanIncompleteError).
+    const guard = setTimeout(() => {
+      if (ctx || token !== loadToken) return; // header is up, or superseded
+      error = new Error("Timed out waiting for this event to load.");
+      loadingPage = false;
+    }, LOAD_GUARD_MS);
     try {
       await connectNdk();
       // The grant scan doesn't need the event context — run both in parallel.
@@ -365,14 +401,21 @@
       if (approved && !hadEck) await refetchAfterEck(ctx);
       if (page) await loadSectionData(page);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      // Only a failure that left us with NOTHING is a page-level error. Once the
+      // header is painted from `ctx`, a later section/post failure must not
+      // replace the whole event with an error card.
+      if (!ctx && token === loadToken) error = e;
     } finally {
+      clearTimeout(guard);
+      if (token === loadToken) loadingPage = false;
       bodyLoading = false;
       // Role resolution is set only by successful custody/approval reads above.
       // A keystore failure must not turn the default state into "visitor".
       perfMark("EventHome", "network-settled");
     }
-  });
+  }
+
+  onMount(loadEventPage);
 
   // The identity can arrive AFTER this page mounted, and nothing recomputed the
   // page when it did: the only other caller of `readinessStore.load` is the
@@ -700,13 +743,14 @@
   }
 </script>
 
-{#if error}
-  <div class="card warn">
-    <strong>{t("event.loadFailed")}</strong>
-    <span class="muted">{error}</span>
-  </div>
+{#if error && !ctx}
+  <!-- role="alert" + a working retry, via the shared surface (ErrorState). The
+       old card was a bare `class="warn"` div with the raw error text in it: not
+       announced, not categorized, and with no way to try again short of a manual
+       reload the newcomer has no reason to think of. -->
+  <ErrorState {error} body="event.loadFailed.body" onRetry={loadEventPage} retrying={loadingPage} />
 {:else if !ctx}
-  <p class="muted">{t("event.loading")}</p>
+  <p class="muted" role="status" aria-live="polite">{t("event.loading")}</p>
 {:else}
   <EventHeader {ctx} status={overviewStatus} />
 
@@ -927,7 +971,7 @@
           <strong>{t("event.attendeesSection")}</strong>
           {#if rosterCount !== undefined}
             <p class="muted" style="margin:0.25rem 0 0.5rem">
-              {t("event.attendeesSection.count", { n: rosterCount })}
+              {tp("event.attendeesSection.count", rosterCount)}
             </p>
           {/if}
           <button class="btn inline" onclick={() => router.go({ name: "attendees", naddr })}>

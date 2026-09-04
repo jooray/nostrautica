@@ -4,12 +4,19 @@
   import { LOCALES, LOCALE_NAMES, type MessageKey } from "$lib/i18n/messages.js";
   import { RELEASE_MANIFEST as rel } from "$lib/release.js";
 
-  const about: { label: string; value: string }[] = [
-    { label: "Release", value: rel.releaseId },
-    { label: "App", value: rel.appVersion },
-    { label: "Protocol", value: `${rel.protocolVersion} (wire v${rel.wireProtocolVersion})` },
-    { label: "Commit", value: rel.gitSha.slice(0, 12) },
-    { label: "Built", value: rel.buildTimestamp },
+  // These five labels were the last hardcoded English in the app — a Slovak or
+  // Czech user's Settings page had an all-English block in the middle of it.
+  // They survived because they sat in an array literal rather than in markup,
+  // where a `t(...)` call would have been obvious.
+  const about: { label: MessageKey; value: string }[] = [
+    { label: "settings.about.release", value: rel.releaseId },
+    { label: "settings.about.app", value: rel.appVersion },
+    {
+      label: "settings.about.protocol",
+      value: `${rel.protocolVersion} (wire v${rel.wireProtocolVersion})`,
+    },
+    { label: "settings.about.commit", value: rel.gitSha.slice(0, 12) },
+    { label: "settings.about.built", value: rel.buildTimestamp },
   ];
 
   const themeOptions: { value: ThemePref; label: MessageKey }[] = [
@@ -47,7 +54,7 @@
   <div class="field-label">{t("settings.about")}</div>
   <dl class="about">
     {#each about as row (row.label)}
-      <dt>{row.label}</dt>
+      <dt>{t(row.label)}</dt>
       <dd>{row.value}</dd>
     {/each}
   </dl>
@@ -63,11 +70,17 @@
     font-size: 0.85rem;
   }
   .about dt {
-    color: var(--muted, #888);
+    /* `--muted` is not a token this app defines (the class is .muted; the token
+       is --text-dim), so this always fell through to the #888 literal — about
+       3.4:1 on the light ground, under the 4.5:1 floor stated at the top of
+       app.css. --text-dim is the real token and meets it in both themes. */
+    color: var(--text-dim);
   }
   .about dd {
+    /* Likewise `--mono` doesn't exist; use the same stack as app.css's .mono so
+       the build metadata is monospaced consistently with every other id/hash. */
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     margin: 0;
-    font-family: var(--mono, ui-monospace, monospace);
     word-break: break-all;
   }
 </style>

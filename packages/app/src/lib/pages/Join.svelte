@@ -546,7 +546,18 @@
   {/if}
 
   {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
-  <div class="card stack">
+  <!-- A real <form> (the card element itself), not a bare div + onclick: Enter in
+       any field submits, and the browser gives the on-screen keyboard a "go" key
+       and treats these fields as one group. Until this existed the only <form> in
+       the whole app was the chat composer, so every newcomer typing their name
+       had to reach for a button that Enter would not press. -->
+  <form
+    class="card stack"
+    onsubmit={(e) => {
+      e.preventDefault();
+      void submit();
+    }}
+  >
     {#if session.loggedIn}
       <!-- Existing Nostr user: kind-0 shown read-only; a load-state machine (UX-O1)
            separates loaded / no-public-profile / failed so a relay error never
@@ -557,7 +568,8 @@
         <div class="card warn" style="margin:0">
           <strong>{t("join.profile.failed.title")}</strong>
           <p class="muted" style="margin:0.25rem 0 0.5rem">{t("join.profile.failed.body")}</p>
-          <button class="btn inline" onclick={() => void loadExistingProfile()}>
+          <!-- type="button": inside the <form> now, an untyped button submits. -->
+          <button type="button" class="btn inline" onclick={() => void loadExistingProfile()}>
             {t("join.profile.retry")}
           </button>
         </div>
@@ -588,6 +600,8 @@
             id="edn"
             bind:value={eventDisplayName}
             placeholder={t("join.namePlaceholder")}
+            autocomplete="name"
+            enterkeyhint="go"
             aria-invalid={errName}
             aria-describedby={describedBy("edn", errName)}
           />
@@ -629,6 +643,8 @@
           id="n"
           bind:value={newName}
           placeholder={t("join.namePlaceholder")}
+          autocomplete="name"
+          enterkeyhint="go"
           aria-invalid={errName}
           aria-describedby={describedBy("n", errName)}
         />
@@ -690,13 +706,19 @@
       </div>
     {/if}
 
-    <button
-      class="btn primary"
-      onclick={submit}
-      disabled={busy || profileLoading || (session.loggedIn && !canSubmitLoggedIn(profileState, eventDisplayName))}
-    >
+    <!-- Check on submit, don't disable (Record.svelte:601 documents moving away
+         from exactly this gate). The old `disabled` included
+         `!canSubmitLoggedIn(...)`, but `showErrors` is set only INSIDE submit() —
+         unreachable behind a disabled button — so a signed-in user whose kind-0
+         is empty or failed to load got a permanently grey button, no field error
+         and no ErrorSummary: a dead end with no stated reason. submit() already
+         validates and focuses the offending field, so let it run.
+         `profileLoading` stays: that state renders "Fetching your profile…" right
+         above, so the disabled button is explained, and the name field it would
+         validate isn't in the DOM yet. -->
+    <button class="btn primary" type="submit" disabled={busy || profileLoading}>
       {busy ? t("join.sending") : session.loggedIn ? t("join.send") : t("join.createAndJoin")}
     </button>
-  </div>
+  </form>
 
 {/if}

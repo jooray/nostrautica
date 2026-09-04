@@ -47,7 +47,11 @@ export const messages = {
     "outbox.retry": "Retry",
     "outbox.discard": "Discard",
     "outbox.syncStatus": "Sync status",
+    // Kept alongside the plural family below because OutboxIndicator still calls
+    // the flat key; the `.one/.many` forms exist so it can move to tp().
     "outbox.retries": "{n} retries",
+    "outbox.retries.one": "{n} retry",
+    "outbox.retries.many": "{n} retries",
     "outbox.waiting.title": "Waiting to send",
     "conn.relayBlocked": "Connected to the internet, but no relay is reachable — this network may be blocking connections. Your changes are saved and will sync once a relay connects.",
     "conn.syncing": "Reconnected — sending your saved changes…",
@@ -290,6 +294,8 @@ export const messages = {
 
     // Event home
     "event.loadFailed": "Couldn't load this event.",
+    "event.loadFailed.body":
+      "Nothing about this event could be read yet — its details live on relays, and none of them answered. That is usually the network, not the event.",
     "event.loading": "Loading event…",
     "event.approval.invite": "Invite only",
     "event.approval.manual": "Organizer approval",
@@ -372,7 +378,8 @@ export const messages = {
     "event.posts": "Posts",
     "event.pinned": "Pinned",
     "event.attendeesSection": "Who's here",
-    "event.attendeesSection.count": "{n} people so far",
+    "event.attendeesSection.count.one": "{n} person so far",
+    "event.attendeesSection.count.many": "{n} people so far",
     "event.allPosts": "All posts ›",
     "event.report": "Event report",
     "event.offline.title": "Available offline",
@@ -438,7 +445,11 @@ export const messages = {
     "post.editor.write": "Write",
     "post.editor.preview": "Preview",
     "post.editor.nothingToPreview": "Nothing to preview yet.",
+    // Flat key kept for PostEditor's existing call site; the plural family is the
+    // one a tp() migration there should use.
     "post.editor.bytes": "{n} bytes",
+    "post.editor.bytes.one": "{n} byte",
+    "post.editor.bytes.many": "{n} bytes",
     "post.editor.byteCount": "{used} / {max} bytes",
     "post.editor.tooLong":
       "Too long for a members-only post — the limit is {max} bytes of Markdown. Trim about {over} bytes.",
@@ -580,8 +591,16 @@ export const messages = {
     // Attendees
     "attendees.title": "People",
     "attendees.decrypting": "Decrypting the roster…",
-    "attendees.empty":
-      "No attendees visible. The list is encrypted for approved attendees — if you haven't joined yet, that's why; if you were just approved, refresh in a moment.",
+    // Three genuinely different reasons the roster can be empty. The old single
+    // string asserted "if you haven't joined yet, that's why" at everyone,
+    // including an approved attendee on venue Wi-Fi whose relays are blocked —
+    // the most likely reader of an empty roster, and the one it was most wrong for.
+    "attendees.empty.notApproved":
+      "The attendee list is encrypted for approved attendees, and this device doesn't have the key yet. Join the event — or, if you were just approved, give it a moment and try again.",
+    "attendees.empty.none":
+      "Nobody is on the list yet. People appear here as the organizer approves them; if you were just approved yourself, your own entry can take a minute to arrive.",
+    "attendees.empty.unreachable":
+      "Couldn't reach the relays that hold the attendee list, so we can't tell who's here. Venue Wi-Fi often blocks them — try again, or switch networks.",
     "attendees.backToEvent": "Back to the event",
     "attendees.count.one": "{n} attendee",
     "attendees.count.many": "{n} attendees",
@@ -726,10 +745,19 @@ export const messages = {
       "These are independent Nostr apps — like different clients for the same account. Copy your key below, open one, choose “log in with a key”, and paste it in — your profile and the people you followed are already there.",
     "me.backupKey": "Back up your key",
     "me.logout": "Log out",
-    "me.logout.warnUnsent":
-      "You have {n} unsent action(s) waiting to send. Logging out will discard them — they won't be published. Log out anyway?",
+    "me.logout.warnUnsent.one":
+      "You have {n} unsent action waiting to send. Logging out will discard it — it won't be published. Log out anyway?",
+    "me.logout.warnUnsent.many":
+      "You have {n} unsent actions waiting to send. Logging out will discard them — they won't be published. Log out anyway?",
     "me.logout.confirmDiscard": "Log out and discard",
     "me.logout.cancel": "Stay logged in",
+    // The unrecoverable case: an app-generated key the user has never saved.
+    // Logging out calls clearKeystore(), which deletes the secret outright.
+    "me.logout.keyLoss.title": "Logging out erases your key from this device",
+    "me.logout.keyLoss.body":
+      "This app created your Nostr identity and the key lives only on this device — you haven't saved it anywhere yet. Logging out deletes it for good. Nobody can bring it back: your profile, the events you joined and your messages go with it.",
+    "me.logout.keyLoss.backup": "Save your key first",
+    "me.logout.keyLoss.confirm": "Log out and erase my key",
 
     // Backup card
     "backup.noKey": "Your key lives in your signer — back it up there. Nothing to export here.",
@@ -786,7 +814,11 @@ export const messages = {
     "dm.empty":
       "No messages yet. Open someone's profile in an event's attendee list and tap Message to start a conversation. Messages are end-to-end encrypted and work with other Nostr messengers too.",
     "dm.youPrefix": "You: ",
+    // Flat key kept for BottomNav / Dm.svelte, which still call t(); EventNav uses
+    // the plural family.
     "dm.unread": "{n} unread direct messages",
+    "dm.unread.one": "{n} unread direct message",
+    "dm.unread.many": "{n} unread direct messages",
     "dm.markAllRead": "Mark all as read",
     "dm.encryptedActivity": "New encrypted inbox activity",
     // Unified Chat pane (group chats + DMs together)
@@ -1132,6 +1164,13 @@ export const messages = {
     "settings.theme.dark": "Dark",
     "settings.about": "About",
     "settings.about.hint": "Build diagnostics — include this when reporting an issue.",
+    // These five were the last hardcoded English strings in the app (they sat in
+    // an array literal in Settings.svelte, which is why they escaped the catalog).
+    "settings.about.release": "Release",
+    "settings.about.app": "App",
+    "settings.about.protocol": "Protocol",
+    "settings.about.commit": "Commit",
+    "settings.about.built": "Built",
 
     // Accessibility (A2)
     "a11y.skipToContent": "Skip to content",
@@ -1143,6 +1182,11 @@ export const messages = {
     "nav.people": "People",
     "nav.matches": "Matches",
     "nav.chat": "Chat",
+    // Distinct from nav.chat: the More menu's row opens DIRECT messages, the nav
+    // bar's Chat tab opens the event group chat. One label on two destinations
+    // read as a duplicate entry; the participant guide already calls this one
+    // "Messages".
+    "nav.messages": "Messages",
     "nav.talks": "Talks",
     "nav.updates": "Updates",
     "nav.more": "More",
@@ -1444,7 +1488,8 @@ export const messages = {
     "report.switch.body":
       "This event created a Nostr key for you. Back it up and use it in any Nostr app.",
     "report.switch.action": "Back up & explore Nostr",
-    "nav.matches.new": "{n} new matches",
+    "nav.matches.new.one": "{n} new match",
+    "nav.matches.new.many": "{n} new matches",
     "event.approvedBanner": "You’re approved — welcome in.",
     "event.approvedBanner.dismiss": "Dismiss",
     "event.viewAsVisitor": "View as visitor",
@@ -1529,6 +1574,9 @@ export const messages = {
     "outbox.discard": "Zahodiť",
     "outbox.syncStatus": "Stav synchronizácie",
     "outbox.retries": "{n} pokusov",
+    "outbox.retries.one": "{n} pokus",
+    "outbox.retries.few": "{n} pokusy",
+    "outbox.retries.many": "{n} pokusov",
     "outbox.waiting.title": "Čaká na odoslanie",
     "conn.relayBlocked": "Pripojené k internetu, ale žiadne relé nie je dostupné — táto sieť možno blokuje spojenia. Vaše zmeny sú uložené a zosynchronizujú sa, keď sa pripojí relé.",
     "conn.syncing": "Znova pripojené — odosielam vaše uložené zmeny…",
@@ -1769,6 +1817,8 @@ export const messages = {
 
     // Event home
     "event.loadFailed": "Toto podujatie sa nepodarilo načítať.",
+    "event.loadFailed.body":
+      "Zatiaľ sa nepodarilo načítať nič o tomto podujatí — jeho údaje sú na relayoch a žiadny neodpovedal. Zvyčajne je na vine sieť, nie podujatie.",
     "event.loading": "Načítava sa podujatie…",
     "event.approval.invite": "Iba na pozvánku",
     "event.approval.manual": "Schválenie organizátorom",
@@ -1852,7 +1902,9 @@ export const messages = {
     "event.posts": "Príspevky",
     "event.pinned": "Pripnuté",
     "event.attendeesSection": "Kto tu je",
-    "event.attendeesSection.count": "Zatiaľ {n} ľudí",
+    "event.attendeesSection.count.one": "Zatiaľ {n} človek",
+    "event.attendeesSection.count.few": "Zatiaľ {n} ľudia",
+    "event.attendeesSection.count.many": "Zatiaľ {n} ľudí",
     "event.allPosts": "Všetky príspevky ›",
     "event.report": "Správa z podujatia",
     "event.offline.title": "Dostupné offline",
@@ -1919,6 +1971,9 @@ export const messages = {
     "post.editor.preview": "Náhľad",
     "post.editor.nothingToPreview": "Zatiaľ nie je čo zobraziť.",
     "post.editor.bytes": "{n} bajtov",
+    "post.editor.bytes.one": "{n} bajt",
+    "post.editor.bytes.few": "{n} bajty",
+    "post.editor.bytes.many": "{n} bajtov",
     "post.editor.byteCount": "{used} / {max} bajtov",
     "post.editor.tooLong":
       "Príliš dlhé pre príspevok len pre členov — limit je {max} bajtov Markdownu. Skráťte približne o {over} bajtov.",
@@ -2062,8 +2117,12 @@ export const messages = {
     // Attendees
     "attendees.title": "Ľudia",
     "attendees.decrypting": "Dešifruje sa zoznam…",
-    "attendees.empty":
-      "Nie sú viditeľní žiadni účastníci. Zoznam je zašifrovaný pre schválených účastníkov — ak ste sa ešte nepripojili, je to preto; ak vás práve schválili, o chvíľu obnovte stránku.",
+    "attendees.empty.notApproved":
+      "Zoznam účastníkov je zašifrovaný pre schválených účastníkov a toto zariadenie ešte nemá kľúč. Pripojte sa k podujatiu — alebo ak vás práve schválili, chvíľu počkajte a skúste to znova.",
+    "attendees.empty.none":
+      "V zozname zatiaľ nikto nie je. Ľudia sa tu objavia, keď ich organizátor schváli; ak schválili práve vás, váš vlastný záznam môže prísť s minútovým oneskorením.",
+    "attendees.empty.unreachable":
+      "Nepodarilo sa spojiť s relaymi, ktoré držia zoznam účastníkov, takže nevieme povedať, kto je tu. Wi-Fi na mieste ich často blokuje — skúste to znova alebo prepnite sieť.",
     "attendees.backToEvent": "Späť na podujatie",
     "attendees.count.one": "{n} účastník",
     "attendees.count.few": "{n} účastníci",
@@ -2210,10 +2269,19 @@ export const messages = {
       "Toto sú nezávislé aplikácie na Nostri — ako rôzni klienti pre ten istý účet. Skopírujte si kľúč nižšie, otvorte niektorú z nich, zvoľte „prihlásiť sa kľúčom“ a vložte ho — váš profil aj ľudia, ktorých sledujete, tam už sú.",
     "me.backupKey": "Zálohujte si kľúč",
     "me.logout": "Odhlásiť sa",
-    "me.logout.warnUnsent":
+    "me.logout.warnUnsent.one":
+      "Máte {n} neodoslanú akciu čakajúcu na odoslanie. Odhlásením sa zahodí — nezverejní sa. Napriek tomu sa odhlásiť?",
+    "me.logout.warnUnsent.few":
+      "Máte {n} neodoslané akcie čakajúce na odoslanie. Odhlásením sa zahodia — nezverejnia sa. Napriek tomu sa odhlásiť?",
+    "me.logout.warnUnsent.many":
       "Máte {n} neodoslaných akcií čakajúcich na odoslanie. Odhlásením sa zahodia — nezverejnia sa. Napriek tomu sa odhlásiť?",
     "me.logout.confirmDiscard": "Odhlásiť a zahodiť",
     "me.logout.cancel": "Zostať prihlásený",
+    "me.logout.keyLoss.title": "Odhlásenie vymaže váš kľúč z tohto zariadenia",
+    "me.logout.keyLoss.body":
+      "Túto Nostr identitu vám vytvorila táto aplikácia a kľúč je uložený iba v tomto zariadení — zatiaľ ste si ho nikam neuložili. Odhlásením sa nenávratne vymaže. Nikto ho neobnoví: prídete o profil, o podujatia, do ktorých ste sa zapojili, aj o svoje správy.",
+    "me.logout.keyLoss.backup": "Najprv si uložte kľúč",
+    "me.logout.keyLoss.confirm": "Odhlásiť sa a vymazať kľúč",
 
     // Backup card
     "backup.noKey":
@@ -2272,6 +2340,9 @@ export const messages = {
       "Zatiaľ žiadne správy. Otvorte niekoho profil v zozname účastníkov podujatia a klepnite na Napísať správu, čím začnete konverzáciu. Správy sú koncovo šifrované a fungujú aj s inými Nostr aplikáciami na správy.",
     "dm.youPrefix": "Vy: ",
     "dm.unread": "{n} neprečítaných priamych správ",
+    "dm.unread.one": "{n} neprečítaná priama správa",
+    "dm.unread.few": "{n} neprečítané priame správy",
+    "dm.unread.many": "{n} neprečítaných priamych správ",
     "dm.markAllRead": "Označiť všetky ako prečítané",
     "dm.encryptedActivity": "Nová šifrovaná aktivita v schránke",
     "chats.groupSection": "Skupinové chaty",
@@ -2616,6 +2687,11 @@ export const messages = {
     "settings.theme.dark": "Tmavý",
     "settings.about": "O aplikácii",
     "settings.about.hint": "Diagnostika zostavenia — priložte ju pri hlásení problému.",
+    "settings.about.release": "Vydanie",
+    "settings.about.app": "Aplikácia",
+    "settings.about.protocol": "Protokol",
+    "settings.about.commit": "Commit",
+    "settings.about.built": "Zostavené",
 
     // Accessibility (A2)
     "a11y.skipToContent": "Preskočiť na obsah",
@@ -2627,6 +2703,7 @@ export const messages = {
     "nav.people": "Ľudia",
     "nav.matches": "Spojenia",
     "nav.chat": "Chat",
+    "nav.messages": "Správy",
     "nav.talks": "Prednášky",
     "nav.updates": "Novinky",
     "nav.more": "Viac",
@@ -2925,7 +3002,9 @@ export const messages = {
     "report.switch.body":
       "Toto podujatie vám vytvorilo Nostr kľúč. Zálohujte si ho a používajte v ktorejkoľvek Nostr aplikácii.",
     "report.switch.action": "Zálohovať a objaviť Nostr",
-    "nav.matches.new": "{n} nových spojení",
+    "nav.matches.new.one": "{n} nové spojenie",
+    "nav.matches.new.few": "{n} nové spojenia",
+    "nav.matches.new.many": "{n} nových spojení",
     "event.approvedBanner": "Ste schválení — vitajte.",
     "event.approvedBanner.dismiss": "Zavrieť",
     "event.viewAsVisitor": "Zobraziť ako návštevník",
@@ -3010,6 +3089,9 @@ export const messages = {
     "outbox.discard": "Zahodit",
     "outbox.syncStatus": "Stav synchronizace",
     "outbox.retries": "{n} pokusů",
+    "outbox.retries.one": "{n} pokus",
+    "outbox.retries.few": "{n} pokusy",
+    "outbox.retries.many": "{n} pokusů",
     "outbox.waiting.title": "Čeká na odeslání",
     "conn.relayBlocked": "Připojeno k internetu, ale žádné relé není dostupné — tato síť možná blokuje spojení. Vaše změny jsou uložené a zsynchronizují se, jakmile se relé připojí.",
     "conn.syncing": "Znovu připojeno — odesílám vaše uložené změny…",
@@ -3250,6 +3332,8 @@ export const messages = {
 
     // Domovská stránka akce
     "event.loadFailed": "Tuto akci se nepodařilo načíst.",
+    "event.loadFailed.body":
+      "Zatím se nepodařilo načíst nic o této akci — její údaje jsou na relayích a žádný neodpověděl. Obvykle za to může síť, ne akce.",
     "event.loading": "Načítání akce…",
     "event.approval.invite": "Pouze na pozvání",
     "event.approval.manual": "Schválení organizátorem",
@@ -3333,7 +3417,9 @@ export const messages = {
     "event.posts": "Příspěvky",
     "event.pinned": "Připnuté",
     "event.attendeesSection": "Kdo tu je",
-    "event.attendeesSection.count": "Zatím {n} lidí",
+    "event.attendeesSection.count.one": "Zatím {n} člověk",
+    "event.attendeesSection.count.few": "Zatím {n} lidé",
+    "event.attendeesSection.count.many": "Zatím {n} lidí",
     "event.allPosts": "Všechny příspěvky ›",
     "event.report": "Zpráva z akce",
     "event.offline.title": "Dostupné offline",
@@ -3400,6 +3486,9 @@ export const messages = {
     "post.editor.preview": "Náhled",
     "post.editor.nothingToPreview": "Zatím není co zobrazit.",
     "post.editor.bytes": "{n} bajtů",
+    "post.editor.bytes.one": "{n} bajt",
+    "post.editor.bytes.few": "{n} bajty",
+    "post.editor.bytes.many": "{n} bajtů",
     "post.editor.byteCount": "{used} / {max} bajtů",
     "post.editor.tooLong":
       "Příliš dlouhé pro příspěvek jen pro členy — limit je {max} bajtů Markdownu. Zkraťte přibližně o {over} bajtů.",
@@ -3542,8 +3631,12 @@ export const messages = {
     // Účastníci
     "attendees.title": "Lidé",
     "attendees.decrypting": "Dešifrování seznamu…",
-    "attendees.empty":
-      "Nejsou vidět žádní účastníci. Seznam je zašifrován pro schválené účastníky — pokud jste se ještě nepřipojili, je to proto; pokud vás právě schválili, za chvíli obnovte stránku.",
+    "attendees.empty.notApproved":
+      "Seznam účastníků je zašifrovaný pro schválené účastníky a toto zařízení zatím nemá klíč. Připojte se k akci — nebo pokud vás právě schválili, chvíli počkejte a zkuste to znovu.",
+    "attendees.empty.none":
+      "V seznamu zatím nikdo není. Lidé se tu objeví, jakmile je organizátor schválí; pokud schválili právě vás, váš vlastní záznam může přijít s minutovým zpožděním.",
+    "attendees.empty.unreachable":
+      "Nepodařilo se spojit s relayi, které drží seznam účastníků, takže nevíme, kdo tu je. Wi-Fi na místě je často blokuje — zkuste to znovu nebo přepněte síť.",
     "attendees.backToEvent": "Zpět na akci",
     "attendees.count.one": "{n} účastník",
     "attendees.count.few": "{n} účastníci",
@@ -3689,10 +3782,19 @@ export const messages = {
       "Toto jsou nezávislé aplikace na Nostru — jako různí klienti pro stejný účet. Zkopírujte si klíč níže, otevřete některou z nich, zvolte „přihlásit se klíčem“ a vložte ho tam — váš profil i lidé, které sledujete, tam už jsou.",
     "me.backupKey": "Zazálohujte si klíč",
     "me.logout": "Odhlásit se",
-    "me.logout.warnUnsent":
+    "me.logout.warnUnsent.one":
+      "Máte {n} neodeslanou akci čekající na odeslání. Odhlášením se zahodí — nezveřejní se. Přesto se odhlásit?",
+    "me.logout.warnUnsent.few":
+      "Máte {n} neodeslané akce čekající na odeslání. Odhlášením se zahodí — nezveřejní se. Přesto se odhlásit?",
+    "me.logout.warnUnsent.many":
       "Máte {n} neodeslaných akcí čekajících na odeslání. Odhlášením se zahodí — nezveřejní se. Přesto se odhlásit?",
     "me.logout.confirmDiscard": "Odhlásit a zahodit",
     "me.logout.cancel": "Zůstat přihlášen",
+    "me.logout.keyLoss.title": "Odhlášení vymaže váš klíč z tohoto zařízení",
+    "me.logout.keyLoss.body":
+      "Tuto Nostr identitu vám vytvořila tato aplikace a klíč je uložený jen v tomto zařízení — zatím jste si ho nikam neuložili. Odhlášením se nenávratně smaže. Nikdo ho neobnoví: přijdete o profil, o akce, do kterých jste se zapojili, i o své zprávy.",
+    "me.logout.keyLoss.backup": "Nejprve si uložte klíč",
+    "me.logout.keyLoss.confirm": "Odhlásit se a smazat klíč",
 
     // Karta zálohy
     "backup.noKey": "Váš klíč žije ve vašem podpisovači — zazálohujte si ho tam. Tady není co exportovat.",
@@ -3750,6 +3852,9 @@ export const messages = {
       "Zatím žádné zprávy. Otevřete něčí profil v seznamu účastníků akce a klepněte na Napsat zprávu, čímž zahájíte konverzaci. Zprávy jsou koncově šifrované a fungují i s jinými Nostr aplikacemi na zprávy.",
     "dm.youPrefix": "Vy: ",
     "dm.unread": "{n} nepřečtených přímých zpráv",
+    "dm.unread.one": "{n} nepřečtená přímá zpráva",
+    "dm.unread.few": "{n} nepřečtené přímé zprávy",
+    "dm.unread.many": "{n} nepřečtených přímých zpráv",
     "dm.markAllRead": "Označit vše jako přečtené",
     "dm.encryptedActivity": "Nová šifrovaná aktivita ve schránce",
     "chats.groupSection": "Skupinové chaty",
@@ -4095,6 +4200,11 @@ export const messages = {
     "settings.theme.dark": "Tmavý",
     "settings.about": "O aplikaci",
     "settings.about.hint": "Diagnostika sestavení — přiložte ji při hlášení problému.",
+    "settings.about.release": "Vydání",
+    "settings.about.app": "Aplikace",
+    "settings.about.protocol": "Protokol",
+    "settings.about.commit": "Commit",
+    "settings.about.built": "Sestaveno",
 
     // Přístupnost (A2)
     "a11y.skipToContent": "Přeskočit na obsah",
@@ -4106,6 +4216,7 @@ export const messages = {
     "nav.people": "Lidé",
     "nav.matches": "Spojení",
     "nav.chat": "Chat",
+    "nav.messages": "Zprávy",
     "nav.talks": "Přednášky",
     "nav.updates": "Novinky",
     "nav.more": "Více",
@@ -4410,7 +4521,9 @@ export const messages = {
     "report.switch.body":
       "Tato akce vám vytvořila Nostr klíč. Zálohujte si jej a používejte v jakékoli Nostr aplikaci.",
     "report.switch.action": "Zálohovat a objevit Nostr",
-    "nav.matches.new": "{n} nových spojení",
+    "nav.matches.new.one": "{n} nové spojení",
+    "nav.matches.new.few": "{n} nová spojení",
+    "nav.matches.new.many": "{n} nových spojení",
     "event.approvedBanner": "Jste schváleni — vítejte.",
     "event.approvedBanner.dismiss": "Zavřít",
     "event.viewAsVisitor": "Zobrazit jako návštěvník",
