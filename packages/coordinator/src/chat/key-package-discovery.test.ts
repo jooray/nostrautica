@@ -160,4 +160,107 @@ describe("discoverKeyPackages", () => {
     const again = await discoverKeyPackages(t, ["hostile"], ["wss://event-relay.example"], []);
     expect(again.map((e) => e.id)).toEqual(["kp-fan"]);
   });
+
+  // ── newest-wins per (author, `d`) ─────────────────────────────────────────
+  // kind-30443 is addressable, so a (pubkey, `d`) pair names ONE live key package.
+  // A multi-relay read does not enforce that: a relay that missed (or has not yet
+  // received) the rotation still serves the superseded copy, and both come back.
+  // Handing the caller both is how `syncMember` ended up inviting a device with an
+  // init key it had already discarded — the Welcome is undecryptable, the
+  // coordinator holds a leaf for a member who cannot see the room, and only a
+  // reload plus Rejoin gets them out of it.
+  it("returns only the NEWEST key package per (author, d) when a lagging relay still serves the old one", async () => {
+    const t = new RelayScopedFake();
+    const stale = ev({
+      id: "kp-stale",
+      kind: KIND_KEY_PACKAGE,
+      pubkey: "alice",
+      created_at: 1_700_000_000,
+      tags: [["d", "web-laptop"]],
+    });
+    const rotated = ev({
+      id: "kp-rotated",
+      kind: KIND_KEY_PACKAGE,
+      pubkey: "alice",
+      created_at: 1_700_000_060,
+      tags: [["d", "web-laptop"]],
+    });
+    // The lagging relay is listed FIRST, so a "whichever arrives first" caller
+    // picks the stale one — that ordering is the whole point of the test.
+    t.seed("wss://lagging.example", stale);
+    t.seed("wss://event-relay.example", rotated);
+
+    const result = await discoverKeyPackages(
+      t,
+      ["alice"],
+      ["wss://lagging.example", "wss://event-relay.example"],
+      [],
+    );
+    expect(result.map((e) => e.id)).toEqual(["kp-rotated"]);
+  });
+
+  it("keeps one key package per slot, so a genuinely multi-device author is not collapsed", async () => {
+    const t = new RelayScopedFake();
+    const laptop = ev({
+      id: "kp-laptop",
+      kind: KIND_KEY_PACKAGE,
+      pubkey: "alice",
+      created_at: 1_700_000_000,
+      tags: [["d", "web-laptop"]],
+    });
+    const phone = ev({
+      id: "kp-phone",
+      kind: KIND_KEY_PACKAGE,
+      pubkey: "alice",
+      created_at: 1_700_000_010,
+      tags: [["d", "web-phone"]],
+    });
+    t.seed("wss://event-relay.example", laptop);
+    t.seed("wss://event-relay.example", phone);
+
+    const result = await discoverKeyPackages(t, ["alice"], ["wss://event-relay.example"], []);
+    expect(new Set(result.map((e) => e.id))).toEqual(new Set(["kp-laptop", "kp-phone"]));
+  });
+
+  it("dedupes the NIP-65 fallback against the primary relays too, newest-wins", async () => {
+    const t = new RelayScopedFake();
+    // Nothing for `bob` on the primary relays → the NIP-65 fallback runs. His own
+    // relay serves the fresh copy; a second one of his relays is behind.
+    const relayList = ev({
+      kind: KIND_RELAY_LIST,
+      pubkey: "bob",
+      tags: [
+        ["r", "wss://bob-lagging.example"],
+        ["r", "wss://bob-fresh.example"],
+      ],
+    });
+    t.seed("wss://event-relay.example", relayList);
+    t.seed(
+      "wss://bob-lagging.example",
+      ev({ id: "bob-old", kind: KIND_KEY_PACKAGE, pubkey: "bob", created_at: 1, tags: [["d", "web-1"]] }),
+    );
+    t.seed(
+      "wss://bob-fresh.example",
+      ev({ id: "bob-new", kind: KIND_KEY_PACKAGE, pubkey: "bob", created_at: 2, tags: [["d", "web-1"]] }),
+    );
+
+    const result = await discoverKeyPackages(t, ["bob"], ["wss://event-relay.example"], []);
+    expect(result.map((e) => e.id)).toEqual(["bob-new"]);
+  });
+
+  it("breaks a same-second tie deterministically (same input ⇒ same choice)", async () => {
+    const t = new RelayScopedFake();
+    t.seed(
+      "wss://a.example",
+      ev({ id: "ffff", kind: KIND_KEY_PACKAGE, pubkey: "carol", created_at: 5, tags: [["d", "web-1"]] }),
+    );
+    t.seed(
+      "wss://b.example",
+      ev({ id: "0000", kind: KIND_KEY_PACKAGE, pubkey: "carol", created_at: 5, tags: [["d", "web-1"]] }),
+    );
+    const first = await discoverKeyPackages(t, ["carol"], ["wss://a.example", "wss://b.example"], []);
+    const second = await discoverKeyPackages(t, ["carol"], ["wss://b.example", "wss://a.example"], []);
+    expect(first.map((e) => e.id)).toEqual(["0000"]);
+    expect(second.map((e) => e.id)).toEqual(["0000"]);
+  });
 });
