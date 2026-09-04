@@ -300,6 +300,10 @@ export interface Transport {
 }
 
 const short = (pk: string) => pk.slice(0, 8);
+
+/** How many undecryptable wrap ids to remember in memory. Sized to comfortably
+ *  cover one inbox rescan's worth of junk without becoming a leak of its own. */
+const MAX_UNDECRYPTABLE_MEMO = 10_000;
 function log(msg: string): void {
   const t = new Date().toISOString().slice(11, 19);
   console.log(`[${t}] ${msg}`);
@@ -519,6 +523,25 @@ export class Coordinator {
    * (two daemons sharing one SQLite file) remains deferred.
    */
   private readonly inFlightRumors = new Set<string>();
+  /**
+   * Wrap ids we could not decrypt, kept IN MEMORY and bounded (2026-09-04 audit).
+   *
+   * These used to go into the durable `seen_rumors` ledger, which is deliberately
+   * never pruned. That retention exists so a re-scanned OLD COMMAND cannot
+   * re-execute — reasoning that applies only to rumors we actually read. A wrap we
+   * cannot decrypt carries no command by definition, so its id has no correctness
+   * value in the ledger and recording it forever was pure liability: the per-sender
+   * rate gate runs only AFTER a successful decrypt, so this path was entirely
+   * ungated, and anyone could turn one Schnorr signature into one permanent
+   * database row by publishing kind-1059 events p-tagged at the coordinator from
+   * throwaway keys, at eight-worker concurrency, on the same volume as the live
+   * SQLite.
+   *
+   * Bounded and in memory: a replayed undecryptable wrap is still skipped within a
+   * session, and after a restart it costs one failed NIP-44 decrypt attempt, which
+   * is cheap and — unlike a disk row — self-limiting.
+   */
+  private readonly undecryptableWraps = new Set<string>();
   /** Coordinates for which a 21606 budget_exceeded was already emitted (H-2): emit
    *  once per block, cleared on resume so a later re-exceed re-notifies. */
   private readonly budgetNotified = new Set<string>();
@@ -1183,8 +1206,19 @@ export class Coordinator {
    * Deterministic failures (undecryptable wrap, future-dated rumor, duplicate)
    * ARE marked seen immediately so they don't loop on every startup rescan.
    */
+  /** Bounded FIFO: remember an undecryptable wrap id without touching disk. */
+  private rememberUndecryptable(wrapId: string): void {
+    if (this.undecryptableWraps.size >= MAX_UNDECRYPTABLE_MEMO) {
+      // Sets iterate in insertion order, so the first key is the oldest.
+      const oldest = this.undecryptableWraps.values().next().value;
+      if (oldest !== undefined) this.undecryptableWraps.delete(oldest);
+    }
+    this.undecryptableWraps.add(wrapId);
+  }
+
   private unwrapFresh(wrap: GiftWrap, recipientSk: Uint8Array): Rumor | undefined {
     if (this.deps.store.isRumorSeen(wrap.id)) return undefined;
+    if (this.undecryptableWraps.has(wrap.id)) return undefined;
     let rumor: Rumor;
     try {
       // R19: take the UNTOUCHED authenticated rumor (its created_at is exactly
@@ -1194,7 +1228,7 @@ export class Coordinator {
       // itself (below), dropping — not silently clamping — a future-dated rumor.
       rumor = unwrapRumorEnvelope(wrap, recipientSk).rumor;
     } catch {
-      this.deps.store.markRumorSeen(wrap.id, this.now()); // can never decrypt — drop
+      this.rememberUndecryptable(wrap.id); // can never decrypt — drop, in memory only
       return undefined;
     }
     // Freshness (COORD-11): drop rumors future-dated > 15 min (clock-skew guard
