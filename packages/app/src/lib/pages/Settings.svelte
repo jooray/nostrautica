@@ -3,6 +3,7 @@
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { LOCALES, LOCALE_NAMES, type MessageKey } from "$lib/i18n/messages.js";
   import { RELEASE_MANIFEST as rel } from "$lib/release.js";
+  import { externalImages, setExternalImagesAllowed } from "$lib/stores/external-images.svelte.js";
 
   // These five labels were the last hardcoded English in the app — a Slovak or
   // Czech user's Settings page had an all-English block in the middle of it.
@@ -48,6 +49,21 @@
       </button>
     {/each}
   </div>
+</div>
+
+<div class="card">
+  <div class="field-label">{t("settings.privacy")}</div>
+  <label class="row" style="gap:0.6rem;align-items:flex-start;cursor:pointer">
+    <input
+      type="checkbox"
+      checked={externalImages.allowed}
+      onchange={(e) => setExternalImagesAllowed(e.currentTarget.checked)}
+    />
+    <span>
+      <span>{t("settings.externalImages")}</span>
+      <span class="muted" style="display:block">{t("settings.externalImages.hint")}</span>
+    </span>
+  </label>
 </div>
 
 <div class="card">

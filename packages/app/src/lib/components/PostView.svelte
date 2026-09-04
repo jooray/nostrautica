@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import { decode } from "nostr-tools/nip19";
   import type { RecentPost } from "$lib/events/social.js";
   import { fetchProfiles, cachedProfiles } from "$lib/events/social.js";
@@ -92,7 +93,25 @@
 
   {#each blocks as tk, i (i)}
     {#if tk.type === "image"}
-      <img class="media" src={(tk as Extract<Token, { type: "image" }>).url} alt="" loading="lazy" />
+      <!-- An image URL inside a note is chosen by whoever wrote the note, and
+           rendering it fetches from that host with the reader's IP (audit
+           SEC-17). https-only, no referrer; when the reader has turned
+           off-origin images off, show the address instead of silently dropping
+           the content — they can still choose to open it. -->
+      {@const imgSrc = safeImageSrc((tk as Extract<Token, { type: "image" }>).url)}
+      {#if imgSrc}
+        <img
+          class="media"
+          src={imgSrc}
+          alt=""
+          loading="lazy"
+          referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY}
+        />
+      {:else}
+        <a class="blocked-media" href={(tk as Extract<Token, { type: "image" }>).url} target="_blank" rel="noopener noreferrer nofollow">
+          {(tk as Extract<Token, { type: "image" }>).url}
+        </a>
+      {/if}
     {:else if tk.type === "video"}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video class="media" src={(tk as Extract<Token, { type: "video" }>).url} controls preload="metadata"
@@ -104,6 +123,13 @@
 </div>
 
 <style>
+  .blocked-media {
+    display: inline-block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    font-size: 0.85em;
+    opacity: 0.8;
+  }
   .post {
     background: var(--bg-elev2);
   }
