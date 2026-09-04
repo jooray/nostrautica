@@ -50,6 +50,14 @@ export interface ProcessDeps {
   maxDurationSec?: number;
   /** Injectable duration probe (tests). `undefined` = "could not probe" (audit H-3). */
   probeDuration?: (media: Uint8Array, mime: string) => Promise<number | undefined>;
+  /** Injectable audio extraction (tests), so the STT boundary is reachable without
+   *  a real ffmpeg. Same seam as `probeDuration`, and it is what lets a test observe
+   *  whether cancellation reaches the transcriber at all (audit SEC-18/R13). */
+  extractAudio?: (
+    media: Uint8Array,
+    mime: string,
+    maxBytes: number,
+  ) => Promise<{ data: Uint8Array; mime: string }[]>;
   /** Account actual downloaded bytes + probed duration into the usage budgets (H-2/H-3). */
   onMediaUsage?: (usage: { bytes: number; durationSec: number }) => void;
   /** Fetch the attendee's kind-0 + last N public posts (resolved reposts). */
@@ -155,7 +163,7 @@ export async function processAttendee(
   //    blob, so they never reach this loop — the authored text is appended below.
   const transcribe =
     deps.transcribe ??
-    ((descriptor: MediaDescriptor, _sig?: AbortSignal) =>
+    ((descriptor: MediaDescriptor, sig?: AbortSignal) =>
       transcribeMedia(
         {
           store: deps.store,
@@ -166,7 +174,14 @@ export async function processAttendee(
           maxMediaBytes: deps.maxMediaBytes,
           maxDurationSec: deps.maxDurationSec,
           probeDuration: deps.probeDuration,
+          extractAudio: deps.extractAudio,
           onUsage: deps.onMediaUsage,
+          // Cancellation, forwarded (audit R13/SEC-18). The parameter was accepted
+          // and dropped here, so an abort could only be observed BETWEEN media —
+          // never inside the blob download, the ffprobe, or the STT call, which is
+          // where all the waiting happens. The talk path already forwards it; this
+          // is the intro path, the same fix on the other side.
+          signal: sig,
           now,
         },
         descriptor,

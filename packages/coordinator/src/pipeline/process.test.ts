@@ -27,6 +27,7 @@ import { MockLlm, MockStt } from "../providers/mock.js";
 import { ProviderContractError } from "../providers/types.js";
 import type { LlmProvider, RoleRoute } from "../providers/types.js";
 import { processAttendee, type ProcessDeps } from "./process.js";
+import { bytesToBase64, sha256Hex, aesGcmEncrypt } from "@nostrautica/protocol";
 
 const PK = "a".repeat(64);
 
@@ -211,5 +212,67 @@ describe("a degraded stage asks the job runner for another attempt", () => {
     expect(asked).toEqual([]);
     expect(out.degraded).toBeUndefined();
     expect(out.aiProfile.translations?.about).toBe(TRANSLATION.about);
+  });
+});
+
+/**
+ * SEC-18 / R13. `processAttendee` accepts a cancellation signal and forwards it to
+ * every stage — except the one that does all the waiting. The default transcribe
+ * closure took a signal parameter, named it `_sig`, and never handed it to
+ * `transcribeMedia`, so an abort could only be noticed BETWEEN media files: never
+ * inside the blob download, the ffprobe, or the STT call. That is the difference
+ * between a coordinator that stops and one that runs each in-flight media file to
+ * its provider deadline. The talk path forwarded it; the intro path did not.
+ */
+describe("SEC-18 — the intro path forwards cancellation into transcription", () => {
+  it("does not start the STT call once the abort has landed", async () => {
+    const ac = new AbortController();
+    const stt = new MockStt();
+    const llm = llmFor({});
+    // A shutdown realistically lands while ffmpeg is running — the longest wait
+    // before any money is spent. The question is whether the pipeline then goes on
+    // to pay for the transcription anyway.
+    // Real AES-GCM, because decryptMedia verifies `x`, `ox` and the tag before the
+    // pipeline ever reaches the STT call — a fake blob fails earlier and would make
+    // this test pass for the wrong reason.
+    const plaintext = new Uint8Array(1024).fill(7);
+    const key = new Uint8Array(32);
+    const nonce = new Uint8Array(12);
+    const media = (await aesGcmEncrypt(plaintext, key, nonce)).ciphertext;
+    const x = sha256Hex(media);
+    const ox = sha256Hex(plaintext);
+    const run = processAttendee(
+      deps(llm, {
+        stt,
+        signal: ac.signal,
+        fetchBlob: async () => media,
+        probeDuration: async () => 12,
+        extractAudio: async () => {
+          ac.abort();
+          return [{ data: new Uint8Array(16), mime: "audio/ogg" }];
+        },
+      }),
+      {
+        pubkey: PK,
+        profile,
+        media: [
+          {
+            url: ["https://blossom.example/a.ogg"],
+            x,
+            ox,
+            size: media.length,
+            m: "audio/ogg",
+            duration: 12,
+            "encryption-algorithm": "aes-gcm",
+            "decryption-key": bytesToBase64(new Uint8Array(32)),
+            "decryption-nonce": bytesToBase64(new Uint8Array(12)),
+          },
+        ],
+      },
+    );
+    await expect(run).rejects.toThrow();
+    // Without the signal forwarded, transcribeMedia never learns about the abort
+    // and bills a full STT call for a coordinator that is already shutting down.
+    expect(stt.calls).toBe(0);
   });
 });
