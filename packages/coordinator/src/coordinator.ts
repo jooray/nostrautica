@@ -602,6 +602,14 @@ export class Coordinator {
         now: this.now,
         coordinatorPubkey: this.coordPubkey,
         fetchKeyPackages: (coordinate, authors) => this.fetchKeyPackages(coordinate, authors),
+        // Durable retry for the attestation path, using the same job the approval
+        // path already uses. The timestamp in the key is deliberate: a retry after
+        // a failure is new work, not a duplicate of the enqueue that succeeded.
+        enqueueSync: (coordinate, pubkey) =>
+          this.jobs.enqueue("chat_sync_member", `chat-sync:${coordinate}:${pubkey}:${this.now()}`, {
+            coordinate,
+            pubkey,
+          }),
         log,
       });
     }
@@ -1579,8 +1587,23 @@ export class Coordinator {
         if (!this.marmot) return;
         const content = chatKeyAttestationContentSchema.parse(JSON.parse(rumor.content));
         log(`[chat] 21607 ${content.op} from ${short(rumor.pubkey)} for ${content.a}`);
+        // Serialize per MEMBER, on the same `member:<pubkey>` subject the organizer's
+        // approve/revoke and the attendee's withdrawal already use.
+        //
+        // Rejoin publishes a revoke and an attestation as two independent gift
+        // wraps, and inbound wraps are dispatched at INBOX_MAX_CONCURRENCY. Without
+        // this lock the two could interleave: a revoke landing between the
+        // attestation's `upsertChatKey` and its `syncMember` makes
+        // `authorizedIdentities` (which filters on status "active") return nothing,
+        // so nothing is added while the revoke drops the leaf — and the user is told
+        // the rejoin worked. Add-before-revoke ends in the same place by a different
+        // route. Sharing the subject with approve/revoke also means an organizer
+        // revoking someone mid-rejoin can no longer interleave with it.
+        //
         // The rumor's created_at is part of the §10.2 proof-of-possession challenge.
-        await this.marmot.handleAttestation(content.a, rumor.pubkey, content, rumor.created_at ?? 0);
+        await this.withSubjectLock(content.a, `member:${rumor.pubkey}`, () =>
+          this.marmot!.handleAttestation(content.a, rumor.pubkey, content, rumor.created_at ?? 0),
+        );
       }
     });
   }

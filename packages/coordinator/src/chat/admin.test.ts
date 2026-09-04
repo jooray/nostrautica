@@ -114,7 +114,16 @@ function kpEvent(pubkey: string, id: string): AnyEvent {
 const COORDINATOR = "c".repeat(64);
 
 /** Build an admin whose key-package fetch returns the pre-seeded events per author. */
-function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = [], log?: (m: string) => void) {
+function makeAdmin(
+  store: Store,
+  mls: FakeMls,
+  kps: AnyEvent[] = [],
+  log?: (m: string) => void,
+  extra?: {
+    enqueueSync?: (coordinate: string, pubkey: string) => void;
+    fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
+  },
+) {
   const now = () => 1000;
   return new MarmotAdmin({
     store,
@@ -122,8 +131,10 @@ function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = [], log?: (m: s
     now,
     log,
     coordinatorPubkey: COORDINATOR,
-    fetchKeyPackages: async (_coordinate, authors) =>
-      kps.filter((e) => authors.includes(e.pubkey)),
+    enqueueSync: extra?.enqueueSync,
+    fetchKeyPackages:
+      extra?.fetchKeyPackages ??
+      (async (_coordinate, authors) => kps.filter((e) => authors.includes(e.pubkey))),
   });
 }
 
@@ -977,5 +988,58 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
     store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 3 });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, CHATKEY].sort());
+  });
+});
+
+/**
+ * Attestation-path durability (MLS-R4, 2026-09-04).
+ *
+ * The approval path has durable `chat_sync_member` retries; the attestation path
+ * called `syncMember` inline and only logged a failure. Since the rumor is marked
+ * seen either way, a transient relay failure stranded the member in "setting up"
+ * until a restart or another manual Rejoin.
+ *
+ * A key-package fetch that throws is the realistic trigger — an invite failure is
+ * already caught per key package inside `syncMember`, deliberately, so one bad
+ * peer cannot take down the loop.
+ */
+describe("a failed attestation sync is retried, not just logged", () => {
+  it("queues durable work when the inline sync throws", async () => {
+    const logs: string[] = [];
+    const queued: Array<{ coordinate: string; pubkey: string }> = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], (m) => logs.push(m), {
+      enqueueSync: (coordinate, pubkey) => queued.push({ coordinate, pubkey }),
+      fetchKeyPackages: async () => {
+        throw new Error("simulated relay outage");
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+
+    // The attestation itself is still accepted and the binding recorded — only the
+    // group add is deferred.
+    expect(ok).toBe(true);
+    expect(queued).toEqual([{ coordinate: COORD, pubkey: ACCOUNT }]);
+    expect(logs.some((l) => l.includes("queued for durable retry"))).toBe(true);
+  });
+
+  it("says so plainly when there is no queue to fall back on", async () => {
+    const logs: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], (m) => logs.push(m), {
+      fetchKeyPackages: async () => {
+        throw new Error("simulated relay outage");
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(logs.some((l) => l.includes("no retry queue"))).toBe(true);
   });
 });

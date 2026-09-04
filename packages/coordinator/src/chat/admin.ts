@@ -31,6 +31,12 @@ export interface MarmotAdminDeps {
   coordinatorPubkey: string;
   /** Fetch kind-30443 key packages authored by `authors` for this event. */
   fetchKeyPackages(coordinate: string, authors: string[]): Promise<AnyEvent[]>;
+  /**
+   * Hand a member sync to the durable job runner. Optional so the admin stays
+   * constructible in tests without a queue; when absent, a failed attestation-path
+   * sync is only logged, which is the behaviour this exists to replace.
+   */
+  enqueueSync?(coordinate: string, accountPubkey: string): void;
   log?: (msg: string) => void;
 }
 
@@ -40,6 +46,7 @@ export class MarmotAdmin {
   private readonly now: () => number;
   private readonly coordinatorPubkey: string;
   private readonly fetchKeyPackages: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
+  private readonly enqueueSync?: (coordinate: string, accountPubkey: string) => void;
   private readonly log: (msg: string) => void;
 
   constructor(deps: MarmotAdminDeps) {
@@ -48,6 +55,7 @@ export class MarmotAdmin {
     this.now = deps.now;
     this.coordinatorPubkey = deps.coordinatorPubkey;
     this.fetchKeyPackages = deps.fetchKeyPackages;
+    this.enqueueSync = deps.enqueueSync;
     this.log = deps.log ?? (() => {});
   }
 
@@ -306,8 +314,25 @@ export class MarmotAdmin {
     // relay replay and nothing else.
     if (member && !opts?.reconcile) return;
     // Deliberate sync, they're in, and this key package is already spent: there is
-    // nothing new to act on.
-    if (member && consumed) return;
+    // nothing new to act on — UNLESS this device just attested re-enrolment for
+    // this event, in which case the two sides disagree and the spent key package
+    // is the symptom, not the answer.
+    //
+    // That case used to fall into this bare `return` with NO log line at all: when
+    // the attestation reached us before the rotated 30443 had propagated (or a
+    // lagging relay served the old one), `syncMember` fetched the consumed key
+    // package, returned silently, and the one signal the device can send was
+    // discarded. Nothing re-drove it, because the watcher path also short-circuits
+    // once the fresh key package arrives. Recovery required pressing Rejoin again
+    // AND winning the propagation race.
+    if (member && consumed) {
+      if (opts?.reenrolling === kp.pubkey) {
+        this.log(
+          `[chat] ${kp.pubkey.slice(0, 8)} attested re-enrolment in ${coordinate} but its newest visible 30443 ${kp.id.slice(0, 8)} is already consumed — the rotated key package has not propagated yet; will retry on the next sync`,
+        );
+      }
+      return;
+    }
     // They're in and the key package is fresh — but a fresh key package is NOT by
     // itself evidence that this device left the room, because one 30443 slot is
     // shared across every event the device is in. Rotating it to re-enrol in event
@@ -481,8 +506,29 @@ export class MarmotAdmin {
       // The attesting device named itself, and `content.a === coordinate` was
       // checked above — so this, and only this, authorizes dropping a leaf we
       // still hold for that device (tryAddKeyPackage's `member` branch).
-      if (attendee.status === "approved")
-        await this.syncMember(coordinate, accountPubkey, { reenrolling: content.chat_pubkey });
+      if (attendee.status === "approved") {
+        // Inline first, so a normal rejoin completes in the same breath as the
+        // attestation. But a failure here used to be LOG-ONLY: the approval path
+        // has durable `chat_sync_member` retries and this path had none, so a
+        // transient marmot or relay failure stranded the member in "setting up"
+        // until a restart or another manual Rejoin — while the rumor was marked
+        // seen, so nothing re-drove it.
+        try {
+          await this.syncMember(coordinate, accountPubkey, { reenrolling: content.chat_pubkey });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (this.enqueueSync) {
+            this.log(
+              `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed (${msg.slice(0, 120)}) — queued for durable retry`,
+            );
+            this.enqueueSync(coordinate, accountPubkey);
+          } else {
+            this.log(
+              `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed with no retry queue: ${msg.slice(0, 160)}`,
+            );
+          }
+        }
+      }
       return true;
     }
     // op === "revoke": drop the key and remove its leaves (lost device, §3.3).
