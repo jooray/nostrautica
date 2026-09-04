@@ -31,12 +31,19 @@ function roleKey(coordinate: string): string {
   return `role:${coordinate}`;
 }
 
+/** How often to re-check local custody while the shell renders "pending". Short,
+ *  because it is a keystore read with no relay traffic behind it. */
+const APPROVAL_WATCH_MS = 5_000;
+
 class EventShell {
   naddr = $state<string | undefined>(undefined);
   ctx = $state<EventContext | undefined>(undefined);
   role = $state<EventRole>("visitor");
   loading = $state(false);
   private token = 0;
+  /** Interval that watches for an approval landing while we render "pending". */
+  private approvalWatch: ReturnType<typeof setInterval> | undefined;
+  private watching: string | undefined;
 
   /**
    * The role the shell should render as — the real role, unless the organizer is
@@ -151,6 +158,9 @@ class EventShell {
       // Reached only after successful custody reads, so it is authoritative and
       // may correct a sticky stale organizer label.
       cacheSet(roleKey(coordinate), resolved, Math.floor(Date.now() / 1000));
+      // An approval that lands WHILE the event is open must move the nav, not wait
+      // for a navigation (see watchForApproval).
+      this.watchForApproval(resolved === "pending" ? coordinate : undefined);
 
       // The context is needed for the tab GATING (matching/talks/chat flags),
       // not for the role. Load it after, so a slow or unreachable relay delays
@@ -163,6 +173,68 @@ class EventShell {
     } finally {
       if (tok === this.token) this.loading = false;
     }
+  }
+
+  /**
+   * Re-resolve ONLY the role from local custody, for the event already synced.
+   *
+   * Deliberately network-free: everything the role depends on (ECK custody, the
+   * organizer label, the join marker) is a keystore read on this device. That is
+   * what makes it cheap enough to poll.
+   */
+  async refreshRole(): Promise<void> {
+    const naddr = this.naddr;
+    if (!naddr) return;
+    let coordinate: string;
+    try {
+      coordinate = naddrToCoordinate(naddr).coordinate;
+    } catch {
+      return;
+    }
+    const tok = this.token;
+    const approved = await isApproved(coordinate).catch(() => false);
+    const keys = await loadEventKeys(coordinate).catch(() => undefined);
+    if (tok !== this.token || this.naddr !== naddr) return; // superseded navigation
+    const resolved: EventRole = keys?.role === "organizer"
+      ? "organizer"
+      : approved
+        ? "attendee"
+        : joinSentAt(coordinate) !== undefined
+          ? "pending"
+          : "visitor";
+    if (resolved === this.role) return;
+    this.role = resolved;
+    cacheSet(roleKey(coordinate), resolved, Math.floor(Date.now() / 1000));
+    this.watchForApproval(resolved === "pending" ? coordinate : undefined);
+  }
+
+  /**
+   * While the shell renders "pending", watch for the approval landing.
+   *
+   * Reported from production: an attendee approved while sitting on the event page
+   * kept the visitor-shaped bottom nav — no People, no Matches — even though the
+   * page itself had already noticed and was offering "see who's here". Leaving to
+   * "all events" and coming back fixed it. The cause is that `sync()` runs from a
+   * layout effect keyed on the route and the session, so nothing re-ran it when the
+   * ECK grant arrived mid-visit: the page's own grant poll updated the PAGE and had
+   * no way to tell the SHELL.
+   *
+   * Watching here rather than calling out from the page keeps it working on every
+   * event subpage, not just the one that happens to poll. The check is a local
+   * keystore read, so this costs no relay traffic; the page's poll does the
+   * fetching, this just notices the result.
+   */
+  private watchForApproval(coordinate: string | undefined): void {
+    if (this.watching === coordinate) return;
+    this.watching = coordinate;
+    if (this.approvalWatch !== undefined) {
+      clearInterval(this.approvalWatch);
+      this.approvalWatch = undefined;
+    }
+    if (!coordinate || typeof setInterval !== "function") return;
+    this.approvalWatch = setInterval(() => {
+      void this.refreshRole();
+    }, APPROVAL_WATCH_MS);
   }
 }
 

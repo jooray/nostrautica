@@ -108,3 +108,62 @@ describe("eventShell.sync — the role never waits on a relay", () => {
     await expect(eventShell.sync("not-an-naddr")).resolves.toBeUndefined();
   });
 });
+
+/**
+ * An approval that lands while the event is already open (production report,
+ * 2026-09-04).
+ *
+ * `sync()` runs from a layout effect keyed on the route and the session, so
+ * nothing re-ran it when the ECK grant arrived mid-visit. The attendee stayed on
+ * the visitor-shaped bottom nav — no People, no Matches — while the page itself
+ * had already noticed and was offering "see who's here". Navigating away to "all
+ * events" and back was the only way to get the tabs.
+ */
+describe("approval landing mid-visit moves the nav without a navigation", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.cacheGet.mockReturnValue(undefined);
+    mocks.loadEventKeys.mockResolvedValue(undefined);
+    mocks.loadEventContext.mockResolvedValue(undefined);
+    mocks.cachedEventContext.mockReturnValue(undefined);
+  });
+
+  it("promotes pending → attendee on refreshRole, and opens the member tabs", async () => {
+    mocks.isApproved.mockResolvedValue(false);
+    mocks.joinSentAt.mockReturnValue(1);
+    await eventShell.sync(NADDR);
+    expect(eventShell.role).toBe("pending");
+    expect(eventShell.showPeople).toBe(false);
+
+    // The grant lands: local custody now says approved.
+    mocks.isApproved.mockResolvedValue(true);
+    await eventShell.refreshRole();
+
+    expect(eventShell.role).toBe("attendee");
+    expect(eventShell.showPeople).toBe(true);
+    expect(mocks.cacheSet).toHaveBeenCalledWith(`role:${COORD}`, "attendee", expect.any(Number));
+  });
+
+  it("watches on its own while pending, so no page has to call in", async () => {
+    vi.useFakeTimers();
+    mocks.isApproved.mockResolvedValue(false);
+    mocks.joinSentAt.mockReturnValue(1);
+    await eventShell.sync(NADDR);
+    expect(eventShell.role).toBe("pending");
+
+    mocks.isApproved.mockResolvedValue(true);
+    await vi.advanceTimersByTimeAsync(6_000);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(eventShell.role).toBe("attendee"));
+  });
+
+  it("refreshRole is a no-op once the role is settled", async () => {
+    mocks.isApproved.mockResolvedValue(true);
+    mocks.joinSentAt.mockReturnValue(undefined);
+    await eventShell.sync(NADDR);
+    expect(eventShell.role).toBe("attendee");
+    mocks.cacheSet.mockClear();
+    await eventShell.refreshRole();
+    expect(mocks.cacheSet).not.toHaveBeenCalled();
+  });
+});
