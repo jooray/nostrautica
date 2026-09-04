@@ -10,6 +10,7 @@ import {
   base64ToBytes,
   bytesToHex,
   eckDecrypt,
+  eckEncrypt,
   nip44Decrypt,
   blindedD,
   wrapRumor,
@@ -3695,6 +3696,73 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
     // A client applying the reader rule (accept only B's records now) sees B's roster.
     const authoredByB = dirB.every((e) => e.pubkey === coordPkB);
     expect(authoredByB).toBe(true);
+  });
+
+  /**
+   * Handover must not accept a roster just because it decrypts (2026-09-04 audit).
+   *
+   * 31604's `d` is the event's PUBLIC `d`, so anyone can publish at that address,
+   * and the ECK is held by every approved attendee — and `tryEckDecrypt` walks
+   * every version in custody, so a REVOKED attendee's old key opens their forgery
+   * too. Accepting on decryptability alone let an attendee plant a roster naming
+   * pubkeys they control and have the incoming coordinator grant those pubkeys the
+   * event's key material.
+   */
+  it("refuses a roster planted by an attendee, and grants that attendee's picks nothing", async () => {
+    const h = await setup();
+    const aliceSk = generateSecretKey();
+    const alicePk = await join(h, aliceSk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // Alice is an approved attendee, so she holds the ECK. She publishes her own
+    // 31604 at the event's public `d`, far-dated so it wins newest-wins, listing a
+    // pubkey she controls as an organizer.
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const mallorySk = generateSecretKey();
+    const malloryPk = getPublicKey(mallorySk);
+    const forged = {
+      v: 2,
+      eck_current: 1,
+      attendees: [{ pubkey: malloryPk, d: "forged-d", role: "organizer" }],
+    };
+    h.transport.seed.push({
+      kind: KIND_ROSTER,
+      pubkey: alicePk,
+      created_at: h.clock.t + 3600,
+      id: "forged-roster",
+      sig: "",
+      tags: [["d", identifier]],
+      content: eckEncrypt(h.eck, JSON.stringify(forged)),
+    } as any);
+
+    const coordSkB = generateSecretKey();
+    const coordPkB = getPublicKey(coordSkB);
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b2", sig: "", content: "",
+      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+    } as any);
+
+    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
+    await coordB.installEvent({
+      coordinate: h.coordinate,
+      inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"],
+      gen: 2,
+      source: "grant",
+      backfill: "full",
+    });
+    await coordB.jobs.drain();
+
+    // Mallory is nowhere in B's state, and never received a key grant.
+    expect(storeB.getAttendee(h.coordinate, malloryPk)).toBeUndefined();
+    const grantsToMallory = h.transport.published.filter(
+      (e) => e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === malloryPk),
+    );
+    expect(grantsToMallory).toHaveLength(0);
+
+    // The genuine attendee, reconstructed from A's real roster, is unaffected.
+    expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
   });
 });
 

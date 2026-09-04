@@ -2135,21 +2135,55 @@ export class Coordinator {
     } catch {
       return;
     }
-    // Newest roster from ANY prior author (previous coordinator or E_id) we can decrypt.
+    // Pick the newest roster from a plausible prior authority (the previous
+    // coordinator, or E_id) that we can decrypt.
+    //
+    // ECK-DECRYPTABILITY IS NOT AUTHORITY (2026-09-04 audit). 31604's `d` is the
+    // event's PUBLIC `d`, so anyone can publish at this address, and the ECK is
+    // held by every approved attendee — `tryEckDecrypt` even walks every version
+    // we hold, so a REVOKED attendee's old key still opens their forgery. Left
+    // unchecked, an attendee could plant a roster naming pubkeys they control and
+    // have the next attached coordinator grant them the event's key material
+    // (see the grants published at the end of this method).
+    //
+    // A full fix needs an author the EVENT IDENTITY vouches for. The wire has no
+    // field naming the outgoing coordinator, and PROTOCOL-NIP.md is frozen against
+    // format changes, so that is an owner decision, not one to make here. What
+    // follows raises the bar as far as the current wire allows, and — critically —
+    // makes the trusted author visible in the log instead of implicit.
+    const nowSec = Math.floor(this.now() / 1000);
     let roster: RosterContent | undefined;
+    let rosterAuthor: string | undefined;
     for (const ev of [...rosterEvents].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))) {
       if (ev.pubkey === this.coordPubkey) continue; // our own record — nothing to bootstrap from
+      // A roster dated in the future is a bid to win newest-wins against every
+      // legitimate one. Same 15-minute tolerance the rumor path already applies.
+      if ((ev.created_at ?? 0) > nowSec + 900) {
+        log(`[handover] ${state.coordinate}: ignoring 31604 from ${short(ev.pubkey)} dated ${(ev.created_at ?? 0) - nowSec}s in the future`);
+        continue;
+      }
+      // An attendee is never a roster authority. This does not stop a fresh
+      // throwaway key, but it does stop the attacker the ECK actually hands this
+      // capability to: a current or revoked member of this very event.
+      if (this.deps.store.getAttendee(state.coordinate, ev.pubkey)) {
+        log(`[handover] ${state.coordinate}: REJECTED 31604 from ${short(ev.pubkey)} — an attendee of this event is not a record authority`);
+        continue;
+      }
       const json = this.tryEckDecrypt(state, ev.content);
       if (!json) continue;
       try {
         roster = rosterContentSchema.parse(JSON.parse(json));
+        rosterAuthor = ev.pubkey;
         break;
       } catch {
         /* malformed — try an older roster */
       }
     }
-    if (!roster || roster.attendees.length === 0) return;
-    log(`[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from the prior roster`);
+    if (!roster || !rosterAuthor || roster.attendees.length === 0) return;
+    log(
+      `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
+        (rosterAuthor === state.eidPubkey ? " (E_id)" : " (prior coordinator)"),
+    );
 
     let seeded = 0;
     for (const a of roster.attendees) {
@@ -2166,6 +2200,12 @@ export class Coordinator {
           state.configRelays,
         );
         for (const de of [...dirEvents].sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))) {
+          // Pin every directory entry to the SAME author the roster came from.
+          // The two reads were independent, so even a legitimate roster could be
+          // paired with a stranger's 31603 at the same blinded d-tag — seeding a
+          // forged profile and ai_profile that we then republish under OUR key,
+          // which is the authority the attacker actually wanted.
+          if (de.pubkey !== rosterAuthor) continue;
           const json = this.tryEckDecrypt(state, de.content);
           if (!json) continue;
           const entry = directoryEntryContentSchema.parse(JSON.parse(json));
