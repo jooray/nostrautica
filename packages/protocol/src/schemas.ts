@@ -157,7 +157,16 @@ const mediaDescriptorBase = z
     // 16-byte tag — so `size: 0` is no longer a valid descriptor.
     size: z.number().int().min(1),
     m: z.string(), // mime type
-    duration: z.number().nonnegative().optional(),
+    // `.finite()` is load-bearing, not decoration. A MediaRecorder WebM carries
+    // no Duration element, so `HTMLMediaElement.duration` reads `Infinity` until
+    // a seek forces the browser to measure it — and the recorder path used to
+    // hand that straight through. Zod accepts Infinity for a plain
+    // `z.number().nonnegative()`, so the descriptor validated, and then
+    // `JSON.stringify({duration: Infinity})` emits `null`: the coordinator saw a
+    // structurally invalid submission, marked it permanently unprocessable and
+    // dropped it, while the attendee's screen said the intro had been saved.
+    // Reject it here so no such descriptor can be built, uploaded or published.
+    duration: z.number().finite().nonnegative().optional(),
     "encryption-algorithm": z.literal("aes-gcm"),
     "decryption-key": base64Bytes(32, "decryption-key"), // 32 bytes b64
     "decryption-nonce": base64Bytes(12, "decryption-nonce"), // 12 bytes b64

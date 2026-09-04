@@ -6,6 +6,7 @@ import {
   talkSubmissionContentSchema,
   talkContentSchema,
   mediaDescriptorSchema,
+  mediaDescriptorDraftSchema,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
   keyGrantContentSchema,
@@ -1196,6 +1197,26 @@ describe("media descriptor tightening (NIP §8, v2)", () => {
     expect(
       mediaDescriptorSchema.parse({ ...noDuration, m: "video/webm", duration: 12 }).duration,
     ).toBe(12);
+  });
+
+  it("rejects a non-finite duration (Infinity from a MediaRecorder WebM)", () => {
+    // A WebM written by MediaRecorder has no Duration element, so the recorder
+    // page read `Infinity` off the <video> element and put it in the descriptor.
+    // `z.number().nonnegative()` alone accepted that, and JSON.stringify then
+    // serialized it as `null` — a submission the coordinator could only reject
+    // as permanently unprocessable, silently, after the UI said "saved".
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, duration: Number.POSITIVE_INFINITY }),
+    ).toThrow(/duration/);
+    expect(() =>
+      mediaDescriptorDraftSchema.parse({
+        ...descriptor,
+        url: [],
+        duration: Number.POSITIVE_INFINITY,
+      }),
+    ).toThrow(/duration/);
+    // The exact wire symptom this guards: Infinity does not survive JSON.
+    expect(JSON.parse(JSON.stringify({ duration: Number.POSITIVE_INFINITY })).duration).toBeNull();
   });
 });
 

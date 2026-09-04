@@ -30,18 +30,42 @@ export interface MediaLimitViolation {
 }
 
 /**
+ * Coerce a duration read off a media element into the "seconds, or 0 = unknown"
+ * contract every caller here assumes.
+ *
+ * `HTMLMediaElement.duration` is NOT reliably a number of seconds: a WebM
+ * written by MediaRecorder carries no Duration element, so the browser reports
+ * `Infinity` until a seek past the end forces it to measure the file, and a
+ * still-unloaded element reports `NaN`. `Math.round(Infinity) || 0` is
+ * `Infinity` (the `|| 0` only catches NaN and 0), which is how a bare
+ * `Math.round(el.duration) || 0` used to leak a non-finite duration onward — a
+ * nonsense "that clip is Infinity s" rejection on a capped event, and on an
+ * uncapped one an `Infinity` in the media descriptor that JSON.stringify turns
+ * into `null`. Anything not finite and positive is simply "unknown".
+ */
+export function normalizeDurationSec(raw: number | undefined | null): number {
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.round(raw);
+}
+
+/**
  * Return the first limit the selected file violates, or null when it is
  * acceptable. `durationSec === 0` means metadata didn't load (unknown) — we don't
  * reject on an unknown duration, deferring to the authoritative server check.
  * `maxSec === 0` means the organizer set no duration cap (unlimited).
+ *
+ * A non-finite `durationSec` counts as unknown for the same reason (see
+ * {@link normalizeDurationSec}): a caller that hasn't normalized must not be
+ * able to produce a violation reading "limit 90 s, actual Infinity s".
  */
 export function checkMediaLimits(opts: {
   sizeBytes: number;
   durationSec: number;
   maxSec: number;
 }): MediaLimitViolation | null {
-  if (opts.maxSec > 0 && opts.durationSec > 0 && opts.durationSec > opts.maxSec) {
-    return { kind: "duration", limit: opts.maxSec, actual: opts.durationSec };
+  const durationSec = normalizeDurationSec(opts.durationSec);
+  if (opts.maxSec > 0 && durationSec > 0 && durationSec > opts.maxSec) {
+    return { kind: "duration", limit: opts.maxSec, actual: durationSec };
   }
   if (opts.sizeBytes > MAX_UPLOAD_BYTES) {
     return { kind: "size", limit: MAX_UPLOAD_BYTES, actual: opts.sizeBytes };
