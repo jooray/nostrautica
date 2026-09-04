@@ -74,7 +74,9 @@ import {
   isNewerVersionTag,
   readEventVersionTag,
   NewerProtocolVersionError,
-  MAX_MEDIA_URLS,} from "./schemas.js";
+  MAX_MEDIA_URLS,
+  MAX_MEDIA_FILE_BYTES,
+} from "./schemas.js";
 import type { z } from "zod";
 
 const hex = "a".repeat(64);
@@ -1427,5 +1429,27 @@ describe("bounds on attacker-influenced arrays and URLs", () => {
       expect(attendeeProfileSchema.safeParse({ links: [bad] }).success).toBe(false);
     }
     expect(attendeeProfileSchema.safeParse({ links: ["https://ok.example"] }).success).toBe(true);
+  });
+});
+
+/**
+ * One media ceiling, three consumers (2026-09-04 audit).
+ *
+ * The app's upload precheck and the coordinator's declared-size screen both said
+ * 250 MiB while the coordinator's ACTUAL download cap was 200 MiB. A file in that
+ * band passed both checks and then died after streaming 200 MiB — as a plain
+ * error rather than a media-policy rejection, so it failed the whole attendee job
+ * and retried, burning 400 MiB of egress per attempt while the attendee was never
+ * matched. This constant exists so the three cannot drift apart again.
+ */
+describe("MAX_MEDIA_FILE_BYTES is the single media ceiling", () => {
+  it("is a sane per-file bound", () => {
+    expect(MAX_MEDIA_FILE_BYTES).toBe(250 * 1024 * 1024);
+  });
+
+  it("leaves room under the coordinator's per-submission aggregate", () => {
+    // The coordinator allows 500 MiB across up to 4 descriptors, so a single file
+    // at the ceiling must not already exceed the aggregate.
+    expect(MAX_MEDIA_FILE_BYTES).toBeLessThan(500 * 1024 * 1024);
   });
 });

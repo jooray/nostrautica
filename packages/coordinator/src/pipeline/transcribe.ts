@@ -4,14 +4,16 @@
  * byte limit), transcribe each segment, and concatenate. Cached by blob sha256
  * so a restart never re-pays for a transcript.
  */
-import { decryptMedia, sha256Hex, type MediaDescriptor } from "@nostrautica/protocol";
+import { decryptMedia, sha256Hex, type MediaDescriptor,
+  MAX_MEDIA_FILE_BYTES,
+} from "@nostrautica/protocol";
 import type { SttProvider } from "../providers/types.js";
 import type { Store } from "../store/db.js";
 import { extractAudioSegments, probeDurationFromBytes, type AudioSegment } from "./audio.js";
 import { safeFetch, SafeFetchError } from "../net/safe-fetch.js";
 
 /** Default hard ceiling on a downloaded media blob (audit C3). */
-export const DEFAULT_MAX_MEDIA_BYTES = 200 * 1024 * 1024;
+export const DEFAULT_MAX_MEDIA_BYTES = MAX_MEDIA_FILE_BYTES;
 
 /**
  * Above this many bytes of EXTRACTED audio, an empty transcript is treated as a

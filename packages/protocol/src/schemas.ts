@@ -152,6 +152,19 @@ export const MAX_URL = 2048;
  * generous for real mirroring — the app publishes two or three.
  */
 export const MAX_MEDIA_URLS = 8;
+/**
+ * Hard per-file ceiling on an encrypted media blob, in bytes.
+ *
+ * Lives here because THREE places have to agree and two of them did not: the
+ * app's upload precheck and playback refusal (250 MiB), the coordinator's
+ * declared-size screen (250 MiB), and the coordinator's ACTUAL download cap,
+ * which was 200 MiB. A file in the 200–250 MiB band therefore passed the app,
+ * passed the screen, and then died after streaming 200 MiB — as a plain error
+ * rather than a media-policy rejection, so it failed the whole attendee job and
+ * retried, burning 400 MiB of egress per attempt while the attendee was never
+ * matched. One constant, imported by all three, is what stops that recurring.
+ */
+export const MAX_MEDIA_FILE_BYTES = 250 * 1024 * 1024;
 
 // ── Media descriptor (spec §6.2) ─────────────────────────────────────────────
 // `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an

@@ -5,7 +5,9 @@
  *
  * Servers see only AES-GCM ciphertext + sizes/hashes (spec §4.2).
  */
-import { sha256Hex } from "@nostrautica/protocol";
+import { sha256Hex,
+  MAX_MEDIA_FILE_BYTES,
+} from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { buildAuthEvent, authHeader } from "./auth.js";
 
@@ -505,7 +507,7 @@ export async function deleteBlob(
  * point at a multi-GB endpoint, and a whole-file `arrayBuffer()` would take the
  * tab down. 250 MB is far above any legit intro/talk video.
  */
-export const MAX_MEDIA_DOWNLOAD_BYTES = 250 * 1024 * 1024;
+export const MAX_MEDIA_DOWNLOAD_BYTES = MAX_MEDIA_FILE_BYTES;
 
 /** How much of a blob's ciphertext has arrived, for a progress indicator. */
 export interface DownloadProgress {

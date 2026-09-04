@@ -84,6 +84,7 @@ import {
   supersedes,
   revisionSupersedes,
   MAX_SKILLS,
+  MAX_MEDIA_FILE_BYTES as PROTOCOL_MAX_MEDIA_FILE_BYTES,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor } from "@nostrautica/protocol";
 import { Store, type BillingStateRow } from "./store/db.js";
@@ -154,7 +155,9 @@ const MAX_SUBMISSION_MEDIA_BYTES = 500 * 1024 * 1024;
  * single descriptor over this bound is rejected up front with a clear reason —
  * anything the app would have refused to upload/play is refused server-side too.
  */
-const MAX_MEDIA_FILE_BYTES = 250 * 1024 * 1024;
+// Re-exported from the protocol package so the declared-size screen, the actual
+// download cap and the app's upload precheck cannot drift apart again.
+const MAX_MEDIA_FILE_BYTES = PROTOCOL_MAX_MEDIA_FILE_BYTES;
 
 /** Distinct talks (by talk_d) one speaker may submit per event (audit COORD-4:
  *  unbounded talk submissions each triggered their own paid STT job). Editing
