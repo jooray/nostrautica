@@ -179,6 +179,51 @@ function lockedKey(account: string): string {
   return `${LOCKED_NS}\x1f${account}`;
 }
 
+/**
+ * Chunked at-rest format for the logout snapshot: NIP-44 pieces joined by `.`
+ * (base64 never contains a dot, so the split is exact). The prefix keeps old
+ * single-blob snapshots readable with no migration.
+ *
+ * This exists because NIP-44 has a hard 65,535-byte plaintext ceiling, and this
+ * snapshot is the whole chat identity — device key, MLS group state, key packages
+ * AND the full decrypted message history. A few hundred messages clears it easily.
+ * Past the ceiling the encrypt threw into a catch that left EVERYTHING in
+ * plaintext: nothing deleted, nothing encrypted, and nothing said. So the
+ * shared-device protection was off precisely for the accounts that had used chat
+ * most. The coordinator hit the same ceiling on its own MLS state in the
+ * 2026-08-04 incident and fixed it with this shape; this is the side that wasn't.
+ *
+ * The ceiling itself is right and stays — it is NIP-44's interop limit, and it
+ * guards every payload that goes on the wire. It was never meant for a blob this
+ * device writes and reads back with its own key.
+ */
+const LOCK_CHUNK_PREFIX = "nip44c:";
+/** Largest plaintext handed to one encrypt call; under the ceiling with room to spare. */
+const LOCK_CHUNK_BYTES = 60_000;
+
+/** Split on UTF-8 byte length without ever cutting a surrogate pair. */
+function chunkByBytes(text: string, maxBytes: number): string[] {
+  const enc = new TextEncoder();
+  if (enc.encode(text).length <= maxBytes) return [text];
+  const out: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    // Walk forward in code POINTS so a chunk boundary never lands mid-pair.
+    let end = start;
+    let bytes = 0;
+    for (const ch of text.slice(start)) {
+      const size = enc.encode(ch).length;
+      if (bytes + size > maxBytes) break;
+      bytes += size;
+      end += ch.length;
+    }
+    if (end === start) end = start + 1; // pathological maxBytes — never loop forever
+    out.push(text.slice(start, end));
+    start = end;
+  }
+  return out;
+}
+
 /** JSON-safe round-trip for values that may hold a `Uint8Array` anywhere in
  *  their structure (raw device keys, marmot's rewind tree, MLS secrets) —
  *  everything else in marmot's persisted state is already JSON-native. */
@@ -233,11 +278,22 @@ export async function lockChatIdentityForLogout(
   try {
     const dump: Record<string, unknown> = {};
     for (const key of keys) dump[key] = await backend.get(key);
-    const ciphertext = await encrypt(JSON.stringify(dump, replacer));
-    await backend.set(lockedKey(account), ciphertext);
+    const plaintext = JSON.stringify(dump, replacer);
+    const pieces = chunkByBytes(plaintext, LOCK_CHUNK_BYTES);
+    const stored =
+      pieces.length === 1
+        ? await encrypt(plaintext)
+        : LOCK_CHUNK_PREFIX + (await Promise.all(pieces.map((p) => encrypt(p)))).join(".");
+    await backend.set(lockedKey(account), stored);
     for (const key of keys) await backend.del(key);
-  } catch {
-    /* left in plaintext (e.g. signer unreachable) — retried next logout */
+  } catch (err) {
+    // Left in plaintext (e.g. signer unreachable) — retried next logout. Say so:
+    // this used to be entirely silent, so an account whose snapshot never locked
+    // looked identical to one that had no chat state at all.
+    console.warn(
+      "[chat] could not lock chat identity on logout — MLS state left in place for the next attempt:",
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
 
@@ -263,7 +319,14 @@ export async function unlockChatIdentityForLogin(
     const ciphertext = await backend.get(lockedKey(account));
     if (typeof ciphertext !== "string") return;
     try {
-      const dump = JSON.parse(await decrypt(ciphertext), reviver) as Record<string, unknown>;
+      const plaintext = ciphertext.startsWith(LOCK_CHUNK_PREFIX)
+        ? (
+            await Promise.all(
+              ciphertext.slice(LOCK_CHUNK_PREFIX.length).split(".").map((c) => decrypt(c)),
+            )
+          ).join("")
+        : await decrypt(ciphertext);
+      const dump = JSON.parse(plaintext, reviver) as Record<string, unknown>;
       for (const [key, value] of Object.entries(dump)) await backend.set(key, value);
       await backend.del(lockedKey(account));
     } catch {
