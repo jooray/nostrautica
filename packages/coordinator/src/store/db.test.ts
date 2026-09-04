@@ -978,3 +978,64 @@ describe("Store at-rest values larger than one NIP-44 plaintext", () => {
     expect(store.marmotKvGet("group-state", "legacy")).toBe("written by the old binary");
   });
 });
+
+/**
+ * Job SQL matched the wrong rows for organizer-chosen identifiers (2026-09-04).
+ *
+ * The app's own slug generator only emits `[a-z0-9-]`, so both bugs are latent
+ * there — but `parseCoordinate` accepts any identifier, so a third-party-authored
+ * 31923 reaches them.
+ */
+describe("job matching survives an organizer-chosen identifier", () => {
+  const tmp = () => mkdtempSync(join(tmpdir(), "nostrautica-db-"));
+
+  it("supersedePendingJobs cancels the older revision when the id contains an underscore", () => {
+    // `LIKE` has no default escape character in SQLite, so escaping `_` without an
+    // ESCAPE clause matched the backslash LITERALLY and the delete hit nothing —
+    // leaving the coordinator to pay for a recording the attendee had replaced.
+    const store = new Store(":memory:");
+    const prefix = "proc:31923:pk:my_event-ab12:";
+    store.enqueueJob("process_attendee", `${prefix}r1`, { coordinate: "c" });
+    store.enqueueJob("process_attendee", `${prefix}r2`, { coordinate: "c" });
+    expect(store.supersedePendingJobs(prefix, `${prefix}r2`)).toBe(1);
+  });
+
+  it("supersedePendingJobs does not reach across a different prefix", () => {
+    const store = new Store(":memory:");
+    store.enqueueJob("process_attendee", "proc:31923:pk:a_b:r1", { coordinate: "c" });
+    store.enqueueJob("process_attendee", "proc:31923:pk:other:r1", { coordinate: "c" });
+    expect(store.supersedePendingJobs("proc:31923:pk:a_b:", "keep")).toBe(1);
+    expect(store.waitingJobCount()).toBe(0);
+  });
+
+  it("resumeWaitingJobs matches one coordinate exactly, never every parked job", () => {
+    // A `%` in the identifier made `payload LIKE '%\"coordinate\":\"<coord>\"%'` match
+    // EVERY parked row, so unblocking one event resumed paid work parked for other
+    // events that were still billing-blocked — a cross-tenant spend-gate bypass.
+    const store = new Store(":memory:");
+    const wild = "31923:pk:party-%";
+    const other = "31923:pk:other-event";
+    store.enqueueJob("process_attendee", "k1", { coordinate: wild });
+    store.enqueueJob("process_attendee", "k2", { coordinate: other });
+    for (const key of ["k1", "k2"]) {
+      const job = store.claimNextJob(Date.now(), `w-${key}`, 60_000);
+      store.parkJob(job!.id, "budget", `w-${key}`);
+    }
+    expect(store.waitingJobCount(other)).toBe(1);
+    expect(store.resumeWaitingJobs(wild)).toBe(1); // not 2
+    expect(store.waitingJobCount(other)).toBe(1); // the other event stays parked
+  });
+
+  it("resumeWaitingJobs still matches an identifier containing a quote", () => {
+    // The mirror-image failure: a `\"` is JSON-escaped in the stored payload but was
+    // not in the pattern, so that event's parked work never resumed at all.
+    const store = new Store(":memory:");
+    const quoted = '31923:pk:say-"hi"';
+    store.enqueueJob("process_attendee", "q1", { coordinate: quoted });
+    const job = store.claimNextJob(Date.now(), "w", 60_000);
+    store.parkJob(job!.id, "budget", "w");
+    expect(store.resumeWaitingJobs(quoted)).toBe(1);
+  });
+
+  void tmp;
+});

@@ -2570,11 +2570,21 @@ export class Store {
    * Returns the number of jobs resumed.
    */
   resumeWaitingJobs(coordinate: string): number {
+    // `json_extract`, not a LIKE over the raw payload. The pattern form was wrong in
+    // BOTH directions, and an event identifier is organizer-chosen:
+    //   - an identifier containing `%` made the pattern match EVERY parked job in
+    //     the table, so unblocking one event resumed paid work parked for other
+    //     events that were still billing-blocked or over budget — a cross-tenant
+    //     spend-gate bypass;
+    //   - an identifier containing `"` or `\` is JSON-escaped in the stored payload
+    //     but was not in the pattern, so nothing matched and that event's parked
+    //     work never resumed when payment cleared, silently.
+    // `clearMatchJobMemo`/`clearAttendeeJobMemo` already do it this way.
     const info = this.db
       .prepare(
-        "UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL WHERE state = 'waiting' AND payload LIKE ?",
+        "UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL WHERE state = 'waiting' AND json_extract(payload, '$.coordinate') = ?",
       )
-      .run(`%"coordinate":"${coordinate}"%`);
+      .run(coordinate);
     return Number(info.changes);
   }
 
@@ -2585,8 +2595,10 @@ export class Store {
     }
     return (
       this.db
-        .prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND payload LIKE ?")
-        .get(`%"coordinate":"${coordinate}"%`) as any
+        .prepare(
+          "SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND json_extract(payload, '$.coordinate') = ?",
+        )
+        .get(coordinate) as any
     ).c;
   }
 
@@ -2600,9 +2612,19 @@ export class Store {
    * compare-and-set logic already discards their stale writes. Returns count deleted.
    */
   supersedePendingJobs(prefix: string, keepKey: string): number {
+    // `ESCAPE '\\'` is REQUIRED, not decorative: SQLite's LIKE has no default escape
+    // character, so the backslashes this pattern inserts were matched literally and
+    // the clause selected nothing. Verified against node:sqlite — for a prefix
+    // containing `_`, the escaped pattern matched 0 rows where the unescaped one
+    // matched 2. The consequence was that a new submission revision stopped
+    // cancelling the older revision's pending job, so the coordinator paid to
+    // download, transcribe and profile a recording the attendee had already
+    // replaced. Latent for app-created events (the slug generator only emits
+    // [a-z0-9-]) and reachable through a third-party-authored 31923, which
+    // `parseCoordinate` accepts.
     const info = this.db
       .prepare(
-        "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? AND dedupe_key != ?",
+        "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? ESCAPE '\\' AND dedupe_key != ?",
       )
       .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
     return Number(info.changes);
