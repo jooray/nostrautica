@@ -12,6 +12,28 @@ import { join } from "node:path";
 
 /** Hard limits for attacker-controlled media (audit C3). */
 export const FFMPEG_TIMEOUT_MS = 120_000; // wall-clock kill for a hung/adversarial input
+/**
+ * Input hardening for every ffmpeg/ffprobe invocation (2026-09-04 audit).
+ *
+ * The bytes we hand ffmpeg are attacker-chosen: an attendee uploads them, we
+ * decrypt them, and until now the format was fully auto-probed. ffmpeg is not
+ * merely a decoder — several of its demuxers are INTERPRETERS. A blob whose
+ * *content* is an HLS playlist or an `ffconcat` script is demuxed as one and its
+ * segment references are resolved, so the file could name local paths; the decoded
+ * audio is then transcribed and the transcript published on the attendee's own
+ * 31603, which makes it a working read-and-publish channel for anything readable
+ * by the daemon user — `coordinator.toml`, `.env`, database fragments.
+ *
+ * `-protocol_whitelist file` confines it to the one temp file we wrote.
+ * `-probesize`/`-analyzeduration` bound how much of a hostile container ffmpeg
+ * will chew through before giving up.
+ */
+const FFMPEG_INPUT_GUARD = [
+  "-protocol_whitelist", "file",
+  "-probesize", "5M",
+  "-analyzeduration", "5M",
+];
+
 export const MAX_INPUT_DURATION_SEC = 2 * 60 * 60; // cap decoded duration (codec-bomb guard)
 /** Cap on accumulated ffmpeg stderr (audit COORD-23): keep only the tail. */
 export const MAX_STDERR_BYTES = 64 * 1024;
@@ -172,7 +194,8 @@ export async function extractAudioSegments(
     // duration cap (`-t`) guard against adversarial/endless inputs (audit C3).
     const wholePath = join(dir, "audio.ogg");
     await run("ffmpeg", [
-      "-nostdin", "-y", "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
+      "-nostdin", "-y", ...FFMPEG_INPUT_GUARD,
+      "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       wholePath,
@@ -188,7 +211,8 @@ export async function extractAudioSegments(
     const secPerSegment = Math.max(30, Math.floor((maxBytes * 0.8) / 2048));
     const segPattern = join(dir, "seg-%03d.ogg");
     await run("ffmpeg", [
-      "-nostdin", "-y", "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
+      "-nostdin", "-y", ...FFMPEG_INPUT_GUARD,
+      "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       "-f", "segment", "-segment_time", String(secPerSegment),
@@ -210,7 +234,8 @@ export async function extractAudioSegments(
 async function probeDurationSec(path: string, signal?: AbortSignal): Promise<number> {
   try {
     const { stdout } = await run("ffprobe", [
-      "-v", "error", "-show_entries", "format=duration",
+      "-v", "error", ...FFMPEG_INPUT_GUARD,
+      "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1", path,
     ], { signal });
     return Math.ceil(parseFloat(stdout.toString()) || 0);
