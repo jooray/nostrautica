@@ -48,10 +48,17 @@ function warm(key: string, run: () => Promise<unknown>): void {
     try {
       await connectNdk();
       await run();
-      doneAt.set(key, Date.now());
     } catch {
       /* prefetch is best-effort — the real fetch on the next page reports errors */
     } finally {
+      // Stamp on FAILURE too. This used to be inside the try, so a warm whose
+      // relays are dead never recorded an attempt: every hover over the event
+      // card, every re-render, every remount re-ran the whole multi-fetch fan-out
+      // (context + page + posts + roster + directory + profiles) and re-paid the
+      // full relay timeout for each. The TTL is 30 s, so a relay that comes back
+      // is picked up on the next trigger anyway — the only thing this loses is a
+      // hammering loop nobody asked for.
+      doneAt.set(key, Date.now());
       inflight.delete(key);
     }
   })();
