@@ -106,3 +106,30 @@ describe("revisioned submission order (NIP §3.3)", () => {
     expect(fold([b, a])).toBe("a");
   });
 });
+
+describe("compareLatest as a sort comparator (§3.1)", () => {
+  it("orders a list newest-first with the lowest id breaking ties", () => {
+    // The coordinator had several ad-hoc `(b.created_at ?? 0) - (a.created_at ?? 0)`
+    // sorts, which leave same-second events to relay arrival order — so two
+    // readers of the same roster/directory/profile set could pick different
+    // winners, and the disagreement is sticky because the result gets cached.
+    const events = [
+      { id: "bb", created_at: 10 },
+      { id: "cc", created_at: 30 },
+      { id: "aa", created_at: 30 },
+      { id: "dd", created_at: 20 },
+    ];
+    const order = [...events].sort(compareLatest).map((e) => e.id);
+    expect(order).toEqual(["aa", "cc", "dd", "bb"]);
+    // Order-independent: a reversed input sorts to the same sequence.
+    expect([...events].reverse().sort(compareLatest).map((e) => e.id)).toEqual(order);
+    // The head of the sort agrees with pickLatest — one rule, two entry points.
+    expect([...events].sort(compareLatest)[0]).toBe(pickLatest(events));
+  });
+
+  it("treats a missing created_at as 0 (oldest) rather than NaN", () => {
+    const withTime = { id: "zz", created_at: 1 };
+    const without = { id: "aa" };
+    expect([without, withTime].sort(compareLatest)[0]).toBe(withTime);
+  });
+});

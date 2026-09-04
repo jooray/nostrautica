@@ -94,3 +94,50 @@ export const RUMOR_KINDS = [
 ] as const;
 
 export type RumorKind = (typeof RUMOR_KINDS)[number];
+
+/**
+ * Per-recipient rumor allowlists (NIP §6.1's "Seal author → recipient" column).
+ *
+ * §5's registry says which kinds may appear in a wrap AT ALL; this says which may
+ * appear in a wrap addressed to a PARTICULAR key. The distinction matters because
+ * the two roles below have wildly different authority: the coordinator's own key
+ * accepts install grants and admin commands, while an event's E_inbox is a
+ * PUBLIC address any attendee seals to. Before these existed, the only thing
+ * keeping a 21603 "install this event, here is its E_inbox secret" from being
+ * processed off an E_inbox read — or a 21600 join from being processed off the
+ * coordinator's own inbox — was which branch of a dispatch if/else the rumor
+ * happened to land in. That is handler layout, not an enforced boundary: adding
+ * one `else if` to the wrong dispatcher silently widens what a key accepts.
+ * Pass these to `unwrapRumor`/`unwrapRumorEnvelope` so the boundary is the
+ * unwrap itself.
+ */
+
+/** Attendee → `E_inbox` (§6.1). The public per-event inbox: no grants, no commands. */
+export const EVENT_INBOX_RUMOR_KINDS = [
+  KIND_JOIN_REQUEST,
+  KIND_PROFILE_SUBMISSION,
+  KIND_PROFILE_CORRECTION,
+  KIND_TALK_SUBMISSION,
+  KIND_ATTENDEE_WITHDRAWAL,
+] as const;
+
+/** → the coordinator's own key (§6.1): install, command, chat-device attestation. */
+export const COORDINATOR_RUMOR_KINDS = [
+  KIND_COORDINATOR_GRANT,
+  KIND_ADMIN_COMMAND,
+  KIND_CHAT_KEY_ATTESTATION,
+] as const;
+
+/** → an organizer identity, i.e. `E_id` or a co-organizer's account key (§6.1). */
+export const ORGANIZER_RUMOR_KINDS = [
+  KIND_ORGANIZER_GRANT,
+  KIND_COORDINATOR_STATUS,
+] as const;
+
+/** → an attendee's own account key (§6.1): DMs, key grants, and status notices. */
+export const ATTENDEE_RUMOR_KINDS = [
+  KIND_DM,
+  KIND_KEY_GRANT,
+  KIND_ORGANIZER_GRANT,
+  KIND_COORDINATOR_STATUS,
+] as const;
