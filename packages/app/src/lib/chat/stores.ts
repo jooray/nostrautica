@@ -179,32 +179,103 @@ function clone<T>(v: T): T {
 const DB_NAME = "nostrautica-marmot";
 const STORE = "kv";
 
+/**
+ * ONE connection for the whole tab, opened lazily and reused.
+ *
+ * This used to be a fresh `indexedDB.open` per operation, with a `close()` in a
+ * `finally`. Opening is not free — it is a round trip to the storage thread — and
+ * marmot drives one operation per MLS state read/write, so the logout wipe
+ * (`clearPrefix` over every namespace, after a `keysWithPrefix` scan) paid for an
+ * open per key. Holding one connection also gives us somewhere to put the
+ * `versionchange` handler below, which per-operation connections cannot have.
+ */
+let connection: Promise<IDBDatabase> | undefined;
+
 function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  return (connection ??= new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, 1);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
+    // `blocked` fires when ANOTHER tab holds an open connection at an older
+    // version and won't let this upgrade through. Without a handler the promise
+    // simply never settles and every chat operation hangs forever with no error —
+    // the browser's own console warning is the only sign. Reject instead: the
+    // caller's catch surfaces it, and the next call re-opens (the other tab's
+    // `versionchange` handler below closes it, so a retry succeeds).
+    req.onblocked = () => {
+      connection = undefined;
+      reject(new Error("marmot IndexedDB upgrade blocked by another tab"));
+    };
+    req.onsuccess = () => {
+      const db = req.result;
+      // Another tab is upgrading: close so it can proceed, and drop the cached
+      // connection so the next operation re-opens at the new version. Keeping it
+      // open is what makes the OTHER tab's `blocked` fire.
+      db.onversionchange = () => {
+        connection = undefined;
+        db.close();
+      };
+      // A connection can also be closed out from under us (storage eviction,
+      // devtools "clear site data"). Forget it so we re-open rather than throwing
+      // InvalidStateError on every subsequent transaction.
+      db.onclose = () => {
+        connection = undefined;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      connection = undefined;
+      reject(req.error);
+    };
+  }));
 }
 
 /** IndexedDB {@link MarmotKvBackend}: one keyed object store; prefix scans use a
  *  bounded key range (`[prefix, prefix+￿)`) rather than a full-store scan. */
 export class IndexedDbKvBackend implements MarmotKvBackend {
+  /**
+   * Run one request and resolve only once its TRANSACTION has committed.
+   *
+   * The previous version resolved on `req.onsuccess` and never looked at the
+   * transaction. A request succeeding means the value was staged, not durable:
+   * IndexedDB delivers a commit-time failure — disk pressure, some quota paths, a
+   * `QuotaExceededError` raised while flushing — to the TRANSACTION as `abort`,
+   * long after every request in it reported success. So `setItem` resolved, marmot
+   * recorded the new MLS epoch as persisted, and it was not. The next load restores
+   * the previous epoch and every message from the missing one is undecryptable —
+   * which looks exactly like the eviction bug the rejoin path exists to fix, except
+   * rejoining doesn't help because the write will fail the same way next time.
+   *
+   * `oncomplete` is the only event that means "committed". Reads go through the
+   * same path deliberately: it costs one extra event turn, and a read that resolves
+   * from an aborted transaction is a value that was never really there.
+   */
   private async tx<T>(mode: IDBTransactionMode, fn: (s: IDBObjectStore) => IDBRequest<T>): Promise<T> {
     const db = await openDb();
-    try {
-      return await new Promise<T>((resolve, reject) => {
-        const req = fn(db.transaction(STORE, mode).objectStore(STORE));
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-    } finally {
-      db.close();
-    }
+    return new Promise<T>((resolve, reject) => {
+      const transaction = db.transaction(STORE, mode);
+      let result: T;
+      let failed: unknown;
+      const req = fn(transaction.objectStore(STORE));
+      req.onsuccess = () => {
+        result = req.result;
+      };
+      // Record it, but do NOT settle here: a request error that goes unprevented
+      // aborts the transaction, and `onabort` below is the authoritative signal.
+      // Settling early would let a rejected caller race a still-live transaction.
+      req.onerror = () => {
+        failed ??= req.error ?? new Error("marmot IndexedDB request failed");
+      };
+      transaction.oncomplete = () =>
+        failed ? reject(failed) : resolve(result as T);
+      transaction.onabort = () =>
+        reject(failed ?? transaction.error ?? new Error("marmot IndexedDB transaction aborted"));
+      transaction.onerror = () => {
+        failed ??= transaction.error ?? new Error("marmot IndexedDB transaction failed");
+      };
+    });
   }
 
   async get(fullKey: string): Promise<unknown> {
@@ -226,6 +297,15 @@ export class IndexedDbKvBackend implements MarmotKvBackend {
     const range = IDBKeyRange.bound(prefix, prefix + "￿", false, true);
     await this.tx("readwrite", (s) => s.delete(range));
   }
+}
+
+/**
+ * Drop the cached IndexedDB connection (tests only). The connection is
+ * module-level by design — one per tab — which means a test that wants a fresh
+ * `indexedDB.open` needs a way to say so.
+ */
+export function __resetMarmotIdbConnectionForTests(): void {
+  connection = undefined;
 }
 
 /** The shared production backend (one IndexedDB DB for all chat identities). */
