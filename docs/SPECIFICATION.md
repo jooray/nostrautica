@@ -78,7 +78,7 @@ Conferences put interesting people in one room and then fail to connect them. No
 
 1. **NIP-07 browser extension** — if `window.nostr` exists, one-click login. Use `getPublicKey()` + `signEvent()`; use extension `nip44` when present.
 2. **NIP-46 remote signer (Amber etc.)** — client-initiated `nostrconnect://` QR / deep link with `relay` + random `secret` + `perms`; verify the signer's `connect` response `result == secret`; then **always call `get_public_key`** — the remote-signer pubkey and the user pubkey are distinct (Amber v6 uses per-connection signer keys). RPC transport is kind 24133 with NIP-44 encryption. Also accept pasted `bunker://` URIs.
-3. **Generated local key (normie default).** A secp256k1 keypair generated on first use, stored in IndexedDB. No jargon shown; the word "password" is not required to start.
+3. **Generated local key (normie default).** A secp256k1 keypair generated on first use, stored in IndexedDB. No jargon shown; the word "password" is not required to start. **The key is stored unencrypted, deliberately.** Wrapping it under a passphrase would put a prompt in front of every signature, in a product whose premise is that an attendee opens a link at an event and acts immediately — and the attacker it would defend against, one with read access to the browser profile, already reaches the session, the event keys and the signer. Anyone who wants at-rest protection uses the NIP-49 export (scrypt, `logn=16`). This is a stated trade-off, not an oversight.
 
 NIP-04 is banned project-wide (deprecated, `final unrecommended`). All NIP-44 calls in NDK must pass the scheme explicitly (`signer.encrypt(user, value, 'nip44')`) — NDK's NIP-07 signer defaults to nip04 otherwise.
 
