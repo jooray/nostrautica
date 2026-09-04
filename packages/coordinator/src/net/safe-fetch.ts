@@ -96,11 +96,35 @@ function expandV6(ip: string): number[] | null {
 
 function isBlockedV6(ip: string): boolean {
   if (ip === "::" || ip === "::1") return true; // unspecified + loopback
-  // IPv4-mapped (::ffff:a.b.c.d) — evaluate the embedded v4.
+  // IPv4-mapped in DOTTED form (::ffff:a.b.c.d). Kept for callers that hand us a
+  // raw string, but note it is DEAD for anything derived from a URL: WHATWG `URL`
+  // normalizes the dotted form to hex on parse, so
+  // `new URL("https://[::ffff:127.0.0.1]/").hostname` is `[::ffff:7f00:1]` — which
+  // this regex cannot match. Until 2026-09-04 that was the ONLY embedded-v4 check,
+  // so every mapped literal that arrived through a URL (i.e. every attendee-supplied
+  // media descriptor) fell through to the hextet rules below, matched none of them
+  // because its high bits are zero, and was ALLOWED. `::ffff:a9fe:a9fe` is cloud
+  // metadata; `::ffff:7f00:1` is loopback.
   const mapped = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (mapped) return isBlockedV4(mapped[1]!);
   const h = expandV6(ip);
   if (!h) return true; // unparseable → block
+  // Everything with the top 64 bits zero embeds an IPv4 address in the last two
+  // hextets. Evaluate it against the v4 policy for the three standard
+  // constructions, and FAIL CLOSED on any other shape in that space rather than
+  // trying to guess what a novel encoding means:
+  //   ::a.b.c.d          IPv4-compatible   (h[4]=0,      h[5]=0)
+  //   ::ffff:a.b.c.d     IPv4-mapped       (h[4]=0,      h[5]=0xffff)
+  //   ::ffff:0:a.b.c.d   IPv4-translated   (h[4]=0xffff, h[5]=0)
+  if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0) {
+    const known =
+      (h[4] === 0 && h[5] === 0) ||
+      (h[4] === 0 && h[5] === 0xffff) ||
+      (h[4] === 0xffff && h[5] === 0);
+    if (!known) return true;
+    const embedded = `${h[6]! >> 8}.${h[6]! & 0xff}.${h[7]! >> 8}.${h[7]! & 0xff}`;
+    return isBlockedV4(embedded);
+  }
   if ((h[0]! & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
   if ((h[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
   if ((h[0]! & 0xff00) === 0xff00) return true; // ff00::/8 multicast
