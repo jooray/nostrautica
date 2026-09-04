@@ -411,12 +411,16 @@ export function pipelineChecks(
 async function cmdDoctor(args: string[]): Promise<number> {
   const configPath = configPathFromArgs(args);
   let failures = 0;
+  let warnings = 0;
   const pass = (label: string, detail = "") => console.log(`  [ok]   ${label}${detail ? ` — ${detail}` : ""}`);
   const fail = (label: string, detail = "") => {
     failures++;
     console.log(`  [FAIL] ${label}${detail ? ` — ${detail}` : ""}`);
   };
-  const warn = (label: string, detail = "") => console.log(`  [warn] ${label}${detail ? ` — ${detail}` : ""}`);
+  const warn = (label: string, detail = "") => {
+    warnings++;
+    console.log(`  [warn] ${label}${detail ? ` — ${detail}` : ""}`);
+  };
 
   console.log(`[doctor] nostrautica-coordinator ${releaseId()} (schema v${SCHEMA_VERSION})`);
 
@@ -543,7 +547,19 @@ async function cmdDoctor(args: string[]): Promise<number> {
     }
   }
 
-  console.log(failures === 0 ? "[doctor] all checks passed" : `[doctor] ${failures} check(s) FAILED`);
+  // Say "all checks passed" only when they all did. A run that lists two stale
+  // poison warnings and then signs off with "all checks passed" is the same
+  // reassurance-over-accuracy that let those two attendees sit unnoticed for seven
+  // weeks — the whole reason the pipeline checks above exist. Warnings still do not
+  // affect the exit code: this must never turn one stuck attendee into a refused
+  // service start.
+  const summary =
+    failures > 0
+      ? `[doctor] ${failures} check(s) FAILED` + (warnings > 0 ? `, ${warnings} warning(s)` : "")
+      : warnings > 0
+        ? `[doctor] no failures, but ${warnings} warning(s) need attention`
+        : "[doctor] all checks passed";
+  console.log(summary);
   return failures === 0 ? 0 : 1;
 }
 
