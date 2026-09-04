@@ -46,6 +46,17 @@ system protects, what it deliberately leaks, and who must be trusted.
   spoof in-event UI and emit allowed image/network beacons. Some themed event
   routes currently reveal sensitive values; `font-src 'self'` limits one remote
   font exfiltration technique but does not make those surfaces safe.
+- **Third-party talk embeds disclose the viewer to the host.** A talk submitted as
+  an external URL renders as a YouTube embed (spec §7, `media/external.ts`), and
+  the CSP admits `frame-src https://www.youtube-nocookie.com` for exactly that.
+  Watching such a talk therefore reveals the viewer's IP and user agent to Google.
+  Mitigated but not removed: the no-cookie origin, a per-source referrer policy,
+  and an explicit pre-load gate so the frame is never created until the attendee
+  chooses to play. An attendee who does not press play discloses nothing.
+- **Profile pictures are fetched from wherever they are hosted.** Kind-0 `picture`
+  and event banner URLs are rendered as ordinary images, so whoever hosts them sees
+  each viewer's IP and user agent. This is inherent to displaying other people's
+  Nostr profiles.
 
 ## Trusted parties
 

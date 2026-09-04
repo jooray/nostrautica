@@ -544,7 +544,7 @@ NIP-17 and dual-backend ideas are intentionally deferred and may change before i
 
 **Event updates (organizer).** Admin composes title + markdown → publish kind 30023 signed by `E_id` (`d` stable per update; same `d` = edit, `published_at` preserved). Event page fetches 30023 by author `E_id`, dedupes by `d` (highest `created_at` wins), renders newest-first.
 
-**Publish event post (§7.4).** Admin composer: title/summary/image + markdown with preview → visibility chosen at creation: **public** → 30023 (as above); **members-only** → 31607 (all metadata inside the ECK ciphertext, random stable `d`, `eck` tag = current version). Edit = republish same `d` (members-only re-encrypted under the current ECK). The editor enforces the 60 KB members-only ceiling.
+**Publish event post (§7.4).** Admin composer: title/summary/image + markdown with preview → visibility chosen at creation: **public** → 30023 (as above); **members-only** → 31607 (all metadata inside the ECK ciphertext, random stable `d`, `eck` tag = current version). Edit = republish same `d` (members-only re-encrypted under the current ECK). The editor enforces the members-only body ceiling (`MAX_POST_BODY`, 100,000 bytes — `packages/protocol/src/schemas.ts`).
 
 **Customize event page (§7.4).** Admin → *Appearance*: CSS editor with live preview → publish 31609. Admin → *Menu & layout*: manage menu items (label + target via the post-aware picker or a URL field; per-item public/members-only toggle) home sections (type + filters + order, per-section visibility), and external long-form feeds (npub + optional hashtags / published-since / relays / display name) → publish 31608 (public parts in tags/cleartext JSON, members-only parts ECK-encrypted in `private`). All signed `E_id`.
 
@@ -762,6 +762,17 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for supported PWA modes, header guarantees, r
 ## 13. Future features
 
 Design-compatible with the current protocol, not yet built. Most of these need no wire change, or only a small additive one.
+
+> **Already shipped, listed here only as design record.** The first four bullets
+> below (post-event report and payoff flow, client-side search, offline event pack,
+> "what's new" affordances) and the organizer QoL bullet (duplicate event, printable
+> invite sheet, view-as-visitor) are all BUILT — see
+> `packages/app/src/lib/events/{report,search,offline-pack,whats-new,duplicate,invite-sheet}.ts`
+> and `stores/visitor-preview.svelte.ts`, and the corresponding sections of the
+> organizer and participant guides. This section was the last document still calling
+> them unbuilt (corrected 2026-09-04). They stay written down because the reasoning
+> — especially the deliberate refusal to publish a follow pack by default — is the
+> record of *why* they were built the way they were.
 
 - **Post-event report & payoff flow.** A print-friendly (browser print-to-PDF, no server rendering) event report: people met, people wanted-to-meet-but-not-met, favorite talks, personal notes. "Met" stays editable after the event ends, so the report reflects what actually happened at the venue, not just what was planned beforehand. A one-click **follow-all** of everyone marked met or want-to-meet (a single kind-3 append-merge, reusing the existing empty-list guard, §5.4). Any npub list the report offers is a **local-only export**, never a published follow pack: kind 39089 / following.space packs are public events, and publishing "everyone I met at event X" by default would leak the user's participation and social graph — that path is deliberately not the default (a clearly-labeled opt-in "publish as follow pack" could be offered later). No vCard export — the app neither holds nor wants contact data beyond what's already in Nostr profiles. For an app-generated identity, the report is where the flow ends in the "switch to Nostr" moment: an nsec/ncryptsec export walkthrough and links to Primal/Damus/Amethyst/Yakihonne (§5.4).
 - **Client-side search** across decrypted directory entries, profiles, and transcripts.

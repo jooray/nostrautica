@@ -14,7 +14,7 @@ single product release.
 | `@nostrautica/protocol` | `packages/protocol/package.json` | The shared protocol **package API** (types/schemas/helpers) changes. |
 | `@nostrautica/coordinator` | `packages/coordinator/package.json` | The coordinator **package API/behavior** changes. |
 | Wire protocol `v` | `PROTOCOL_VERSION` in `packages/protocol/src/schemas.ts` | The **on-the-wire payload contract** changes. This is deliberately separate: package versions can move without a wire change, and a wire change is a compatibility event for every peer. Currently `2`. |
-| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `2`. |
+| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `5`. |
 
 Do **not** infer compatibility from equal or unequal package versions. Compatibility
 is defined by the wire protocol version (and the protocol registry,
@@ -33,9 +33,21 @@ O3). It has two parts:
   matters because many pre-v2 databases were all stamped `user_version = 1` with
   differing column sets.
 - **Numbered migrations** carry the downgrade-incompatible boundaries. Each runs in a
-  single transaction and advances `PRAGMA user_version` at its boundary. Version `2`
-  is the first such boundary (it adds the audit C3/C5 tables — inbound rate accounting
-  and the reference-count tables for retention deletion).
+  single transaction and advances `PRAGMA user_version` at its boundary.
+
+The boundaries so far (`MIGRATIONS` in `db.ts`) — keep this list in step with the
+code, because it is what an operator reads before deciding a rollback is safe:
+
+| `user_version` | Migration | What it changes |
+|---|---|---|
+| `2` | `applyRemediationDDL` | Adds the audit C3/C5 tables: inbound rate accounting, and the reference-count tables retention deletion needs. The first downgrade-incompatible boundary. |
+| `3` | `applyMembershipSubjectMerge` | Re-keys `command_watermarks`: the separate `pubkey:` and `withdraw:` subject namespaces merge into one membership subject, so an approve and a withdrawal for the same person are ordered against each other instead of in parallel. |
+| `4` | `applyArtifactLegacyQuarantine` | Adds `pipeline_artifacts.quarantined_at` and stamps every artifact that no `artifact_refs` row owns, so pre-ownership artifacts can be garbage-collected after a grace window instead of growing forever. |
+| `5` | `applyInviteUsagePerRedeemer` | Re-keys `invite_usage` on `(coordinate, invite_pubkey, used_by)` so a reusable invite code records one row per redeemer. Required by the `uses`/`exp` invite fields. |
+
+Adding a migration means: append to `MIGRATIONS`, bump `SCHEMA_VERSION`, and add a
+row above. A migration is **one-way** — once applied, no older binary will open the
+file (see the refusal below) — so take the backup first (operator guide §7).
 
 The open path **refuses** a database whose `user_version` is greater than the binary's
 `SCHEMA_VERSION` (a database written by a newer coordinator), with a clear operator

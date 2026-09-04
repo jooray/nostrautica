@@ -100,7 +100,12 @@ model = "free"                    # free | per_user | per_event | negotiated | e
 # summary = "Up to 20 attendees free; larger events by quote."
 # checkout_url = "https://…/checkout"   # the app appends ?event=<naddr>
 # currency = "sats"
-# free_organizers = ["<E_id hex pubkey>"] # always-free E_id allowlist; PRIVATE.
+# free_eids = ["<E_id hex pubkey>"]     # always-free E_id allowlist; PRIVATE.
+#   NB: this key was called `free_organizers` in an earlier draft and this file kept
+#   the old name long after the schema moved on. The config object is not strict, so
+#   an unknown key is silently DROPPED — an operator who uncommented the old name got
+#   no allowlist, no warning, and an event that crossed free_up_to_users into grace
+#   and then blocked, parking every paid job mid-event.
 
 # ── Daemon-side security policy ───────────────────────────────────────────────
 # Installation is protocol-level (any E_id can gift-wrap a 21603 grant to this

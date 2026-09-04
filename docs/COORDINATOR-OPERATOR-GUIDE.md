@@ -18,13 +18,22 @@ nostrautica-coordinator verify-backup <file> [--allow-unsigned] [--config coordi
 nostrautica-coordinator restore <file> [--force] [--allow-unsigned] [--config coordinator.toml]
 ```
 
-Two environment variables locate runtime state (both optional, with the defaults
-shown):
+Environment variables the daemon reads (all optional, defaults shown):
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `NOSTRAUTICA_COORDINATOR_DB` | `coordinator.sqlite` | SQLite database path |
 | `NOSTRAUTICA_COORDINATOR_NSEC` | — | coordinator identity (nsec or hex); or use `identity.ncryptsec_file` in the TOML |
+| `NOSTRAUTICA_COORDINATOR_CONFIG` | first CLI arg, else `coordinator.toml` | config file path; the `--config` flag wins over it |
+| `NOSTRAUTICA_COORDINATOR_PASSPHRASE` | — | **required** when identity comes from `identity.ncryptsec_file`; without it startup fails with `NOSTRAUTICA_COORDINATOR_PASSPHRASE required to decrypt key` |
+| `NOSTRAUTICA_RELEASE_ID` | `git describe`, else `v<pkg version>` | pins the release id a build with no `.git` reports (rsync/container deploys) |
+| `NOSTRAUTICA_GIT_SHA` | `git rev-parse HEAD`, else `unknown` | same, for the commit |
+| `NOSTRAUTICA_BUILD_TIMESTAMP` | commit date, else `unknown` | same, for the build time |
+| *(the key named by `providers.venice.api_key_env`)* | — | the provider API key; the name is yours to choose in the TOML |
+
+Set at least one of `NOSTRAUTICA_RELEASE_ID` / `NOSTRAUTICA_GIT_SHA` on a deploy
+that ships source without `.git`, or the daemon logs a provenance warning at
+startup and a running instance cannot be tied back to a build.
 
 ---
 
@@ -57,8 +66,8 @@ run it on an encrypted filesystem with separate key custody.
 
 ## 2. Provision
 
-Create `coordinator.toml` (see `packages/coordinator/local-test.toml` for the full
-shape). Provision the identity **once** and keep it stable — the coordinator's
+Create `coordinator.toml` (copy `packages/coordinator/coordinator.example.toml`,
+which is the checked-in template with every key documented). Provision the identity **once** and keep it stable — the coordinator's
 pubkey is the root of trust every installed event's key custody is encrypted
 under, so rotating it strands every event.
 
@@ -106,10 +115,10 @@ nostrautica-coordinator doctor --config coordinator.toml
 Expected output on a healthy host:
 
 ```
-[doctor] nostrautica-coordinator v0.1.0 (schema v2)
+[doctor] nostrautica-coordinator v0.2.0 (schema v5)
   [ok]   config parse — coordinator.toml
   [ok]   identity load — npub1...
-  [ok]   database integrity — 3 event(s), schema v2
+  [ok]   database integrity — 3 event(s), schema v5
   [ok]   protected-row decryption — 3 event row(s) decrypt under the identity
   [ok]   ffmpeg/ffprobe
   [ok]   relays — 4/4 reachable
@@ -280,11 +289,10 @@ forging the tag requires the coordinator identity key. Expected:
 ```
 [backup] wrote .../2026-07-23-0400.sqlite (+ .../2026-07-23-0400.sqlite.meta.json)
   coordinator   npub1...
-  release       v0.1.0
-  schema        v2
+  release       v0.2.0
+  schema        v5
   events        3
   checksum      a3c0e0b7...
-  auth          hmac-sha256 (a1b2c3d4...)
   quiesced      true
 [backup] OK
 ```
