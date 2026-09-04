@@ -300,7 +300,7 @@ function applyMembershipSubjectMerge(db: DatabaseSync): void {
   for (const r of rows) {
     const pk = r.subject.slice(r.subject.indexOf(":") + 1);
     const newSubject = `member:${pk}`;
-    const key = `${r.coordinate} ${newSubject}`;
+    const key = `${r.coordinate}\u0000${newSubject}`;
     const cur = winners.get(key);
     const wins =
       !cur ||
@@ -3427,6 +3427,6 @@ export function talkContentHash(fields: {
   } catch {
     speakers = [];
   }
-  const canonical = [fields.mediaX, fields.title, fields.description, speakers.join(","), fields.lang].join(" ");
+  const canonical = [fields.mediaX, fields.title, fields.description, speakers.join(","), fields.lang].join("\u0000");
   return sha256Hex(utf8ToBytes(canonical));
 }
