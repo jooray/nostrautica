@@ -9,6 +9,7 @@ import { z } from "zod";
 import { sha256Hex, utf8ToBytes, languageName, hasAiProfileContent } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
+import { fenceUntrusted, fenceUntrustedList } from "../pipeline/fencing.js";
 
 /**
  * Lenient envelope validation for batch-score output (audit finding Q9). This
@@ -144,15 +145,21 @@ export function pairInputsHash(hashA: string, hashB: string): string {
 }
 
 function profileText(p: AiProfile, name?: string): string {
+  // Every value below is attendee-authored, and it is being pasted between the
+  // delimiters this prompt asks the model to trust — `--- CANDIDATE n ---`,
+  // `TARGET ATTENDEE:`. Fence it (audit SEC-15) so a bio cannot open a section of
+  // its own and invent a candidate, or forge a boundary and steal the target's
+  // work. The prompt scaffolding itself is untouched: BP3 is benchmark-validated.
+  const f = fenceUntrusted;
   return [
     // B1: without a Name line the model cannot address anyone correctly and
     // falls back to inventing one (it copied "Elena" from the prompt example).
-    ...(name ? [`Name: ${name}`] : []),
-    `Summary: ${p.summary}`,
-    `Skills: ${p.skills.join(", ")}`,
-    `Interests: ${p.interests.join(", ")}`,
-    `Offers: ${p.offers.join(", ")}`,
-    `Seeks: ${p.seeks.join(", ")}`,
+    ...(name ? [`Name: ${f(name)}`] : []),
+    `Summary: ${f(p.summary)}`,
+    `Skills: ${fenceUntrustedList(p.skills).join(", ")}`,
+    `Interests: ${fenceUntrustedList(p.interests).join(", ")}`,
+    `Offers: ${fenceUntrustedList(p.offers).join(", ")}`,
+    `Seeks: ${fenceUntrustedList(p.seeks).join(", ")}`,
   ].join("\n");
 }
 
@@ -504,10 +511,12 @@ function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
 
 /** EVENT/ABOUT/TOPICS header shared by both batch shapes; empty lines dropped. */
 function eventBlock(event: EventContextForScoring): string[] {
+  // Organizer-authored, which is a lower-risk source than an attendee bio but not
+  // a trusted one — anyone can create an event (audit SEC-15).
   return [
-    `EVENT: ${event.title}`,
-    event.summary ? `ABOUT: ${event.summary}` : "",
-    event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
+    `EVENT: ${fenceUntrusted(event.title)}`,
+    event.summary ? `ABOUT: ${fenceUntrusted(event.summary)}` : "",
+    event.hashtags.length ? `TOPICS: ${fenceUntrustedList(event.hashtags).join(", ")}` : "",
   ].filter(Boolean);
 }
 

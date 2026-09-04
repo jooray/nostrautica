@@ -18,6 +18,7 @@ import {
   type AttendeeProfile,
 } from "@nostrautica/protocol";
 import type { LlmProvider, ModelRef } from "../providers/types.js";
+import { fenceUntrusted, fenceUntrustedList } from "./fencing.js";
 
 // ── Provider-output response schemas (audit finding Q9) ──────────────────────
 // The model's raw JSON is validated at the provider boundary before it can enter
@@ -267,10 +268,18 @@ export async function buildAiProfile(
   inputs: ProfileInputs,
   signal?: AbortSignal,
 ): Promise<AiProfile> {
+  // Everything here is written or spoken by the person being profiled, and it is
+  // being pasted under headers the model reads as structure — including the `---`
+  // that separates one transcript from the next. Fence it (audit SEC-15): a bio
+  // saying "PUBLIC NOSTR ACTIVITY:" followed by invented history would otherwise
+  // be read as this daemon's own attestation of that history.
+  const p = inputs.profile;
   const user = [
-    inputs.transcripts.length ? `INTRO/TALK TRANSCRIPT:\n${inputs.transcripts.join("\n---\n")}` : "",
-    `SELF-DESCRIBED PROFILE:\nAbout: ${inputs.profile.about}\nSkills: ${inputs.profile.skills.join(", ")}\nLooking for: ${inputs.profile.looking_for}`,
-    inputs.nostrSummary ? `PUBLIC NOSTR ACTIVITY:\n${inputs.nostrSummary}` : "",
+    inputs.transcripts.length
+      ? `INTRO/TALK TRANSCRIPT:\n${inputs.transcripts.map(fenceUntrusted).join("\n---\n")}`
+      : "",
+    `SELF-DESCRIBED PROFILE:\nAbout: ${fenceUntrusted(p.about)}\nSkills: ${fenceUntrustedList(p.skills).join(", ")}\nLooking for: ${fenceUntrusted(p.looking_for)}`,
+    inputs.nostrSummary ? `PUBLIC NOSTR ACTIVITY:\n${fenceUntrusted(inputs.nostrSummary)}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -355,9 +364,13 @@ export async function translateProfileFields(
   const user = [
     `TARGET LANGUAGE: ${targetName} (${base})`,
     "USER-AUTHORED FIELDS:",
-    `About: ${fields.about}`,
-    `Looking for: ${fields.looking_for}`,
-    `Skills: ${fields.skills.join(", ")}`,
+    // The name of this section says what it is; fence it anyway (audit SEC-15).
+    // The output here is republished verbatim as the attendee's translated
+    // directory entry, so a field that talks the model out of translating and
+    // into writing something else publishes that something else.
+    `About: ${fenceUntrusted(fields.about)}`,
+    `Looking for: ${fenceUntrusted(fields.looking_for)}`,
+    `Skills: ${fenceUntrustedList(fields.skills).join(", ")}`,
   ].join("\n");
 
   const { value } = await llm.completeStructured<RawTranslation>({
@@ -441,12 +454,15 @@ export async function summarizeNostr(
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (posts.length === 0) return undefined;
+  // Public Nostr posts: authored by the attendee, but ALSO by anyone the attendee
+  // can get to post — the least trusted input the daemon reads (audit SEC-15).
+  const clean = (t: string) => fenceUntrusted(t).replace(/\s+/g, " ").slice(0, 300);
   const lines = posts.slice(0, 100).flatMap((p) => {
     if (p.kind === 0) {
       const bio = extractProfileBio(p.content);
-      return bio ? [`- Profile bio: ${bio.replace(/\s+/g, " ").slice(0, 300)}`] : [];
+      return bio ? [`- Profile bio: ${clean(bio)}`] : [];
     }
-    return [`- ${p.content.replace(/\s+/g, " ").slice(0, 300)}`];
+    return [`- ${clean(p.content)}`];
   });
   if (lines.length === 0) return undefined;
   const user = ["Recent public posts by this person (newest first):", ...lines].join("\n");
