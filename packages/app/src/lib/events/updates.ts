@@ -11,6 +11,7 @@ import { finalizeEvent } from "nostr-tools";
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { KIND_LONGFORM, parseCoordinate, hexToBytes, supersedes } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
@@ -33,7 +34,13 @@ function tag(tags: string[][], name: string): string | undefined {
 /** Fetch the event's updates, deduped by `d` (highest created_at), newest first. */
 export async function fetchEventUpdates(coordinate: string): Promise<EventUpdate[]> {
   const { pubkey } = parseCoordinate(coordinate);
-  const events = await fetchEvents({ kinds: [KIND_LONGFORM], authors: [pubkey] });
+  const raw = await fetchEvents({ kinds: [KIND_LONGFORM], authors: [pubkey] });
+  // Authority boundary: `authors` is what we ASK a relay for, not what it has to
+  // answer with. These render as the organizer's own announcements ("venue
+  // change", "schedule posted") with no attribution shown, so a 30023 slipped in
+  // by any relay would read as coming from the event itself. E_id is the only
+  // valid author (spec §7.1); re-verify and pin before the per-`d` dedupe.
+  const events = onlyByAuthors(onlyVerified(raw), [pubkey]);
 
   const byD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
