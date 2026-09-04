@@ -115,9 +115,43 @@ export async function resolveRoleRoutes(
   return routes;
 }
 
-/** The per-role privacy map for the 31611 announcement, from the RESOLVED routes. */
-export function disclosureFromRoutes(routes: RoleRoutes): Record<string, string> {
-  const privacy: Record<string, string> = { stt: "private" };
+/**
+ * The STT tier for the disclosure map. Optional, and there is no default that
+ * claims anything.
+ *
+ * Every LLM role's tier in this map is VERIFIED — resolved against the provider's
+ * own catalogue above, and startup fails closed when a `require_private` role
+ * cannot be confirmed. `stt` was a hardcoded `"private"` string sitting in the
+ * same object, indistinguishable to any reader from the four that were checked
+ * (2026-09-04 audit). It is a public claim about where an attendee's recorded
+ * voice goes, made in the 31611 announcement that organizers pick a coordinator
+ * on, and nothing anywhere established it.
+ *
+ * It cannot be verified the way the others are: Venice's `GET /models` returns the
+ * LLM catalogue, and the STT model (`openai/whisper-large-v3`) is not in it — the
+ * same reason the `embed` role is exempted from the not-found warning above. So
+ * the honest options were "verify it" and "say it is unverified", and this is how
+ * a caller that HAS verified it supplies the answer.
+ */
+export interface SttDisclosure {
+  /** STT provider id, e.g. "venice-stt" (for the operator's own diagnostics). */
+  provider: string;
+  model: string;
+  /** The tier, when the caller actually established it. Omitted = unverified. */
+  privacy?: RoleRoute["privacy"];
+}
+
+/**
+ * The per-role privacy map for the 31611 announcement, from the RESOLVED routes.
+ *
+ * `stt` reads `"unverified"` unless a caller passes a tier it has established.
+ * That is a deliberate downgrade from the previous unconditional `"private"`:
+ * overstating a privacy guarantee is the failure that matters here, and the app's
+ * coordinator picker already renders any role whose value is not `"private"`, so
+ * the claim becomes visible to organizers instead of quietly true-by-assertion.
+ */
+export function disclosureFromRoutes(routes: RoleRoutes, stt?: SttDisclosure): Record<string, string> {
+  const privacy: Record<string, string> = { stt: stt?.privacy ?? "unverified" };
   for (const role of ROLES) privacy[role] = routes[role].privacy;
   return privacy;
 }
