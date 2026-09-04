@@ -32,8 +32,25 @@ export interface Filter {
  *  memory. Once reached, collection stops and the subscription is closed. */
 export const MAX_FETCH_EVENTS = 5000;
 
+function relayLog(msg: string): void {
+  const t = new Date().toISOString().slice(11, 19);
+  console.log(`[${t}] ${msg}`);
+}
+
 export class NostrClient {
-  private pool = new SimplePool();
+  // Reconnect and keepalive are BOTH off by default in nostr-tools
+  // (`AbstractSimplePool`: `enableReconnect = opts.enableReconnect || false`, and
+  // `enablePing = opts.enablePing`, i.e. undefined ⇒ falsy). With them off, any
+  // socket close takes `AbstractRelay.handleHardClose`'s terminal branch, which
+  // drops the relay from the pool and closes EVERY subscription on it — and with
+  // no ping there is nothing keeping an idle socket alive through an nginx or NAT
+  // timeout in the first place. The daemon's subscriptions are long-lived by
+  // design (coordinator inbox, each event's E_inbox, each config watcher, each
+  // Marmot watcher), so the failure mode was: one relay drops, the coordinator
+  // goes permanently deaf to it, nothing is logged, and only a restart recovers —
+  // which is why deploys masked it. The app has always set both explicitly
+  // (`packages/app/src/lib/signer/nip46.ts`); the daemon was the outlier.
+  private pool = new SimplePool({ enableReconnect: true, enablePing: true });
 
   constructor(private readonly defaultRelays: string[]) {}
 
@@ -43,10 +60,27 @@ export class NostrClient {
     onEvent: (event: NostrEvent) => void,
     relays: string[] = this.defaultRelays,
   ): () => void {
+    // `onclose` fires once every relay in the group has closed — including when we
+    // close deliberately (`SubCloser.close()` closes each relay sub, which lands in
+    // the same handler). Only an UNPROMPTED close is worth a line; the coordinator
+    // re-subscribes on every relay-set change, and logging those would spam a log
+    // that is already never rotated.
+    let closingDeliberately = false;
     const sub = this.pool.subscribe(relays, filter as any, {
       onevent: (e: NostrEvent) => onEvent(e),
+      // A drop is now recoverable (the pool reconnects and resubscribes from
+      // `since = lastEmitted + 1`), but it must never again be SILENT: an
+      // operator diagnosing a stuck event needs to see that the wire went away.
+      onclose: (reasons: string[]) => {
+        if (closingDeliberately) return;
+        const why = reasons.filter(Boolean).join("; ") || "no reason given";
+        relayLog(`[relay] subscription dropped on ${relays.join(", ")}: ${why}`);
+      },
     });
-    return () => sub.close();
+    return () => {
+      closingDeliberately = true;
+      sub.close();
+    };
   }
 
   /**

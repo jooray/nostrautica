@@ -82,3 +82,26 @@ describe("NostrClient.fetchAll pagination (audit R4)", () => {
     expect(all.length).toBeLessThan(500);
   });
 });
+
+/**
+ * Long-lived subscriptions must survive a socket drop (2026-09-04 audit).
+ *
+ * nostr-tools defaults BOTH reconnect and keepalive-ping to off
+ * (`enableReconnect = opts.enableReconnect || false`, `enablePing = opts.enablePing`).
+ * With them off, any close drops the relay from the pool and kills every
+ * subscription on it, so the daemon went permanently deaf to that relay until the
+ * process restarted — silently, and masked by the fact that every deploy restarts it.
+ *
+ * This asserts the pool OPTIONS rather than simulating a drop, deliberately: the
+ * regression is a missing constructor argument, and the library's own reconnect
+ * machinery is not ours to re-test.
+ */
+describe("NostrClient relay pool durability (audit 2026-09-04)", () => {
+  it("enables reconnect and keepalive ping on the pool", () => {
+    const client = new NostrClient(["wss://stub"]);
+    const pool = (client as unknown as { pool: { enableReconnect: boolean; enablePing: boolean } })
+      .pool;
+    expect(pool.enableReconnect).toBe(true);
+    expect(pool.enablePing).toBe(true);
+  });
+});
