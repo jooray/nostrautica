@@ -27,7 +27,16 @@ import type { EventContext } from "$lib/events/event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { ChatMessage } from "./messages.js";
 import type { MarmotChat } from "./client.js";
-import { ChatTabCoordinator, type TabRole } from "./tab-leader.js";
+import {
+  ChatTabCoordinator,
+  type TabRole,
+  type TabCoordinatorOptions,
+} from "./tab-leader.js";
+
+/** Test-only override; production always constructs the real coordinator. */
+let coordinatorFactory: ((opts: TabCoordinatorOptions) => ChatTabCoordinator) | undefined;
+const makeCoordinator = (opts: TabCoordinatorOptions): ChatTabCoordinator =>
+  coordinatorFactory ? coordinatorFactory(opts) : new ChatTabCoordinator(opts);
 
 /**
  * `setup` — client is up, no group yet (waiting on the coordinator's Add +
@@ -58,6 +67,15 @@ class ChatSessionStore {
   rejoining = $state(false);
   /** The multi-tab coordinator (leader election + follower proxy). */
   private coordinator?: ChatTabCoordinator;
+  /**
+   * The coordinator this session currently holds. Test-visible so a test can
+   * assert the one property that broke in production: a promotion from follower
+   * to leader must KEEP this object, because disposing it releases the Web Lock
+   * and two tabs then trade leadership forever.
+   */
+  get __coordinatorForTests(): ChatTabCoordinator | undefined {
+    return this.coordinator;
+  }
 
   /** Guards against a superseded start (event switch / logout) writing state. */
   private token = 0;
@@ -111,7 +129,7 @@ class ChatSessionStore {
       // IndexedDB MLS state concurrently.
       const scope = this.owner ?? (await signer.getPublicKey());
       if (tok !== this.token) return;
-      const coordinator = new ChatTabCoordinator({
+      const coordinator = makeCoordinator({
         scope,
         onRoleChange: (role) => {
           if (tok !== this.token) return;
@@ -125,8 +143,16 @@ class ChatSessionStore {
           // and — worse than the visible error — no live client existed anywhere in
           // this browser profile, so no 445 traffic was ingested and no Welcome was
           // joined until a manual reload.
+          //
+          // Build it IN PLACE on the coordinator we already hold. Calling begin()
+          // here instead — which the first version of this fix did — disposes that
+          // coordinator, and disposing releases the Web Lock we were just promoted
+          // into. With two tabs open both doing it, they trade the lock back and
+          // forth forever: each release promotes the other, each promotion tears
+          // down and re-elects, and the room flickers between "setting up" and
+          // "ready" several times a second. Reported from a real two-tab session.
           if (role === "leader" && wasFollower && !this.chat) {
-            void this.begin();
+            void this.becomeLeaderClient(tok, coordinator, ctx, signer);
           }
         },
         onLeaderState: (coordinate, messages) => {
@@ -172,39 +198,7 @@ class ChatSessionStore {
         return;
       }
 
-      // Leader: the whole marmot-ts + ts-mls stack (~220 kB gz) is lazy — a chat-off
-      // event, or a non-member, never loads it.
-      const { MarmotChat } = await import("./client.js");
-      const chat = await MarmotChat.create({ accountSigner: signer, ctx });
-      if (tok !== this.token) {
-        chat.dispose();
-        return;
-      }
-      this.chat = chat;
-      this.chatPubkey = chat.identity.pubkey;
-      this.recomputeReadOnly();
-      chat.onMessage = (m) => {
-        if (tok !== this.token) return;
-        this.ingest(m);
-        // Mirror the fresh list to follower tabs.
-        coordinator.broadcastState(ctx.coordinate, this.messages);
-      };
-      chat.onStateChange = () => {
-        if (tok === this.token) void this.syncPhase(tok);
-      };
-      // First v2 chat session: best-effort retire the account's legacy 31602
-      // chat-device-key backup (NIP §7.5). Leader-only + once-per-account gated, so
-      // followers don't duplicate it. Fire-and-forget — never blocks the handshake.
-      void import("./legacy-cleanup.js")
-        .then(({ deleteLegacyChatDeviceKeyBackup }) =>
-          deleteLegacyChatDeviceKeyBackup(signer, ctx.config.relays),
-        )
-        .catch(() => {});
-      // Publish the key package (+ attestation for device-key accounts) so the
-      // coordinator can add us, then listen for the welcome and 445 traffic.
-      await chat.ensurePublished();
-      await chat.start();
-      await this.syncPhase(tok);
+      await this.becomeLeaderClient(tok, coordinator, ctx, signer);
     })();
     this.starting = run
       .catch((e) => {
@@ -216,6 +210,59 @@ class ChatSessionStore {
         if (tok === this.token) this.starting = undefined;
       });
     await this.starting;
+  }
+
+  /**
+   * Build and start the live client for a tab that owns the leader lock.
+   *
+   * Called from `begin()` when this tab wins the election outright, and from the
+   * role-change handler when it is promoted later. Deliberately takes the
+   * coordinator it should use rather than reading `this.coordinator`: the
+   * promotion path must keep the coordinator (and therefore the LOCK) it was
+   * promoted into, and must never tear it down to re-elect.
+   */
+  private async becomeLeaderClient(
+    tok: number,
+    coordinator: ChatTabCoordinator,
+    ctx: EventContext,
+    signer: AppSigner,
+  ): Promise<void> {
+    if (tok !== this.token || this.chat) return;
+    // A promotion arrives while the room is already rendering "ready" off the
+    // departed leader's last broadcast. Do not drop it back to "setup" — the
+    // messages on screen are still the right ones, and flipping the phase for the
+    // duration of a client build is exactly the flicker this path is fixing.
+    const { MarmotChat } = await import("./client.js");
+    const chat = await MarmotChat.create({ accountSigner: signer, ctx });
+    if (tok !== this.token || this.chat) {
+      chat.dispose();
+      return;
+    }
+    this.chat = chat;
+    this.chatPubkey = chat.identity.pubkey;
+    this.recomputeReadOnly();
+    chat.onMessage = (m) => {
+      if (tok !== this.token) return;
+      this.ingest(m);
+      // Mirror the fresh list to follower tabs.
+      coordinator.broadcastState(ctx.coordinate, this.messages);
+    };
+    chat.onStateChange = () => {
+      if (tok === this.token) void this.syncPhase(tok);
+    };
+    // First v2 chat session: best-effort retire the account's legacy 31602
+    // chat-device-key backup (NIP §7.5). Leader-only + once-per-account gated, so
+    // followers don't duplicate it. Fire-and-forget — never blocks the handshake.
+    void import("./legacy-cleanup.js")
+      .then(({ deleteLegacyChatDeviceKeyBackup }) =>
+        deleteLegacyChatDeviceKeyBackup(signer, ctx.config.relays),
+      )
+      .catch(() => {});
+    // Publish the key package (+ attestation for device-key accounts) so the
+    // coordinator can add us, then listen for the welcome and 445 traffic.
+    await chat.ensurePublished();
+    await chat.start();
+    await this.syncPhase(tok);
   }
 
   /** De-dupe by inner rumor id, keep chronological order (Bug 4 echo-safe). */
@@ -347,3 +394,19 @@ class ChatSessionStore {
 }
 
 export const chatSession = new ChatSessionStore();
+
+/**
+ * Swap the multi-tab coordinator factory (tests only), the same seam
+ * `__setMarmotKvBackendForTests` and `__setPersistBackend` give their modules.
+ *
+ * Leader election is the thing worth testing here and it is unreachable
+ * otherwise: `ChatTabCoordinator` falls back to a single-tab ping election when
+ * `navigator.locks` is absent, which it always is under the node test
+ * environment — so without this, every test tab is trivially the leader and the
+ * promotion path cannot be exercised at all.
+ */
+export function __setChatCoordinatorFactoryForTests(
+  factory: ((opts: TabCoordinatorOptions) => ChatTabCoordinator) | null,
+): void {
+  coordinatorFactory = factory ?? undefined;
+}
