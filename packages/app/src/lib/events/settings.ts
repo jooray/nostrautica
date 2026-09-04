@@ -8,12 +8,14 @@ import {
   KIND_APP_DATA,
   blindedD,
   perEventSettingsSchema,
+  pickLatest,
   type PerEventSettings,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { VerifiedEvent } from "nostr-tools/pure";
 import type { EventContext } from "./event-context.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
@@ -42,6 +44,21 @@ async function settingsD(signer: AppSigner, ctx: EventContext, blindingKey: Uint
   return `nostrautica:ev:${blindedD(blindingKey, ctx.coordinate, pubkey)}`;
 }
 
+/**
+ * Load the user's private per-event settings, or the empty set when they have
+ * never saved any.
+ *
+ * THROWS when a 30078 exists at this `d` but cannot be read (signer round-trip
+ * failed, NIP-46 bunker timed out, ciphertext garbled). That is not the same
+ * thing as "no notes yet", and this function used to answer both with EMPTY —
+ * which was silently destructive, because every caller that writes
+ * (`toggleSetting`, `setNote`) is a read-modify-write: one flaky `nip44Decrypt`
+ * during a want-to-meet tap republished an EMPTY payload over the user's entire
+ * private state for that event — every note, favourite and met marker gone, with
+ * no error shown and nothing to restore from (the event is replaceable, and the
+ * only copy was the one just overwritten). Callers that only READ may catch this
+ * and fall back to `cachedPerEventSettings`; callers that write must not.
+ */
 export async function loadPerEventSettings(
   signer: AppSigner,
   ctx: EventContext,
@@ -50,16 +67,18 @@ export async function loadPerEventSettings(
   const pubkey = await signer.getPublicKey();
   const d = await settingsD(signer, ctx, blindingKey);
   const events = await fetchEvents({ kinds: [KIND_APP_DATA], authors: [pubkey], "#d": [d] });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Pin to the user's own key before the latest-wins pick. `authors` is a request
+  // a relay may ignore, and with the refusal-to-write below in place an
+  // undecryptable foreign 30078 at this `d` would be worse than noise — it would
+  // be a wedge: one hostile event with a high created_at and the user could never
+  // save a note again. Their own events are the only ones that can be self-decrypted
+  // anyway, so pinning costs nothing and closes that off.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
   if (!latest) return { ...EMPTY };
-  try {
-    const json = await signer.nip44Decrypt(pubkey, latest.content);
-    const settings = perEventSettingsSchema.parse(JSON.parse(json));
-    cacheSet(settingsKey(ctx.coordinate), settings, latest.created_at ?? 0);
-    return settings;
-  } catch {
-    return { ...EMPTY };
-  }
+  const json = await signer.nip44Decrypt(pubkey, latest.content);
+  const settings = perEventSettingsSchema.parse(JSON.parse(json));
+  cacheSet(settingsKey(ctx.coordinate), settings, latest.created_at ?? 0);
+  return settings;
 }
 
 async function saveSettings(
