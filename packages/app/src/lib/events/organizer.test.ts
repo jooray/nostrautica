@@ -39,7 +39,9 @@ import {
   type InviteListContent,
   type RosterContent,
   type ChatBackend,
-} from "@nostrautica/protocol";
+  wrapRumor,
+  KIND_JOIN_REQUEST,
+  KIND_ATTENDEE_WITHDRAWAL,} from "@nostrautica/protocol";
 import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
@@ -68,7 +70,7 @@ import {
   revokeAttendeeClient,
   updateEventConfig,
   type PendingRequest,
-} from "./organizer.js";
+  fetchPending,} from "./organizer.js";
 import {
   __setKeystoreBackend,
   setActiveOwner,
@@ -588,6 +590,60 @@ describe("roster read-modify-write safety", () => {
     expect((await loadEventKeys(COORD))?.eck).toHaveLength(2);
     expect(warn.mock.calls.flat().join(" ")).toMatch(/only on this device/i);
     warn.mockRestore();
+  });
+});
+
+/**
+ * Withdrawals on an event with no coordinator (2026-09-04 audit).
+ *
+ * `withdrawAttendee` publishes a 21610 to E_inbox and reports success on the
+ * relay ack — but the only handler for that kind is the coordinator's. Without
+ * one the rumor sat unread forever: the attendee was told they had left, deleted
+ * their self-copy and their media, and stayed in the roster and directory with
+ * their ECK still on their device.
+ */
+describe("fetchPending surfaces withdrawals", () => {
+  const EINBOX_SK = generateSecretKey();
+  const ATTENDEE_SK = generateSecretKey();
+  const ATTENDEE = getPublicKey(ATTENDEE_SK);
+  const inboxCtx = {
+    ...ctx,
+    config: { ...ctx.config, inbox: getPublicKey(EINBOX_SK) },
+  } as EventContext;
+
+  const joinWrap = (createdAt: number) =>
+    wrapRumor(ATTENDEE_SK, getPublicKey(EINBOX_SK), {
+      kind: KIND_JOIN_REQUEST,
+      created_at: createdAt,
+      content: { v: 2, a: COORD, name: "Ann", message: "hi", rsvp_public: false },
+      tags: [["a", COORD]],
+    });
+  const withdrawWrap = (createdAt: number, deleteData: boolean) =>
+    wrapRumor(ATTENDEE_SK, getPublicKey(EINBOX_SK), {
+      kind: KIND_ATTENDEE_WITHDRAWAL,
+      created_at: createdAt,
+      content: { v: 2, a: COORD, delete_data: deleteData },
+      tags: [["a", COORD]],
+    });
+
+  beforeEach(async () => {
+    await saveEventKeys({ ...organizerKeys(), einboxNsecHex: bytesToHex(EINBOX_SK) }, OWNER);
+  });
+
+  it("marks an attendee whose withdrawal is newer than their join", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([joinWrap(100), withdrawWrap(200, true)]);
+
+    const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
+    const who = pending.find((p) => p.attendeePubkey === ATTENDEE);
+    expect(who?.withdrawn).toBe(true);
+    expect(who?.withdrawalRequestedPurge).toBe(true);
+  });
+
+  it("does not let a stale withdrawal shadow a later re-join", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
+
+    const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
+    expect(pending.find((p) => p.attendeePubkey === ATTENDEE)?.withdrawn).toBeUndefined();
   });
 });
 

@@ -21,6 +21,8 @@ import {
   KIND_GIFT_WRAP,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
+  KIND_ATTENDEE_WITHDRAWAL,
+  withdrawalContentSchema,
   KIND_KEY_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
@@ -140,6 +142,16 @@ export interface PendingRequest {
   introText?: string;
   invite?: InviteProof;
   rumorCreatedAt: number;
+  /**
+   * This attendee sent a 21610 withdrawal that is NEWER than their join.
+   *
+   * Only meaningful on a coordinator-less event: with a coordinator attached, the
+   * daemon acts on the 21610 itself and the roster it republishes is the truth.
+   * Without one, nothing consumed the rumor at all — see the scan below.
+   */
+  withdrawn?: boolean;
+  /** `delete_data` from that withdrawal: the attendee asked for a data purge. */
+  withdrawalRequestedPurge?: boolean;
 }
 
 /** The publisher pubkey for directory/roster: coordinator if set, else E_id. */
@@ -203,6 +215,9 @@ export async function fetchPending(
     return undefined;
   };
 
+  /** Newest 21610 per attendee, by the same (created_at, lowest id) tie-break. */
+  const withdrawals = new Map<string, { id: string; created_at: number; deleteData: boolean }>();
+
   for (const wrap of wraps) {
     const rumor = unwrapAny(wrap);
     if (!rumor) continue; // not ours / malformed
@@ -235,6 +250,28 @@ export async function fetchPending(
           rumorCreatedAt: rumor.created_at,
         });
         joinRumorId.set(rumor.pubkey, rumor.id);
+      }
+    } else if (rumor.kind === KIND_ATTENDEE_WITHDRAWAL) {
+      // Nothing read these before. `withdrawAttendee` publishes a 21610 to
+      // E_inbox and reports success on the RELAY ACK — but the only handler for
+      // the kind is the coordinator's. On an event with no coordinator the
+      // rumor sat in the inbox unread forever: the attendee was told they had
+      // left, deleted their self-copy and their media, and stayed in the roster
+      // and the directory indefinitely, with their ECK still on their device.
+      // Surfacing it here at least puts the request in front of the organizer.
+      try {
+        const parsed = withdrawalContentSchema.parse(JSON.parse(rumor.content));
+        if (parsed.a !== ctx.coordinate) continue;
+        const prev = withdrawals.get(rumor.pubkey);
+        if (!prev || supersedes({ id: rumor.id, created_at: rumor.created_at }, prev)) {
+          withdrawals.set(rumor.pubkey, {
+            id: rumor.id,
+            created_at: rumor.created_at,
+            deleteData: parsed.delete_data ?? true,
+          });
+        }
+      } catch {
+        continue;
       }
     } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
       try {
@@ -270,6 +307,18 @@ export async function fetchPending(
       req.profile = sub.profile;
       req.media = sub.media;
       req.introText = sub.introText;
+    }
+  }
+  // Mark anyone whose newest withdrawal supersedes their newest join. Ordering
+  // matters: someone may withdraw and then re-join, and a stale withdrawal must
+  // not shadow the newer request.
+  for (const [pubkey, w] of withdrawals) {
+    const req = byAttendee.get(pubkey);
+    if (!req) continue;
+    const joinId = joinRumorId.get(pubkey) ?? "";
+    if (supersedes({ id: w.id, created_at: w.created_at }, { id: joinId, created_at: req.rumorCreatedAt })) {
+      req.withdrawn = true;
+      req.withdrawalRequestedPurge = w.deleteData;
     }
   }
   const result = [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
