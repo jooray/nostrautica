@@ -324,9 +324,25 @@ export class MarmotAdmin {
     }
     const evaluation = this.mls.evaluateKeyPackage
       ? await this.mls.evaluateKeyPackage(mlsGroupId, kp)
-      : { eligible: await this.mls.isEligible(mlsGroupId, kp), reasons: [] };
-    if (!evaluation.eligible) {
-      this.store.markKpConsumed(coordinate, kp.id); // ineligible (e.g. ciphersuite) → don't re-eval
+      : { eligible: await this.mls.isEligible(mlsGroupId, kp), reasons: [], alreadyMember: member };
+    // "Already a member" is not a refusal — it is the exact condition the branch
+    // below exists to repair, and it must not be treated as one.
+    //
+    // The library computes `eligible: reasons.length === 0` and pushes
+    // "already a member" as a reason, so `member === true` implies
+    // `eligible === false`. This check used to sit ABOVE the re-enrolment branch,
+    // which therefore could never execute in production: a device that lost its
+    // MLS state pressed Rejoin, the add arrived with the stale leaf still present,
+    // and we refused it AND marked the freshly rotated key package consumed. The
+    // user saw "Rejoin requested" and nothing happened; every further press
+    // rotated and burned another key package. The test suite did not catch it
+    // because the fake MLS returned a fixed eligibility with no membership
+    // awareness — it modelled a library that cannot exist.
+    const onlyBecauseMember =
+      evaluation.alreadyMember &&
+      evaluation.reasons.every((r) => r.toLowerCase().includes("already a member"));
+    if (!evaluation.eligible && !onlyBecauseMember) {
+      this.store.markKpConsumed(coordinate, kp.id); // genuinely ineligible (e.g. ciphersuite) → don't re-eval
       const why = evaluation.reasons.length ? `: ${evaluation.reasons.join(", ")}` : "";
       this.log(
         `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible${why}`,

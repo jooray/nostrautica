@@ -47,8 +47,29 @@ class FakeMls implements ChatMls {
   async isEligible(): Promise<boolean> {
     return this.eligible;
   }
-  async evaluateKeyPackage(): Promise<{ eligible: boolean; reasons: string[] }> {
-    return { eligible: this.eligible, reasons: this.eligible ? [] : this.ineligibleReasons };
+  /**
+   * Membership-aware, because the REAL library is
+   * (`packages/vendor/marmot-ts/lib/core/key-package-eligibility.js`): it pushes
+   * "already a member" onto `reasons` whenever the credential pubkey is in the
+   * group, and returns `eligible: reasons.length === 0`. So a member is ALWAYS
+   * ineligible.
+   *
+   * This double used to return a fixed `this.eligible` with no membership
+   * awareness — modelling a library that cannot exist — which is exactly why the
+   * re-enrolment repair could be unreachable in production while its trajectory
+   * test passed. Any future change to the add path is now tested against the
+   * shape the real library actually has.
+   */
+  async evaluateKeyPackage(
+    group: string,
+    kp: AnyEvent,
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }> {
+    const alreadyMember = this.members.get(group)?.has(kp.pubkey) ?? false;
+    const reasons = [
+      ...(alreadyMember ? ["already a member"] : []),
+      ...(this.eligible ? [] : this.ineligibleReasons),
+    ];
+    return { eligible: reasons.length === 0, reasons, alreadyMember };
   }
   async isMember(group: string, pubkey: string): Promise<boolean> {
     return this.members.get(group)?.has(pubkey) ?? false;
@@ -523,6 +544,31 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
     expect(line).toContain("already a member");
     expect(line).toContain("cipher suite 0x0002 ≠ group 0x0001");
     expect(mls.invited).toEqual([]);
+  });
+
+  /**
+   * The mirror image of the re-enrolment repair (2026-09-04 audit): a key package
+   * refused for a REAL reason must still be refused and still be consumed, so we
+   * do not re-evaluate it on every relay replay. Only the "already a member"-only
+   * refusal is special, because that is the condition the repair exists to fix.
+   */
+  it("a genuinely ineligible key package is still refused and still consumed", async () => {
+    const logs: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.eligible = false;
+    mls.ineligibleReasons = ["cipher suite 0x0002 ≠ group 0x0001"];
+    const kp = kpEvent(CHATKEY, "kp-badsuite");
+    const admin = makeAdmin(store, mls, [kp], (m) => logs.push(m));
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.backfillApproved(COORD);
+
+    expect(mls.invited).toEqual([]);
+    expect(store.isKpConsumed(COORD, kp.id)).toBe(true);
+    expect(logs.find((l) => l.includes("ineligible"))).toContain("cipher suite");
   });
 
   it("the 30443 watcher adds an authorized author and ignores an unauthorized one", async () => {

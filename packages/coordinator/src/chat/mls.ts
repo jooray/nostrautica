@@ -41,11 +41,15 @@ export interface ChatMls {
   }): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }>;
   /** Whether a candidate's kind-30443 key package can be added to the group. */
   isEligible(mlsGroupIdHex: string, keyPackageEvent: AnyEvent): Promise<boolean>;
-  /** Eligibility WITH the library's reasons, for logging a refusal that can be acted on. */
+  /**
+   * Eligibility WITH the library's reasons, for logging a refusal that can be
+   * acted on — and with `alreadyMember` surfaced separately, because it is the one
+   * "reason" that is not a refusal at all. See `tryAddKeyPackage`.
+   */
   evaluateKeyPackage?(
     mlsGroupIdHex: string,
     keyPackageEvent: AnyEvent,
-  ): Promise<{ eligible: boolean; reasons: string[] }>;
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }>;
   /** Whether `pubkey` already holds at least one leaf in the group. */
   isMember(mlsGroupIdHex: string, pubkey: string): Promise<boolean>;
   /** Add a candidate from their key package (Add commit + Welcome delivery). */
@@ -161,13 +165,23 @@ export class MarmotClientMls implements ChatMls {
   async evaluateKeyPackage(
     mlsGroupIdHex: string,
     keyPackageEvent: AnyEvent,
-  ): Promise<{ eligible: boolean; reasons: string[] }> {
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }> {
     const group = await this.client.groups.get(mlsGroupIdHex);
     const result = group.evaluateKeyPackage(keyPackageEvent as never) as {
       eligible: boolean;
       reasons?: string[];
+      alreadyMember?: boolean;
     };
-    return { eligible: result.eligible, reasons: result.reasons ?? [] };
+    // The library computes `eligible: reasons.length === 0` and pushes
+    // "already a member" as one of those reasons, so a member is ALWAYS
+    // ineligible. Carrying the flag through separately is what lets the caller
+    // tell "this key package is unusable" from "this device is already in, which
+    // is the very thing we are here to repair."
+    return {
+      eligible: result.eligible,
+      reasons: result.reasons ?? [],
+      alreadyMember: result.alreadyMember ?? false,
+    };
   }
 
   async isMember(mlsGroupIdHex: string, pubkey: string): Promise<boolean> {
