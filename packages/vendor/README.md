@@ -71,3 +71,35 @@ pnpm run build                              # → dist
 ```
 
 Treat every bump as a mini-audit (marmot-ts is alpha; ts-mls is a from-scratch TS MLS).
+
+## Integrity manifest
+
+`INTEGRITY.sha256` records a SHA-256 for every file under both `lib/` directories,
+and `node scripts/vendor-manifest.mjs --check` runs in the release gate.
+
+This does **not** prove the bytes match an upstream build — they cannot, because
+of the carried patches above, and a reproducible vendoring pipeline is a larger
+piece of work. What it does is make a change to these bytes impossible to land
+unnoticed. That gap was worth closing on its own: this is the MLS engine and the
+Marmot layer over it, committed as ~450 files of built output with no source, no
+build step and no lockfile entry — the single most valuable place to hide
+something and the least likely directory to be read in review.
+
+After a deliberate re-vendor:
+
+```sh
+node scripts/vendor-manifest.mjs --write   # then commit INTEGRITY.sha256 with the bump
+```
+
+A `--check` failure in CI is far more likely to be a re-vendor than an attack, but
+the required response is the same either way: read the diff, confirm it is what
+you meant, update the commit pins and carried-patch notes above, then `--write`.
+
+## Outstanding: upstream licence files
+
+Both packages declare `"license": "MIT"` in their `package.json`, but neither
+upstream `LICENSE` file was copied in with the build output, so this repo
+redistributes their code without the notice MIT requires. Copy the real
+`LICENSE` from each upstream repository at the pinned commit — deliberately not
+reconstructed here, because a licence file with guessed copyright holders and
+years is worse than a missing one.

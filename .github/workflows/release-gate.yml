@@ -22,6 +22,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Assert one Node major and no mutable infrastructure tags
         run: node .github/scripts/check-pins.mjs
+      # The vendored MLS/Marmot engine is committed BUILT OUTPUT with no source and
+      # no lockfile entry, so nothing else in this gate looks at those bytes. This
+      # does not prove they match upstream — it makes a change to them impossible to
+      # land without someone deciding to.
+      - name: Assert the vendored crypto has not changed unnoticed
+        run: node scripts/vendor-manifest.mjs --check
 
   build:
     runs-on: ubuntu-latest
