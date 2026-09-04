@@ -74,7 +74,7 @@ import {
   isNewerVersionTag,
   readEventVersionTag,
   NewerProtocolVersionError,
-} from "./schemas.js";
+  MAX_MEDIA_URLS,} from "./schemas.js";
 import type { z } from "zod";
 
 const hex = "a".repeat(64);
@@ -1380,5 +1380,52 @@ describe("hasAiProfileContent — one shared definition of an empty AI profile",
 
   it("translations alone are not content — they restate authored fields, and there were none", () => {
     expect(hasAiProfileContent({ ...empty, translations: { lang: "sk", about: "ahoj" } })).toBe(false);
+  });
+});
+
+/**
+ * Unbounded arrays and unconstrained URL schemes (2026-09-04 audit).
+ *
+ * Every one of these is reachable from an attacker-authored event: the media
+ * descriptor drives the coordinator's serial fetch loop, the profile is
+ * republished in every directory entry and fed to the model, and the event page
+ * is a PUBLIC kind, so the NIP-44 ceiling that incidentally bounds every
+ * ECK-encrypted payload does not apply to it at all.
+ */
+describe("bounds on attacker-influenced arrays and URLs", () => {
+  const descriptor = (over: Record<string, unknown>) => ({
+    kind: "intro",
+    url: ["https://b.example/x"],
+    x: "a".repeat(64),
+    ox: "b".repeat(64),
+    size: 100,
+    m: "video/webm",
+    duration: 30, // required for audio/video media
+    "encryption-algorithm": "aes-gcm",
+    "decryption-key": Buffer.alloc(32).toString("base64"),
+    "decryption-nonce": Buffer.alloc(12).toString("base64"),
+    ...over,
+  });
+
+  it("caps mirror URLs per media descriptor", () => {
+    const many = Array.from({ length: MAX_MEDIA_URLS + 1 }, (_, i) => `https://b.example/${i}`);
+    expect(mediaDescriptorSchema.safeParse(descriptor({ url: many })).success).toBe(false);
+    expect(
+      mediaDescriptorSchema.safeParse(descriptor({ url: many.slice(0, MAX_MEDIA_URLS) })).success,
+    ).toBe(true);
+  });
+
+  it("caps the length of a single mirror URL", () => {
+    const long = "https://b.example/" + "a".repeat(MAX_URL);
+    expect(mediaDescriptorSchema.safeParse(descriptor({ url: [long] })).success).toBe(false);
+  });
+
+  it("rejects non-https schemes in profile links", () => {
+    // zod's `.url()` accepts all three of these; the schema comment has always
+    // claimed to be the https-only boundary, and now it is.
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd"]) {
+      expect(attendeeProfileSchema.safeParse({ links: [bad] }).success).toBe(false);
+    }
+    expect(attendeeProfileSchema.safeParse({ links: ["https://ok.example"] }).success).toBe(true);
   });
 });

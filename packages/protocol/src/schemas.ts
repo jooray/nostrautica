@@ -143,6 +143,16 @@ function httpsUrl(maxLen?: number) {
   }, "must be an https URL");
 }
 
+/** Chars per URL, anywhere one is accepted. */
+export const MAX_URL = 2048;
+/**
+ * Mirror URLs per media descriptor. The coordinator walks these SERIALLY as fetch
+ * fallbacks with a per-attempt timeout, so an uncapped array turned one submission
+ * into an unbounded run of downloads on a strictly serial job worker. Eight is
+ * generous for real mirroring — the app publishes two or three.
+ */
+export const MAX_MEDIA_URLS = 8;
+
 // ── Media descriptor (spec §6.2) ─────────────────────────────────────────────
 // `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an
 // unexpected field is rejected rather than silently ignored. Key/nonce lengths are
@@ -150,7 +160,7 @@ function httpsUrl(maxLen?: number) {
 const mediaDescriptorBase = z
   .object({
     kind: z.enum(["intro", "talk"]),
-    url: z.array(httpsUrl()).min(1),
+    url: z.array(httpsUrl(MAX_URL)).min(1).max(MAX_MEDIA_URLS),
     x: hex32, // sha256 of ciphertext
     ox: hex32, // sha256 of plaintext
     // v2 (NIP §8): a real blob is at least 1 byte — AES-GCM always emits ≥ the
@@ -252,7 +262,6 @@ export const MAX_LOOKING_FOR = 2000;
 export const MAX_SKILLS = 50; // skills array items
 export const MAX_SKILL = 200; // chars per skill
 export const MAX_LINKS = 20; // profile links array items
-export const MAX_URL = 2048; // chars per URL
 export const MAX_INVITE_LABEL = 100;
 export const MAX_INVITES = 10000; // 31601 invites array items
 export const MAX_REASONING = 2000; // per-match reasoning
@@ -275,13 +284,25 @@ export const MAX_TITLE = 300; // members-post title
 export const MAX_POST_BODY = 100_000; // members-post markdown body
 export const MAX_NOTES = 2000; // per-event private note map entries
 export const MAX_NOTE = 5000; // chars per per-event private note
+/** Transcript entries per directory entry — one per media descriptor, plus slack. */
+export const MAX_TRANSCRIPTS = 20;
+/** Sections in a 31608 event page. That kind is PUBLIC, so the NIP-44 ceiling
+ *  that incidentally bounds every ECK-encrypted payload does not apply here. */
+export const MAX_PAGE_SECTIONS = 50;
+/** Pinned naddr refs per event page; each one costs the client a fetch. */
+export const MAX_PINNED_REFS = 50;
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
   about: z.string().max(MAX_ABOUT).default(""),
   skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).default([]),
   looking_for: z.string().max(MAX_LOOKING_FOR).default(""),
-  links: z.array(z.string().url().max(MAX_URL)).max(MAX_LINKS).default([]),
+  // `httpsUrl`, not `z.string().url()`: zod's `.url()` accepts `javascript:`,
+  // `data:` and `file:` (verified against the installed version). The render path
+  // drops non-http(s) today, so this was never a live XSS — but the value is
+  // STORED, republished in every directory entry, and fed to the model, and the
+  // schema comment above claims to be the https-only boundary. Now it is.
+  links: z.array(httpsUrl(MAX_URL)).max(MAX_LINKS).default([]),
 });
 export type AttendeeProfile = z.infer<typeof attendeeProfileSchema>;
 
@@ -700,7 +721,7 @@ export const directoryEntryContentSchema = z
     // Published transcripts (audit A1): the nonvisual consumption path. Each ties
     // to a media blob by `x`; the refine below rejects any that don't reference
     // live media, so a re-record (new `x`) can't surface a stale transcript.
-    transcripts: z.array(mediaTranscriptSchema).optional(),
+    transcripts: z.array(mediaTranscriptSchema).max(MAX_TRANSCRIPTS).optional(),
     // Echoes the authored text intro (spec F1) for display when there's no blob.
     intro_text: z.string().max(MAX_INTRO_TEXT).optional(),
     updated_at: z.number().int(),
@@ -883,7 +904,7 @@ export const postsSectionSchema = z.object({
 });
 export const pinnedSectionSchema = z.object({
   type: z.literal("pinned"),
-  refs: z.array(z.string()), // naddr refs
+  refs: z.array(z.string().max(MAX_URL)).max(MAX_PINNED_REFS), // naddr refs
 });
 export const attendeesSectionSchema = z.object({
   type: z.literal("attendees"), // roster preview — renders only for members
@@ -953,7 +974,7 @@ const pos = z.number().int().nonnegative();
 
 export const eventPagePrivateSchema = z.object({
   v: version,
-  menu: z.array(menuItemSchema.extend({ pos })).default([]),
+  menu: z.array(menuItemSchema.extend({ pos })).max(MAX_PAGE_SECTIONS).default([]),
   sections: z
     .array(
       z.discriminatedUnion("type", [
@@ -962,6 +983,7 @@ export const eventPagePrivateSchema = z.object({
         attendeesSectionSchema.extend({ pos }),
       ]),
     )
+    .max(MAX_PAGE_SECTIONS)
     .default([]),
 });
 export type EventPagePrivate = z.infer<typeof eventPagePrivateSchema>;
