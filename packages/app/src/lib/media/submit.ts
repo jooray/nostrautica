@@ -94,7 +94,12 @@ const TEXTLIB_KEY = "textlib";
  */
 function nextRev(coordinate: string, observed: number | undefined): number {
   const next = revFloor(coordinate, observed) + 1;
-  cacheSet(selfRevKey(coordinate), next, next);
+  // Stamp with the WALL CLOCK, not with `next`. The third argument is the cache's
+  // latest-wins timestamp, and a revision counter is 0, 1, 2… — as a timestamp that
+  // is 1970, so the 30-day prune deleted this high-water mark on the next boot and
+  // reinstated the exact incident the comment above describes. `Math.max` keeps
+  // latest-wins monotonic if two writes land in the same second.
+  cacheSet(selfRevKey(coordinate), next, Math.floor(Date.now() / 1000));
   return next;
 }
 
@@ -107,7 +112,8 @@ function revFloor(coordinate: string, observed: number | undefined): number {
 /** Raise the high-water mark to `rev` without consuming one (a rev already sent). */
 function nextRevFloor(coordinate: string, rev: number): void {
   const floor = revFloor(coordinate, rev);
-  cacheSet(selfRevKey(coordinate), floor, floor);
+  // Same reason as `nextRev`: the counter is not a timestamp.
+  cacheSet(selfRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
 }
 
 /** The cross-event reuse library: recorded intros (`media`) + authored text intros

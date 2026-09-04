@@ -255,14 +255,48 @@ describe("persist hydrate + prune", () => {
     vi.useRealTimers();
   });
 
-  it("pruneCache drops entries older than 30 days", async () => {
+  /**
+   * Eviction runs on `touchedAt` (last use), never on `at` (the source event's
+   * created_at). This test asserted the opposite until 2026-09-04, which is why the
+   * bug survived: most writers stamp `at` with the source event's timestamp, so
+   * pruning on `at` evicted every record of an event configured more than 30 days
+   * before it happened — on every boot, permanently, exactly at the venue where the
+   * cache matters most.
+   */
+  it("pruneCache keeps a current record derived from an OLD event (the 2026-09-04 regression)", async () => {
     __setPersistBackend(memBackend().backend);
     setActiveCacheOwner(A);
-    const nowSec = Math.floor(Date.now() / 1000);
-    cacheSet("fresh", "keep", nowSec);
-    cacheSet("stale", "drop", nowSec - 31 * 24 * 60 * 60);
+    const old = Math.floor(Date.now() / 1000) - 60 * 24 * 60 * 60;
+    // A conference configured two months ago and untouched since: `at` is ancient,
+    // but we are caching it right now, so it must survive.
+    cacheSet("ctx", "keep", old);
+    await pruneCache();
+    expect(cacheGet("ctx")?.data).toBe("keep");
+  });
+
+  it("pruneCache drops entries not touched in 30 days", async () => {
+    vi.useFakeTimers();
+    __setPersistBackend(memBackend().backend);
+    setActiveCacheOwner(A);
+    // Written 31 days ago and never read or rewritten since.
+    vi.setSystemTime(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000));
+    cacheSet("stale", "drop");
+    vi.useRealTimers();
+    cacheSet("fresh", "keep");
     await pruneCache();
     expect(cacheGet("fresh")?.data).toBe("keep");
     expect(cacheGet("stale")).toBeUndefined();
+  });
+
+  it("a read refreshes the eviction clock, so data still in use never ages out", async () => {
+    vi.useFakeTimers();
+    __setPersistBackend(memBackend().backend);
+    setActiveCacheOwner(A);
+    vi.setSystemTime(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000));
+    cacheSet("used", "keep");
+    vi.useRealTimers();
+    expect(cacheGet("used")?.data).toBe("keep"); // touches it
+    await pruneCache();
+    expect(cacheGet("used")?.data).toBe("keep");
   });
 });

@@ -34,11 +34,32 @@
 
 import { cacheHydration } from "./hydration.svelte.js";
 
-/** A stored value: the derived data plus the newest `created_at` it came from. */
+/**
+ * A stored value carrying TWO independent clocks, which is the whole point:
+ *
+ * - `at` is the newest `created_at` the data was derived from. It drives
+ *   latest-wins and must stay tied to the source event.
+ * - `touchedAt` is wall-clock seconds at the last write or read. It drives
+ *   eviction, and nothing else may.
+ *
+ * They were one field until 2026-09-04, and conflating them silently disabled the
+ * cache for the data it exists to serve: most writers stamp `at` with the source
+ * event's timestamp (see event-context.ts, attendee.ts, social.ts), so an event
+ * configured two months before it happens looked 60 days stale the moment it was
+ * cached, and the 30-day prune deleted its context, roster, directory and every
+ * profile on the next boot. Forever, because the next boot re-fetched and
+ * re-stamped them with the same old `created_at`.
+ *
+ * `touchedAt` is optional only for entries written by a pre-split build; those are
+ * treated as freshly touched rather than as ancient (see {@link pruneCache}).
+ */
 export interface CacheEntry<T = unknown> {
   at: number;
+  touchedAt?: number;
   data: T;
 }
+
+const nowSec = (): number => Math.floor(Date.now() / 1000);
 
 /** Public scope for data that isn't decrypted with user/event keys. */
 export const ANON = "anon";
@@ -268,6 +289,10 @@ export function hydrateAppCache(): Promise<void> {
       for (const [k, v] of all) {
         if (!v || typeof v.at !== "number") continue;
         if (wiped && !k.startsWith(anonPrefix)) continue;
+        // Backfill the eviction clock for entries written by a pre-split build, so
+        // the first boot after the upgrade doesn't evict a warm cache on the very
+        // `at` semantics the split exists to stop using.
+        if (typeof v.touchedAt !== "number") v.touchedAt = nowSec();
         mirror.set(k, v);
       }
     })()
@@ -288,7 +313,14 @@ export function hydrateAppCache(): Promise<void> {
 export function cacheGet<T>(key: string, scope?: string): CacheEntry<T> | undefined {
   const s = resolveScope(scope);
   if (s === null) return undefined;
-  return mirror.get(compositeKey(s, key)) as CacheEntry<T> | undefined;
+  const entry = mirror.get(compositeKey(s, key)) as CacheEntry<T> | undefined;
+  // Touch on read, in the MIRROR ONLY. An entry the app keeps reading is live and
+  // must not age out, but this is a hot path — persisting here would put an IDB
+  // write behind every cache read. The value reaches disk on the next `cacheSet`,
+  // which SWR performs on every revalidation, so anything genuinely in use is
+  // re-stamped on disk soon enough.
+  if (entry) entry.touchedAt = nowSec();
+  return entry;
 }
 
 /**
@@ -315,7 +347,7 @@ export function cacheSet<T>(
   const stamp = at ?? Math.floor(Date.now() / 1000);
   const existing = mirror.get(ck);
   if (existing && existing.at > stamp) return; // never overwrite newer with older
-  const entry: CacheEntry<T> = { at: stamp, data };
+  const entry: CacheEntry<T> = { at: stamp, touchedAt: nowSec(), data };
   mirror.set(ck, entry);
   void backend?.put(ck, entry as CacheEntry).catch(() => {
     /* best-effort persistence; the mirror is authoritative for this session */
@@ -358,9 +390,13 @@ export function clearOwnerCache(owner: string): void {
  * their own modules.
  */
 export async function pruneCache(): Promise<void> {
-  const cutoff = Math.floor(Date.now() / 1000) - 30 * 24 * 60 * 60;
+  const cutoff = nowSec() - 30 * 24 * 60 * 60;
   const keys: string[] = [];
-  for (const [k, v] of mirror) if (v.at < cutoff) keys.push(k);
+  // `touchedAt`, never `at`: `at` is the source event's timestamp, so pruning on it
+  // evicts a current record merely because the organizer published it a while ago.
+  // A missing `touchedAt` (pre-split entry that hydration somehow didn't backfill)
+  // means "no eviction evidence" and is kept, not deleted.
+  for (const [k, v] of mirror) if ((v.touchedAt ?? nowSec()) < cutoff) keys.push(k);
   for (const k of keys) mirror.delete(k);
   if (backend) await backend.delete(keys).catch(() => {});
 }
