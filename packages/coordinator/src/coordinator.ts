@@ -3819,7 +3819,16 @@ export class Coordinator {
     // Self-heal: additively fold the Whitenoise relays into the group's own
     // routing state, even for a group that already existed before this was
     // added — a no-op once they're present, so safe to run on every install.
-await this.marmot.ensureRelays(state.coordinate, chatInteropRelays(state.configRelays));
+    // The group's OWN routing relays, not just the interop pair. This used to pass
+    // `chatInteropRelays(...)` alone, so the event's own relays never reached the
+    // group's routing state after `createGroup` baked them in — and an organizer who
+    // later edited the event's relays ended up with 445 traffic still routed to the
+    // OLD set while ingest and the 30443 watcher listened on the NEW one
+    // (`chatRelaysFor`, used by subscribeChat). The coordinator's own commits were
+    // published where it could not see them, and once the removed relay went away
+    // the room split silently. `ensureRelays` is additive and idempotent — it was
+    // simply being handed the wrong list.
+    await this.marmot.ensureRelays(state.coordinate, chatRelaysFor(state));
     await this.marmot.backfillApproved(state.coordinate);
     this.subscribeChat(state);
   }
@@ -4526,6 +4535,12 @@ await this.marmot.ensureRelays(state.coordinate, chatInteropRelays(state.configR
     if (this.marmot && prev.chat !== state.chat) {
       if (state.chat) await this.ensureChat(state);
       else this.marmot.freeze(coordinate);
+    } else if (this.marmot && state.chat && relayChanged) {
+      // A relay edit with chat already on used to reach everything EXCEPT the
+      // group's routing state, because this branch only fired on the chat toggle.
+      // Additive and idempotent, so re-running it is free; without it the group
+      // keeps routing to relays the coordinator has stopped listening on.
+      await this.marmot.ensureRelays(coordinate, chatRelaysFor(state));
     }
     // The caller runs the relay handover (outside the lock) for the recorded candidate.
     return relayChanged ? candidateRelays : undefined;
