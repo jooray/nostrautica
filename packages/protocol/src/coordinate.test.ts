@@ -197,6 +197,32 @@ describe("event config (kind 31600)", () => {
     expect(parseEventConfig(pubkey, cleared.tags).retentionDays).toBeUndefined();
   });
 
+  it("treats a blank int tag as absent, not as zero", () => {
+    // `Number("")` is 0, so a blank tag value used to parse as the NUMBER zero.
+    // For max_video_sec/max_talk_sec zero is the UNLIMITED_SEC sentinel, which
+    // inverts the meaning completely: `["max_video_sec", ""]` from a buggy
+    // publisher removed the 90-second intro cap instead of falling back to it,
+    // and the recorder then offered unlimited recording on an event whose
+    // organizer never asked for one.
+    const base = [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)]];
+    for (const blank of ["", " ", "\t"]) {
+      const cfg = parseEventConfig(pubkey, [
+        ...base,
+        ["max_video_sec", blank],
+        ["max_talk_sec", blank],
+        ["nostr_context", blank],
+      ]);
+      expect(cfg.maxVideoSec).toBe(90);
+      expect(cfg.maxTalkSec).toBe(900);
+      expect(cfg.nostrContext).toBe(0); // 0 IS this tag's default — unchanged
+    }
+    // An EXPLICIT "0" still means unlimited: only blank is treated as absent.
+    const unlimited = parseEventConfig(pubkey, [...base, ["max_video_sec", "0"]]);
+    expect(unlimited.maxVideoSec).toBe(UNLIMITED_SEC);
+    // And a real value still parses.
+    expect(parseEventConfig(pubkey, [...base, ["max_video_sec", "30"]]).maxVideoSec).toBe(30);
+  });
+
   it("omits the chat tag when off (default) but round-trips marmot", () => {
     const base = {
       d: "ev",

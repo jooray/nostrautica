@@ -47,6 +47,7 @@ import {
   MAX_LINKS,
   MAX_URL,
   MAX_INVITE_LABEL,
+  MAX_ADMIN_ARGS,
   MAX_INVITES,
   MAX_REASONING,
   MAX_MATCHES,
@@ -1451,5 +1452,94 @@ describe("MAX_MEDIA_FILE_BYTES is the single media ceiling", () => {
     // The coordinator allows 500 MiB across up to 4 descriptors, so a single file
     // at the ceiling must not already exceed the aggregate.
     expect(MAX_MEDIA_FILE_BYTES).toBeLessThan(500 * 1024 * 1024);
+  });
+});
+
+/**
+ * Bounds and scheme checks that had drifted apart from their own siblings
+ * (2026-09-04 audit). Each of these was the ONE field in its schema that took a
+ * looser type than the field next to it.
+ */
+describe("field bounds parity with sibling fields", () => {
+  const hex = "a".repeat(64);
+  const b64_32 = "A".repeat(43) + "=";
+  const coord = "31923:" + hex + ":ev";
+  const organizerGrant = (a: string) => ({
+    v: 2,
+    a,
+    eid_nsec: hex,
+    einbox_nsec: hex,
+    eck: [{ id: 1, key: b64_32 }],
+    config_relays: [],
+    granted_by: hex,
+  });
+
+  it("21605 organizer grant requires a canonical 31923 coordinate (R18)", () => {
+    // 21602 and 21603 already used `eventCoordinate`; 21605 took a plain string
+    // while granting strictly MORE than either — full E_id custody, the E_inbox
+    // secret and every ECK. An alias kind against the same author (`1:<E_id>:<d>`)
+    // opens a second namespace for the same event whose custody and revocation
+    // state are tracked separately from the real one.
+    expect(organizerGrantContentSchema.parse(organizerGrant(coord)).a).toBe(coord);
+    for (const bad of ["1:" + hex + ":ev", "31600:" + hex + ":ev", "not-a-coordinate", hex]) {
+      expect(organizerGrantContentSchema.safeParse(organizerGrant(bad)).success).toBe(false);
+    }
+  });
+
+  it("21604 admin command args are bounded in key count", () => {
+    // `args` is stored durably in the ordered-ops table (§3.4 retention), so an
+    // unbounded record let one command write an arbitrarily wide row forever.
+    const cmd = (args: Record<string, unknown>) => ({
+      v: 2,
+      a: coord,
+      cmd: "approve" as const,
+      args,
+      expires: 2_000_000_000,
+    });
+    const wide = Object.fromEntries(
+      Array.from({ length: MAX_ADMIN_ARGS + 1 }, (_, i) => [`k${i}`, i]),
+    );
+    expect(adminCommandContentSchema.safeParse(cmd(wide)).success).toBe(false);
+    const atLimit = Object.fromEntries(
+      Array.from({ length: MAX_ADMIN_ARGS }, (_, i) => [`k${i}`, i]),
+    );
+    expect(adminCommandContentSchema.safeParse(cmd(atLimit)).success).toBe(true);
+    // The real shape (two keys) is unaffected, as is the default.
+    expect(adminCommandContentSchema.safeParse(cmd({ pubkey: hex, talk_d: "t1" })).success).toBe(
+      true,
+    );
+    expect(
+      adminCommandContentSchema.parse({ v: 2, a: coord, cmd: "recompute", expires: 1 }).args,
+    ).toEqual({});
+  });
+
+  it("31607 members-post `image` is https-only, like every other URL field", () => {
+    const post = (image: string) => ({
+      v: 2,
+      title: "t",
+      image,
+      published_at: 1,
+      content: "body",
+    });
+    expect(membersPostContentSchema.safeParse(post("https://cdn.example/x.png")).success).toBe(true);
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "http://cdn.example/x.png", "x"]) {
+      expect(membersPostContentSchema.safeParse(post(bad)).success).toBe(false);
+    }
+    // Still optional — a post with no header image parses.
+    expect(
+      membersPostContentSchema.safeParse({ v: 2, title: "t", published_at: 1, content: "b" })
+        .success,
+    ).toBe(true);
+  });
+
+  it("31611 announcement `picture` is https-only, like its checkout_url/terms_url siblings", () => {
+    const announce = (picture: string) => ({ v: 2, name: "coord", picture });
+    expect(coordinatorAnnounceSchema.safeParse(announce("https://x.example/a.png")).success).toBe(
+      true,
+    );
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "http://x.example/a.png"]) {
+      expect(coordinatorAnnounceSchema.safeParse(announce(bad)).success).toBe(false);
+    }
+    expect(coordinatorAnnounceSchema.safeParse({ v: 2, name: "coord" }).success).toBe(true);
   });
 });

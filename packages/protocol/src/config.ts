@@ -246,6 +246,14 @@ const TALKS_MODES: TalksMode[] = ["off", "on", "prerecord-first"];
 function intTag(tags: string[][], name: string, def: number): number {
   const raw = first(tags, name);
   if (raw === undefined) return def;
+  // `Number("")` is 0, and `Number("  ")` is 0 too — so a blank tag value used to
+  // parse as the number zero rather than as "no usable value". For the two tags
+  // where 0 is the UNLIMITED_SEC sentinel that inverted the meaning completely:
+  // `["max_video_sec", ""]` from a buggy publisher removed the 90-second intro cap
+  // instead of falling back to it, and the recorder UI then offered unlimited
+  // recording on an event whose organizer never asked for it. A blank value is
+  // absent, not zero.
+  if (raw.trim() === "") return def;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : def;
 }

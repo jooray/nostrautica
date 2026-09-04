@@ -49,12 +49,26 @@ export async function encryptMedia(
 
 /**
  * Decrypt a media blob given its descriptor and the fetched ciphertext.
- * Verifies the ciphertext hash (`x`) and, after decryption, the plaintext hash (`ox`).
+ * Verifies the declared `size`, the ciphertext hash (`x`) and, after decryption,
+ * the plaintext hash (`ox`).
  */
 export async function decryptMedia(
   descriptor: MediaDescriptor,
   ciphertext: Uint8Array,
 ): Promise<Uint8Array> {
+  // NIP §8 makes `size` part of what a consumer verifies, and it was the one
+  // declared field nothing checked. It is what the fetch side budgets against —
+  // the coordinator screens a submission on the DECLARED size before spending a
+  // download, and the app's playback precheck does the same — so a descriptor
+  // declaring 1 MiB and serving 200 MiB was caught only by the transfer cap,
+  // after the bytes were paid for. Checking it here also makes the mismatch a
+  // media-policy error instead of the "sha256 mismatch" it would otherwise
+  // surface as, which reads like corruption rather than a lying descriptor.
+  if (ciphertext.length !== descriptor.size) {
+    throw new Error(
+      `ciphertext is ${ciphertext.length} bytes, descriptor declares ${descriptor.size} (size)`,
+    );
+  }
   if (sha256Hex(ciphertext) !== descriptor.x) {
     throw new Error("ciphertext sha256 mismatch (x)");
   }

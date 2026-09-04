@@ -530,6 +530,19 @@ export type CoordinatorGrantContent = z.infer<
  *  issued, so an old revoke/recompute can never re-execute from a backfill/restore. */
 export const ADMIN_COMMAND_TTL_SEC = 172_800; // 48 hours
 
+/**
+ * Key ceiling on an admin command's `args` (bounds tightening).
+ *
+ * `args` is a free-form bag because the seven commands take different shapes, but
+ * it is DURABLE: `handleAdmin` records the operation (args included) in the
+ * ordered-ops table, retained per §3.4 so an old command can never re-execute.
+ * An unbounded `z.record` meant one 21604 could write an arbitrarily wide object
+ * into that table forever. No real command uses more than two keys
+ * (`{ pubkey, talk_d }`); twelve leaves room for several rounds of additive
+ * fields without ever making the row a storage-amplification target.
+ */
+export const MAX_ADMIN_ARGS = 12;
+
 export const adminCommandContentSchema = z.object({
   v: version,
   a: z.string(),
@@ -537,7 +550,10 @@ export const adminCommandContentSchema = z.object({
   // carry { pubkey, talk_d }. `detach` (NIP §3.5) uninstalls the coordinator from
   // the event (no args) with the same effects as a config-based detach.
   cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject", "detach"]),
-  args: z.record(z.unknown()).default({}),
+  args: z
+    .record(z.unknown())
+    .refine((o) => Object.keys(o).length <= MAX_ADMIN_ARGS, `at most ${MAX_ADMIN_ARGS} args`)
+    .default({}),
   // Replay horizon (NIP §3.4, required): unix seconds after which the command is
   // void. The coordinator skips an expired command on live delivery AND on backfill.
   expires: z.number().int(),
@@ -678,8 +694,15 @@ export type WithdrawalContent = z.infer<typeof withdrawalContentSchema>;
 
 // ── 21605 Organizer Grant rumor content (co-organizer, full key custody) ─────
 export const organizerGrantContentSchema = z.object({
+  // 31923 event coordinate (audit R18), for the same reason 21602/21603 use it —
+  // and more urgently. A 21605 hands over STRICTLY MORE than either of those: full
+  // E_id custody, the E_inbox secret, and every ECK version. An alias kind
+  // (`1:<E_id>:<d>`) parsed as a plain string would let the same author address a
+  // second, divergent namespace for the same event — one whose per-coordinate
+  // accounting, key custody and revocation state are tracked separately from the
+  // real one — off a grant that looks legitimate at every other check.
   v: version,
-  a: z.string(), // coordinate
+  a: eventCoordinate,
   eid_nsec: secretKeyHex, // E_id secret (hex) — lets a co-organizer edit the event
   einbox_nsec: secretKeyHex, // E_inbox secret (hex) — read submissions + approve
   eck: z.array(eckVersionSchema),
@@ -899,7 +922,11 @@ export const membersPostContentSchema = z.object({
   v: version,
   title: z.string().max(MAX_TITLE),
   summary: z.string().max(MAX_MESSAGE).optional(),
-  image: z.string().max(MAX_URL).optional(),
+  // https-only, like every other URL field (C3 / APPR-1). A members post is rendered
+  // as markdown with this as its header image, so a bare `z.string()` accepted
+  // `javascript:` and `data:` here while the sibling `links`/media URLs on the very
+  // same screen were scheme-checked at the boundary.
+  image: httpsUrl(MAX_URL).optional(),
   published_at: z.number().int(),
   author: hex32.optional(),
   content: z.string().max(MAX_POST_BODY), // markdown
@@ -1138,7 +1165,10 @@ export const coordinatorAnnounceSchema = z.object({
   v: version,
   name: z.string().min(1).max(120),
   about: z.string().max(2000).optional(),
-  picture: z.string().max(2048).optional(),
+  // https-only, matching `checkout_url`/`terms_url` on this same announcement: the
+  // discovery UI renders it as the coordinator's avatar next to those links, and a
+  // 31611 is read from ANY relay before its author is trusted for anything.
+  picture: httpsUrl(2048).optional(),
   operator: z.string().max(200).optional(),
   relays: z.array(z.string()).max(MAX_RELAYS).default([]),
   features: z

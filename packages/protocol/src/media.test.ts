@@ -64,6 +64,34 @@ describe("media descriptor + AES-GCM (spec §6.2)", () => {
     await expect(decryptMedia(descriptor, ciphertext)).rejects.toThrow(/x/);
   });
 
+  it("rejects a ciphertext whose length does not match the declared size (NIP §8)", async () => {
+    // `size` is what the FETCH side budgets against — the coordinator screens a
+    // submission on the declared size before spending a download and the app's
+    // playback precheck does the same — but decryptMedia verified only `x` and
+    // `ox`. A descriptor that declares 3 bytes and serves 200 MiB was therefore
+    // caught only by the transfer cap, after the bytes were paid for, and then
+    // surfaced as "sha256 mismatch", which reads like corruption rather than a
+    // lying descriptor.
+    const { ciphertext, descriptor } = await encryptMedia({
+      kind: "intro",
+      data: new Uint8Array([1, 2, 3]),
+      mime: "video/webm",
+      duration: 3,
+      urls: [sampleUrl],
+    });
+    const oversized = new Uint8Array(ciphertext.length + 16);
+    oversized.set(ciphertext);
+    await expect(decryptMedia(descriptor, oversized)).rejects.toThrow(/size/);
+    // Understated the other way (truncated blob) is rejected the same way.
+    await expect(decryptMedia(descriptor, ciphertext.slice(0, -1))).rejects.toThrow(/size/);
+    // A descriptor that LIES about its own size fails even with the right blob.
+    await expect(
+      decryptMedia({ ...descriptor, size: 1 }, ciphertext),
+    ).rejects.toThrow(/descriptor declares 1/);
+    // The honest pair still decrypts.
+    expect(await decryptMedia(descriptor, ciphertext)).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
   it("fresh copy re-keys into a different blob hash (spec §6.2)", async () => {
     const data = crypto.getRandomValues(new Uint8Array(1024));
     const orig = await encryptMedia({
