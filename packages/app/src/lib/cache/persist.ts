@@ -250,6 +250,126 @@ export function cacheGeneration(): number {
   return generation;
 }
 
+// ── Size budget + quota reporting ────────────────────────────────────────────
+
+/**
+ * Why this exists at all (2026-09-04): the IDB put was `.catch(() => {})`, and
+ * the ONE error it is guaranteed to see eventually is `QuotaExceededError`. Once
+ * a heavy user's origin quota filled, every write failed silently while the
+ * in-memory mirror kept happily reporting the data as cached — so the app
+ * behaved perfectly all session and started stone cold on every subsequent boot,
+ * forever, with nothing logged anywhere. `pruneCache` could not dig them out
+ * either: it was age-only, so a cache full of entries touched this week was
+ * exactly as unprunable as it was unwritable.
+ *
+ * The budget is deliberately coarse. Origin quota is a browser-decided fraction
+ * of free disk that this code cannot query cheaply or portably, so the cap is a
+ * self-imposed ceiling well under any plausible allowance — the point is to stop
+ * unbounded growth, not to track the real limit.
+ */
+let MAX_CACHE_ENTRIES = 4_000;
+let MAX_CACHE_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Approximate serialized size per entry, memoized on the entry OBJECT (a
+ * WeakMap, so nothing is persisted and a replaced entry's measurement is
+ * collected with it). `JSON.stringify` on a hot write path would be absurd; the
+ * measurement happens once per stored value and is reused by every later budget
+ * pass.
+ */
+const entryBytes = new WeakMap<CacheEntry, number>();
+
+function approxBytes(entry: CacheEntry): number {
+  const known = entryBytes.get(entry);
+  if (known !== undefined) return known;
+  let n = 0;
+  try {
+    n = JSON.stringify(entry.data)?.length ?? 0;
+  } catch {
+    // Circular or non-serializable: it can't reach IDB either, so it costs
+    // nothing on disk. Count a nominal size so it still ages out normally.
+    n = 0;
+  }
+  n += 96; // composite key + envelope + IDB record overhead, roughly
+  entryBytes.set(entry, n);
+  return n;
+}
+
+/** Running approximation of the mirror's on-disk cost; re-derived on each pass. */
+let mirrorBytes = 0;
+
+function recountMirrorBytes(): number {
+  let total = 0;
+  for (const v of mirror.values()) total += approxBytes(v);
+  mirrorBytes = total;
+  return total;
+}
+
+/**
+ * True when persistence is known to be failing — the browser refused a write for
+ * lack of space. The mirror still answers reads for THIS session, so the app is
+ * not broken; the next boot is simply cold. Exposed so a caller can say so
+ * rather than leaving the user with an app that is mysteriously slow every
+ * morning.
+ */
+let quotaExceeded = false;
+
+export function cachePersistenceDegraded(): boolean {
+  return quotaExceeded;
+}
+
+/** Entry/byte counts for diagnostics (and for the eviction tests). */
+export function cacheStats(): { entries: number; bytes: number; quotaExceeded: boolean } {
+  return { entries: mirror.size, bytes: recountMirrorBytes(), quotaExceeded };
+}
+
+function isQuotaError(err: unknown): boolean {
+  const e = err as { name?: unknown; code?: unknown } | null;
+  // Firefox uses the legacy `NS_ERROR_DOM_QUOTA_REACHED` name; DOMException code
+  // 22 is the pre-name spelling still emitted by older Safari.
+  return (
+    !!e &&
+    (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED" || e.code === 22)
+  );
+}
+
+/**
+ * Drop least-recently-USED entries until the mirror is inside the budget, and
+ * mirror the deletions to disk. `touchedAt` is the eviction clock (never `at` —
+ * see the CacheEntry docs), so what goes first is what nothing has read or
+ * rewritten for the longest, which is exactly the data whose absence costs the
+ * least. Returns how many entries were evicted.
+ */
+function enforceCacheBudget(): number {
+  let bytes = recountMirrorBytes();
+  if (mirror.size <= MAX_CACHE_ENTRIES && bytes <= MAX_CACHE_BYTES) return 0;
+  const byAge = [...mirror.entries()].sort(
+    (a, b) => (a[1].touchedAt ?? 0) - (b[1].touchedAt ?? 0),
+  );
+  const evicted: string[] = [];
+  for (const [k, v] of byAge) {
+    if (mirror.size - evicted.length <= MAX_CACHE_ENTRIES && bytes <= MAX_CACHE_BYTES) break;
+    evicted.push(k);
+    bytes -= approxBytes(v);
+  }
+  for (const k of evicted) mirror.delete(k);
+  mirrorBytes = bytes;
+  if (evicted.length && backend) void backend.delete(evicted).catch(() => {});
+  return evicted.length;
+}
+
+/** Coalesce budget passes so a write burst schedules at most one sweep. */
+let budgetScheduled = false;
+
+function scheduleBudgetCheck(): void {
+  if (budgetScheduled) return;
+  budgetScheduled = true;
+  scheduleIdle(() => {
+    budgetScheduled = false;
+    enforceCacheBudget();
+  });
+}
+
 /**
  * One bulk read at boot to fill the synchronous mirror. Bounded (§1.1): resolves
  * after 1500 ms even if IDB is slow/broken — the mirror simply stays (partly)
@@ -264,19 +384,31 @@ export function hydrateAppCache(): Promise<void> {
   const startGen = generation;
   hydrating = new Promise<void>((resolve) => {
     let settled = false;
-    const done = () => {
+    /**
+     * Unblock BOOT. Deliberately separate from the wake-up signal below, which
+     * is not one-shot.
+     */
+    const settleBoot = () => {
       if (settled) return;
       settled = true;
       hydrated = true;
       hydrating = null;
-      // Wake cache-backed pages so they re-read the now-warm mirror (§7.4.5).
-      // Boot no longer awaits this, so the signal is how pages get their
-      // cache-paint after rendering immediately.
-      cacheHydration.markHydrated();
       resolve();
     };
-    // Bound: never let a slow/broken IDB block boot.
-    const timer = setTimeout(done, 1500);
+    // Bound: never let a slow/broken IDB block boot. The bound fires exactly on
+    // the devices this cache matters most for (old phones, contended storage) —
+    // and until 2026-09-04 firing it LOST the wake-up: `done()` marked hydrated,
+    // short-circuited on `settled`, and the real getAll then filled the mirror
+    // with nobody left to tell. Pages that had already snapshotted the cold
+    // mirror never re-read it, so the cache sat fully populated and completely
+    // unused for that entire boot — the worst of both worlds, since it had
+    // already cost the 1.5 s. `markHydrated()` is therefore called on BOTH
+    // paths: once when boot gives up waiting, and again when the data actually
+    // lands, because `cacheHydration.version` is what pages watch.
+    const timer = setTimeout(() => {
+      settleBoot();
+      cacheHydration.markHydrated();
+    }, 1500);
     (async () => {
       if (!backend) return;
       const all = await backend.getAll();
@@ -295,13 +427,17 @@ export function hydrateAppCache(): Promise<void> {
         if (typeof v.touchedAt !== "number") v.touchedAt = nowSec();
         mirror.set(k, v);
       }
+      recountMirrorBytes();
     })()
       .catch(() => {
         /* IDB unavailable — mirror stays empty, app degrades to no-cache */
       })
       .finally(() => {
         clearTimeout(timer);
-        done();
+        settleBoot();
+        // ALWAYS bump, even when the 1500 ms bound already marked boot hydrated:
+        // that earlier signal described a mirror that was still cold.
+        cacheHydration.markHydrated();
         // Opportunistic prune once hydrated (idle; never blocks boot).
         scheduleIdle(() => void pruneCache());
       });
@@ -349,8 +485,33 @@ export function cacheSet<T>(
   if (existing && existing.at > stamp) return; // never overwrite newer with older
   const entry: CacheEntry<T> = { at: stamp, touchedAt: nowSec(), data };
   mirror.set(ck, entry);
-  void backend?.put(ck, entry as CacheEntry).catch(() => {
-    /* best-effort persistence; the mirror is authoritative for this session */
+  mirrorBytes += approxBytes(entry) - (existing ? approxBytes(existing) : 0);
+  if (mirror.size > MAX_CACHE_ENTRIES || mirrorBytes > MAX_CACHE_BYTES) scheduleBudgetCheck();
+  void backend?.put(ck, entry as CacheEntry).catch((err: unknown) => {
+    // Best-effort persistence — the mirror is authoritative for this session —
+    // but a QUOTA failure is not a transient blip to swallow: it means every
+    // later write fails too and every future boot is cold. Say so once, and free
+    // space so the next write has somewhere to go.
+    if (!isQuotaError(err)) return;
+    if (!quotaExceeded) {
+      quotaExceeded = true;
+      console.warn(
+        "[cache] IndexedDB is out of space: this session still reads from memory, " +
+          "but nothing new is being persisted. Evicting least-recently-used entries.",
+      );
+    }
+    if (enforceCacheBudget() === 0) {
+      // Nothing left to evict at our own ceiling — the pressure is elsewhere in
+      // the origin (Blossom blobs, the outbox, the keystore). Force a pass by
+      // dropping the oldest tenth so the app is not permanently write-dead.
+      const byAge = [...mirror.entries()].sort(
+        (a, b) => (a[1].touchedAt ?? 0) - (b[1].touchedAt ?? 0),
+      );
+      const drop = byAge.slice(0, Math.ceil(byAge.length / 10)).map(([k]) => k);
+      for (const k of drop) mirror.delete(k);
+      recountMirrorBytes();
+      if (drop.length && backend) void backend.delete(drop).catch(() => {});
+    }
   });
 }
 
@@ -359,6 +520,8 @@ export function cacheDelete(key: string, scope?: string): void {
   const s = resolveScope(scope);
   if (s === null) return;
   const ck = compositeKey(s, key);
+  const existing = mirror.get(ck);
+  if (existing) mirrorBytes -= approxBytes(existing);
   mirror.delete(ck);
   void backend?.delete([ck]).catch(() => {});
 }
@@ -376,6 +539,7 @@ export function clearOwnerCache(owner: string): void {
   const keys: string[] = [];
   for (const k of mirror.keys()) if (k.startsWith(prefix)) keys.push(k);
   for (const k of keys) mirror.delete(k);
+  recountMirrorBytes();
   // Delete by owner-prefix RANGE in one transaction (H-5): this removes keys
   // another tab wrote that never entered this tab's mirror, closing the leak
   // where a second tab's decrypted copy survived the first tab's logout. Fall
@@ -399,6 +563,11 @@ export async function pruneCache(): Promise<void> {
   for (const [k, v] of mirror) if ((v.touchedAt ?? nowSec()) < cutoff) keys.push(k);
   for (const k of keys) mirror.delete(k);
   if (backend) await backend.delete(keys).catch(() => {});
+  // Age alone is not a bound. A heavy user reads everything they store, so
+  // nothing ever gets old enough to prune and the store grows until the browser
+  // starts refusing writes — silently, since the mirror keeps answering. The
+  // size budget is what actually caps it (LRU by `touchedAt`).
+  enforceCacheBudget();
 }
 
 /** Run `fn` when the browser is idle, or soon (test/SSR-safe fallback). */
@@ -416,4 +585,21 @@ export function __resetPersistForTests(): void {
   hydrating = null;
   activeOwner = null;
   generation = 0;
+  mirrorBytes = 0;
+  quotaExceeded = false;
+  budgetScheduled = false;
+}
+
+/** Test-only: run the LRU size pass synchronously. Returns entries evicted. */
+export function __enforceCacheBudgetForTests(): number {
+  return enforceCacheBudget();
+}
+
+/**
+ * Test-only: shrink the budget so eviction can be exercised without allocating
+ * eight megabytes of fixture. Pass nothing to restore the production ceiling.
+ */
+export function __setCacheBudgetForTests(limits?: { entries?: number; bytes?: number }): void {
+  MAX_CACHE_ENTRIES = limits?.entries ?? 4_000;
+  MAX_CACHE_BYTES = limits?.bytes ?? 8 * 1024 * 1024;
 }
