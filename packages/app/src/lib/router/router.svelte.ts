@@ -148,9 +148,20 @@ export class Router {
         // Back button and the system Back ping-pong between two pages (UX-8).
         this.stack.pop();
       } else {
-        // Push the screen we're leaving (cap the depth, avoid immediate dupes).
-        this.stack.push(this.route);
-        if (this.stack.length > 50) this.stack.shift();
+        // Push the screen we're leaving — capped in depth, and skipping an
+        // IMMEDIATE DUPE. This comment claimed the dedupe for a long time before
+        // the code did it; it does it now. Two consecutive entries naming the
+        // same screen are what makes a later `back()` pop a target identical to
+        // the screen the user is already on, which navigates nowhere. The
+        // reachable route to that state was the latched `goingBack` flag (see
+        // navigateBack), so this is now belt-and-braces rather than the primary
+        // guard — but a stack that can't hold `[A, A]` can't produce a dead Back
+        // button no matter how the flag behaves.
+        const departing = this.route;
+        if (top === undefined || buildHash(top) !== buildHash(departing)) {
+          this.stack.push(departing);
+          if (this.stack.length > 50) this.stack.shift();
+        }
       }
     }
     // Perf baseline (§1.3): page cache-paint/network-settled deltas measure from
@@ -183,6 +194,27 @@ export class Router {
     const target = parentOf(this.route, this.eventOrigin) ?? { name: "home" as const };
     const top = this.stack[this.stack.length - 1];
     if (top !== undefined && buildHash(top) === buildHash(target)) this.stack.pop();
+    this.navigateBack(target);
+  }
+
+  /**
+   * Navigate "backwards" — the one place `goingBack` is latched, so it can never
+   * be latched for a navigation that won't happen.
+   *
+   * Assigning `location.hash` the value it already holds fires NO `hashchange`,
+   * so `sync()` never runs and never consumes the flag. It then stays true for
+   * the rest of the session and the next genuine FORWARD navigation is
+   * mis-classified as a back: the screen being left is not pushed, so in-app
+   * Back skips a level from then on. The trivially reachable case is the top-bar
+   * up button on Home — `parentOf(home)` is null, so the target is Home, which
+   * is where we already are.
+   */
+  private navigateBack(target: Route): void {
+    if (buildHash(target) === buildHash(this.route)) {
+      // Already on the target: nothing to navigate to, and nothing to latch.
+      this.goingBack = false;
+      return;
+    }
     this.goingBack = true;
     this.go(target);
   }
@@ -194,10 +226,22 @@ export class Router {
    * app). The visible top-bar button uses `up()` instead (see above).
    */
   back(): void {
-    const prev = this.stack.pop();
+    // Skip stack entries that name the screen we're already on. A stale duplicate
+    // (or a hash we arrived at by another route) would otherwise make Back a
+    // no-op that LOOKS broken — the user taps, nothing moves, and the entry is
+    // spent. Unwinding to the first genuinely different screen is what the user
+    // meant by "back".
+    const currentHash = buildHash(this.route);
+    let prev: Route | undefined;
+    while (this.stack.length > 0) {
+      const candidate = this.stack.pop() as Route;
+      if (buildHash(candidate) !== currentHash) {
+        prev = candidate;
+        break;
+      }
+    }
     const target = prev ?? parentOf(this.route, this.eventOrigin) ?? { name: "home" as const };
-    this.goingBack = true;
-    this.go(target);
+    this.navigateBack(target);
   }
 }
 

@@ -398,6 +398,35 @@
       </button>
     </div>
   {/if}
+  <!-- A persisted session that could not be brought back. Without this the user
+       simply appeared logged out, and the only route forward the UI offered was
+       a fresh QR pairing — a new client key and a new approval in the signer —
+       for a session that usually works on the second try. The persisted session
+       is deliberately kept on disk for exactly that, so offer the retry.
+       `error.signerTimeout` already says the right thing ("your signer didn't
+       respond — check it's online and try again"); no new string. -->
+  {#if session.restoreError && !session.loggedIn}
+    <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
+      {t("error.signerTimeout")}
+      <button
+        type="button"
+        class="btn primary"
+        style="margin-left:0.5rem"
+        disabled={session.restoring}
+        onclick={() => void session.retryRestore()}
+      >
+        {session.restoring ? t("error.state.retrying") : t("error.state.retry")}
+      </button>
+      <button
+        type="button"
+        class="btn"
+        style="margin-left:0.5rem"
+        onclick={() => (session.restoreError = false)}
+      >
+        {t("logout.dismiss")}
+      </button>
+    </div>
+  {/if}
   {#if signerAuthUrl}
     <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
       {t("signin.remote.authRequired")}

@@ -28,7 +28,22 @@ import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 import { ControllerLatch } from "$lib/pwa-latch.js";
 import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route-modules.js";
 import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
+import { UpdateHealth } from "$lib/pwa/update-health.js";
+import { RELEASE_MANIFEST } from "$lib/release.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
+
+/**
+ * Watchdog over the update path itself (see pwa/update-health.ts). Every failure
+ * mode here used to be perfectly silent — no `onRegisterError`, an empty catch
+ * around the poll — which is why the 2026-07-28 stale-`sw.js` incident ran for
+ * days with the only symptom being "users are on an old build".
+ */
+const health = new UpdateHealth(RELEASE_MANIFEST.releaseId);
+
+/** Exposed for support: `__nostrauticaPwaHealth.warnIfSilent()` from the console. */
+export function pwaHealth(): UpdateHealth {
+  return health;
+}
 
 /**
  * Warm the critical participant route chunks once the service worker is in
@@ -104,18 +119,43 @@ export function registerPwa(): void {
           // and browser-specific. The nginx side is fixed (sw.js is now
           // no-store), but the client must not depend on a server header to
           // notice a new version.
-          await fetch(swUrl, { cache: "reload" });
+          const res = await fetch(swUrl, { cache: "reload" });
+          // Reading the body is free here (the HTTP cache write already
+          // happened) and it is the only evidence available in the client about
+          // WHICH build the server is actually serving: the precache manifest
+          // inside sw.js carries `revision: <releaseId>` for index.html (see
+          // vite.config.ts). A body that never mentions our release, check after
+          // check, means the update path is wedged — a stale proxy/cache answer,
+          // or a worker that cannot activate — and that is exactly the state
+          // that used to persist for days in total silence.
+          health.observeServiceWorkerSource(await res.text().catch(() => ""));
           await registration.update();
-        } catch {
-          /* offline — try again next tick */
+        } catch (e) {
+          // Offline is normal and expected (the `online` listener below retries);
+          // failing WHILE ONLINE is not, and was previously indistinguishable
+          // from a healthy check.
+          const online = typeof navigator === "undefined" || navigator.onLine !== false;
+          if (online) health.noteCheckFailed(e, true);
+          else console.debug("[pwa] update check skipped (offline)");
         }
       };
 
-      setInterval(check, UPDATE_INTERVAL_MS);
+      setInterval(() => {
+        // Even a check that never throws can stop mattering (a hung fetch, a
+        // suspended timer). Say so if nothing has succeeded in a long while.
+        if (typeof navigator === "undefined" || navigator.onLine !== false) health.warnIfSilent();
+        void check();
+      }, UPDATE_INTERVAL_MS);
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible") void check();
       });
       window.addEventListener("online", () => void check());
+    },
+    onRegisterError(error: unknown) {
+      // Without this the registration silently failed and NOTHING polled for the
+      // rest of the page's life — no update checks, no offline shell, no signal.
+      health.noteRegisterFailed(error);
+      (window as unknown as Record<string, unknown>).__nostrauticaPwaError = error;
     },
     onNeedRefresh() {
       // A new version is waiting. With autoUpdate it will skipWaiting and the
@@ -126,4 +166,7 @@ export function registerPwa(): void {
 
   // Expose for a manual "update now" affordance if ever needed.
   (window as any).__nostrauticaUpdateSW = updateSW;
+  // …and the watchdog, so a support session can ask "is this tab's updater
+  // alive?" without a new build.
+  (window as any).__nostrauticaPwaHealth = health;
 }
