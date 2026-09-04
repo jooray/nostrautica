@@ -81,6 +81,7 @@ import {
   type MatchListContent,
   type CoordinatorBilling,
   pickLatest,
+  compareLatest,
   supersedes,
   revisionSupersedes,
   MAX_SKILLS,
@@ -2255,7 +2256,10 @@ export class Coordinator {
     const nowSec = Math.floor(this.now() / 1000);
     let roster: RosterContent | undefined;
     let rosterAuthor: string | undefined;
-    for (const ev of [...rosterEvents].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))) {
+    // §3.1 order (created_at desc, then LOWEST id) via the shared comparator — a
+    // created_at-only sort left two same-second rosters to relay arrival order, so
+    // two coordinators bootstrapping the same handover could adopt different ones.
+    for (const ev of [...rosterEvents].sort(compareLatest)) {
       if (ev.pubkey === this.coordPubkey) continue; // our own record — nothing to bootstrap from
       // A roster dated in the future is a bid to win newest-wins against every
       // legitimate one. Same 15-minute tolerance the rumor path already applies.
@@ -2300,7 +2304,7 @@ export class Coordinator {
           { kinds: [KIND_DIRECTORY_ENTRY], "#d": [a.d] },
           state.configRelays,
         );
-        for (const de of [...dirEvents].sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))) {
+        for (const de of [...dirEvents].sort(compareLatest)) {
           // Pin every directory entry to the SAME author the roster came from.
           // The two reads were independent, so even a legitimate roster could be
           // paired with a stranger's 31603 at the same blinded d-tag — seeding a
@@ -3790,9 +3794,16 @@ export class Coordinator {
         state.configRelays,
       ),
     ]);
-    const profile = profileEvents.sort((a, b) => b.created_at - a.created_at)[0];
-    const posts = postEvents
-      .sort((a, b) => b.created_at - a.created_at)
+    // Kind 0 is replaceable — pick it with the §3.1 rule, not an ad-hoc sort, so a
+    // profile edited twice in one second resolves the same way here as in the app.
+    const profile = pickLatest(profileEvents);
+    // The posts are not replaceable, but the ORDER still has to be deterministic:
+    // this list is the matching prompt, its output is published as a 31603/31605
+    // and cached, so two same-second notes swapping places changes an attendee's
+    // ai_profile depending on relay arrival order. compareLatest's id tie-break
+    // makes the newest-first slice reproducible.
+    const posts = [...postEvents]
+      .sort(compareLatest)
       .slice(0, n)
       .map((e) => ({ kind: e.kind, content: e.content, created_at: e.created_at }));
     return profile
