@@ -642,6 +642,27 @@ export class Coordinator {
             coordinate,
             pubkey,
           }),
+        // A device-management action changes `chat_keys`, and the published 31604
+        // roster is the only place a client reads the device list from — so without
+        // this, every action visibly undid itself when the card re-fetched: a
+        // revoked device reappeared, a rename reverted, a new device stayed a raw
+        // pubkey until some unrelated approval happened to republish. Coalesced,
+        // because an attestation burst is one roster.
+        onRosterChanged: (coordinate) => {
+          const state = this.events.get(coordinate);
+          if (state) void this.publishRosterCoalesced(state).catch(() => {});
+        },
+        // Attestation refusals reach the person who can act on them. Each one is a
+        // dead end the device cannot detect on its own: it published a key package,
+        // sent a 21607, and then sat in "setting up your secure chat" forever while
+        // the only record of why was a line in this daemon's log.
+        notifyAttendee: (coordinate, pubkey, content) => {
+          const state = this.events.get(coordinate);
+          if (!state) return;
+          void this.deps.transport
+            .publish(buildCoordinatorStatus(this.deps.coordSk, pubkey, content), this.accountRelays(state))
+            .catch(() => {});
+        },
         log,
       });
     }

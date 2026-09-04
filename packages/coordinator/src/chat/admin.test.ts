@@ -7,6 +7,7 @@ import {
   makeChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
+  type CoordinatorStatusContent,
 } from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][] };
@@ -122,6 +123,12 @@ function makeAdmin(
   extra?: {
     enqueueSync?: (coordinate: string, pubkey: string) => void;
     fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
+    onRosterChanged?: (coordinate: string) => void;
+    notifyAttendee?: (
+      coordinate: string,
+      accountPubkey: string,
+      content: CoordinatorStatusContent,
+    ) => void;
   },
 ) {
   const now = () => 1000;
@@ -132,6 +139,8 @@ function makeAdmin(
     log,
     coordinatorPubkey: COORDINATOR,
     enqueueSync: extra?.enqueueSync,
+    onRosterChanged: extra?.onRosterChanged,
+    notifyAttendee: extra?.notifyAttendee,
     fetchKeyPackages:
       extra?.fetchKeyPackages ??
       (async (_coordinate, authors) => kps.filter((e) => authors.includes(e.pubkey))),
@@ -1041,5 +1050,200 @@ describe("a failed attestation sync is retried, not just logged", () => {
 
     expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
     expect(logs.some((l) => l.includes("no retry queue"))).toBe(true);
+  });
+});
+
+/**
+ * The 31604 roster is the ONLY channel a client can read the device list from:
+ * `ChatHandoffCard` renders `devicesForAccount(roster)` and re-fetches ~4s after
+ * every action. Nothing on the attestation or chat-revoke paths published one, so
+ * every device-management action visibly undid itself in front of the user — a
+ * revoked device reappeared, a rename reverted, a newly-added device stayed a raw
+ * pubkey — until an UNRELATED approval happened to republish. The app even carried
+ * a comment claiming the coordinator republished here. It did not.
+ */
+describe("MarmotAdmin — roster republish on every chat_keys change", () => {
+  function setup(extra: Parameters<typeof makeAdmin>[4] = {}) {
+    const published: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      ...extra,
+      onRosterChanged: (c) => published.push(c),
+    });
+    return { published, store, mls, admin };
+  }
+
+  it("republishes when a device binds (op:add)", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("republishes for a still-PENDING attendee too — the roster is how the device list renders", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("republishes when a device is revoked (op:revoke)", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    published.length = 0;
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT)).toBe(true);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("republishes when an attendee is removed from the chat entirely", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    published.length = 0;
+
+    await admin.handleRevoke(COORD, ACCOUNT);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("does NOT republish for a rejected attestation — nothing changed", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    // A stranger: no attendee row at all.
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+    expect(published).toEqual([]);
+
+    // And an enrolled attendee whose proof doesn't verify.
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    expect(
+      await admin.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { deviceSk: null }), CREATED_AT),
+    ).toBe(false);
+    expect(published).toEqual([]);
+  });
+});
+
+/**
+ * A refused attestation used to be a log line and nothing else. The device had
+ * published a key package, sent its 21607, and then sat in "setting up your secure
+ * chat" forever — while the app's only hint said the coordinator might be offline,
+ * which for a device-cap or rebind refusal points at exactly the wrong thing. The
+ * reasons were already computed; they are now sealed to the attendee over the same
+ * 21606 channel a failed talk/submission already uses.
+ */
+describe("MarmotAdmin — telling the attendee WHY their device was refused", () => {
+  function setup() {
+    const notices: { account: string; content: CoordinatorStatusContent }[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      notifyAttendee: (_c, account, content) => notices.push({ account, content }),
+    });
+    return { notices, store, mls, admin };
+  }
+
+  it("names the device cap, addressed to the attendee, not retryable", async () => {
+    const { notices, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    // Fill the cap with keys that are not CHATKEY/CHATKEY2.
+    for (let i = 0; i < MAX_CHAT_KEYS_PER_ACCOUNT; i++) {
+      store.upsertChatKey({
+        coordinate: COORD,
+        accountPubkey: ACCOUNT,
+        chatPubkey: `${i}`.repeat(64),
+        status: "active",
+        now: 1,
+      });
+    }
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.account).toBe(ACCOUNT);
+    expect(notices[0]!.content.error_category).toBe("chat_device_cap_reached");
+    expect(notices[0]!.content.stage).toBe("chat_attestation");
+    expect(notices[0]!.content.pubkey).toBe(ACCOUNT);
+    // Waiting cannot clear a cap hit; saying "retryable" would keep them staring
+    // at the spinner instead of removing a device.
+    expect(notices[0]!.content.retryable).toBe(false);
+  });
+
+  it("names a chat key already bound to a different account", async () => {
+    const { notices, store, admin } = setup();
+    const other = "b".repeat(64);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: other, status: "approved", now: 1 });
+    store.upsertChatKey({
+      coordinate: COORD,
+      accountPubkey: other,
+      chatPubkey: CHATKEY,
+      status: "active",
+      now: 1,
+    });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+
+    expect(notices.map((n) => n.content.error_category)).toEqual(["chat_key_bound_to_other_account"]);
+  });
+
+  it("names a proof of possession that does not verify", async () => {
+    const { notices, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(
+      await admin.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { deviceSk: null }), CREATED_AT),
+    ).toBe(false);
+
+    expect(notices.map((n) => n.content.error_category)).toEqual(["chat_proof_invalid"]);
+  });
+
+  it("names an unusable key package — the most invisible refusal of the lot", async () => {
+    // The attestation SUCCEEDS (the device is bound, listed in the roster, and the
+    // UI shows it), and then the add fails and the key package is marked consumed
+    // so no later pass reconsiders it. Nothing else in the system says a word.
+    const { notices, store, mls, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    mls.eligible = false;
+    mls.ineligibleReasons = ["unsupported ciphersuite"];
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(notices.map((n) => n.content.error_category)).toEqual(["chat_key_package_ineligible"]);
+    expect(notices[0]!.account).toBe(ACCOUNT);
+  });
+
+  it("says nothing to a stranger — an unenrolled sender must not make us publish", async () => {
+    // Otherwise anyone who can reach the inbox can drive gift-wrap publishes.
+    const { notices, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+
+    expect(notices).toEqual([]);
+  });
+
+  it("says nothing when the attestation is accepted", async () => {
+    const { notices, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(notices).toEqual([]);
   });
 });

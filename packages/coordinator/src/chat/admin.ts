@@ -19,6 +19,7 @@ import {
   verifyChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
+  type CoordinatorStatusContent,
 } from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
@@ -37,8 +38,52 @@ export interface MarmotAdminDeps {
    * sync is only logged, which is the behaviour this exists to replace.
    */
   enqueueSync?(coordinate: string, accountPubkey: string): void;
+  /**
+   * The event's published roster (31604) is now stale — republish it.
+   *
+   * Every device-management action changes `chat_keys`, which is the ONLY place a
+   * client can read the device list from: `ChatHandoffCard` renders
+   * `devicesForAccount(roster)` and re-fetches ~4s after an action. Nothing on
+   * this path published a new roster, so every action visibly undid itself after
+   * that refresh — a revoked device reappeared, a rename reverted, and a
+   * newly-added device rendered as a raw pubkey until some UNRELATED approval
+   * happened to republish. The approve path has always republished (the
+   * coordinator's `grantAndPublish`); the attestation and chat-revoke paths never
+   * did, and there was a comment in the app claiming otherwise.
+   *
+   * Optional so the admin stays constructible in tests without a coordinator; when
+   * absent the roster is simply not republished, which is the pre-fix behaviour.
+   */
+  onRosterChanged?(coordinate: string): void;
+  /**
+   * Seal a 21606 coordinator-status notice to ONE attendee (NIP §6.3) — the same
+   * attendee-scoped channel `surfacePoison` already uses, which the app records in
+   * `ownStatusStore`.
+   *
+   * Used for the attestation refusals below. Every one of them is a dead end the
+   * device cannot detect: it published a key package, sent a 21607, and then sat in
+   * "setting up your secure chat" forever while the only record of WHY was a line
+   * in the coordinator's log. The reasons are already computed here; this hands
+   * them to the one person who can act on them.
+   *
+   * Deliberately NOT called for an attestation from a non-enrolled stranger: that
+   * would let anyone who can reach the inbox make the daemon publish gift wraps.
+   */
+  notifyAttendee?(coordinate: string, accountPubkey: string, content: CoordinatorStatusContent): void;
   log?: (msg: string) => void;
 }
+
+/**
+ * Sanitized refusal classes for the attendee-facing 21606 (`error_category`).
+ * Stable strings — the app maps them to localized guidance, so renaming one is a
+ * wire change, not a refactor.
+ */
+export const CHAT_ATTESTATION_STAGE = "chat_attestation";
+export type ChatAttestationRefusal =
+  | "chat_device_cap_reached"
+  | "chat_key_bound_to_other_account"
+  | "chat_proof_invalid"
+  | "chat_key_package_ineligible";
 
 export class MarmotAdmin {
   private readonly store: Store;
@@ -47,6 +92,12 @@ export class MarmotAdmin {
   private readonly coordinatorPubkey: string;
   private readonly fetchKeyPackages: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
   private readonly enqueueSync?: (coordinate: string, accountPubkey: string) => void;
+  private readonly onRosterChanged?: (coordinate: string) => void;
+  private readonly notifyAttendee?: (
+    coordinate: string,
+    accountPubkey: string,
+    content: CoordinatorStatusContent,
+  ) => void;
   private readonly log: (msg: string) => void;
 
   constructor(deps: MarmotAdminDeps) {
@@ -56,6 +107,8 @@ export class MarmotAdmin {
     this.coordinatorPubkey = deps.coordinatorPubkey;
     this.fetchKeyPackages = deps.fetchKeyPackages;
     this.enqueueSync = deps.enqueueSync;
+    this.onRosterChanged = deps.onRosterChanged;
+    this.notifyAttendee = deps.notifyAttendee;
     this.log = deps.log ?? (() => {});
   }
 
@@ -210,6 +263,53 @@ export class MarmotAdmin {
   /** Drop the cached eligible-author set (call on approve/attest/revoke). */
   invalidateEligibility(coordinate: string): void {
     this.eligibleCache.delete(coordinate);
+  }
+
+  /**
+   * One choke point for "this event's `chat_keys` changed": drop the eligibility
+   * cache AND republish the roster.
+   *
+   * These two were split before, and only the first had a call site. The 31604
+   * roster is the only channel a client can read the device list from, so a bind,
+   * a rename (a re-attest with a new label) and a revoke were all invisible until
+   * something else — an unrelated approval — happened to republish. The device
+   * management UI re-reads the roster ~4s after every action, so what the user
+   * actually saw was their own change being undone in front of them.
+   *
+   * Republishing is fire-and-forget on purpose: the coordinator coalesces roster
+   * publishes, and a relay hiccup must never turn an accepted attestation into a
+   * rejected one (the binding is already committed to SQLite by the time we get
+   * here).
+   */
+  private rosterChanged(coordinate: string): void {
+    this.invalidateEligibility(coordinate);
+    this.onRosterChanged?.(coordinate);
+  }
+
+  /**
+   * Tell ONE attendee, over the 21606 channel their app already listens on, that
+   * we refused their device — with the reason we already computed. Best-effort and
+   * never allowed to change the refusal itself.
+   */
+  private notifyRefusal(
+    coordinate: string,
+    accountPubkey: string,
+    category: ChatAttestationRefusal,
+  ): void {
+    this.notifyAttendee?.(coordinate, accountPubkey, {
+      v: 2,
+      a: coordinate,
+      pubkey: accountPubkey,
+      stage: CHAT_ATTESTATION_STAGE,
+      state: "poison",
+      attempts: 0,
+      error_category: category,
+      // None of these clear by waiting: the user has to remove a device, use a
+      // different account, or re-enrol. Saying "retryable" would be a lie that
+      // keeps them staring at the spinner.
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    });
   }
 
   private eligibleAuthorSet(coordinate: string): Set<string> {
@@ -372,6 +472,14 @@ export class MarmotAdmin {
       this.log(
         `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} ineligible${why}`,
       );
+      // This is the most invisible refusal of the lot: the device published a key
+      // package, attested successfully (so it IS in the roster's `chat_keys` and the
+      // UI lists it), and then nothing ever happens — the key package is marked
+      // consumed so no later pass reconsiders it. Tell the owner, if we know which
+      // account owns this chat key; an unbound author cannot be an enrolled
+      // attendee, so there is nobody to tell and nothing to publish.
+      const owner = this.store.getChatKey(coordinate, kp.pubkey)?.account_pubkey;
+      if (owner) this.notifyRefusal(coordinate, owner, "chat_key_package_ineligible");
       return;
     }
     if (consumed) {
@@ -471,6 +579,7 @@ export class MarmotAdmin {
         this.log(
           `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: invalid/missing proof of possession for ${content.chat_pubkey.slice(0, 8)}`,
         );
+        this.notifyRefusal(coordinate, accountPubkey, "chat_proof_invalid");
         return false;
       }
       // Per-account device cap (NIP §10.1): at most MAX_CHAT_KEYS_PER_ACCOUNT active
@@ -484,6 +593,7 @@ export class MarmotAdmin {
         this.log(
           `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: account already at the ${MAX_CHAT_KEYS_PER_ACCOUNT}-device cap`,
         );
+        this.notifyRefusal(coordinate, accountPubkey, "chat_device_cap_reached");
         return false;
       }
       const recorded = this.store.upsertChatKey({
@@ -499,10 +609,13 @@ export class MarmotAdmin {
         this.log(
           `[chat] REJECTED 21607 add from ${accountPubkey.slice(0, 8)}: chat key ${content.chat_pubkey.slice(0, 8)} already bound to another account`,
         );
+        this.notifyRefusal(coordinate, accountPubkey, "chat_key_bound_to_other_account");
         return false;
       }
       this.log(`[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)}`);
-      this.invalidateEligibility(coordinate);
+      // Republish: this add is what puts the device (and its label) in the roster's
+      // `chat_keys`, which is the only thing the device-management UI can read.
+      this.rosterChanged(coordinate);
       // The attesting device named itself, and `content.a === coordinate` was
       // checked above — so this, and only this, authorizes dropping a leaf we
       // still hold for that device (tryAddKeyPackage's `member` branch).
@@ -546,7 +659,10 @@ export class MarmotAdmin {
       return false;
     }
     this.store.setChatKeyStatus(coordinate, content.chat_pubkey, "revoked", this.now());
-    this.invalidateEligibility(coordinate);
+    // Republish BEFORE the MLS remove: dropping the leaf can take a relay round
+    // trip, and the roster is what the user is staring at. Without this the
+    // revoked device reappeared in their device list about four seconds later.
+    this.rosterChanged(coordinate);
     const group = this.activeGroup(coordinate);
     if (group) await this.mls.removePubkeys(group.mls_group_id, [content.chat_pubkey]);
     // A revoked organizer device must also lose its co-admin standing.
@@ -569,7 +685,9 @@ export class MarmotAdmin {
     const pubkeys = [accountPubkey, ...chatKeys.map((k) => k.chat_pubkey)];
     await this.mls.removePubkeys(group.mls_group_id, pubkeys);
     for (const k of chatKeys) this.store.setChatKeyStatus(coordinate, k.chat_pubkey, "revoked", this.now());
-    this.invalidateEligibility(coordinate);
+    // Same reason as the 21607 revoke path: the removed member's devices stay in
+    // every OTHER member's roster-derived view until a new 31604 goes out.
+    this.rosterChanged(coordinate);
     // A removed organizer must lose co-admin standing (desiredAdminPubkeys keys
     // off the approved-organizer set, so a removed organizer drops out of it).
     await this.maybeSyncAdmins(coordinate, accountPubkey);
