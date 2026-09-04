@@ -12,6 +12,7 @@ import {
   utf8ByteLength,
   MAX_THEME_CSS_BYTES,
   pickLatest,
+  hasCurrentVersionTag,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
@@ -52,7 +53,17 @@ export async function fetchEventTheme(ctx: EventContext): Promise<string | undef
   // `fetchRoster`), and pick the winner with the §3.1 rule (created_at, then
   // LOWEST id) rather than an ad-hoc sort that leaves same-second ties to
   // arrival order.
-  const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
+  //
+  // Wire version (NIP §2): a reader of a public custom kind MUST ignore an event
+  // whose `v` tag is absent or ≠ "2". 31609 is the kind where that matters most,
+  // and the only one that had no version check at all: its content is RAW CSS
+  // with no payload schema, so unlike every other public kind there is no `"v": 2`
+  // inside to reject on — the tag is the entire version signal. Without this,
+  // a v1 theme (or a v3 one written against semantics this build predates) is
+  // injected verbatim into <head> and styles the whole app shell.
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), [pubkey]).filter((e) => hasCurrentVersionTag(e.tags)),
+  );
   const css = latest?.content ?? "";
   const valid = css.trim() && utf8ByteLength(css) <= MAX_THEME_CSS_BYTES;
   // Write-through: cache the CSS (or "" for "no theme") so the next entry paints
