@@ -43,15 +43,16 @@ const modelRefSchema = z.object({
    * `strip_thinking_response` keeps them out of the content; budget for it.
    */
   disable_thinking: z.boolean().optional(),
-});
+}).strict();
 
 export const configSchema = z.object({
   identity: z
     .object({
       ncryptsec_file: z.string().optional(),
     })
+    .strict()
     .default({}),
-  relays: z.object({ default: z.array(z.string()).min(1) }),
+  relays: z.object({ default: z.array(z.string()).min(1) }).strict(),
   providers: z
     .object({
       venice: z
@@ -60,6 +61,7 @@ export const configSchema = z.object({
           require_private: z.boolean().default(true),
           base_url: z.string().optional(),
         })
+        .strict()
         .optional(),
       routstr: z
         .object({
@@ -68,14 +70,17 @@ export const configSchema = z.object({
           mint: z.string().optional(),
           wallet_db: z.string().optional(),
         })
+        .strict()
         .optional(),
     })
+    .strict()
     .default({}),
   stt: z
     .object({
       provider: z.enum(["venice-stt", "local-whisper"]).default("venice-stt"),
       model: z.string().default("openai/whisper-large-v3"),
     })
+    .strict()
     .default({}),
   models: z.object({
     summary: modelRefSchema,
@@ -88,16 +93,23 @@ export const configSchema = z.object({
       provider: "venice",
       model: "gemini-3-flash-preview",
     }),
-  }),
+  }).strict(),
   matching: z
     .object({
-      prefilter_threshold: z.number().default(50),
-      prefilter_top_m: z.number().default(30),
-      prefilter_random: z.number().default(10),
-      top_k: z.number().default(20),
+      // Counts of attendees/candidates, every one of them. They were bare
+      // `z.number()`, which accepts `-1` and `3.7` and hands them straight to
+      // `LIMIT`/slice arithmetic, where a negative silently means "no candidates"
+      // and a fraction means an off-by-a-fraction slice — a mistyped config that
+      // produces empty match lists rather than an error at load.
+      prefilter_threshold: z.number().int().nonnegative().default(50),
+      prefilter_top_m: z.number().int().nonnegative().default(30),
+      prefilter_random: z.number().int().nonnegative().default(10),
+      // Zero matches per attendee is not a configuration anyone means; it is a typo.
+      top_k: z.number().int().positive().default(20),
       /** Candidates per batched match-scoring call (benchmark winner: K=10). */
       batch_size: z.number().int().min(1).default(10),
     })
+    .strict()
     .default({}),
   // Public discovery announcement (kind 31611, docs/COORDINATOR-DISCOVERY-PLAN.md).
   // Published on boot so organizers can pick this coordinator instead of pasting
@@ -111,6 +123,7 @@ export const configSchema = z.object({
       operator: z.string().optional(),
       terms_url: z.string().optional(),
     })
+    .strict()
     .default({}),
   // Billing policy (Part 3). Payment is NOT handled here — this only shapes the
   // announce + the `billing` signal in the 21606 status. Default: free.
@@ -134,6 +147,7 @@ export const configSchema = z.object({
       // grace (straight to blocked). Keeps the evaluating→grace→blocked path real.
       grace_period_sec: z.number().int().nonnegative().optional(),
     })
+    .strict()
     .default({}),
   // Per-attendee / per-event usage budgets (spec §8, audit H-2). Generous abuse
   // ceilings, NOT product limits — exceeding one parks further paid processing for
@@ -152,6 +166,7 @@ export const configSchema = z.object({
       per_attendee_calls: z.number().int().nonnegative().default(500),
       per_event_calls: z.number().int().nonnegative().default(20_000),
     })
+    .strict()
     .default({}),
   // Daemon-side security policy (audit COORD-3/COORD-20). Install is
   // protocol-level, so unsolicited 21603 grants are bounded here.
@@ -186,8 +201,9 @@ export const configSchema = z.object({
        */
       allow_insecure_urls: z.boolean().default(false),
     })
+    .strict()
     .default({}),
-});
+}).strict();
 
 export type CoordinatorConfig = z.infer<typeof configSchema>;
 
@@ -278,9 +294,90 @@ function validateConfigUrls(config: CoordinatorConfig): void {
   config.relays.default = config.relays.default.map((r, i) => ws(r, `relays.default[${i}]`));
 }
 
-export function loadConfig(path: string): CoordinatorConfig {
+/** A config key the schema does not know, as `[section] key` for the operator. */
+export interface UnknownConfigKey {
+  /** Dotted path of the containing table (`""` for the file's top level). */
+  section: string;
+  key: string;
+  /** `matching.top_kk` — what to grep the file for. */
+  path: string;
+}
+
+export interface LoadConfigOptions {
+  /**
+   * Called with EVERY unknown key found, instead of the default loud warning.
+   * `doctor` passes one so the finding lands in its own report format.
+   */
+  onUnknownKeys?: (keys: UnknownConfigKey[]) => void;
+}
+
+/**
+ * Remove the keys zod flagged as unrecognized from a parsed-TOML value, so the
+ * (strict) schema can then parse it. Mutates a shallow-cloned spine only where a
+ * deletion happens; the input is left alone.
+ */
+function pruneKeys(raw: unknown, issues: { path: (string | number)[]; keys: string[] }[]): unknown {
+  const clone = structuredClone(raw) as any;
+  for (const issue of issues) {
+    let node = clone;
+    for (const seg of issue.path) {
+      if (node == null || typeof node !== "object") break;
+      node = node[seg as any];
+    }
+    if (node == null || typeof node !== "object") continue;
+    for (const k of issue.keys) delete node[k];
+  }
+  return clone;
+}
+
+/**
+ * Load + validate coordinator.toml.
+ *
+ * Unknown keys are LOUD. The schema objects are `.strict()`, but an unknown key is
+ * reported and then dropped rather than fatal — a running production daemon must
+ * still be able to restart mid-incident with a config carrying one stray line.
+ *
+ * Silence here has already cost a real event. `pricing.free_organizers` was renamed
+ * to `pricing.free_eids` (spec §9 D5) and the example TOML kept the old spelling; an
+ * operator who uncommented it got no allowlist, no error, and no log — the key was
+ * simply dropped by a non-strict `z.object`. The event crossed `free_up_to_users`
+ * into `grace`, then `blocked`, and every paid job for it parked mid-event. Zod
+ * knows the offending key by name, which is exactly the message an operator needs;
+ * it was being discarded.
+ */
+export function loadConfig(path: string, opts: LoadConfigOptions = {}): CoordinatorConfig {
   const raw = parseToml(readFileSync(path, "utf8"));
-  const config = configSchema.parse(raw);
+  let parsed = configSchema.safeParse(raw);
+  if (!parsed.success) {
+    const unrecognized = parsed.error.issues.filter(
+      (i): i is typeof i & { keys: string[] } => i.code === "unrecognized_keys",
+    );
+    // Anything OTHER than an unknown key is a real validation failure (a missing
+    // section, a negative top_k, a wrong type) and still throws as before.
+    if (unrecognized.length === 0 || unrecognized.length !== parsed.error.issues.length) {
+      throw parsed.error;
+    }
+    const found: UnknownConfigKey[] = unrecognized.flatMap((i) =>
+      i.keys.map((k) => {
+        const section = i.path.join(".");
+        return { section, key: k, path: section ? `${section}.${k}` : k };
+      }),
+    );
+    if (opts.onUnknownKeys) {
+      opts.onUnknownKeys(found);
+    } else {
+      for (const u of found) {
+        console.warn(
+          `[config] UNKNOWN KEY ${u.path} in ${path} — not part of the coordinator schema, IGNORED. ` +
+            "Check for a typo or a renamed setting (e.g. pricing.free_organizers → pricing.free_eids); " +
+            "it is having no effect whatsoever.",
+        );
+      }
+    }
+    parsed = configSchema.safeParse(pruneKeys(raw, unrecognized));
+    if (!parsed.success) throw parsed.error;
+  }
+  const config = parsed.data;
   validateConfigUrls(config);
   return config;
 }

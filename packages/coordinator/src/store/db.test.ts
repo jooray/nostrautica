@@ -9,7 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
 import { bytesToHex } from "@nostrautica/protocol";
-import { Store, acquireDaemonLock, inspectDatabaseReadOnly, SCHEMA_VERSION } from "./db.js";
+import {
+  Store,
+  acquireDaemonLock,
+  inspectDatabaseReadOnly,
+  inspectPipelineReadOnly,
+  SCHEMA_VERSION,
+  DEFAULT_BUSY_TIMEOUT_MS,
+} from "./db.js";
 
 const ENC_PREFIX = "nip44:";
 
@@ -1038,4 +1045,299 @@ describe("job matching survives an organizer-chosen identifier", () => {
   });
 
   void tmp;
+});
+
+
+// ── SQLITE_BUSY handling ─────────────────────────────────────────────────────
+describe("lock contention (busy_timeout)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-busy-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("sets a non-zero busy timeout by default", () => {
+    // SQLite defaults to 0 — the first contended statement throws SQLITE_BUSY
+    // immediately. A busy error out of claimNextJob propagates through
+    // JobRunner.drain() into main.ts's loop and EXITS THE DAEMON, so a momentary
+    // overlap with an operator's backup used to be able to kill the coordinator.
+    const store = new Store(tmpDb());
+    const row = (store as any).db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+    expect(row.timeout).toBe(DEFAULT_BUSY_TIMEOUT_MS);
+    store.close();
+  });
+
+  it("a contended write WAITS for the configured timeout instead of failing instantly", () => {
+    const path = tmpDb();
+    const holder = new Store(path);
+    const waiter = new Store(path, undefined, { busyTimeoutMs: 400 });
+    // The holder takes (and keeps) the write lock.
+    (holder as any).db.exec("BEGIN IMMEDIATE");
+    (holder as any).db.prepare("INSERT INTO jobs (type, dedupe_key, payload) VALUES ('t','held','{}')").run();
+    const started = Date.now();
+    expect(() => waiter.enqueueJob("t", "waiter", {})).toThrow();
+    const elapsed = Date.now() - started;
+    // With busy_timeout = 0 (the unfixed behaviour) this returns in ~0ms.
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    (holder as any).db.exec("ROLLBACK");
+    waiter.close();
+    holder.close();
+  });
+
+  it("busyTimeoutMs: 0 restores the fail-fast behaviour (the control for the test above)", () => {
+    const path = tmpDb();
+    const holder = new Store(path);
+    const waiter = new Store(path, undefined, { busyTimeoutMs: 0 });
+    (holder as any).db.exec("BEGIN IMMEDIATE");
+    (holder as any).db.prepare("INSERT INTO jobs (type, dedupe_key, payload) VALUES ('t','held','{}')").run();
+    const started = Date.now();
+    expect(() => waiter.enqueueJob("t", "waiter", {})).toThrow();
+    expect(Date.now() - started).toBeLessThan(250);
+    (holder as any).db.exec("ROLLBACK");
+    waiter.close();
+    holder.close();
+  });
+});
+
+// ── backup must not migrate the database it is snapshotting ──────────────────
+describe("Store({ migrate: false }) — the snapshot open (§13.2)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-nomig-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("leaves user_version exactly as found, where a normal open would migrate it", async () => {
+    const path = tmpDb();
+    // A database written by an OLDER binary — the routine case on the box, where the
+    // deploy rsyncs source and the operator's binary is ahead of the file.
+    const seed = new Store(path);
+    seed.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION - 1}`);
+    raw.close();
+
+    const snapshotOpen = new Store(path, undefined, { migrate: false });
+    expect(snapshotOpen.schemaVersion()).toBe(SCHEMA_VERSION - 1);
+    snapshotOpen.close();
+    // Still v(N-1) on disk: a schema migration is ONE-WAY, so backup applying one
+    // would destroy the very pre-migration rollback point it is being taken for.
+    expect(inspectDatabaseReadOnly(path).userVersion).toBe(SCHEMA_VERSION - 1);
+
+    // A normal open is what DOES migrate — the behaviour backup must not have.
+    const daemonOpen = new Store(path);
+    expect(daemonOpen.schemaVersion()).toBe(SCHEMA_VERSION);
+    daemonOpen.close();
+  });
+
+  it("still refuses a database written by a NEWER binary", async () => {
+    const path = tmpDb();
+    const seed = new Store(path);
+    seed.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    raw.close();
+    expect(() => new Store(path, undefined, { migrate: false })).toThrow(/NEWER coordinator/);
+  });
+});
+
+// ── file modes ───────────────────────────────────────────────────────────────
+describe("store file permissions", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("the SQLite file and its WAL sidecars are owner-only", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-mode-"));
+    dirs.push(dir);
+    const path = join(dir, "coordinator.sqlite");
+    const store = new Store(path);
+    // Force the -wal/-shm into existence before checking them.
+    store.enqueueJob("t", "k", {});
+    const { statSync } = await import("node:fs");
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const st = statSync(path + suffix);
+      // Only the per-event key columns are encrypted at rest (F1) — attendee names,
+      // profiles, transcripts, match scores and the Cashu journal are cleartext here,
+      // so the file mode is the only thing protecting them.
+      expect(st.mode & 0o077).toBe(0);
+    }
+    store.close();
+  });
+});
+
+// ── shutdown release ─────────────────────────────────────────────────────────
+describe("releaseJob (shutdown abort)", () => {
+  it("returns the row to pending, runnable NOW, with attempts untouched", () => {
+    const store = new Store();
+    store.enqueueJob("process_attendee", "k", { coordinate: "c", pubkey: "p" });
+    const now = 1_000_000;
+    const job = store.claimNextJob(now, "worker-1", 5 * 60_000)!;
+    expect(job.lease_until).toBe(now + 5 * 60_000);
+
+    expect(store.releaseJob(job.id, "worker-1")).toBe(true);
+
+    // Immediately claimable at the SAME instant. Left `running` (the old behaviour)
+    // it would have stayed unclaimable until its lease expired five minutes later,
+    // because claimNextJob's stranded arm requires lease_until <= now.
+    const again = store.claimNextJob(now, "worker-2", 5 * 60_000);
+    expect(again?.id).toBe(job.id);
+    expect(again?.attempts).toBe(0); // consumed no retry
+  });
+
+  it("refuses a worker that has lost its lease", () => {
+    const store = new Store();
+    store.enqueueJob("t", "k", {});
+    const job = store.claimNextJob(1000, "worker-1", 60_000)!;
+    expect(store.releaseJob(job.id, "stale-worker")).toBe(false);
+  });
+});
+
+// ── poisoned process_talk had no remedy at all ───────────────────────────────
+describe("clearAttendeeJobMemo covers process_talk", () => {
+  it("frees a POISONED talk job whose dedupe key is content-addressed on the media hash", () => {
+    const store = new Store();
+    const coordinate = "31923:aaaa:evt";
+    const pubkey = "b".repeat(64);
+    // The key a re-submission of the SAME recording reproduces exactly.
+    const key = `talk:${coordinate}:${pubkey}:my-talk:${"c".repeat(64)}`;
+    store.enqueueJob("process_talk", key, { coordinate, pubkey, talkD: "my-talk" });
+    const job = store.claimNextJob(1000, "w", 60_000)!;
+    store.failJob(job.id, 26, 2000, "provider contract", true, "w");
+    expect(store.enqueueJob("process_talk", key, { coordinate, pubkey })).toBe("poison");
+
+    expect(store.clearAttendeeJobMemo(coordinate, pubkey)).toBe(1);
+    expect(store.enqueueJob("process_talk", key, { coordinate, pubkey })).toBe("enqueued");
+  });
+
+  it("still leaves another attendee's talk row alone", () => {
+    const store = new Store();
+    const coordinate = "31923:aaaa:evt";
+    const mine = "b".repeat(64);
+    const theirs = "d".repeat(64);
+    store.enqueueJob("process_talk", "t:theirs", { coordinate, pubkey: theirs });
+    const job = store.claimNextJob(1000, "w", 60_000)!;
+    store.failJob(job.id, 3, 2000, "x", true, "w");
+    expect(store.clearAttendeeJobMemo(coordinate, mine)).toBe(0);
+    expect(store.enqueueJob("process_talk", "t:theirs", { coordinate, pubkey: theirs })).toBe("poison");
+  });
+});
+
+// ── a rollback that throws must not eat the original exception ───────────────
+describe("guarded ROLLBACK in the purge paths", () => {
+  /** A db façade whose ROLLBACK throws the way SQLite does after an auto-rollback. */
+  function withHostileRollback(store: Store, failOn: RegExp): void {
+    const real = (store as any).db;
+    (store as any).db = {
+      prepare(sql: string) {
+        if (failOn.test(sql)) throw new Error("the original failure");
+        return real.prepare(sql);
+      },
+      exec(sql: string) {
+        if (sql === "ROLLBACK") throw new Error("cannot rollback - no transaction is active");
+        return real.exec(sql);
+      },
+    };
+  }
+
+  it("purgeEventArtifacts surfaces the ORIGINAL error, not the rollback complaint", () => {
+    const store = new Store();
+    withHostileRollback(store, /DELETE FROM attendees/);
+    expect(() => store.purgeEventArtifacts("31923:a:e")).toThrow("the original failure");
+  });
+
+  it("purgeAttendeeArtifacts surfaces the ORIGINAL error, not the rollback complaint", () => {
+    const store = new Store();
+    withHostileRollback(store, /DELETE FROM attendees/);
+    expect(() => store.purgeAttendeeArtifacts("31923:a:e", "p".repeat(64))).toThrow("the original failure");
+  });
+});
+
+// ── doctor's pipeline read ───────────────────────────────────────────────────
+describe("inspectPipelineReadOnly (doctor)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-pipe-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("reports queue depth, the poisoned rows, and the last completion", () => {
+    const path = tmpDb();
+    const store = new Store(path);
+    const coordinate = "31923:aaaa:evt";
+    const pubkey = "e".repeat(64);
+
+    store.enqueueJob("process_attendee", "poisoned", { coordinate, pubkey });
+    const bad = store.claimNextJob(1_000, "w", 60_000)!;
+    store.failJob(bad.id, 26, 2_000, "provider returned a malformed profile", true, "w");
+    store.recordJobStatus({
+      coordinate,
+      stage: "process_attendee",
+      pubkey,
+      state: "poison",
+      attempts: 26,
+      error_category: "provider_contract",
+      retryable: 1,
+      updated_at: 5_000,
+    });
+
+    store.enqueueJob("score_batch", "finished", { coordinate });
+    const good = store.claimNextJob(2_000, "w2", 60_000)!;
+    store.completeJob(good.id, "w2");
+
+    store.enqueueJob("publish_matches", "waiting-one", { coordinate });
+    store.close();
+
+    const p = inspectPipelineReadOnly(path);
+    expect(p.counts.poison).toBe(1);
+    expect(p.counts.done).toBe(1);
+    expect(p.counts.pending).toBe(1);
+    expect(p.poisonJobs).toHaveLength(1);
+    expect(p.poisonJobs[0]!.type).toBe("process_attendee");
+    expect(p.poisonJobs[0]!.coordinate).toBe(coordinate);
+    expect(p.poisonJobs[0]!.pubkey).toBe(pubkey);
+    expect(p.poisonStatuses).toHaveLength(1);
+    expect(p.poisonStatuses[0]!.error_category).toBe("provider_contract");
+    expect(p.lastCompletedStartedAt).toBe(2_000);
+    expect(p.oldestPending?.type).toBe("publish_matches");
+  });
+
+  it("leaves the file byte-identical (same audit-O2 contract as the schema read)", () => {
+    const path = tmpDb();
+    const store = new Store(path);
+    store.enqueueJob("t", "k", { coordinate: "c" });
+    store.close();
+    const before = readFileSync(path);
+    inspectPipelineReadOnly(path);
+    expect(readFileSync(path).equals(before)).toBe(true);
+  });
+
+  it("tolerates a database that predates the pipeline tables", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-pipe-old-"));
+    dirs.push(dir);
+    const path = join(dir, "old.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("CREATE TABLE events (coordinate TEXT PRIMARY KEY)");
+    raw.close();
+    const p = inspectPipelineReadOnly(path);
+    expect(p.counts).toEqual({});
+    expect(p.poisonJobs).toEqual([]);
+    expect(p.lastCompletedStartedAt).toBeNull();
+  });
 });

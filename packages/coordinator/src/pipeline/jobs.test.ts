@@ -342,9 +342,63 @@ describe("shutdown abort (audit C11)", () => {
     runner.abort();
     await drainP;
     // The aborted job was neither poisoned nor retried — it is still claimable
-    // (left 'running' with its lease for the next start's stranded-lease recovery).
+    // (released back to `pending`, runnable at once; see the next case).
     expect(store.poisonJobs()).toHaveLength(0);
     expect(store.pendingJobCount()).toBe(1);
+  });
+
+  it("an aborted job is claimable IMMEDIATELY on restart, not after the lease expires", async () => {
+    // The deploy case. The abort branch used to leave the row `running` and call
+    // that "claimable for restart" — but both recovery paths (claimNextJob's
+    // stranded arm and reclaimExpiredLeases) require `lease_until <= now`, and the
+    // heartbeat had just pushed the lease to now + 5 minutes. So a deploy landing
+    // mid-job idled that attendee's pipeline for up to five minutes past the
+    // restart while the fresh daemon logged "recovered 0 stranded job(s)".
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, leaseMs: 5 * 60_000 });
+    runner.register("slow", async (_p, { signal }) => {
+      await new Promise((r) => setTimeout(r, 5));
+      signal.throwIfAborted();
+    });
+    runner.enqueue("slow", "k", { coordinate: "c" });
+    const drainP = runner.drain();
+    runner.abort();
+    await drainP;
+
+    // What a restarting daemon does, at the SAME instant (no clock advance).
+    const fresh = new JobRunner(store, { now: clock.now, leaseMs: 5 * 60_000 });
+    expect(fresh.recoverStrandedJobs()).toBe(0); // nothing stranded — it was released
+    let ran = 0;
+    fresh.register("slow", async () => {
+      ran++;
+    });
+    await fresh.drain();
+    expect(ran).toBe(1);
+
+    const row = store.claimNextJob(clock.now(), "probe", 1000);
+    expect(row).toBeUndefined(); // it completed; nothing left to claim
+  });
+
+  it("the release consumes no retry and clears the lease", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, maxAttempts: 3, baseBackoffMs: 100 });
+    runner.register("slow", async (_p, { signal }) => {
+      await new Promise((r) => setTimeout(r, 5));
+      signal.throwIfAborted();
+    });
+    runner.enqueue("slow", "k", {});
+    const drainP = runner.drain();
+    runner.abort();
+    await drainP;
+
+    const row = (store as any).db.prepare("SELECT * FROM jobs WHERE dedupe_key = 'k'").get();
+    expect(row.state).toBe("pending");
+    expect(row.attempts).toBe(0); // a shutdown is not the job's fault
+    expect(row.next_run_at).toBe(0); // no backoff — run it now
+    expect(row.lease_until).toBeNull();
+    expect(row.worker_token).toBeNull();
   });
 });
 

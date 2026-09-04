@@ -5,7 +5,7 @@
  * to overwrite without --force.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
@@ -242,5 +242,40 @@ describe("coordinator backup/restore (§13.2)", () => {
       const v = verifyBackup({ filePath: dest, identitySk: sk, expectedPubkey: pubkey });
       expect(v.authOk).toBe(false);
     });
+  });
+});
+
+
+describe("backup artifacts are owner-only", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    for (const d of tmpDirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("the snapshot and its metadata sidecar are mode 0600", () => {
+    // A backup is only PARTIALLY encrypted: `selfEncrypt` covers the per-event inbox
+    // key and ECK columns and nothing else, so attendee names, profiles, AI profiles,
+    // transcripts, match scores and the Cashu payment journal all travel in the
+    // snapshot as cleartext. `VACUUM INTO` creates the file under the process umask
+    // (0644 on a stock systemd unit), which for that content is the wrong default —
+    // the file mode is the only thing protecting those rows.
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-backup-mode-"));
+    tmpDirs.push(dir);
+    const sk = generateSecretKey();
+    const store = new Store(join(dir, "src.sqlite"), sk);
+    seed(store);
+    const dest = join(dir, "snap.sqlite");
+    createBackup({
+      srcStore: store,
+      destPath: dest,
+      identitySk: sk,
+      coordinatorPubkey: getPublicKey(sk),
+      releaseId: "test",
+      packageVersion: "0.0.0",
+      quiesced: true,
+    });
+    store.close();
+    expect(statSync(dest).mode & 0o077).toBe(0);
+    expect(statSync(metaPathFor(dest)).mode & 0o077).toBe(0);
   });
 });

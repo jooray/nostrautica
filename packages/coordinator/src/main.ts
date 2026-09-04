@@ -36,6 +36,16 @@ async function runDaemon(): Promise<void> {
   // all). See lifecycle.ts for what each handler covers and why.
   installExitLogging();
 
+  // Owner-only for EVERY file this process creates from here on: the SQLite store
+  // and its WAL sidecars, the Cashu wallet, ffmpeg temp dirs, backups. A stock
+  // Debian/systemd user unit inherits umask 022, so all of those were being created
+  // world-readable — and the store is only PARTIALLY encrypted (F1 covers the
+  // per-event inbox key and ECK columns; attendee names, profiles, AI profiles,
+  // transcripts, match scores and the payment journal sit in it as cleartext). Set
+  // before the store is opened so it applies to the file's creation, not just to
+  // the after-the-fact chmod the Store also does.
+  process.umask(0o077);
+
   // Release provenance (§13.9) + process identity: tie the running daemon to a
   // specific build AND to a pid/start time, so a restart — or a death followed by
   // no restart — is unmistakable in a log that spans many deploys.

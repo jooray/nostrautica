@@ -205,36 +205,106 @@ export class NostrClient {
     });
   }
 
-  /** Publish a signed event to the given relays; resolves when any accepts. The
-   *  outcome's `replaced` flag is set when a relay answered "replaced/have newer" for
-   *  a replaceable event, so the coordinator can reconcile via the §3.1 comparator
-   *  (reliability tail) instead of silently dropping the genuinely-newest event. */
+  /**
+   * Publish a signed event to the given relays; resolves as soon as ANY relay
+   * accepts it, rejects only when every relay refused.
+   *
+   * Two things used to be thrown away here, both of them the answer to a question
+   * an operator or the coordinator would later ask.
+   *
+   * 1. `Promise.any` resolved on the first ack and the code then read a `replaced`
+   *    variable that the OTHER relays' handlers were still racing to write. A relay
+   *    answering "replaced: have newer event" a few milliseconds after a faster
+   *    relay's plain OK set the flag into a value nobody would ever read again, so
+   *    the §3.1 reconciliation that exists for exactly that case never fired and a
+   *    genuinely-newest event could be silently dropped.
+   * 2. When every relay failed, `Promise.any` rejects with an `AggregateError`
+   *    whose `.message` is the fixed string "All promises were rejected". That
+   *    string — carrying no relay URL and no reason — is what reached the daemon
+   *    log and the organizer's 21606 status notice, while the actual per-relay
+   *    reasons sat unread in `err.errors[]`.
+   *
+   * So: EVERY relay's outcome is now recorded — each publish promise is wrapped so
+   * it can never reject, and all of them are allowed to settle — while the caller is
+   * still resolved by the first ack rather than made to wait for the slowest relay — a stalled-but-connected relay costs
+   * nostr-tools' full 4.4s publish timeout, and the daemon publishes many events
+   * per pipeline run.
+   *
+   * The consequence of that choice is deliberate and bounded: a "replaced" answer
+   * arriving AFTER the first ack cannot be in the returned flag, so it is logged
+   * loudly instead. It is self-correcting — the competing event is still newer on
+   * that relay, so the next publish to the same coordinate hits "replaced" again,
+   * this time with a fair chance of being the first outcome seen.
+   */
   async publish(event: NostrEvent, relays: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
-    let replaced = false;
-    await Promise.any(
-      this.pool.publish(relays, event).map((p) =>
-        p.catch((err) => {
-          // OK=false with "duplicate"/"replaced" means the relay already holds
-          // this event (or a newer version of the addressable coordinate) — the
-          // data is durably there, which is what publish promises. Burst
-          // republishes of 31605 lists otherwise fail every retry against
-          // strfry's "replaced: have newer event".
-          const reason = String((err as Error)?.message ?? err);
-          if (/\b(duplicate|replaced)\b/i.test(reason)) {
-            // A "replaced: have newer" (not a plain "duplicate") means a competing
-            // event superseded ours — flag it so the coordinator reconciles (audit
-            // COORD-27): with clock skew this can silently drop the newest event.
-            if (/\breplaced\b/i.test(reason)) replaced = true;
-            console.debug(
-              `[nostr] kind ${event.kind} ${event.id.slice(0, 8)} already-stored (${reason.slice(0, 80)}) — treating as success`,
+    type Outcome = { url: string; ok: boolean; replaced: boolean; reason: string };
+    let settledCount = 0;
+    let resolvedToCaller = false;
+    const outcomes: Outcome[] = [];
+
+    const classify = (url: string, err: unknown): Outcome => {
+      // OK=false with "duplicate"/"replaced" means the relay already holds this
+      // event (or a newer version of the addressable coordinate) — the data is
+      // durably there, which is what publish promises. Burst republishes of 31605
+      // lists otherwise fail every retry against strfry's "replaced: have newer event".
+      const reason = String((err as Error)?.message ?? err);
+      if (/\b(duplicate|replaced)\b/i.test(reason)) {
+        console.debug(
+          `[nostr] kind ${event.kind} ${event.id.slice(0, 8)} already-stored on ${url} (${reason.slice(0, 80)}) — treating as success`,
+        );
+        // A "replaced: have newer" (not a plain "duplicate") means a competing event
+        // superseded ours — flag it so the coordinator reconciles (audit COORD-27):
+        // with clock skew this can otherwise silently drop the newest event.
+        return { url, ok: true, replaced: /\breplaced\b/i.test(reason), reason };
+      }
+      return { url, ok: false, replaced: false, reason };
+    };
+
+    // `this.pool.publish` returns one promise per relay, in the order given.
+    const wrapped = this.pool.publish(relays, event).map((p, i) => {
+      const url = relays[i] ?? "(unknown relay)";
+      return p.then(
+        (): Outcome => ({ url, ok: true, replaced: false, reason: "OK" }),
+        (err: unknown): Outcome => classify(url, err),
+      );
+    });
+
+    return await new Promise<{ replaced?: boolean }>((resolve, reject) => {
+      if (wrapped.length === 0) {
+        reject(new Error(`publish of kind ${event.kind} ${event.id.slice(0, 8)}: no relays configured`));
+        return;
+      }
+      for (const w of wrapped) {
+        // Never rejects (both arms of the `.then` above return an Outcome), so this
+        // bookkeeping cannot itself produce an unhandled rejection.
+        void w.then((o) => {
+          outcomes.push(o);
+          settledCount++;
+          if (o.ok && !resolvedToCaller) {
+            resolvedToCaller = true;
+            // Whatever is known AT THIS MOMENT — including a "replaced" that landed
+            // in the same tick as, or before, the first plain ack.
+            resolve({ replaced: outcomes.some((x) => x.replaced) });
+          } else if (o.replaced && resolvedToCaller) {
+            console.warn(
+              `[nostr] kind ${event.kind} ${event.id.slice(0, 8)}: ${o.url} answered "replaced/have newer" AFTER ` +
+                "another relay had already acked — reconciliation not triggered for this publish; " +
+                "the next publish to this coordinate will see it again",
             );
-            return "already-stored";
           }
-          throw err;
-        }),
-      ),
-    );
-    return { replaced };
+          if (settledCount === wrapped.length && !resolvedToCaller) {
+            // Total failure. Join the per-relay reasons: this message is what the
+            // operator's log and the organizer's status notice actually show.
+            const why = outcomes.map((x) => `${x.url}: ${x.reason}`).join("; ");
+            reject(
+              new Error(
+                `publish of kind ${event.kind} ${event.id.slice(0, 8)} failed on all ${wrapped.length} relay(s) — ${why}`,
+              ),
+            );
+          }
+        });
+      }
+    });
   }
 
   close(): void {

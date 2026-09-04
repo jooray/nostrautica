@@ -192,10 +192,22 @@ export class JobRunner {
     return this.abortController.signal;
   }
 
-  /** Abort the in-flight handler (audit C11): fired after the graceful-drain window
-   *  expires so a blocked provider/media call unwinds. The caller MUST then await the
-   *  outstanding drain promise before closing transport/store/lock. Idempotent. */
+  /**
+   * Abort the in-flight handler (audit C11): fired after the graceful-drain window
+   * expires so a blocked provider/media call unwinds. The caller MUST then await the
+   * outstanding drain promise before closing transport/store/lock. Idempotent.
+   *
+   * Also stops claiming, which `main.ts` already did on its own line before calling
+   * this. It has to be here rather than only at the call site: once the signal is
+   * aborted, every job the drain loop goes on to claim is handed an already-aborted
+   * signal, so the loop would spin through the whole queue handing out cancellations
+   * — and now that an aborted job is RELEASED back to `pending` (runnable at once)
+   * instead of left `running` under an unexpired lease, that spin is on the same row
+   * forever, up to `maxIterations`. Aborting and continuing to claim is not a
+   * combination anything wants.
+   */
   abort(reason = "coordinator shutting down"): void {
+    this.stopping = true;
     if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
   }
 
@@ -302,12 +314,25 @@ export class JobRunner {
       }
     } catch (err) {
       const ms = this.now() - startedAt;
-      // A shutdown abort (audit C11) is not a real failure: leave the job `running`
-      // with its lease so it is neither retried-toward-poison nor lost — the next
-      // start's stranded-lease recovery reclaims it. Consumes no retry.
+      // A shutdown abort (audit C11) is not a real failure: hand the row straight
+      // back to the queue, runnable NOW and with its retry counter untouched.
+      //
+      // This used to just `return`, leaving the row `running` and calling that
+      // "claimable for restart". It was not: `claimNextJob`'s stranded-job arm and
+      // `reclaimExpiredLeases` BOTH require `lease_until <= now`, and the heartbeat
+      // had pushed that lease to `now + leaseMs` less than a third of a lease ago.
+      // A deploy landing mid-job therefore idled that attendee's pipeline for up to
+      // the full five-minute lease past the restart, while the fresh daemon logged
+      // "recovered 0 stranded job(s)" — the gap had no explanation anywhere.
+      // `releaseJob` preserves the documented "consumes no retry" contract (unlike
+      // failJob) and does not park it out of reach (unlike parkJob).
       if (this.abortController.signal.aborted) {
+        const released = this.store.releaseJob(job.id, token);
         console.log(
-          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms — left claimable for restart`,
+          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms — ` +
+            (released
+              ? "released back to the queue, runnable immediately on restart (no retry consumed)"
+              : "lease already lost — another worker owns the row"),
         );
         return;
       }
