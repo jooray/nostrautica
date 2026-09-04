@@ -85,3 +85,77 @@ The public reference instance is an operator-managed conventional static host pl
 3. Verify app and landing HTTP status, CSP/header policy for the chosen host, and service-worker update behavior.
 4. Exercise an event flow appropriate to the release: join, approval, media where applicable, and coordinator health.
 5. Record the Git revision and deployed app/coordinator versions.
+
+## Rollback
+
+Every deployment mechanism in this document is one-directional: it describes how
+to ship a newer build and says nothing about getting back to an older one. That
+is the wrong shape for an incident, where the decision is usually "put back what
+worked" and the time to discover the procedure is not while the site is down.
+
+**Decide first whether the coordinator database has migrated.** This is the only
+step that is not reversible by re-deploying code. The store refuses to open a
+database whose `user_version` exceeds what the binary knows, so rolling the
+coordinator back past a schema bump means restoring a database file, not just an
+older build:
+
+```sh
+# On the coordinator host — what schema does the live DB carry?
+sqlite3 -readonly "$HOME/nostrautica/packages/coordinator/coordinator.sqlite" "PRAGMA user_version;"
+# What does the build you want to roll back TO know?
+git show <target-ref>:packages/coordinator/src/store/db.ts | grep 'SCHEMA_VERSION ='
+```
+
+If the live number is higher, you need the pre-migration backup (the operator
+notes' migration checklist takes one before every schema-bumping push, named for
+the version it CONTAINS). No backup, no rollback — go forward with a fix instead.
+
+**Static site (landing / `/app` / `/docs`).** The build is a pure function of the
+commit, so rolling back is re-deploying the older commit; nothing on the serving
+host holds state.
+
+```sh
+git push origin <good-sha>:main --force-with-lease
+```
+
+`--force-with-lease`, not `--force`: it refuses if someone else has pushed since
+you last fetched, which during an incident is exactly the case you cannot afford
+to guess about. Then verify the served bundle is the one you meant, using the
+marker-grep in the release-verification section above — the OK markers only prove
+a build ran.
+
+**Coordinator.** The same push redeploys and restarts it. Two things to check
+afterwards, in this order:
+
+```sh
+ssh <coordinator-host> 'systemctl --user is-active nostrautica-coordinator;
+  systemctl --user show nostrautica-coordinator -p NRestarts --value'
+```
+
+`NRestarts` climbing means the daemon is dying and being respawned — with
+`Restart=always` that looks identical to "up" from the outside, and a rollback
+onto a database it cannot open is one of the ways to get there.
+
+**Restoring a database.** Stop the daemon first: a copy taken or placed while it
+holds the WAL is not a consistent database.
+
+```sh
+ssh <coordinator-host> 'set -e
+  systemctl --user stop nostrautica-coordinator
+  DB="$HOME/nostrautica/packages/coordinator/coordinator.sqlite"
+  mv "$DB" "$DB.failed-$(date +%Y%m%d-%H%M%S)"   # keep it — it is the only copy of what went wrong
+  rm -f "$DB-wal" "$DB-shm"                       # stale WAL/shm belong to the file you just moved
+  cp "$HOME/coordinator.sqlite.vN-<timestamp>.bak" "$DB"
+  systemctl --user start nostrautica-coordinator'
+```
+
+Keep the failed database rather than deleting it. It is the only record of the
+state the incident happened in, and a migration that corrupted data is diagnosed
+from it, not from the backup that replaced it.
+
+**What a rollback does not undo.** Anything already published to relays — a
+roster, a directory entry, a match list, a coordinator status — is out and stays
+out; replaceable events can be superseded but not withdrawn, and gift wraps
+cannot be recalled at all. Provider spend is likewise spent. So a rollback
+restores the code and the local state, not the world's view of what happened,
+which is worth saying to an organizer before they ask.
