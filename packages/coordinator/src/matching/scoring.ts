@@ -151,6 +151,27 @@ export const MAX_ICEBREAKERS = 3;
 export const MAX_ICEBREAKER_LEN = 280;
 
 /**
+ * Completion budget for one batch scoring call (2026-09-04 audit).
+ *
+ * A batch returns one entry per candidate, and each entry carries reasoning plus up
+ * to {@link MAX_ICEBREAKERS} openers of up to {@link MAX_ICEBREAKER_LEN} chars. At
+ * the production batch size of 10 that does not fit in the provider default of
+ * 4096, and a truncated body is not a lost ROW — it is unparseable JSON, so the
+ * whole batch fails and rides the full paid retry schedule. `icebreaker-run.mjs`
+ * measured this and pins 12000; deriving it per call keeps a larger batch_size from
+ * silently re-creating the same cliff.
+ *
+ * Non-English events hit the ceiling first (worse token-per-character ratio), and a
+ * model that refuses `disable_thinking` spends reasoning tokens from the same
+ * budget — hence the deliberately generous per-candidate allowance.
+ */
+export const BATCH_TOKENS_BASE = 2000;
+export const BATCH_TOKENS_PER_CANDIDATE = 1000;
+export function batchMaxTokens(candidateCount: number): number {
+  return BATCH_TOKENS_BASE + BATCH_TOKENS_PER_CANDIDATE * Math.max(1, candidateCount);
+}
+
+/**
  * Coerce a raw model `icebreakers` value into a bounded string[] (NIP §6.2):
  * keep only non-empty strings, trim to MAX_ICEBREAKER_LEN, cap at MAX_ICEBREAKERS.
  * Anything else (absent, not an array) yields undefined so the field stays off the
@@ -501,6 +522,7 @@ export async function scoreBatch(
     schemaName: "batch_score",
     model,
     temperature: 0.3,
+    maxTokens: batchMaxTokens(ordered.length),
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
     signal,
   });
@@ -802,6 +824,7 @@ export async function scoreReverseBatch(
     schemaName: "reverse_batch_score",
     model,
     temperature: 0.3,
+    maxTokens: batchMaxTokens(ordered.length),
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
     signal,
   });

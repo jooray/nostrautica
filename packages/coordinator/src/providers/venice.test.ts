@@ -229,3 +229,39 @@ describe("per-model disable_thinking", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * A response cut off at the token ceiling (2026-09-04 audit).
+ *
+ * Production scored at the 4096 default while the benchmark harness had long since
+ * pinned 12000, with a comment saying that a K=10 batch truncates mid-JSON there.
+ * A truncated body is not a lost row — it is unparseable JSON, so the whole batch
+ * fails and rides the full paid retry schedule. Nothing read `finish_reason`, so in
+ * the log it was indistinguishable from a model emitting garbage, and the two want
+ * opposite responses: raise the budget vs. fix the prompt.
+ */
+describe("truncated completions are named, not mistaken for a malformed model", () => {
+  it("reports finish_reason=length and the ceiling that was hit", async () => {
+    const truncated = JSON.stringify({
+      choices: [{ finish_reason: "length", message: { content: '{"matches":[{"ind' } }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(truncated, { status: 200 })));
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await expect(
+      llm.completeStructured({ ...req, model: "deepseek-v4-flash-0731", maxTokens: 12000 }),
+    ).rejects.toThrow(/truncated at the 12000-token ceiling/);
+  });
+
+  it("still calls a genuinely malformed body invalid JSON", async () => {
+    const garbage = JSON.stringify({
+      choices: [{ finish_reason: "stop", message: { content: "not json at all" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(garbage, { status: 200 })));
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await expect(
+      llm.completeStructured({ ...req, model: "deepseek-v4-flash-0731" }),
+    ).rejects.toThrow(/not valid JSON/);
+  });
+});

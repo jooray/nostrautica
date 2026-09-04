@@ -245,6 +245,20 @@ export class VeniceLlm implements LlmProvider {
     if (typeof content !== "string") {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
     }
+    // A response cut off at the token ceiling is unparseable JSON, and used to be
+    // indistinguishable in the logs from a model that emitted garbage — the two want
+    // opposite responses (raise the budget vs. fix the prompt), so name it. Checked
+    // BEFORE the parse so the diagnosis survives even if a truncation happens to
+    // land on a syntactically complete prefix.
+    const finish = body.choices?.[0]?.finish_reason;
+    if (finish === "length") {
+      throw new ProviderContractError(
+        this.id,
+        req.schemaName,
+        req.model,
+        `response truncated at the ${req.maxTokens ?? 4096}-token ceiling (finish_reason=length)`,
+      );
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);

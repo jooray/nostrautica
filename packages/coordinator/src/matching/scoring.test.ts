@@ -10,6 +10,9 @@ import {
   BATCH_SYSTEM_PROMPT,
   REVERSE_BATCH_SYSTEM_PROMPT,
   BATCH_SCORE_SCHEMA,
+  batchMaxTokens,
+  BATCH_TOKENS_BASE,
+  BATCH_TOKENS_PER_CANDIDATE,
   type BatchCandidate,
   type EventContextForScoring,
 } from "./scoring.js";
@@ -736,5 +739,27 @@ describe("reverseSystemPrompt — the language reminder is inside the icebreaker
     // reverting a measured fix, which is exactly how the regression it fixes got in.
     const mod = await import("./scoring.js");
     expect(mod.REVERSE_BATCH_SYSTEM_PROMPT).toContain("Return one entry per target");
+  });
+});
+
+/**
+ * The batch completion budget (2026-09-04 audit). `batchMaxTokens` exists because
+ * the provider default of 4096 truncates a production-sized batch mid-JSON, which
+ * fails the WHOLE batch rather than one row.
+ */
+describe("batchMaxTokens — a batch must not be cut off at the provider default", () => {
+  it("clears the 4096 default at the production batch size of 10", () => {
+    expect(batchMaxTokens(10)).toBeGreaterThan(4096);
+    // At least the 12000 the benchmark harness measured and pinned.
+    expect(batchMaxTokens(10)).toBeGreaterThanOrEqual(12000);
+  });
+
+  it("scales with the batch, so raising batch_size cannot silently re-create the cliff", () => {
+    expect(batchMaxTokens(20)).toBeGreaterThan(batchMaxTokens(10));
+    expect(batchMaxTokens(20) - batchMaxTokens(10)).toBe(10 * BATCH_TOKENS_PER_CANDIDATE);
+  });
+
+  it("never returns a budget below the single-candidate floor", () => {
+    expect(batchMaxTokens(0)).toBe(BATCH_TOKENS_BASE + BATCH_TOKENS_PER_CANDIDATE);
   });
 });
