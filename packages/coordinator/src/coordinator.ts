@@ -87,7 +87,7 @@ import {
   MAX_MEDIA_FILE_BYTES as PROTOCOL_MAX_MEDIA_FILE_BYTES,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor } from "@nostrautica/protocol";
-import { Store, type BillingStateRow } from "./store/db.js";
+import { Store, DAEMON_PARK_REASON, type BillingStateRow } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
@@ -422,6 +422,12 @@ export interface CoordinatorDeps {
     perEventDurationSec: number;
     perAttendeeCalls: number;
     perEventCalls: number;
+    /** Daemon-wide rolling ceilings across every installation (audit SEC-7).
+     *  Omitted ⇒ no daemon gate (only the per-event/per-attendee ones apply). */
+    daemonBytes?: number;
+    daemonDurationSec?: number;
+    daemonCalls?: number;
+    daemonWindowHours?: number;
   };
 }
 
@@ -548,6 +554,9 @@ export class Coordinator {
   /** Coordinates for which a 21606 budget_exceeded was already emitted (H-2): emit
    *  once per block, cleared on resume so a later re-exceed re-notifies. */
   private readonly budgetNotified = new Set<string>();
+  /** True while the daemon-wide ceiling (audit SEC-7) is parking paid work, so the
+   *  operator log says so once rather than once per gated job. */
+  private daemonCeilingParked = false;
   /** Bounded inbound work queue (audit C3): pending handler closures + the number of
    *  handlers currently running, enforcing a global concurrency limit and a queue
    *  depth cap so a gift-wrap burst can't spawn unbounded concurrent work. */
@@ -3940,6 +3949,26 @@ export class Coordinator {
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.push(() => clearInterval(retentionTimer));
+    // Daemon-wide ceiling release (audit SEC-7): work parked because the whole
+    // daemon was over its rolling budget has no other way back — the per-event
+    // resume paths are driven by billing and by organizer action, and neither
+    // knows about this ceiling. Once at boot (a restart must not strand work
+    // parked by the previous process) and then every 10 minutes, well inside the
+    // one-hour granularity of the window's buckets.
+    try {
+      this.daemonCeilingSweep();
+    } catch (e) {
+      log(`[budget] boot daemon-ceiling sweep failed: ${e instanceof Error ? e.message : e}`);
+    }
+    const daemonBudgetTimer = setInterval(() => {
+      try {
+        this.daemonCeilingSweep();
+      } catch {
+        /* next tick */
+      }
+    }, 600_000);
+    if (typeof (daemonBudgetTimer as any).unref === "function") (daemonBudgetTimer as any).unref();
+    this.closers.push(() => clearInterval(daemonBudgetTimer));
     // Resume any relay handover left pending by a transient outage or a restart
     // (audit C9): probe the stored candidate and promote it once reachable. Run once
     // at boot, then periodically.
@@ -4645,7 +4674,29 @@ export class Coordinator {
         throw new ParkJobError(`billing blocked for ${coordinate} — paid work parked until payment`);
       }
     }
-    // 2. Budget gate (already-exceeded → park + emit budget_exceeded once).
+    // 2. Daemon-wide ceiling (audit SEC-7), checked BEFORE the per-event budget
+    // because it protects a different party. The per-event/per-attendee budgets
+    // below cap what one installation can spend; this caps what EVERY installation
+    // can spend together, which is the only thing standing between an operator's
+    // provider key and someone who self-installs `security.max_events` events.
+    const daemonOver = this.checkDaemonBudget();
+    if (daemonOver) {
+      if (!this.daemonCeilingParked) {
+        this.daemonCeilingParked = true;
+        log(`[budget] DAEMON-WIDE ceiling reached — parking paid work for every event: ${daemonOver}`);
+      }
+      if (!this.budgetNotified.has(coordinate)) {
+        this.budgetNotified.add(coordinate);
+        const state = this.events.get(coordinate);
+        // Deliberately vague on the wire. The organizer needs to know their work is
+        // parked and will resume on its own; they do not need — and an attacker
+        // probing the ceiling must not get — a read-out of the operator's running
+        // daemon-wide spend. The numbers are in the operator's log above.
+        if (state) await this.emitBudgetStatus(state, "coordinator at capacity — processing resumes automatically");
+      }
+      throw new ParkJobError(`${DAEMON_PARK_REASON}: ${daemonOver}`);
+    }
+    // 3. Budget gate (already-exceeded → park + emit budget_exceeded once).
     const over = this.checkBudget(coordinate, pubkey);
     if (over) {
       if (!this.budgetNotified.has(coordinate)) {
@@ -4690,6 +4741,46 @@ export class Coordinator {
       if (over(b.perAttendeeCalls, at.calls)) return `budget_exceeded: attendee calls ${at.calls} ≥ ${b.perAttendeeCalls}`;
     }
     return undefined;
+  }
+
+  /**
+   * Return a reason string if the daemon-wide rolling ceiling is already reached
+   * (audit SEC-7), else undefined. Rolling rather than lifetime: an all-time total
+   * would eventually park a legitimately busy coordinator with no release short of
+   * an operator edit, whereas this one lets itself out as the window advances.
+   */
+  private checkDaemonBudget(): string | undefined {
+    const b = this.deps.budgets;
+    if (!b) return undefined;
+    const bytes = b.daemonBytes ?? 0;
+    const durationSec = b.daemonDurationSec ?? 0;
+    const calls = b.daemonCalls ?? 0;
+    // Every limit unset or 0 ⇒ unlimited: return without touching the DB, since
+    // this runs on the hot path immediately before every provider call.
+    if (bytes <= 0 && durationSec <= 0 && calls <= 0) return undefined;
+    const hours = b.daemonWindowHours ?? 24;
+    const d = this.deps.store.getDaemonUsage(this.now(), hours);
+    const over = (limit: number, val: number) => limit > 0 && val >= limit;
+    if (over(bytes, d.bytes)) return `daemon bytes ${d.bytes} ≥ ${bytes} in ${hours}h`;
+    if (over(durationSec, d.durationSec)) return `daemon duration ${d.durationSec}s ≥ ${durationSec}s in ${hours}h`;
+    if (over(calls, d.calls)) return `daemon calls ${d.calls} ≥ ${calls} in ${hours}h`;
+    return undefined;
+  }
+
+  /**
+   * Release work parked by the daemon-wide ceiling once the rolling window has
+   * moved back under it (audit SEC-7). Runs on a timer AND at boot: the park
+   * marker lives in the job row, so a restart between park and release does not
+   * strand the work — which a process-local latch alone would.
+   */
+  private daemonCeilingSweep(): void {
+    if (this.checkDaemonBudget()) return;
+    const resumed = this.deps.store.resumeDaemonParkedJobs();
+    this.daemonCeilingParked = false;
+    if (resumed > 0) {
+      log(`[budget] daemon-wide ceiling back under limit — resumed ${resumed} parked job(s)`);
+      for (const coordinate of this.events.keys()) this.budgetNotified.delete(coordinate);
+    }
   }
 
   /** Gift-wrap a 21606 budget_exceeded status to the event identity (H-2). */

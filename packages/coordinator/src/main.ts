@@ -11,6 +11,7 @@ import {
   veniceApiKey,
   buildAnnounceContent,
   evaluateBilling,
+  spendExposure,
 } from "./config.js";
 import { Store, acquireDaemonLock } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
@@ -65,6 +66,21 @@ async function runDaemon(): Promise<void> {
       "[coordinator] WARNING: release provenance is unknown (gitSha: unknown, no NOSTRAUTICA_RELEASE_ID) — " +
         "set NOSTRAUTICA_GIT_SHA or NOSTRAUTICA_RELEASE_ID so this daemon can be tied to a build (§13.9, R23)",
     );
+  }
+
+  // Spend exposure (audit SEC-7). Fail closed BEFORE anything expensive is built:
+  // an announced, open-install coordinator with no daemon-wide ceiling is handing
+  // its provider key to whoever reads the announcement. The default config is not
+  // in this state — it only happens when an operator explicitly zeroes the daemon
+  // budgets — so this aborts rather than warns, the same way an unverifiable
+  // private model does.
+  const exposure = spendExposure(config);
+  if (exposure) {
+    if (config.security.allow_unbounded_spend) {
+      console.warn(`[coordinator] WARNING: ${exposure}`);
+    } else {
+      throw new Error(`unbounded spend exposure — ${exposure}`);
+    }
   }
 
   await verifyFfmpeg().catch(() => {
@@ -233,6 +249,10 @@ async function runDaemon(): Promise<void> {
       perEventDurationSec: config.budgets.per_event_duration_sec,
       perAttendeeCalls: config.budgets.per_attendee_calls,
       perEventCalls: config.budgets.per_event_calls,
+      daemonBytes: config.budgets.daemon_bytes_per_window,
+      daemonDurationSec: config.budgets.daemon_duration_sec_per_window,
+      daemonCalls: config.budgets.daemon_calls_per_window,
+      daemonWindowHours: config.budgets.daemon_window_hours,
     },
   });
 

@@ -165,6 +165,27 @@ export const configSchema = z.object({
       /** Provider spend attempts (paid job executions). Default 500 / attendee, 20k / event. */
       per_attendee_calls: z.number().int().nonnegative().default(500),
       per_event_calls: z.number().int().nonnegative().default(20_000),
+      /**
+       * DAEMON-WIDE rolling ceilings across every installed event (audit SEC-7).
+       * The limits above are lifetime and per-installation, which means they cap
+       * what ONE event can spend and say nothing about what fifty can. Install is
+       * protocol-level and `security.allowed_eid_pubkeys` is empty by default, so
+       * an attacker who self-installs up to `security.max_events` events gets
+       * `max_events ×` the per-event budget against the operator's single provider
+       * key — with the defaults, a million provider calls. These cap the total.
+       *
+       * Rolling (see `daemon_window_hours`), not lifetime: an all-time daemon
+       * ceiling would eventually park a legitimately busy coordinator forever with
+       * no way back except an operator edit. The defaults are 4× one event's whole
+       * lifetime budget per DAY — far above any plausible single-operator day, far
+       * below what fifty hostile installs would draw. 0 = unlimited (the old
+       * behaviour, for an operator who has their own spend cap at the provider).
+       */
+      daemon_bytes_per_window: z.number().int().nonnegative().default(200 * 1024 * 1024 * 1024),
+      daemon_duration_sec_per_window: z.number().int().nonnegative().default(800 * 3600),
+      daemon_calls_per_window: z.number().int().nonnegative().default(80_000),
+      /** Width of the daemon-wide rolling window, in hours. Default 24. */
+      daemon_window_hours: z.number().int().positive().max(24 * 7).default(24),
     })
     .strict()
     .default({}),
@@ -200,6 +221,18 @@ export const configSchema = z.object({
        * Blossom proxy, a `nak serve` on localhost) can run. Default false.
        */
       allow_insecure_urls: z.boolean().default(false),
+      /**
+       * Escape hatch for the startup spend-exposure check (audit SEC-7). A
+       * coordinator that ANNOUNCES itself publicly (kind 31611), accepts installs
+       * from any E_id (`allowed_eid_pubkeys` empty) and has every daemon-wide
+       * ceiling set to 0 is offering its provider key to the internet: the
+       * per-event budgets bound one installation, and anyone can create up to
+       * `max_events` of them. Startup normally ABORTS on that combination. Set
+       * true to boot anyway — for an operator whose spend cap lives at the
+       * provider (a prepaid key, a Cashu wallet with a fixed balance) rather than
+       * here, where an unbounded local ceiling is a deliberate choice.
+       */
+      allow_unbounded_spend: z.boolean().default(false),
     })
     .strict()
     .default({}),
@@ -422,6 +455,35 @@ export type ModelRole = "summary" | "match" | "embed" | "translate";
 export function roleRequiresPrivate(config: CoordinatorConfig, role: ModelRole): boolean {
   return (
     config.models[role].require_private ?? config.providers.venice?.require_private ?? true
+  );
+}
+
+/**
+ * The startup spend-exposure check (audit SEC-7). Returns a message when the
+ * config leaves the operator's provider key unbounded to the public, else
+ * undefined.
+ *
+ * All three conditions have to hold at once, and each one alone is fine:
+ * announcing publicly is the point of a public coordinator; an empty
+ * `allowed_eid_pubkeys` is the default and is what makes it usable; and an
+ * unlimited daemon ceiling is reasonable for an operator whose spend cap is at
+ * the provider. Together they mean anyone who can read the announcement can
+ * install up to `max_events` events and spend `max_events ×` the per-event
+ * budget on the operator's single API key.
+ */
+export function spendExposure(config: CoordinatorConfig): string | undefined {
+  if (!config.coordinator.announce) return undefined;
+  if (config.security.allowed_eid_pubkeys.length > 0) return undefined;
+  const b = config.budgets;
+  const bounded =
+    b.daemon_bytes_per_window > 0 || b.daemon_duration_sec_per_window > 0 || b.daemon_calls_per_window > 0;
+  if (bounded) return undefined;
+  return (
+    "publicly announced + open to any installer + every daemon-wide budget set to 0: " +
+    `anyone can install up to security.max_events (${config.security.max_events}) events and spend ` +
+    `budgets.per_event_calls (${config.budgets.per_event_calls}) provider calls each against your API key. ` +
+    "Set one of budgets.daemon_*_per_window, or security.allowed_eid_pubkeys, or coordinator.announce = false " +
+    "— or security.allow_unbounded_spend = true if your spend cap lives at the provider."
   );
 }
 

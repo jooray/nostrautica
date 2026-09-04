@@ -11,7 +11,7 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
-import { loadConfig, resolveIdentity, veniceApiKey, type UnknownConfigKey } from "./config.js";
+import { loadConfig, resolveIdentity, veniceApiKey, spendExposure, type UnknownConfigKey } from "./config.js";
 import {
   Store,
   acquireDaemonLock,
@@ -443,6 +443,18 @@ async function cmdDoctor(args: string[]): Promise<number> {
       "config unknown key(s)",
       `${unknownKeys.map((u) => u.path).join(", ")} — not in the schema, IGNORED (typo or renamed setting?)`,
     );
+  }
+
+  // Spend exposure (audit SEC-7). Mirrors the startup gate exactly, including the
+  // escape hatch: doctor must agree with whether the daemon will actually boot,
+  // or it is worse than not checking.
+  const exposure = spendExposure(config);
+  if (!exposure) {
+    pass("spend exposure", "daemon-wide budget bounded (or installs restricted)");
+  } else if (config.security.allow_unbounded_spend) {
+    warn("spend exposure", `${exposure} — allowed by security.allow_unbounded_spend`);
+  } else {
+    fail("spend exposure", `${exposure} — the daemon will REFUSE TO START`);
   }
 
   // 2. identity load

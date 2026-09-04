@@ -712,7 +712,21 @@ model = "free"
 # per_event_duration_sec = ...
 # per_attendee_calls = ...
 # per_event_calls = ...
+# Daemon-wide rolling ceilings across EVERY installed event. The limits above are
+# lifetime and per-installation; these bound the total, because install is
+# protocol-level and anyone may create up to security.max_events of them.
+# daemon_bytes_per_window = ...
+# daemon_duration_sec_per_window = ...
+# daemon_calls_per_window = ...
+# daemon_window_hours = 24
 ```
+
+An announced coordinator (`coordinator.announce = true`) that accepts installs
+from any identity (`security.allowed_eid_pubkeys` empty) and sets every
+`daemon_*_per_window` to 0 **refuses to start**: that combination offers the
+operator's provider key to whoever reads the announcement. Override with
+`security.allow_unbounded_spend = true` when the spend cap lives at the provider
+instead.
 
 Installation is protocol-level (21603 grant + 31600 `coordinator` tag) — no per-event server configuration.
 

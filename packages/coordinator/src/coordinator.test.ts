@@ -350,6 +350,10 @@ async function setup(
       perEventDurationSec: number;
       perAttendeeCalls: number;
       perEventCalls: number;
+      daemonBytes?: number;
+      daemonDurationSec?: number;
+      daemonCalls?: number;
+      daemonWindowHours?: number;
     };
     /** C2 race hook: awaited by the injected transcribe BEFORE it returns, so a test
      *  can pause a specific revision's STT/LLM mid-flight and interleave a newer one. */
@@ -3230,6 +3234,65 @@ describe("H-2 §8 — usage budgets gate paid processing", () => {
     await admin(h, "recompute", {});
     await h.coordinator.jobs.drain();
     expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  /**
+   * SEC-7. The budgets above are lifetime AND per-installation, so they bound what
+   * one event can spend and say nothing about what many can. Install is
+   * protocol-level and `allowedEidPubkeys` is empty by default, so anyone can
+   * self-install up to `maxEvents` events; with the shipped defaults that is 50 ×
+   * 20,000 provider calls against the operator's one API key. The daemon-wide
+   * ceiling is the only thing that bounds the total.
+   */
+  it("a daemon-wide ceiling parks paid work even when the event's own budget is untouched", async () => {
+    // Every per-event/per-attendee limit unlimited: nothing but the daemon ceiling
+    // can park anything here, so a park proves the daemon gate fired.
+    const budgets = { ...generous, daemonCalls: 1, daemonWindowHours: 24 };
+    const h = await setup(0, { budgets });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+    const s = lastCoordinatorStatus(h);
+    expect(s?.error_category).toBe("budget_exceeded");
+    // The organizer is told they are parked, NOT how much the daemon has spent.
+    // Anyone can install, so that number would be a spend read-out for whoever is
+    // probing the ceiling.
+    expect(s?.billing?.reason ?? "").not.toMatch(/daemon|\d/);
+  });
+
+  it("the daemon ceiling releases itself as the rolling window advances", async () => {
+    const budgets = { ...generous, daemonCalls: 1, daemonWindowHours: 24 };
+    const h = await setup(0, { budgets });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+
+    // No config raise, no organizer action — just time. This is what makes the
+    // ceiling rolling rather than an all-time number that would park a busy
+    // coordinator forever with no way out but an operator edit.
+    h.clock.t += 25 * 3_600_000;
+    // What the boot path and the 10-minute timer both call.
+    (h.coordinator as any).daemonCeilingSweep();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  it("does not release work parked for billing or a per-event budget", async () => {
+    // Under the daemon ceiling, but over the attendee's own call budget. The sweep
+    // runs every 10 minutes across every event; if it resumed by state rather than
+    // by park reason it would hand a billing-blocked event free provider calls.
+    const budgets = { ...generous, perAttendeeCalls: 1, daemonCalls: 1_000_000 };
+    const h = await setup(0, { budgets });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const parked = h.store.waitingJobCount(h.coordinate);
+    expect(parked).toBeGreaterThan(0);
+
+    (h.coordinator as any).daemonCeilingSweep();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(parked);
   });
 
   it("actual downloaded bytes (not declared size) accrue to the per-attendee budget", async () => {

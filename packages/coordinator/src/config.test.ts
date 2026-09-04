@@ -7,7 +7,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, validateConfiguredUrl, type UnknownConfigKey } from "./config.js";
+import { loadConfig, validateConfiguredUrl, spendExposure, type UnknownConfigKey } from "./config.js";
 
 const tmpDirs: string[] = [];
 afterEach(() => {
@@ -185,5 +185,46 @@ describe("matching knobs are counts, not arbitrary numbers", () => {
       top_k: 20,
       batch_size: 10,
     });
+  });
+});
+
+/**
+ * SEC-7. The per-event budgets bound one installation, and install is
+ * protocol-level: an announced coordinator that accepts any E_id hands out as
+ * many of those budgets as `security.max_events` allows, all drawn on one
+ * provider key. This is the startup gate that refuses that shape.
+ */
+describe("SEC-7 spend exposure at startup", () => {
+  it("passes with the shipped defaults, which carry a daemon-wide ceiling", () => {
+    const cfg = loadConfig(writeConfig(BASE));
+    // Announced and open to any installer — the normal public-coordinator shape —
+    // but bounded, so it boots.
+    expect(cfg.coordinator.announce).toBe(true);
+    expect(cfg.security.allowed_eid_pubkeys).toEqual([]);
+    expect(spendExposure(cfg)).toBeUndefined();
+  });
+
+  it("flags an announced, open coordinator whose daemon budgets are all zeroed", () => {
+    const body =
+      BASE +
+      `\n[budgets]\ndaemon_bytes_per_window = 0\ndaemon_duration_sec_per_window = 0\ndaemon_calls_per_window = 0\n`;
+    const msg = spendExposure(loadConfig(writeConfig(body)));
+    expect(msg).toBeDefined();
+    // The message has to name the way out, not just the problem — an operator
+    // hitting this at 3am needs the knob, not a lecture.
+    expect(msg).toMatch(/allowed_eid_pubkeys/);
+    expect(msg).toMatch(/announce/);
+  });
+
+  it("clears once ANY of the three conditions no longer holds", () => {
+    const zeroed = `\n[budgets]\ndaemon_bytes_per_window = 0\ndaemon_duration_sec_per_window = 0\ndaemon_calls_per_window = 0\n`;
+    // Not announced: nobody can discover it to install against it.
+    expect(spendExposure(loadConfig(writeConfig(BASE + zeroed + `\n[coordinator]\nannounce = false\n`)))).toBeUndefined();
+    // Restricted installs: only known organizers get a budget at all.
+    const allowed = `\n[security]\nallowed_eid_pubkeys = ["${"a".repeat(64)}"]\n`;
+    expect(spendExposure(loadConfig(writeConfig(BASE + zeroed + allowed)))).toBeUndefined();
+    // One ceiling left standing is enough to bound the total.
+    const oneLimit = `\n[budgets]\ndaemon_bytes_per_window = 0\ndaemon_duration_sec_per_window = 0\ndaemon_calls_per_window = 1000\n`;
+    expect(spendExposure(loadConfig(writeConfig(BASE + oneLimit)))).toBeUndefined();
   });
 });

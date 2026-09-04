@@ -75,6 +75,17 @@ const AT_REST_PACK_THRESHOLD = AT_REST_CHUNK;
  */
 export const SCHEMA_VERSION = 5;
 
+/** How many hourly `daemon_usage` buckets to keep (audit SEC-7). Comfortably more
+ *  than the longest window a ceiling can ask for, so a rolling read never sees a
+ *  bucket that pruning removed early; old rows are dropped on every write. */
+const DAEMON_USAGE_RETENTION_HOURS = 24 * 7;
+
+/** Park-reason prefix that marks a job parked by the daemon-wide ceiling (audit
+ *  SEC-7). It is the ONLY thing that distinguishes such a job from one waiting on
+ *  billing or a per-event budget, so the sweep that releases them can be scoped —
+ *  shared between the thrower and the sweeper so the two cannot drift apart. */
+export const DAEMON_PARK_REASON = "daemon budget exceeded";
+
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
  * `BEGIN IMMEDIATE` transaction and, on success, `user_version` is advanced to
@@ -1141,6 +1152,24 @@ CREATE TABLE IF NOT EXISTS usage (
   calls INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
+);
+
+-- Daemon-wide usage in hourly buckets (audit SEC-7). The per-event and
+-- per-attendee budgets above are LIFETIME counters scoped to one installation,
+-- so they cannot see the shape of the attack they leave open: install is
+-- protocol-level and allowed_eid_pubkeys is empty by default, so anyone can
+-- self-install up to security.max_events events and spend each one's full
+-- budget against the operator's single provider key. This table is the total
+-- across every installation, bucketed by hour so the ceiling can be a rolling
+-- window rather than an all-time number that would eventually park a busy
+-- daemon forever. Purely additive: an older binary that doesn't know it simply
+-- doesn't read it, which is why this needs no schema-version bump.
+CREATE TABLE IF NOT EXISTS daemon_usage (
+  hour INTEGER PRIMARY KEY,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
 );
 `;
 
@@ -2868,6 +2897,28 @@ export class Store {
     return Number(info.changes);
   }
 
+  /**
+   * Re-enqueue jobs parked specifically by the DAEMON-WIDE ceiling (audit SEC-7),
+   * across every coordinate. Scoped by the park reason rather than resuming all
+   * waiting jobs, because a daemon-ceiling sweep must not un-park work that is
+   * waiting on a billing block or a per-event budget — those have their own,
+   * unrelated release conditions.
+   *
+   * Safe to call on a schedule and after a restart: a resumed row has its
+   * `last_error` cleared, so it is no longer matched and a second sweep resumes
+   * nothing. That is also what makes the release survive a restart — the marker
+   * lives in the row, not in a process-local latch.
+   */
+  resumeDaemonParkedJobs(): number {
+    const info = this.db
+      .prepare(
+        `UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL
+         WHERE state = 'waiting' AND last_error LIKE '${DAEMON_PARK_REASON}%'`,
+      )
+      .run();
+    return Number(info.changes);
+  }
+
   /** Count parked jobs for a coordinate (test/observability helper). */
   waitingJobCount(coordinate?: string): number {
     if (coordinate === undefined) {
@@ -2939,6 +2990,53 @@ export class Store {
         calls: delta.calls ?? 0,
         now,
       });
+    // Every spend is also daemon-wide spend (audit SEC-7). Folding it in HERE
+    // rather than at the call sites is deliberate: there are four of them and
+    // they will grow, and a daemon ceiling that a future call site forgets to
+    // feed is worse than no ceiling, because it reads as protection.
+    this.addDaemonUsage(delta, now);
+  }
+
+  /** Accumulate one hour's daemon-wide usage and drop buckets older than
+   *  {@link DAEMON_USAGE_RETENTION_HOURS}, so the table stays a fixed handful of
+   *  rows however long the daemon runs. */
+  private addDaemonUsage(delta: { bytes?: number; durationSec?: number; calls?: number }, now: number): void {
+    const hour = Math.floor(now / 3_600_000);
+    this.db
+      .prepare(
+        `INSERT INTO daemon_usage (hour, bytes, duration_sec, calls, updated_at)
+         VALUES (:hour, :bytes, :duration_sec, :calls, :now)
+         ON CONFLICT(hour) DO UPDATE SET
+           bytes = bytes + excluded.bytes,
+           duration_sec = duration_sec + excluded.duration_sec,
+           calls = calls + excluded.calls,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        hour,
+        bytes: delta.bytes ?? 0,
+        duration_sec: delta.durationSec ?? 0,
+        calls: delta.calls ?? 0,
+        now,
+      });
+    this.db.prepare("DELETE FROM daemon_usage WHERE hour < ?").run(hour - DAEMON_USAGE_RETENTION_HOURS);
+  }
+
+  /**
+   * Daemon-wide usage over the trailing `windowHours` (default 24), summed across
+   * every installed event. The window is bucket-aligned: a bucket is counted whole
+   * once its hour is inside the window, so the effective span is between
+   * `windowHours` and `windowHours + 1` — the ceiling is an abuse guard, not a
+   * billing meter, and an hour of slack is cheaper than per-event timestamps.
+   */
+  getDaemonUsage(now: number, windowHours = 24): { bytes: number; durationSec: number; calls: number } {
+    const from = Math.floor(now / 3_600_000) - windowHours + 1;
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(bytes),0) AS bytes, COALESCE(SUM(duration_sec),0) AS duration_sec, COALESCE(SUM(calls),0) AS calls FROM daemon_usage WHERE hour >= ?",
+      )
+      .get(from) as { bytes: number; duration_sec: number; calls: number };
+    return { bytes: row.bytes, durationSec: row.duration_sec, calls: row.calls };
   }
 
   /** Cumulative usage for one attendee (defaults to zeros when none recorded). */

@@ -786,6 +786,76 @@ describe("reference-counted purge (audit C5)", () => {
 });
 
 /**
+ * Daemon-wide usage accounting (audit SEC-7). The per-event/per-attendee counters
+ * are lifetime and scoped to one installation, which is exactly why they cannot
+ * see the abuse they leave open: install is protocol-level, so an attacker gets
+ * `max_events` separate lifetime budgets against one provider key. These rows are
+ * the total across all of them, and the two properties that matter are that the
+ * window rolls (so a busy coordinator lets itself out) and that nothing an
+ * installer can trigger resets it.
+ */
+describe("SEC-7 daemon-wide usage window", () => {
+  const HOUR = 3_600_000;
+  const T0 = 1_700_000_000_000;
+
+  it("sums every event's spend and rolls old buckets out of the window", () => {
+    const store = new Store();
+    store.addUsage("31923:eid:a", "pk1", { calls: 3, bytes: 10 }, T0);
+    store.addUsage("31923:eid:b", "pk2", { calls: 4, bytes: 20 }, T0);
+    // Two different events, one total.
+    expect(store.getDaemonUsage(T0, 24)).toEqual({ bytes: 30, durationSec: 0, calls: 7 });
+
+    // 30 hours later the original spend has aged out of a 24h window, while a
+    // fresh call inside it still counts.
+    store.addUsage("31923:eid:a", "pk1", { calls: 1 }, T0 + 30 * HOUR);
+    expect(store.getDaemonUsage(T0 + 30 * HOUR, 24)).toEqual({ bytes: 0, durationSec: 0, calls: 1 });
+    // A wider window still sees both.
+    expect(store.getDaemonUsage(T0 + 30 * HOUR, 48).calls).toBe(8);
+  });
+
+  it("keeps the total when an event is purged — a purge must not reset the ceiling", () => {
+    const store = new Store();
+    const c = "31923:eid:doomed";
+    store.addUsage(c, "pk", { calls: 5, bytes: 100 }, T0);
+    store.purgeEventArtifacts(c);
+    // The event's own counters are gone with the event...
+    expect(store.getEventUsage(c)).toEqual({ bytes: 0, durationSec: 0, calls: 0 });
+    // ...but the daemon-wide window is not something an installer gets to clear by
+    // detaching and reinstalling, or the ceiling would be a formality.
+    expect(store.getDaemonUsage(T0, 24)).toEqual({ bytes: 100, durationSec: 0, calls: 5 });
+  });
+
+  it("prunes buckets far outside any window it can be asked for", () => {
+    const store = new Store();
+    store.addUsage("31923:eid:a", "pk", { calls: 1 }, T0);
+    store.addUsage("31923:eid:a", "pk", { calls: 1 }, T0 + 24 * 8 * HOUR);
+    // The eight-day-old bucket is gone, so the table cannot grow without bound on
+    // a daemon that runs for a year.
+    expect(store.getDaemonUsage(T0 + 24 * 8 * HOUR, 24 * 7).calls).toBe(1);
+  });
+
+  it("releases only jobs parked by the daemon ceiling", () => {
+    const store = new Store();
+    const c = "31923:eid:a";
+    store.enqueueJob("work", "k1", { coordinate: c });
+    store.enqueueJob("work", "k2", { coordinate: c });
+    const a = store.claimNextJob(1, "w", 60_000)!;
+    store.parkJob(a.id, "daemon budget exceeded: daemon calls 9 ≥ 9 in 24h", "w");
+    const b = store.claimNextJob(1, "w", 60_000)!;
+    store.parkJob(b.id, "billing blocked for " + c, "w");
+    expect(store.waitingJobCount(c)).toBe(2);
+
+    // A daemon-ceiling release runs across every event on a timer. If it resumed
+    // by state rather than by park reason it would hand billing-blocked and
+    // over-budget events free provider calls every ten minutes.
+    expect(store.resumeDaemonParkedJobs()).toBe(1);
+    expect(store.waitingJobCount(c)).toBe(1);
+    // Idempotent: the resumed row's reason is cleared, so a second sweep is a no-op.
+    expect(store.resumeDaemonParkedJobs()).toBe(0);
+  });
+});
+
+/**
  * The job queue's memory of finished work (production incident 2026-07-24). The
  * dedupe key is what stops a re-delivered rumor or a mid-pipeline restart from
  * paying twice — but a TERMINAL row keeps that key for 30 days, so the same key

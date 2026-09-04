@@ -121,3 +121,34 @@ max_events = 50                   # reject installs beyond this many simultaneou
                                   # escape hatch (default false = fail CLOSED):
                                   # boot even when GET /models can't be fetched
                                   # while a role has require_private set
+# allow_unbounded_spend = true     # escape hatch (default false = fail CLOSED):
+                                  # boot even when this daemon is announced
+                                  # publicly, accepts any installer, AND has every
+                                  # daemon-wide budget below set to 0. Set it only
+                                  # if your spend cap lives at the provider (a
+                                  # prepaid key, a fixed Cashu balance).
+
+# ── Usage budgets ─────────────────────────────────────────────────────────────
+# Abuse ceilings, not product limits. Exceeding one parks further paid processing
+# (the same waiting state as a billing block) and tells the organizer; it does not
+# lose work. 0 = unlimited. All the defaults below are already in effect — the
+# section exists so you can see them and lower them.
+[budgets]
+# Lifetime, per installation. These bound what ONE event can spend.
+# per_attendee_bytes = 2147483648          # 2 GiB
+# per_event_bytes = 53687091200            # 50 GiB
+# per_attendee_duration_sec = 14400        # 4 h of decoded media
+# per_event_duration_sec = 720000          # 200 h
+# per_attendee_calls = 500                 # paid provider calls
+# per_event_calls = 20000
+#
+# Rolling and daemon-wide, across EVERY installed event. These are the ones that
+# bound your provider bill, because the limits above do not: installation is
+# protocol-level, so anyone who can see this daemon's announcement can create up
+# to security.max_events events and draw a full per-event budget on each. Rolling
+# rather than lifetime so a busy coordinator lets itself back in as the window
+# advances, with no operator action.
+# daemon_bytes_per_window = 214748364800   # 200 GiB per window
+# daemon_duration_sec_per_window = 2880000 # 800 h
+# daemon_calls_per_window = 80000
+# daemon_window_hours = 24
