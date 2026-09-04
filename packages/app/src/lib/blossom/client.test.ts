@@ -6,6 +6,9 @@ import {
   upload,
   PREFLIGHT_TIMEOUT_MS,
   UPLOAD_TIMEOUT_MS,
+  UPLOAD_CONNECT_TIMEOUT_MS,
+  UPLOAD_STALL_TIMEOUT_MS,
+  onUploadProgress,
   MIRROR_TIMEOUT_MS,
   DOWNLOAD_TIMEOUT_MS,
   DOWNLOAD_STALL_TIMEOUT_MS,
@@ -328,5 +331,184 @@ describe("Blossom timeouts (UX-7)", () => {
       "https://primary.example/deadbeef",
       "https://good.example/deadbeef",
     ]);
+  });
+});
+
+/**
+ * The upload path's progress-aware budget. Uploads used to race the ENTIRE PUT —
+ * headers and body together — against one 60s clock, so 15 MB of ciphertext on
+ * venue Wi-Fi was killed mid-body and `uploadAndMirror` then re-uploaded the whole
+ * blob to the next server and blew the same budget again.
+ */
+describe("upload progress budgets (XHR path)", () => {
+  interface ProgressEvent_ {
+    loaded: number;
+    total: number;
+    lengthComputable: boolean;
+  }
+
+  /** A scriptable XMLHttpRequest: `script` drives the events after send(). */
+  class FakeXhr {
+    static script: (xhr: FakeXhr) => void = () => {};
+    static sent: Uint8Array[] = [];
+    upload: {
+      onprogress?: (e: ProgressEvent_) => void;
+      onload?: () => void;
+    } = {};
+    onload?: () => void;
+    onerror?: () => void;
+    onabort?: () => void;
+    ontimeout?: () => void;
+    onprogress?: () => void;
+    status = 0;
+    statusText = "";
+    responseText = "";
+    aborted = false;
+    reason: string | null = null;
+    open(): void {}
+    setRequestHeader(): void {}
+    getResponseHeader(name: string): string | null {
+      return name === "X-Reason" ? this.reason : null;
+    }
+    send(body: Uint8Array): void {
+      FakeXhr.sent.push(body);
+      queueMicrotask(() => FakeXhr.script(this));
+    }
+    abort(): void {
+      this.aborted = true;
+      this.onabort?.();
+    }
+    /** Answer 200 with a BUD-02 descriptor. */
+    succeed(url = "https://good.example/blob"): void {
+      this.upload.onload?.();
+      this.status = 200;
+      this.responseText = JSON.stringify({ url });
+      this.onload?.();
+    }
+  }
+
+  function useFakeXhr(script: (xhr: FakeXhr) => void) {
+    FakeXhr.script = script;
+    FakeXhr.sent = [];
+    vi.stubGlobal("XMLHttpRequest", FakeXhr as unknown as typeof XMLHttpRequest);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("keeps going far past the old whole-request budget while bytes keep moving", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    const gap = UPLOAD_STALL_TIMEOUT_MS / 2;
+    const steps = 5;
+    // 5 × 15s = 75s of transfer: past UPLOAD_CONNECT_TIMEOUT_MS and past the old
+    // single UPLOAD_TIMEOUT_MS, which is exactly the failure being fixed.
+    expect(gap * steps).toBeGreaterThan(UPLOAD_TIMEOUT_MS);
+    useFakeXhr(async (xhr) => {
+      for (let i = 1; i <= steps; i++) {
+        await new Promise((r) => setTimeout(r, gap));
+        xhr.upload.onprogress?.({ loaded: i * 2, total: steps * 2, lengthComputable: true });
+      }
+      xhr.succeed();
+    });
+
+    const p = upload(signer, "https://slow.example", new Uint8Array(steps * 2));
+    await vi.advanceTimersByTimeAsync(gap * steps + 1);
+    await expect(p).resolves.toMatchObject({ url: "https://good.example/blob" });
+  });
+
+  it("gives up on a server that stops accepting bytes mid-body", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    useFakeXhr((xhr) => {
+      xhr.upload.onprogress?.({ loaded: 2, total: 10, lengthComputable: true });
+      // …then silence forever.
+    });
+
+    const p = upload(signer, "https://stalls.example", new Uint8Array(10));
+    const assertion = expect(p).rejects.toThrow(/stalled/);
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_TIMEOUT_MS + 1);
+    await assertion;
+  });
+
+  it("skips a server that never connects, without waiting a whole transfer", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    useFakeXhr(() => {
+      /* never answers, never acknowledges a byte */
+    });
+
+    const p = upload(signer, "https://dead.example", new Uint8Array(10));
+    const assertion = expect(p).rejects.toThrow(/no connection/);
+    await vi.advanceTimersByTimeAsync(UPLOAD_CONNECT_TIMEOUT_MS + 1);
+    await assertion;
+  });
+
+  it("waits out a long store-side silence once the body is fully sent", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    // A big blob leaves the client quickly on a fast uplink, then the server
+    // hashes and stores it — a legitimate silence far longer than a stall.
+    useFakeXhr(async (xhr) => {
+      xhr.upload.onprogress?.({ loaded: 10, total: 10, lengthComputable: true });
+      xhr.upload.onload?.();
+      await new Promise((r) => setTimeout(r, UPLOAD_STALL_TIMEOUT_MS * 2));
+      xhr.status = 200;
+      xhr.responseText = JSON.stringify({ url: "https://good.example/blob" });
+      xhr.onload?.();
+    });
+
+    const p = upload(signer, "https://slow-store.example", new Uint8Array(10));
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_TIMEOUT_MS * 2 + 1);
+    await expect(p).resolves.toMatchObject({ url: "https://good.example/blob" });
+  });
+
+  it("reports byte progress to the caller and to onUploadProgress subscribers", async () => {
+    const signer = LocalSigner.generate();
+    useFakeXhr((xhr) => {
+      xhr.upload.onprogress?.({ loaded: 4, total: 10, lengthComputable: true });
+      xhr.upload.onprogress?.({ loaded: 10, total: 10, lengthComputable: true });
+      xhr.succeed();
+    });
+
+    const own: Array<{ sent: number; total: number }> = [];
+    const subscribed: Array<{ sent: number; total: number; server: string }> = [];
+    const off = onUploadProgress((p) => subscribed.push(p));
+    await upload(signer, "https://good.example", new Uint8Array(10), "application/octet-stream", {
+      onProgress: (p) => own.push({ sent: p.sent, total: p.total }),
+    });
+    off();
+
+    // 0 before the first byte (so the bar starts at a truthful 0%), then each
+    // progress event, then `total` once the body is out.
+    expect(own).toEqual([
+      { sent: 0, total: 10 },
+      { sent: 4, total: 10 },
+      { sent: 10, total: 10 },
+      { sent: 10, total: 10 },
+    ]);
+    expect(subscribed).toEqual(own.map((p) => ({ ...p, server: "https://good.example" })));
+
+    // Unsubscribed listeners stop hearing about later uploads.
+    subscribed.length = 0;
+    await upload(signer, "https://good.example", new Uint8Array(10));
+    expect(subscribed).toEqual([]);
+  });
+
+  it("surfaces the server's X-Reason on a rejected upload", async () => {
+    const signer = LocalSigner.generate();
+    useFakeXhr((xhr) => {
+      xhr.upload.onload?.();
+      xhr.status = 413;
+      xhr.statusText = "Payload Too Large";
+      xhr.reason = "file too big";
+      xhr.onload?.();
+    });
+
+    await expect(upload(signer, "https://picky.example", new Uint8Array(10))).rejects.toThrow(
+      /413 file too big/,
+    );
   });
 });
