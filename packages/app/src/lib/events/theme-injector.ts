@@ -10,10 +10,18 @@
  * territory — the organizer's 31609 stylesheet is live there. CSS can exfiltrate
  * page text (attribute-selector + background/font tricks), so NO KEY MATERIAL
  * may ever be rendered on a themed route: no nsec, no E_id/E_inbox secrets, no
- * ECK. (The pre-audit nsec-export UI was removed for exactly this reason; the
- * invite links Admin renders are single-use invite codes, an accepted UX
- * trade-off.) font-src 'self' in the CSP (app.html) is the load-bearing second
- * layer that keeps remote-font exfiltration closed — do not loosen it.
+ * ECK. (The pre-audit nsec-export UI was removed for exactly this reason.)
+ * font-src 'self' in the CSP (app.html) is the load-bearing second layer that
+ * keeps remote-font exfiltration closed — do not loosen it.
+ *
+ * This comment used to add that Admin's invite links were "single-use invite
+ * codes, an accepted UX trade-off". That reasoning expired when reusable codes
+ * shipped: a shared entry code with `uses: 0` admits an UNLIMITED number of
+ * attendees, so lifting one is not a bounded loss. Every invite surface —
+ * per-person links, the code export, and the shared room-code QR — is now inside
+ * a SecretSurface, which suppresses the stylesheet outright. Do not add a new one
+ * without the same wrapper, and do not reintroduce a trade-off argument in place
+ * of it.
  */
 import { loadEventContext, cachedEventContext } from "./event-context.js";
 import { parseCoordinate } from "@nostrautica/protocol";
