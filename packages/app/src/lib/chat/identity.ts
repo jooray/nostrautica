@@ -77,12 +77,46 @@ export interface ChatIdentity {
 // ── Persistence (IndexedDB via the shared marmot KV backend) ──────────────────
 const DEVICE_KEY_NS = "__chat_device_key__";
 const CLIENT_ID_NS = "__chat_client_id__";
+const DEVICE_LABEL_NS = "__chat_device_label__";
 
 function deviceKeyKey(account: string): string {
   return `${DEVICE_KEY_NS}\x1f${account}`;
 }
 function clientIdKey(chatPubkey: string): string {
   return `${CLIENT_ID_NS}\x1f${chatPubkey}`;
+}
+function deviceLabelKey(chatPubkey: string): string {
+  return `${DEVICE_LABEL_NS}\x1f${chatPubkey}`;
+}
+
+/**
+ * The label the USER chose for this device, if they ever renamed it.
+ *
+ * The coordinator's `upsertChatKey` does `label = COALESCE(excluded.label, …)`, so
+ * whatever an attestation carries WINS. Every chat open re-attests (that is how a
+ * device heals), and every re-attest carried `defaultDeviceLabel()` — so renaming
+ * "Chrome on macOS" to "Work laptop" held only until the next chat open, at which
+ * point the rename silently reverted and there was nothing on either side to
+ * explain it.
+ *
+ * The label is local, not restored across devices, and deliberately not part of
+ * the chat identity: it is a display preference, and losing it just means the
+ * device goes back to being called what the browser says it is.
+ */
+export async function loadDeviceLabel(chatPubkey: string): Promise<string | undefined> {
+  const stored = await marmotKvBackend()
+    .get(deviceLabelKey(chatPubkey))
+    .catch(() => undefined);
+  return typeof stored === "string" && stored.trim() ? stored : undefined;
+}
+
+/** Remember a user-chosen device label so later re-attests carry it, not the UA guess. */
+export async function saveDeviceLabel(chatPubkey: string, label: string): Promise<void> {
+  const trimmed = label.trim();
+  if (!trimmed) return;
+  await marmotKvBackend()
+    .set(deviceLabelKey(chatPubkey), trimmed)
+    .catch(() => {});
 }
 
 /** Load the persisted chat device key for an account, or undefined. */
@@ -253,6 +287,11 @@ async function chatKeysFor(account: string): Promise<string[]> {
     for (const k of await backend.keysWithPrefix(identityPrefix(chatPubkey))) keys.add(k);
     keys.add(deviceKeyKey(account));
     keys.add(clientIdKey(chatPubkey));
+    // Not a secret (the label is published in the roster for members to read), but
+    // it belongs to this account's chat identity, so it rides the same snapshot —
+    // otherwise a logout/login would silently revert a rename the way the missing
+    // label persistence used to.
+    keys.add(deviceLabelKey(chatPubkey));
   }
   return [...keys];
 }

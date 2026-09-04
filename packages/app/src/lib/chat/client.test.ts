@@ -50,6 +50,18 @@ const shared = vi.hoisted(() => ({
   liveFetchCount: new Map<string, number>(),
   /** Ordered trace of the publish-side calls a rejoin makes (order is the point). */
   calls: [] as string[],
+  /** The label the user last chose for this device, if any (identity.ts store). */
+  savedLabel: undefined as string | undefined,
+  /** The 21607 `label` each attestation actually carried, newest last. */
+  attestedLabels: [] as (string | undefined)[],
+  /**
+   * What the relays serve for this device's 30443 slot, when a test wants to say
+   * so explicitly. `null` keeps the default heuristic (whatever this client last
+   * published is visible). Set it to model a relay that is BEHIND — still serving
+   * a superseded copy — which is the case a bare "does something exist?" check
+   * cannot tell apart from "our current key package is published".
+   */
+  relayKeyPackages: null as { id: string }[] | null,
 }));
 
 interface FakeRumor {
@@ -127,10 +139,17 @@ class FakeGroups {
 class FakeMarmotClient {
   invites = new FakeInvites();
   groups = new FakeGroups();
-  /** Locally stored key packages `rotate` can target (a real one has private material). */
-  storedKeyPackages: { keyPackageRef: Uint8Array; identifier?: string }[] = [
-    { keyPackageRef: new Uint8Array([7]), identifier: "web-test" },
-  ];
+  /**
+   * Locally stored key packages `rotate` can target (a real one has private
+   * material). `published` is the marmot store's record of the kind-30443 events
+   * this entry has actually gone out as — the id the client can compare against
+   * what a relay serves back.
+   */
+  storedKeyPackages: {
+    keyPackageRef: Uint8Array;
+    identifier?: string;
+    published?: { id: string; created_at: number }[];
+  }[] = [{ keyPackageRef: new Uint8Array([7]), identifier: "web-test" }];
   keyPackages = {
     ensurePublished: vi.fn(async () => {
       shared.calls.push("kp:ensurePublished");
@@ -198,6 +217,9 @@ vi.mock("@internet-privacy/marmot-ts/core", async (orig) => {
     getNostrGroupIdHex: (state: { nostrGroupId?: string }) => state?.nostrGroupId ?? "deadbeef",
     getPubkeyLeafNodes: (state: { members?: string[] }, pubkey: string) =>
       (state?.members ?? []).includes(pubkey) ? [{}] : [],
+    // The group's own roster of nostr pubkeys — the ground truth the member list
+    // now uses instead of the roster's attested chat_keys.
+    getGroupMembers: (state: { members?: string[] }) => [...(state?.members ?? [])],
   };
 });
 vi.mock("@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js", () => ({
@@ -217,6 +239,13 @@ vi.mock("./identity.js", () => ({
   }),
   buildChatKeyProfile: () => ({ kind: 0, pubkey: "c".repeat(64), content: "{}", tags: [], sig: "" }),
   defaultDeviceLabel: () => "Test device",
+  // A user-chosen device label, when one was saved. `undefined` here means "never
+  // renamed", so `ensurePublished` falls back to the UA guess above — the default
+  // for every test that isn't about renaming.
+  loadDeviceLabel: async () => shared.savedLabel,
+  saveDeviceLabel: async (_pk: string, label: string) => {
+    shared.savedLabel = label;
+  },
 }));
 // Device kind-0 publish reads the account profile; keep it out of the network.
 vi.mock("$lib/events/social.js", () => ({ fetchProfiles: vi.fn(async () => new Map()) }));
@@ -232,9 +261,14 @@ vi.mock("./stores.js", async (orig) => {
 });
 vi.mock("./network.js", () => ({ createMarmotNetwork: () => ({}) }));
 vi.mock("./attest.js", () => ({
-  sendChatKeyAttestation: vi.fn(async (_signer: unknown, _ctx: unknown, input: { op: string }) => {
-    shared.calls.push(`attest:${input.op}`);
-  }),
+  sendChatKeyAttestation: vi.fn(
+    async (_signer: unknown, _ctx: unknown, input: { op: string; label?: string }) => {
+      shared.calls.push(`attest:${input.op}`);
+      if (input.op === "add") shared.attestedLabels.push(input.label);
+      // The real one returns whether the wrap reached a relay (false = outbox only).
+      return true;
+    },
+  ),
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({
   publishSigned: vi.fn(async () => {}),
@@ -242,7 +276,8 @@ vi.mock("$lib/nostr/ndk.js", () => ({
   // Model a relay that serves whatever this client last published, so a key
   // package it just rotated/created is found (and not redundantly republished).
   fetchEventsRelayOnly: vi.fn(async () =>
-    shared.calls.some((c) => c === "kp:rotate" || c === "kp:create") ? [{ id: "kp-on-relay" }] : [],
+    shared.relayKeyPackages ??
+    (shared.calls.some((c) => c === "kp:rotate" || c === "kp:create") ? [{ id: "kp-on-relay" }] : []),
   ),
 }));
 // The roster is the coordinator's authoritative event→group binding (APPK-3).
@@ -274,6 +309,9 @@ beforeEach(() => {
   shared.staleCache.clear();
   shared.liveFetchCount.clear();
   shared.calls.length = 0;
+  shared.savedLabel = undefined;
+  shared.attestedLabels.length = 0;
+  shared.relayKeyPackages = null;
 });
 
 describe("MarmotChat.start() — late welcome (G-3)", () => {
@@ -1055,5 +1093,187 @@ describe("MarmotChat relay set (chat_relay)", () => {
       { relays: string[] },
     ];
     expect(arg.relays).toEqual(["wss://r"]);
+  });
+});
+
+/**
+ * The Bug-2 key-package re-verification: "is the 30443 we currently hold actually
+ * retrievable from the relays?"
+ *
+ * Two things made the answer unreliable, and they compounded into the same
+ * outcome — a device that is listed, attested, and unreachable.
+ */
+describe("MarmotChat.ensureKeyPackageOnRelays — the check that skipped the device that needed it", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+
+  /** Join, then have the coordinator remove our leaf — the evicted state. */
+  async function evicted(nostrGroupId: string) {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: nostrGroupId, attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w", nostrGroupId, members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w"]));
+    lastClient.groups.groups[0]!.state.members = [COORD]; // leaf removed
+    return chat;
+  }
+
+  // The old guard was `currentEventGroups().length > 0` — "do we hold state for
+  // this event's group?". An evicted member holds exactly that (MLS Remove strips
+  // the leaf and leaves the group and its history), so the check returned early
+  // for the one device whose freshly-rotated key package HAS to be on the relays:
+  // without it the coordinator has nothing to re-add us from.
+  it("runs for an evicted member and republishes when the relays have nothing", async () => {
+    const chat = await evicted("gid-evicted");
+    shared.calls.length = 0;
+    shared.relayKeyPackages = []; // the rotated key package reached no relay
+
+    await chat.ensurePublished();
+
+    expect(shared.calls).toContain("kp:create");
+  });
+
+  it("stays quiet for a member who still holds their leaf", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-in", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w-in", nostrGroupId: "gid-in", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-in"]));
+    shared.calls.length = 0;
+    shared.relayKeyPackages = [];
+
+    await chat.ensurePublished();
+
+    // Nothing at all: a joined member re-advertising would prompt a redundant
+    // re-add, a new epoch, and a ratchet its persisted state is behind.
+    expect(shared.calls).toEqual([]);
+  });
+
+  // The second half. "Some 30443 exists under this author and `d`" is satisfied by
+  // a SUPERSEDED copy that one lagging relay never replaced — so a rotation that
+  // reached nobody looked published, and the coordinator was left to invite us
+  // with an init key we had already thrown away (undecryptable Welcome, a leaf it
+  // holds, a member who cannot see the room).
+  it("republishes when the relay copy is not the key package we currently hold", async () => {
+    const chat = await evicted("gid-stale");
+    lastClient.storedKeyPackages = [
+      {
+        keyPackageRef: new Uint8Array([7]),
+        identifier: "web-test",
+        published: [{ id: "kp-current", created_at: 200 }],
+      },
+    ];
+    shared.calls.length = 0;
+    shared.relayKeyPackages = [{ id: "kp-superseded" }]; // a relay that is behind
+
+    await chat.ensurePublished();
+
+    expect(shared.calls).toContain("kp:create");
+  });
+
+  it("is satisfied when the relay serves exactly the key package we hold", async () => {
+    const chat = await evicted("gid-fresh");
+    lastClient.storedKeyPackages = [
+      {
+        keyPackageRef: new Uint8Array([7]),
+        identifier: "web-test",
+        published: [{ id: "kp-current", created_at: 200 }],
+      },
+    ];
+    shared.calls.length = 0;
+    shared.relayKeyPackages = [{ id: "kp-current" }];
+
+    await chat.ensurePublished();
+
+    expect(shared.calls).not.toContain("kp:create");
+  });
+});
+
+/**
+ * Device labels (NIP §10.2 `label`). The coordinator's upsert is
+ * `label = COALESCE(excluded.label, …)` — a non-null incoming label always wins —
+ * and this client re-attests on EVERY chat open. Sending `defaultDeviceLabel()`
+ * every time therefore overwrote a rename within one page load, silently.
+ */
+describe("MarmotChat device label", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("re-attests with the user's chosen label, not the browser guess", async () => {
+    shared.savedLabel = "Work laptop";
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.ensurePublished();
+    expect(shared.attestedLabels).toEqual(["Work laptop"]);
+  });
+
+  it("falls back to the browser guess when the device was never renamed", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.ensurePublished();
+    expect(shared.attestedLabels).toEqual(["Test device"]);
+  });
+});
+
+/**
+ * Everything on this class is scoped to ONE event's group (audit APPK-3), and
+ * leaving was the one method that wasn't: it walked `groups.loadAll()`, the
+ * per-IDENTITY pool, so a "leave this event" would have walked out of every other
+ * event's room too.
+ */
+describe("MarmotChat.leaveEventGroup()", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+
+  it("leaves only this event's group, never a sibling event's", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-mine", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w-mine", nostrGroupId: "gid-mine", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-mine"]));
+    // Another event's group, joined by that event's session, in the same
+    // per-identity store.
+    lastClient.groups.groups.push({
+      idStr: "group-other-event",
+      id: new Uint8Array([99]),
+      state: { members: [COORD, "c".repeat(64)], nostrGroupId: "gid-other-event" },
+      on: () => {},
+    });
+    const left: Uint8Array[] = [];
+    (lastClient.groups as unknown as { leave: unknown }).leave = vi.fn(async (id: Uint8Array) => {
+      left.push(id);
+    });
+
+    await chat.leaveEventGroup();
+
+    expect(left).toEqual([new Uint8Array([1])]); // this event's group only
+  });
+});
+
+/**
+ * Real MLS membership, which the member list had no source for at all: it was
+ * derived from the roster's attested `chat_keys`, a set that both over- and
+ * under-reports who is actually in the room.
+ */
+describe("MarmotChat.groupMemberPubkeys()", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+
+  it("reports the group's own leaf holders, and undefined when there is no group", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-mem", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    // No group for this event yet — "unknown", not "empty". Rendering an empty
+    // room here would erase everyone during setup.
+    expect(await chat.groupMemberPubkeys()).toBeUndefined();
+
+    lastClient.invites.deliver({
+      id: "w-mem",
+      nostrGroupId: "gid-mem",
+      members: [COORD, "c".repeat(64), "d".repeat(64)],
+    });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-mem"]));
+
+    expect(await chat.groupMemberPubkeys()).toEqual([COORD, "c".repeat(64), "d".repeat(64)]);
   });
 });

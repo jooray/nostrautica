@@ -68,10 +68,15 @@
       // `added_at` is unix SECONDS. Rosters published before that was fixed carry
       // milliseconds, which rendered as year-58xxx dates; a value that large can
       // only be ms (seconds wouldn't reach 2001-09 until ~1e9, and 1e12 seconds is
-      // the year 33658), so read those as ms rather than showing nonsense until the
-      // coordinator republishes.
+      // the year 33658), so read those as ms rather than showing nonsense.
       const at = d.added_at > 1e12 ? d.added_at : d.added_at * 1000;
-      return t("chat.devices.added", { date: new Date(at).toLocaleDateString() });
+      // "Last active", NOT "Added". The field is the coordinator's
+      // `marmot_chat_keys.updated_at`, which is rewritten by EVERY attestation —
+      // and a device re-attests on every chat open, so a device bound months ago
+      // read "Added today" the moment its owner opened the room. There is no
+      // first-bound timestamp on the wire to publish instead, so the honest fix is
+      // to call the number what it actually is.
+      return t("chat.devices.lastActive", { date: new Date(at).toLocaleDateString() });
     } catch {
       return "";
     }
@@ -91,18 +96,28 @@
     try {
       // Re-attesting THIS device needs its secret to sign the §10.2 proof — resolve
       // it lazily (pulls the marmot bundle only when the user actually renames).
-      const { resolveChatIdentity } = await import("$lib/chat/identity.js");
+      const { resolveChatIdentity, saveDeviceLabel } = await import("$lib/chat/identity.js");
       const id = await resolveChatIdentity(session.signer);
-      await sendChatKeyAttestation(session.signer, ctx, {
+      // Remember the choice locally BEFORE publishing. Every chat open re-attests
+      // this device, and it used to send `defaultDeviceLabel()` — which the
+      // coordinator's `label = COALESCE(excluded.label, …)` upsert always prefers
+      // over the stored one. So a rename held only until the next chat start and
+      // then silently reverted to "Chrome on macOS". Persisting first means even a
+      // publish that only reaches the outbox still ends with the right label going
+      // out whenever the device next attests.
+      await saveDeviceLabel(id.pubkey, label);
+      const delivered = await sendChatKeyAttestation(session.signer, ctx, {
         op: "add",
         chatPubkey: id.pubkey,
         clientId: id.clientId,
         label,
         deviceSecretKey: id.secretKey,
       });
-      // Optimistic: reflect the new label locally; the roster catches up shortly.
+      // Optimistic: reflect the new label locally; the coordinator republishes the
+      // roster when it records the attestation (its `onRosterChanged` hook), and
+      // the refresh below picks that up.
       devices = devices.map((x) => (x.pubkey === d.pubkey ? { ...x, label } : x));
-      notice = t("chat.devices.updated");
+      notice = t(delivered ? "chat.devices.updated" : "chat.devices.queued");
       renaming = null;
     } catch {
       notice = t("chat.devices.actionFailed");
@@ -117,10 +132,17 @@
     busy = d.pubkey;
     notice = null;
     try {
-      await sendChatKeyAttestation(session.signer, ctx, { op: "revoke", chatPubkey: d.pubkey });
-      // Optimistic removal; the coordinator removes the leaf and republishes.
+      const delivered = await sendChatKeyAttestation(session.signer, ctx, {
+        op: "revoke",
+        chatPubkey: d.pubkey,
+      });
+      // Optimistic removal. The coordinator drops the leaf AND republishes the
+      // roster — the latter is new: nothing on the attestation path published a
+      // 31604, so the refresh below used to re-read a roster that still listed the
+      // device and put it straight back on screen about four seconds later, which
+      // looked exactly like the revoke had failed.
       devices = devices.filter((x) => x.pubkey !== d.pubkey);
-      notice = t("chat.devices.updated");
+      notice = t(delivered ? "chat.devices.updated" : "chat.devices.queued");
       confirmingRevoke = null;
     } catch {
       notice = t("chat.devices.actionFailed");
