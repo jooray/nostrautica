@@ -72,6 +72,25 @@ export interface JobRunnerOptions {
    * classification is injected by the coordinator.
    */
   poisonExempt?: (err: unknown) => string | undefined;
+  /**
+   * Consulted on every failure: return a SHORTER attempt cap for this error, or
+   * undefined for the default tail.
+   *
+   * The default schedule spends ~26 attempts over three days, which is right for a
+   * failure that might clear on its own — a relay outage, a provider hiccup. It is
+   * exactly wrong for a DETERMINISTIC failure, where the same prompt and the same
+   * model will produce the same malformed shape every time: those spent three fully
+   * billed days re-asking a question already answered, and only then poisoned.
+   *
+   * Prod evidence (2026-09-04): two attendees sat poisoned since mid-July on
+   * `process_attendee` with error_category=provider_contract, and a third cleared
+   * only after 27 attempts. The classification already existed — it was computed
+   * for the organizer's status notice and then thrown away.
+   *
+   * Injected rather than inferred here: the runner deliberately knows nothing about
+   * providers, same as {@link poisonExempt}.
+   */
+  retryBudget?: (err: unknown) => number | undefined;
 }
 
 /** 1s, 10s, 100s, six tries ~1h apart, then every 4h until ~3 days have elapsed. */
@@ -98,6 +117,7 @@ export class JobRunner {
   private readonly now: () => number;
   private readonly onPoison?: (info: PoisonInfo) => void;
   private readonly poisonExempt?: (err: unknown) => string | undefined;
+  private readonly retryBudget?: (err: unknown) => number | undefined;
 
   constructor(private readonly store: Store, opts: JobRunnerOptions = {}) {
     this.backoffSchedule =
@@ -110,6 +130,7 @@ export class JobRunner {
     this.now = opts.now ?? (() => Date.now());
     this.onPoison = opts.onPoison;
     this.poisonExempt = opts.poisonExempt;
+    this.retryBudget = opts.retryBudget;
   }
 
   /** Backoff for the Nth failed attempt (1-indexed); the last schedule entry repeats. */
@@ -302,7 +323,10 @@ export class JobRunner {
         return;
       }
       const attempts = job.attempts + 1;
-      const poison = attempts >= this.maxAttempts;
+      // A deterministic failure gets a short cap; everything else keeps the long
+      // tail. Never longer than the default — this may only tighten.
+      const budget = Math.min(this.retryBudget?.(err) ?? this.maxAttempts, this.maxAttempts);
+      const poison = attempts >= budget;
       const backoff = this.backoffForAttempt(attempts);
       const msg = err instanceof Error ? err.message : String(err);
       // Out of retries, but the failure says the provider account is empty rather
@@ -322,7 +346,7 @@ export class JobRunner {
         }
       }
       console.warn(
-        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
+        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? `POISONED after ${attempts}/${budget}` : `failed (retry ${attempts}/${budget}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
       );
       const owned = this.store.failJob(job.id, attempts, this.now() + backoff, msg, poison, token);
       // Only surface the poison if we still owned the lease (a stale worker whose

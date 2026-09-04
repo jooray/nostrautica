@@ -429,3 +429,83 @@ describe("JobRunner — a job that does not run says so", () => {
     out.mockRestore();
   });
 });
+
+/**
+ * Per-error retry budgets (2026-09-04 audit).
+ *
+ * The default schedule spends ~26 attempts over three days. That is right for a
+ * failure that may clear on its own and exactly wrong for a deterministic one:
+ * the same prompt and model produce the same malformed shape every time, so the
+ * tail is three fully billed days of re-asking an answered question.
+ *
+ * Prod at the time of the audit held two attendees poisoned since mid-July on
+ * error_category=provider_contract, plus one that cleared only after 27 attempts.
+ */
+describe("JobRunner — a deterministic failure must not buy the full paid tail", () => {
+  class DeterministicError extends Error {}
+
+  it("poisons a classified error at its short budget, not at maxAttempts", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const poisoned: number[] = [];
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      onPoison: (info) => poisoned.push(info.attempts),
+      retryBudget: (err) => (err instanceof DeterministicError ? 3 : undefined),
+    });
+    let calls = 0;
+    runner.register("det", async () => {
+      calls++;
+      throw new DeterministicError("output was not valid JSON");
+    });
+    runner.enqueue("det", "k", {});
+    for (let i = 0; i < 30; i++) {
+      await runner.drain();
+      clock.advance(5 * 24 * 60 * 60_000); // past any backoff
+    }
+    expect(calls).toBe(3);
+    expect(poisoned).toEqual([3]);
+  });
+
+  it("leaves an unclassified error on the long tail", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      retryBudget: (err) => (err instanceof DeterministicError ? 3 : undefined),
+    });
+    let calls = 0;
+    runner.register("transient", async () => {
+      calls++;
+      throw new Error("relay unreachable");
+    });
+    runner.enqueue("transient", "k", {});
+    for (let i = 0; i < 6; i++) {
+      await runner.drain();
+      clock.advance(5 * 60 * 60_000);
+    }
+    expect(calls).toBeGreaterThan(3);
+  });
+
+  it("can only tighten the budget, never extend past maxAttempts", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      maxAttempts: 2,
+      baseBackoffMs: 1,
+      retryBudget: () => 99,
+    });
+    let calls = 0;
+    runner.register("capped", async () => {
+      calls++;
+      throw new Error("boom");
+    });
+    runner.enqueue("capped", "k", {});
+    for (let i = 0; i < 10; i++) {
+      await runner.drain();
+      clock.advance(60_000);
+    }
+    expect(calls).toBe(2);
+  });
+});

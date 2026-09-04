@@ -123,6 +123,7 @@ import {
 import { transcribeMedia, MediaPolicyError } from "./pipeline/transcribe.js";
 import type { LlmProvider, SttProvider, ModelRef, RoleRoute, RoleRoutes } from "./providers/types.js";
 import { ProviderHttpError } from "./providers/http.js";
+import { ProviderContractError } from "./providers/types.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
@@ -597,6 +598,19 @@ export class Coordinator {
         err instanceof ProviderHttpError && err.payment
           ? "provider account out of credit — parked for reprocess after top-up"
           : undefined,
+      // A contract error is DETERMINISTIC: same prompt, same model, same malformed
+      // shape. Retrying it on the three-day schedule spends ~26 fully billed calls
+      // re-asking a question that was already answered, and poisons anyway.
+      //
+      // Prod 2026-09-04: two attendees had sat poisoned since mid-July on exactly
+      // this category, and a third cleared only after 27 attempts. The category was
+      // already computed here — for the organizer's 21606 notice — and then thrown
+      // away rather than used to decide anything.
+      //
+      // Three attempts, not one: a "missing candidate" from a batch is nominally a
+      // contract error but does clear on a re-roll, since scoring reshuffles
+      // candidate order per call.
+      retryBudget: (err) => (err instanceof ProviderContractError ? 3 : undefined),
     });
     this.registerJobHandlers();
   }
