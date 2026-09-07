@@ -6,7 +6,7 @@
  *   (audit O6). `docs/internal/**` and `docs/archive/**` are intentionally NOT
  *   published; they live in subdirectories and are skipped because we only scan
  *   the top level of `docs/`.
- * - `SECTIONS` controls INDEX visibility and order only — a doc absent from
+ * - `SECTIONS` controls INDEX visibility and order only. A doc absent from
  *   SECTIONS is still built (so inbound links resolve), it just isn't featured
  *   on the index page.
  * - A post-build link + anchor checker (audit O6) fails the build if any
@@ -27,7 +27,7 @@
  *
  * Usage: node scripts/build-docs.mjs [outDir]   (default docs-site-build)
  * `outDir` may be relative (resolved against the repo root) or absolute
- * (used as-is — audit O7).
+ * (used as-is, audit O7).
  */
 import { marked } from "marked";
 import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync } from "node:fs";
@@ -51,7 +51,7 @@ export function resolveOutDir(root, arg) {
 const SECTIONS = [
   {
     title: "User guides",
-    blurb: "Start here — how to run or attend an event.",
+    blurb: "Start here: how to run or attend an event.",
     docs: [
       { file: "ORGANIZER-GUIDE.md", title: "Event Organizer Guide" },
       { file: "PARTICIPANT-GUIDE.md", title: "Participant Guide" },
@@ -173,7 +173,7 @@ function page(title, body, { home = false } = {}) {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${title} — Nostrautica Docs</title>
+<title>${title} · Nostrautica Docs</title>
 <style>${CSS}</style>
 <script>${THEME_JS}</script>
 </head>
@@ -184,7 +184,7 @@ function page(title, body, { home = false } = {}) {
 </div></header>
 <main class="wrap">
 ${body}
-<footer>Nostrautica — Nostr-native event matchmaking. <a href="/app">Open the app</a> · <a href="index.html">Docs index</a></footer>
+<footer>Nostrautica: Nostr-native event matchmaking. <a href="/app">Open the app</a> · <a href="index.html">Docs index</a></footer>
 </main>
 </body>
 </html>`;
@@ -193,7 +193,7 @@ ${body}
 /**
  * GitHub-compatible heading slugger. marked v18 emits no heading ids, so in-page
  * table-of-contents links and cross-doc `#anchor` links would all 404 without
- * this — and the anchor checker needs real ids to validate against. Reset per
+ * this, and the anchor checker needs real ids to validate against. Reset per
  * document via `mdToHtml` so duplicate-heading disambiguation is document-local.
  */
 let slugCounts = new Map();
@@ -254,7 +254,7 @@ function render(mdFile) {
  * filename → HTML string. Returns `{ errors, warnings }`:
  *   - errors:   a rewritten internal link points at a page that was never built,
  *               or at an anchor that does not exist. These fail the build.
- *   - warnings: a link still ends in `.md` — i.e. it points into the
+ *   - warnings: a link still ends in `.md`, i.e. it points into the
  *               deliberately-unpublished `archive/`/`internal/` areas (or any
  *               source doc that isn't published). Reported, not fatal.
  */
@@ -342,7 +342,7 @@ export function build(outDir) {
 
   const indexBody = [
     `<h1>Nostrautica documentation</h1>`,
-    `<p class="section-blurb">Meet the right people at events — intro videos, AI matchmaking, and a portable identity you keep. <a href="/app">Open the app →</a></p>`,
+    `<p class="section-blurb">Meet the right people at events: intro videos, AI matchmaking, and a portable identity you keep. <a href="/app">Open the app →</a></p>`,
     ...SECTIONS.map((s) => {
       const cards = s.docs
         .filter((d) => existsSync(join(DOCS, d.file)))
@@ -370,7 +370,7 @@ export function build(outDir) {
   const { errors, warnings } = checkInternalLinks(pages);
   for (const w of warnings) console.warn(`[docs] warning: ${w}`);
   if (errors.length) {
-    console.error(`[docs] link check FAILED — ${errors.length} broken internal link(s):`);
+    console.error(`[docs] link check FAILED: ${errors.length} broken internal link(s):`);
     for (const e of errors) console.error(`  ✗ ${e}`);
     process.exitCode = 1;
     throw new Error(`docs link check failed: ${errors.length} broken internal link(s)`);
