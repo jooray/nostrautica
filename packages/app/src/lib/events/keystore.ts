@@ -139,7 +139,7 @@ function openDb(): Promise<IDBDatabase> {
     req.onblocked = () =>
       reject(
         new Error(
-          "event key store upgrade is blocked by another open tab — close the app's other tabs and retry",
+          "event key store upgrade is blocked by another open tab. Close the app's other tabs and retry",
         ),
       );
   });

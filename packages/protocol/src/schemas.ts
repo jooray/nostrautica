@@ -31,7 +31,7 @@ export class NewerProtocolVersionError extends Error {
   readonly newerVersion: number;
   constructor(newerVersion: number) {
     super(
-      `payload requires protocol v${newerVersion}; this client speaks v${PROTOCOL_VERSION} — update required`,
+      `payload requires protocol v${newerVersion}; this client speaks v${PROTOCOL_VERSION}. Update required`,
     );
     this.name = "NewerProtocolVersionError";
     this.newerVersion = newerVersion;

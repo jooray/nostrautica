@@ -58,7 +58,7 @@ function assertNip44Ceiling(plaintext: string): void {
   const bytes = utf8ToBytes(plaintext).length;
   if (bytes > NIP44_MAX_PLAINTEXT_BYTES) {
     throw new Error(
-      `NIP-44 plaintext is ${bytes} bytes — the ceiling is 65535`,
+      `NIP-44 plaintext is ${bytes} bytes, over the 65535-byte ceiling`,
     );
   }
 }
@@ -81,7 +81,7 @@ const NIP44_MAX_CIPHERTEXT_B64 =
 function assertNip44CiphertextCeiling(ciphertext: string): void {
   if (ciphertext.length > NIP44_MAX_CIPHERTEXT_B64) {
     throw new Error(
-      `NIP-44 ciphertext is ${ciphertext.length} base64 chars — the ceiling is ${NIP44_MAX_CIPHERTEXT_B64}`,
+      `NIP-44 ciphertext is ${ciphertext.length} base64 chars, over the ${NIP44_MAX_CIPHERTEXT_B64} ceiling`,
     );
   }
 }

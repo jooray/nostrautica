@@ -292,7 +292,7 @@ function xhrPut(
     for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
 
     xhr.upload.onprogress = (e) => {
-      arm(UPLOAD_STALL_TIMEOUT_MS, `${label} stalled — no data sent for ${UPLOAD_STALL_TIMEOUT_MS}ms`);
+      arm(UPLOAD_STALL_TIMEOUT_MS, `${label} stalled: no data sent for ${UPLOAD_STALL_TIMEOUT_MS}ms`);
       emit(e.loaded);
     };
     xhr.upload.onload = () => {
@@ -554,12 +554,12 @@ async function readCapped(
 ): Promise<Uint8Array> {
   const contentLength = Number(res.headers.get("content-length") ?? 0);
   if (contentLength > maxBytes) {
-    throw new Error(`blob is ${contentLength} bytes — over the ${maxBytes}-byte cap (${url})`);
+    throw new Error(`blob is ${contentLength} bytes, over the ${maxBytes}-byte cap (${url})`);
   }
   // Content-Length first; a cross-origin response that doesn't expose it still
   // has the descriptor's own ciphertext size to show a real percentage against.
   const total = contentLength > 0 ? contentLength : opts.expectedSize;
-  const stalled = `Download from ${url} stalled — no data for ${DOWNLOAD_STALL_TIMEOUT_MS}ms`;
+  const stalled = `Download from ${url} stalled: no data for ${DOWNLOAD_STALL_TIMEOUT_MS}ms`;
 
   const reader = res.body?.getReader();
   if (!reader) {
@@ -574,7 +574,7 @@ async function readCapped(
       ),
     );
     if (bytes.length > maxBytes) {
-      throw new Error(`blob is ${bytes.length} bytes — over the ${maxBytes}-byte cap (${url})`);
+      throw new Error(`blob is ${bytes.length} bytes, over the ${maxBytes}-byte cap (${url})`);
     }
     return bytes;
   }
@@ -593,7 +593,7 @@ async function readCapped(
     received += value.byteLength;
     if (received > maxBytes) {
       await reader.cancel().catch(() => {});
-      throw new Error(`blob passed the ${maxBytes}-byte download cap — aborted (${url})`);
+      throw new Error(`blob passed the ${maxBytes}-byte download cap and was aborted (${url})`);
     }
     chunks.push(value);
     opts.onProgress?.({ received, total });

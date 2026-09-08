@@ -275,18 +275,18 @@ describe("NIP-44 plaintext ceiling (65,535 bytes, PROTO-3)", () => {
   const tooBig = "x".repeat(65_536); // 65,536 UTF-8 bytes
 
   it("eckEncrypt rejects an over-ceiling plaintext", () => {
-    expect(() => eckEncrypt(generateEck(), tooBig)).toThrow(/ceiling is 65535/);
+    expect(() => eckEncrypt(generateEck(), tooBig)).toThrow(/over the 65535-byte ceiling/);
   });
 
   it("nip44Encrypt rejects an over-ceiling plaintext", () => {
     const sender = generateSecretKey();
     expect(() =>
       nip44Encrypt(sender, getPublicKey(generateSecretKey()), tooBig),
-    ).toThrow(/ceiling is 65535/);
+    ).toThrow(/over the 65535-byte ceiling/);
   });
 
   it("selfEncrypt rejects an over-ceiling plaintext", () => {
-    expect(() => selfEncrypt(generateSecretKey(), tooBig)).toThrow(/ceiling is 65535/);
+    expect(() => selfEncrypt(generateSecretKey(), tooBig)).toThrow(/over the 65535-byte ceiling/);
   });
 
   it("a plaintext exactly at the ceiling still round-trips", () => {

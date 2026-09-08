@@ -48,7 +48,7 @@ export function encryptMembersPost(
   const mdBytes = utf8ByteLength(valid.content);
   if (mdBytes > MAX_MEMBERS_POST_MARKDOWN_BYTES) {
     throw new Error(
-      `members-only post markdown is ${mdBytes} bytes — the limit is ${MAX_MEMBERS_POST_MARKDOWN_BYTES}`,
+      `members-only post markdown is ${mdBytes} bytes, over the ${MAX_MEMBERS_POST_MARKDOWN_BYTES}-byte limit`,
     );
   }
   return eckEncrypt(eck, JSON.stringify(valid));

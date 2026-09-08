@@ -1377,7 +1377,7 @@
     ></textarea>
     <p class="muted" style="margin:0.25rem 0" class:danger-text={themeOver}>
       {t("admin.theme.byteCount", { used: themeBytes, max: MAX_THEME_CSS_BYTES })}
-      {#if themeOver}— {t("admin.theme.tooBig")}{/if}
+      {#if themeOver}· {t("admin.theme.tooBig")}{/if}
     </p>
     <div class="row">
       <button class="btn inline" onclick={previewTheme} disabled={themeOver}>

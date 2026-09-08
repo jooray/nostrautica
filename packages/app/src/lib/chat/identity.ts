@@ -186,7 +186,7 @@ async function ensureChatDeviceKeyInner(account: string): Promise<Uint8Array> {
   // unreachable right now: refuse, and let the caller retry once the signer is back.
   if (await marmotKvBackend().get(lockedKey(account))) {
     throw new Error(
-      "chat identity is locked and could not be unlocked — signer unavailable; not minting a new device key",
+      "chat identity is locked and could not be unlocked: signer unavailable; not minting a new device key",
     );
   }
   // Genuinely fresh device (no local key, no locked snapshot): mint this device's
@@ -482,7 +482,7 @@ export function buildChatKeyProfile(
   const npub = npubEncode(identity.account);
   const content = JSON.stringify({
     name,
-    about: `Nostrautica MLS chat key for a Nostrautica event — not a person. Follow ${npub} for the main account this belongs to. Messages are end-to-end encrypted.`,
+    about: `Nostrautica MLS chat key for a Nostrautica event, not a person. Follow ${npub} for the main account this belongs to. Messages are end-to-end encrypted.`,
     ...(accountPicture ? { picture: accountPicture } : {}),
   });
   return identity.eventSigner.signEvent({

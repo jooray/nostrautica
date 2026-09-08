@@ -82,7 +82,7 @@ export async function publishEventTheme(ctx: EventContext, css: string): Promise
   const bytes = utf8ByteLength(css);
   if (bytes > MAX_THEME_CSS_BYTES) {
     throw new Error(
-      `theme CSS is ${bytes} bytes — the limit is ${MAX_THEME_CSS_BYTES}`,
+      `theme CSS is ${bytes} bytes, over the ${MAX_THEME_CSS_BYTES}-byte limit`,
     );
   }
   const keys = await loadEventKeys(ctx.coordinate);

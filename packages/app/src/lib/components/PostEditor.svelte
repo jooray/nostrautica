@@ -91,7 +91,7 @@
       // file, EXIF and all, on a public server: exactly what this guards against.
       // Fail closed here, the way prepareAvatarImage does for the same reason.
       if (prepared === (file as Blob)) {
-        throw new Error("That photo couldn't be processed — please choose a different one.");
+        throw new Error("That photo couldn't be processed. Please choose a different one.");
       }
       image = await uploadPublicImage(session.signer, prepared);
     } catch (err) {
@@ -138,14 +138,14 @@
       <input type="radio" value="public" bind:group={visibility} />
       <span>
         {t("post.editor.public")}
-        <span class="muted">— {t("post.editor.public.hint")}</span>
+        <span class="muted">({t("post.editor.public.hint")})</span>
       </span>
     </label>
     <label class="radio">
       <input type="radio" value="members" bind:group={visibility} />
       <span>
         {t("post.editor.members")}
-        <span class="muted">— {t("post.editor.members.hint")}</span>
+        <span class="muted">({t("post.editor.members.hint")})</span>
       </span>
     </label>
     {#if editing}

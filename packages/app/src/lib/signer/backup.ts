@@ -54,7 +54,7 @@ export function mailtoBackup(appBaseUrl: string, sk: Uint8Array): string {
   const body = encodeURIComponent(
     [
       "This link logs you back into Nostrautica on any device.",
-      "Keep this email private — anyone with this link controls your account.",
+      "Keep this email private: anyone with this link controls your account.",
       "",
       link,
       "",

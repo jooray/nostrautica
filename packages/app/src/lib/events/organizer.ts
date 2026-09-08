@@ -514,8 +514,8 @@ export async function loadRoster(
  * on the roster, and rewriting it blind would remove people.
  */
 const ROSTER_UNREADABLE =
-  "Couldn't read this event's current roster, so nothing was published — " +
-  "rewriting it now would remove everyone already approved. " +
+  "Couldn't read this event's current roster, so nothing was published. " +
+  "Rewriting it now would remove everyone already approved. " +
   "Check your connection and try again.";
 
 /**
@@ -852,8 +852,8 @@ export async function fetchPublishedInvites(
 }
 
 const INVITES_UNREADABLE =
-  "Couldn't read this event's published invite list, so no codes were generated — " +
-  "republishing it now would revoke every code already handed out. " +
+  "Couldn't read this event's published invite list, so no codes were generated. " +
+  "Republishing it now would revoke every code already handed out. " +
   "Check your connection and try again.";
 
 /**

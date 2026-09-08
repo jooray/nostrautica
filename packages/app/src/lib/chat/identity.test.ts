@@ -211,7 +211,7 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
     // A ceiling-enforcing encrypt, exactly like the real NIP-44 self-encrypt.
     const ceilingEncrypt = async (pt: string) => {
       const bytes = new TextEncoder().encode(pt).length;
-      if (bytes > 65_535) throw new Error(`NIP-44 plaintext is ${bytes} bytes — the ceiling is 65535`);
+      if (bytes > 65_535) throw new Error(`NIP-44 plaintext is ${bytes} bytes, over the 65535-byte ceiling`);
       return `enc:${pt}`;
     };
 
