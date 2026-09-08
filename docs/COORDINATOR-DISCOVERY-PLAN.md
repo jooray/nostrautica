@@ -1,4 +1,4 @@
-# Coordinator discovery + billing-aware attach — plan (2026-07-17)
+# Coordinator discovery + billing-aware attach: plan (2026-07-17)
 
 Status: **partially implemented design.** Announcement and discovery are shipped.
 Billing is advisory only: the current coordinator evaluates it at install time and
@@ -27,15 +27,15 @@ Today an organizer attaches an AI coordinator by pasting its `npub` in Admin
 (`attachCoordinator` → republish 31600 with the `coordinator` tag + gift-wrap a
 21603 Coordinator Grant). Two gaps:
 
-1. **Discovery** — you have to know the npub. Coordinators should *announce*
+1. **Discovery**: you have to know the npub. Coordinators should *announce*
    themselves on Nostr (like Routstr nodes do) so an organizer can **pick one
    from a list** (and still paste an npub if they want).
-2. **Billing awareness** — AI matchmaking costs scale with attendee count, so a
+2. **Billing awareness**, AI matchmaking costs scale with attendee count, so a
    coordinator may want to charge. We are **not** building payment now, but the
    protocol should carry a clean "payment required → here's a checkout link"
    signal so we can slot payment in later without a redesign.
 
-## Part 1 — Coordinator Announcement (kind 31611)
+## Part 1: Coordinator Announcement (kind 31611)
 
 A new **public, replaceable** addressable event, signed by the coordinator's
 identity key. Authenticity = the pubkey (self-published; see Trust below).
@@ -75,9 +75,9 @@ Notes:
   `pricing.model = "free"` (or omits `pricing` entirely).
 - The **community free-for-this-npub** case is deliberately *not* in the public
   announce (it would leak an allowlist). It's a private coordinator config knob
-   (`free_organizers = ["<E_id hex pubkey>"]`) evaluated at attach time — see Part 3.
+   (`free_organizers = ["<E_id hex pubkey>"]`) evaluated at attach time, see Part 3.
 
-## Part 2 — Discovery UI
+## Part 2: Discovery UI
 
 `fetchCoordinators()` in the app: `fetchEvents({ kinds: [31611] })` over the
 default + event relays, dedupe latest-per-pubkey, parse + validate, drop
@@ -96,14 +96,14 @@ Admin → "AI coordinator" section becomes:
   fresh organizer sees a trustworthy default at the top; everything else is
   clearly "community / unverified".
 
-**Attach is unchanged** under the hood — pick from the list just fills the same
+**Attach is unchanged** under the hood: pick from the list just fills the same
 `attachCoordinator(pubkey)` call.
 
-## Part 3 — Billing-aware attach (design; not built)
+## Part 3: Billing-aware attach (design; not built)
 
 Pricing depends on attendee count, which isn't known at attach time. So billing
 is a **stage in the handshake**, surfaced through the *existing* 21606
-Coordinator Status channel — not a blocking gate at attach.
+Coordinator Status channel, not a blocking gate at attach.
 
 Flow:
 
@@ -129,15 +129,15 @@ Flow:
 
 3. Admin surfaces it in the coordinator-status widget:
    - `ok` → nothing special (attached & active).
-   - `payment_required` → a banner: *"Payment required — [Open checkout]"* plus
+   - `payment_required` → a banner: *"Payment required, [Open checkout]"* plus
      the reason. Matching for **new** attendees pauses (existing matches stay);
       the coordinator resumes on payment. **Design target only:** current runtime
       does not enforce this pause.
-   - `grace` → "active, payment due by <date>" — soft nudge, no interruption.
+   - `grace` → "active, payment due by <date>", soft nudge, no interruption.
 
-4. **Payment itself is out of scope now** — it's just a link. Later options:
+4. **Payment itself is out of scope now**. It's just a link. Later options:
    - Cashu/ecash (the coordinator already has a `CashuPayment` provider for its
-     *own* AI spend — the organizer→coordinator direction can reuse it), or
+     *own* AI spend: the organizer→coordinator direction can reuse it), or
    - Lightning invoice / external checkout.
    The `checkout_url` is the seam; swapping in native ecash later doesn't touch
    the announce or the status schema.
@@ -150,7 +150,7 @@ and stops matching *new* joiners until paid. This needs no up-front size
 declaration and matches "up to 20 users free". An organizer allowlisted in
 `free_organizers` always gets `state: "ok"`.
 
-## Part 4 — The current (free) coordinator
+## Part 4: The current (free) coordinator
 
 - Publishes a 31611 announce with `pricing.model = "free"`; always replies
   `billing.state = "ok"` (or omits billing). **Zero behaviour change.**
@@ -159,11 +159,11 @@ declaration and matches "up to 20 users free". An organizer allowlisted in
 
 ## Trust & safety
 
-- Announcements are self-published — anyone can claim to be a coordinator.
+- Announcements are self-published. Anyone can claim to be a coordinator.
   Discovery lists all; the app marks non-curated ones "community / unverified"
   and keeps the maintainer default on top.
 - Attaching hands the coordinator `E_inbox` + the ECK (read access to event
-  content) — already the threat model (`docs/THREAT-MODEL.md`). The attach UI
+  content), already the threat model (`docs/THREAT-MODEL.md`). The attach UI
   must keep warning that a coordinator can read event content; picking from a
   list doesn't lower that bar.
 
@@ -172,7 +172,7 @@ declaration and matches "up to 20 users free". An organizer allowlisted in
 1. **Protocol**: `coordinatorAnnounceSchema` + `KIND_COORDINATOR_ANNOUNCE = 31611`;
    extend `coordinatorStatusContentSchema` with the optional `billing` block.
 2. **Coordinator**: publish/refresh its 31611 on boot + config change; add
-   `[pricing]`/`free_organizers` config (default free). No payment logic — just
+   `[pricing]`/`free_organizers` config (default free). No payment logic, just
    emit `billing.state` in the status it already sends.
 3. **App discovery**: `fetchCoordinators()` + the Admin coordinator picker
    (list + keep paste box). Attach unchanged.

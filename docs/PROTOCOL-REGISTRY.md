@@ -1,17 +1,17 @@
-<!-- GENERATED FILE — do not edit by hand.
+<!-- GENERATED FILE: do not edit by hand.
      Source of truth: packages/protocol/src/registry.ts (CUSTOM_KIND_REGISTRY).
      Regenerate with `pnpm gen:registry`. The prose sections live in
      renderRegistryDoc(); the tables are generated from the typed registry. -->
 # Nostrautica Protocol Registry
 
 **Status:** Compact index of every custom event kind. **`docs/PROTOCOL-NIP.md` is the
-normative specification** — full per-kind content schemas, cryptographic constructions,
+normative specification**: full per-kind content schemas, cryptographic constructions,
 ordering rules, and rationale live there; this document is a quick-reference table,
 generated from the typed `CUSTOM_KIND_REGISTRY` in `packages/protocol/src/registry.ts`.
 
 **Ordering (PROTOCOL-NIP.md §3.1):** for any two events sharing (kind, author, `d`), the
 event with the higher `created_at` wins; on a tie, the event with the lexicographically
-lowest `id` wins. This rule applies everywhere — the app and the coordinator, fetch paths
+lowest `id` wins. This rule applies everywhere, in the app and the coordinator, fetch paths
 and streaming subscriptions alike. Sender-mutable rumors (profile submissions,
 corrections, talk submissions) additionally carry an explicit `rev`/`revision` field that
 is the primary ordering key; the sender-chosen timestamp is only a tie-break (§3.3).
@@ -32,8 +32,8 @@ public event whose `v` is not exactly `2` (§2).
 | 31605 | Match List | Coordinator | NIP-44 coordinator→recipient; ECK-blinded `d` | Directional match reasoning (+ optional icebreakers) for one recipient. Replaced after scoring or ECK rotation. |
 | 31606 | Match Matrix | Coordinator | ECK-encrypted; `d` = event `d` | Event-wide score-only matrix; published only when `match_visibility: event`. Deleted when visibility changes away from it. |
 | 31607 | Members-only Event Post | `E_id` | ECK-encrypted; random stable `d` | Official members-only post. Same `d` on edit; old ciphertext stays readable to whoever held the ECK version it was published under. |
-| 31608 | Event Page | `E_id` | Public sections + optional ECK-encrypted `private`; `d` = event `d` | Official menu and layout, plus `sources` — long-form feeds by other npubs the organizer folds into this event's official posts. Latest valid page wins. |
-| 31609 | Event Theme | `E_id` | Public raw CSS; `d` = event `d` | Organizer-controlled presentation. Not a secret-safe rendering boundary — clients must not render it on routes carrying secrets. |
+| 31608 | Event Page | `E_id` | Public sections + optional ECK-encrypted `private`; `d` = event `d` | Official menu and layout, plus `sources`: long-form feeds by other npubs the organizer folds into this event's official posts. Latest valid page wins. |
+| 31609 | Event Theme | `E_id` | Public raw CSS; `d` = event `d` | Organizer-controlled presentation. Not a secret-safe rendering boundary: clients must not render it on routes carrying secrets. |
 | 31610 | Talk | Coordinator, or `E_id` without one | ECK-encrypted; talk/ECK-blinded `d` | Moderated prerecorded talk, transcript, language, revision, status. Republished under a new address on ECK rotation; old address NIP-09-deleted. |
 | 31611 | Coordinator Announcement | Coordinator | Public; `d = nostrautica:coordinator` | Discovery name, capabilities, resolved-route privacy disclosure, relays, optional pricing. Latest announcement per coordinator wins. |
 
@@ -42,16 +42,16 @@ public event whose `v` is not exactly `2` (§2).
 | Kind | Name | Seal author → recipient | Ordering / notes |
 |---:|---|---|---|
 | 21600 | Join Request | Attendee account → `E_inbox` | No revision field; optional invite proof (§7). |
-| 21601 | Profile Submission | Attendee account → `E_inbox` | Carries `rev` (required) — the primary ordering key over `(rev, created_at, id)` (§3.3). |
+| 21601 | Profile Submission | Attendee account → `E_inbox` | Carries `rev` (required): the primary ordering key over `(rev, created_at, id)` (§3.3). |
 | 21602 | Key Grant | `E_id`, or the coordinator currently named (current generation) in the newest `31600` → attendee | ECK versions union-merge into local custody; never downgrades. |
-| 21603 | Coordinator Grant (install) | `E_id` → coordinator | Carries `gen` (required, strictly increasing per coordinate) — install authorization rules in §3.5. |
+| 21603 | Coordinator Grant (install) | `E_id` → coordinator | Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. |
 | 21604 | Admin Command | `E_id` → coordinator | Carries `expires` (required) and is ordered by a per-subject watermark, not arrival order (§3.4); includes the `detach` command. |
 | 21605 | Organizer Grant | `E_id` → co-organizer | Grants full, irrevocable `E_id`/`E_inbox`/ECK custody; no scoped roles. |
 | 21606 | Coordinator Status | Coordinator → organizer, and optionally the affected attendee | Poison/health status and/or a billing block; attendee-directed copies are scoped to that attendee's own items. |
 | 21607 | Chat Device Attestation | Attendee account → coordinator | `op:"add"` requires a proof of possession signed by the chat device key (§10.2). |
 | 21608 | Profile Correction | Attendee account → `E_inbox` | Carries `rev` (required); `overrides` bounded exactly like `ai_profile`. |
 | 21609 | Talk Submission | Attendee account → `E_inbox` | Carries `revision`; a resubmission at the stored revision with different content is rejected (§3.3). |
-| 21610 | Attendee Withdrawal | Attendee account → `E_inbox` | Attendee-initiated removal — same effect chain as an organizer `revoke`, without organizer action. |
+| 21610 | Attendee Withdrawal | Attendee account → `E_inbox` | Attendee-initiated removal: the same effect chain as an organizer `revoke`, without organizer action. |
 
 ## Standard Events Used by the Application
 
@@ -73,7 +73,7 @@ user-private (§4.1):
 | `nostrautica:blindseed` | The 32-byte seed the blinded-`d` construction derives from. |
 | `nostrautica:dmread` | Per-peer DM read positions, synced across the account's devices (§7.2). Replaceable, so writers must read-merge-write (per-peer maximum), never overwrite. |
 
-(`nostrautica:`-prefixed strings also appear as device-local `localStorage`/cache keys —
+(`nostrautica:`-prefixed strings also appear as device-local `localStorage`/cache keys,
 theme, language, correction revisions, watch progress. Those are not relay records and are
 not listed here.)
 

@@ -25,7 +25,7 @@ Three nginx specifics, each of which bit the reference deployment:
   `mime.types` has no `webmanifest` entry, so it goes out as
   `application/octet-stream`, which is a documented cause of a PWA refusing to
   install. Force it per-location with an EMPTY `types { }` block plus
-  `default_type application/manifest+json` — an empty block avoids replacing the
+  `default_type application/manifest+json`, an empty block avoids replacing the
   inherited type map for anything else.
 - **Never use `add_header` in one of these locations.** nginx drops every
   INHERITED `add_header` at any level that defines its own, so a single
@@ -52,7 +52,7 @@ to an unlinked inode and the live log would silently stop growing. The daemon's
 stdout descriptor carries `O_APPEND`, so after truncation its next write goes to
 offset 0 rather than leaving a large sparse hole.
 
-Without this the log simply grows forever — the reference deployment reached
+Without this the log simply grows forever, the reference deployment reached
 ~37 MB over seven weeks before anyone looked, on a filesystem shared with other
 services. Note that `restart-coordinator.sh` greps this exact path for the
 daemon's readiness marker, so the path must stay stable, and a rotation landing
@@ -70,8 +70,8 @@ took. Two thresholds, doing different jobs:
 | hard | 240 s | `COORDINATOR_READY_TIMEOUT` | fails the deploy step |
 
 The hard limit is deliberately far above anything normal. It does **not** bound a
-crash — the readiness loop fails within a second when the unit goes inactive,
-whatever the limit is — it bounds a daemon that is alive and never becomes ready.
+crash (the readiness loop fails within a second when the unit goes inactive,
+whatever the limit is). It bounds a daemon that is alive and never becomes ready.
 A limit set too *short* is the worse failure: the script does not kill anything,
 so the daemon starts normally while the deploy prints "coordinator is NOT
 running" and sends whoever pushed into an incident that is not happening.
@@ -79,7 +79,7 @@ running" and sends whoever pushed into an incident that is not happening.
 The soft threshold is the part worth watching. Startup resolves each provider
 route over the network and then backfills every event's `E_inbox` plus the
 coordinator's own inbox, and that last one grows with every wrap the daemon has
-ever been sent — 98 wraps on one boot, 153 two months later. It does not come
+ever been sent, 98 wraps on one boot, 153 two months later. It does not come
 back down on its own. The limit was 45 s until a 2026-09-04 deploy came in at
 44 s, which is not a margin.
 
@@ -106,7 +106,7 @@ The public reference instance is an operator-managed conventional static host pl
 ## Release Verification
 
 1. Run `pnpm check`.
-2. Build the PWA and run a **clean-context coordinator Docker build** — it must succeed from a checkout with no working-tree state:
+2. Build the PWA and run a **clean-context coordinator Docker build**: it must succeed from a checkout with no working-tree state:
 
    ```sh
    rel="$(git describe --tags --always --dirty)"; sha="$(git rev-parse HEAD)"; ts="$(git show -s --format=%cI HEAD)"
@@ -116,7 +116,7 @@ The public reference instance is an operator-managed conventional static host pl
      /tmp/cc
    ```
 
-   The image's dependency layer copies the lockfile, `patches/`, and the vendored Marmot/MLS workspace packages before `pnpm install --frozen-lockfile`, and pins the base image by digest, so this build is reproducible from a clean checkout. Keep it in the release gate. A `git archive` checkout has no `.git`, so the coordinator's own git-describe provenance is unavailable inside the container — pass the `RELEASE_ID`/`GIT_SHA`/`BUILD_TIMESTAMP` build args (as above) so the running daemon reports the real release instead of `v<pkg>` / `gitSha: unknown`. OCI image labels (`org.opencontainers.image.*`) are set from the same args.
+   The image's dependency layer copies the lockfile, `patches/`, and the vendored Marmot/MLS workspace packages before `pnpm install --frozen-lockfile`, and pins the base image by digest, so this build is reproducible from a clean checkout. Keep it in the release gate. A `git archive` checkout has no `.git`, so the coordinator's own git-describe provenance is unavailable inside the container: pass the `RELEASE_ID`/`GIT_SHA`/`BUILD_TIMESTAMP` build args (as above) so the running daemon reports the real release instead of `v<pkg>` / `gitSha: unknown`. OCI image labels (`org.opencontainers.image.*`) are set from the same args.
 3. Verify app and landing HTTP status, CSP/header policy for the chosen host, and service-worker update behavior.
 4. Exercise an event flow appropriate to the release: join, approval, media where applicable, and coordinator health.
 5. Record the Git revision and deployed app/coordinator versions.
@@ -143,7 +143,7 @@ git show <target-ref>:packages/coordinator/src/store/db.ts | grep 'SCHEMA_VERSIO
 
 If the live number is higher, you need the pre-migration backup (the operator
 notes' migration checklist takes one before every schema-bumping push, named for
-the version it CONTAINS). No backup, no rollback — go forward with a fix instead.
+the version it CONTAINS). No backup, no rollback, go forward with a fix instead.
 
 **Static site (landing / `/app` / `/docs`).** The build is a pure function of the
 commit, so rolling back is re-deploying the older commit; nothing on the serving
@@ -156,7 +156,7 @@ git push origin <good-sha>:main --force-with-lease
 `--force-with-lease`, not `--force`: it refuses if someone else has pushed since
 you last fetched, which during an incident is exactly the case you cannot afford
 to guess about. Then verify the served bundle is the one you meant, using the
-marker-grep in the release-verification section above — the OK markers only prove
+marker-grep in the release-verification section above: the OK markers only prove
 a build ran.
 
 **Coordinator.** The same push redeploys and restarts it. Two things to check
@@ -167,7 +167,7 @@ ssh <coordinator-host> 'systemctl --user is-active nostrautica-coordinator;
   systemctl --user show nostrautica-coordinator -p NRestarts --value'
 ```
 
-`NRestarts` climbing means the daemon is dying and being respawned — with
+`NRestarts` climbing means the daemon is dying and being respawned, with
 `Restart=always` that looks identical to "up" from the outside, and a rollback
 onto a database it cannot open is one of the ways to get there.
 
@@ -188,8 +188,8 @@ Keep the failed database rather than deleting it. It is the only record of the
 state the incident happened in, and a migration that corrupted data is diagnosed
 from it, not from the backup that replaced it.
 
-**What a rollback does not undo.** Anything already published to relays — a
-roster, a directory entry, a match list, a coordinator status — is out and stays
+**What a rollback does not undo.** Anything already published to relays (a
+roster, a directory entry, a match list, a coordinator status) is out and stays
 out; replaceable events can be superseded but not withdrawn, and gift wraps
 cannot be recalled at all. Provider spend is likewise spent. So a rollback
 restores the code and the local state, not the world's view of what happened,

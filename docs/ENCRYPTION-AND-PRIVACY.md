@@ -1,4 +1,4 @@
-# Nostrautica — Encryption & Privacy Review
+# Nostrautica: Encryption & Privacy Review
 
 A sanity review of how key material is used across the codebase. Unlike
 `THREAT-MODEL.md` (which restates the spec's intent), this document is written
@@ -17,7 +17,7 @@ code on 2026-07-15 and are marked as such below. Primary sources:
 ## 1. Summary
 
 The design is coherent and, for its stated purpose (short-lived conference
-networking data), basically sane. It uses audited primitives throughout — no
+networking data), basically sane. It uses audited primitives throughout, no
 bespoke crypto. The two-key event model (`E_id` identity vs `E_inbox` inbox) is
 a genuinely good idea and is implemented as specified: pre-approval attendees can
 encrypt to a stable key the coordinator can read, without giving the coordinator
@@ -28,18 +28,18 @@ no true revocation** (anyone who ever held an ECK keeps it forever), and a
 **fully-trusted coordinator** that reads all event content in plaintext. Beyond
 those, this review flags several concrete issues the spec is quieter about:
 
-- The **ECK is not in the invite link** — a coordinator (or the organizer's
+- The **ECK is not in the invite link**, a coordinator (or the organizer's
   online client) is *required* to distribute event access. The invite link only
   auto-*requests*; it does not auto-*admit*. (§3, §4)
 - The coordinator stored **`E_inbox` nsec and every ECK in plaintext SQLite** on
-  disk. **Fixed 2026-07-15** — now NIP-44-encrypted at rest under the
+  disk. **Fixed 2026-07-15**, now NIP-44-encrypted at rest under the
   coordinator identity key. (§2, F1)
 - The coordinator **did not verify that a `21603` install grant actually came
-  from `E_id`**. **Fixed 2026-07-15** — the seal author must now equal the
+  from `E_id`**. **Fixed 2026-07-15**: the seal author must now equal the
   coordinate's `E_id` pubkey, same as `21604`. (§6, F2)
 - **Invite `nsec` in the URL fragment** leaked through browser history because,
   unlike the login-`nsec` link, it was never stripped after consumption.
-  **Fixed 2026-07-15** — stripped from URL + history the moment it is read; the
+  **Fixed 2026-07-15**: stripped from URL + history the moment it is read; the
   remaining exposure (clipboard, share sheets, shoulder-surf) is inherent to
   link-based invites. (§7, F3)
 
@@ -58,11 +58,11 @@ concrete code issues (F1–F3) have since been fixed.
 | **Coordinator identity** | secp256k1 | operator-provided | env `NOSTRAUTICA_COORDINATOR_NSEC` or `ncryptsec_file` + passphrase | coordinator operator | public key referenced in `31600` `coordinator` tag |
 | **Media key** (AES-256-GCM) | 32 bytes + 12-byte IV | fresh per blob, `aesGcmEncrypt()` | only inside encrypted media descriptors | anyone who can read the descriptor | rides inside `21601`/`31602`/`31603` payloads, never its own event |
 | **Blinding key** | derived / 32-byte seed | self-conversation-key (local) or random seed in `30078` `nostrautica:blindseed` (remote signer) | derived, or self-encrypted `30078` | the user | never (it's a self-secret) |
-| **Chat device key** | 32-byte secp256k1 secret | generated locally the first time **any** account type (local key, NIP-07, NIP-46) opens event chat on a device | this device's IndexedDB only — **no relay backup, no cross-device restore** (v1's `31602` chat-device-key backup is retired) | that device's chat client | never directly; the coordinator receives only its public key through an account-sealed `21607` attestation with a device-key proof of possession |
+| **Chat device key** | 32-byte secp256k1 secret | generated locally the first time **any** account type (local key, NIP-07, NIP-46) opens event chat on a device | this device's IndexedDB only, **no relay backup, no cross-device restore** (v1's `31602` chat-device-key backup is retired) | that device's chat client | never directly; the coordinator receives only its public key through an account-sealed `21607` attestation with a device-key proof of possession |
 
 ---
 
-## 2. Encryption primitives — what's used where
+## 2. Encryption primitives: what's used where
 
 All confidentiality reuses **NIP-44 v2** (ChaCha20 + HMAC-SHA256, padded) from
 `nostr-tools`, or WebCrypto **AES-256-GCM** for media. No NIP-04 (banned
@@ -71,7 +71,7 @@ project-wide; the ladder passes `'nip44'` explicitly). Source: `crypto.ts`.
 | Purpose | Scheme | Notes |
 |---|---|---|
 | Inbound submissions → `E_inbox` | NIP-44 (sender→`E_inbox.pubkey`) inside a **NIP-59 gift wrap** | `join.ts`, `giftwrap.ts` |
-| Event-wide content (directory, roster, matrix) | **ECK as a raw NIP-44 conversation key** (`eckEncrypt`/`eckDecrypt`) | symmetric: the 32-byte ECK is fed directly to `nip44v2.encrypt` in place of an ECDH conversation key — a legitimate use of the primitive |
+| Event-wide content (directory, roster, matrix) | **ECK as a raw NIP-44 conversation key** (`eckEncrypt`/`eckDecrypt`) | symmetric: the 32-byte ECK is fed directly to `nip44v2.encrypt` in place of an ECDH conversation key, a legitimate use of the primitive |
 | Match lists (`31605`) | NIP-44 coordinator→recipient | directional; only the pair reads it |
 | User-private (`30078`, self-copy `31602`, key backups) | NIP-44 **self-encryption** (`getConversationKey(sk, ownPubkey)`) | `selfEncrypt`/`selfDecrypt` |
 | Grants, admin commands, DMs | NIP-59 gift wrap (rumor → seal kind 13 → wrap kind 1059, one-time key) | `wrapRumor`/`unwrapRumor` |
@@ -82,7 +82,7 @@ project-wide; the ladder passes `'nip44'` explicitly). Source: `crypto.ts`.
 ### Marmot state and recovery
 
 Chat identity is **per device** and is not backed up or restored (wire v2). Every
-device — for every account type — mints its own chat device key, held only in that
+device (for every account type) mints its own chat device key, held only in that
 device's IndexedDB, and attests it to the account via a `21607`. There is no relay
 backup of a chat device key and no cross-device restore: a lost, evicted, or
 logged-out device is *revoked* from another still-logged-in device, not recovered.
@@ -100,7 +100,7 @@ Browser logout normally self-encrypts chat state; if that best-effort step fails
 plaintext local state can remain.
 
 **Assessment: primitives are used correctly.** Using the ECK directly as a
-NIP-44 conversation key is unusual but sound — NIP-44's construction takes a
+NIP-44 conversation key is unusual but sound: NIP-44's construction takes a
 32-byte symmetric key and does not require it be an ECDH output. AES-GCM uses a
 fresh 12-byte random nonce per blob with a fresh 32-byte key, so the
 GCM nonce-reuse footgun is avoided by construction (key and nonce are always
@@ -110,7 +110,7 @@ name-collision-resistance role.
 One structural weakness inherent to the ECK model: **the same 32-byte ECK is
 both the key and the "conversation" for every entry.** All directory entries,
 roster, and matrix for a given ECK version share one key. There is no
-per-recipient or per-entry key separation within a version — which is exactly
+per-recipient or per-entry key separation within a version, which is exactly
 why "revocation" can only mean minting a new version (§4).
 
 ---
@@ -119,18 +119,17 @@ why "revocation" can only mean minting a new version (§4).
 
 This is the flow the task asks to be traced concretely, because the spec's
 prose can read as if the invite link alone admits you. **It does not.** The
-invite link auto-*requests* and (with a coordinator) auto-*approves the request*
-— but the ECK that actually grants access is always distributed by an online
+invite link auto-*requests* and (with a coordinator) auto-*approves the request*, but the ECK that actually grants access is always distributed by an online
 party, never embedded in the link.
 
 **Invite generation** (`organizer.ts` `generateInvites`):
 1. Organizer mints N secp256k1 keypairs (each *is* an invite code / nsec).
 2. Publishes a replaceable `31601` list containing only `sha256(invite-pubkey)`
-   per code — so observers can't enumerate valid codes.
+   per code, so observers can't enumerate valid codes.
 3. Builds a link: `…/#/e/<naddr>/join?code=<invite-nsec>`.
    *(Note: spec §6.5 writes this as `#/join?event=<naddr>&code=…`; the code uses
    the `#/e/:naddr/join?code=` route form. Same mechanism, different route
-   shape — a spec/code cosmetic mismatch.)*
+   shape, a spec/code cosmetic mismatch.)*
 
 **Join** (`join.ts` `sendJoinRequest`, driven by `Join.svelte`):
 4. Attendee opens the link; the app parses the `code` out of the fragment.
@@ -141,14 +140,14 @@ party, never embedded in the link.
    `["invite", <invite-pubkey>, <sig>]`, optionally a **`21601` Profile
    Submission**, and saves a self-copy **`31602`**.
 
-**Approval — where the ECK actually comes from:**
+**Approval, where the ECK actually comes from:**
 7a. **With a coordinator** (`coordinator.ts` `handleJoin` → `evaluateEntitlement`
     → `InviteChecker`): the coordinator fetches the current `31601` hash set,
     checks `isInviteValid` (hash membership ∧ signature), claims the invite
     pubkey first-come single-use in its SQLite, and if OK calls
     `grantAndPublish`: publishes a **`21602` Key Grant** (the ECK, gift-wrapped
     to the attendee), the directory entry, and the roster. This is typically
-    within seconds — `Join.svelte` polls for the grant.
+    within seconds, `Join.svelte` polls for the grant.
 7b. **Without a coordinator**: nothing auto-approves. The invited attendee lands
     in the manual queue; the organizer's client (`organizer.ts` `approveAttendee`)
     must be opened to unwrap `E_inbox` requests and issue the `21602`.
@@ -156,14 +155,14 @@ party, never embedded in the link.
 **The key fact:** the ECK is **not** in the invite link and is **never**
 derivable from it. Access requires an online grantor (coordinator daemon, or the
 organizer's browser). The invite link's only power is to skip the *manual
-review* step — and only if a coordinator is running. This is the correct design
+review* step, and only if a coordinator is running. This is the correct design
 (you cannot put the shared key in a URL and still hope to revoke or scope it),
 but it means "auto-accept invite links" have a hard liveness dependency on the
 coordinator that the UI should make honest.
 
 ---
 
-## 4. Creator, admins, shared secret, coordinator — who can decrypt / grant what
+## 4. Creator, admins, shared secret, coordinator: who can decrypt / grant what
 
 **Roles and custody** (from `create.ts`, `organizer.ts`, `attendee.ts`):
 
@@ -174,13 +173,13 @@ coordinator that the UI should make honest.
   **`21605` Organizer Grant**, which hands over **full key custody**: `E_id`
   nsec + `E_inbox` nsec + all ECK versions. Their client stores them as an
   `organizer`-role record (`attendee.ts` `receiveGrants`). **There is no
-  scoped/approve-only admin role** — the spec flags scoped roles as future work
+  scoped/approve-only admin role**: the spec flags scoped roles as future work
   (§13), and the code confirms it: a co-organizer is cryptographically
   indistinguishable from the creator. Anyone made an admin can themselves add
   more admins, revoke attendees, and impersonate the event's signing identity.
 - **Coordinator** holds `E_inbox` + all ECK versions (via `21603`), plus its own
   identity key. It can read every submission and all event-encrypted content and
-  authors the directory/roster/matches — but it **never** holds `E_id`, so it
+  authors the directory/roster/matches, but it **never** holds `E_id`, so it
   cannot alter the public event, config, or invite list, and cannot sign as the
   event.
 - **Approved attendees** hold only the ECK versions granted to them. They can
@@ -199,7 +198,7 @@ coordinator that the UI should make honest.
 | User-private `30078` (favorites, notes) | ✘ | ✘ | ✘ | ✔ (self only) | ✘ |
 
 ¹ Organizers can't read pairwise match reasoning under the default
-`match_visibility:"pair"` — it's NIP-44'd coordinator→recipient. (They *can* see
+`match_visibility:"pair"`, it's NIP-44'd coordinator→recipient. (They *can* see
 the score matrix if `match_visibility:"event"` is enabled, `31606`, under ECK.)
 ² The coordinator authors the match lists, so it necessarily knows all
 reasoning.
@@ -208,13 +207,13 @@ reasoning.
 co-organizers) or the coordinator can issue `21602` grants. A plain attendee
 cannot grant anyone anything.
 
-**Revocation — the honest truth (matches spec §6.3, verified in
+**Revocation, the honest truth (matches spec §6.3, verified in
 `organizer.ts` `revokeAttendeeClient` and `coordinator.ts` `revokeAttendee`):**
 Removing an attendee mints ECK v(n+1), gift-wraps it to every *remaining*
 attendee, re-encrypts future directory/roster content under it, and deletes the
 removed entry via NIP-09. **This is forward-only and cannot un-share the past.**
 The removed member keeps ECK v1..vn forever and can decrypt any ciphertext that
-was published under those versions — including anything they cached before
+was published under those versions: including anything they cached before
 removal. NIP-09 deletion is also only advisory: relays may ignore it, and the
 removed member likely already has the plaintext. So: *access to future content
 is revocable; access to already-published content is not, ever.* For the data in
@@ -232,7 +231,7 @@ in the organizer UI, which it is.
   kind-1/3/6 the app publishes.
 - Ciphertext + metadata for everything else: sizes, timing, counts, and author
   pubkeys of addressable encrypted events. Gift-wrap authors are one-time keys,
-  so wrap authors don't identify senders — but **the `p`-tag on inbound wraps is
+  so wrap authors don't identify senders, but **the `p`-tag on inbound wraps is
   `E_inbox.pubkey`**, marking "someone submitted to this event" (not who).
 - **Approximate attendee count** leaks: the number of `31603` directory entries
   under the coordinator/`E_id` pubkey is countable. (Documented, accepted.)
@@ -262,7 +261,7 @@ in the organizer UI, which it is.
 - Sees plaintext transcripts and profile/summary text. Mitigation is policy, not
   crypto: Venice private/TEE tiers (`require_private`) or operator-chosen Routstr
   nodes. Note the reference deployment (spec §16.4) runs the *match* model on a
-  **non-private** tier for cost — so at cypherpunk.today, pairwise profile text
+  **non-private** tier for cost, so at cypherpunk.today, pairwise profile text
   is sent to a non-TEE model. That's a deliberate, logged trade-off but worth
   restating: match-quality won over match-privacy there.
 
@@ -270,55 +269,53 @@ in the organizer UI, which it is.
 
 ## 6. Concrete findings & footguns
 
-**F1 — Coordinator stores `E_inbox` nsec and all ECKs in plaintext on disk.**
+**F1: Coordinator stores `E_inbox` nsec and all ECKs in plaintext on disk.**
 **FIXED 2026-07-15.** `store/db.ts` now encrypts the `events.inbox_nsec` and
 `eck_json` columns with NIP-44 self-encryption under the coordinator's identity
-key (the audited primitive via the protocol package's `selfEncrypt`/`selfDecrypt`
-— no bespoke crypto) before they touch SQLite; encrypted values carry a `nip44:`
+key (the audited primitive via the protocol package's `selfEncrypt`/`selfDecrypt`, no bespoke crypto) before they touch SQLite; encrypted values carry a `nip44:`
 prefix, so detection is unambiguous. All write paths encrypt and all read paths
 transparently decrypt. On startup, a one-way, idempotent, logged migration
 re-encrypts any legacy plaintext rows in place. Residual truth: whoever holds
 *both* the DB file and the coordinator identity key (env/ncryptsec passphrase)
-can still read everything — the DB volume alone is no longer sufficient.
+can still read everything: the DB volume alone is no longer sufficient.
 Original finding: anyone who read the coordinator's SQLite file (backup, disk
 seizure, container escape, filesystem access) got read access to every hosted
 event's inbox and content keys.
 
-**F2 — Coordinator does not authenticate the `21603` install grant against
+**F2: Coordinator does not authenticate the `21603` install grant against
 `E_id`.** **FIXED 2026-07-15.** The client (`organizer.ts` `attachCoordinator`)
 now seals the `21603` grant with `E_id` (it previously sealed with the
-organizer's personal key), and the coordinator (`handleCoordinatorWrap`) rejects
-— with a log line — any install grant whose seal author (`rumor.pubkey`) does not
+organizer's personal key), and the coordinator (`handleCoordinatorWrap`) rejects, with a log line, any install grant whose seal author (`rumor.pubkey`) does not
 equal the pubkey inside the grant's coordinate: the exact `seal-author == E_id`
 check `21604` admin commands already had. Spec §7.2 now states this for 21603.
 While fixing this, a deeper hole was found and closed: the protocol package's
 `unwrapRumor` delegated to nostr-tools `unwrapEvent`, which never binds
-`rumor.pubkey` to the seal author — so a forger could seal with their *own* key
+`rumor.pubkey` to the seal author, so a forger could seal with their *own* key
 and claim `E_id` inside the rumor, defeating both the 21603 and the existing
 21604 check (this review's earlier claim that the 21604 check was "authentic"
 was wrong). `unwrapRumor` now enforces `rumor.pubkey == seal.pubkey` (the seal
 author being authenticated by the NIP-44 ECDH decryption itself), mirroring the
 app's `signerUnwrap`.
 Note: grants sent by pre-fix clients (sealed by the organizer's personal key)
-are rejected by a fixed coordinator — acceptable pre-release. Original finding:
+are rejected by a fixed coordinator, acceptable pre-release. Original finding:
 `installEvent` derived `eidPubkey` from the *coordinate inside the grant*, never
 checking the seal author, so the coordinator would "install" and serve an event
 (on relays the sender chose) for any well-formed grant.
 
-**F3 — Invite `nsec` in the URL fragment.** **FIXED 2026-07-15** (the
+**F3: Invite `nsec` in the URL fragment.** **FIXED 2026-07-15** (the
 history-lingering part). `Join.svelte` now consumes the code into memory and
 immediately strips `?code=` from the URL and history via
-`history.replaceState` — mirroring the login-`nsec` handling in
-`consumeNsecFromHash` — and clears it from the in-memory route so back-navigation
+`history.replaceState` (mirroring the login-`nsec` handling in
+`consumeNsecFromHash`), and clears it from the in-memory route so back-navigation
 cannot rebuild a URL carrying it. A reload mid-join degrades gracefully to the
 normal join screen. What remains (inherent to link-based invites): the code is a
 full nsec riding `…/join?code=<invite-nsec>` in the fragment, so clipboard,
 chat-app link previews, "share sheet", and shoulder-surfing still expose it in
 transit. Because the proof is pubkey-bound, a leaked code can't be replayed
-against a *different* attendee — but it *can* be used first by anyone who sees
+against a *different* attendee, but it *can* be used first by anyone who sees
 it (first-come single-use), stealing the slot.
 
-**F4 — Local user keys are stored as raw bytes in IndexedDB.** `signer/keystore.ts`
+**F4: Local user keys are stored as raw bytes in IndexedDB.** `signer/keystore.ts`
 puts the 32-byte secret key unencrypted in IndexedDB (`nostrautica`/`keystore`).
 This matches spec §14 ("IndexedDB, not localStorage strings") and is the normal
 web-crypto-at-rest trade-off (no passphrase for normies by design), but it means
@@ -327,30 +324,30 @@ no `unsafe-eval`, no `{@html}` on untrusted content) is the real mitigation here
 and looks reasonable (spec §16.3). Worth stating plainly: **a normie's key is
 recoverable from their browser profile.**
 
-**F5 — No scoped admin roles.** (§4.) `21605` grants full custody including
+**F5: No scoped admin roles.** (§4.) `21605` grants full custody including
 `E_id`. A co-organizer can impersonate the event and add/revoke at will. Fine if
 co-organizers are fully trusted; a footgun if "admin" is handed out casually.
 
-**F6 — Media-blob hash linkage across events.** Reusing an intro reuses the
+**F6: Media-blob hash linkage across events.** Reusing an intro reuses the
 identical ciphertext (same AES key/IV → same `sha256`), publicly linking a
 pubkey's presence across events. The "fresh copy" option re-keys it. Documented,
-accepted, and the default is the linkable one — users must opt into privacy.
+accepted, and the default is the linkable one: users must opt into privacy.
 
-**F7 — Revocation relies on NIP-09 + relay cooperation.** Directory-entry
+**F7: Revocation relies on NIP-09 + relay cooperation.** Directory-entry
 deletion is best-effort; relays may retain the event, and the removed member
 already holds the plaintext/keys. "Delete" is cosmetic, not a security boundary.
 
-**F8 — First-come invite single-use is eventually-consistent.** The coordinator
+**F8: First-come invite single-use is eventually-consistent.** The coordinator
 claims invites in its own SQLite (`InviteChecker`), so a wiped DB or a race can
 let a code appear reusable; the failure mode is benign (falls back to manual
 queue), as the spec states. Not a vulnerability, just a caveat.
 
-**F9 — Attendee-derived data is mostly plaintext at rest in the coordinator DB.**
-Only key material (`E_inbox` nsec, ECKs — F1), Cashu proofs, and selected
+**F9: Attendee-derived data is mostly plaintext at rest in the coordinator DB.**
+Only key material (`E_inbox` nsec, ECKs, F1), Cashu proofs, and selected
 MLS/pipeline artifact values are NIP-44-encrypted under the coordinator identity.
-The materialized copies of everything the coordinator derives — attendee profiles,
+The materialized copies of everything the coordinator derives (attendee profiles,
 AI profiles, transcripts, corrections, Nostr summaries, pair reasoning, and talk
-transcripts/metadata — are **plaintext SQLite fields**. File mode `0600` is access
+transcripts/metadata) are **plaintext SQLite fields**. File mode `0600` is access
 control, not encryption. A read-only database read or an unencrypted-backup
 disclosure therefore reveals attendee bios, voice transcripts, inferred interests,
 and pairwise reasoning *without* needing the coordinator identity key. This is a
@@ -358,23 +355,23 @@ disclosed limitation, not a fixed gap: operators must protect the database file 
 encrypt backups at rest (operator guide §5). Prefer full-database encryption with
 separate key custody if the deployment's data sensitivity warrants it.
 
-**F10 — "Delete member data" is now real, but reference-counted and backup-bounded.**
+**F10: "Delete member data" is now real, but reference-counted and backup-bounded.**
 Withdrawal (21610) and retention now perform an event-wide local purge of the
 coordinator's own copies (profiles, AI profiles, transcripts, pair reasoning, talks,
 summaries) in addition to deleting relay records across *all* historical ECK
-versions — not just the current relay entries. Two honest caveats: (1) content-
+versions, not just the current relay entries. Two honest caveats: (1) content-
 addressed payloads (e.g. a shared transcript-cache or pipeline artifact) are
-**reference-counted** — a deduplicated payload still referenced by another event
+**reference-counted**: a deduplicated payload still referenced by another event
 **survives** this event's purge, and is deleted only when its last reference is
-gone; (2) a backup taken *before* a purge still contains the purged data — the
+gone; (2) a backup taken *before* a purge still contains the purged data, the
 coordinator cannot reach external backup files, so operators must rotate/expire old
 backups themselves (operator guide §5). NIP-09 relay deletion remains advisory.
 
-**F11 — A remote signer (NIP-46) leaves a bearer capability in the browser.** When a
+**F11: A remote signer (NIP-46) leaves a bearer capability in the browser.** When a
 user signs in with Amber/bunker (NIP-46), the app stores a *connection capability*
 (a client key plus the bunker secret) in IndexedDB so the session survives refreshes.
 This is **not** the account private key (the external signer keeps that) and it is
-**not** encrypted at rest beyond the browser's own storage isolation — treat it like
+**not** encrypted at rest beyond the browser's own storage isolation: treat it like
 a logged-in session on a shared device. It is cleared on logout and when the signer
 answers for a different account; full revocation is done by disconnecting the app in
 the signer. Wrapping it under a WebCrypto credential was considered and deliberately
@@ -406,7 +403,7 @@ Ordered roughly by value:
    `consumeNsecFromHash`.
 4. **Reconcile spec §6.5 route shape** (`#/join?event=…&code=…`) with the
    implemented `#/e/:naddr/join?code=…` so the doc and code agree.
-5. **Ship scoped admin roles** (F5) — an approve-only delegate that gets the ECK
+5. **Ship scoped admin roles** (F5): an approve-only delegate that gets the ECK
    (to publish directory/roster) and `E_inbox` (to read the queue) but *not*
    `E_id`. The protocol already separates these keys; only the grant payload and
    client role-handling need the split.
@@ -418,7 +415,7 @@ Ordered roughly by value:
    the match model on a non-private tier (as cypherpunk.today does) means profile
    text reaches a non-TEE provider. Make that visible where organizers pick a
    coordinator.
-8. **Consider key rotation for long-lived events** — the current model rotates
+8. **Consider key rotation for long-lived events**, the current model rotates
    the ECK only on revocation. For a multi-day event where laptops get lost,
    periodic rotation would bound the damage of a leaked ECK to one window. Lower
    priority given the bounded-sensitivity framing.
