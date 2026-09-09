@@ -42,7 +42,15 @@ const makeCoordinator = (opts: TabCoordinatorOptions): ChatTabCoordinator =>
  * `setup` — client is up, no group yet (waiting on the coordinator's Add +
  * welcome). `ready` — joined; the room is usable. `error` — the handshake threw.
  */
-export type ChatSessionPhase = "idle" | "setup" | "ready" | "error";
+/**
+ * `evicted` is the state MLS makes possible and nothing in the UI could express:
+ * a Remove strips our leaf but leaves our local group state — and its decrypted
+ * history — exactly where it was. So "do we hold a group?" still answers yes, the
+ * room rendered `ready` with its old messages on screen, and the only symptoms
+ * were that nothing new ever decrypted and a send failed. A reader who does not
+ * send sees a quiet room and no explanation at all.
+ */
+export type ChatSessionPhase = "idle" | "setup" | "ready" | "evicted" | "error";
 
 /**
  * This device holds no routable group for the event — it was removed, evicted, or
@@ -350,11 +358,27 @@ class ChatSessionStore {
     this.readOnly = !(c.usingWebLocks && c.leaderCoordinate === this.ctx?.coordinate);
   }
 
-  /** Joined a group ⇒ the room is usable. */
+  /**
+   * MEMBERSHIP, not merely state, decides whether the room is usable.
+   *
+   * This used to be `nostrGroupId()` alone — "do I hold a group for this event?" —
+   * which a removed member answers yes to forever, because MLS leaves their local
+   * state and decrypted history untouched when their leaf goes. They got a `ready`
+   * room full of old messages where nothing new ever arrived.
+   *
+   * An unreadable member list is left alone deliberately: `undefined` means "we
+   * could not tell", and demoting a working room on a state shape we failed to
+   * walk would be the same mistake in the other direction.
+   */
   private async syncPhase(tok: number): Promise<void> {
     const gid = await this.chat?.nostrGroupId().catch(() => undefined);
+    if (tok !== this.token || !gid) return;
+    const members = await Promise.resolve()
+      .then(() => this.chat?.groupMemberPubkeys())
+      .catch(() => undefined);
     if (tok !== this.token) return;
-    if (gid) this.phase = "ready";
+    const me = this.chat?.identity.pubkey;
+    this.phase = members && me && !members.includes(me) ? "evicted" : "ready";
   }
 
   /** Re-run the handshake from scratch (the page's "Try again"). */

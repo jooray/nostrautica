@@ -369,3 +369,65 @@ describe("chat session — a failed send says WHICH failure it was", () => {
     expect(chatSession.phase).toBe("setup");
   });
 });
+
+/**
+ * A removed member's room used to look fine (2026-09-09 audit, CHAT-N-2).
+ *
+ * `syncPhase` asked `nostrGroupId()` — "do I hold a group for this event?" — which
+ * a removed member answers yes to forever: an MLS Remove strips their leaf but
+ * leaves their local group state, and its decrypted history, exactly where it was.
+ * So the room rendered `ready` with its old messages on screen, nothing new ever
+ * decrypted, and the only symptom was a send that failed. A reader who does not
+ * send saw a quiet room and no explanation anywhere.
+ */
+describe("chat session — phase follows MEMBERSHIP, not leftover group state", () => {
+  let locks: FakeLockManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    FakeChannel.buses.clear();
+    locks = new FakeLockManager();
+    resolveChatIdentity.mockResolvedValue({ pubkey: "c".repeat(64) });
+    chatCreate.mockImplementation(async () => fakeChat());
+    __setChatCoordinatorFactoryForTests(
+      (opts: TabCoordinatorOptions) =>
+        new ChatTabCoordinator({
+          ...opts,
+          locks: locks as never,
+          createChannel: (n: string) => new FakeChannel(n) as never,
+        }),
+    );
+  });
+
+  afterEach(() => {
+    chatSession.dispose();
+    __setChatCoordinatorFactoryForTests(null);
+  });
+
+  it("goes to `evicted` when our own key holds no leaf, though the group state remains", async () => {
+    // `nostrGroupId()` keeps answering — that is the whole point of the finding.
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      chat.groupMemberPubkeys = vi.fn().mockResolvedValue(["d".repeat(64)]); // not us
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("evicted"));
+  });
+
+  it("stays `ready` while we are still a member", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("ready"));
+  });
+
+  it("does NOT demote on an unreadable member list — unknown is not eviction", async () => {
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      // `groupMemberPubkeys` returns undefined for a state it cannot walk.
+      chat.groupMemberPubkeys = vi.fn().mockResolvedValue(undefined);
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("ready"));
+  });
+});

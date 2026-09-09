@@ -122,6 +122,7 @@ function makeAdmin(
   log?: (m: string) => void,
   extra?: {
     enqueueSync?: (coordinate: string, pubkey: string, reenrolling?: string) => void;
+    withMemberLock?: (coordinate: string, pubkey: string, fn: () => Promise<void>) => Promise<void>;
     fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
     onRosterChanged?: (coordinate: string) => void;
     notifyAttendee?: (
@@ -139,6 +140,7 @@ function makeAdmin(
     log,
     coordinatorPubkey: COORDINATOR,
     enqueueSync: extra?.enqueueSync,
+    withMemberLock: extra?.withMemberLock,
     onRosterChanged: extra?.onRosterChanged,
     notifyAttendee: extra?.notifyAttendee,
     fetchKeyPackages:
@@ -1012,6 +1014,35 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
  * already caught per key package inside `syncMember`, deliberately, so one bad
  * peer cannot take down the loop.
  */
+describe("the startup backfill takes the same per-member lock the live paths do", () => {
+  // CHAT-N-5. `backfillApproved` walked a roster SNAPSHOT calling `syncMember` and
+  // took no lock, while every live path (approve, revoke, attestation) serializes
+  // on `member:<pubkey>`. An attestation or a revoke arriving for the same member
+  // mid-walk could therefore interleave with the backfill's add, so the two
+  // orderings could land in either sequence — a revoked device left in the group,
+  // or a legitimate rejoin undone. The window widened once install started
+  // subscribing to the event inbox BEFORE ensureChat, which is the right delivery
+  // order and means live traffic really can arrive during a backfill.
+  it("wraps every member's sync in withMemberLock", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const locked: string[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      withMemberLock: async (_c: string, pubkey: string, fn: () => Promise<void>) => {
+        locked.push(pubkey);
+        await fn();
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.backfillApproved(COORD);
+    expect(locked).toEqual([ACCOUNT]);
+    expect(mls.invited).toEqual([CHATKEY]); // and the sync still happened
+  });
+});
+
 describe("a failed attestation sync is retried, not just logged", () => {
   it("queues durable work when the inline sync throws", async () => {
     const logs: string[] = [];

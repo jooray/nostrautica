@@ -39,6 +39,24 @@ export interface MarmotAdminDeps {
    */
   enqueueSync?(coordinate: string, accountPubkey: string, reenrolling?: string): void;
   /**
+   * Run `fn` under the coordinator's per-member subject lock — the same
+   * `member:<pubkey>` mutex the live approve / revoke / attestation paths already
+   * serialize on.
+   *
+   * The startup/chat-toggle backfill walks a roster SNAPSHOT and calls
+   * `syncMember` for each row, and it took no lock at all: an attestation or a
+   * revoke arriving for the same member mid-walk could interleave with the
+   * backfill's add, so the two orderings (add-then-revoke, revoke-then-add) could
+   * land in either sequence — leaving a revoked device in the group, or a
+   * legitimate rejoin undone. The window widened when the install path started
+   * subscribing to the event inbox BEFORE running ensureChat, which is the right
+   * order for delivery and means live traffic really can arrive during a backfill.
+   *
+   * Optional so the admin stays constructible in tests without a coordinator; when
+   * absent, `fn` simply runs, which is the previous behaviour.
+   */
+  withMemberLock?(coordinate: string, accountPubkey: string, fn: () => Promise<void>): Promise<void>;
+  /**
    * The event's published roster (31604) is now stale — republish it.
    *
    * Every device-management action changes `chat_keys`, which is the ONLY place a
@@ -92,6 +110,11 @@ export class MarmotAdmin {
   private readonly coordinatorPubkey: string;
   private readonly fetchKeyPackages: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
   private readonly enqueueSync?: (coordinate: string, accountPubkey: string, reenrolling?: string) => void;
+  private readonly withMemberLock?: (
+    coordinate: string,
+    accountPubkey: string,
+    fn: () => Promise<void>,
+  ) => Promise<void>;
   private readonly onRosterChanged?: (coordinate: string) => void;
   private readonly notifyAttendee?: (
     coordinate: string,
@@ -107,6 +130,7 @@ export class MarmotAdmin {
     this.coordinatorPubkey = deps.coordinatorPubkey;
     this.fetchKeyPackages = deps.fetchKeyPackages;
     this.enqueueSync = deps.enqueueSync;
+    this.withMemberLock = deps.withMemberLock;
     this.onRosterChanged = deps.onRosterChanged;
     this.notifyAttendee = deps.notifyAttendee;
     this.log = deps.log ?? (() => {});
@@ -525,10 +549,15 @@ export class MarmotAdmin {
     }
   }
 
-  /** Backfill every approved attendee into the group (config toggled on, §4.2). */
+  /** Backfill every approved attendee into the group (config toggled on, §4.2).
+   *  Each member under the same `member:<pubkey>` lock the live paths take, so a
+   *  revoke or an attestation arriving mid-walk cannot interleave with this
+   *  member's add — see {@link MarmotAdminDeps.withMemberLock}. */
   async backfillApproved(coordinate: string): Promise<void> {
     for (const a of this.store.approvedAttendees(coordinate)) {
-      await this.syncMember(coordinate, a.pubkey);
+      const sync = () => this.syncMember(coordinate, a.pubkey);
+      if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
+      else await sync();
     }
   }
 

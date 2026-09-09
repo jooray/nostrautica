@@ -185,10 +185,16 @@
     untrack(() => void chatSession.ensure(naddr, context, signer, owner).catch(() => {}));
   });
 
-  const phase = $derived.by<"loading" | "setup" | "ready" | "unavailable">(() => {
+  const phase = $derived.by<"loading" | "setup" | "evicted" | "ready" | "unavailable">(() => {
     if (error || chatSession.error) return "unavailable";
     if (gate === "loading") return "loading";
     if (gate === "unavailable") return "unavailable";
+    // "evicted" is NOT a kind of "setup": setup is a room that hasn't happened
+    // yet, whose remedy is waiting (and, once slow, Rejoin). Eviction is a room
+    // that stopped, whose remedy is Rejoin and only Rejoin — and whose history is
+    // still on screen, so the setup empty-state that carries the escalation would
+    // never render for it.
+    if (chatSession.phase === "evicted") return "evicted";
     return chatSession.phase === "ready" ? "ready" : "setup";
   });
 
@@ -432,6 +438,24 @@
 {:else if phase === "loading"}
   <p class="muted">{t("chat.checking")}</p>
 {:else}
+  {#if phase === "evicted"}
+    <!-- Above the messages, not inside the empty state: an evicted member still
+         has their whole decrypted history on screen, so the empty state — where
+         the Rejoin escalation used to live — never renders for them. They saw a
+         normal-looking room in which nothing new ever arrived. -->
+    <div class="card warn" role="alert">
+      <strong>{t("chat.evicted.title")}</strong>
+      <p class="muted" style="margin:0.3rem 0 0.6rem">{t("chat.evicted.body")}</p>
+      <button class="btn primary" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
+        {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+      </button>
+      {#if rejoinError}
+        <p class="send-error" role="alert" style="margin:0.5rem 0 0">{rejoinError}</p>
+      {:else if rejoined}
+        <p class="muted rejoin-note" role="status" style="margin:0.5rem 0 0">{t("chat.rejoinRequested")}</p>
+      {/if}
+    </div>
+  {/if}
   <div class="display-toggle" role="group" aria-label={t("chat.display.label")}>
     <button
       class="btn inline"
@@ -580,7 +604,7 @@
         bind:value={draft}
         rows="1"
         placeholder={t("chat.compose.placeholder")}
-        disabled={phase === "setup"}
+        disabled={phase === "setup" || phase === "evicted"}
         onkeydown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -588,7 +612,12 @@
           }
         }}
       ></textarea>
-      <button class="send" type="submit" disabled={!draft.trim() || sending || phase === "setup"} aria-label={t("chat.send")}>
+      <button
+        class="send"
+        type="submit"
+        disabled={!draft.trim() || sending || phase === "setup" || phase === "evicted"}
+        aria-label={t("chat.send")}
+      >
         <Icon name="send" size={20} />
       </button>
     </form>

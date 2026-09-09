@@ -644,6 +644,11 @@ export class Coordinator {
         // Durable retry for the attestation path, using the same job the approval
         // path already uses. The timestamp in the key is deliberate: a retry after
         // a failure is new work, not a duplicate of the enqueue that succeeded.
+        // Same `member:<pubkey>` mutex the live approve / revoke / attestation
+        // paths use, so the startup backfill's walk over the roster cannot
+        // interleave with one of them for the same member.
+        withMemberLock: (coordinate, pubkey, fn) =>
+          this.withSubjectLock(coordinate, `member:${pubkey}`, fn),
         enqueueSync: (coordinate, pubkey, reenrolling) =>
           this.jobs.enqueue("chat_sync_member", `chat-sync:${coordinate}:${pubkey}:${this.now()}`, {
             coordinate,

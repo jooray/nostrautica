@@ -1252,6 +1252,9 @@ export const messages = {
     "chat.sendFailedTransport":
       "Couldn't send — we couldn't reach the relays. Your message is still here; try again.",
     "chat.sendRetry": "Try again",
+    "chat.evicted.title": "You're no longer in this chat",
+    "chat.evicted.body":
+      "New messages won't reach this device until you're added again. Everything above is what you received while you were in.",
     "chat.sending": "Sending…",
     "chat.rejoin": "Rejoin this chat",
     "chat.rejoining": "Rejoining…",
@@ -2807,6 +2810,9 @@ export const messages = {
     "chat.sendFailedTransport":
       "Správu sa nepodarilo odoslať — nepodarilo sa spojiť s relayami. Text tu zostal, skús to znova.",
     "chat.sendRetry": "Skúsiť znova",
+    "chat.evicted.title": "Už nie si v tomto chate",
+    "chat.evicted.body":
+      "Nové správy sa na toto zariadenie nedostanú, kým ťa znova nepridajú. Všetko vyššie je to, čo ti prišlo, kým si bol vnútri.",
     "chat.sending": "Odosiela sa…",
     "chat.rejoin": "Znovu sa pripojiť do chatu",
     "chat.rejoining": "Pripájame…",
@@ -4368,6 +4374,9 @@ export const messages = {
     "chat.sendFailedTransport":
       "Odeslání se nezdařilo — nepodařilo se spojit s relayi. Text tu zůstal, zkus to znovu.",
     "chat.sendRetry": "Zkusit znovu",
+    "chat.evicted.title": "Už nejsi v tomto chatu",
+    "chat.evicted.body":
+      "Nové zprávy se na toto zařízení nedostanou, dokud tě znovu nepřidají. Všechno výše je to, co ti přišlo, dokud jsi byl uvnitř.",
     "chat.sending": "Odesílá se…",
     "chat.rejoin": "Znovu se připojit do chatu",
     "chat.rejoining": "Připojujeme…",
