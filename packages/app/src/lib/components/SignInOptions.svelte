@@ -33,6 +33,10 @@
   }
 
   let error = $state<string | null>(null);
+  // Unique per instance: SignInOptions renders on Login AND inside Join, and two
+  // copies on one page must not share an id.
+  const pasteKeyId = `signin-paste-${Math.random().toString(36).slice(2, 8)}`;
+  const pastePwId = `${pasteKeyId}-pw`;
   let busy = $state(false);
   let nc = $state<NostrConnectHandle | null>(null);
   let pasteKey = $state("");
@@ -197,7 +201,9 @@
 </script>
 
 <div class="card stack">
-  {#if error}<div class="card warn" style="margin:0">{error}</div>{/if}
+  <!-- Announced (A6). A sign-in failure that is only visible costs the reader who
+       most needs it: this is the screen where a key was just rejected. -->
+  {#if error}<div class="card warn" style="margin:0" role="alert">{error}</div>{/if}
 
   {#if authUrl}
     <!-- Popup-blocked auth_url: give the user a real tap to open it. -->
@@ -277,7 +283,14 @@
       like a bad key rather than a mangled one. inputmode="url" also gets the
       iOS keyboard to surface ":" and "/" without a shift.
     -->
+    <!-- Labelled, not just placeheld: a placeholder disappears on the first
+         keystroke and is not a reliable accessible name, so these two fields —
+         the ones where pasting the wrong string signs you in as somebody else —
+         were unnamed to a screen reader. Visually hidden so the layout, which
+         deliberately leads with the paste box, is unchanged. -->
+    <label class="visually-hidden" for={pasteKeyId}>{t("signin.paste.placeholder")}</label>
     <input
+      id={pasteKeyId}
       placeholder={t("signin.paste.placeholder")}
       bind:value={pasteKey}
       autocomplete="off"
@@ -287,7 +300,14 @@
       inputmode="url"
     />
     {#if pasteKey.trim().startsWith("ncryptsec1")}
-      <input type="password" placeholder={t("signin.paste.passphrase")} bind:value={pastePw} />
+      <label class="visually-hidden" for={pastePwId}>{t("signin.paste.passphrase")}</label>
+      <input
+        id={pastePwId}
+        type="password"
+        autocomplete="current-password"
+        placeholder={t("signin.paste.passphrase")}
+        bind:value={pastePw}
+      />
     {/if}
     <div class="row" style="margin-top:0.5rem">
       {#if looksLikeBunker}

@@ -599,8 +599,11 @@
     const resolved = resolveTarget(ctx, target);
     if (!resolved) return;
     if (resolved.type === "post") router.go({ name: "post", naddr, d: resolved.d });
-    else if (resolved.type === "url") window.open(resolved.href, "_blank", "noopener");
-    else window.open(`https://njump.me/${resolved.naddr}`, "_blank", "noopener");
+    // `noreferrer` as well as `noopener`: these hrefs come from the organizer's own
+    // 31608 page model, so the destination is chosen by someone other than us, and
+    // there is no reason to hand it the URL of the event page the reader was on.
+    else if (resolved.type === "url") window.open(resolved.href, "_blank", "noopener,noreferrer");
+    else window.open(`https://njump.me/${resolved.naddr}`, "_blank", "noopener,noreferrer");
   }
 
   async function promptInstall() {

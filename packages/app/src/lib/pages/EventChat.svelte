@@ -19,7 +19,7 @@
   import { buildDeviceAccountMap, chatMembers } from "$lib/chat/members.js";
   import type { RosterContent } from "@nostrautica/protocol";
   import { evaluateChatGate } from "$lib/chat/gate.js";
-  import { chatSession } from "$lib/chat/session.svelte.js";
+  import { chatSession, ChatUnroutableError } from "$lib/chat/session.svelte.js";
   import { fillHeight } from "$lib/components/fill-height.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
@@ -54,6 +54,8 @@
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let error = $state<unknown>(null);
   let sendError = $state<string | null>(null);
+  /** The last send failed because this device is out of the group, not on the wire. */
+  let sendUnroutable = $state(false);
   let rejoinError = $state<string | null>(null);
   let rejoined = $state(false);
   let draft = $state("");
@@ -214,6 +216,7 @@
   // retrying the send fixes it — the coordinator has to add this device again.
   async function rejoin() {
     sendError = null;
+    sendUnroutable = false;
     rejoinError = null;
     rejoined = false;
     try {
@@ -234,16 +237,23 @@
     if (!text || sending || readOnly) return;
     sending = true;
     sendError = null;
+    sendUnroutable = false;
     try {
       await chatSession.send(text);
       draft = "";
       // A message got through — retire any leftover recovery notice.
       rejoined = false;
       rejoinError = null;
-    } catch {
+    } catch (e) {
       // Bug 5: surface the failure instead of silently swallowing it. A revoked
       // (removed) attendee's send lands here once they've lost the group locally.
-      sendError = t("chat.sendFailed");
+      // Which of the two it was decides what to OFFER: Rejoin revokes this device,
+      // rotates its key package and re-attests — an MLS epoch change and a roster
+      // republish. Right for a lost membership, wrong for a dropped socket, where
+      // the message is still in the composer and pressing Send again is the whole
+      // remedy.
+      sendUnroutable = e instanceof ChatUnroutableError;
+      sendError = sendUnroutable ? t("chat.sendFailed") : t("chat.sendFailedTransport");
     } finally {
       sending = false;
     }
@@ -590,9 +600,19 @@
        coordinator's welcome lands. -->
   {#if sendError}
     <p class="send-error" role="alert">{sendError}</p>
-    <button class="btn inline" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
-      {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
-    </button>
+    {#if sendUnroutable}
+      <button class="btn inline" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
+        {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+      </button>
+    {:else}
+      <!-- A transport failure. The text is still in the composer, so the remedy is
+           the button that is already there — say so rather than offering an epoch
+           change for a dropped socket. Rejoin stays available in the handoff card
+           below for anyone whose retries keep failing. -->
+      <button class="btn inline" disabled={sending} onclick={() => void send()}>
+        {sending ? t("chat.sending") : t("chat.sendRetry")}
+      </button>
+    {/if}
   {/if}
   {#if rejoinError}
     <p class="send-error" role="alert">{rejoinError}</p>

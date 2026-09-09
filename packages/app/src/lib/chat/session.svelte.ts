@@ -44,6 +44,20 @@ const makeCoordinator = (opts: TabCoordinatorOptions): ChatTabCoordinator =>
  */
 export type ChatSessionPhase = "idle" | "setup" | "ready" | "error";
 
+/**
+ * This device holds no routable group for the event — it was removed, evicted, or
+ * its binding is contradicted by the roster. Distinct from a send that failed on
+ * the wire, because only this one is fixed by Rejoin (which revokes the device,
+ * rotates its key package and re-attests: an MLS epoch change and a roster
+ * republish, quite the wrong price for a dropped socket).
+ */
+export class ChatUnroutableError extends Error {
+  constructor() {
+    super("this device is not in the event's chat group");
+    this.name = "ChatUnroutableError";
+  }
+}
+
 class ChatSessionStore {
   /** The event this session belongs to (undefined when idle). */
   naddr = $state<string | undefined>(undefined);
@@ -360,12 +374,20 @@ class ChatSessionStore {
       try {
         await this.chat.send(text);
       } catch (err) {
-        // A send can only fail because this session no longer holds a routable
-        // group for the event (removed, evicted, or a binding the roster
-        // contradicts). `phase` had latched `ready` and never moved back, leaving
-        // an enabled composer over a session that cannot send — demote it so the
-        // room reads as "setting up" again and the rejoin affordance applies.
-        await this.demoteIfUnroutable();
+        // Two different failures used to arrive here as one. A send fails either
+        // because this session no longer holds a routable group for the event
+        // (removed, evicted, or a binding the roster contradicts) or because the
+        // publish did not reach a relay. `phase` had latched `ready` and never
+        // moved back, leaving an enabled composer over a session that cannot send
+        // — demote it when the group really is gone, so the room reads as "setting
+        // up" again and the rejoin affordance applies.
+        //
+        // The distinction is worth carrying to the caller: the remedy offered for a
+        // failed send is Rejoin, which revokes this device, rotates its key package
+        // and re-attests — an MLS epoch change and a roster republish. That is the
+        // right price for a lost membership and quite the wrong one for a dropped
+        // socket.
+        if (await this.demoteIfUnroutable()) throw new ChatUnroutableError();
         throw err;
       }
       return;
@@ -379,10 +401,14 @@ class ChatSessionStore {
     throw new Error("no chat session");
   }
 
-  /** Leader: drop back to `setup` when the client holds no routable group. */
-  private async demoteIfUnroutable(): Promise<void> {
+  /** Leader: drop back to `setup` when the client holds no routable group.
+   *  Returns whether the group is in fact unroutable (which is the membership
+   *  problem Rejoin exists for), as opposed to a transport failure. */
+  private async demoteIfUnroutable(): Promise<boolean> {
     const gid = await this.chat?.nostrGroupId().catch(() => undefined);
-    if (!gid && this.phase === "ready") this.phase = "setup";
+    if (gid) return false;
+    if (this.phase === "ready") this.phase = "setup";
+    return true;
   }
 
   /**

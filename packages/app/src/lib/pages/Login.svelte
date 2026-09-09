@@ -8,10 +8,13 @@
   import SignInOptions from "$lib/components/SignInOptions.svelte";
   import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
-  let error = $state<string | null>(null);
+  /** Raw thrown value: ErrorState categorizes it and keeps the technical
+   *  text behind a disclosure, as every other async surface does. */
+  let error = $state<unknown>(null);
   let busy = $state(false);
   let showExisting = $state(false);
   let newName = $state("");
@@ -50,7 +53,7 @@
         }
         // Stay so the freshly-generated key's backup card shows.
       } catch (e) {
-        error = e instanceof Error ? e.message : String(e);
+        error = e;
       } finally {
         busy = false;
       }
@@ -81,7 +84,10 @@
   <h1>{t("login.welcome")}</h1>
 
   {#if error}
-    <div class="card warn"><strong>{t("login.failed")}</strong> {error}</div>
+    <!-- Announced and categorized, like every other async failure surface (Q3/A6).
+         A raw thrown string in an unannounced card is invisible to a screen reader
+         and unreadable to everyone else. -->
+    <ErrorState {error} body="login.failed" />
   {/if}
 
   <!-- Nostr users are first-class citizens: their purple sign-in comes first,

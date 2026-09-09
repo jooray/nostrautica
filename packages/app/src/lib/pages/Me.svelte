@@ -130,7 +130,7 @@
       <BackupCard />
       <div class="stack" style="margin-top:0.75rem">
         {#each clients as c (c.name)}
-          <a class="btn" href={c.url} target="_blank" rel="noopener">{c.name} ↗</a>
+          <a class="btn" href={c.url} target="_blank" rel="noopener noreferrer">{c.name} ↗</a>
         {/each}
       </div>
     </div>

@@ -31,7 +31,11 @@ vi.mock("./client.js", () => ({
 vi.mock("./identity.js", () => ({ resolveChatIdentity }));
 vi.mock("./legacy-cleanup.js", () => ({ deleteLegacyChatDeviceKeyBackup: vi.fn() }));
 
-import { chatSession, __setChatCoordinatorFactoryForTests } from "./session.svelte.js";
+import {
+  chatSession,
+  ChatUnroutableError,
+  __setChatCoordinatorFactoryForTests,
+} from "./session.svelte.js";
 
 /** A browser-wide exclusive lock table, shared by every "tab" in a test. */
 class FakeLockManager {
@@ -108,6 +112,7 @@ function fakeChat() {
     ensurePublished: vi.fn().mockResolvedValue(undefined),
     start: vi.fn().mockResolvedValue(undefined),
     nostrGroupId: vi.fn().mockResolvedValue("gid"),
+    send: vi.fn().mockResolvedValue(undefined),
     // Real MLS membership. The member list is derived from this now, not from the
     // roster's attested `chat_keys`, so the double has to answer it.
     groupMemberPubkeys: vi.fn().mockResolvedValue(groupMembers),
@@ -294,5 +299,73 @@ describe("chat session — real MLS membership, and its handoff to follower tabs
     leaderTab.broadcastMembers("31923:" + "e".repeat(64) + ":other", ["9".repeat(64)]);
     await Promise.resolve();
     expect(chatSession.memberDevices).toBeUndefined();
+  });
+});
+
+/**
+ * A failed send is two different problems (2026-09-09 audit, CHAT-N-4).
+ *
+ * Both arrived at the composer as one error, and the only remedy offered next to
+ * it was Rejoin — which revokes this device, rotates its key package and
+ * re-attests: an MLS epoch change and a roster republish. Right for a lost
+ * membership, and quite the wrong price for a dropped socket, where the message is
+ * still in the composer and pressing Send again is the whole remedy.
+ */
+describe("chat session — a failed send says WHICH failure it was", () => {
+  let locks: FakeLockManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    FakeChannel.buses.clear();
+    locks = new FakeLockManager();
+    resolveChatIdentity.mockResolvedValue({ pubkey: "c".repeat(64) });
+    chatCreate.mockImplementation(async () => fakeChat());
+    __setChatCoordinatorFactoryForTests(
+      (opts: TabCoordinatorOptions) =>
+        new ChatTabCoordinator({
+          ...opts,
+          locks: locks as never,
+          createChannel: (n: string) => new FakeChannel(n) as never,
+        }),
+    );
+  });
+
+  afterEach(() => {
+    chatSession.dispose();
+    __setChatCoordinatorFactoryForTests(null);
+  });
+
+  it("a publish failure with a routable group stays the original error", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const chat = chatSession.chat as unknown as {
+      send: ReturnType<typeof vi.fn>;
+      nostrGroupId: ReturnType<typeof vi.fn>;
+    };
+    chat.send.mockRejectedValue(new Error("publish failed on all 2 relay(s)"));
+
+    const thrown = await chatSession.send("hi").then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(thrown).toBeInstanceOf(Error);
+    expect(thrown).not.toBeInstanceOf(ChatUnroutableError);
+    expect((thrown as Error).message).toMatch(/publish failed/);
+    // The room is still usable — no demotion, and no Rejoin offered, for a blip.
+    expect(chatSession.phase).toBe("ready");
+  });
+
+  it("a send with no routable group is a ChatUnroutableError, and demotes the room", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const chat = chatSession.chat as unknown as {
+      send: ReturnType<typeof vi.fn>;
+      nostrGroupId: ReturnType<typeof vi.fn>;
+    };
+    chat.send.mockRejectedValue(new Error("no joined chat group yet"));
+    chat.nostrGroupId.mockResolvedValue(undefined); // removed from the group
+
+    await expect(chatSession.send("hi")).rejects.toBeInstanceOf(ChatUnroutableError);
+    expect(chatSession.phase).toBe("setup");
   });
 });

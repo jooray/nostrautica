@@ -1246,7 +1246,11 @@ export const messages = {
     "chat.compose.placeholder": "Message",
     "chat.send": "Send",
     "chat.checking": "Checking your access…",
-    "chat.sendFailed": "Couldn't send. You may have been removed from this chat, or the connection dropped.",
+    "chat.sendFailed": "Couldn't send: this device is no longer in the chat. Ask to be added again.",
+    "chat.sendFailedTransport":
+      "Couldn't send — we couldn't reach the relays. Your message is still here; try again.",
+    "chat.sendRetry": "Try again",
+    "chat.sending": "Sending…",
     "chat.rejoin": "Rejoin this chat",
     "chat.rejoining": "Rejoining…",
     "chat.rejoinRequested":
@@ -2795,7 +2799,11 @@ export const messages = {
     "chat.compose.placeholder": "Správa",
     "chat.send": "Odoslať",
     "chat.checking": "Overujeme váš prístup…",
-    "chat.sendFailed": "Správu sa nepodarilo odoslať. Možno vás z tohto chatu odstránili, alebo vypadlo spojenie.",
+    "chat.sendFailed": "Správu sa nepodarilo odoslať: toto zariadenie už nie je v chate. Požiadaj o opätovné pridanie.",
+    "chat.sendFailedTransport":
+      "Správu sa nepodarilo odoslať — nepodarilo sa spojiť s relayami. Text tu zostal, skús to znova.",
+    "chat.sendRetry": "Skúsiť znova",
+    "chat.sending": "Odosiela sa…",
     "chat.rejoin": "Znovu sa pripojiť do chatu",
     "chat.rejoining": "Pripájame…",
     "chat.rejoinRequested":
@@ -4350,7 +4358,11 @@ export const messages = {
     "chat.compose.placeholder": "Zpráva",
     "chat.send": "Odeslat",
     "chat.checking": "Kontrola vašeho přístupu…",
-    "chat.sendFailed": "Odeslání se nezdařilo. Možná jste byli z tohoto chatu odebráni, nebo vypadlo spojení.",
+    "chat.sendFailed": "Odeslání se nezdařilo: toto zařízení už není v chatu. Požádej o opětovné přidání.",
+    "chat.sendFailedTransport":
+      "Odeslání se nezdařilo — nepodařilo se spojit s relayi. Text tu zůstal, zkus to znovu.",
+    "chat.sendRetry": "Zkusit znovu",
+    "chat.sending": "Odesílá se…",
     "chat.rejoin": "Znovu se připojit do chatu",
     "chat.rejoining": "Připojujeme…",
     "chat.rejoinRequested":
