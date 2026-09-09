@@ -51,6 +51,12 @@ export interface BlobFetchOptions {
   maxBytes?: number;
   /** Caller cancellation (audit R13): shutdown / per-event teardown. */
   signal?: AbortSignal;
+  /**
+   * The guarded downloader, injectable for tests — the same shape every other
+   * expensive dependency in this pipeline takes (`probeDuration`, `extractAudio`,
+   * `fetchBlob` itself one level up). Defaults to the real `safeFetch`.
+   */
+  fetch?: typeof safeFetch;
 }
 
 /**
@@ -66,11 +72,19 @@ export async function fetchBlob(
   opts: BlobFetchOptions = {},
 ): Promise<Uint8Array> {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_MEDIA_BYTES;
+  const get = opts.fetch ?? safeFetch;
   let lastErr: unknown;
+  // Whether EVERY mirror failed for a reason another attempt cannot change: a hash
+  // that doesn't match the descriptor, a host the allowlist refuses, a body that
+  // ran past the byte cap. One retryable failure anywhere (a DNS blip, a 502) and
+  // this stays false, because then retrying really can work.
+  let allPermanent = urls.length > 0;
   for (const url of urls) {
     try {
-      const bytes = await safeFetch(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal });
+      const bytes = await get(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal });
       if (sha256Hex(bytes) !== expectedSha256) {
+        // The bytes arrived and are not the bytes the descriptor names. No number
+        // of retries changes that; the blob is either corrupt or substituted.
         lastErr = new Error(`hash mismatch from ${url}`);
         continue;
       }
@@ -81,9 +95,18 @@ export async function fetchBlob(
       // others (a different mirror may be an allowlisted host), so keep trying —
       // but never widen the target set beyond the descriptor's declared urls.
       if (e instanceof SafeFetchError && !e.retryable) continue;
+      allPermanent = false;
     }
   }
-  throw new Error(`could not fetch blob ${expectedSha256}: ${lastErr}`);
+  const why = `could not fetch blob ${expectedSha256}: ${lastErr}`;
+  // MED-5's other half. This threw a plain Error whatever the reason, and
+  // `processAttendee` rethrows anything that is not a MediaPolicyError — so a blob
+  // that can NEVER be fetched (corrupt, substituted, on a host the allowlist
+  // refuses, or larger than the cap) failed the whole attendee job and re-ran it on
+  // the retry schedule: up to 26 full downloads of every mirror over three days,
+  // for an answer that was settled on the first one. As a policy rejection it costs
+  // that media only, and the attendee keeps their profile and their other media.
+  throw allPermanent ? new MediaPolicyError(why) : new Error(why);
 }
 
 export interface TranscribeDeps {

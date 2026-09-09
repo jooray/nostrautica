@@ -394,8 +394,16 @@ export async function upload(
     // BUD-02 says the response is a blob descriptor, but a server that answers
     // 200 with something else still stored the blob at its content address.
   }
+  // Take the server's URL only if it actually points at OUR blob (audit MED-9).
+  // Blossom is content-addressed, so a descriptor URL that does not carry the
+  // sha256 we uploaded is either a broken server or one substituting a different
+  // blob — and this URL goes straight into the media descriptor other people
+  // fetch from. The coordinator re-verifies the hash on download and would reject
+  // the substitute, but the app's own players would have followed it, and there
+  // is no reason to publish a pointer we can already tell is wrong.
+  const serverUrl = blob.url?.includes(sha256) ? blob.url : undefined;
   return {
-    url: blob.url ?? `${trimServer(server)}/${sha256}`,
+    url: serverUrl ?? `${trimServer(server)}/${sha256}`,
     sha256,
     size: ciphertext.length,
     type: contentType,

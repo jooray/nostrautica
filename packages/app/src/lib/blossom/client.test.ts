@@ -39,7 +39,8 @@ describe("uploadAndMirror", () => {
         return new Response("nope", { status: 415 });
       }
       if (url.startsWith("https://good.example/upload")) {
-        return jsonResponse({ url: "https://good.example/deadbeef" });
+        // A conforming BUD-02 descriptor: content-addressed at our sha256.
+        return jsonResponse({ url: `https://good.example/${sha256Hex(new Uint8Array([1, 2, 3]))}` });
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -52,7 +53,7 @@ describe("uploadAndMirror", () => {
       "application/octet-stream",
     );
 
-    expect(result.primary).toBe("https://good.example/deadbeef");
+    expect(result.primary).toBe(`https://good.example/${sha256Hex(new Uint8Array([1, 2, 3]))}`);
     expect(calls[0]).toBe("PUT https://bad.example/upload");
     expect(calls[1]).toBe("PUT https://good.example/upload");
   });
@@ -72,6 +73,45 @@ describe("uploadAndMirror", () => {
         "application/octet-stream",
       ),
     ).rejects.toThrow(/bad-one\.example.*bad-two\.example/s);
+  });
+});
+
+/**
+ * The server's own descriptor URL goes straight into the media descriptor other
+ * people fetch from (audit MED-9). Blossom is content-addressed, so a URL that
+ * does not carry the sha256 we uploaded is a broken server or one substituting a
+ * different blob — and there is no reason to publish a pointer we can already
+ * tell is wrong. The coordinator re-verifies the hash on download and would
+ * reject the substitute, but the app's own players would have followed it.
+ */
+describe("upload descriptor URL is verified against our own hash", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const data = new Uint8Array([7, 7, 7]);
+
+  async function uploadWithServerUrl(serverUrl: unknown): Promise<string> {
+    const signer = LocalSigner.generate();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ url: serverUrl })),
+    );
+    const r = await uploadAndMirror(signer, ["https://s.example"], data, "application/octet-stream");
+    return r.primary;
+  }
+
+  it("keeps a URL that carries our sha256", async () => {
+    const good = `https://s.example/${sha256Hex(data)}.webm`;
+    expect(await uploadWithServerUrl(good)).toBe(good);
+  });
+
+  it("replaces a URL pointing at some OTHER blob with the content-addressed one", async () => {
+    expect(await uploadWithServerUrl("https://evil.example/someone-elses-blob")).toBe(
+      `https://s.example/${sha256Hex(data)}`,
+    );
+  });
+
+  it("falls back when the server answers 200 with no usable descriptor", async () => {
+    expect(await uploadWithServerUrl(undefined)).toBe(`https://s.example/${sha256Hex(data)}`);
   });
 });
 
@@ -300,14 +340,17 @@ describe("Blossom timeouts (UX-7)", () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       calls.push(`${init?.method ?? "GET"} ${url}`);
+      // Conforming BUD-02 descriptors, i.e. content-addressed at our own sha256 —
+      // a URL that is not gets replaced by the content-addressed one (MED-9).
+      const addr = sha256Hex(new Uint8Array([1, 2, 3]));
       if (url.startsWith("https://primary.example/upload")) {
-        return Promise.resolve(jsonResponse({ url: "https://primary.example/deadbeef" }));
+        return Promise.resolve(jsonResponse({ url: `https://primary.example/${addr}` }));
       }
       if (url.startsWith("https://hung.example/mirror")) {
         return new Promise<Response>(() => {});
       }
       if (url.startsWith("https://good.example/mirror")) {
-        return Promise.resolve(jsonResponse({ url: "https://good.example/deadbeef" }));
+        return Promise.resolve(jsonResponse({ url: `https://good.example/${addr}` }));
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -327,9 +370,10 @@ describe("Blossom timeouts (UX-7)", () => {
 
     await vi.advanceTimersByTimeAsync(MIRROR_TIMEOUT_MS);
     const result = await p;
+    const addr = sha256Hex(new Uint8Array([1, 2, 3]));
     expect(result.urls).toEqual([
-      "https://primary.example/deadbeef",
-      "https://good.example/deadbeef",
+      `https://primary.example/${addr}`,
+      `https://good.example/${addr}`,
     ]);
   });
 });
@@ -350,6 +394,9 @@ describe("upload progress budgets (XHR path)", () => {
   /** A scriptable XMLHttpRequest: `script` drives the events after send(). */
   class FakeXhr {
     static script: (xhr: FakeXhr) => void = () => {};
+    /** sha256 of the payload the current test uploads, so `succeed()` can answer
+     *  with a CONFORMING content-addressed descriptor (MED-9). */
+    static addr = "";
     static sent: Uint8Array[] = [];
     upload: {
       onprogress?: (e: ProgressEvent_) => void;
@@ -378,8 +425,8 @@ describe("upload progress budgets (XHR path)", () => {
       this.aborted = true;
       this.onabort?.();
     }
-    /** Answer 200 with a BUD-02 descriptor. */
-    succeed(url = "https://good.example/blob"): void {
+    /** Answer 200 with a BUD-02 descriptor (content-addressed — see MED-9). */
+    succeed(url = `https://good.example/${FakeXhr.addr}`): void {
       this.upload.onload?.();
       this.status = 200;
       this.responseText = JSON.stringify({ url });
@@ -414,9 +461,11 @@ describe("upload progress budgets (XHR path)", () => {
       xhr.succeed();
     });
 
-    const p = upload(signer, "https://slow.example", new Uint8Array(steps * 2));
+    const body = new Uint8Array(steps * 2);
+    FakeXhr.addr = sha256Hex(body);
+    const p = upload(signer, "https://slow.example", body);
     await vi.advanceTimersByTimeAsync(gap * steps + 1);
-    await expect(p).resolves.toMatchObject({ url: "https://good.example/blob" });
+    await expect(p).resolves.toMatchObject({ url: `https://good.example/${FakeXhr.addr}` });
   });
 
   it("gives up on a server that stops accepting bytes mid-body", async () => {
@@ -451,18 +500,20 @@ describe("upload progress budgets (XHR path)", () => {
     const signer = LocalSigner.generate();
     // A big blob leaves the client quickly on a fast uplink, then the server
     // hashes and stores it — a legitimate silence far longer than a stall.
+    const body = new Uint8Array(10);
+    FakeXhr.addr = sha256Hex(body);
     useFakeXhr(async (xhr) => {
       xhr.upload.onprogress?.({ loaded: 10, total: 10, lengthComputable: true });
       xhr.upload.onload?.();
       await new Promise((r) => setTimeout(r, UPLOAD_STALL_TIMEOUT_MS * 2));
       xhr.status = 200;
-      xhr.responseText = JSON.stringify({ url: "https://good.example/blob" });
+      xhr.responseText = JSON.stringify({ url: `https://good.example/${FakeXhr.addr}` });
       xhr.onload?.();
     });
 
-    const p = upload(signer, "https://slow-store.example", new Uint8Array(10));
+    const p = upload(signer, "https://slow-store.example", body);
     await vi.advanceTimersByTimeAsync(UPLOAD_STALL_TIMEOUT_MS * 2 + 1);
-    await expect(p).resolves.toMatchObject({ url: "https://good.example/blob" });
+    await expect(p).resolves.toMatchObject({ url: `https://good.example/${FakeXhr.addr}` });
   });
 
   it("reports byte progress to the caller and to onUploadProgress subscribers", async () => {

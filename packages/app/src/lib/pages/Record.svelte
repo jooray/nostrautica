@@ -376,10 +376,20 @@
       recording = true;
       const result = await capture.start(stream, maxSec, (r) => (remaining = r));
       recording = false;
+      const url = URL.createObjectURL(result.blob);
+      // `result.durationSec` is WALL CLOCK (capture.ts counts `Date.now()` from
+      // the start), which is not the same as how much media came out. iOS suspends
+      // a backgrounded tab's MediaRecorder, so answering a call mid-take produces a
+      // 40-second clip that reports four minutes — and the precheck below then
+      // tells the person their clip is over an event limit it is nowhere near.
+      // Read the real decoded duration where we can; `readDuration` already knows
+      // how to coax a finite answer out of MediaRecorder WebM (MED-3), and returns
+      // 0 when it cannot, which is when the wall clock is the best guess we have.
+      const decoded = await readDuration(url, mode === "audio").catch(() => 0);
       recorded = {
         blob: result.blob,
-        url: URL.createObjectURL(result.blob),
-        durationSec: result.durationSec,
+        url,
+        durationSec: decoded > 0 ? decoded : result.durationSec,
       };
       // stopStream(), not just stopMeter(): the take is done, so the camera light
       // must go out NOW. It used to stay on through the review UI, the encrypt +
