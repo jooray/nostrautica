@@ -95,6 +95,13 @@
     // and never waits for the async boot below (registerPwa inits it too,
     // idempotently, as a backstop). SW-independent.
     install.init();
+    // PWA-7: register the service worker in the FIRST SYNCHRONOUS BLOCK, not after
+    // the awaits below. `registerPwa` attaches the `controllerchange` listener that
+    // drives the post-deploy reload, and attaching it late means another tab's
+    // update landing during boot is missed — self-healing, but only on a later
+    // check. It needs nothing from the session, so there was never a reason for it
+    // to wait behind one.
+    registerPwa();
     // Warm the persistent app-cache mirror in the BACKGROUND (§7.4.5). Boot no
     // longer awaits this — the shell + route render immediately, and cache-backed
     // pages re-read the mirror when `cacheHydration` fires (they watch it), so a
@@ -150,7 +157,6 @@
     }
     installQueueFlusher();
     void flushQueue();
-    registerPwa();
     booted = true;
     // Identity-scoped warmers (§2.15): grants, recovery, own kind-0, follows,
     // mutes, DM relay list, blind seed (local only), one DM inbox scan. Silent

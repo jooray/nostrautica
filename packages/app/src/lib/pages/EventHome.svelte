@@ -33,6 +33,7 @@
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
+  import { cachePersistenceDegraded } from "$lib/cache/persist.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
   import {
     buildOfflinePack,
@@ -716,6 +717,15 @@
   let packSteps = $state<PackStep[]>([]);
   let packPersisted = $state<boolean | null>(null);
   const packDone = $derived(offlinePack ? packComplete(offlinePack) : false);
+  /**
+   * Persistence is failing for lack of space. Re-read on every cache-hydration
+   * bump, which is the only thing that moves during a visit — the flag is set by a
+   * refused write, and a write happens on essentially every fetch this page makes.
+   */
+  const storageFull = $derived.by(() => {
+    void cacheHydration.version;
+    return cachePersistenceDegraded();
+  });
   // What THIS pack added, not the browser's origin-wide (on Firefox: whole
   // eTLD+1 group) usage figure this line used to show. Omitted below 100 KB so a
   // re-download that changed nothing doesn't claim a footprint it didn't add.
@@ -955,6 +965,16 @@
       {#if packNotes}
         <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
           {packNotes}
+        </p>
+      {/if}
+      {#if storageFull}
+        <!-- INFRA-12: the browser refused a write for lack of space. The in-memory
+             mirror still answers reads, so nothing looks broken THIS session — the
+             next boot is simply cold, every morning, with no signal anywhere. This
+             card is where a user is already thinking about local storage, so it is
+             where the one sentence belongs. -->
+        <p class="muted" role="status" style="margin:0.4rem 0 0;font-size:0.78rem">
+          {t("event.offline.storageFull")}
         </p>
       {/if}
     </div>

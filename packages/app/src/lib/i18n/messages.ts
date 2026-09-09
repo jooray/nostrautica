@@ -402,6 +402,8 @@ export const messages = {
     "event.offline.ready": "Ready to use offline.",
     "event.offline.partial": "Saved, but some parts didn’t download. Try again.",
     "event.offline.noSw": "Data saved, but the app screens aren’t cached yet. Reopen the app once (or reload), then download again so it opens with no signal.",
+    "event.offline.storageFull":
+      "This device is out of storage, so nothing is being saved for offline use. Free some space and download again.",
     "event.offline.stored": "Added {size} to this device",
     "event.offline.persisted": "kept on this device",
     "event.offline.mediaNote": "audio/video isn’t pre-downloaded",
@@ -1965,6 +1967,8 @@ export const messages = {
     "event.offline.ready": "Pripravené na použitie offline.",
     "event.offline.partial": "Uložené, no niektoré časti sa nestiahli. Skúste znova.",
     "event.offline.noSw": "Dáta sú uložené, ale obrazovky aplikácie ešte nie sú uložené. Znova otvorte aplikáciu (alebo obnovte stránku) a stiahnite znova, aby sa otvorila aj bez signálu.",
+    "event.offline.storageFull":
+      "Zariadenie nemá voľné miesto, takže sa nič neukladá na offline použitie. Uvoľni miesto a stiahni znova.",
     "event.offline.stored": "Pridané {size} do zariadenia",
     "event.offline.persisted": "ponechané v tomto zariadení",
     "event.offline.mediaNote": "zvuk/video sa nesťahuje vopred",
@@ -3518,6 +3522,8 @@ export const messages = {
     "event.offline.ready": "Připraveno k použití offline.",
     "event.offline.partial": "Uloženo, ale některé části se nestáhly. Zkuste to znovu.",
     "event.offline.noSw": "Data jsou uložena, ale obrazovky aplikace se zatím neuložily. Znovu otevřete aplikaci (nebo obnovte stránku) a stáhněte znovu, aby se otevřela i bez signálu.",
+    "event.offline.storageFull":
+      "Zařízení nemá volné místo, takže se nic neukládá pro offline použití. Uvolni místo a stáhni znovu.",
     "event.offline.stored": "Přidáno {size} do zařízení",
     "event.offline.persisted": "ponecháno v tomto zařízení",
     "event.offline.mediaNote": "zvuk/video se nestahuje předem",
