@@ -34,6 +34,16 @@ const FFMPEG_INPUT_GUARD = [
   "-analyzeduration", "5M",
 ];
 
+/**
+ * Wall-clock budget for a metadata-only ffprobe. Far shorter than
+ * {@link FFMPEG_TIMEOUT_MS}, which is sized for transcoding an hour of video:
+ * reading `format=duration` under a 5M probesize is milliseconds' work, and a
+ * probe that has not answered in fifteen seconds is a wedged host, not a slow
+ * file. Getting that verdict sooner matters because it is now a RETRY rather than
+ * a permanent rejection.
+ */
+export const FFPROBE_TIMEOUT_MS = 15_000;
+
 export const MAX_INPUT_DURATION_SEC = 2 * 60 * 60; // cap decoded duration (codec-bomb guard)
 /** Cap on accumulated ffmpeg stderr (audit COORD-23): keep only the tail. */
 export const MAX_STDERR_BYTES = 64 * 1024;
@@ -62,6 +72,38 @@ export async function sweepStaleTempDirs(maxAgeMs = STALE_TEMP_DIR_AGE_MS, now =
     removed++;
   }
   return removed;
+}
+
+/**
+ * The ffprobe/ffmpeg process could not be run to a VERDICT — it timed out, was
+ * killed, or could not be spawned at all.
+ *
+ * Deliberately distinct from "ffprobe ran and could not parse this container",
+ * which is an answer about the media and is cached as a policy rejection. This is
+ * an answer about the HOST, is transient, and must never be cached: one slow probe
+ * (a box under load, a deploy in progress) otherwise permanently rejects an
+ * attendee's recording, and re-submitting the identical blob hits the same cached
+ * verdict forever.
+ */
+export class ProbeUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ProbeUnavailableError";
+  }
+}
+
+/** Why a `run()` rejected — lets a caller tell "the tool answered no" from "the
+ *  tool never answered". `exit` and `output` are answers ABOUT the input. */
+export type SubprocessFailure = "timeout" | "spawn" | "exit" | "output";
+
+export class SubprocessError extends Error {
+  constructor(
+    message: string,
+    readonly kind: SubprocessFailure,
+  ) {
+    super(message);
+    this.name = "SubprocessError";
+  }
 }
 
 /**
@@ -106,7 +148,7 @@ function run(
       settled = true;
       cleanupAbort();
       kill();
-      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+      reject(new SubprocessError(`${cmd} timed out after ${timeoutMs}ms`, "timeout"));
     }, timeoutMs);
     // Caller cancellation (audit R13): kill the whole process group so a hung/slow
     // ffmpeg child can't outlive a coordinator shutdown or a retention/detach
@@ -130,7 +172,7 @@ function run(
         clearTimeout(timer);
         cleanupAbort();
         kill();
-        reject(new Error(`${cmd} output exceeded ${maxOutputBytes} bytes`));
+        reject(new SubprocessError(`${cmd} output exceeded ${maxOutputBytes} bytes`, "output"));
         return;
       }
       out.push(d);
@@ -152,7 +194,9 @@ function run(
       settled = true;
       clearTimeout(timer);
       cleanupAbort();
-      reject(e);
+      // Could not spawn at all (ENOENT, EAGAIN, out of fds): about the host, not
+      // about the media.
+      reject(new SubprocessError(`${cmd} could not be spawned: ${e.message}`, "spawn"));
     });
     child.on("close", (code) => {
       if (settled) return;
@@ -160,7 +204,7 @@ function run(
       clearTimeout(timer);
       cleanupAbort();
       if (code === 0) resolve({ stdout: Buffer.concat(out) });
-      else reject(new Error(`${cmd} exited ${code}: ${Buffer.concat(err).toString().slice(-500)}`));
+      else reject(new SubprocessError(`${cmd} exited ${code}: ${Buffer.concat(err).toString().slice(-500)}`, "exit"));
     });
     if (opts.input) {
       child.stdin.write(opts.input);
@@ -206,7 +250,10 @@ export async function extractAudioSegments(
     }
 
     // Too big: segment. Aim each segment well under the limit by duration.
-    const durationSec = await probeDurationSec(inPath, signal);
+    // (No probe here: its result was computed and then discarded — `void durationSec`
+    // — so it was one wasted ffprobe spawn per oversized upload, and after the
+    // ProbeUnavailableError change it would also be a new way for extraction to fail
+    // for a value nothing reads. Segment length is derived from the byte budget.)
     // ~16 kbit/s → ~2 KB/s; leave headroom.
     const secPerSegment = Math.max(30, Math.floor((maxBytes * 0.8) / 2048));
     const segPattern = join(dir, "seg-%03d.ogg");
@@ -218,7 +265,6 @@ export async function extractAudioSegments(
       "-f", "segment", "-segment_time", String(secPerSegment),
       segPattern,
     ], { signal });
-    void durationSec;
     const files = (await readdir(dir)).filter((f) => f.startsWith("seg-")).sort();
     const segments: AudioSegment[] = [];
     for (const f of files) {
@@ -246,20 +292,43 @@ export async function extractAudioSegments(
  * enforcement, defeated by one unparseable header.
  *
  * `undefined` forces every caller to decide, and TypeScript makes them.
+ *
+ * THIRD case, added 2026-09-09: `undefined` was ALSO covering "ffprobe never
+ * answered" — a timeout, a kill, a failed spawn. The caller turns `undefined` into
+ * a permanent media-policy rejection with a cached empty transcript, so one slow
+ * probe on a loaded host meant an attendee's recording was never transcribed and
+ * re-submitting the identical blob hit the same cached verdict, forever. That is a
+ * fact about the HOST being recorded as a fact about the media, which is the
+ * transient-failure-as-truth pattern this whole audit round is about. It now
+ * throws {@link ProbeUnavailableError}, which is retryable and never cached.
+ *
+ * A non-zero EXIT stays `undefined`: that is ffprobe answering "I cannot parse
+ * this", which is exactly the container-that-defeats-the-probe case the 09-04
+ * audit decided to reject rather than wave through.
  */
-async function probeDurationSec(path: string, signal?: AbortSignal): Promise<number | undefined> {
+async function probeDurationSec(
+  path: string,
+  signal?: AbortSignal,
+  timeoutMs = FFPROBE_TIMEOUT_MS,
+): Promise<number | undefined> {
   let stdout: Buffer;
   try {
     ({ stdout } = await run("ffprobe", [
       "-v", "error", ...FFMPEG_INPUT_GUARD,
       "-show_entries", "format=duration",
       "-of", "default=noprint_wrappers=1:nokey=1", path,
-    ], { signal }));
+    ], { signal, timeoutMs }));
   } catch (e) {
+    // Caller cancellation (shutdown, retention teardown) unwinds as itself.
+    if (signal?.aborted) throw e;
+    const msg = e instanceof Error ? e.message : String(e);
     // Logged, because "could not probe" now has a policy consequence and an
     // operator staring at a rejected intro needs to see WHY (a timeout and a
     // malformed container want different responses).
-    console.warn(`[audio] ffprobe failed: ${e instanceof Error ? e.message : String(e)}`);
+    console.warn(`[audio] ffprobe failed: ${msg}`);
+    if (e instanceof SubprocessError && (e.kind === "timeout" || e.kind === "spawn")) {
+      throw new ProbeUnavailableError(msg);
+    }
     return undefined;
   }
   // ffprobe exits 0 and prints "N/A" for a stream whose duration it cannot
@@ -285,13 +354,14 @@ export async function probeDurationFromBytes(
   media: Uint8Array,
   mime: string,
   signal?: AbortSignal,
+  timeoutMs = FFPROBE_TIMEOUT_MS,
 ): Promise<number | undefined> {
   const dir = await mkdtemp(join(tmpdir(), "nostrautica-probe-"));
   try {
     const ext = mime.includes("mp4") ? "mp4" : mime.includes("webm") ? "webm" : "bin";
     const inPath = join(dir, `probe.${ext}`);
     await writeFile(inPath, media);
-    return await probeDurationSec(inPath, signal);
+    return await probeDurationSec(inPath, signal, timeoutMs);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -2634,12 +2634,13 @@ export class Store {
    * batches were logged as dispatched, no row was created, nothing ever ran, and
    * not one line said so (production incident 2026-07-24).
    */
-  enqueueJob(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
+  /** `notBefore` (epoch ms) delays first execution; 0/omitted means "runnable now". */
+  enqueueJob(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
     const info = this.db
       .prepare(
-        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', 0)",
+        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', ?)",
       )
-      .run(type, dedupeKey, JSON.stringify(payload));
+      .run(type, dedupeKey, JSON.stringify(payload), notBefore);
     if (Number(info.changes) > 0) return "enqueued";
     const row = this.db.prepare("SELECT state FROM jobs WHERE dedupe_key = ?").get(dedupeKey) as
       | { state: JobState }

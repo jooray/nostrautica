@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { encryptMedia } from "@nostrautica/protocol";
 import { Store } from "../store/db.js";
 import { transcribeMedia, MediaPolicyError, MIN_AUDIO_BYTES_TO_EXPECT_SPEECH } from "./transcribe.js";
+import { ProbeUnavailableError } from "./audio.js";
 import { MockStt } from "../providers/mock.js";
 
 async function fixture(durationDeclared = 30) {
@@ -169,6 +170,50 @@ describe("H-3 — an UNPROBEABLE duration is a rejection, not a pass", () => {
     ).rejects.toBeInstanceOf(MediaPolicyError);
     // Bytes actually downloaded are still metered on rejection.
     expect(usage.at(-1)!.bytes).toBe(ciphertext.length);
+  });
+
+  it("a probe that never ANSWERED is retryable and is NOT cached (PIPE-N-1)", async () => {
+    // The 09-04 fix collapsed two different things into `undefined`: "ffprobe ran
+    // and could not parse this" (a fact about the media — rejected, cached) and
+    // "ffprobe never answered" (a timeout, a kill, a failed spawn — a fact about
+    // the HOST). The second was cached as a permanent policy rejection, so one slow
+    // probe during a deploy meant the attendee's recording was never transcribed
+    // and re-submitting the identical blob hit the same cached verdict forever.
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "ok" });
+    const usage: { bytes: number; durationSec: number }[] = [];
+    let probes = 0;
+    const deps = (probe: () => Promise<number | undefined>) => ({
+      store,
+      stt,
+      sttModel: "m",
+      fetchBlob: async () => ciphertext,
+      maxDurationSec: 60,
+      probeDuration: probe,
+      onUsage: (u: { bytes: number; durationSec: number }) => usage.push(u),
+      extractAudio: async () => [{ data: new Uint8Array(8), mime: "audio/ogg" }],
+    });
+
+    await expect(
+      transcribeMedia(
+        deps(async () => {
+          probes++;
+          throw new ProbeUnavailableError("ffprobe timed out after 120000ms");
+        }),
+        descriptor as any,
+      ),
+    ).rejects.toBeInstanceOf(ProbeUnavailableError);
+    // NOT a MediaPolicyError: processAttendee rethrows this, so the job runner
+    // retries with backoff instead of skipping the media for good.
+    expect(stt.calls).toBe(0);
+    expect(usage.at(-1)!.bytes).toBe(ciphertext.length); // bytes really spent, metered
+    expect(store.getTranscriptRow(descriptor.x)).toBeUndefined(); // nothing cached
+
+    // The retry, on a host that is no longer wedged, transcribes normally.
+    const r = await transcribeMedia(deps(async () => 30), descriptor as any);
+    expect(r.text).toBe("ok");
+    expect(probes).toBe(1);
   });
 
   it("still transcribes unprobeable media when NO duration limit is configured", async () => {

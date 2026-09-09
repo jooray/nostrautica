@@ -168,8 +168,15 @@ describe("a degraded stage asks the job runner for another attempt", () => {
     // The attendee still gets everything that succeeded.
     expect(out.aiProfile.summary).toBe(AI_PROFILE.summary);
     expect(out.aiProfile.translations).toBeUndefined();
+    // Delayed, not immediate: the one retry the dedupe key allows must not be spent
+    // in the same second as the failure that asked for it.
     expect(asked).toEqual([
-      { stage: "translation", pubkey: PK, reason: expect.stringContaining("provider timeout") },
+      {
+        stage: "translation",
+        pubkey: PK,
+        reason: expect.stringContaining("provider timeout"),
+        delayMs: 60_000,
+      },
     ]);
     expect(out.degraded).toEqual([
       { stage: "translation", reason: expect.stringContaining("provider timeout"), retryable: true },

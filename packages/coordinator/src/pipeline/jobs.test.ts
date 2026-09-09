@@ -117,6 +117,36 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.pendingJobCount()).toBe(1);
   });
 
+  it("a park NOTIFIES, exactly like a poison does (PIPE-N-4)", async () => {
+    // The park path returned without calling `onPoison`, so nothing was published
+    // at all: the organizer's Admin view showed nothing wrong, and the attendee's
+    // screen said "processing" indefinitely. A park is reached only after the
+    // three-day tail ran out — it means "this outage outlasted every retry and now
+    // needs a human" — which is the same fact to a reader as a poison.
+    const store = new Store();
+    const clock = fixedClock();
+    const notified: { parked?: { reason: string }; attempts: number }[] = [];
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      maxAttempts: 2,
+      baseBackoffMs: 100,
+      onPoison: (info) => notified.push(info),
+      poisonExempt: (err) => (String(err).includes("insufficient balance") ? "out of credit" : undefined),
+    });
+    runner.register("paid", async () => {
+      throw new Error("provider billing: insufficient balance (402)");
+    });
+    runner.enqueue("paid", "k", { coordinate: "31923:abc:evt" });
+    await runner.drain();
+    clock.advance(100);
+    await runner.drain();
+
+    expect(store.waitingJobCount()).toBe(1); // still parked, not discarded
+    expect(notified).toHaveLength(1);
+    expect(notified[0]!.parked?.reason).toBe("out of credit");
+    expect(notified[0]!.attempts).toBe(2);
+  });
+
   it("still poisons a failure that is genuinely about the job, not the account", async () => {
     const store = new Store();
     const clock = fixedClock();

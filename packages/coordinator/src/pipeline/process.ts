@@ -12,6 +12,7 @@
 import type { AiProfile, AttendeeProfile, MediaDescriptor, MediaTranscript } from "@nostrautica/protocol";
 import type { SttProvider, RoleRoute } from "../providers/types.js";
 import { ProviderContractError } from "../providers/types.js";
+import { ProviderHttpError } from "../providers/http.js";
 import type { Store } from "../store/db.js";
 import { transcribeMedia, MediaPolicyError, type TranscriptResult } from "./transcribe.js";
 import {
@@ -98,7 +99,20 @@ export interface ProcessDeps {
    * deterministic for a given prompt and model, so re-queueing it only re-bills
    * (the lesson of the 27-attempt translation poison in July).
    */
-  retryLater?: (req: { stage: "translation" | "nostr_summary"; pubkey: string; reason: string }) => void;
+  retryLater?: (req: {
+    stage: "translation" | "nostr_summary";
+    pubkey: string;
+    reason: string;
+    /**
+     * How long to wait before the retry runs. A degraded stage is asked for again
+     * because the world was briefly wrong — a 429, a 5xx, a dropped socket — and
+     * the retry used to be enqueued runnable IMMEDIATELY, which hits a
+     * rate-limited provider again in the same second and burns the one retry the
+     * dedupe key allows. Honours the provider's own `Retry-After` when it sent
+     * one, and otherwise waits long enough for a blip to have passed.
+     */
+    delayMs: number;
+  }) => void;
 }
 
 export interface ProcessInput {
@@ -141,6 +155,17 @@ export interface ProcessResult {
  */
 function isRetryableStageFailure(e: unknown): boolean {
   return !(e instanceof ProviderContractError);
+}
+
+/** Default wait before a degraded stage is re-attempted, when the provider gave no
+ *  `Retry-After`. Long enough that a rate limit or a restarting backend has moved
+ *  on, short enough that a profile is translated well within the event. */
+const DEFAULT_STAGE_RETRY_MS = 60_000;
+
+/** How long to wait before re-running a degraded stage that failed with `e`. */
+function stageRetryDelayMs(e: unknown): number {
+  const after = e instanceof ProviderHttpError ? e.retryAfterSec : undefined;
+  return after !== undefined ? Math.max(after * 1000, 1_000) : DEFAULT_STAGE_RETRY_MS;
 }
 
 /** Run the full profile pipeline for one attendee (spec §9.2, F1 branch).
@@ -285,7 +310,8 @@ export async function processAttendee(
           deps.log?.(
             `[pipeline] ${input.pubkey.slice(0, 8)}: nostr summary failed, building the profile without it — ${reason}`,
           );
-          if (retryable) deps.retryLater?.({ stage: "nostr_summary", pubkey: input.pubkey, reason });
+          if (retryable)
+            deps.retryLater?.({ stage: "nostr_summary", pubkey: input.pubkey, reason, delayMs: stageRetryDelayMs(e) });
         }
       }
     }
@@ -389,7 +415,8 @@ export async function processAttendee(
       // untranslated for the life of the event, and the sole trace was the line
       // above. Ask the job runner for another attempt, unless the failure is the
       // deterministic kind that re-billing cannot fix.
-      if (retryable) deps.retryLater?.({ stage: "translation", pubkey: input.pubkey, reason });
+      if (retryable)
+        deps.retryLater?.({ stage: "translation", pubkey: input.pubkey, reason, delayMs: stageRetryDelayMs(e) });
     }
   } else if (owner) {
     // Cache hit — a cached `null` (nothing to translate) is still a hit; record this

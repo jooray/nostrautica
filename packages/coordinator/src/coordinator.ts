@@ -819,7 +819,18 @@ export class Coordinator {
       // still-unscored candidates, so finished pairs are never re-billed and one
       // bad candidate never poisons its batch-mates.
       if (missing > 0) {
-        throw new Error(`batch response missing ${missing} candidate(s); retrying unscored remainder`);
+        // A ProviderContractError, not a plain Error: this IS the case the
+        // `retryBudget` comment above describes ("a 'missing candidate' from a
+        // batch is nominally a contract error but does clear on a re-roll"), and
+        // throwing a plain Error meant it never reached that budget — it rode the
+        // default ~26-attempt three-day schedule, which for a batch is 26 fully
+        // billed LLM calls asking the same question.
+        throw new ProviderContractError(
+          this.roles.match.provider,
+          "match_batch",
+          this.roles.match.model,
+          `response missing ${missing} candidate(s); retrying unscored remainder`,
+        );
       }
      }));
     });
@@ -848,7 +859,12 @@ export class Coordinator {
         });
       }
       if (missing > 0) {
-        throw new Error(`reverse batch missing ${missing} target(s); retrying unscored remainder`);
+        throw new ProviderContractError(
+          this.roles.match.provider,
+          "match_reverse_batch",
+          this.roles.match.model,
+          `response missing ${missing} target(s); retrying unscored remainder`,
+        );
       }
      }));
     });
@@ -2738,11 +2754,17 @@ export class Coordinator {
         // content-addressed — only the uncached stage actually re-runs. Deterministic
         // failures are excluded upstream (`isRetryableStageFailure`), since
         // re-asking a model the same question only re-bills.
-        retryLater: ({ stage }) =>
+        retryLater: ({ stage, delayMs }) =>
           this.jobs.enqueue(
             "process_attendee",
             `proc:${coordinate}:${pubkey}:retry:${stage}:${sourceRevision}`,
             { coordinate, pubkey, sourceRevision },
+            // Not runnable immediately. The dedupe key allows exactly ONE retry per
+            // (revision, stage), and enqueuing it with `next_run_at = 0` spent that
+            // one retry inside the same second as the 429 that caused it — against a
+            // provider that had just said "not now". The delay comes from the
+            // provider's own `Retry-After` where it sent one.
+            this.now() + delayMs,
           ),
         now: this.now,
         log,
@@ -5186,7 +5208,14 @@ export class Coordinator {
     const state = this.events.get(coordinate);
     if (!state) return;
     const pubkey = typeof info.payload?.pubkey === "string" ? info.payload.pubkey : null;
-    const category = errorCategory(info.error);
+    // A parked job's category is the PARK reason, not the last error text: an
+    // out-of-credit park's underlying message is whatever the provider happened to
+    // say on the final attempt, and the reader needs to know it is a billing
+    // problem on the coordinator's side. `state` stays "poison" — the frozen 21606
+    // enum is `poison | cleared`, and to every reader of that field the meaning is
+    // the same one ("this stage stopped and needs you"), so this needs no wire
+    // change. `retryable` is true, which is the honest part: parked work revives.
+    const category = info.parked ? errorCategory(info.parked.reason) : errorCategory(info.error);
     this.deps.store.recordJobStatus({
       coordinate,
       stage: info.type,
@@ -5219,7 +5248,9 @@ export class Coordinator {
       const attendeeStatus = buildCoordinatorStatus(this.deps.coordSk, pubkey, content);
       await this.deps.transport.publish(attendeeStatus, this.accountRelays(state));
     }
-    log(`[status] surfaced poisoned ${info.type} for ${pubkey ? short(pubkey) : coordinate}${pubkey ? " to organizer + attendee" : " to organizer"}`);
+    log(
+      `[status] surfaced ${info.parked ? `PARKED (${info.parked.reason})` : "poisoned"} ${info.type} for ${pubkey ? short(pubkey) : coordinate}${pubkey ? " to organizer + attendee" : " to organizer"}`,
+    );
   }
 
   stop(): void {
@@ -5316,7 +5347,14 @@ function applyCorrection(
  */
 function errorCategory(msg: string): string {
   const m = msg.toLowerCase();
-  if (m.includes("billing") || m.includes("insufficient balance") || m.includes("insufficient credit")) {
+  if (
+    m.includes("billing") ||
+    m.includes("insufficient balance") ||
+    m.includes("insufficient credit") ||
+    // The poison-exempt park reason, so a parked job's 21606 says "the provider
+    // account is empty" rather than the generic processing_error it landed on.
+    m.includes("out of credit")
+  ) {
     return "provider_billing";
   }
   if (m.includes("contract")) return "provider_contract";

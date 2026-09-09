@@ -143,6 +143,11 @@ interface Counters {
   reverseCalls: { sharedRole?: string; targetRoles: (string | undefined)[] }[];
   /** When set, the NEXT batch containing a candidate of this role omits that entry once. */
   dropRoleOnce?: string;
+  /** When set, EVERY batch (forward and reverse) comes back with entries missing —
+   *  a persistently incomplete model response, which drives the retry-budget test.
+   *  Both directions, because the reverse batch writes the same directed rows and
+   *  would otherwise quietly satisfy the forward batch's retry. */
+  dropAllScores?: boolean;
   /** How many profile-translation calls the pipeline made. */
   translateCalls: number;
   /** When set, every batch-scoring call throws — drives the batch FAILED log line. */
@@ -230,6 +235,7 @@ function makeLlm(counters: Counters): MockLlm {
         const chunk = chunks[i + 1]!;
         const role = roleOf(chunk);
         call.candidateRoles.push(role);
+        if (counters.dropAllScores) continue;
         if (role && counters.dropRoleOnce === role) {
           // Simulate the model skipping this candidate (partial batch failure).
           counters.dropRoleOnce = undefined;
@@ -254,6 +260,7 @@ function makeLlm(counters: Counters): MockLlm {
         const chunk = chunks[i + 1]!;
         const role = roleOf(chunk);
         call.targetRoles.push(role);
+        if (counters.dropAllScores) continue;
         // reasoning addressed to the TARGET about meeting the shared person.
         matches.push(scoreEntry(index, role, sharedRole, sharedUpdated || chunk.includes("(updated)")));
       }
@@ -5362,6 +5369,28 @@ describe("prod 2026-07-24 — an organizer recompute must actually re-run the sc
       expect(h.store.pairsFor(h.coordinate, a).map((r) => r.other)).toEqual([b]);
       expect(h.store.pairsFor(h.coordinate, b).map((r) => r.other)).toEqual([a]);
     }
+  });
+
+  it("a persistently incomplete batch gets the 3-attempt contract budget, not 26 (PIPE-N-2)", async () => {
+    // The `retryBudget` comment says a missing candidate "is nominally a contract
+    // error but does clear on a re-roll", and gives contract errors three attempts.
+    // The throw was a plain `Error`, so it never reached that budget: it rode the
+    // default ~26-attempt three-day schedule, which for a batch is 26 fully billed
+    // LLM calls asking the same question.
+    const h = await setup();
+    h.counters.dropAllScores = true; // the model never returns a complete batch
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    // Three attempts, spaced by the default 1s/10s head of the backoff schedule.
+    // Under the old plain-Error throw the job would still be `pending` here, with
+    // 23 more billed attempts and three days to go.
+    for (const gap of [0, 1_000, 10_000, 100_000]) {
+      h.clock.t += gap;
+      await h.coordinator.jobs.drain();
+    }
+    const poisoned = h.store.poisonJobs().filter((j) => j.type === "score_batch");
+    expect(poisoned.length).toBeGreaterThan(0);
+    expect(poisoned[0]!.attempts).toBe(3);
   });
 
   it("logs a per-batch outcome line with elapsed ms, and a FAILED line when a batch throws", async () => {

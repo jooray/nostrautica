@@ -11,7 +11,13 @@ import type { Store, JobRow, EnqueueOutcome } from "../store/db.js";
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn; signal: AbortSignal }) => Promise<void>;
 /** Returns what the enqueue did, so a caller can summarize a dispatch (see
  *  {@link JobRunner.enqueue}); most callers ignore it. */
-export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => EnqueueOutcome;
+export type EnqueueFn = (
+  type: string,
+  dedupeKey: string,
+  payload: unknown,
+  /** Epoch ms before which the job must not run (default: runnable immediately). */
+  notBefore?: number,
+) => EnqueueOutcome;
 
 /** `[hh:mm:ss] ` prefix, matching coordinator.ts's `log()`. */
 function stamp(): string {
@@ -32,12 +38,15 @@ export class ParkJobError extends Error {
   }
 }
 
-/** A poisoned job, surfaced so the coordinator can notify the organizer (Q12). */
+/** A poisoned job, surfaced so the coordinator can notify the organizer (Q12).
+ *  `parked` marks the {@link JobRunnerOptions.poisonExempt} variant: the job was
+ *  NOT discarded, but it has stopped and needs someone to act. */
 export interface PoisonInfo {
   type: string;
   payload: any;
   attempts: number;
   error: string;
+  parked?: { reason: string };
 }
 
 export interface JobRunnerOptions {
@@ -152,8 +161,8 @@ export class JobRunner {
    * existed the only symptom was a dispatch log followed by silence forever
    * (production incident 2026-07-24).
    */
-  enqueue(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
-    const outcome = this.store.enqueueJob(type, dedupeKey, payload);
+  enqueue(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
+    const outcome = this.store.enqueueJob(type, dedupeKey, payload, notBefore);
     if (outcome === "done" || outcome === "poison") {
       console.warn(
         `[${stamp()}] [job] ${type} enqueue DISCARDED — dedupe key already '${outcome}': ${dedupeKey.slice(0, 120)} — this work will NOT run`,
@@ -367,6 +376,24 @@ export class JobRunner {
           console.warn(
             `[${stamp()}] [job] ${job.type} #${job.id} PARKED instead of poisoned after ${attempts} attempt(s)${parked ? "" : " [lease lost — not applied]"}: ${parkReason} — ${msg.slice(0, 200)}`,
           );
+          // Tell somebody. This park is reached only after the retry tail ran out
+          // — three days — so it means "this outage outlasted every retry", and
+          // the work now sits waiting for a human (a provider top-up, an organizer
+          // reprocess). It used to return here without calling `onPoison`, so no
+          // 21606 went out at all: the organizer's Admin view showed nothing wrong
+          // and the attendee's screen said "processing" indefinitely. Same
+          // notification as a poison, with the reason attached — it is the same
+          // fact to the reader ("this stopped and needs you"), and it stays inside
+          // the frozen 21606 schema.
+          if (parked && this.onPoison) {
+            this.onPoison({
+              type: job.type,
+              payload: safeParse(job.payload),
+              attempts,
+              error: msg,
+              parked: { reason: parkReason },
+            });
+          }
           return;
         }
       }

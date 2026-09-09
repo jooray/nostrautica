@@ -9,7 +9,12 @@ import { decryptMedia, sha256Hex, type MediaDescriptor,
 } from "@nostrautica/protocol";
 import type { SttProvider } from "../providers/types.js";
 import type { Store } from "../store/db.js";
-import { extractAudioSegments, probeDurationFromBytes, type AudioSegment } from "./audio.js";
+import {
+  extractAudioSegments,
+  probeDurationFromBytes,
+  ProbeUnavailableError,
+  type AudioSegment,
+} from "./audio.js";
 import { safeFetch, SafeFetchError } from "../net/safe-fetch.js";
 
 /** Default hard ceiling on a downloaded media blob (audit C3). */
@@ -160,7 +165,22 @@ export async function transcribeMedia(
   // H-3: probe the REAL decoded duration and reject over-limit media BEFORE STT,
   // regardless of the declared `duration`. Account the actual bytes + duration.
   const probe = deps.probeDuration ?? ((m, mime) => probeDurationFromBytes(m, mime, deps.signal));
-  const realDurationSec = await probe(plaintext, descriptor.m);
+  let realDurationSec: number | undefined;
+  try {
+    realDurationSec = await probe(plaintext, descriptor.m);
+  } catch (e) {
+    // ffprobe never ANSWERED (timed out, was killed, could not be spawned). That is
+    // a fact about this host at this moment, not about the media, and the branch
+    // below would otherwise cache it as a permanent policy rejection: the recording
+    // is never transcribed and re-submitting the identical blob hits the same
+    // cached empty transcript forever. Account the bytes we really spent
+    // downloading (abuse is metered even on failure) and rethrow so the job runner
+    // retries with backoff. Nothing is cached.
+    if (e instanceof ProbeUnavailableError) {
+      deps.onUsage?.({ bytes: ciphertext.length, durationSec: 0 });
+    }
+    throw e;
+  }
   // Unknown is booked as 0 against the usage budget because there is nothing else
   // to book — which is precisely why an unknown duration must not also be allowed
   // to PASS the cap below (2026-09-04 audit).

@@ -100,10 +100,27 @@ export class ProviderHttpError extends Error {
     /** Credit/quota exhaustion rather than any other failure — see {@link isPaymentFailure}. */
     readonly payment: boolean,
     message: string,
+    /** The provider's own `Retry-After`, in seconds, when it sent one. */
+    readonly retryAfterSec?: number,
   ) {
     super(message);
     this.name = "ProviderHttpError";
   }
+}
+
+/**
+ * `Retry-After`, in seconds, from a rate-limited/unavailable response. Accepts
+ * both wire forms (delta-seconds and an HTTP-date) and clamps to something a job
+ * scheduler can act on — a provider asking us to wait a week is telling us
+ * something, but not something worth encoding as a literal delay.
+ */
+export function parseRetryAfter(res: Response, nowMs = Date.now()): number | undefined {
+  const raw = res.headers.get("retry-after");
+  if (!raw) return undefined;
+  const seconds = Number(raw.trim());
+  const value = Number.isFinite(seconds) ? seconds : (Date.parse(raw) - nowMs) / 1000;
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(Math.ceil(value), 3600);
 }
 
 /**
@@ -146,6 +163,7 @@ export async function providerHttpError(
   const raw = await readBodyCapped(res, PROVIDER_BODY_LIMITS.error, label).catch(() => "");
   const body = raw.replace(/\s+/g, " ").trim().slice(0, BODY_EXCERPT_MAX) || "(empty body)";
   const payment = isPaymentFailure(res.status, raw);
+  const retryAfterSec = parseRetryAfter(res);
   if (payment) {
     // Loud and specific: this one is fixed by topping up an account, not by
     // debugging the coordinator, and nothing else in the pipeline can tell the
@@ -159,10 +177,18 @@ export async function providerHttpError(
       body,
       true,
       `provider billing: insufficient balance (${res.status}) — ${label}: ${body}`,
+      retryAfterSec,
     );
   }
   console.warn(`[${stamp()}] [${tag}] provider error (${res.status}) — ${label}: ${body}`);
-  return new ProviderHttpError(label, res.status, body, false, `${label} failed: ${res.status} ${body}`);
+  return new ProviderHttpError(
+    label,
+    res.status,
+    body,
+    false,
+    `${label} failed: ${res.status} ${body}`,
+    retryAfterSec,
+  );
 }
 
 // ── response-size caps (2026-09-04 audit) ─────────────────────────────────────
