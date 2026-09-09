@@ -194,6 +194,13 @@ const MAX_ATTENDEES_PER_EVENT = 2000;
 
 /** Durable inbox rate accounting (audit C3): fixed 60s window. */
 const INBOX_RATE_WINDOW_MS = 60_000;
+/**
+ * How often every live inbox is re-read from the relays (P1 #14). Ten minutes is
+ * chosen against what is actually waiting on it: a join request that the live
+ * subscription missed is somebody standing at a door, and the pre-existing
+ * recovery for that was "wait for the next deploy".
+ */
+const INBOX_RESCAN_INTERVAL_MS = 600_000;
 /** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
 /**
@@ -1268,22 +1275,35 @@ export class Coordinator {
    * ARE marked seen immediately so they don't loop on every startup rescan.
    */
   /** Bounded FIFO: remember an undecryptable wrap id without touching disk. */
-  private rememberUndecryptable(wrapId: string): void {
+  private rememberUndecryptable(key: string): void {
     if (this.undecryptableWraps.size >= MAX_UNDECRYPTABLE_MEMO) {
       // Sets iterate in insertion order, so the first key is the oldest.
       const oldest = this.undecryptableWraps.values().next().value;
       if (oldest !== undefined) this.undecryptableWraps.delete(oldest);
     }
-    this.undecryptableWraps.add(wrapId);
+    this.undecryptableWraps.add(key);
   }
 
+  /**
+   * `scope` names the KEY the wrap is being opened with — the coordinator's own
+   * inbox, or one event's E_inbox. The undecryptable memo is keyed by
+   * (scope, wrap id), not by wrap id alone: "this key cannot open that wrap" is a
+   * fact about a pair, and recording it globally means a wrap that legitimately
+   * belongs to an event inbox is permanently ignored there if it was ever offered
+   * to the coordinator key first. Relays honour `#p`, so in normal operation the
+   * two streams don't overlap — but "the relay only sends what we filtered for"
+   * is not something a daemon should be staking delivery on, and the periodic
+   * rescan gives a sloppy or hostile relay a second chance to cause it.
+   */
   private unwrapFresh(
     wrap: GiftWrap,
     recipientSk: Uint8Array,
     allowedKinds: readonly RumorKind[],
+    scope: string,
   ): FreshRumor | undefined {
     if (this.deps.store.isRumorSeen(wrap.id)) return undefined;
-    if (this.undecryptableWraps.has(wrap.id)) return undefined;
+    const memoKey = `${scope}\u0000${wrap.id}`;
+    if (this.undecryptableWraps.has(memoKey)) return undefined;
     let rumor: Rumor;
     try {
       // R19: take the UNTOUCHED authenticated rumor (its created_at is exactly
@@ -1297,7 +1317,7 @@ export class Coordinator {
       // were separated only by which dispatch if/else the rumor fell into.
       rumor = unwrapRumorEnvelope(wrap, recipientSk, allowedKinds).rumor;
     } catch {
-      this.rememberUndecryptable(wrap.id); // can never decrypt — drop, in memory only
+      this.rememberUndecryptable(memoKey); // this key can never open it — memo, in memory only
       return undefined;
     }
     const nowSec = Math.floor(this.now() / 1000);
@@ -1602,7 +1622,7 @@ export class Coordinator {
     // COORDINATOR_RUMOR_KINDS, not the global registry: this key installs events
     // and executes admin commands, so it must never even parse an attendee-facing
     // rumor addressed to it.
-    const fresh = this.unwrapFresh(wrap, this.deps.coordSk, COORDINATOR_RUMOR_KINDS);
+    const fresh = this.unwrapFresh(wrap, this.deps.coordSk, COORDINATOR_RUMOR_KINDS, "coordinator");
     if (!fresh) return;
     const { rumor, effectiveCreatedAt } = fresh;
     // Rate-limit the coordinator's OWN inbox BEFORE any durable dispatch (audit R4):
@@ -1701,7 +1721,7 @@ export class Coordinator {
     // EVENT_INBOX_RUMOR_KINDS, not the global registry: E_inbox is a PUBLIC address
     // any attendee seals to, so a grant or an admin command must not get as far as
     // the dispatcher on this key.
-    const fresh = this.unwrapFresh(wrap, state.inboxSk, EVENT_INBOX_RUMOR_KINDS);
+    const fresh = this.unwrapFresh(wrap, state.inboxSk, EVENT_INBOX_RUMOR_KINDS, coordinate);
     if (!fresh) return;
     const { rumor, effectiveCreatedAt } = fresh;
     // Durable per-sender / per-event rate accounting (audit C3). A sender or event
@@ -4074,6 +4094,22 @@ export class Coordinator {
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
     this.closers.push(() => clearInterval(relayTimer));
+    // Periodic inbox rescan (P1 #14). Every "left unseen for a later backfill
+    // rescan" comment in this file — the rate gate, the inbound queue cap, the
+    // give-up arm of processRumorWithRetry — was writing a cheque only a RESTART
+    // could cash. Overlapping-serialized (never two at once) so a slow sweep on a
+    // many-event daemon can't stack.
+    const rescanTimer = setInterval(() => {
+      if (this.rescanRunning) return;
+      this.rescanRunning = true;
+      void this.rescanInboxes()
+        .catch((e) => log(`[rescan] sweep failed: ${e instanceof Error ? e.message : e}`))
+        .finally(() => {
+          this.rescanRunning = false;
+        });
+    }, INBOX_RESCAN_INTERVAL_MS);
+    if (typeof (rescanTimer as any).unref === "function") (rescanTimer as any).unref();
+    this.closers.push(() => clearInterval(rescanTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
   }
@@ -4081,6 +4117,7 @@ export class Coordinator {
   // Live subscriptions keyed by (inbox pubkey + sorted relay set) — audit COORD-8:
   // a relay handover or a rotated E_inbox re-creates the sub instead of the old
   // coordinate-only guard pinning the daemon to stale relays forever.
+  private rescanRunning = false;
   private inboxSubs = new Map<string, { key: string; close: () => void }>();
   private configSubs = new Map<string, { key: string; close: () => void }>();
   private chatSubs = new Map<string, { key: string; close: () => void }>();
@@ -4388,7 +4425,7 @@ export class Coordinator {
    * capped (C3) so the backfill stays bounded, and each wrap runs through the same
    * `handleInboxWrap` path (rate accounting, retention, ordered ops) as live traffic.
    */
-  private async backfillEventInbox(state: EventState, since: number): Promise<void> {
+  private async backfillEventInbox(state: EventState, since: number, label = "boot"): Promise<void> {
     const inboxPk = getPublicKey(state.inboxSk);
     let wraps: NostrEvent[];
     try {
@@ -4399,10 +4436,16 @@ export class Coordinator {
         state.configRelays,
       )) as unknown as NostrEvent[];
     } catch (e) {
-      log(`[boot] E_inbox backfill for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`);
+      log(`[${label}] E_inbox backfill for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`);
       return;
     }
     if (!wraps.length) return;
+    // A periodic rescan re-reads the same window every time, so the interesting
+    // number is what it RECOVERED, not what it fetched. Say nothing when the answer
+    // is "nothing new" — otherwise this is a line per event every rescan, forever,
+    // in a log that is never rotated.
+    const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
+    if (label !== "boot" && unseen === 0) return;
     // Peek at each wrap's kind (read-only decrypt, no seen/in-flight side effects) so
     // joins can be dispatched first. A wrap we cannot decrypt (addressed elsewhere, or
     // ours to publish, not consume) sorts last and is dropped by handleInboxWrap.
@@ -4421,8 +4464,53 @@ export class Coordinator {
         return { w, joinFirst };
       })
       .sort((a, b) => a.joinFirst - b.joinFirst);
-    log(`[boot] E_inbox backfill for ${state.scoringCtx.title}: ${wraps.length} historical wrap(s)`);
+    log(
+      `[${label}] E_inbox backfill for ${state.scoringCtx.title}: ${wraps.length} wrap(s) in the window, ${unseen} not yet seen`,
+    );
     for (const { w } of ordered) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
+  }
+
+  /**
+   * Periodic rescan of every live inbox (P1 #14, open since July).
+   *
+   * The live subscriptions are the only path a join request, a submission or an
+   * admin command has into this daemon, and there are several ways for one to be
+   * missed with no recovery short of a restart:
+   *
+   *  - A relay that was unreachable when we subscribed is retried by the transport
+   *    now, but the events published to it in the meantime are not replayed:
+   *    nostr-tools resumes a reconnected subscription from `since = lastEmitted + 1`,
+   *    and NIP-59 randomises a wrap's `created_at` up to two days INTO THE PAST, so
+   *    wraps published during the gap sort below that watermark and never arrive.
+   *  - A wrap dropped by the inbound queue cap or the rate gate is deliberately left
+   *    unseen "for a later backfill rescan" — which, until now, only ran at startup.
+   *  - A relay can simply lose an event.
+   *
+   * Every one of those ends with a person waiting for something that will never
+   * happen. This is the sweep that makes "left unseen for the rescan" true. It is
+   * cheap by construction: already-handled wraps are rejected by the durable
+   * `seen_rumors` ledger before any decrypt, and consume no rate budget.
+   */
+  async rescanInboxes(): Promise<void> {
+    const since = giftwrapSince(Math.floor(this.now() / 1000));
+    try {
+      const wraps = await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
+        this.deps.defaultRelays,
+      );
+      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
+      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
+      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
+    } catch (e) {
+      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
+    }
+    // Snapshot: an event can detach (or a config handover can repoint relays)
+    // while this loop is awaiting, and `eventStillLive` re-checks per iteration.
+    for (const coordinate of [...this.events.keys()]) {
+      const state = this.events.get(coordinate);
+      if (!state || !this.eventStillLive(coordinate)) continue;
+      await this.backfillEventInbox(state, since, "rescan");
+    }
   }
 
   /**

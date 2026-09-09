@@ -197,3 +197,89 @@ describe("NostrClient.publish outcomes", () => {
     await expect(client.publish(EVENT)).rejects.toThrow(/no relays configured/);
   });
 });
+
+/**
+ * A relay that is DOWN when we subscribe must be retried (2026-09-09 audit,
+ * CORE-N-1).
+ *
+ * nostr-tools' reconnect only ever covers a socket that was established and then
+ * dropped. When `ensureRelay` fails at subscribe time — the relay is unreachable,
+ * or slower than `maxWaitForConnection` (3 s) — it sets `skipReconnection = true`
+ * and calls the subscription's close handler for that relay. Nothing retried it,
+ * and because the pool's group `onclose` only fires once EVERY relay has closed,
+ * on a multi-relay event nothing even logged it. On a single-relay event the
+ * daemon was simply deaf to every join request until the next restart.
+ */
+describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
+  interface FakeSub {
+    url: string;
+    params: { onevent: (e: NostrEvent) => void; onclose: (r: string[]) => void };
+    closed: boolean;
+  }
+  /** A pool that records each per-relay subscribe and lets the test drive closes. */
+  function fakePool(client: NostrClient): FakeSub[] {
+    const subs: FakeSub[] = [];
+    (client as any).pool = {
+      subscribe(relays: string[], _f: unknown, params: FakeSub["params"]) {
+        const sub: FakeSub = { url: relays[0]!, params, closed: false };
+        subs.push(sub);
+        return { close: () => (sub.closed = true) };
+      },
+      close() {},
+    };
+    return subs;
+  }
+
+  const ev = (id: string): NostrEvent =>
+    ({ id, pubkey: "a".repeat(64), kind: 1059, created_at: 1, tags: [], content: "", sig: "s" }) as unknown as NostrEvent;
+
+  it("opens ONE subscription per relay, not one group subscription", () => {
+    const client = new NostrClient([]);
+    const subs = fakePool(client);
+    const close = client.subscribe({ kinds: [1059] }, () => {}, ["wss://a", "wss://b", "wss://a"]);
+    expect(subs.map((s) => s.url)).toEqual(["wss://a", "wss://b"]); // deduped
+    close();
+    expect(subs.every((s) => s.closed)).toBe(true);
+  });
+
+  it("resubscribes the one relay that closed, and leaves the healthy one alone", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([]);
+      const subs = fakePool(client);
+      const close = client.subscribe({ kinds: [1059] }, () => {}, ["wss://down", "wss://up"]);
+      expect(subs).toHaveLength(2);
+
+      // The unreachable relay's subscribe fails: nostr-tools calls onclose for it.
+      subs[0]!.params.onclose(["connection failed"]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(subs).toHaveLength(3);
+      expect(subs[2]!.url).toBe("wss://down");
+
+      // Still down: it keeps trying, with a longer gap each time.
+      subs[2]!.params.onclose(["connection failed"]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(subs).toHaveLength(3); // 15s backoff, not yet
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(subs).toHaveLength(4);
+      expect(subs[3]!.url).toBe("wss://down");
+
+      close();
+      await vi.advanceTimersByTimeAsync(600_000);
+      expect(subs).toHaveLength(4); // a deliberate close stops the retry loop
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dedupes by event id across relays (the group subscribe used to do this)", () => {
+    const client = new NostrClient([]);
+    const subs = fakePool(client);
+    const got: string[] = [];
+    client.subscribe({ kinds: [1059] }, (e) => got.push(e.id), ["wss://a", "wss://b"]);
+    subs[0]!.params.onevent(ev("w1"));
+    subs[1]!.params.onevent(ev("w1")); // same wrap, second relay
+    subs[1]!.params.onevent(ev("w2"));
+    expect(got).toEqual(["w1", "w2"]);
+  });
+});

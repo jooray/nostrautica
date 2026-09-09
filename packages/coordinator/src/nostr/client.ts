@@ -37,6 +37,47 @@ function relayLog(msg: string): void {
   console.log(`[${t}] ${msg}`);
 }
 
+/**
+ * Per-relay resubscribe backoff (ms); the last entry repeats forever.
+ *
+ * "Forever" is the point. A relay that was down when the daemon booted and comes
+ * back three hours later has to be picked up without a restart — the daemon's
+ * subscriptions are the only thing standing between an attendee's join request and
+ * nobody ever seeing it.
+ */
+const RESUBSCRIBE_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000];
+
+/**
+ * Cross-relay event dedupe with a bounded memory footprint.
+ *
+ * `SimplePool.subscribe` deduped by id across the relay group for us. Subscribing
+ * per relay (so one dead relay can be retried on its own) gives that up, and
+ * without it every wrap arrives once per relay: three redundant NIP-44 decrypt
+ * attempts per join request on a three-relay event, and a config watcher that
+ * re-applies the same 31600 N times.
+ *
+ * Two generations rather than one unbounded Set: a long-lived subscription runs for
+ * weeks. Dedupe is guaranteed over at least the last `limit` ids and at most `2 ×
+ * limit`, which is all a stream of relay deliveries needs — anything older than
+ * 20k events is being deduped by the coordinator's durable `seen_rumors` ledger
+ * anyway. (nostr-tools' own `_knownIds` grows without bound here; this does not.)
+ */
+class BoundedSeenIds {
+  private current = new Set<string>();
+  private previous = new Set<string>();
+  constructor(private readonly limit = 20_000) {}
+  /** True when `id` was already delivered; records it either way. */
+  seenBefore(id: string): boolean {
+    if (this.current.has(id) || this.previous.has(id)) return true;
+    this.current.add(id);
+    if (this.current.size >= this.limit) {
+      this.previous = this.current;
+      this.current = new Set();
+    }
+    return false;
+  }
+}
+
 export class NostrClient {
   // Reconnect and keepalive are BOTH off by default in nostr-tools
   // (`AbstractSimplePool`: `enableReconnect = opts.enableReconnect || false`, and
@@ -54,32 +95,70 @@ export class NostrClient {
 
   constructor(private readonly defaultRelays: string[]) {}
 
-  /** Long-lived subscription; returns a closer. */
+  /**
+   * Long-lived subscription; returns a closer.
+   *
+   * ONE SUBSCRIPTION PER RELAY, retried individually. `SimplePool.subscribe` takes
+   * the whole relay set as a group, and nostr-tools' reconnect only ever covers a
+   * socket that was ESTABLISHED and then dropped: when `ensureRelay` fails at
+   * subscribe time — the relay is down, or slower than `maxWaitForConnection`
+   * (3 s) — the pool sets `skipReconnection = true`, calls the group's
+   * `handleClose` for that one relay, and never touches it again. Nothing retried
+   * it, and because the group's `onclose` only fires once EVERY relay has closed,
+   * nothing logged it either. A relay that was down for the ten seconds the daemon
+   * happened to boot in was silently dropped until the next restart, which on an
+   * event whose relay set is one relay long means every join request goes nowhere.
+   *
+   * Per relay we therefore keep our own backoff and resubscribe forever. The
+   * pool's own reconnect still handles the "was up, socket dropped" case (it does
+   * not surface an `onclose` in that branch, so the two cannot double up), and a
+   * deliberate close stops both.
+   */
   subscribe(
     filter: Filter,
     onEvent: (event: NostrEvent) => void,
     relays: string[] = this.defaultRelays,
   ): () => void {
-    // `onclose` fires once every relay in the group has closed — including when we
-    // close deliberately (`SubCloser.close()` closes each relay sub, which lands in
-    // the same handler). Only an UNPROMPTED close is worth a line; the coordinator
-    // re-subscribes on every relay-set change, and logging those would spam a log
-    // that is already never rotated.
     let closingDeliberately = false;
-    const sub = this.pool.subscribe(relays, filter as any, {
-      onevent: (e: NostrEvent) => onEvent(e),
-      // A drop is now recoverable (the pool reconnects and resubscribes from
-      // `since = lastEmitted + 1`), but it must never again be SILENT: an
-      // operator diagnosing a stuck event needs to see that the wire went away.
-      onclose: (reasons: string[]) => {
-        if (closingDeliberately) return;
-        const why = reasons.filter(Boolean).join("; ") || "no reason given";
-        relayLog(`[relay] subscription dropped on ${relays.join(", ")}: ${why}`);
-      },
-    });
+    const seen = new BoundedSeenIds();
+    const open = new Map<string, { close: (reason?: string) => Promise<void> | void }>();
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+
+    const subscribeOne = (url: string, attempt: number): void => {
+      if (closingDeliberately) return;
+      const sub = this.pool.subscribe([url], filter as any, {
+        onevent: (e: NostrEvent) => {
+          // The pool deduped across the group for us; per-relay subs must do it
+          // themselves or the same wrap is handled once per relay.
+          if (seen.seenBefore(e.id)) return;
+          onEvent(e);
+        },
+        onclose: (reasons: string[]) => {
+          if (closingDeliberately) return;
+          const why = reasons.filter(Boolean).join("; ") || "no reason given";
+          const delay = RESUBSCRIBE_BACKOFF_MS[Math.min(attempt, RESUBSCRIBE_BACKOFF_MS.length - 1)]!;
+          // Never silent: an operator diagnosing a stuck event has to be able to see
+          // that this relay went away and that we are still trying.
+          relayLog(`[relay] subscription closed on ${url}: ${why} — resubscribing in ${delay}ms (attempt ${attempt + 1})`);
+          const timer = setTimeout(() => {
+            timers.delete(timer);
+            subscribeOne(url, attempt + 1);
+          }, delay);
+          if (typeof (timer as any).unref === "function") (timer as any).unref();
+          timers.add(timer);
+        },
+      });
+      open.set(url, sub);
+    };
+
+    for (const url of new Set(relays)) subscribeOne(url, 0);
+
     return () => {
       closingDeliberately = true;
-      sub.close();
+      for (const timer of timers) clearTimeout(timer);
+      timers.clear();
+      for (const sub of open.values()) void sub.close();
+      open.clear();
     };
   }
 

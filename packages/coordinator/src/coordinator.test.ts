@@ -4392,6 +4392,77 @@ describe("audit R4 — the coordinator's own inbox is rate-gated before durable 
   });
 });
 
+describe("P1 #14 — the periodic inbox rescan makes \"left unseen\" recoverable", () => {
+  // Half a dozen places in coordinator.ts drop a wrap and leave it UNSEEN with the
+  // comment "recovered by a later backfill rescan": the per-sender rate gate, the
+  // per-event budget, the inbound queue cap, and the give-up arm of
+  // processRumorWithRetry. There was no later rescan. The only one that ever ran
+  // was at startup, so every one of those paths actually meant "until the next
+  // deploy" — and separately, a reconnected subscription resumes from
+  // `since = lastEmitted + 1`, which NIP-59's up-to-two-days-in-the-past
+  // `created_at` randomisation puts most replayable wraps below.
+  it("picks up a join request the live subscription never delivered", async () => {
+    // The shape of "a relay was down when we subscribed, or dropped the event":
+    // the wrap exists on the relay and the daemon has simply never seen it. Before
+    // the rescan the only recovery was a restart's boot backfill.
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const attendeePubkey = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
+    const joinWrap = wrapRumor(attendeeSk, getPublicKey(h.einboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Someone at the door", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    h.transport.seed.push(joinWrap as any); // on the relay, never delivered to us
+    expect(h.store.getAttendee(h.coordinate, attendeePubkey)).toBeUndefined();
+
+    await h.coordinator.rescanInboxes();
+    expect(h.store.getAttendee(h.coordinate, attendeePubkey)?.status).toBe("approved");
+  });
+
+  it("recovers submissions the per-sender rate gate dropped, once the window has passed", async () => {
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    const inboxPk = getPublicKey(h.einboxSk);
+    // 40 revisions from one identity inside one 60s window: 30 are accepted, the
+    // rest are rate-dropped and deliberately left UNSEEN.
+    const wraps = Array.from({ length: 40 }, (_, i) =>
+      wrapRumor(attendeeSk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: {
+          v: 2,
+          rev: 100 + i,
+          profile: { about: `edit ${i}`, skills: ["zk"], looking_for: "", links: [] },
+          media: [],
+        },
+        tags: [["a", h.coordinate]],
+      }),
+    );
+    for (const w of wraps) await h.coordinator.handleInboxWrap(h.coordinate, w as any);
+    const droppedUnseen = wraps.filter((w) => !h.store.isRumorSeen((w as any).id));
+    expect(droppedUnseen.length).toBeGreaterThan(0);
+
+    h.transport.seed.push(...(wraps as any));
+    h.clock.t += 61_000; // the 60s rate window has passed; the burst has subsided
+
+    await h.coordinator.rescanInboxes();
+    expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
+    // The newest edit is the one that stuck (§3.3 revision ordering, unchanged).
+    expect(h.store.getAttendee(h.coordinate, pk)!.profile_rev).toBe(139);
+  });
+
+  it("is idempotent — a rescan that finds nothing new changes nothing", async () => {
+    const h = await setup();
+    const before = h.transport.published.length;
+    await h.coordinator.rescanInboxes();
+    await h.coordinator.rescanInboxes();
+    expect(h.transport.published.length).toBe(before);
+  });
+});
+
 describe("audit C2 — a running attendee job cannot overwrite a newer submission", () => {
   it("pausing rev1 mid-STT while rev2 lands discards rev1's stale commit and matching", async () => {
     let release: () => void = () => {};
