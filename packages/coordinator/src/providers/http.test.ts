@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { withProviderTimeout, ProviderTimeoutError, PROVIDER_TIMEOUTS } from "./http.js";
+import { withProviderTimeout, ProviderTimeoutError, PROVIDER_TIMEOUTS, parseRetryAfter } from "./http.js";
 import { VeniceLlm } from "./venice.js";
 
 describe("withProviderTimeout (audit H-4)", () => {
@@ -147,5 +147,29 @@ describe("shutdown aborts a REAL provider adapter path (audit R13)", () => {
     // The call rejected (it did not hang to the 2-minute completion deadline).
     expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(ProviderTimeoutError);
+  });
+});
+
+describe("Retry-After (2026-09-09 audit, PIPE-N-3)", () => {
+  const res = (h: Record<string, string>) => new Response("", { headers: h });
+
+  it("reads delta-seconds", () => {
+    expect(parseRetryAfter(res({ "retry-after": "30" }))).toBe(30);
+  });
+
+  it("reads an HTTP-date, relative to now", () => {
+    const now = Date.parse("2026-09-09T10:00:00Z");
+    const when = new Date(now + 45_000).toUTCString();
+    expect(parseRetryAfter(res({ "retry-after": when }), now)).toBe(45);
+  });
+
+  it("ignores a header that is absent, unparseable, or already in the past", () => {
+    expect(parseRetryAfter(res({}))).toBeUndefined();
+    expect(parseRetryAfter(res({ "retry-after": "soon" }))).toBeUndefined();
+    expect(parseRetryAfter(res({ "retry-after": "-5" }))).toBeUndefined();
+  });
+
+  it("clamps an absurd wait — a provider asking for a week is telling us something, but not a delay", () => {
+    expect(parseRetryAfter(res({ "retry-after": "604800" }))).toBe(3600);
   });
 });

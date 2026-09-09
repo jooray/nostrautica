@@ -13,7 +13,7 @@
   } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { uploadPublicImage } from "$lib/media/image.js";
+  import { uploadPublicImage, cropScaleImage } from "$lib/media/image.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -57,14 +57,43 @@
     if (title.trim().length > 0 || content.trim().length > 0) return refreshGuard.hold("post");
   });
 
+  /**
+   * Header-image output size. 1200×630 is the standard cover/OG ratio, and the
+   * editor already previews the picked image `object-fit: cover`, so the crop
+   * matches what the author is shown before publishing.
+   */
+  const POST_IMAGE_W = 1200;
+  const POST_IMAGE_H = 630;
+
   async function onImageFile(e: Event) {
-    const file = (e.target as HTMLInputElement).files?.[0];
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    // Re-picking the same file fires no `change` event unless the value is
+    // cleared first (same reason as EventSettings' picker).
+    input.value = "";
     if (!file || !session.signer) return;
     uploading = true;
     uploadError = "";
     try {
       await connectNdk();
-      image = await uploadPublicImage(session.signer, file);
+      // Re-encode BEFORE upload, never the raw camera file. `accept="image/*"`
+      // on a phone opens the camera roll, and a photo straight off a phone
+      // carries EXIF — including GPS coordinates — plus several MB of full-
+      // resolution pixels. This is a PUBLIC Blossom upload referenced from a
+      // post that may itself be members-only, so the raw file used to publish
+      // the photographer's location to anyone who could guess the blob URL.
+      // Canvas re-encoding strips metadata BY CONSTRUCTION (canvas pixels carry
+      // none) and bounds the size, which is exactly why every other image path
+      // here (avatar, event icon, event banner) already does it.
+      const prepared = await cropScaleImage(file, POST_IMAGE_W, POST_IMAGE_H);
+      // cropScaleImage FAILS OPEN — an undecodable image (HEIC, corrupt) comes
+      // back as the original object. Uploading that would put the untouched
+      // file, EXIF and all, on a public server: exactly what this guards against.
+      // Fail closed here, the way prepareAvatarImage does for the same reason.
+      if (prepared === (file as Blob)) {
+        throw new Error("That photo couldn't be processed. Please choose a different one.");
+      }
+      image = await uploadPublicImage(session.signer, prepared);
     } catch (err) {
       uploadError = err instanceof Error ? err.message : String(err);
     } finally {
@@ -109,14 +138,14 @@
       <input type="radio" value="public" bind:group={visibility} />
       <span>
         {t("post.editor.public")}
-        <span class="muted">— {t("post.editor.public.hint")}</span>
+        <span class="muted">({t("post.editor.public.hint")})</span>
       </span>
     </label>
     <label class="radio">
       <input type="radio" value="members" bind:group={visibility} />
       <span>
         {t("post.editor.members")}
-        <span class="muted">— {t("post.editor.members.hint")}</span>
+        <span class="muted">({t("post.editor.members.hint")})</span>
       </span>
     </label>
     {#if editing}

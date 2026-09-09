@@ -50,6 +50,15 @@
   // deep-linked page's own load; subsequent navigations manage focus + announce.
   let firstRoute = true;
   let prefetchedIdentity: string | null = null;
+  /** A boot step that failed in a way the user has to be told about. */
+  let bootError = $state<MessageKey | null>(null);
+  /**
+   * How long first paint waits on a "local-only" session restore. The same budget
+   * the signer paths already use (LOGOUT_LOCK_TIMEOUT_MS, EventHome's LOAD_GUARD_MS):
+   * long enough that a normal restore always wins the race, short enough that a
+   * blocked IndexedDB open or an extension dialog cannot hold the shell hostage.
+   */
+  const RESTORE_GUARD_MS = 12_000;
 
   /**
    * Dismiss the cold-boot splash (item 3). onMount fires after this component's
@@ -86,6 +95,13 @@
     // and never waits for the async boot below (registerPwa inits it too,
     // idempotently, as a backstop). SW-independent.
     install.init();
+    // PWA-7: register the service worker in the FIRST SYNCHRONOUS BLOCK, not after
+    // the awaits below. `registerPwa` attaches the `controllerchange` listener that
+    // drives the post-deploy reload, and attaching it late means another tab's
+    // update landing during boot is missed — self-healing, but only on a later
+    // check. It needs nothing from the session, so there was never a reason for it
+    // to wait behind one.
+    registerPwa();
     // Warm the persistent app-cache mirror in the BACKGROUND (§7.4.5). Boot no
     // longer awaits this — the shell + route render immediately, and cache-backed
     // pages re-read the mirror when `cacheHydration` fires (they watch it), so a
@@ -93,7 +109,21 @@
     // forget; `hydrateAppCache` is internally idempotent + bounded.
     void hydrateAppCache();
     // Consume any nsec carried in #/login?nsec= and strip it from history first.
-    await consumeNsecFromHash();
+    //
+    // GUARDED. `importLocalKey` throws on a malformed key, and this was awaited
+    // bare inside `onMount`: the whole callback rejected, so `booted` never became
+    // true, the service worker was never registered, and the outbox never flushed.
+    // The app sat on "Loading…" with no way out but clearing site data. The
+    // recovery-link email flow is exactly where a truncated or line-wrapped nsec
+    // arrives, so the one URL most likely to be damaged was the one that bricked
+    // the app. The secret is stripped from the URL either way (the `finally` inside
+    // consumeNsecFromHash), so a failed import is safe to continue past.
+    try {
+      await consumeNsecFromHash();
+    } catch (e) {
+      console.warn("[boot] recovery link carried an unusable key", e);
+      bootError = "boot.badRecoveryLink";
+    }
     // UX-19: never gate the shell on a NIP-46 reconnect — a dead signer relay
     // otherwise burns connect (12s) + getPublicKey (12s) before `booted`,
     // delaying queue-flush/prefetch/registration behind it. Local/nip07
@@ -110,13 +140,23 @@
       // Background — the 2×12s worst case must not block the shell.
       restored = session.restore().catch(() => false);
     } else {
-      // Local/nip07 (or no) restore: local-only and fast — keep it awaited.
+      // Local/nip07 (or no) restore: local-only and fast — keep it awaited so first
+      // paint is already logged in. BOUNDED, though: "local-only" is not the same as
+      // "cannot hang". These reads go through IndexedDB, where an `open` blocked by
+      // a `versionchange` in another tab never settles at all, and a NIP-07 adoption
+      // calls into an extension that can put a dialog in front of `getPublicKey`.
+      // Either one held the entire shell at "Loading…" indefinitely with no timeout
+      // and nothing on screen to explain it. Past the budget we render logged-out
+      // and let the restore land later — `session.loggedIn` is reactive, and the
+      // pages that matter already re-derive on it.
       restored = session.restore().catch(() => false);
-      await restored;
+      await Promise.race([
+        restored,
+        new Promise((r) => setTimeout(r, RESTORE_GUARD_MS)),
+      ]);
     }
     installQueueFlusher();
     void flushQueue();
-    registerPwa();
     booted = true;
     // Identity-scoped warmers (§2.15): grants, recovery, own kind-0, follows,
     // mutes, DM relay list, blind seed (local only), one DM inbox scan. Silent
@@ -393,6 +433,46 @@
         class="btn"
         style="margin-left:0.5rem"
         onclick={() => (session.logoutError = false)}
+      >
+        {t("logout.dismiss")}
+      </button>
+    </div>
+  {/if}
+  <!-- A persisted session that could not be brought back. Without this the user
+       simply appeared logged out, and the only route forward the UI offered was
+       a fresh QR pairing — a new client key and a new approval in the signer —
+       for a session that usually works on the second try. The persisted session
+       is deliberately kept on disk for exactly that, so offer the retry.
+       `error.signerTimeout` already says the right thing ("your signer didn't
+       respond — check it's online and try again"); no new string. -->
+  {#if bootError}
+    <!-- A boot step the user has to be told about. Today that is only a damaged
+         recovery link: the import threw, the app carried on rather than wedging on
+         "Loading…", and this says why they are not signed in. -->
+    <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
+      {t(bootError)}
+      <button type="button" class="btn" style="margin-left:0.5rem" onclick={() => (bootError = null)}>
+        {t("logout.dismiss")}
+      </button>
+    </div>
+  {/if}
+  {#if session.restoreError && !session.loggedIn}
+    <div class="card warn" style="margin:0.5rem 0" role="alert" aria-live="assertive">
+      {t(session.restoreErrorKind === "extension" ? "error.extensionMissing" : "error.signerTimeout")}
+      <button
+        type="button"
+        class="btn primary"
+        style="margin-left:0.5rem"
+        disabled={session.restoring}
+        onclick={() => void session.retryRestore()}
+      >
+        {session.restoring ? t("error.state.retrying") : t("error.state.retry")}
+      </button>
+      <button
+        type="button"
+        class="btn"
+        style="margin-left:0.5rem"
+        onclick={() => (session.restoreError = false)}
       >
         {t("logout.dismiss")}
       </button>

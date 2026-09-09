@@ -6,7 +6,7 @@
   // marker (forced-colors safe), 48px targets, safe-area padding.
   import { router } from "$lib/router/router.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
@@ -77,7 +77,7 @@
         {/if}
       </span><span class="lbl"
         >{t("nav.matches")}{#if newMatches > 0 && !active("matches")}<span class="visually-hidden"
-            >{t("nav.matches.new", { n: newMatches })}</span
+            >{tp("nav.matches.new", newMatches)}</span
           >{/if}</span
       >
     </button>
@@ -99,7 +99,7 @@
         {:else if dmUnread.hasEncryptedActivity}
           <span class="badge-dot" aria-hidden="true"></span>
         {/if}
-      </span><span class="lbl">{t("nav.chat")}{#if dmUnread.confirmedCount > 0}<span class="visually-hidden">{t("dm.unread", { n: dmUnread.confirmedCount })}</span>{:else if dmUnread.hasEncryptedActivity}<span class="visually-hidden">{t("dm.encryptedActivity")}</span>{/if}</span>
+      </span><span class="lbl">{t("nav.chat")}{#if dmUnread.confirmedCount > 0}<span class="visually-hidden">{tp("dm.unread", dmUnread.confirmedCount)}</span>{:else if dmUnread.hasEncryptedActivity}<span class="visually-hidden">{t("dm.encryptedActivity")}</span>{/if}</span>
     </button>
   {/if}
 

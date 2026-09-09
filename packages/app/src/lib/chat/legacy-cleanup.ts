@@ -20,6 +20,23 @@ const DEVICE_KEY_LITERAL = "chat-device-key";
 function markerKey(account: string): string {
   return `nostrautica:chat-legacy-backup-deleted:${account}`;
 }
+function attemptKey(account: string): string {
+  return `nostrautica:chat-legacy-backup-attempts:${account}`;
+}
+
+/**
+ * How many chat sessions may try this before we stop asking.
+ *
+ * The marker was only ever set on SUCCESS, so an account whose deletion kept
+ * failing re-ran the whole thing on every leader session forever — and the first
+ * thing it does is `deriveBlindingKey(signer)`, which for a NIP-46 account is a
+ * round trip to a remote signer (Amber: a prompt on the user's phone) before
+ * anything is even published. Retrying housekeeping across three sessions is
+ * generous; a fourth is just taxing every chat start for a v1 backup that most
+ * accounts never had in the first place.
+ */
+const MAX_ATTEMPTS = 3;
+
 function alreadyDeleted(account: string): boolean {
   try {
     return localStorage.getItem(markerKey(account)) === "1";
@@ -30,8 +47,30 @@ function alreadyDeleted(account: string): boolean {
 function markDeleted(account: string): void {
   try {
     localStorage.setItem(markerKey(account), "1");
+    localStorage.removeItem(attemptKey(account));
   } catch {
     /* storage unavailable — a re-attempt next session is harmless */
+  }
+}
+/** Attempts recorded so far (0 when storage is unavailable — then it just retries). */
+function attempts(account: string): number {
+  try {
+    return Number(localStorage.getItem(attemptKey(account))) || 0;
+  } catch {
+    return 0;
+  }
+}
+/**
+ * Count this attempt BEFORE the expensive part, not after. Counting on failure
+ * would miss the case that motivated the cap: a signer round trip that never
+ * returns (the user ignores the Amber prompt) leaves the whole function pending,
+ * so no post-hoc bookkeeping runs and the next session pays for it again.
+ */
+function countAttempt(account: string): void {
+  try {
+    localStorage.setItem(attemptKey(account), String(attempts(account) + 1));
+  } catch {
+    /* storage unavailable */
   }
 }
 
@@ -57,7 +96,12 @@ export async function deleteLegacyChatDeviceKeyBackup(
 ): Promise<void> {
   const account = await signer.getPublicKey();
   if (alreadyDeleted(account)) return;
+  if (attempts(account) >= MAX_ATTEMPTS) return;
+  countAttempt(account);
   try {
+    // The remote-signer round trip. Everything above this line is deliberately
+    // free — it is what keeps a repeatedly-failing deletion from prompting the
+    // user's phone on every single chat start.
     const blindingKey = await deriveBlindingKey(signer);
     const d = blindedDLiteral(blindingKey, DEVICE_KEY_LITERAL);
     const deletion = await signer.signEvent({

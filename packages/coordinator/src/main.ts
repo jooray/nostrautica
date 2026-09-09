@@ -11,6 +11,7 @@ import {
   veniceApiKey,
   buildAnnounceContent,
   evaluateBilling,
+  spendExposure,
 } from "./config.js";
 import { Store, acquireDaemonLock } from "./store/db.js";
 import { NostrClient } from "./nostr/client.js";
@@ -36,6 +37,16 @@ async function runDaemon(): Promise<void> {
   // all). See lifecycle.ts for what each handler covers and why.
   installExitLogging();
 
+  // Owner-only for EVERY file this process creates from here on: the SQLite store
+  // and its WAL sidecars, the Cashu wallet, ffmpeg temp dirs, backups. A stock
+  // Debian/systemd user unit inherits umask 022, so all of those were being created
+  // world-readable — and the store is only PARTIALLY encrypted (F1 covers the
+  // per-event inbox key and ECK columns; attendee names, profiles, AI profiles,
+  // transcripts, match scores and the payment journal sit in it as cleartext). Set
+  // before the store is opened so it applies to the file's creation, not just to
+  // the after-the-fact chmod the Store also does.
+  process.umask(0o077);
+
   // Release provenance (§13.9) + process identity: tie the running daemon to a
   // specific build AND to a pid/start time, so a restart — or a death followed by
   // no restart — is unmistakable in a log that spans many deploys.
@@ -55,6 +66,21 @@ async function runDaemon(): Promise<void> {
       "[coordinator] WARNING: release provenance is unknown (gitSha: unknown, no NOSTRAUTICA_RELEASE_ID) — " +
         "set NOSTRAUTICA_GIT_SHA or NOSTRAUTICA_RELEASE_ID so this daemon can be tied to a build (§13.9, R23)",
     );
+  }
+
+  // Spend exposure (audit SEC-7). Fail closed BEFORE anything expensive is built:
+  // an announced, open-install coordinator with no daemon-wide ceiling is handing
+  // its provider key to whoever reads the announcement. The default config is not
+  // in this state — it only happens when an operator explicitly zeroes the daemon
+  // budgets — so this aborts rather than warns, the same way an unverifiable
+  // private model does.
+  const exposure = spendExposure(config);
+  if (exposure) {
+    if (config.security.allow_unbounded_spend) {
+      console.warn(`[coordinator] WARNING: ${exposure}`);
+    } else {
+      throw new Error(`unbounded spend exposure — ${exposure}`);
+    }
   }
 
   await verifyFfmpeg().catch(() => {
@@ -223,6 +249,10 @@ async function runDaemon(): Promise<void> {
       perEventDurationSec: config.budgets.per_event_duration_sec,
       perAttendeeCalls: config.budgets.per_attendee_calls,
       perEventCalls: config.budgets.per_event_calls,
+      daemonBytes: config.budgets.daemon_bytes_per_window,
+      daemonDurationSec: config.budgets.daemon_duration_sec_per_window,
+      daemonCalls: config.budgets.daemon_calls_per_window,
+      daemonWindowHours: config.budgets.daemon_window_hours,
     },
   });
 

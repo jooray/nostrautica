@@ -1,6 +1,6 @@
 /**
  * Message catalogs (spec §10.5, en + sk). Compile-time-static and
- * static-host-friendly — the same property Paraglide JS gives, kept here as a
+ * static-host-friendly, the same property Paraglide JS gives, kept here as a
  * plain typed catalog so there's no runtime message loading. Keys are shared
  * across locales; `en` is the source of truth for the key set.
  *
@@ -17,7 +17,7 @@ export const messages = {
     "route.renderFailed": "This section hit an error and couldn't be shown.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
-      "Offline — you can still browse cached people and matches; changes will sync when you reconnect.",
+      "Offline. You can still browse cached people and matches; changes will sync when you reconnect.",
 
     // App update available (NIP §2 / D2): a trusted authority published a payload
     // in a newer protocol version than this build understands.
@@ -31,9 +31,9 @@ export const messages = {
     "logout.dismiss": "Dismiss",
 
     // Background sync (audit UX-15)
-    "sync.queued": "Saved — will send when you're back online.",
+    "sync.queued": "Saved, will send when you're back online.",
     "submit.error.invalid":
-      "Your profile couldn't be sent: {field} is {reason}. Fix it and save again — nothing was lost.",
+      "Your profile couldn't be sent: {field} is {reason}. Fix it and save again. Nothing was lost.",
     "profile.authored.links.dropped":
       "Couldn't read these as links, so they weren't saved: {links}",
     "draft.restored": "Restored an unsent draft.",
@@ -47,10 +47,14 @@ export const messages = {
     "outbox.retry": "Retry",
     "outbox.discard": "Discard",
     "outbox.syncStatus": "Sync status",
+    // Kept alongside the plural family below because OutboxIndicator still calls
+    // the flat key; the `.one/.many` forms exist so it can move to tp().
     "outbox.retries": "{n} retries",
+    "outbox.retries.one": "{n} retry",
+    "outbox.retries.many": "{n} retries",
     "outbox.waiting.title": "Waiting to send",
-    "conn.relayBlocked": "Connected to the internet, but no relay is reachable — this network may be blocking connections. Your changes are saved and will sync once a relay connects.",
-    "conn.syncing": "Reconnected — sending your saved changes…",
+    "conn.relayBlocked": "Connected to the internet, but no relay is reachable. This network may be blocking connections. Your changes are saved and will sync once a relay connects.",
+    "conn.syncing": "Reconnected, sending your saved changes…",
     "logistics.happeningNow": "Happening now",
     "logistics.today": "Today",
     "logistics.ended": "Ended",
@@ -71,7 +75,7 @@ export const messages = {
     // Home
     "home.title": "Meet the right people",
     "home.intro":
-      "Nostrautica figures out who you should meet at an event — and explains why — from short intro videos and your public Nostr activity.",
+      "Nostrautica figures out who you should meet at an event (and explains why) from short intro videos and your public Nostr activity.",
     "home.backup.title": "Back up your account",
     "home.backup.body":
       "Takes 30 seconds. Without it, losing this device means losing your account.",
@@ -91,9 +95,9 @@ export const messages = {
     "home.loadingEvents": "Loading your events…",
     "home.restoringSession": "Reconnecting your signer…",
     "home.scanFailed.body":
-      "We couldn't finish looking for your events — your signer didn't answer. Nothing is lost; they're still on your relays.",
+      "We couldn't finish looking for your events: your signer didn't answer. Nothing is lost; they're still on your relays.",
     "home.scanIncomplete":
-      "This list may be incomplete — the check for your events didn't finish.",
+      "This list may be incomplete: the check for your events didn't finish.",
     "home.how.title": "How it works",
     "home.how.record": "Record a short intro video (and optionally a talk).",
     "home.how.matched": "Get matched with people whose skills complement yours.",
@@ -112,7 +116,7 @@ export const messages = {
     "login.failed": "Couldn't log in.",
     "login.createIdentity": "Create an identity",
     "login.createHeading": "Create your identity",
-    "login.createSub": "No email, no password — your account is created instantly.",
+    "login.createSub": "No email, no password: your account is created instantly.",
     "login.photoPublic": "public",
     "login.photoAdd": "Photo",
     "login.photoTap": "tap to add",
@@ -129,12 +133,19 @@ export const messages = {
     "signin.extension.button": "Log in with extension (Alby, nos2x…)",
     "signin.remote": "Remote signer",
     "signin.remote.scan":
-      "Scan this with your signer app — on this device or on another phone — or open it directly here:",
+      "Scan this with your signer app (on this device or on another phone) or open it directly here:",
     // Names several signers across platforms instead of "Open in Amber": Amber is
     // Android-only, so on an iPhone or a desktop the old label promised an app
     // the user could not have. Whether the link opens anything depends on a
     // signer being installed, which is equally true everywhere.
-    "signin.remote.openSigner": "Open in your signer app (Amber, Clave, Primal, Amethyst, …)",
+    //
+    // Primal is NOT in this list, and is called out in `signin.trouble.primal`
+    // instead: its built-in signer refuses the addressable/custom event kinds this
+    // whole app is built on (31600-31611, 21600-21610) and drops them SILENTLY, so
+    // it is not a signer that merely might be missing, it is one that connects and
+    // then breaks everything quietly. Recommending it by name was actively
+    // steering people into that.
+    "signin.remote.openSigner": "Open in your signer app (Amber, Clave, Amethyst, …)",
     "signin.remote.copy": "Copy",
     "signin.remote.copied": "Copied ✓",
     "signin.remote.waiting": "Waiting for the signer to approve…",
@@ -142,11 +153,18 @@ export const messages = {
       "Didn't get the approval? Keep this tab open while approving, or retry with a fresh code.",
     "signin.remote.retry": "Retry",
     "signin.remote.cancel": "Cancel",
-    "signin.remote.hint": "such as Amber, Amethyst, Clave or Primal",
+    "signin.remote.hint": "such as Amber, Amethyst or Clave",
     "signin.remote.connect": "Connect with Remote Signer",
     "signin.remote.authRequired":
       "Your signer asks you to approve this request on its website:",
     "signin.remote.openAuth": "Open approval page",
+    "signin.trouble": "Trouble signing in?",
+    "signin.trouble.primal":
+      "Primal's built-in signer does not work here. It silently refuses the kinds of event Nostrautica publishes, so signing in looks like it worked and then nothing you do is saved. Use Amber on Android, Clave on iOS, or another NIP-46 signer.",
+    "signin.trouble.wrongApp":
+      "Opened the wrong app? With more than one signer installed, the button opens whichever one claimed the link, which is often not the one you want. Copy the code above, open the signer you want yourself, and paste it in there.",
+    "signin.trouble.bunker":
+      "Or go the other way: in your signer, create a connection, copy the bunker:// link it gives you, and paste that into \"Paste a key\" below.",
     "signin.paste": "Paste a key",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Passphrase",
@@ -169,14 +187,14 @@ export const messages = {
     "create.receipt.enrolled": "You're enrolled as a participant",
     "create.receipt.grant": "Coordinator grant published",
     "create.receipt.backup": "Organizer key backed up",
-    "create.receipt.backup.pending.body": "Back up your organizer key below — without it you can't recover admin access.",
+    "create.receipt.backup.pending.body": "Back up your organizer key below: without it you can't recover admin access.",
     "create.step.share": "Share the event",
     "create.copyLink": "Copy link",
     "create.copied": "Copied ✓",
     "create.share": "Share…",
     "create.step.coordinator": "Optional: attach an AI coordinator",
     "create.step.coordinator.body":
-      "Enables matchmaking and instant invite-link approval — done from the admin screen, or skip it and approve people yourself.",
+      "Enables matchmaking and instant invite-link approval, done from the admin screen, or skip it and approve people yourself.",
     "create.step.coordinator.attached": "AI coordinator attached ✓",
     "create.step.coordinator.attached.body":
       "It starts building matches and processing intros within a few minutes. You can change or remove it later from the admin screen.",
@@ -192,11 +210,11 @@ export const messages = {
     "create.openAdmin": "Open organizer admin",
     "create.viewEvent": "View event page",
     "create.backupOrganizer": "Back up your organizer identity",
-    "create.backupOrganizer.body": "This key controls your event — don't lose it.",
+    "create.backupOrganizer.body": "This key controls your event. Don't lose it.",
     "create.organizerName": "Your name",
     "create.organizerName.placeholder": "How should attendees know you?",
     "create.organizerName.body":
-      "Your organizer identity is created with the event — no signup needed.",
+      "Your organizer identity is created with the event, no signup needed.",
     "create.field.title": "Title",
     "create.field.title.placeholder": "Cypherpunk Assembly 2026",
     "create.field.summary": "Summary",
@@ -207,7 +225,7 @@ export const messages = {
     "create.field.language": "Event language",
     "create.field.language.body":
       "Sets the attendee interface and the language of AI match reasoning and profile summaries. Attendees can still write in any language.",
-    "create.advanced": "Advanced — images, video length",
+    "create.advanced": "Advanced: images, video length",
     "create.field.images": "Event images",
     "create.field.images.optional": "(both optional)",
     "create.iconAlt": "event icon preview",
@@ -244,9 +262,9 @@ export const messages = {
     "create.field.talks.body":
       "Let attendees submit talks that others can watch. Off keeps the event as a normal meetup.",
     "create.talks.off": "Off",
-    "create.talks.on": "On — attendees can submit talks (Talks tab appears)",
+    "create.talks.on": "On: attendees can submit talks (Talks tab appears)",
     "create.talks.prerecordFirst":
-      "Prerecord-first — same, but Talks is the featured tab: the format is watch ahead, meet at the venue",
+      "Prerecord-first. Same, but Talks is the featured tab: the format is watch ahead, meet at the venue",
     "create.field.maxTalk": "Max talk length (minutes)",
     "create.coordinator.title": "AI coordinator",
     "create.coordinator.optional": "(optional)",
@@ -257,7 +275,7 @@ export const messages = {
     "create.coordinator.use": "Use this coordinator",
     "create.coordinator.invalidKey": "That's not a valid coordinator npub or hex key.",
     "create.rotationNote":
-      "Note: key rotation is forward-only — anyone who ever held a decryption key can decrypt content published while it was current, forever (spec §4.2).",
+      "Note: key rotation is forward-only: anyone who ever held a decryption key can decrypt content published while it was current, forever (spec §4.2).",
     "create.creating": "Creating…",
     "create.submit": "Create event",
     "create.error.titleRequired": "Title and start time are required.",
@@ -265,31 +283,33 @@ export const messages = {
     "create.error.nameRequired": "Please enter your name.",
     "create.error.startRequired": "Please choose a start date and time.",
     "form.errorSummary.title": "Please fix the following:",
-    "op.queued": "Saved — your {what} will send when you're back online.",
+    "op.queued": "Saved, your {what} will send when you're back online.",
     "op.introPublished": "Your intro was published.",
-    "op.introSubmittedProcessing": "Your intro was sent — the coordinator is processing it.",
+    "op.introSubmittedProcessing": "Your intro was sent. The coordinator is processing it.",
     "op.talkSubmitted": "Your talk was submitted to the coordinator.",
-    "op.talkAwaitingModeration": "Your talk was sent — it's awaiting the organizer's review.",
+    "op.talkAwaitingModeration": "Your talk was sent. It's awaiting the organizer's review.",
     "op.eventCreated": "Your event was created and published.",
-    "op.eventCreateQueued": "Saved — your event will publish when you're back online. It isn't visible to others yet.",
+    "op.eventCreateQueued": "Saved, your event will publish when you're back online. It isn't visible to others yet.",
     "op.eventUpdated": "Your event details were updated and published.",
-    "op.eventUpdateQueued": "Saved — your changes will publish when you're back online. Attendees still see the old details.",
+    "op.eventUpdateQueued": "Saved, your changes will publish when you're back online. Attendees still see the old details.",
     "op.postPublished": "Your post was published.",
-    "op.postQueued": "Saved — your post will publish when you're back online. It isn't visible to attendees yet.",
+    "op.postQueued": "Saved, your post will publish when you're back online. It isn't visible to attendees yet.",
     "op.pagePublished": "Your event page was saved and published.",
-    "op.pageQueued": "Saved — your event page will publish when you're back online. Attendees still see the old page.",
+    "op.pageQueued": "Saved, your event page will publish when you're back online. Attendees still see the old page.",
     "op.themePublished": "Your theme was published.",
-    "op.themeQueued": "Saved — your theme will publish when you're back online. Attendees still see the old theme.",
+    "op.themeQueued": "Saved, your theme will publish when you're back online. Attendees still see the old theme.",
     "op.coOrgSent": "The organizer keys were sent to your co-organizer.",
     "op.coOrgQueued":
-      "Saved — the organizer keys will send when you're back online. Your co-organizer can't unlock the event until they do.",
-    "create.error.identityFailed": "Couldn't create your identity — please retry.",
+      "Saved, the organizer keys will send when you're back online. Your co-organizer can't unlock the event until they do.",
+    "create.error.identityFailed": "Couldn't create your identity, please retry.",
     "create.error.loginToUpload":
-      "Log in (or create the event first) to upload images — generated ones are used meanwhile.",
+      "Log in (or create the event first) to upload images. Generated ones are used meanwhile.",
     "create.error.uploadFailed": "Image upload failed: {reason}",
 
     // Event home
     "event.loadFailed": "Couldn't load this event.",
+    "event.loadFailed.body":
+      "Nothing about this event could be read yet: its details live on relays, and none of them answered. That is usually the network, not the event.",
     "event.loading": "Loading event…",
     "event.approval.invite": "Invite only",
     "event.approval.manual": "Organizer approval",
@@ -299,8 +319,9 @@ export const messages = {
     "event.status.pending": "Pending",
     "event.status.visitor": "Visitor",
     "event.ownStatus.title": "Processing problem",
-    "event.ownStatus.submission": "Your profile couldn't be processed — try re-submitting.",
-    "event.ownStatus.talk": "Your talk couldn't be processed — try re-recording.",
+    "event.ownStatus.submission": "Your profile couldn't be processed. Try re-submitting.",
+    "event.ownStatus.talk": "Your talk couldn't be processed. Try re-recording.",
+    "event.ownStatus.chat": "This device couldn't be added to the group chat. Open Chat for what to do.",
     "event.recoverKeys.title": "Organizer on a new device?",
     "event.recoverKeys.body":
       "If you created this event with this account, its keys have an encrypted backup on the relays. Restoring asks your signer to unlock it.",
@@ -308,7 +329,7 @@ export const messages = {
     "event.recoverKeys.working": "Restoring…",
     "event.recoverKeys.restored": "Your organizer keys are back on this device.",
     "event.recoverKeys.empty": "No key backup for this event was found for this account.",
-    "event.recoverKeys.failed": "Couldn't restore your keys — check your connection or signer and try again.",
+    "event.recoverKeys.failed": "Couldn't restore your keys. Check your connection or signer and try again.",
     "event.retention.line": "Your event data is deleted {days} days after the event.",
     "event.leave.action": "Leave event",
     "event.leave.confirm": "Leave this event? This sends a request to the organizer to remove your directory entry and matches and delete your intro media. It takes effect once they process it.",
@@ -316,15 +337,15 @@ export const messages = {
     "event.leave.cancel": "Cancel",
     "event.leave.leaving": "Leaving…",
     "event.leave.done": "You've left this event.",
-    "event.leave.requested": "Your request to leave was sent. The organizer will remove your entry, matches and media — this can take a moment.",
+    "event.leave.requested": "Your request to leave was sent. The organizer will remove your entry, matches and media. This can take a moment.",
     "event.leave.queued": "Your request to leave is saved and will send when you reconnect. You haven't left yet.",
-    "event.leave.failed": "Couldn't leave — please try again.",
+    "event.leave.failed": "Couldn't leave, please try again.",
     "event.latest": "Latest",
 
     // Readiness journey (redesign §4.1)
     "readiness.title": "Getting you ready",
     "readiness.progress": "{done} of {total}",
-    "readiness.allSet": "You're all set — matches are ready",
+    "readiness.allSet": "You're all set: matches are ready",
     "readiness.step.joined": "Joined",
     "readiness.step.backup": "Backup secured",
     "readiness.step.intro": "Intro submitted",
@@ -343,17 +364,27 @@ export const messages = {
     "readiness.hint.empty":
       "Your profile is empty, so matching has nothing to go on and you won't appear in anyone's matches. A line about yourself or a few skills is enough.",
     "readiness.cta.matches": "See your matches",
+    "readiness.cta.rerecord": "Record your intro again",
+    "readiness.lastChecked": "Last checked {time}.",
+    "readiness.checkAgain": "Check again",
+    "readiness.checking": "Checking…",
+    "readiness.cta.editProfile": "Edit your profile",
+    "readiness.hint.failed":
+      "The coordinator couldn't build your profile. Editing and saving it sends it again.",
+    "readiness.hint.failedMedia":
+      "Your recording couldn't be processed. Recording a new one usually fixes it.",
     "readiness.state.done": "Done",
     "readiness.state.current": "Current step",
+    "readiness.state.failed": "Needs your attention",
     "readiness.state.upcoming": "Upcoming",
 
     "event.organizerAdmin": "Organizer admin",
     "event.recordIntro": "Record your intro",
-    "event.recordIntro.body": "Matches come from intros — record yours to show up in them.",
+    "event.recordIntro.body": "Matches come from intros. Record yours to show up in them.",
     "event.seeWhosHere": "See who's here",
     "event.peopleToMeet": "People you should meet",
     "event.recordOrUpdate": "Record / update your intro",
-    "event.requestSent": "Request sent — waiting for approval.",
+    "event.requestSent": "Request sent, waiting for approval.",
     "event.requestSent.body":
       "The organizer will let you in; check back here. You'll see the event open up as soon as they approve.",
     "event.checkStatus": "Check status",
@@ -362,7 +393,7 @@ export const messages = {
       "You'll be approved by the organizer (or instantly with an invite link).",
     "event.install.title": "Add Nostrautica to your home screen",
     "event.install.body":
-      "You'll open it a lot during the event — one tap beats digging through tabs.",
+      "You'll open it a lot during the event. One tap beats digging through tabs.",
     "event.install.install": "Install",
     "event.install.notNow": "Not now",
     "event.install.iosHint":
@@ -372,7 +403,8 @@ export const messages = {
     "event.posts": "Posts",
     "event.pinned": "Pinned",
     "event.attendeesSection": "Who's here",
-    "event.attendeesSection.count": "{n} people so far",
+    "event.attendeesSection.count.one": "{n} person so far",
+    "event.attendeesSection.count.many": "{n} people so far",
     "event.allPosts": "All posts ›",
     "event.report": "Event report",
     "event.offline.title": "Available offline",
@@ -382,8 +414,10 @@ export const messages = {
     "event.offline.downloadingShort": "Downloading…",
     "event.offline.downloading": "Downloading… ({n} of {total})",
     "event.offline.ready": "Ready to use offline.",
-    "event.offline.partial": "Saved, but some parts didn’t download — try again.",
+    "event.offline.partial": "Saved, but some parts didn’t download. Try again.",
     "event.offline.noSw": "Data saved, but the app screens aren’t cached yet. Reopen the app once (or reload), then download again so it opens with no signal.",
+    "event.offline.storageFull":
+      "This device is out of storage, so nothing is being saved for offline use. Free some space and download again.",
     "event.offline.stored": "Added {size} to this device",
     "event.offline.persisted": "kept on this device",
     "event.offline.mediaNote": "audio/video isn’t pre-downloaded",
@@ -420,14 +454,14 @@ export const messages = {
     "post.editor.imagePreview": "header image preview",
     "cropper.title": "Position your image",
     "cropper.hint": "Drag to move, use the slider to zoom. What you see is what gets saved.",
-    "cropper.viewportLabel": "Crop preview — drag or use arrow keys to reposition",
+    "cropper.viewportLabel": "Crop preview: drag or use arrow keys to reposition",
     "cropper.zoom": "Zoom",
     "cropper.use": "Use this",
     "cropper.cancel": "Cancel",
-    "cropper.decodeError": "This image could not be opened — it may be a HEIC or an unsupported format. Try a JPEG or PNG.",
+    "cropper.decodeError": "This image could not be opened: it may be a HEIC or an unsupported format. Try a JPEG or PNG.",
     "post.replyingTo": "In reply to",
     "post.quote.unavailable": "Quoted note unavailable",
-    "post.editor.contentPlaceholder": "Write your post — Markdown supported.",
+    "post.editor.contentPlaceholder": "Write your post. Markdown supported.",
     "post.editor.visibility": "Who can read it",
     "post.editor.public": "Public",
     "post.editor.public.hint": "anyone, in any Nostr client",
@@ -438,10 +472,14 @@ export const messages = {
     "post.editor.write": "Write",
     "post.editor.preview": "Preview",
     "post.editor.nothingToPreview": "Nothing to preview yet.",
+    // Flat key kept for PostEditor's existing call site; the plural family is the
+    // one a tp() migration there should use.
     "post.editor.bytes": "{n} bytes",
+    "post.editor.bytes.one": "{n} byte",
+    "post.editor.bytes.many": "{n} bytes",
     "post.editor.byteCount": "{used} / {max} bytes",
     "post.editor.tooLong":
-      "Too long for a members-only post — the limit is {max} bytes of Markdown. Trim about {over} bytes.",
+      "Too long for a members-only post: the limit is {max} bytes of Markdown. Trim about {over} bytes.",
     "post.editor.publishing": "Publishing…",
     "post.editor.publish": "Publish post",
     "post.editor.saveEdit": "Save edit",
@@ -450,17 +488,16 @@ export const messages = {
     // Join
     "join.title": "Join {title}",
     "join.retention": "This event's data is deleted {days} days after it ends.",
-    "join.wentWrong": "Something went wrong.",
     "join.loading": "Loading event…",
     "join.youreIn": "You're in",
     "join.recordIntro": "Record your intro",
     "join.whyIntro.summary": "Why record an intro?",
-    "join.whyIntro.intro": "Optional, but recommended — it helps in a few ways:",
-    "join.whyIntro.matches": "Better matches — the more you share, the more the matching has to work with.",
+    "join.whyIntro.intro": "Optional, but recommended. It helps in a few ways:",
+    "join.whyIntro.matches": "Better matches: the more you share, the more the matching has to work with.",
     "join.whyIntro.vibe":
-      "A feel for who you'd click with — people can play your intro and see if you'd vibe together. Matching isn't just projects and skills — it's also a feeling AI can't capture on its own.",
+      "A feel for who you'd click with: people can play your intro and see if you'd vibe together. Matching isn't just projects and skills, it's also a feeling AI can't capture on its own.",
     "join.whyIntro.recognize":
-      "Recognizing each other — a video intro means you'll actually recognize your matches when you spot them in the crowd.",
+      "Recognizing each other: a video intro means you'll actually recognize your matches when you spot them in the crowd.",
     "join.goToOverview": "Go to event overview",
     "join.seeWhosHere": "See who's here",
     "join.backupIdentity": "Back up your new identity",
@@ -478,43 +515,43 @@ export const messages = {
     "join.noName": "(no name set in your Nostr profile)",
     "join.aboutYou": "About you",
     "join.fromProfile":
-      "From your Nostr profile — we won't change it. To update it, edit it in your Nostr app and it shows up here.",
+      "From your Nostr profile. We won't change it. To update it, edit it in your Nostr app and it shows up here.",
     "join.inviteRecognized": "Invite recognized",
-    "join.displayNameEvent": "(for this event — your Nostr profile stays as is)",
+    "join.displayNameEvent": "(for this event, your Nostr profile stays as is)",
     "join.profile.failed.title": "Couldn't load your profile",
     "join.profile.failed.body":
       "We couldn't reach the relays to fetch your Nostr profile. Retry, or just enter a display name for this event.",
     "join.profile.retry": "Retry",
     "join.profile.empty":
-      "You don't have a public Nostr profile yet. Enter a display name for this event — your Nostr profile isn't changed.",
-    "join.publicNote": "Name, photo and bio are public — everything else stays inside the event.",
+      "You don't have a public Nostr profile yet. Enter a display name for this event. Your Nostr profile isn't changed.",
+    "join.publicNote": "Name, photo and bio are public, everything else stays inside the event.",
     "join.photoPublic": "public",
     "join.photoAdd": "Photo",
     "join.photoTap": "tap to add",
     "join.displayNamePublic": "(public)",
     "join.namePlaceholder": "How should people know you?",
     "join.aboutOptional": "(optional)",
-    "join.aboutEvent": "(for this event — your Nostr profile isn't changed)",
+    "join.aboutEvent": "(for this event, your Nostr profile isn't changed)",
     "join.about.placeholder": "A sentence or two about what you work on.",
     "join.empty.badge": "Nothing to match on yet",
     "join.empty.hint":
-      "You can join like this, but matching has nothing to go on — add a line about yourself or a few skills and you'll actually get introduced to people.",
-    "join.concreteHint": "The next two pick who you should meet — be concrete.",
+      "You can join like this, but matching has nothing to go on: add a line about yourself or a few skills and you'll actually get introduced to people.",
+    "join.concreteHint": "The next two pick who you should meet. Be concrete.",
     "join.skills": "Skills",
-    "join.skills.hint": "— separate with commas",
+    "join.skills.hint": "(separate with commas)",
     "join.skills.placeholder": "cryptography, rust, design",
     "join.lookingFor": "What are you looking for?",
     "join.lookingFor.placeholder": "a co-founder, collaborators…",
     "join.rsvpPublic": "Publish a public RSVP (others can see I'm attending)",
     "join.reuse.title": "Use your previous intro?",
     "join.reuse.body":
-      "You already have an intro video ({duration}s). Bring it to this event instead of recording again — matches come from intros.",
+      "You already have an intro video ({duration}s). Bring it to this event instead of recording again. Matches come from intros.",
     "join.reuse.reuse": "Reuse it",
-    "join.reuse.reuse.hint": "— fastest, mirrors the existing video",
+    "join.reuse.reuse.hint": "(fastest, mirrors the existing video)",
     "join.reuse.fresh": "Fresh copy",
-    "join.reuse.fresh.hint": "— re-uploads so it's not linkable across events",
+    "join.reuse.fresh.hint": "(re-uploads so it's not linkable across events)",
     "join.reuse.new": "I'll record a new one",
-    "join.reuse.new.hint": "— later, on the event page",
+    "join.reuse.new.hint": "(later, on the event page)",
     "join.sending": "Sending…",
     "join.send": "Send join request",
     "join.createAndJoin": "Create identity & join",
@@ -528,13 +565,13 @@ export const messages = {
     "record.intro": "Record your intro",
     "record.uploaded": "Uploaded ✓ Your {kind} is encrypted and shared with this event's attendees.",
     "record.done.queued":
-      "Saved on this device ✓ Your {kind} is encrypted and will be sent as soon as you reconnect to a relay — it hasn't reached the event yet.",
+      "Saved on this device ✓ Your {kind} is encrypted and will be sent as soon as you reconnect to a relay. It hasn't reached the event yet.",
     "record.done.introPublished":
       "Published ✓ Your {kind} is encrypted and shared with this event's attendees.",
     "record.done.introProcessing":
-      "Sent ✓ Your {kind} is encrypted and on its way — the coordinator is processing it now.",
+      "Sent ✓ Your {kind} is encrypted and on its way. The coordinator is processing it now.",
     "record.done.talkModeration":
-      "Sent ✓ Your {kind} is encrypted and submitted — it will appear once the organizer approves it.",
+      "Sent ✓ Your {kind} is encrypted and submitted. It will appear once the organizer approves it.",
     "record.kind.intro": "intro",
     "record.kind.talk": "talk",
     "record.backToEvent": "Back to event",
@@ -547,7 +584,7 @@ export const messages = {
     "record.role.join": "Join this event",
     "record.reuse.title": "Reuse a previous intro",
     "record.reuse.body":
-      "Pick an intro you recorded or wrote at another event — reuse it as-is, or make a fresh copy that isn't linkable across events.",
+      "Pick an intro you recorded or wrote at another event: reuse it as-is, or make a fresh copy that isn't linkable across events.",
     "record.reuse.reuse": "Reuse",
     "record.reuse.fresh": "Fresh copy",
     "record.reuse.videoLabel": "Video",
@@ -559,29 +596,39 @@ export const messages = {
     "record.uploading": "Uploading…",
     "record.useThis": "Use this",
     "record.limit": "Limit: {sec}s. Recording hard-stops at the limit.",
-    "record.limit.unlimited": "No limit — recording runs until you stop it.",
+    "record.limit.unlimited": "No limit: recording runs until you stop it.",
     "record.timeLeft": " · {sec}s left",
     "record.elapsed": " · {sec}s recorded so far",
     "record.stop": "■ Stop",
     "record.enableCamera": "Enable camera",
     "record.record": "● Record",
     "record.error.camera": "Camera/microphone access is required to record. {reason}",
-    "record.deviceError.denied.camera": "Camera access was blocked. Allow camera + microphone for this site in your browser's address bar, then try again — or record audio or type your intro instead.",
-    "record.deviceError.denied.mic": "Microphone access was blocked. Allow the microphone for this site in your browser's address bar, then try again — or type your intro instead.",
+    "record.deviceError.denied.camera": "Camera access was blocked. Allow camera + microphone for this site in your browser's address bar, then try again, or record audio or type your intro instead.",
+    "record.deviceError.denied.mic": "Microphone access was blocked. Allow the microphone for this site in your browser's address bar, then try again, or type your intro instead.",
     "record.deviceError.absent.camera": "No camera was found on this device. Try a device with a camera, or record audio or type your intro instead.",
     "record.deviceError.absent.mic": "No microphone was found on this device. Try another device, or type your intro instead.",
     "record.deviceError.busy.camera": "Your camera is in use by another app or tab. Close it and try again.",
     "record.deviceError.busy.mic": "Your microphone is in use by another app or tab. Close it and try again.",
-    "record.deviceError.unsupported.camera": "Recording isn't supported in this browser. Try a recent Chrome, Safari, or Firefox — or type your intro instead.",
-    "record.deviceError.unsupported.mic": "Recording isn't supported in this browser. Try a recent browser — or type your intro instead.",
+    "record.deviceError.unsupported.camera": "Recording isn't supported in this browser. Try a recent Chrome, Safari, or Firefox, or type your intro instead.",
+    "record.deviceError.unsupported.mic": "Recording isn't supported in this browser. Try a recent browser, or type your intro instead.",
     "record.deviceError.unknown.camera": "Couldn't start the camera. Try again, or record audio or type your intro instead.",
     "record.deviceError.unknown.mic": "Couldn't start the microphone. Try again, or type your intro instead.",
 
     // Attendees
     "attendees.title": "People",
     "attendees.decrypting": "Decrypting the roster…",
-    "attendees.empty":
-      "No attendees visible. The list is encrypted for approved attendees — if you haven't joined yet, that's why; if you were just approved, refresh in a moment.",
+    // Three genuinely different reasons the roster can be empty. The old single
+    // string asserted "if you haven't joined yet, that's why" at everyone,
+    // including an approved attendee on venue Wi-Fi whose relays are blocked:
+    // the most likely reader of an empty roster, and the one it was most wrong for.
+    "attendees.empty.notApproved":
+      "The attendee list is encrypted for approved attendees, and this device doesn't have the key yet. Join the event, or, if you were just approved, give it a moment and try again.",
+    "attendees.empty.none":
+      "Nobody is on the list yet. People appear here as the organizer approves them; if you were just approved yourself, your own entry can take a minute to arrive.",
+    "attendees.empty.unreachable":
+      "Couldn't reach the relays that hold the attendee list, so we can't tell who's here. Venue Wi-Fi often blocks them. Try again, or switch networks.",
+    "attendees.empty.staleKey":
+      "There are people here, but this device can't read the list. Your access key is out of date, which happens after the organizer removes someone. Try again in a moment; if it persists, ask the organizer whether you're still on the list.",
     "attendees.backToEvent": "Back to the event",
     "attendees.count.one": "{n} attendee",
     "attendees.count.many": "{n} attendees",
@@ -632,12 +679,12 @@ export const messages = {
     "profile.authored.introText": "Text intro",
     "profile.authored.introText.hint": "A short written intro, used when you have no recording.",
     "profile.authored.cancel": "Cancel",
-    "profile.authored.saved.hint": "Sent a new revision — it replaces what you wrote before.",
+    "profile.authored.saved.hint": "Sent a new revision. It replaces what you wrote before.",
     "profile.generated.title": "Generated from your intro",
     "profile.generated.hint":
       "The event coordinator built this from your intro. Correct any field, hide it, or hide the whole thing.",
     "profile.generated.none":
-      "No AI profile yet — it appears once your intro has been processed (or it's hidden).",
+      "No AI profile yet. It appears once your intro has been processed (or it's hidden).",
     "profile.hide.all": "Hide the AI profile entirely (show only what you wrote)",
     "profile.field.summary": "Summary",
     "profile.field.skills": "Skills",
@@ -645,7 +692,7 @@ export const messages = {
     "profile.field.offers": "Can help with",
     "profile.field.seeks": "Looking for",
     "profile.field.hide": "Hide",
-    "profile.field.hidden": "Hidden — this field won't be shown.",
+    "profile.field.hidden": "Hidden: this field won't be shown.",
     "profile.field.listPlaceholder": "One per line",
     "profile.field.listHint": "One item per line.",
     "profile.report.title": "Report a problem (optional)",
@@ -664,7 +711,7 @@ export const messages = {
     "attendee.recentPosts": "Recent posts",
     "attendee.name": "Attendee",
     "attendee.error.badNpub": "bad npub",
-    "attendee.error.badNpub.body": "This profile link isn't valid — check the link and try again.",
+    "attendee.error.badNpub.body": "This profile link isn't valid. Check the link and try again.",
     "attendee.translated": "Translated",
     "attendee.showOriginal": "show original",
     "attendee.showTranslation": "show translation",
@@ -681,10 +728,10 @@ export const messages = {
     "matches.seeWhosHere": "See who's here",
     "matches.fetching": "Fetching your matches…",
     "matches.none":
-      "No matches yet — they appear once the coordinator has processed a few attendees. Check back soon.",
+      "No matches yet. They appear once the coordinator has processed a few attendees. Check back soon.",
     "matches.none.noIntro":
-      "No matches yet — the coordinator starts from your Nostr profile and posts, so check back in a few minutes. Recording an intro makes your matches much better.",
-    "matches.rankedNote": "Ranked by how much you'd get from meeting — with the reasoning.",
+      "No matches yet. The coordinator starts from your Nostr profile and posts, so check back in a few minutes. Recording an intro makes your matches much better.",
+    "matches.rankedNote": "Ranked by how much you'd get from meeting, with the reasoning.",
     "matches.live": "your intro is in, so these are live",
     "matches.band.strong": "Strong match",
     "matches.band.good": "Good match",
@@ -701,7 +748,7 @@ export const messages = {
     "matches.similar": "similar {pct}%",
     "matches.complementary": "complementary {pct}%",
     "matches.name": "Attendee",
-    "matches.role.loggedOut": "Log in to see who you should meet — your matches are personal to your account.",
+    "matches.role.loggedOut": "Log in to see who you should meet. Your matches are personal to your account.",
     "matches.role.login": "Log in",
     "matches.role.visitor": "Matches are for members. Join this event to get your personal list of who to meet.",
     "matches.role.join": "Join this event",
@@ -714,35 +761,44 @@ export const messages = {
     "me.title.new": "You're a Nostr user now",
     "me.title.profile": "Your Nostr profile",
     "me.new.body":
-      "You own a real Nostr identity — an account no company controls and no one can take away. Your profile and the people you followed travel with it into a whole ecosystem of apps.",
+      "You own a real Nostr identity: an account no company controls and no one can take away. Your profile and the people you followed travel with it into a whole ecosystem of apps.",
     "me.handle": "Your public handle (npub)",
-    "me.handle.body": "Share this freely — it's how people find and follow you. (It's safe to post.)",
+    "me.handle.body": "Share this freely: it's how people find and follow you. (It's safe to post.)",
     "me.copied": "Copied ✓",
     "me.copyNpub": "Copy npub",
     "me.signedInVia": "Signed in via {method}.",
-    "me.keyInSigner": "Your key lives in your signer — back it up there.",
+    "me.keyInSigner": "Your key lives in your signer. Back it up there.",
     "me.takeAnywhere": "Take it anywhere",
     "me.takeAnywhere.body":
-      "These are independent Nostr apps — like different clients for the same account. Copy your key below, open one, choose “log in with a key”, and paste it in — your profile and the people you followed are already there.",
+      "These are independent Nostr apps, like different clients for the same account. Copy your key below, open one, choose “log in with a key”, and paste it in. Your profile and the people you followed are already there.",
     "me.backupKey": "Back up your key",
     "me.logout": "Log out",
-    "me.logout.warnUnsent":
-      "You have {n} unsent action(s) waiting to send. Logging out will discard them — they won't be published. Log out anyway?",
+    "me.logout.warnUnsent.one":
+      "You have {n} unsent action waiting to send. Logging out will discard it. It won't be published. Log out anyway?",
+    "me.logout.warnUnsent.many":
+      "You have {n} unsent actions waiting to send. Logging out will discard them. They won't be published. Log out anyway?",
     "me.logout.confirmDiscard": "Log out and discard",
     "me.logout.cancel": "Stay logged in",
+    // The unrecoverable case: an app-generated key the user has never saved.
+    // Logging out calls clearKeystore(), which deletes the secret outright.
+    "me.logout.keyLoss.title": "Logging out erases your key from this device",
+    "me.logout.keyLoss.body":
+      "This app created your Nostr identity and the key lives only on this device. You haven't saved it anywhere yet. Logging out deletes it for good. Nobody can bring it back: your profile, the events you joined and your messages go with it.",
+    "me.logout.keyLoss.backup": "Save your key first",
+    "me.logout.keyLoss.confirm": "Log out and erase my key",
 
     // Backup card
-    "backup.noKey": "Your key lives in your signer — back it up there. Nothing to export here.",
-    "backup.copied": "Copied ✓ — now paste it into a Nostr app",
+    "backup.noKey": "Your key lives in your signer. Back it up there. Nothing to export here.",
+    "backup.copied": "Copied ✓, now paste it into a Nostr app",
     "backup.copyKey": "Copy my secret key",
-    "backup.stage.copied": "Secret copied. Copying isn't a backup yet — save it somewhere safe.",
+    "backup.stage.copied": "Secret copied. Copying isn't a backup yet. Save it somewhere safe.",
     "backup.stage.iSavedIt": "I saved it somewhere safe",
     "backup.stage.saved": "Saved somewhere safe",
     "backup.stage.confirming": "Confirming backup…",
     "backup.stage.confirmed": "Backup confirmed ✓",
-    "backup.stage.confirmFailed": "Couldn't record the backup marker — try again.",
+    "backup.stage.confirmFailed": "Couldn't record the backup marker, try again.",
     "backup.stage.retry": "Retry",
-    "backup.warning.a": "This is your private key. It's like your password —",
+    "backup.warning.a": "This is your private key. It's like your password:",
     "backup.warning.keepSecret": "keep it secret",
     "backup.warning.b":
       ", anyone who has it controls your account. To use another Nostr app, choose “log in with a key / nsec” there and paste this in.",
@@ -786,7 +842,11 @@ export const messages = {
     "dm.empty":
       "No messages yet. Open someone's profile in an event's attendee list and tap Message to start a conversation. Messages are end-to-end encrypted and work with other Nostr messengers too.",
     "dm.youPrefix": "You: ",
+    // Flat key kept for BottomNav / Dm.svelte, which still call t(); EventNav uses
+    // the plural family.
     "dm.unread": "{n} unread direct messages",
+    "dm.unread.one": "{n} unread direct message",
+    "dm.unread.many": "{n} unread direct messages",
     "dm.markAllRead": "Mark all as read",
     "dm.encryptedActivity": "New encrypted inbox activity",
     // Unified Chat pane (group chats + DMs together)
@@ -798,10 +858,10 @@ export const messages = {
     "dmchat.login": "Log in",
     "dmchat.invalidLink": "Invalid profile link.",
     "dmchat.title": "Chat",
-    "dmchat.e2e": "End-to-end encrypted (NIP-17) — also readable in other Nostr messengers.",
+    "dmchat.e2e": "End-to-end encrypted (NIP-17), also readable in other Nostr messengers.",
     "dmchat.sharedEvents": "Also attending:",
     "dmchat.decrypting": "Decrypting…",
-    "dmchat.empty": "No messages yet — say hi.",
+    "dmchat.empty": "No messages yet. Say hi.",
     "dmchat.signerSlow": "Waiting for your signer to sign & encrypt… if you use Amber or a bunker, make sure it's reachable.",
     "dmchat.placeholder": "Write a message…",
     "dmchat.send": "Send",
@@ -812,19 +872,19 @@ export const messages = {
     "admin.done": "Done ✓",
     "admin.notOrganizer.title": "You don't hold this event's organizer keys on this device.",
     "admin.notOrganizer.body":
-      "Organizer keys live on the device that created the event — they aren't derived from your login. To admin from here, have them granted to this device's npub:",
+      "Organizer keys live on the device that created the event. They aren't derived from your login. To admin from here, have them granted to this device's npub:",
     "admin.yourNpub": "Your npub",
     "admin.copyNpub": "Copy npub",
     "admin.copied": "Copied ✓",
     "admin.person.copyId": "Copy this person's Nostr id (nprofile)",
-    "admin.person.copyIdFailed": "Copying failed — select and copy it by hand:",
+    "admin.person.copyIdFailed": "Copying failed. Select and copy it by hand:",
     "admin.grant.step1": "On the device you created the event with, open Admin → Co-organizers.",
     "admin.grant.step2": "Paste this npub and add it.",
     "admin.grant.step3":
-      "Keep this page open — it unlocks here automatically once the grant arrives.",
+      "Keep this page open. It unlocks here automatically once the grant arrives.",
     "admin.grant.waiting": "Checking for the grant every few seconds…",
     "admin.grant.waitingSigner":
-      "Waiting for your signer to connect — checking starts as soon as it does.",
+      "Waiting for your signer to connect. Checking starts as soon as it does.",
     "admin.grant.notChecking": "Automatic checking has stopped.",
     "admin.grant.lastChecked": "Last checked at {time}.",
     "admin.grant.checkNow": "Check now",
@@ -837,14 +897,14 @@ export const messages = {
     "admin.section.operations": "Operations",
     "admin.enrollSelf.title": "Join your own event",
     "admin.enrollSelf.body":
-      "You created this event but aren't a participant yet. Join to appear in People, get matched, and — if group chat is on — be added to it. Being the organizer alone doesn't put you on the roster.",
+      "You created this event but aren't a participant yet. Join to appear in People, get matched, and (if group chat is on) be added to it. Being the organizer alone doesn't put you on the roster.",
     "admin.noEidKey.title": "Organizer key not on this device",
     "admin.noEidKey.body":
       "You hold this event's organizer role here, but not its signing key (E_id), so admin actions can't be published from this device. Open the event on the device where you created it, or restore that device's key backup, then come back.",
     "admin.enrollSelf.action": "Join as a participant",
     "admin.enrollSelf.busy": "Joining…",
     "admin.enrollSelf.sent":
-      "Joined ✓ — with a coordinator attached it adds you to People and the group chat within a few seconds. Refresh to check.",
+      "Joined ✓. With a coordinator attached it adds you to People and the group chat within a few seconds. Refresh to check.",
     "admin.section.communicate": "Communicate",
     "admin.section.people": "People",
     "admin.section.setup": "Event setup",
@@ -871,7 +931,7 @@ export const messages = {
     "admin.metadata.saved": "Saved ✓",
     "admin.page.title": "Menu & layout",
     "admin.page.body":
-      "Customize the event page: a menu of links (to posts or any URL) and the sections shown below the header. Members-only items are encrypted — visitors don't even see they exist.",
+      "Customize the event page: a menu of links (to posts or any URL) and the sections shown below the header. Members-only items are encrypted: visitors don't even see they exist.",
     "admin.page.menu": "Menu",
     "admin.page.moveUp": "Move up",
     "admin.page.moveDown": "Move down",
@@ -887,11 +947,11 @@ export const messages = {
     "admin.page.type.pinned": "Pinned posts",
     "admin.page.type.attendees": "Attendee preview",
     "admin.page.pinPost": "Pin a post…",
-    "admin.page.attendees.hint": "A roster preview — only members ever see it.",
+    "admin.page.attendees.hint": "A roster preview. Only members ever see it.",
     "admin.page.membersOnlySection": "Members-only section",
     "admin.page.feeds": "Posts from other accounts",
     "admin.page.feeds.body":
-      "Fold long-form posts by another npub into this event's feed — your organization's own Nostr account, for example. Filter by hashtag and publication date.",
+      "Fold long-form posts by another npub into this event's feed, your organization's own Nostr account, for example. Filter by hashtag and publication date.",
     "admin.page.feeds.npubPlaceholder": "npub… (the account to pull from)",
     "admin.page.feeds.tagsPlaceholder": "Hashtags, comma-separated (optional)",
     "admin.page.feeds.since": "Only posts published since (optional)",
@@ -910,7 +970,7 @@ export const messages = {
     "admin.page.saved": "Published ✓",
     "admin.theme.title": "Appearance",
     "admin.theme.body":
-      "Custom CSS for this event's pages (max 32 KB). It applies only while someone is viewing this event — never to the rest of the app.",
+      "Custom CSS for this event's pages (max 32 KB). It applies only while someone is viewing this event, never to the rest of the app.",
     "admin.theme.placeholder": ":root { --accent: #ff6b00; }",
     "admin.theme.byteCount": "{used} / {max} bytes",
     "admin.theme.tooBig": "too big to publish",
@@ -924,7 +984,7 @@ export const messages = {
     "admin.coordinator.noActivity": "no activity yet",
     // NOT an alarm: "last seen" is the coordinator's newest published work for
     // this event, so a quiet event simply produces no events. See Admin.svelte.
-    "admin.coordinator.idle": " · quiet — the coordinator only publishes when there's something to do",
+    "admin.coordinator.idle": " · quiet: the coordinator only publishes when there's something to do",
     "admin.coordinator.recomputing": "Recomputing…",
     "admin.coordinator.recompute": "↻ Recompute all matches",
     "admin.coordinator.attachedOk":
@@ -940,7 +1000,7 @@ export const messages = {
     "admin.coordinator.lastSeen": "Last seen:",
     "admin.coordinator.test": "Test connection",
     "admin.coordinator.testing": "Testing…",
-    "admin.coordinator.testOk": "Coordinator reachable — announcement and activity found.",
+    "admin.coordinator.testOk": "Coordinator reachable: announcement and activity found.",
     "admin.coordinator.testFail": "Couldn't reach the coordinator (no announcement or recent activity).",
     "admin.coordinator.resend": "Re-send grant",
     "admin.coordinator.resending": "Re-sending…",
@@ -956,7 +1016,7 @@ export const messages = {
     "admin.coordinator.paste": "Or paste a coordinator npub (advanced)",
     "admin.coordinator.terms": "Terms",
     "admin.coordinator.unverified":
-      "Coordinators self-publish these listings; only attach one you trust — it can read event content.",
+      "Coordinators self-publish these listings; only attach one you trust. It can read event content.",
     "admin.coordinator.nonPrivate": "leaves TEE",
     "admin.coordinator.feat.matching": "Matching",
     "admin.coordinator.feat.talks": "Talks",
@@ -966,7 +1026,7 @@ export const messages = {
     "admin.billing.checkout": "Open checkout",
     "admin.coorg.title": "Co-organizers",
     "admin.coorg.body":
-      "Add someone by their npub to share full organizer control — they can edit the event, approve attendees, and manage the coordinator. (Their keys are gift-wrapped to them; they'll get access next time they open the event.)",
+      "Add someone by their npub to share full organizer control: they can edit the event, approve attendees, and manage the coordinator. (Their keys are gift-wrapped to them; they'll get access next time they open the event.)",
     "admin.coorg.placeholder": "npub1… (co-organizer)",
     "admin.coorg.adding": "Adding…",
     "admin.coorg.add": "Add co-organizer",
@@ -979,14 +1039,14 @@ export const messages = {
     "admin.invites.copyLink": "Copy link",
     "admin.invites.shared.title": "Shared entry code (one QR for the room)",
     "admin.invites.shared.body":
-      "One code everyone can scan — put it on the opening slide and people join without waiting for approval. The link is the secret: knowing the event is not enough to get in.",
+      "One code everyone can scan: put it on the opening slide and people join without waiting for approval. The link is the secret: knowing the event is not enough to get in.",
     "admin.invites.shared.uses": "People",
     "admin.invites.shared.hours": "Valid for (hours)",
     "admin.invites.shared.generate": "Create shared code",
     "admin.invites.shared.usesHint":
-      "0 means no limit. Anyone who scans it can forward the link, so keep the window short — after it expires, latecomers land in the approval queue instead of being turned away.",
+      "0 means no limit. Anyone who scans it can forward the link, so keep the window short. After it expires, latecomers land in the approval queue instead of being turned away.",
     "admin.invites.shared.ephemeral":
-      "This code is only in this tab — it is never saved. Show or copy it before you close the page.",
+      "This code is only in this tab. It is never saved. Show or copy it before you close the page.",
     "admin.invites.copyAll": "Copy all links (one per line)",
     "admin.invites.copiedAll": "Copied all ✓",
     "admin.invites.download": "Download as .txt",
@@ -998,6 +1058,12 @@ export const messages = {
     "admin.requests.approving": "Approving…",
     "admin.requests.approveAll": "Approve all ({n})",
     "admin.requests.invite": "invite",
+    "admin.requests.withdrew": "Asked to leave after sending this request. Approving now would re-admit them.",
+    "admin.requests.withdrew.purge": "Asked to leave and to have their data deleted, after sending this request. Approving now would re-admit them.",
+    "admin.people.withdrew":
+      "Asked to leave. Their app has already removed their intro and media, so revoking here is what takes them off the roster.",
+    "admin.people.withdrew.purge":
+      "Asked to leave and to have their data deleted. Their app has already removed their intro and media, so revoking here is what takes them off the roster.",
     "admin.requests.video.one": "{n} video",
     "admin.requests.video.many": "{n} videos",
     "admin.requests.approve": "Approve",
@@ -1010,9 +1076,9 @@ export const messages = {
     "admin.approvedTag": "Approved ✓",
     "admin.reprocess": "Re-process",
     "common.close": "Close",
-    "common.copyFailed": "Couldn't copy automatically — select the text and copy it manually.",
+    "common.copyFailed": "Couldn't copy automatically. Select the text and copy it manually.",
     "admin.person.details": "Details",
-    "admin.person.title": "{name} — details",
+    "admin.person.title": "{name}: details",
     "admin.person.profile": "Submitted profile",
     "admin.person.noIntake": "No submitted intake is available for this person.",
     "admin.person.intro": "Intro",
@@ -1043,12 +1109,12 @@ export const messages = {
     "admin.requests.bulkSummary": "{approved} approved, {retry} need retry",
     "admin.requests.bulk.queued": "Queued…",
     "admin.requests.bulk.publishing": "Publishing…",
-    "admin.requests.bulk.failed": "Couldn't approve — try again.",
+    "admin.requests.bulk.failed": "Couldn't approve, try again.",
     "admin.requests.bulk.retry": "Retry",
     "admin.people.organizer": "Organizer",
     "admin.people.failed": "Processing failed",
     "admin.people.intakeUnavailable":
-      "Intake details unavailable (their request predates the sync window) — controls still work.",
+      "Intake details unavailable (their request predates the sync window). Controls still work.",
     "admin.requests.reviewed": "Reviewed",
     "admin.requests.reject": "Reject",
     "admin.requests.reject.confirm":
@@ -1107,12 +1173,23 @@ export const messages = {
     // Errors from lib
     "error.followListGuard":
       "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
-    "error.signerTimeout": "Your signer didn't respond — check it's online and try again.",
-    // Same failure, but we know a signer relay refused the connection — say which
+    "error.signerTimeout": "Your signer didn't respond. Check it's online and try again.",
+    "error.extensionMissing":
+      "Your Nostr browser extension isn't available. You're still signed in; unlock or enable it, then try again.",
+    "boot.badRecoveryLink":
+      "That recovery link didn't carry a usable key. Ask for a fresh one, or sign in another way.",
+    "join.loadFailed.body": "We couldn't load this event, so there's nothing to join yet.",
+    "join.waiting.checking": "Checking every {sec} seconds…",
+    "join.waiting.checked": "Last checked {time} · checking again every {sec} seconds.",
+    "join.waiting.canClose": "You can close this. We'll show you're in when you come back.",
+    "matches.none.why":
+      "Matches appear once your intro has been processed and the organizer has run matching.",
+    "matches.checkAgain": "Check again",
+    // Same failure, but we know a signer relay refused the connection, so say which
     // one. A relay outage and a closed signer app produce the identical symptom
     // otherwise, and only one of the two is something the user can act on.
     "error.signerRelaysUnreachable":
-      "Your signer didn't respond — couldn't reach {relays}. Check your signer is online and try again.",
+      "Your signer didn't respond: couldn't reach {relays}. Check your signer is online and try again.",
     "error.badBunkerLink": "That doesn't look like a valid bunker link.",
     "error.badEventLink":
       "This event link looks invalid. Please reopen it from your invite or events list.",
@@ -1130,8 +1207,18 @@ export const messages = {
     "settings.theme.system": "System",
     "settings.theme.light": "Light",
     "settings.theme.dark": "Dark",
+    "settings.privacy": "Privacy",
+    "settings.externalImages": "Load profile pictures from other servers",
+    "settings.externalImages.hint": "Profile pictures and event banners are hosted wherever the person who set them chose. Loading one tells that server your IP address and when you looked. Turn this off to show initials and generated artwork instead. Nothing else changes.",
     "settings.about": "About",
-    "settings.about.hint": "Build diagnostics — include this when reporting an issue.",
+    "settings.about.hint": "Build diagnostics. Include this when reporting an issue.",
+    // These five were the last hardcoded English strings in the app (they sat in
+    // an array literal in Settings.svelte, which is why they escaped the catalog).
+    "settings.about.release": "Release",
+    "settings.about.app": "App",
+    "settings.about.protocol": "Protocol",
+    "settings.about.commit": "Commit",
+    "settings.about.built": "Built",
 
     // Accessibility (A2)
     "a11y.skipToContent": "Skip to content",
@@ -1143,6 +1230,11 @@ export const messages = {
     "nav.people": "People",
     "nav.matches": "Matches",
     "nav.chat": "Chat",
+    // Distinct from nav.chat: the More menu's row opens DIRECT messages, the nav
+    // bar's Chat tab opens the event group chat. One label on two destinations
+    // read as a duplicate entry; the participant guide already calls this one
+    // "Messages".
+    "nav.messages": "Messages",
     "nav.talks": "Talks",
     "nav.updates": "Updates",
     "nav.more": "More",
@@ -1164,37 +1256,50 @@ export const messages = {
     "chat.disclosure.body":
       "This chat is end-to-end encrypted (MLS/Marmot). The event coordinator operates and can read it, and each device sees only messages sent after it joined.",
     "chat.setup": "Setting up your secure chat… you'll join once the coordinator adds you.",
-    "chat.setupSlow": "Still waiting to be added. The coordinator adds you to the group chat — if this doesn't clear, it may be offline; check with the organizer. You can keep waiting or try again.",
+    "chat.setupSlow": "Still waiting to be added. The coordinator adds you to the group chat. If this doesn't clear, it may be offline; check with the organizer. You can keep waiting or try again.",
+    "chat.refused.deviceCap": "The coordinator turned this device away: your account is already using the maximum number of chat devices for this event. Remove one under \u201cChat devices\u201d below, then try again.",
+    "chat.refused.boundElsewhere": "The coordinator turned this device away: its chat key is already registered to a different account on this event. Clearing this site's data for this browser will mint a fresh device key.",
+    "chat.refused.proof": "The coordinator couldn't verify that this device owns its chat key. Sign out and back in on this device, then open the chat again.",
+    "chat.refused.keyPackage": "The coordinator couldn't use this device's encryption key. Ask to be added to this chat again to publish a fresh one.",
+    "chat.refused.other": "The coordinator turned this device away. Ask to be added to this chat again, or check with the organizer.",
     "chat.retry": "Try again",
     "chat.empty": "No messages yet. Say hello.",
     "chat.jumpToLatest": "New messages ↓",
     "chat.compose.placeholder": "Message",
     "chat.send": "Send",
     "chat.checking": "Checking your access…",
-    "chat.sendFailed": "Couldn't send. You may have been removed from this chat, or the connection dropped.",
+    "chat.sendFailed": "Couldn't send: this device is no longer in the chat. Ask to be added again.",
+    "chat.sendFailedTransport":
+      "Couldn't send: we couldn't reach the relays. Your message is still here, try again.",
+    "chat.sendRetry": "Try again",
+    "chat.evicted.title": "You're no longer in this chat",
+    "chat.evicted.body":
+      "New messages won't reach this device until you're added again. Everything above is what you received while you were in.",
+    "chat.sending": "Sending…",
     "chat.rejoin": "Rejoin this chat",
     "chat.rejoining": "Rejoining…",
     "chat.rejoinRequested":
-      "Asked to be added again — this usually takes under a minute. Your message stays in the box; send it once the chat is back.",
+      "Asked to be added again. This usually takes under a minute. Your message stays in the box; send it once the chat is back.",
     "chat.rejoinFailed": "Couldn't ask to rejoin. Check your connection and try again.",
     "chat.rejoinHint": "Still nothing after trying again? Ask to be added to this chat again.",
     "chat.unavailable": "Group chat isn't available for this event, or you're not a member yet.",
     "chat.backToEvent": "Back to event",
     "chat.handoff.link.title": "Use this chat in Whitenoise (or another Marmot client)",
     "chat.handoff.link.body":
-      "Already have an identity there? Paste its npub below to authorize it — it'll join this chat automatically, no key leaves this device.",
+      "Already have an identity there? Paste its npub below to authorize it. It'll join this chat automatically, no key leaves this device.",
     "chat.handoff.link.placeholder": "npub or hex pubkey",
     "chat.handoff.link.button": "Authorize",
     "chat.handoff.link.authorizing": "Authorizing…",
     "chat.handoff.link.success":
-      "Authorized. Open it in that client — it'll join once its key package is found. If it hasn't after a few minutes, authorize again here to re-check.",
+      "Authorized. Open it in that client: it'll join once its key package is found. If it hasn't after a few minutes, authorize again here to re-check.",
     "chat.handoff.link.badNpub": "Enter an npub or 64-char hex pubkey",
     "chat.handoff.link.relaysHint": "This event's relays, in case it still doesn't join:",
     "chat.devices.manage.title": "Chat devices",
     "chat.devices.manage.body":
-      "Devices signed in to this event's chat with your account. Each has its own key and joins the group on its own — to add your phone or another browser, open this event there and sign in. Remove any you no longer use. History starts from when each device joins.",
+      "Devices signed in to this event's chat with your account. Each has its own key and joins the group on its own. To add your phone or another browser, open this event there and sign in. Remove any you no longer use. History starts from when each device joins.",
     "chat.devices.thisDevice": "This device",
     "chat.devices.added": "Added {date}",
+    "chat.devices.lastActive": "Last active {date}",
     "chat.devices.rename": "Rename",
     "chat.devices.renameLabel": "Device name",
     "chat.devices.renameSave": "Save",
@@ -1204,15 +1309,17 @@ export const messages = {
     "chat.devices.revokeYes": "Remove",
     "chat.devices.revokeNo": "Cancel",
     "chat.devices.loading": "Loading your devices…",
-    "chat.devices.none": "No devices yet — open this event's chat to add this one.",
-    "chat.devices.updated": "Saved — the list updates once the coordinator processes it.",
+    "chat.devices.none": "No devices yet. Open this event's chat to add this one.",
+    "chat.devices.updated": "Saved. The list updates once the coordinator processes it.",
+    "chat.devices.queued": "Saved, but it hasn't reached a relay yet. It'll be sent when you're back online.",
     "chat.devices.actionFailed": "Couldn't save. Check your connection or signer and try again.",
     "chat.members.title": "In this chat",
+    "chat.members.attested": "(registered devices, the room hasn't answered yet)",
     "chat.members.devices.one": "{n} device",
     "chat.members.devices.many": "{n} devices",
     "chat.otherTab.title": "Chat is open in another tab",
     "chat.otherTab.body":
-      "This event's chat is active in another tab or window. Use it there to send messages — the newest messages still show here.",
+      "This event's chat is active in another tab or window. Use it there to send messages. The newest messages still show here.",
     "chat.display.label": "Chat style",
     "chat.display.bubbles": "Bubbles",
     "chat.display.irc": "IRC",
@@ -1256,14 +1363,14 @@ export const messages = {
     "talks.edit": "Edit / replace this talk",
     "talks.favorite.add": "Favorite this talk",
     "talks.favorite.remove": "Remove from favorites",
-    "talks.editing": "Editing your talk — recording a new clip replaces the current one.",
+    "talks.editing": "Editing your talk. Recording a new clip replaces the current one.",
     "talks.source.label": "Talk video",
     "talks.source.record": "Record",
     "talks.source.upload": "Upload file",
     "talks.source.url": "Paste a URL",
     "talks.url.label": "Video URL",
     "talks.url.placeholder": "YouTube link or direct .mp4 URL",
-    "talks.url.hint": "Paste an unlisted YouTube link or a direct video (.mp4) URL. The link is encrypted to the event; the file stays where you host it — ideal for talks too large to upload.",
+    "talks.url.hint": "Paste an unlisted YouTube link or a direct video (.mp4) URL. The link is encrypted to the event; the file stays where you host it, ideal for talks too large to upload.",
     "talks.url.invalid": "Enter a valid https YouTube or video (.mp4) URL.",
     "talks.url.detectedYoutube": "Detected: YouTube video",
     "talks.url.detectedVideo": "Detected: direct video file",
@@ -1277,7 +1384,7 @@ export const messages = {
     "talks.external.gate.title": "This talk plays from another site",
     "talks.external.gate.host": "Playback will contact:",
     "talks.external.gate.note":
-      "The event link itself is encrypted, but loading the video connects your device directly to that host — sharing your IP address and browser details with it. Load only if you trust it.",
+      "The event link itself is encrypted, but loading the video connects your device directly to that host, sharing your IP address and browser details with it. Load only if you trust it.",
     "talks.external.gate.load": "Load video",
     "talks.field.title": "Talk title",
     "talks.field.title.placeholder": "e.g. Zero-knowledge proofs for beginners",
@@ -1289,7 +1396,7 @@ export const messages = {
     // Shared busy/done states for every save button on Event settings. These used
     // to be `admin.talks.saving`/`admin.talks.saved`, and because they were reached
     // for from the retention/relays/chat cards too, `admin.talks.save` came along
-    // with them — so unrelated buttons all read "Save talks setting" in production
+    // with them, so unrelated buttons all read "Save talks setting" in production
     // (report 2026-07-28). Only the transient states are interchangeable; every
     // idle label must name its own setting.
     "admin.saving": "Saving…",
@@ -1301,12 +1408,12 @@ export const messages = {
     "admin.retention.unit": "days after the event ends",
     "admin.retention.consequence":
       "The directory, matches and talks are deleted from relays {n} days after the event ends. Deletion is best-effort.",
-    "admin.retention.consequenceOff": "No automatic deletion — member data is kept indefinitely.",
+    "admin.retention.consequenceOff": "No automatic deletion: member data is kept indefinitely.",
     "admin.retention.invalid": "Enter a whole number of days (1 or more), or leave it blank for no deletion.",
     "admin.retention.save": "Save deletion setting",
     "admin.relays.title": "Event relays",
     "admin.relays.body":
-      "The relays this event publishes to and is found on. Changing this only affects this event — existing attendees keep working on the old relays until they refresh. New events use the app defaults automatically.",
+      "The relays this event publishes to and is found on. Changing this only affects this event. Existing attendees keep working on the old relays until they refresh. New events use the app defaults automatically.",
     "admin.relays.placeholder": "wss://relay.example.com",
     "admin.relays.hint": "One relay per line. Must start with wss:// (ws:// is allowed only for localhost).",
     "admin.relays.save": "Save relays",
@@ -1381,14 +1488,14 @@ export const messages = {
     "record.disclosure.confirmText":
       "I understand the coordinator and its AI provider will process this text to build my profile and matches.",
     "record.disclosure.textProviders":
-      "Its configured AI provider receives your text to build your profile and matches. Nothing is recorded or transcribed — no audio leaves your device.",
+      "Its configured AI provider receives your text to build your profile and matches. Nothing is recorded or transcribed. No audio leaves your device.",
 
     // Tabbed intro composer (F1.4): video · audio · text
     "record.mode.label": "How would you like to introduce yourself?",
     "record.mode.video": "Video",
     "record.mode.audio": "Audio",
     "record.mode.text": "Text",
-    "record.audio.hint": "Record a short spoken intro — no camera needed.",
+    "record.audio.hint": "Record a short spoken intro. No camera needed.",
     "record.audio.enableMic": "Enable microphone",
     "record.audio.record": "● Record audio",
     "record.micReady": "Microphone ready ✓",
@@ -1399,7 +1506,7 @@ export const messages = {
     "record.chooseAudioFile": "Choose an audio file",
     "record.chooseVideoFile": "Choose a video file",
     "record.text.title": "Write your intro",
-    "record.text.hint": "Type your intro instead of recording — it feeds your matches just like a spoken one.",
+    "record.text.hint": "Type your intro instead of recording. It feeds your matches just like a spoken one.",
     "record.text.placeholder": "Tell other attendees who you are, what you do, and who you'd like to meet…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Use this intro",
@@ -1418,7 +1525,7 @@ export const messages = {
     "report.print": "Print / save PDF",
     "report.loading": "Assembling your report…",
     "report.empty":
-      "Nothing to report yet — mark people you met or want to meet, favorite talks, and jot notes as you go.",
+      "Nothing to report yet: mark people you met or want to meet, favorite talks, and jot notes as you go.",
     "report.empty.people": "Go to People",
     "report.followAll": "Follow everyone",
     "report.copyNpubs": "Copy npubs",
@@ -1426,7 +1533,7 @@ export const messages = {
     "report.downloadNpubs": "Download .txt",
     "report.followConfirm.title": "Follow on Nostr",
     "report.followConfirm.body":
-      "Uncheck anyone you'd rather not follow. This appends to your existing follow list — it never replaces it.",
+      "Uncheck anyone you'd rather not follow. This appends to your existing follow list. It never replaces it.",
     "report.followSelected": "Follow {n}",
     "report.following": "Following…",
     "report.cancel": "Cancel",
@@ -1444,11 +1551,12 @@ export const messages = {
     "report.switch.body":
       "This event created a Nostr key for you. Back it up and use it in any Nostr app.",
     "report.switch.action": "Back up & explore Nostr",
-    "nav.matches.new": "{n} new matches",
-    "event.approvedBanner": "You’re approved — welcome in.",
+    "nav.matches.new.one": "{n} new match",
+    "nav.matches.new.many": "{n} new matches",
+    "event.approvedBanner": "You’re approved, welcome in.",
     "event.approvedBanner.dismiss": "Dismiss",
     "event.viewAsVisitor": "View as visitor",
-    "event.viewAsVisitor.active": "Previewing the public view — members-only parts are hidden.",
+    "event.viewAsVisitor.active": "Previewing the public view. Members-only parts are hidden.",
     "event.viewAsVisitor.exit": "Exit preview",
     "event.duplicate": "Duplicate event",
     "event.duplicate.copyOf": "Copy of {title}",
@@ -1463,17 +1571,17 @@ export const messages = {
     // by email; `label` is the join key between this app and their spreadsheet).
     "admin.invites.exports": "Exports",
     "admin.invites.exports.intro":
-      "Two exports, with two very different lifetimes. The codes themselves only exist while this page is open — they are never saved, on your device or on a relay — so they can only be exported now. Who has joined is worked out from the invite list published for this event, so that one keeps working months later.",
+      "Two exports, with two very different lifetimes. The codes themselves only exist while this page is open (they are never saved, on your device or on a relay) so they can only be exported now. Who has joined is worked out from the invite list published for this event, so that one keeps working months later.",
     "admin.invites.exportCodes.title": "Codes for mailing",
     "admin.invites.exportCodes.body":
-      "One row per code you just generated, each with its label. Match the label to the buyer in your own list — the app never sees email addresses.",
+      "One row per code you just generated, each with its label. Match the label to the buyer in your own list. The app never sees email addresses.",
     "admin.invites.exportCodes.unavailable":
       "Nothing to export right now. Invite codes are single-use secrets that are never stored anywhere, so they can only be exported in the same session that created them. Generate a new batch above for anyone you still need to mail.",
     "admin.invites.exportCodes.warning":
-      "The file contains live invite codes — anyone who gets a copy can join. Handle it like a list of passwords.",
+      "The file contains live invite codes: anyone who gets a copy can join. Handle it like a list of passwords.",
     "admin.invites.format": "Format",
-    "admin.invites.format.csv": "CSV — label, code and link",
-    "admin.invites.format.txt": "Text — links only, one per line",
+    "admin.invites.format.csv": "CSV: label, code and link",
+    "admin.invites.format.txt": "Text: links only, one per line",
     "admin.invites.downloadCsv": "Download as CSV",
     "admin.invites.exportUsed.title": "Who has joined",
     "admin.invites.exportUsed.body":
@@ -1486,7 +1594,7 @@ export const messages = {
     "admin.invites.scope.unused": "Unused codes only",
     "admin.invites.usedCount": "{used} of {total} codes used",
     "admin.invites.usedNote":
-      "Once a code is seen used it stays used. Old join requests eventually disappear from relays, so this can only ever count up — it will never wrongly tell you a code is still free.",
+      "Once a code is seen used it stays used. Old join requests eventually disappear from relays, so this can only ever count up. It will never wrongly tell you a code is still free.",
     "admin.invites.exportBusy": "Checking for new sign-ups…",
   },
   sk: {
@@ -1497,7 +1605,7 @@ export const messages = {
     "route.renderFailed": "V tejto časti nastala chyba a nedá sa zobraziť.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
-      "Bez pripojenia — stále si môžete prezerať uložených ľudí a spojenia; zmeny sa zosynchronizujú po opätovnom pripojení.",
+      "Bez pripojenia. Stále si môžete prezerať uložených ľudí a spojenia; zmeny sa zosynchronizujú po opätovnom pripojení.",
 
     // Dostupná aktualizácia aplikácie (NIP §2 / D2)
     "update.available":
@@ -1510,9 +1618,9 @@ export const messages = {
     "logout.dismiss": "Zavrieť",
 
     // Synchronizácia na pozadí (audit UX-15)
-    "sync.queued": "Uložené — odošle sa po obnovení pripojenia.",
+    "sync.queued": "Uložené, odošle sa po obnovení pripojenia.",
     "submit.error.invalid":
-      "Tvoj profil sa nepodarilo odoslať: {field} — {reason}. Oprav to a ulož znova, nič sa nestratilo.",
+      "Tvoj profil sa nepodarilo odoslať: {field}. {reason}. Oprav to a ulož znova, nič sa nestratilo.",
     "profile.authored.links.dropped":
       "Tieto sa nepodarilo prečítať ako odkazy, takže sa neuložili: {links}",
     "draft.restored": "Obnovený neodoslaný koncept.",
@@ -1529,9 +1637,12 @@ export const messages = {
     "outbox.discard": "Zahodiť",
     "outbox.syncStatus": "Stav synchronizácie",
     "outbox.retries": "{n} pokusov",
+    "outbox.retries.one": "{n} pokus",
+    "outbox.retries.few": "{n} pokusy",
+    "outbox.retries.many": "{n} pokusov",
     "outbox.waiting.title": "Čaká na odoslanie",
-    "conn.relayBlocked": "Pripojené k internetu, ale žiadne relé nie je dostupné — táto sieť možno blokuje spojenia. Vaše zmeny sú uložené a zosynchronizujú sa, keď sa pripojí relé.",
-    "conn.syncing": "Znova pripojené — odosielam vaše uložené zmeny…",
+    "conn.relayBlocked": "Pripojené k internetu, ale žiadne relé nie je dostupné. Táto sieť možno blokuje spojenia. Vaše zmeny sú uložené a zosynchronizujú sa, keď sa pripojí relé.",
+    "conn.syncing": "Znova pripojené, odosielam vaše uložené zmeny…",
     "logistics.happeningNow": "Práve prebieha",
     "logistics.today": "Dnes",
     "logistics.ended": "Skončilo",
@@ -1553,7 +1664,7 @@ export const messages = {
     // Home
     "home.title": "Stretnite tých správnych ľudí",
     "home.intro":
-      "Nostrautica zistí, koho by ste mali na podujatí stretnúť — a vysvetlí prečo — z krátkych predstavovacích videí a vašej verejnej aktivity na Nostri.",
+      "Nostrautica zistí, koho by ste mali na podujatí stretnúť (a vysvetlí prečo) z krátkych predstavovacích videí a vašej verejnej aktivity na Nostri.",
     "home.backup.title": "Zálohujte si účet",
     "home.backup.body":
       "Zaberie to 30 sekúnd. Bez zálohy strata tohto zariadenia znamená stratu účtu.",
@@ -1573,9 +1684,9 @@ export const messages = {
     "home.loadingEvents": "Načítavajú sa vaše podujatia…",
     "home.restoringSession": "Znovu sa pripájame k vášmu podpisovaču…",
     "home.scanFailed.body":
-      "Nepodarilo sa dokončiť hľadanie vašich podujatí — váš podpisovač neodpovedal. Nič sa nestratilo, stále sú na vašich relayoch.",
+      "Nepodarilo sa dokončiť hľadanie vašich podujatí: váš podpisovač neodpovedal. Nič sa nestratilo, stále sú na vašich relayoch.",
     "home.scanIncomplete":
-      "Tento zoznam nemusí byť úplný — hľadanie vašich podujatí sa nedokončilo.",
+      "Tento zoznam nemusí byť úplný: hľadanie vašich podujatí sa nedokončilo.",
     "home.how.title": "Ako to funguje",
     "home.how.record": "Nahrajte krátke predstavovacie video (a voliteľne aj prednášku).",
     "home.how.matched": "Spojíme vás s ľuďmi, ktorých zručnosti dopĺňajú tie vaše.",
@@ -1594,7 +1705,7 @@ export const messages = {
     "login.failed": "Prihlásenie sa nepodarilo.",
     "login.createIdentity": "Vytvoriť identitu",
     "login.createHeading": "Vytvorte si identitu",
-    "login.createSub": "Bez e‑mailu, bez hesla — účet sa vytvorí okamžite.",
+    "login.createSub": "Bez e‑mailu, bez hesla: účet sa vytvorí okamžite.",
     "login.photoPublic": "verejné",
     "login.photoAdd": "Fotka",
     "login.photoTap": "klepnutím pridáte",
@@ -1611,9 +1722,9 @@ export const messages = {
     "signin.extension.button": "Prihlásiť sa rozšírením (Alby, nos2x…)",
     "signin.remote": "Vzdialený podpisovač",
     "signin.remote.scan":
-      "Naskenujte to svojou podpisovacou aplikáciou — na tomto zariadení alebo na inom telefóne — alebo to otvorte priamo tu:",
+      "Naskenujte to svojou podpisovacou aplikáciou (na tomto zariadení alebo na inom telefóne) alebo to otvorte priamo tu:",
     "signin.remote.openSigner":
-      "Otvoriť v podpisovacej aplikácii (Amber, Clave, Primal, Amethyst, …)",
+      "Otvoriť v podpisovacej aplikácii (Amber, Clave, Amethyst, …)",
     "signin.remote.copy": "Kopírovať",
     "signin.remote.copied": "Skopírované ✓",
     "signin.remote.waiting": "Čaká sa na schválenie podpisovačom…",
@@ -1621,11 +1732,18 @@ export const messages = {
       "Neprišlo schválenie? Nechajte túto kartu otvorenú počas schvaľovania, alebo to skúste znova s novým kódom.",
     "signin.remote.retry": "Skúsiť znova",
     "signin.remote.cancel": "Zrušiť",
-    "signin.remote.hint": "napríklad Amber, Amethyst, Clave alebo Primal",
+    "signin.remote.hint": "napríklad Amber, Amethyst alebo Clave",
     "signin.remote.connect": "Pripojiť vzdialený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žiada o schválenie tejto požiadavky na svojej stránke:",
     "signin.remote.openAuth": "Otvoriť schvaľovaciu stránku",
+    "signin.trouble": "Problém s prihlásením?",
+    "signin.trouble.primal":
+      "Vstavaný podpisovač v Primale tu nefunguje. Ticho odmieta typy udalostí, ktoré Nostrautica zverejňuje, takže prihlásenie vyzerá úspešne a potom sa nič, čo urobíte, neuloží. Použite Amber na Androide, Clave na iOS alebo iný NIP-46 podpisovač.",
+    "signin.trouble.wrongApp":
+      "Otvorila sa nesprávna aplikácia? Ak máte nainštalovaných viac podpisovačov, tlačidlo otvorí ten, ktorý si odkaz zaregistroval, a to často nie je ten, ktorý chcete. Skopírujte kód vyššie, sami si otvorte podpisovač, ktorý chcete, a vložte ho tam.",
+    "signin.trouble.bunker":
+      "Alebo opačne: v podpisovači vytvorte pripojenie, skopírujte bunker:// odkaz, ktorý vám dá, a vložte ho nižšie do poľa „Vložiť kľúč“.",
     "signin.paste": "Vložiť kľúč",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Heslo",
@@ -1648,14 +1766,14 @@ export const messages = {
     "create.receipt.enrolled": "Ste zapísaný ako účastník",
     "create.receipt.grant": "Grant pre koordinátora zverejnený",
     "create.receipt.backup": "Kľúč organizátora zálohovaný",
-    "create.receipt.backup.pending.body": "Zálohujte si kľúč organizátora nižšie — bez neho nezískate späť prístup správcu.",
+    "create.receipt.backup.pending.body": "Zálohujte si kľúč organizátora nižšie: bez neho nezískate späť prístup správcu.",
     "create.step.share": "Zdieľajte podujatie",
     "create.copyLink": "Kopírovať odkaz",
     "create.copied": "Skopírované ✓",
     "create.share": "Zdieľať…",
     "create.step.coordinator": "Voliteľné: pripojte AI koordinátora",
     "create.step.coordinator.body":
-      "Umožní párovanie a okamžité schvaľovanie cez pozývacie odkazy — nastavíte to v administrácii, alebo to preskočte a schvaľujte ľudí sami.",
+      "Umožní párovanie a okamžité schvaľovanie cez pozývacie odkazy, nastavíte to v administrácii, alebo to preskočte a schvaľujte ľudí sami.",
     "create.step.coordinator.attached": "AI koordinátor pripojený ✓",
     "create.step.coordinator.attached.body":
       "Do niekoľkých minút začne vytvárať spojenia a spracúvať predstavenia. Neskôr ho môžete zmeniť alebo odstrániť v administrácii.",
@@ -1671,11 +1789,11 @@ export const messages = {
     "create.openAdmin": "Otvoriť administráciu organizátora",
     "create.viewEvent": "Zobraziť stránku podujatia",
     "create.backupOrganizer": "Zálohujte si organizátorskú identitu",
-    "create.backupOrganizer.body": "Tento kľúč ovláda vaše podujatie — nestraťte ho.",
+    "create.backupOrganizer.body": "Tento kľúč ovláda vaše podujatie. Nestraťte ho.",
     "create.organizerName": "Vaše meno",
     "create.organizerName.placeholder": "Ako vás majú účastníci poznať?",
     "create.organizerName.body":
-      "Vaša organizátorská identita sa vytvorí spolu s podujatím — bez registrácie.",
+      "Vaša organizátorská identita sa vytvorí spolu s podujatím, bez registrácie.",
     "create.field.title": "Názov",
     "create.field.title.placeholder": "Cypherpunk Assembly 2026",
     "create.field.summary": "Zhrnutie",
@@ -1688,7 +1806,7 @@ export const messages = {
     "create.bannerPick": "Vyberte obrázok bannera podujatia",
     "create.field.language.body":
       "Nastaví rozhranie pre účastníkov a jazyk odôvodnení AI párovania aj profilových zhrnutí. Účastníci môžu naďalej písať v ľubovoľnom jazyku.",
-    "create.advanced": "Rozšírené — obrázky, dĺžka videa",
+    "create.advanced": "Rozšírené: obrázky, dĺžka videa",
     "create.field.images": "Obrázky podujatia",
     "create.field.images.optional": "(oba voliteľné)",
     "create.iconAlt": "náhľad ikony podujatia",
@@ -1717,9 +1835,9 @@ export const messages = {
     "create.field.talks.body":
       "Umožnite účastníkom pridávať prednášky, ktoré si ostatní môžu pozrieť. Vypnuté ponechá podujatie ako bežné stretnutie.",
     "create.talks.off": "Vypnuté",
-    "create.talks.on": "Zapnuté — účastníci môžu posielať prednášky (pribudne záložka Prednášky)",
+    "create.talks.on": "Zapnuté: účastníci môžu posielať prednášky (pribudne záložka Prednášky)",
     "create.talks.prerecordFirst":
-      "Najprv prednahraté — to isté, ale Prednášky sú hlavná záložka: formát „pozri vopred, stretni sa na mieste“",
+      "Najprv prednahraté. To isté, ale Prednášky sú hlavná záložka: formát „pozri vopred, stretni sa na mieste“",
     "create.field.maxTalk": "Max. dĺžka prednášky (minúty)",
     "create.field.matching": "AI párovanie",
     "create.matching.on": "Zapnuté (potrebuje koordinátora)",
@@ -1736,7 +1854,7 @@ export const messages = {
     "create.coordinator.use": "Použiť tohto koordinátora",
     "create.coordinator.invalidKey": "Toto nie je platný npub ani hex kľúč koordinátora.",
     "create.rotationNote":
-      "Poznámka: rotácia kľúčov je len dopredná — ktokoľvek, kto niekedy držal dešifrovací kľúč, dokáže navždy dešifrovať obsah zverejnený počas jeho platnosti (špec. §4.2).",
+      "Poznámka: rotácia kľúčov je len dopredná: ktokoľvek, kto niekedy držal dešifrovací kľúč, dokáže navždy dešifrovať obsah zverejnený počas jeho platnosti (špec. §4.2).",
     "create.creating": "Vytvára sa…",
     "create.submit": "Vytvoriť podujatie",
     "create.error.titleRequired": "Názov a čas začiatku sú povinné.",
@@ -1744,31 +1862,33 @@ export const messages = {
     "create.error.nameRequired": "Zadajte, prosím, svoje meno.",
     "create.error.startRequired": "Vyberte, prosím, dátum a čas začiatku.",
     "form.errorSummary.title": "Opravte, prosím, nasledujúce:",
-    "op.queued": "Uložené — vaše {what} sa odošle po pripojení.",
+    "op.queued": "Uložené, vaše {what} sa odošle po pripojení.",
     "op.introPublished": "Vaše predstavenie bolo zverejnené.",
-    "op.introSubmittedProcessing": "Vaše predstavenie bolo odoslané — koordinátor ho spracúva.",
+    "op.introSubmittedProcessing": "Vaše predstavenie bolo odoslané. Koordinátor ho spracúva.",
     "op.talkSubmitted": "Vaša prednáška bola odoslaná koordinátorovi.",
-    "op.talkAwaitingModeration": "Vaša prednáška bola odoslaná — čaká na schválenie organizátorom.",
+    "op.talkAwaitingModeration": "Vaša prednáška bola odoslaná. Čaká na schválenie organizátorom.",
     "op.eventCreated": "Vaše podujatie bolo vytvorené a zverejnené.",
-    "op.eventCreateQueued": "Uložené — podujatie sa zverejní po pripojení. Ostatní ho zatiaľ nevidia.",
+    "op.eventCreateQueued": "Uložené, podujatie sa zverejní po pripojení. Ostatní ho zatiaľ nevidia.",
     "op.eventUpdated": "Údaje podujatia boli aktualizované a zverejnené.",
-    "op.eventUpdateQueued": "Uložené — zmeny sa zverejnia po pripojení. Účastníci zatiaľ vidia pôvodné údaje.",
+    "op.eventUpdateQueued": "Uložené, zmeny sa zverejnia po pripojení. Účastníci zatiaľ vidia pôvodné údaje.",
     "op.postPublished": "Váš príspevok bol zverejnený.",
-    "op.postQueued": "Uložené — príspevok sa zverejní po pripojení. Účastníci ho zatiaľ nevidia.",
+    "op.postQueued": "Uložené, príspevok sa zverejní po pripojení. Účastníci ho zatiaľ nevidia.",
     "op.pagePublished": "Stránka podujatia bola uložená a zverejnená.",
-    "op.pageQueued": "Uložené — stránka sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodnú stránku.",
+    "op.pageQueued": "Uložené, stránka sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodnú stránku.",
     "op.themePublished": "Vzhľad bol zverejnený.",
-    "op.themeQueued": "Uložené — vzhľad sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodný vzhľad.",
+    "op.themeQueued": "Uložené, vzhľad sa zverejní po pripojení. Účastníci zatiaľ vidia pôvodný vzhľad.",
     "op.coOrgSent": "Organizátorské kľúče boli odoslané spoluorganizátorovi.",
     "op.coOrgQueued":
-      "Uložené — organizátorské kľúče sa odošlú po pripojení. Dovtedy si spoluorganizátor podujatie neodomkne.",
-    "create.error.identityFailed": "Nepodarilo sa vytvoriť vašu identitu — skúste to znova.",
+      "Uložené, organizátorské kľúče sa odošlú po pripojení. Dovtedy si spoluorganizátor podujatie neodomkne.",
+    "create.error.identityFailed": "Nepodarilo sa vytvoriť vašu identitu, skúste to znova.",
     "create.error.loginToUpload":
-      "Ak chcete nahrať obrázky, prihláste sa (alebo najprv vytvorte podujatie) — dovtedy sa použijú vygenerované.",
+      "Ak chcete nahrať obrázky, prihláste sa (alebo najprv vytvorte podujatie). Dovtedy sa použijú vygenerované.",
     "create.error.uploadFailed": "Nahranie obrázka zlyhalo: {reason}",
 
     // Event home
     "event.loadFailed": "Toto podujatie sa nepodarilo načítať.",
+    "event.loadFailed.body":
+      "Zatiaľ sa nepodarilo načítať nič o tomto podujatí: jeho údaje sú na relayoch a žiadny neodpovedal. Zvyčajne je na vine sieť, nie podujatie.",
     "event.loading": "Načítava sa podujatie…",
     "event.approval.invite": "Iba na pozvánku",
     "event.approval.manual": "Schválenie organizátorom",
@@ -1778,8 +1898,9 @@ export const messages = {
     "event.status.pending": "Čaká sa",
     "event.status.visitor": "Návštevník",
     "event.ownStatus.title": "Problém so spracovaním",
-    "event.ownStatus.submission": "Tvoj profil sa nepodarilo spracovať — skús ho odoslať znova.",
-    "event.ownStatus.talk": "Tvoju prednášku sa nepodarilo spracovať — skús ju nahrať znova.",
+    "event.ownStatus.submission": "Tvoj profil sa nepodarilo spracovať. Skús ho odoslať znova.",
+    "event.ownStatus.talk": "Tvoju prednášku sa nepodarilo spracovať. Skús ju nahrať znova.",
+    "event.ownStatus.chat": "Toto zariadenie sa nepodarilo pridať do skupinového chatu. Otvor Chat, kde nájdeš, čo s tým.",
     "event.recoverKeys.title": "Organizátor na novom zariadení?",
     "event.recoverKeys.body":
       "Ak si toto podujatie vytvoril týmto účtom, jeho kľúče majú šifrovanú zálohu na relayoch. Obnovenie požiada tvoj podpisovač o jej odomknutie.",
@@ -1787,7 +1908,7 @@ export const messages = {
     "event.recoverKeys.working": "Obnovuje sa…",
     "event.recoverKeys.restored": "Tvoje organizátorské kľúče sú späť na tomto zariadení.",
     "event.recoverKeys.empty": "Pre tento účet sa nenašla žiadna záloha kľúčov k tomuto podujatiu.",
-    "event.recoverKeys.failed": "Kľúče sa nepodarilo obnoviť — skontroluj pripojenie alebo podpisovač a skús to znova.",
+    "event.recoverKeys.failed": "Kľúče sa nepodarilo obnoviť. Skontroluj pripojenie alebo podpisovač a skús to znova.",
     "event.retention.line": "Tvoje údaje z podujatia sa vymažú {days} dní po podujatí.",
     "event.leave.action": "Opustiť podujatie",
     "event.leave.confirm": "Opustiť toto podujatie? Odošle sa žiadosť organizátorovi, aby odstránil tvoj záznam v adresári a zhody a vymazal tvoje intro médiá. Prejaví sa to, keď ju spracuje.",
@@ -1795,15 +1916,15 @@ export const messages = {
     "event.leave.cancel": "Zrušiť",
     "event.leave.leaving": "Opúšťam…",
     "event.leave.done": "Opustil si toto podujatie.",
-    "event.leave.requested": "Tvoja žiadosť o odchod bola odoslaná. Organizátor odstráni tvoj záznam, zhody a médiá — môže to chvíľu trvať.",
+    "event.leave.requested": "Tvoja žiadosť o odchod bola odoslaná. Organizátor odstráni tvoj záznam, zhody a médiá. Môže to chvíľu trvať.",
     "event.leave.queued": "Tvoja žiadosť o odchod je uložená a odošle sa po opätovnom pripojení. Zatiaľ si neodišiel.",
-    "event.leave.failed": "Nepodarilo sa odísť — skús to znova.",
+    "event.leave.failed": "Nepodarilo sa odísť, skús to znova.",
     "event.latest": "Najnovšie",
 
     // Readiness journey (redesign §4.1)
     "readiness.title": "Pripravujeme vás",
     "readiness.progress": "{done} z {total}",
-    "readiness.allSet": "Všetko je hotové — spojenia sú pripravené",
+    "readiness.allSet": "Všetko je hotové: spojenia sú pripravené",
     "readiness.step.joined": "Pripojené",
     "readiness.step.backup": "Záloha zabezpečená",
     "readiness.step.intro": "Predstavenie odoslané",
@@ -1822,18 +1943,28 @@ export const messages = {
     "readiness.hint.empty":
       "Tvoj profil je prázdny, párovanie nemá z čoho vychádzať a v ničích návrhoch sa neobjavíš. Stačí veta o sebe alebo pár zručností.",
     "readiness.cta.matches": "Zobraziť spojenia",
+    "readiness.cta.rerecord": "Nahrať predstavenie znova",
+    "readiness.lastChecked": "Naposledy overené o {time}.",
+    "readiness.checkAgain": "Overiť znova",
+    "readiness.checking": "Overuje sa…",
+    "readiness.cta.editProfile": "Upraviť profil",
+    "readiness.hint.failed":
+      "Koordinátorovi sa nepodarilo zostaviť váš profil. Keď ho upravíte a uložíte, odošle sa znova.",
+    "readiness.hint.failedMedia":
+      "Vašu nahrávku sa nepodarilo spracovať. Zvyčajne pomôže nahrať novú.",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuálny krok",
+    "readiness.state.failed": "Vyžaduje vašu pozornosť",
     "readiness.state.upcoming": "Nasleduje",
 
     "event.organizerAdmin": "Administračné rozhranie udalosti",
     "event.recordIntro": "Nahrajte svoje predstavenie",
     "event.recordIntro.body":
-      "Spojenia vznikajú z predstavovacích videí — nahrajte svoje, aby ste sa v nich objavili.",
+      "Spojenia vznikajú z predstavovacích videí. Nahrajte svoje, aby ste sa v nich objavili.",
     "event.seeWhosHere": "Pozrite, kto je tu",
     "event.peopleToMeet": "Ľudia, ktorých by ste mali stretnúť",
     "event.recordOrUpdate": "Nahrať / aktualizovať predstavenie",
-    "event.requestSent": "Žiadosť odoslaná — čaká sa na schválenie.",
+    "event.requestSent": "Žiadosť odoslaná, čaká sa na schválenie.",
     "event.requestSent.body":
       "Organizátor vás vpustí; vráťte sa sem. Hneď ako vás schváli, podujatie sa vám otvorí.",
     "event.checkStatus": "Skontrolovať stav",
@@ -1842,7 +1973,7 @@ export const messages = {
       "Schváli vás organizátor (alebo okamžite pomocou pozývacieho odkazu).",
     "event.install.title": "Pridajte si Nostrauticu na plochu",
     "event.install.body":
-      "Počas podujatia ju budete otvárať často — jedno klepnutie je lepšie než hľadanie medzi kartami.",
+      "Počas podujatia ju budete otvárať často. Jedno klepnutie je lepšie než hľadanie medzi kartami.",
     "event.install.install": "Inštalovať",
     "event.install.notNow": "Teraz nie",
     "event.install.iosHint":
@@ -1852,7 +1983,9 @@ export const messages = {
     "event.posts": "Príspevky",
     "event.pinned": "Pripnuté",
     "event.attendeesSection": "Kto tu je",
-    "event.attendeesSection.count": "Zatiaľ {n} ľudí",
+    "event.attendeesSection.count.one": "Zatiaľ {n} človek",
+    "event.attendeesSection.count.few": "Zatiaľ {n} ľudia",
+    "event.attendeesSection.count.many": "Zatiaľ {n} ľudí",
     "event.allPosts": "Všetky príspevky ›",
     "event.report": "Správa z podujatia",
     "event.offline.title": "Dostupné offline",
@@ -1862,8 +1995,10 @@ export const messages = {
     "event.offline.downloadingShort": "Sťahujem…",
     "event.offline.downloading": "Sťahujem… ({n} z {total})",
     "event.offline.ready": "Pripravené na použitie offline.",
-    "event.offline.partial": "Uložené, no niektoré časti sa nestiahli — skúste znova.",
+    "event.offline.partial": "Uložené, no niektoré časti sa nestiahli. Skúste znova.",
     "event.offline.noSw": "Dáta sú uložené, ale obrazovky aplikácie ešte nie sú uložené. Znova otvorte aplikáciu (alebo obnovte stránku) a stiahnite znova, aby sa otvorila aj bez signálu.",
+    "event.offline.storageFull":
+      "Zariadenie nemá voľné miesto, takže sa nič neukladá na offline použitie. Uvoľnite miesto a stiahnite to znova.",
     "event.offline.stored": "Pridané {size} do zariadenia",
     "event.offline.persisted": "ponechané v tomto zariadení",
     "event.offline.mediaNote": "zvuk/video sa nesťahuje vopred",
@@ -1900,14 +2035,14 @@ export const messages = {
     "post.editor.imagePreview": "náhľad úvodného obrázka",
     "cropper.title": "Umiestnite obrázok",
     "cropper.hint": "Ťahaním posúvajte, posuvníkom priblížte. Uloží sa presne to, čo vidíte.",
-    "cropper.viewportLabel": "Náhľad orezu — presúvajte ťahaním alebo šípkami",
+    "cropper.viewportLabel": "Náhľad orezu: presúvajte ťahaním alebo šípkami",
     "cropper.zoom": "Priblíženie",
     "cropper.use": "Použiť",
     "cropper.cancel": "Zrušiť",
-    "cropper.decodeError": "Tento obrázok sa nepodarilo otvoriť — môže ísť o formát HEIC alebo nepodporovaný formát. Skúste JPEG alebo PNG.",
+    "cropper.decodeError": "Tento obrázok sa nepodarilo otvoriť: môže ísť o formát HEIC alebo nepodporovaný formát. Skúste JPEG alebo PNG.",
     "post.replyingTo": "Odpoveď na",
     "post.quote.unavailable": "Citovaný príspevok nedostupný",
-    "post.editor.contentPlaceholder": "Napíšte príspevok — Markdown podporovaný.",
+    "post.editor.contentPlaceholder": "Napíšte príspevok. Markdown podporovaný.",
     "post.editor.visibility": "Kto ho môže čítať",
     "post.editor.public": "Verejný",
     "post.editor.public.hint": "ktokoľvek, v akomkoľvek Nostr klientovi",
@@ -1919,9 +2054,12 @@ export const messages = {
     "post.editor.preview": "Náhľad",
     "post.editor.nothingToPreview": "Zatiaľ nie je čo zobraziť.",
     "post.editor.bytes": "{n} bajtov",
+    "post.editor.bytes.one": "{n} bajt",
+    "post.editor.bytes.few": "{n} bajty",
+    "post.editor.bytes.many": "{n} bajtov",
     "post.editor.byteCount": "{used} / {max} bajtov",
     "post.editor.tooLong":
-      "Príliš dlhé pre príspevok len pre členov — limit je {max} bajtov Markdownu. Skráťte približne o {over} bajtov.",
+      "Príliš dlhé pre príspevok len pre členov: limit je {max} bajtov Markdownu. Skráťte približne o {over} bajtov.",
     "post.editor.publishing": "Zverejňuje sa…",
     "post.editor.publish": "Zverejniť príspevok",
     "post.editor.saveEdit": "Uložiť úpravu",
@@ -1930,17 +2068,16 @@ export const messages = {
     // Join
     "join.title": "Pripojiť sa: {title}",
     "join.retention": "Údaje z tohto podujatia sa vymažú {days} dní po jeho skončení.",
-    "join.wentWrong": "Niečo sa pokazilo.",
     "join.loading": "Načítava sa podujatie…",
     "join.youreIn": "Ste vnútri",
     "join.recordIntro": "Nahrať predstavenie",
     "join.whyIntro.summary": "Prečo nahrať predstavenie?",
-    "join.whyIntro.intro": "Nepovinné, ale odporúčané — pomôže to v niekoľkých smeroch:",
-    "join.whyIntro.matches": "Lepšie zhody — čím viac o sebe prezradíte, tým má párovanie s čím pracovať.",
+    "join.whyIntro.intro": "Nepovinné, ale odporúčané. Pomôže to v niekoľkých smeroch:",
+    "join.whyIntro.matches": "Lepšie zhody: čím viac o sebe prezradíte, tým má párovanie s čím pracovať.",
     "join.whyIntro.vibe":
-      "Pocit, s kým by ste si sadli — ostatní si môžu prehrať vaše predstavenie a zistiť, či by ste si sadli. Párovanie nie je len o projektoch a zručnostiach — je to aj pocit, ktorý AI sama o sebe nedokáže zachytiť.",
+      "Pocit, s kým by ste si sadli: ostatní si môžu prehrať vaše predstavenie a zistiť, či by ste si sadli. Párovanie nie je len o projektoch a zručnostiach, je to aj pocit, ktorý AI sama o sebe nedokáže zachytiť.",
     "join.whyIntro.recognize":
-      "Spoznáte sa navzájom — video predstavenie znamená, že svoje zhody naozaj spoznáte, keď ich stretnete v dave.",
+      "Spoznáte sa navzájom: video predstavenie znamená, že svoje zhody naozaj spoznáte, keď ich stretnete v dave.",
     "join.goToOverview": "Prejsť na prehľad podujatia",
     "join.seeWhosHere": "Pozrite, kto je tu",
     "join.backupIdentity": "Zálohujte si novú identitu",
@@ -1958,44 +2095,44 @@ export const messages = {
     "join.noName": "(vo vašom profile na Nostri nie je nastavené meno)",
     "join.aboutYou": "O vás",
     "join.fromProfile":
-      "Z vášho profilu na Nostri — nemeníme ho. Ak ho chcete upraviť, upravte ho vo svojej Nostr aplikácii a zobrazí sa tu.",
+      "Z vášho profilu na Nostri. Nemeníme ho. Ak ho chcete upraviť, upravte ho vo svojej Nostr aplikácii a zobrazí sa tu.",
     "join.inviteRecognized": "Pozvánka rozpoznaná",
-    "join.displayNameEvent": "(pre toto podujatie — váš Nostr profil zostáva nezmenený)",
+    "join.displayNameEvent": "(pre toto podujatie, váš Nostr profil zostáva nezmenený)",
     "join.profile.failed.title": "Nepodarilo sa načítať váš profil",
     "join.profile.failed.body":
       "Nepodarilo sa spojiť s relaymi a načítať váš Nostr profil. Skúste znova alebo jednoducho zadajte meno pre toto podujatie.",
     "join.profile.retry": "Skúsiť znova",
     "join.profile.empty":
-      "Zatiaľ nemáte verejný Nostr profil. Zadajte meno pre toto podujatie — váš Nostr profil sa nemení.",
+      "Zatiaľ nemáte verejný Nostr profil. Zadajte meno pre toto podujatie. Váš Nostr profil sa nemení.",
     "join.publicNote":
-      "Meno, fotka a bio sú verejné — všetko ostatné zostáva vnútri podujatia.",
+      "Meno, fotka a bio sú verejné, všetko ostatné zostáva vnútri podujatia.",
     "join.photoPublic": "verejné",
     "join.photoAdd": "Fotka",
     "join.photoTap": "klepnutím pridáte",
     "join.displayNamePublic": "(verejné)",
     "join.namePlaceholder": "Ako vás majú ľudia poznať?",
     "join.aboutOptional": "(voliteľné)",
-    "join.aboutEvent": "(pre toto podujatie — tvoj Nostr profil sa nemení)",
+    "join.aboutEvent": "(pre toto podujatie, tvoj Nostr profil sa nemení)",
     "join.about.placeholder": "Veta či dve o tom, čomu sa venuješ.",
     "join.empty.badge": "Zatiaľ niet čo párovať",
     "join.empty.hint":
-      "Takto sa pripojiť môžeš, ale párovanie nemá z čoho vychádzať — pridaj vetu o sebe alebo pár zručností a naozaj ťa s niekým spojíme.",
-    "join.concreteHint": "Ďalšie dve polia určia, koho by ste mali stretnúť — buďte konkrétni.",
+      "Takto sa pripojiť môžeš, ale párovanie nemá z čoho vychádzať: pridaj vetu o sebe alebo pár zručností a naozaj ťa s niekým spojíme.",
+    "join.concreteHint": "Ďalšie dve polia určia, koho by ste mali stretnúť. Buďte konkrétni.",
     "join.skills": "Zručnosti",
-    "join.skills.hint": "— oddeľte čiarkami",
+    "join.skills.hint": "(oddeľte čiarkami)",
     "join.skills.placeholder": "kryptografia, rust, dizajn",
     "join.lookingFor": "Čo hľadáte?",
     "join.lookingFor.placeholder": "spoluzakladateľa, spolupracovníkov…",
     "join.rsvpPublic": "Zverejniť verejnú účasť (ostatní uvidia, že sa zúčastňujem)",
     "join.reuse.title": "Použiť vaše predchádzajúce predstavenie?",
     "join.reuse.body":
-      "Už máte predstavovacie video ({duration}s). Prineste ho na toto podujatie namiesto opätovného nahrávania — spojenia vznikajú z predstavení.",
+      "Už máte predstavovacie video ({duration}s). Prineste ho na toto podujatie namiesto opätovného nahrávania. Spojenia vznikajú z predstavení.",
     "join.reuse.reuse": "Použiť znova",
-    "join.reuse.reuse.hint": "— najrýchlejšie, zrkadlí existujúce video",
+    "join.reuse.reuse.hint": "(najrýchlejšie, zrkadlí existujúce video)",
     "join.reuse.fresh": "Čerstvá kópia",
-    "join.reuse.fresh.hint": "— nahrá sa znova, takže nie je prepojiteľné medzi podujatiami",
+    "join.reuse.fresh.hint": "(nahrá sa znova, takže nie je prepojiteľné medzi podujatiami)",
     "join.reuse.new": "Nahrám nové",
-    "join.reuse.new.hint": "— neskôr, na stránke podujatia",
+    "join.reuse.new.hint": "(neskôr, na stránke podujatia)",
     "join.sending": "Odosiela sa…",
     "join.send": "Odoslať žiadosť o pripojenie",
     "join.createAndJoin": "Vytvoriť identitu a pripojiť sa",
@@ -2010,13 +2147,13 @@ export const messages = {
     "record.uploaded":
       "Nahrané ✓ Vaše {kind} je zašifrované a zdieľané s účastníkmi tohto podujatia.",
     "record.done.queued":
-      "Uložené na tomto zariadení ✓ Vaše {kind} je zašifrované a odošle sa hneď po pripojení k relay — zatiaľ sa k podujatiu nedostalo.",
+      "Uložené na tomto zariadení ✓ Vaše {kind} je zašifrované a odošle sa hneď po pripojení k relay. Zatiaľ sa k podujatiu nedostalo.",
     "record.done.introPublished":
       "Zverejnené ✓ Vaše {kind} je zašifrované a zdieľané s účastníkmi tohto podujatia.",
     "record.done.introProcessing":
-      "Odoslané ✓ Vaše {kind} je zašifrované a na ceste — koordinátor ho práve spracúva.",
+      "Odoslané ✓ Vaše {kind} je zašifrované a na ceste. Koordinátor ho práve spracúva.",
     "record.done.talkModeration":
-      "Odoslané ✓ Vaše {kind} je zašifrované a odovzdané — zobrazí sa po schválení organizátorom.",
+      "Odoslané ✓ Vaše {kind} je zašifrované a odovzdané. Zobrazí sa po schválení organizátorom.",
     "record.kind.intro": "predstavenie",
     "record.kind.talk": "prednáška",
     "record.backToEvent": "Späť na podujatie",
@@ -2029,7 +2166,7 @@ export const messages = {
     "record.role.join": "Pripojiť sa k podujatiu",
     "record.reuse.title": "Znova použiť predchádzajúce predstavenie",
     "record.reuse.body":
-      "Vyberte si predstavenie, ktoré ste nahrali alebo napísali na inom podujatí — použite ho tak, ako je, alebo si spravte čerstvú kópiu, ktorá nie je prepojiteľná medzi podujatiami.",
+      "Vyberte si predstavenie, ktoré ste nahrali alebo napísali na inom podujatí: použite ho tak, ako je, alebo si spravte čerstvú kópiu, ktorá nie je prepojiteľná medzi podujatiami.",
     "record.reuse.reuse": "Použiť znova",
     "record.reuse.fresh": "Čerstvá kópia",
     "record.reuse.videoLabel": "Video",
@@ -2041,29 +2178,35 @@ export const messages = {
     "record.uploading": "Nahráva sa…",
     "record.useThis": "Použiť toto",
     "record.limit": "Limit: {sec}s. Nahrávanie sa na limite tvrdo zastaví.",
-    "record.limit.unlimited": "Bez limitu — nahrávanie beží, kým ho nezastavíte.",
+    "record.limit.unlimited": "Bez limitu: nahrávanie beží, kým ho nezastavíte.",
     "record.timeLeft": " · zostáva {sec}s",
     "record.elapsed": " · zatiaľ nahraté {sec}s",
     "record.stop": "■ Zastaviť",
     "record.enableCamera": "Povoliť kameru",
     "record.record": "● Nahrávať",
     "record.error.camera": "Na nahrávanie je potrebný prístup ku kamere/mikrofónu. {reason}",
-    "record.deviceError.denied.camera": "Prístup ku kamere bol zablokovaný. Povoľte kameru a mikrofón pre túto stránku v paneli s adresou a skúste znova — alebo nahrajte zvuk či napíšte predstavenie.",
-    "record.deviceError.denied.mic": "Prístup k mikrofónu bol zablokovaný. Povoľte mikrofón pre túto stránku v paneli s adresou a skúste znova — alebo napíšte predstavenie.",
+    "record.deviceError.denied.camera": "Prístup ku kamere bol zablokovaný. Povoľte kameru a mikrofón pre túto stránku v paneli s adresou a skúste znova, alebo nahrajte zvuk či napíšte predstavenie.",
+    "record.deviceError.denied.mic": "Prístup k mikrofónu bol zablokovaný. Povoľte mikrofón pre túto stránku v paneli s adresou a skúste znova, alebo napíšte predstavenie.",
     "record.deviceError.absent.camera": "Na tomto zariadení sa nenašla kamera. Skúste zariadenie s kamerou, alebo nahrajte zvuk či napíšte predstavenie.",
     "record.deviceError.absent.mic": "Na tomto zariadení sa nenašiel mikrofón. Skúste iné zariadenie, alebo napíšte predstavenie.",
     "record.deviceError.busy.camera": "Vašu kameru používa iná aplikácia alebo karta. Zatvorte ju a skúste znova.",
     "record.deviceError.busy.mic": "Váš mikrofón používa iná aplikácia alebo karta. Zatvorte ju a skúste znova.",
-    "record.deviceError.unsupported.camera": "Nahrávanie tento prehliadač nepodporuje. Skúste novší Chrome, Safari alebo Firefox — alebo napíšte predstavenie.",
-    "record.deviceError.unsupported.mic": "Nahrávanie tento prehliadač nepodporuje. Skúste novší prehliadač — alebo napíšte predstavenie.",
+    "record.deviceError.unsupported.camera": "Nahrávanie tento prehliadač nepodporuje. Skúste novší Chrome, Safari alebo Firefox, alebo napíšte predstavenie.",
+    "record.deviceError.unsupported.mic": "Nahrávanie tento prehliadač nepodporuje. Skúste novší prehliadač, alebo napíšte predstavenie.",
     "record.deviceError.unknown.camera": "Kameru sa nepodarilo spustiť. Skúste znova, alebo nahrajte zvuk či napíšte predstavenie.",
     "record.deviceError.unknown.mic": "Mikrofón sa nepodarilo spustiť. Skúste znova, alebo napíšte predstavenie.",
 
     // Attendees
     "attendees.title": "Ľudia",
     "attendees.decrypting": "Dešifruje sa zoznam…",
-    "attendees.empty":
-      "Nie sú viditeľní žiadni účastníci. Zoznam je zašifrovaný pre schválených účastníkov — ak ste sa ešte nepripojili, je to preto; ak vás práve schválili, o chvíľu obnovte stránku.",
+    "attendees.empty.notApproved":
+      "Zoznam účastníkov je zašifrovaný pre schválených účastníkov a toto zariadenie ešte nemá kľúč. Pripojte sa k podujatiu, alebo ak vás práve schválili, chvíľu počkajte a skúste to znova.",
+    "attendees.empty.none":
+      "V zozname zatiaľ nikto nie je. Ľudia sa tu objavia, keď ich organizátor schváli; ak schválili práve vás, váš vlastný záznam môže prísť s minútovým oneskorením.",
+    "attendees.empty.unreachable":
+      "Nepodarilo sa spojiť s relaymi, ktoré držia zoznam účastníkov, takže nevieme povedať, kto je tu. Wi-Fi na mieste ich často blokuje. Skúste to znova alebo prepnite sieť.",
+    "attendees.empty.staleKey":
+      "Ľudia tu sú, ale toto zariadenie zoznam neprečíta. Váš prístupový kľúč je zastaraný, čo sa stáva po tom, ako organizátor niekoho odstráni. Skúste to o chvíľu znova; ak to pretrváva, overte si u organizátora, či ste stále na zozname.",
     "attendees.backToEvent": "Späť na podujatie",
     "attendees.count.one": "{n} účastník",
     "attendees.count.few": "{n} účastníci",
@@ -2114,12 +2257,12 @@ export const messages = {
     "profile.authored.introText": "Textové predstavenie",
     "profile.authored.introText.hint": "Krátke písané predstavenie, použije sa, keď nemáte nahrávku.",
     "profile.authored.cancel": "Zrušiť",
-    "profile.authored.saved.hint": "Odoslaná nová revízia — nahrádza to, čo ste napísali predtým.",
+    "profile.authored.saved.hint": "Odoslaná nová revízia. Nahrádza to, čo ste napísali predtým.",
     "profile.generated.title": "Vygenerované z vášho predstavenia",
     "profile.generated.hint":
       "Koordinátor podujatia to zostavil z vášho predstavenia. Ktorékoľvek pole opravte, skryte alebo skryte celé.",
     "profile.generated.none":
-      "Zatiaľ žiadny AI profil — objaví sa po spracovaní vášho predstavenia (alebo je skrytý).",
+      "Zatiaľ žiadny AI profil. Objaví sa po spracovaní vášho predstavenia (alebo je skrytý).",
     "profile.hide.all": "Skryť celý AI profil (zobraziť len to, čo ste napísali)",
     "profile.field.summary": "Zhrnutie",
     "profile.field.skills": "Zručnosti",
@@ -2127,7 +2270,7 @@ export const messages = {
     "profile.field.offers": "Viem pomôcť s",
     "profile.field.seeks": "Hľadám",
     "profile.field.hide": "Skryť",
-    "profile.field.hidden": "Skryté — toto pole sa nezobrazí.",
+    "profile.field.hidden": "Skryté: toto pole sa nezobrazí.",
     "profile.field.listPlaceholder": "Jedno na riadok",
     "profile.field.listHint": "Jedna položka na riadok.",
     "profile.report.title": "Nahlásiť problém (voliteľné)",
@@ -2147,7 +2290,7 @@ export const messages = {
     "attendee.recentPosts": "Nedávne príspevky",
     "attendee.name": "Účastník",
     "attendee.error.badNpub": "neplatný npub",
-    "attendee.error.badNpub.body": "Tento odkaz na profil nie je platný — skontrolujte ho a skúste to znova.",
+    "attendee.error.badNpub.body": "Tento odkaz na profil nie je platný. Skontrolujte ho a skúste to znova.",
     "attendee.translated": "Preložené",
     "attendee.showOriginal": "zobraziť originál",
     "attendee.showTranslation": "zobraziť preklad",
@@ -2160,7 +2303,7 @@ export const messages = {
     // Matches
     "matches.title": "Ľudia, ktorých sa oplatí stretnúť",
     "matches.none.noIntro":
-      "Zatiaľ žiadne spojenia — koordinátor začína z vášho Nostr profilu a príspevkov, skúste o pár minút. Nahraté predstavenie vaše spojenia výrazne zlepší.",
+      "Zatiaľ žiadne spojenia. Koordinátor začína z vášho Nostr profilu a príspevkov, skúste o pár minút. Nahraté predstavenie vaše spojenia výrazne zlepší.",
     "matches.live": "vaše predstavenie je odoslané, takže tieto sú aktuálne",
     "matches.band.strong": "Silná zhoda",
     "matches.band.good": "Dobrá zhoda",
@@ -2178,13 +2321,13 @@ export const messages = {
     "matches.seeWhosHere": "Pozrite, kto je tu",
     "matches.fetching": "Načítavajú sa vaše spojenia…",
     "matches.none":
-      "Zatiaľ žiadne spojenia — objavia sa, keď koordinátor spracuje pár účastníkov. Vráťte sa čoskoro.",
-    "matches.rankedNote": "Zoradené podľa toho, koľko by vám stretnutie prinieslo — aj s odôvodnením.",
+      "Zatiaľ žiadne spojenia. Objavia sa, keď koordinátor spracuje pár účastníkov. Vráťte sa čoskoro.",
+    "matches.rankedNote": "Zoradené podľa toho, koľko by vám stretnutie prinieslo, aj s odôvodnením.",
     "matches.matchPct": "{pct}% zhoda",
     "matches.similar": "podobnosť {pct}%",
     "matches.complementary": "doplnkovosť {pct}%",
     "matches.name": "Účastník",
-    "matches.role.loggedOut": "Prihláste sa, aby ste videli, s kým sa stretnúť — vaše zhody sú viazané na váš účet.",
+    "matches.role.loggedOut": "Prihláste sa, aby ste videli, s kým sa stretnúť. Vaše zhody sú viazané na váš účet.",
     "matches.role.login": "Prihlásiť sa",
     "matches.role.visitor": "Zhody sú pre členov. Pripojte sa k podujatiu a získajte osobný zoznam ľudí, s ktorými sa oplatí stretnúť.",
     "matches.role.join": "Pripojiť sa k podujatiu",
@@ -2197,37 +2340,46 @@ export const messages = {
     "me.title.new": "Teraz ste používateľ Nostru",
     "me.title.profile": "Váš profil na Nostri",
     "me.new.body":
-      "Vlastníte skutočnú identitu na Nostri — účet, ktorý neovláda žiadna firma a nikto vám ho nemôže vziať. Váš profil a ľudia, ktorých sledujete, s ním putujú do celého ekosystému aplikácií.",
+      "Vlastníte skutočnú identitu na Nostri: účet, ktorý neovláda žiadna firma a nikto vám ho nemôže vziať. Váš profil a ľudia, ktorých sledujete, s ním putujú do celého ekosystému aplikácií.",
     "me.handle": "Vaša verejná adresa (npub)",
     "me.handle.body":
-      "Zdieľajte ju voľne — takto vás ľudia nájdu a začnú sledovať. (Je bezpečné ju zverejniť.)",
+      "Zdieľajte ju voľne: takto vás ľudia nájdu a začnú sledovať. (Je bezpečné ju zverejniť.)",
     "me.copied": "Skopírované ✓",
     "me.copyNpub": "Kopírovať npub",
     "me.signedInVia": "Prihlásený(á) cez {method}.",
-    "me.keyInSigner": "Váš kľúč žije vo vašom podpisovači — zálohujte si ho tam.",
+    "me.keyInSigner": "Váš kľúč žije vo vašom podpisovači. Zálohujte si ho tam.",
     "me.takeAnywhere": "Vezmite si to kamkoľvek",
     "me.takeAnywhere.body":
-      "Toto sú nezávislé aplikácie na Nostri — ako rôzni klienti pre ten istý účet. Skopírujte si kľúč nižšie, otvorte niektorú z nich, zvoľte „prihlásiť sa kľúčom“ a vložte ho — váš profil aj ľudia, ktorých sledujete, tam už sú.",
+      "Toto sú nezávislé aplikácie na Nostri, ako rôzni klienti pre ten istý účet. Skopírujte si kľúč nižšie, otvorte niektorú z nich, zvoľte „prihlásiť sa kľúčom“ a vložte ho. Váš profil aj ľudia, ktorých sledujete, tam už sú.",
     "me.backupKey": "Zálohujte si kľúč",
     "me.logout": "Odhlásiť sa",
-    "me.logout.warnUnsent":
-      "Máte {n} neodoslaných akcií čakajúcich na odoslanie. Odhlásením sa zahodia — nezverejnia sa. Napriek tomu sa odhlásiť?",
+    "me.logout.warnUnsent.one":
+      "Máte {n} neodoslanú akciu čakajúcu na odoslanie. Odhlásením sa zahodí. Nezverejní sa. Napriek tomu sa odhlásiť?",
+    "me.logout.warnUnsent.few":
+      "Máte {n} neodoslané akcie čakajúce na odoslanie. Odhlásením sa zahodia. Nezverejnia sa. Napriek tomu sa odhlásiť?",
+    "me.logout.warnUnsent.many":
+      "Máte {n} neodoslaných akcií čakajúcich na odoslanie. Odhlásením sa zahodia. Nezverejnia sa. Napriek tomu sa odhlásiť?",
     "me.logout.confirmDiscard": "Odhlásiť a zahodiť",
     "me.logout.cancel": "Zostať prihlásený",
+    "me.logout.keyLoss.title": "Odhlásenie vymaže váš kľúč z tohto zariadenia",
+    "me.logout.keyLoss.body":
+      "Túto Nostr identitu vám vytvorila táto aplikácia a kľúč je uložený iba v tomto zariadení. Zatiaľ ste si ho nikam neuložili. Odhlásením sa nenávratne vymaže. Nikto ho neobnoví: prídete o profil, o podujatia, do ktorých ste sa zapojili, aj o svoje správy.",
+    "me.logout.keyLoss.backup": "Najprv si uložte kľúč",
+    "me.logout.keyLoss.confirm": "Odhlásiť sa a vymazať kľúč",
 
     // Backup card
     "backup.noKey":
-      "Váš kľúč žije vo vašom podpisovači — zálohujte si ho tam. Tu nie je čo exportovať.",
-    "backup.copied": "Skopírované ✓ — teraz ho vložte do Nostr aplikácie",
+      "Váš kľúč žije vo vašom podpisovači. Zálohujte si ho tam. Tu nie je čo exportovať.",
+    "backup.copied": "Skopírované ✓, teraz ho vložte do Nostr aplikácie",
     "backup.copyKey": "Kopírovať môj tajný kľúč",
-    "backup.stage.copied": "Tajný kľúč skopírovaný. Kopírovanie ešte nie je záloha — uložte ho na bezpečné miesto.",
+    "backup.stage.copied": "Tajný kľúč skopírovaný. Kopírovanie ešte nie je záloha. Uložte ho na bezpečné miesto.",
     "backup.stage.iSavedIt": "Uložil som ho na bezpečné miesto",
     "backup.stage.saved": "Uložené na bezpečnom mieste",
     "backup.stage.confirming": "Potvrdzuje sa záloha…",
     "backup.stage.confirmed": "Záloha potvrdená ✓",
-    "backup.stage.confirmFailed": "Nepodarilo sa zaznamenať značku zálohy — skúste znova.",
+    "backup.stage.confirmFailed": "Nepodarilo sa zaznamenať značku zálohy, skúste znova.",
     "backup.stage.retry": "Zopakovať",
-    "backup.warning.a": "Toto je váš súkromný kľúč. Je ako vaše heslo —",
+    "backup.warning.a": "Toto je váš súkromný kľúč. Je ako vaše heslo:",
     "backup.warning.keepSecret": "držte ho v tajnosti",
     "backup.warning.b":
       ", ktokoľvek, kto ho má, ovláda váš účet. Ak chcete použiť inú Nostr aplikáciu, zvoľte tam „prihlásiť sa kľúčom / nsec“ a vložte tento kľúč.",
@@ -2272,6 +2424,9 @@ export const messages = {
       "Zatiaľ žiadne správy. Otvorte niekoho profil v zozname účastníkov podujatia a klepnite na Napísať správu, čím začnete konverzáciu. Správy sú koncovo šifrované a fungujú aj s inými Nostr aplikáciami na správy.",
     "dm.youPrefix": "Vy: ",
     "dm.unread": "{n} neprečítaných priamych správ",
+    "dm.unread.one": "{n} neprečítaná priama správa",
+    "dm.unread.few": "{n} neprečítané priame správy",
+    "dm.unread.many": "{n} neprečítaných priamych správ",
     "dm.markAllRead": "Označiť všetky ako prečítané",
     "dm.encryptedActivity": "Nová šifrovaná aktivita v schránke",
     "chats.groupSection": "Skupinové chaty",
@@ -2282,10 +2437,10 @@ export const messages = {
     "dmchat.login": "Prihlásiť sa",
     "dmchat.invalidLink": "Neplatný odkaz na profil.",
     "dmchat.title": "Konverzácia",
-    "dmchat.e2e": "Koncovo šifrované (NIP‑17) — čitateľné aj v iných Nostr aplikáciách na správy.",
+    "dmchat.e2e": "Koncovo šifrované (NIP‑17), čitateľné aj v iných Nostr aplikáciách na správy.",
     "dmchat.sharedEvents": "Tiež sa zúčastňuje:",
     "dmchat.decrypting": "Dešifruje sa…",
-    "dmchat.empty": "Zatiaľ žiadne správy — pozdravte sa.",
+    "dmchat.empty": "Zatiaľ žiadne správy. Pozdravte sa.",
     "dmchat.signerSlow": "Čaká sa, kým podpisovač podpíše a zašifruje… ak používate Amber alebo bunker, uistite sa, že je dostupný.",
     "dmchat.placeholder": "Napíšte správu…",
     "dmchat.send": "Odoslať",
@@ -2296,20 +2451,20 @@ export const messages = {
     "admin.done": "Hotovo ✓",
     "admin.notOrganizer.title": "Na tomto zariadení nedržíte organizátorské kľúče tohto podujatia.",
     "admin.notOrganizer.body":
-      "Organizátorské kľúče žijú na zariadení, ktoré podujatie vytvorilo — neodvodzujú sa z vášho prihlásenia. Ak chcete administrovať odtiaľto, nechajte si ich udeliť na npub tohto zariadenia:",
+      "Organizátorské kľúče žijú na zariadení, ktoré podujatie vytvorilo. Neodvodzujú sa z vášho prihlásenia. Ak chcete administrovať odtiaľto, nechajte si ich udeliť na npub tohto zariadenia:",
     "admin.yourNpub": "Váš npub",
     "admin.copyNpub": "Kopírovať npub",
     "admin.copied": "Skopírované ✓",
     "admin.person.copyId": "Skopírovať Nostr id tejto osoby (nprofile)",
-    "admin.person.copyIdFailed": "Kopírovanie zlyhalo — označte a skopírujte ručne:",
+    "admin.person.copyIdFailed": "Kopírovanie zlyhalo. Označte a skopírujte ručne:",
     "admin.grant.step1":
       "Na zariadení, ktorým ste podujatie vytvorili, otvorte Administrácia → Spoluorganizátori.",
     "admin.grant.step2": "Vložte tento npub a pridajte ho.",
     "admin.grant.step3":
-      "Nechajte túto stránku otvorenú — po doručení udelenia sa tu automaticky odomkne.",
+      "Nechajte túto stránku otvorenú. Po doručení udelenia sa tu automaticky odomkne.",
     "admin.grant.waiting": "Každých pár sekúnd sa kontroluje, či udelenie prišlo…",
     "admin.grant.waitingSigner":
-      "Čaká sa na pripojenie podpisovača — kontrola sa spustí hneď, ako sa pripojí.",
+      "Čaká sa na pripojenie podpisovača. Kontrola sa spustí hneď, ako sa pripojí.",
     "admin.grant.notChecking": "Automatická kontrola sa zastavila.",
     "admin.grant.lastChecked": "Naposledy skontrolované o {time}.",
     "admin.grant.checkNow": "Skontrolovať teraz",
@@ -2323,14 +2478,14 @@ export const messages = {
     "admin.section.operations": "Prevádzka",
     "admin.enrollSelf.title": "Pridajte sa na vlastné podujatie",
     "admin.enrollSelf.body":
-      "Vytvorili ste toto podujatie, ale ešte nie ste účastník. Pridajte sa, aby ste sa zobrazili v zozname ľudí, boli spárovaní a — ak je zapnutý skupinový chat — boli doň pridaní. Byť organizátorom vás samo o sebe nezaradí do zoznamu.",
+      "Vytvorili ste toto podujatie, ale ešte nie ste účastník. Pridajte sa, aby ste sa zobrazili v zozname ľudí, boli spárovaní a (ak je zapnutý skupinový chat) boli doň pridaní. Byť organizátorom vás samo o sebe nezaradí do zoznamu.",
     "admin.noEidKey.title": "Kľúč organizátora nie je na tomto zariadení",
     "admin.noEidKey.body":
       "Na tomto zariadení máte rolu organizátora, ale nie podpisový kľúč (E_id), takže odtiaľto sa administrátorské akcie nedajú zverejniť. Otvorte podujatie na zariadení, kde ste ho vytvorili, alebo obnovte zálohu kľúča z toho zariadenia a vráťte sa.",
     "admin.enrollSelf.action": "Pridať sa ako účastník",
     "admin.enrollSelf.busy": "Pridávam…",
     "admin.enrollSelf.sent":
-      "Pridané ✓ — s pripojeným koordinátorom vás do zoznamu ľudí a skupinového chatu pridá v priebehu pár sekúnd. Obnovte pre kontrolu.",
+      "Pridané ✓. S pripojeným koordinátorom vás do zoznamu ľudí a skupinového chatu pridá v priebehu pár sekúnd. Obnovte pre kontrolu.",
     "admin.section.communicate": "Komunikácia",
     "admin.section.people": "Ľudia",
     "admin.section.setup": "Nastavenie podujatia",
@@ -2357,7 +2512,7 @@ export const messages = {
     "admin.metadata.saved": "Uložené ✓",
     "admin.page.title": "Menu a rozloženie",
     "admin.page.body":
-      "Prispôsobte stránku podujatia: menu odkazov (na príspevky alebo akúkoľvek URL) a sekcie pod hlavičkou. Položky len pre členov sú zašifrované — návštevníci ani nevidia, že existujú.",
+      "Prispôsobte stránku podujatia: menu odkazov (na príspevky alebo akúkoľvek URL) a sekcie pod hlavičkou. Položky len pre členov sú zašifrované: návštevníci ani nevidia, že existujú.",
     "admin.page.menu": "Menu",
     "admin.page.moveUp": "Posunúť vyššie",
     "admin.page.moveDown": "Posunúť nižšie",
@@ -2373,7 +2528,7 @@ export const messages = {
     "admin.page.type.pinned": "Pripnuté príspevky",
     "admin.page.type.attendees": "Náhľad účastníkov",
     "admin.page.pinPost": "Pripnúť príspevok…",
-    "admin.page.attendees.hint": "Náhľad zoznamu účastníkov — vidia ho len členovia.",
+    "admin.page.attendees.hint": "Náhľad zoznamu účastníkov. Vidia ho len členovia.",
     "admin.page.membersOnlySection": "Sekcia len pre členov",
     "admin.page.feeds": "Príspevky z iných účtov",
     "admin.page.feeds.body":
@@ -2396,7 +2551,7 @@ export const messages = {
     "admin.page.saved": "Zverejnené ✓",
     "admin.theme.title": "Vzhľad",
     "admin.theme.body":
-      "Vlastné CSS pre stránky tohto podujatia (max 32 KB). Platí len počas prezerania tohto podujatia — nikdy pre zvyšok aplikácie.",
+      "Vlastné CSS pre stránky tohto podujatia (max 32 KB). Platí len počas prezerania tohto podujatia, nikdy pre zvyšok aplikácie.",
     "admin.theme.placeholder": ":root { --accent: #ff6b00; }",
     "admin.theme.byteCount": "{used} / {max} bajtov",
     "admin.theme.tooBig": "príliš veľké na zverejnenie",
@@ -2408,7 +2563,7 @@ export const messages = {
     "admin.coordinator.title": "AI koordinátor",
     "admin.coordinator.attached": "Pripojený:",
     "admin.coordinator.noActivity": "zatiaľ žiadna aktivita",
-    "admin.coordinator.idle": " · ticho — koordinátor publikuje, len keď má čo robiť",
+    "admin.coordinator.idle": " · ticho: koordinátor publikuje, len keď má čo robiť",
     "admin.coordinator.recomputing": "Prepočítava sa…",
     "admin.coordinator.recompute": "↻ Prepočítať všetky spojenia",
     "admin.coordinator.attachedOk":
@@ -2424,7 +2579,7 @@ export const messages = {
     "admin.coordinator.lastSeen": "Naposledy videný:",
     "admin.coordinator.test": "Otestovať spojenie",
     "admin.coordinator.testing": "Testuje sa…",
-    "admin.coordinator.testOk": "Koordinátor je dostupný — oznam a aktivita nájdené.",
+    "admin.coordinator.testOk": "Koordinátor je dostupný: oznam a aktivita nájdené.",
     "admin.coordinator.testFail": "Koordinátor nedostupný (žiadny oznam ani nedávna aktivita).",
     "admin.coordinator.resend": "Znova odoslať grant",
     "admin.coordinator.resending": "Odosiela sa…",
@@ -2440,7 +2595,7 @@ export const messages = {
     "admin.coordinator.paste": "Alebo vložte npub koordinátora (pokročilé)",
     "admin.coordinator.terms": "Podmienky",
     "admin.coordinator.unverified":
-      "Koordinátori si tieto záznamy zverejňujú sami; pripojte len takého, ktorému dôverujete — dokáže čítať obsah podujatia.",
+      "Koordinátori si tieto záznamy zverejňujú sami; pripojte len takého, ktorému dôverujete. Dokáže čítať obsah podujatia.",
     "admin.coordinator.nonPrivate": "opúšťa TEE",
     "admin.coordinator.feat.matching": "Párovanie",
     "admin.coordinator.feat.talks": "Prednášky",
@@ -2450,7 +2605,7 @@ export const messages = {
     "admin.billing.checkout": "Otvoriť platbu",
     "admin.coorg.title": "Spoluorganizátori",
     "admin.coorg.body":
-      "Pridajte niekoho podľa jeho npub a zdieľajte plnú organizátorskú kontrolu — môže upravovať podujatie, schvaľovať účastníkov a spravovať koordinátora. (Ich kľúče sú im zabalené ako darček (gift wrap); prístup získajú, keď nabudúce otvoria podujatie.)",
+      "Pridajte niekoho podľa jeho npub a zdieľajte plnú organizátorskú kontrolu: môže upravovať podujatie, schvaľovať účastníkov a spravovať koordinátora. (Ich kľúče sú im zabalené ako darček (gift wrap); prístup získajú, keď nabudúce otvoria podujatie.)",
     "admin.coorg.placeholder": "npub1… (spoluorganizátor)",
     "admin.coorg.adding": "Pridáva sa…",
     "admin.coorg.add": "Pridať spoluorganizátora",
@@ -2463,14 +2618,14 @@ export const messages = {
     "admin.invites.copyLink": "Kopírovať odkaz",
     "admin.invites.shared.title": "Zdieľaný vstupný kód (jeden QR pre celú sálu)",
     "admin.invites.shared.body":
-      "Jeden kód, ktorý naskenujú všetci — daj ho na úvodnú snímku a ľudia sa pripoja bez čakania na schválenie. Tajomstvom je odkaz: vedieť o podujatí nestačí.",
+      "Jeden kód, ktorý naskenujú všetci: daj ho na úvodnú snímku a ľudia sa pripoja bez čakania na schválenie. Tajomstvom je odkaz: vedieť o podujatí nestačí.",
     "admin.invites.shared.uses": "Počet ľudí",
     "admin.invites.shared.hours": "Platnosť (hodiny)",
     "admin.invites.shared.generate": "Vytvoriť zdieľaný kód",
     "admin.invites.shared.usesHint":
-      "0 znamená bez limitu. Kto ho naskenuje, môže odkaz poslať ďalej, preto nechaj okno krátke — po vypršaní sa oneskorenci dostanú do frontu na schválenie, nie sú odmietnutí.",
+      "0 znamená bez limitu. Kto ho naskenuje, môže odkaz poslať ďalej, preto nechaj okno krátke. Po vypršaní sa oneskorenci dostanú do frontu na schválenie, nie sú odmietnutí.",
     "admin.invites.shared.ephemeral":
-      "Tento kód existuje len v tomto okne — nikde sa neukladá. Ukáž alebo skopíruj ho skôr, než stránku zavrieš.",
+      "Tento kód existuje len v tomto okne. Nikde sa neukladá. Ukáž alebo skopíruj ho skôr, než stránku zavrieš.",
     "admin.invites.copyAll": "Kopírovať všetky odkazy (po riadkoch)",
     "admin.invites.copiedAll": "Všetky skopírované ✓",
     "admin.invites.download": "Stiahnuť ako .txt",
@@ -2482,6 +2637,12 @@ export const messages = {
     "admin.requests.approving": "Schvaľuje sa…",
     "admin.requests.approveAll": "Schváliť všetky ({n})",
     "admin.requests.invite": "pozvánka",
+    "admin.requests.withdrew": "Táto osoba po odoslaní žiadosti požiadala o odchod. Schválením ju teraz znova prijmete.",
+    "admin.requests.withdrew.purge": "Táto osoba po odoslaní žiadosti požiadala o odchod a o vymazanie svojich údajov. Schválením ju teraz znova prijmete.",
+    "admin.people.withdrew":
+      "Táto osoba požiadala o odchod. Jej aplikácia už odstránila predstavenie aj médiá, takže zo zoznamu ju odstráni až zrušenie prístupu tu.",
+    "admin.people.withdrew.purge":
+      "Táto osoba požiadala o odchod a o vymazanie svojich údajov. Jej aplikácia už odstránila predstavenie aj médiá, takže zo zoznamu ju odstráni až zrušenie prístupu tu.",
     "admin.requests.video.one": "{n} video",
     "admin.requests.video.few": "{n} videá",
     "admin.requests.video.many": "{n} videí",
@@ -2495,9 +2656,9 @@ export const messages = {
     "admin.approvedTag": "Schválený ✓",
     "admin.reprocess": "Spracovať znova",
     "common.close": "Zavrieť",
-    "common.copyFailed": "Nepodarilo sa skopírovať automaticky — označte text a skopírujte ho ručne.",
+    "common.copyFailed": "Nepodarilo sa skopírovať automaticky. Označte text a skopírujte ho ručne.",
     "admin.person.details": "Podrobnosti",
-    "admin.person.title": "{name} — podrobnosti",
+    "admin.person.title": "{name}: podrobnosti",
     "admin.person.profile": "Odoslaný profil",
     "admin.person.noIntake": "Pre túto osobu nie sú k dispozícii žiadne odoslané údaje.",
     "admin.person.intro": "Predstavenie",
@@ -2528,12 +2689,12 @@ export const messages = {
     "admin.requests.bulkSummary": "{approved} schválených, {retry} treba zopakovať",
     "admin.requests.bulk.queued": "V poradí…",
     "admin.requests.bulk.publishing": "Zverejňuje sa…",
-    "admin.requests.bulk.failed": "Nepodarilo sa schváliť — skúste znova.",
+    "admin.requests.bulk.failed": "Nepodarilo sa schváliť, skúste znova.",
     "admin.requests.bulk.retry": "Zopakovať",
     "admin.people.organizer": "Organizátor",
     "admin.people.failed": "Spracovanie zlyhalo",
     "admin.people.intakeUnavailable":
-      "Údaje o prihláške nedostupné (žiadosť je staršia než okno synchronizácie) — ovládanie funguje.",
+      "Údaje o prihláške nedostupné (žiadosť je staršia než okno synchronizácie). Ovládanie funguje.",
     "admin.requests.reviewed": "Skontrolované",
     "admin.requests.reject": "Odmietnuť",
     "admin.requests.reject.confirm":
@@ -2594,9 +2755,20 @@ export const messages = {
     // Errors from lib
     "error.followListGuard":
       "Nepodarilo sa načítať váš zoznam sledovaných z relayov, preto je sledovanie pozastavené, aby sa neprepísal. Skúste to o chvíľu znova.",
-    "error.signerTimeout": "Váš podpisovač neodpovedal — skontrolujte, či je online, a skúste znova.",
+    "error.signerTimeout": "Váš podpisovač neodpovedal. Skontrolujte, či je online, a skúste znova.",
+    "error.extensionMissing":
+      "Vaše rozšírenie pre Nostr nie je dostupné. Stále ste prihlásený; odomknite ho alebo zapnite a skúste znova.",
+    "boot.badRecoveryLink":
+      "Tento obnovovací odkaz neniesol použiteľný kľúč. Vypýtajte si nový alebo sa prihláste inak.",
+    "join.loadFailed.body": "Podujatie sa nepodarilo načítať, takže sa zatiaľ nie je k čomu pripojiť.",
+    "join.waiting.checking": "Overujeme každých {sec} sekúnd…",
+    "join.waiting.checked": "Naposledy overené o {time} · overujeme každých {sec} sekúnd.",
+    "join.waiting.canClose": "Pokojne to zavrite. Keď sa vrátite, ukážeme, že ste vnútri.",
+    "matches.none.why":
+      "Spojenia sa objavia, keď sa spracuje vaše predstavenie a organizátor spustí párovanie.",
+    "matches.checkAgain": "Overiť znova",
     "error.signerRelaysUnreachable":
-      "Váš podpisovač neodpovedal — nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
+      "Váš podpisovač neodpovedal: nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
     "error.badBunkerLink": "Toto nevyzerá ako platný bunker odkaz.",
     "error.badEventLink":
       "Tento odkaz na podujatie vyzerá neplatne. Otvorte ho, prosím, znova z pozvánky alebo zo zoznamu podujatí.",
@@ -2614,8 +2786,16 @@ export const messages = {
     "settings.theme.system": "Systémový",
     "settings.theme.light": "Svetlý",
     "settings.theme.dark": "Tmavý",
+    "settings.privacy": "Súkromie",
+    "settings.externalImages": "Načítavať profilové fotky z cudzích serverov",
+    "settings.externalImages.hint": "Profilové fotky a bannery udalostí sú uložené tam, kde si zvolil ten, kto ich nastavil. Načítanie prezradí tomu serveru vašu IP adresu a čas, kedy ste sa pozerali. Vypnutím sa namiesto nich zobrazia iniciály a generovaná grafika. Nič iné sa nezmení.",
     "settings.about": "O aplikácii",
-    "settings.about.hint": "Diagnostika zostavenia — priložte ju pri hlásení problému.",
+    "settings.about.hint": "Diagnostika zostavenia. Priložte ju pri hlásení problému.",
+    "settings.about.release": "Vydanie",
+    "settings.about.app": "Aplikácia",
+    "settings.about.protocol": "Protokol",
+    "settings.about.commit": "Commit",
+    "settings.about.built": "Zostavené",
 
     // Accessibility (A2)
     "a11y.skipToContent": "Preskočiť na obsah",
@@ -2627,6 +2807,7 @@ export const messages = {
     "nav.people": "Ľudia",
     "nav.matches": "Spojenia",
     "nav.chat": "Chat",
+    "nav.messages": "Správy",
     "nav.talks": "Prednášky",
     "nav.updates": "Novinky",
     "nav.more": "Viac",
@@ -2646,37 +2827,50 @@ export const messages = {
     "chat.disclosure.body":
       "Tento chat je end-to-end šifrovaný (MLS/Marmot). Koordinátor podujatia ho prevádzkuje a môže ho čítať a každé zariadenie vidí len správy odoslané po tom, ako sa pripojilo.",
     "chat.setup": "Nastavujeme váš zabezpečený chat… pripojíte sa, keď vás koordinátor pridá.",
-    "chat.setupSlow": "Stále čakáte na pridanie. Do skupinového chatu vás pridáva koordinátor — ak to nezmizne, môže byť offline; overte to u organizátora. Môžete počkať alebo to skúsiť znova.",
+    "chat.setupSlow": "Stále čakáte na pridanie. Do skupinového chatu vás pridáva koordinátor. Ak to nezmizne, môže byť offline; overte to u organizátora. Môžete počkať alebo to skúsiť znova.",
+    "chat.refused.deviceCap": "Koordinátor toto zariadenie odmietol: váš účet už používa najvyšší povolený počet chatovacích zariadení pre toto podujatie. Odstráňte jedno nižšie v \u201eZariadenia v chate\u201c a skúste to znova.",
+    "chat.refused.boundElsewhere": "Koordinátor toto zariadenie odmietol: jeho chatovací kľúč už patrí inému účtu na tomto podujatí. Vymazaním údajov tejto stránky v tomto prehliadači sa vytvorí nový kľúč zariadenia.",
+    "chat.refused.proof": "Koordinátor nevedel overiť, že toto zariadenie vlastní svoj chatovací kľúč. Odhláste sa a znova prihláste na tomto zariadení a potom otvorte chat.",
+    "chat.refused.keyPackage": "Koordinátor nevedel použiť šifrovací kľúč tohto zariadenia. Požiadajte o opätovné pridanie do tohto chatu, aby sa zverejnil nový.",
+    "chat.refused.other": "Koordinátor toto zariadenie odmietol. Požiadajte o opätovné pridanie do tohto chatu alebo to overte u organizátora.",
     "chat.retry": "Skúsiť znova",
     "chat.empty": "Zatiaľ žiadne správy. Pozdravte sa.",
     "chat.jumpToLatest": "Nové správy ↓",
     "chat.compose.placeholder": "Správa",
     "chat.send": "Odoslať",
     "chat.checking": "Overujeme váš prístup…",
-    "chat.sendFailed": "Správu sa nepodarilo odoslať. Možno vás z tohto chatu odstránili, alebo vypadlo spojenie.",
+    "chat.sendFailed": "Správu sa nepodarilo odoslať: toto zariadenie už nie je v chate. Požiadajte o opätovné pridanie.",
+    "chat.sendFailedTransport":
+      "Správu sa nepodarilo odoslať: nepodarilo sa spojiť s relayami. Text tu zostal, skúste to znova.",
+    "chat.sendRetry": "Skúsiť znova",
+    "chat.evicted.title": "Už nie ste v tomto chate",
+    "chat.evicted.body":
+      "Nové správy sa na toto zariadenie nedostanú, kým vás znova nepridajú. Všetko vyššie je to, čo vám prišlo, kým ste boli vnútri.",
+    "chat.sending": "Odosiela sa…",
     "chat.rejoin": "Znovu sa pripojiť do chatu",
     "chat.rejoining": "Pripájame…",
     "chat.rejoinRequested":
-      "Požiadali sme o opätovné pridanie — zvyčajne to trvá do minúty. Správa vám zostáva v okienku, odošlite ju, keď bude chat späť.",
+      "Požiadali sme o opätovné pridanie. Zvyčajne to trvá do minúty. Správa vám zostáva v okienku, odošlite ju, keď bude chat späť.",
     "chat.rejoinFailed": "Žiadosť o opätovné pripojenie sa nepodarila. Skontrolujte spojenie a skúste to znova.",
     "chat.rejoinHint": "Stále nič ani po opätovnom pokuse? Požiadajte o opätovné pridanie do tohto chatu.",
     "chat.unavailable": "Skupinový chat nie je pre toto podujatie dostupný, alebo ešte nie ste členom.",
     "chat.backToEvent": "Späť na podujatie",
     "chat.handoff.link.title": "Použite tento chat vo Whitenoise (alebo inom klientovi Marmot)",
     "chat.handoff.link.body":
-      "Máte tam už identitu? Vložte jej npub nižšie a autorizujte ju — automaticky sa pripojí do tohto chatu, žiadny kľúč neopúšťa toto zariadenie.",
+      "Máte tam už identitu? Vložte jej npub nižšie a autorizujte ju. Automaticky sa pripojí do tohto chatu, žiadny kľúč neopúšťa toto zariadenie.",
     "chat.handoff.link.placeholder": "npub alebo hex pubkey",
     "chat.handoff.link.button": "Autorizovať",
     "chat.handoff.link.authorizing": "Autorizujem…",
     "chat.handoff.link.success":
-      "Autorizované. Otvorte to v danom klientovi — pripojí sa, keď sa nájde jeho key package. Ak sa to po pár minútach nestane, autorizujte znova — tým sa vyhľadávanie zopakuje.",
+      "Autorizované. Otvorte to v danom klientovi: pripojí sa, keď sa nájde jeho key package. Ak sa to po pár minútach nestane, autorizujte znova, tým sa vyhľadávanie zopakuje.",
     "chat.handoff.link.badNpub": "Zadajte npub alebo 64-znakový hex pubkey",
     "chat.handoff.link.relaysHint": "Relaye tejto akcie, pre prípad, že sa stále nepripojí:",
     "chat.devices.manage.title": "Zariadenia v chate",
     "chat.devices.manage.body":
-      "Zariadenia prihlásené do chatu tohto podujatia vaším účtom. Každé má vlastný kľúč a do skupiny sa pripája samostatne — ak chcete pridať telefón alebo iný prehliadač, otvorte tam toto podujatie a prihláste sa. Odstráňte tie, ktoré už nepoužívate. História začína od pripojenia daného zariadenia.",
+      "Zariadenia prihlásené do chatu tohto podujatia vaším účtom. Každé má vlastný kľúč a do skupiny sa pripája samostatne. Ak chcete pridať telefón alebo iný prehliadač, otvorte tam toto podujatie a prihláste sa. Odstráňte tie, ktoré už nepoužívate. História začína od pripojenia daného zariadenia.",
     "chat.devices.thisDevice": "Toto zariadenie",
     "chat.devices.added": "Pridané {date}",
+    "chat.devices.lastActive": "Naposledy aktívne {date}",
     "chat.devices.rename": "Premenovať",
     "chat.devices.renameLabel": "Názov zariadenia",
     "chat.devices.renameSave": "Uložiť",
@@ -2686,16 +2880,18 @@ export const messages = {
     "chat.devices.revokeYes": "Odstrániť",
     "chat.devices.revokeNo": "Zrušiť",
     "chat.devices.loading": "Načítavajú sa vaše zariadenia…",
-    "chat.devices.none": "Zatiaľ žiadne zariadenia — otvorením chatu tohto podujatia pridáte toto.",
-    "chat.devices.updated": "Uložené — zoznam sa aktualizuje, keď to koordinátor spracuje.",
+    "chat.devices.none": "Zatiaľ žiadne zariadenia. Otvorením chatu tohto podujatia pridáte toto.",
+    "chat.devices.updated": "Uložené. Zoznam sa aktualizuje, keď to koordinátor spracuje.",
+    "chat.devices.queued": "Uložené, ale zatiaľ sa to nedostalo na relay. Odošle sa to, keď budete online.",
     "chat.devices.actionFailed": "Nepodarilo sa uložiť. Skontrolujte pripojenie alebo podpisovač a skúste znova.",
     "chat.members.title": "V tomto chate",
+    "chat.members.attested": "(registrované zariadenia, miestnosť sa zatiaľ neozvala)",
     "chat.members.devices.one": "{n} zariadenie",
     "chat.members.devices.few": "{n} zariadenia",
     "chat.members.devices.many": "{n} zariadení",
     "chat.otherTab.title": "Chat je otvorený v inej karte",
     "chat.otherTab.body":
-      "Chat tohto podujatia je aktívny v inej karte alebo okne. Ak chcete posielať správy, použite ho tam — najnovšie správy sa zobrazujú aj tu.",
+      "Chat tohto podujatia je aktívny v inej karte alebo okne. Ak chcete posielať správy, použite ho tam. Najnovšie správy sa zobrazujú aj tu.",
     "chat.display.label": "Štýl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",
@@ -2739,14 +2935,14 @@ export const messages = {
     "talks.edit": "Upraviť / nahradiť prednášku",
     "talks.favorite.add": "Pridať prednášku k obľúbeným",
     "talks.favorite.remove": "Odobrať z obľúbených",
-    "talks.editing": "Upravujete svoju prednášku — nová nahrávka nahradí súčasnú.",
+    "talks.editing": "Upravujete svoju prednášku. Nová nahrávka nahradí súčasnú.",
     "talks.source.label": "Video prednášky",
     "talks.source.record": "Nahrať",
     "talks.source.upload": "Nahrať súbor",
     "talks.source.url": "Vložiť URL",
     "talks.url.label": "URL videa",
     "talks.url.placeholder": "YouTube odkaz alebo priama .mp4 URL",
-    "talks.url.hint": "Vložte neverejný YouTube odkaz alebo priamu URL videa (.mp4). Odkaz je šifrovaný pre podujatie; súbor zostáva tam, kde ho hostujete — ideálne pre prednášky príliš veľké na nahranie.",
+    "talks.url.hint": "Vložte neverejný YouTube odkaz alebo priamu URL videa (.mp4). Odkaz je šifrovaný pre podujatie; súbor zostáva tam, kde ho hostujete, ideálne pre prednášky príliš veľké na nahranie.",
     "talks.url.invalid": "Zadajte platnú https YouTube alebo video (.mp4) URL.",
     "talks.url.detectedYoutube": "Rozpoznané: YouTube video",
     "talks.url.detectedVideo": "Rozpoznané: priamy videosúbor",
@@ -2760,7 +2956,7 @@ export const messages = {
     "talks.external.gate.title": "Táto prednáška sa prehráva z inej stránky",
     "talks.external.gate.host": "Prehrávanie sa spojí s:",
     "talks.external.gate.note":
-      "Samotný odkaz na podujatie je šifrovaný, ale načítanie videa pripojí vaše zariadenie priamo k tomuto hostiteľovi — zdieľate s ním svoju IP adresu a údaje prehliadača. Načítajte len ak mu dôverujete.",
+      "Samotný odkaz na podujatie je šifrovaný, ale načítanie videa pripojí vaše zariadenie priamo k tomuto hostiteľovi, zdieľate s ním svoju IP adresu a údaje prehliadača. Načítajte len ak mu dôverujete.",
     "talks.external.gate.load": "Načítať video",
     "talks.field.title": "Názov prednášky",
     "talks.field.title.placeholder": "napr. Dôkazy s nulovou znalosťou pre začiatočníkov",
@@ -2778,12 +2974,12 @@ export const messages = {
     "admin.retention.unit": "dní po skončení podujatia",
     "admin.retention.consequence":
       "Adresár, spárovania a prednášky sa z relé zmažú {n} dní po skončení podujatia. Mazanie je podľa najlepšej snahy.",
-    "admin.retention.consequenceOff": "Žiadne automatické mazanie — údaje účastníkov sa uchovávajú natrvalo.",
+    "admin.retention.consequenceOff": "Žiadne automatické mazanie: údaje účastníkov sa uchovávajú natrvalo.",
     "admin.retention.invalid": "Zadajte celý počet dní (1 alebo viac), alebo pole nechajte prázdne pre žiadne mazanie.",
     "admin.retention.save": "Uložiť nastavenie mazania",
     "admin.relays.title": "Relaye udalosti",
     "admin.relays.body":
-      "Relaye, na ktoré sa táto udalosť publikuje a kde ju možno nájsť. Zmena ovplyvní iba túto udalosť — existujúci účastníci fungujú na pôvodných relayoch, kým sa neobnovia. Nové udalosti použijú predvolené relaye aplikácie automaticky.",
+      "Relaye, na ktoré sa táto udalosť publikuje a kde ju možno nájsť. Zmena ovplyvní iba túto udalosť. Existujúci účastníci fungujú na pôvodných relayoch, kým sa neobnovia. Nové udalosti použijú predvolené relaye aplikácie automaticky.",
     "admin.relays.placeholder": "wss://relay.example.com",
     "admin.relays.hint": "Jeden relay na riadok. Musí začínať wss:// (ws:// je povolené iba pre localhost).",
     "admin.relays.save": "Uložiť relaye",
@@ -2859,14 +3055,14 @@ export const messages = {
     "record.disclosure.confirmText":
       "Rozumiem, že koordinátor a jeho AI poskytovateľ spracujú tento text, aby vytvorili môj profil a spojenia.",
     "record.disclosure.textProviders":
-      "Jeho nakonfigurovaný AI poskytovateľ dostane váš text, aby vytvoril váš profil a spojenia. Nič sa nenahráva ani neprepisuje — z vášho zariadenia neodchádza žiadny zvuk.",
+      "Jeho nakonfigurovaný AI poskytovateľ dostane váš text, aby vytvoril váš profil a spojenia. Nič sa nenahráva ani neprepisuje. Z vášho zariadenia neodchádza žiadny zvuk.",
 
     // Tabbed intro composer (F1.4): video · audio · text
     "record.mode.label": "Ako sa chcete predstaviť?",
     "record.mode.video": "Video",
     "record.mode.audio": "Zvuk",
     "record.mode.text": "Text",
-    "record.audio.hint": "Nahrajte krátke hovorené predstavenie — kamera nie je potrebná.",
+    "record.audio.hint": "Nahrajte krátke hovorené predstavenie. Kamera nie je potrebná.",
     "record.audio.enableMic": "Povoliť mikrofón",
     "record.audio.record": "● Nahrať zvuk",
     "record.micReady": "Mikrofón pripravený ✓",
@@ -2877,7 +3073,7 @@ export const messages = {
     "record.chooseAudioFile": "Vybrať zvukový súbor",
     "record.chooseVideoFile": "Vybrať video súbor",
     "record.text.title": "Napíšte svoje predstavenie",
-    "record.text.hint": "Namiesto nahrávania napíšte predstavenie — do spojení vstupuje rovnako ako hovorené.",
+    "record.text.hint": "Namiesto nahrávania napíšte predstavenie. Do spojení vstupuje rovnako ako hovorené.",
     "record.text.placeholder": "Povedzte ostatným účastníkom, kto ste, čo robíte a koho by ste chceli stretnúť…",
     "record.text.count": "{n} / {max}",
     "record.text.submit": "Použiť toto predstavenie",
@@ -2896,7 +3092,7 @@ export const messages = {
     "report.print": "Tlačiť / uložiť PDF",
     "report.loading": "Zostavujeme vašu správu…",
     "report.empty":
-      "Zatiaľ niet čo zhrnúť — priebežne označujte ľudí, ktorých ste stretli alebo chcete stretnúť, obľúbené prednášky a poznámky.",
+      "Zatiaľ niet čo zhrnúť: priebežne označujte ľudí, ktorých ste stretli alebo chcete stretnúť, obľúbené prednášky a poznámky.",
     "report.empty.people": "Prejsť na Ľudí",
     "report.followAll": "Sledovať všetkých",
     "report.copyNpubs": "Kopírovať npub-y",
@@ -2904,7 +3100,7 @@ export const messages = {
     "report.downloadNpubs": "Stiahnuť .txt",
     "report.followConfirm.title": "Sledovať na Nostri",
     "report.followConfirm.body":
-      "Odznačte každého, koho radšej sledovať nechcete. Pridá sa to k vášmu existujúcemu zoznamu sledovaných — nikdy ho nenahradí.",
+      "Odznačte každého, koho radšej sledovať nechcete. Pridá sa to k vášmu existujúcemu zoznamu sledovaných. Nikdy ho nenahradí.",
     "report.followSelected": "Sledovať {n}",
     "report.following": "Sledujem…",
     "report.cancel": "Zrušiť",
@@ -2925,11 +3121,13 @@ export const messages = {
     "report.switch.body":
       "Toto podujatie vám vytvorilo Nostr kľúč. Zálohujte si ho a používajte v ktorejkoľvek Nostr aplikácii.",
     "report.switch.action": "Zálohovať a objaviť Nostr",
-    "nav.matches.new": "{n} nových spojení",
-    "event.approvedBanner": "Ste schválení — vitajte.",
+    "nav.matches.new.one": "{n} nové spojenie",
+    "nav.matches.new.few": "{n} nové spojenia",
+    "nav.matches.new.many": "{n} nových spojení",
+    "event.approvedBanner": "Ste schválení, vitajte.",
     "event.approvedBanner.dismiss": "Zavrieť",
     "event.viewAsVisitor": "Zobraziť ako návštevník",
-    "event.viewAsVisitor.active": "Náhľad verejného zobrazenia — časti len pre členov sú skryté.",
+    "event.viewAsVisitor.active": "Náhľad verejného zobrazenia. Časti len pre členov sú skryté.",
     "event.viewAsVisitor.exit": "Ukončiť náhľad",
     "event.duplicate": "Duplikovať podujatie",
     "event.duplicate.copyOf": "Kópia: {title}",
@@ -2944,17 +3142,17 @@ export const messages = {
     // pozná len podľa e-mailu; „označenie“ je spojka medzi appkou a jeho tabuľkou).
     "admin.invites.exports": "Exporty",
     "admin.invites.exports.intro":
-      "Dva exporty s veľmi rozdielnou životnosťou. Samotné kódy existujú len počas toho, ako je táto stránka otvorená — nikde sa neukladajú, ani v zariadení, ani na relayi — takže sa dajú exportovať iba teraz. To, kto sa už pripojil, sa dá zistiť zo zoznamu pozvánok zverejneného pre toto podujatie, takže tento export funguje aj po mesiacoch.",
+      "Dva exporty s veľmi rozdielnou životnosťou. Samotné kódy existujú len počas toho, ako je táto stránka otvorená (nikde sa neukladajú, ani v zariadení, ani na relayi) takže sa dajú exportovať iba teraz. To, kto sa už pripojil, sa dá zistiť zo zoznamu pozvánok zverejneného pre toto podujatie, takže tento export funguje aj po mesiacoch.",
     "admin.invites.exportCodes.title": "Kódy na rozposlanie",
     "admin.invites.exportCodes.body":
-      "Jeden riadok na každý práve vygenerovaný kód, spolu s jeho označením. Označenie si spárujte s kupujúcim vo vlastnom zozname — aplikácia e-mailové adresy nikdy nevidí.",
+      "Jeden riadok na každý práve vygenerovaný kód, spolu s jeho označením. Označenie si spárujte s kupujúcim vo vlastnom zozname. Aplikácia e-mailové adresy nikdy nevidí.",
     "admin.invites.exportCodes.unavailable":
       "Momentálne nie je čo exportovať. Pozývacie kódy sú jednorazové tajomstvá, ktoré sa nikde neukladajú, takže sa dajú exportovať len v tej istej session, v ktorej vznikli. Pre ľudí, ktorým ešte musíte napísať, vygenerujte novú dávku vyššie.",
     "admin.invites.exportCodes.warning":
-      "Súbor obsahuje živé pozývacie kódy — kto ho získa, môže sa pripojiť. Zaobchádzajte s ním ako so zoznamom hesiel.",
+      "Súbor obsahuje živé pozývacie kódy: kto ho získa, môže sa pripojiť. Zaobchádzajte s ním ako so zoznamom hesiel.",
     "admin.invites.format": "Formát",
-    "admin.invites.format.csv": "CSV — označenie, kód a odkaz",
-    "admin.invites.format.txt": "Text — len odkazy, jeden na riadok",
+    "admin.invites.format.csv": "CSV: označenie, kód a odkaz",
+    "admin.invites.format.txt": "Text: len odkazy, jeden na riadok",
     "admin.invites.downloadCsv": "Stiahnuť ako CSV",
     "admin.invites.exportUsed.title": "Kto sa už pripojil",
     "admin.invites.exportUsed.body":
@@ -2967,7 +3165,7 @@ export const messages = {
     "admin.invites.scope.unused": "Len nepoužité kódy",
     "admin.invites.usedCount": "Použitých {used} zo {total} kódov",
     "admin.invites.usedNote":
-      "Keď sa kód raz zobrazí ako použitý, zostane použitý. Staré žiadosti o pripojenie z relayov postupne mizia, takže tento počet môže len rásť — nikdy vám nesprávne nepovie, že kód je ešte voľný.",
+      "Keď sa kód raz zobrazí ako použitý, zostane použitý. Staré žiadosti o pripojenie z relayov postupne mizia, takže tento počet môže len rásť. Nikdy vám nesprávne nepovie, že kód je ešte voľný.",
     "admin.invites.exportBusy": "Kontrolujeme nové registrácie…",
   },
   cs: {
@@ -2978,7 +3176,7 @@ export const messages = {
     "route.renderFailed": "V této části nastala chyba a nelze ji zobrazit.",
     "app.brand": "✦ Nostrautica",
     "app.offline":
-      "Offline — stále si můžete prohlížet uložené lidi a spojení; změny se synchronizují po opětovném připojení.",
+      "Offline. Stále si můžete prohlížet uložené lidi a spojení; změny se synchronizují po opětovném připojení.",
 
     // Dostupná aktualizace aplikace (NIP §2 / D2)
     "update.available":
@@ -2991,9 +3189,9 @@ export const messages = {
     "logout.dismiss": "Zavřít",
 
     // Synchronizace na pozadí (audit UX-15)
-    "sync.queued": "Uloženo — odešle se po obnovení připojení.",
+    "sync.queued": "Uloženo, odešle se po obnovení připojení.",
     "submit.error.invalid":
-      "Tvůj profil se nepodařilo odeslat: {field} — {reason}. Oprav to a ulož znovu, nic se neztratilo.",
+      "Tvůj profil se nepodařilo odeslat: {field}. {reason}. Oprav to a ulož znovu, nic se neztratilo.",
     "profile.authored.links.dropped":
       "Tyto se nepodařilo přečíst jako odkazy, takže se neuložily: {links}",
     "draft.restored": "Obnoven neodeslaný koncept.",
@@ -3010,9 +3208,12 @@ export const messages = {
     "outbox.discard": "Zahodit",
     "outbox.syncStatus": "Stav synchronizace",
     "outbox.retries": "{n} pokusů",
+    "outbox.retries.one": "{n} pokus",
+    "outbox.retries.few": "{n} pokusy",
+    "outbox.retries.many": "{n} pokusů",
     "outbox.waiting.title": "Čeká na odeslání",
-    "conn.relayBlocked": "Připojeno k internetu, ale žádné relé není dostupné — tato síť možná blokuje spojení. Vaše změny jsou uložené a zsynchronizují se, jakmile se relé připojí.",
-    "conn.syncing": "Znovu připojeno — odesílám vaše uložené změny…",
+    "conn.relayBlocked": "Připojeno k internetu, ale žádné relé není dostupné. Tato síť možná blokuje spojení. Vaše změny jsou uložené a zsynchronizují se, jakmile se relé připojí.",
+    "conn.syncing": "Znovu připojeno, odesílám vaše uložené změny…",
     "logistics.happeningNow": "Právě probíhá",
     "logistics.today": "Dnes",
     "logistics.ended": "Skončilo",
@@ -3034,7 +3235,7 @@ export const messages = {
     // Domů
     "home.title": "Poznejte ty správné lidi",
     "home.intro":
-      "Nostrautica zjistí, koho byste měli na akci poznat — a vysvětlí proč — z krátkých představovacích videí a vaší veřejné aktivity na Nostru.",
+      "Nostrautica zjistí, koho byste měli na akci poznat (a vysvětlí proč) z krátkých představovacích videí a vaší veřejné aktivity na Nostru.",
     "home.backup.title": "Zazálohujte si účet",
     "home.backup.body":
       "Zabere to 30 sekund. Bez zálohy ztráta tohoto zařízení znamená ztrátu účtu.",
@@ -3054,9 +3255,9 @@ export const messages = {
     "home.loadingEvents": "Načítání vašich akcí…",
     "home.restoringSession": "Znovu se připojujeme k vašemu podepisovači…",
     "home.scanFailed.body":
-      "Nepodařilo se dokončit hledání vašich akcí — váš podepisovač neodpověděl. Nic se neztratilo, stále jsou na vašich relayích.",
+      "Nepodařilo se dokončit hledání vašich akcí: váš podepisovač neodpověděl. Nic se neztratilo, stále jsou na vašich relayích.",
     "home.scanIncomplete":
-      "Tento seznam nemusí být úplný — hledání vašich akcí se nedokončilo.",
+      "Tento seznam nemusí být úplný: hledání vašich akcí se nedokončilo.",
     "home.how.title": "Jak to funguje",
     "home.how.record": "Nahrajte krátké představovací video (a volitelně i přednášku).",
     "home.how.matched": "Propojíme vás s lidmi, jejichž dovednosti doplňují ty vaše.",
@@ -3075,7 +3276,7 @@ export const messages = {
     "login.failed": "Přihlášení se nezdařilo.",
     "login.createIdentity": "Vytvořit identitu",
     "login.createHeading": "Vytvořte si identitu",
-    "login.createSub": "Bez e-mailu, bez hesla — účet se vytvoří okamžitě.",
+    "login.createSub": "Bez e-mailu, bez hesla: účet se vytvoří okamžitě.",
     "login.photoPublic": "veřejné",
     "login.photoAdd": "Fotka",
     "login.photoTap": "klepnutím přidáte",
@@ -3092,9 +3293,9 @@ export const messages = {
     "signin.extension.button": "Přihlásit se rozšířením (Alby, nos2x…)",
     "signin.remote": "Vzdálený podpisovač",
     "signin.remote.scan":
-      "Naskenujte to svojí podepisovací aplikací — na tomto zařízení nebo na jiném telefonu — nebo to otevřete přímo tady:",
+      "Naskenujte to svojí podepisovací aplikací (na tomto zařízení nebo na jiném telefonu) nebo to otevřete přímo tady:",
     "signin.remote.openSigner":
-      "Otevřít v podepisovací aplikaci (Amber, Clave, Primal, Amethyst, …)",
+      "Otevřít v podepisovací aplikaci (Amber, Clave, Amethyst, …)",
     "signin.remote.copy": "Kopírovat",
     "signin.remote.copied": "Zkopírováno ✓",
     "signin.remote.waiting": "Čeká se na schválení podpisovačem…",
@@ -3102,11 +3303,18 @@ export const messages = {
       "Nepřišlo schválení? Nechte tuto kartu otevřenou během schvalování, nebo to zkuste znovu s novým kódem.",
     "signin.remote.retry": "Zkusit znovu",
     "signin.remote.cancel": "Zrušit",
-    "signin.remote.hint": "například Amber, Amethyst, Clave nebo Primal",
+    "signin.remote.hint": "například Amber, Amethyst nebo Clave",
     "signin.remote.connect": "Připojit vzdálený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žádá o schválení tohoto požadavku na svém webu:",
     "signin.remote.openAuth": "Otevřít schvalovací stránku",
+    "signin.trouble": "Problém s přihlášením?",
+    "signin.trouble.primal":
+      "Vestavěný podpisovač v Primalu tu nefunguje. Tiše odmítá typy událostí, které Nostrautica zveřejňuje, takže přihlášení vypadá úspěšně a potom se nic, co uděláte, neuloží. Použijte Amber na Androidu, Clave na iOS nebo jiný NIP-46 podpisovač.",
+    "signin.trouble.wrongApp":
+      "Otevřela se špatná aplikace? Když máte nainstalovaných víc podpisovačů, tlačítko otevře ten, který si odkaz zaregistroval, a to často není ten, který chcete. Zkopírujte kód výše, sami si otevřete podpisovač, který chcete, a vložte ho tam.",
+    "signin.trouble.bunker":
+      "Nebo opačně: v podpisovači vytvořte připojení, zkopírujte bunker:// odkaz, který vám dá, a vložte ho níže do pole „Vložit klíč“.",
     "signin.paste": "Vložit klíč",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Heslo",
@@ -3129,14 +3337,14 @@ export const messages = {
     "create.receipt.enrolled": "Jste zapsán jako účastník",
     "create.receipt.grant": "Grant pro koordinátora zveřejněn",
     "create.receipt.backup": "Klíč organizátora zálohován",
-    "create.receipt.backup.pending.body": "Zálohujte si klíč organizátora níže — bez něj nezískáte zpět přístup správce.",
+    "create.receipt.backup.pending.body": "Zálohujte si klíč organizátora níže: bez něj nezískáte zpět přístup správce.",
     "create.step.share": "Sdílejte akci",
     "create.copyLink": "Kopírovat odkaz",
     "create.copied": "Zkopírováno ✓",
     "create.share": "Sdílet…",
     "create.step.coordinator": "Volitelné: připojte AI koordinátora",
     "create.step.coordinator.body":
-      "Umožní párování a okamžité schvalování přes pozvánkové odkazy — nastavíte to v administraci, nebo to přeskočte a schvalujte lidi sami.",
+      "Umožní párování a okamžité schvalování přes pozvánkové odkazy, nastavíte to v administraci, nebo to přeskočte a schvalujte lidi sami.",
     "create.step.coordinator.attached": "AI koordinátor připojen ✓",
     "create.step.coordinator.attached.body":
       "Během několika minut začne vytvářet spojení a zpracovávat představení. Později ho můžete změnit nebo odebrat v administraci.",
@@ -3152,11 +3360,11 @@ export const messages = {
     "create.openAdmin": "Otevřít administraci organizátora",
     "create.viewEvent": "Zobrazit stránku akce",
     "create.backupOrganizer": "Zazálohujte si organizátorskou identitu",
-    "create.backupOrganizer.body": "Tento klíč ovládá vaši akci — neztraťte ho.",
+    "create.backupOrganizer.body": "Tento klíč ovládá vaši akci. Neztraťte ho.",
     "create.organizerName": "Vaše jméno",
     "create.organizerName.placeholder": "Jak vás mají účastníci znát?",
     "create.organizerName.body":
-      "Vaše organizátorská identita se vytvoří spolu s akcí — bez registrace.",
+      "Vaše organizátorská identita se vytvoří spolu s akcí, bez registrace.",
     "create.field.title": "Název",
     "create.field.title.placeholder": "Cypherpunk Assembly 2026",
     "create.field.summary": "Shrnutí",
@@ -3169,7 +3377,7 @@ export const messages = {
     "create.bannerPick": "Vyberte obrázek banneru akce",
     "create.field.language.body":
       "Nastaví rozhraní pro účastníky a jazyk odůvodnění AI spojení i profilových shrnutí. Účastníci mohou nadále psát v libovolném jazyce.",
-    "create.advanced": "Pokročilé — obrázky, délka videa",
+    "create.advanced": "Pokročilé: obrázky, délka videa",
     "create.field.images": "Obrázky akce",
     "create.field.images.optional": "(obojí volitelné)",
     "create.iconAlt": "náhled ikony akce",
@@ -3204,9 +3412,9 @@ export const messages = {
     "create.field.talks.body":
       "Umožněte účastníkům přidávat přednášky, které si ostatní mohou pustit. Vypnuto ponechá akci jako běžné setkání.",
     "create.talks.off": "Vypnuto",
-    "create.talks.on": "Zapnuto — účastníci mohou přidávat přednášky (přibude záložka Přednášky)",
+    "create.talks.on": "Zapnuto: účastníci mohou přidávat přednášky (přibude záložka Přednášky)",
     "create.talks.prerecordFirst":
-      "Nejprve nahrávka — stejné, ale Přednášky jsou hlavní záložka: formát je „podívejte se předem, setkejte se na místě“",
+      "Nejprve nahrávka. Stejné, ale Přednášky jsou hlavní záložka: formát je „podívejte se předem, setkejte se na místě“",
     "create.field.maxTalk": "Max. délka přednášky (minuty)",
     "create.coordinator.title": "AI koordinátor",
     "create.coordinator.optional": "(volitelné)",
@@ -3217,7 +3425,7 @@ export const messages = {
     "create.coordinator.use": "Použít tohoto koordinátora",
     "create.coordinator.invalidKey": "Toto není platný npub ani hex klíč koordinátora.",
     "create.rotationNote":
-      "Poznámka: rotace klíčů funguje jen dopředně — kdokoli, kdo někdy držel dešifrovací klíč, dokáže navždy dešifrovat obsah zveřejněný v době jeho platnosti (spec. §4.2).",
+      "Poznámka: rotace klíčů funguje jen dopředně: kdokoli, kdo někdy držel dešifrovací klíč, dokáže navždy dešifrovat obsah zveřejněný v době jeho platnosti (spec. §4.2).",
     "create.creating": "Vytváření…",
     "create.submit": "Vytvořit akci",
     "create.error.titleRequired": "Název a čas začátku jsou povinné.",
@@ -3225,31 +3433,33 @@ export const messages = {
     "create.error.nameRequired": "Zadejte prosím své jméno.",
     "create.error.startRequired": "Vyberte prosím datum a čas začátku.",
     "form.errorSummary.title": "Opravte prosím následující:",
-    "op.queued": "Uloženo — vaše {what} se odešle po připojení.",
+    "op.queued": "Uloženo, vaše {what} se odešle po připojení.",
     "op.introPublished": "Vaše představení bylo zveřejněno.",
-    "op.introSubmittedProcessing": "Vaše představení bylo odesláno — koordinátor jej zpracovává.",
+    "op.introSubmittedProcessing": "Vaše představení bylo odesláno. Koordinátor jej zpracovává.",
     "op.talkSubmitted": "Vaše přednáška byla odeslána koordinátorovi.",
-    "op.talkAwaitingModeration": "Vaše přednáška byla odeslána — čeká na schválení organizátorem.",
+    "op.talkAwaitingModeration": "Vaše přednáška byla odeslána. Čeká na schválení organizátorem.",
     "op.eventCreated": "Vaše akce byla vytvořena a zveřejněna.",
-    "op.eventCreateQueued": "Uloženo — akce se zveřejní po připojení. Ostatní ji zatím nevidí.",
+    "op.eventCreateQueued": "Uloženo, akce se zveřejní po připojení. Ostatní ji zatím nevidí.",
     "op.eventUpdated": "Údaje akce byly aktualizovány a zveřejněny.",
-    "op.eventUpdateQueued": "Uloženo — změny se zveřejní po připojení. Účastníci zatím vidí původní údaje.",
+    "op.eventUpdateQueued": "Uloženo, změny se zveřejní po připojení. Účastníci zatím vidí původní údaje.",
     "op.postPublished": "Váš příspěvek byl zveřejněn.",
-    "op.postQueued": "Uloženo — příspěvek se zveřejní po připojení. Účastníci ho zatím nevidí.",
+    "op.postQueued": "Uloženo, příspěvek se zveřejní po připojení. Účastníci ho zatím nevidí.",
     "op.pagePublished": "Stránka akce byla uložena a zveřejněna.",
-    "op.pageQueued": "Uloženo — stránka se zveřejní po připojení. Účastníci zatím vidí původní stránku.",
+    "op.pageQueued": "Uloženo, stránka se zveřejní po připojení. Účastníci zatím vidí původní stránku.",
     "op.themePublished": "Vzhled byl zveřejněn.",
-    "op.themeQueued": "Uloženo — vzhled se zveřejní po připojení. Účastníci zatím vidí původní vzhled.",
+    "op.themeQueued": "Uloženo, vzhled se zveřejní po připojení. Účastníci zatím vidí původní vzhled.",
     "op.coOrgSent": "Organizátorské klíče byly odeslány spoluorganizátorovi.",
     "op.coOrgQueued":
-      "Uloženo — organizátorské klíče se odešlou po připojení. Do té doby si spoluorganizátor akci neodemkne.",
-    "create.error.identityFailed": "Vytvoření identity se nezdařilo — zkuste to prosím znovu.",
+      "Uloženo, organizátorské klíče se odešlou po připojení. Do té doby si spoluorganizátor akci neodemkne.",
+    "create.error.identityFailed": "Vytvoření identity se nezdařilo, zkuste to prosím znovu.",
     "create.error.loginToUpload":
-      "Pro nahrání obrázků se přihlaste (nebo nejprve vytvořte akci) — mezitím se použijí vygenerované.",
+      "Pro nahrání obrázků se přihlaste (nebo nejprve vytvořte akci). Mezitím se použijí vygenerované.",
     "create.error.uploadFailed": "Nahrání obrázku se nezdařilo: {reason}",
 
     // Domovská stránka akce
     "event.loadFailed": "Tuto akci se nepodařilo načíst.",
+    "event.loadFailed.body":
+      "Zatím se nepodařilo načíst nic o této akci: její údaje jsou na relayích a žádný neodpověděl. Obvykle za to může síť, ne akce.",
     "event.loading": "Načítání akce…",
     "event.approval.invite": "Pouze na pozvání",
     "event.approval.manual": "Schválení organizátorem",
@@ -3259,8 +3469,9 @@ export const messages = {
     "event.status.pending": "Čeká se",
     "event.status.visitor": "Návštěvník",
     "event.ownStatus.title": "Problém se zpracováním",
-    "event.ownStatus.submission": "Tvůj profil se nepodařilo zpracovat — zkus ho odeslat znovu.",
-    "event.ownStatus.talk": "Tvou přednášku se nepodařilo zpracovat — zkus ji nahrát znovu.",
+    "event.ownStatus.submission": "Tvůj profil se nepodařilo zpracovat. Zkus ho odeslat znovu.",
+    "event.ownStatus.talk": "Tvou přednášku se nepodařilo zpracovat. Zkus ji nahrát znovu.",
+    "event.ownStatus.chat": "Toto zařízení se nepodařilo přidat do skupinového chatu. Otevři Chat, kde najdeš, co s tím.",
     "event.recoverKeys.title": "Organizátor na novém zařízení?",
     "event.recoverKeys.body":
       "Pokud jsi tuto akci vytvořil tímto účtem, její klíče mají šifrovanou zálohu na relayích. Obnovení požádá tvůj podpisovač o její odemknutí.",
@@ -3268,7 +3479,7 @@ export const messages = {
     "event.recoverKeys.working": "Obnovuje se…",
     "event.recoverKeys.restored": "Tvé organizátorské klíče jsou zpět na tomto zařízení.",
     "event.recoverKeys.empty": "Pro tento účet se nenašla žádná záloha klíčů k této akci.",
-    "event.recoverKeys.failed": "Klíče se nepodařilo obnovit — zkontroluj připojení nebo podpisovač a zkus to znovu.",
+    "event.recoverKeys.failed": "Klíče se nepodařilo obnovit. Zkontroluj připojení nebo podpisovač a zkus to znovu.",
     "event.retention.line": "Tvá data z akce se smažou {days} dní po akci.",
     "event.leave.action": "Opustit akci",
     "event.leave.confirm": "Opustit tuto akci? Odešle se žádost organizátorovi, aby odstranil tvůj záznam v adresáři a shody a smazal tvá intro média. Projeví se to, až ji zpracuje.",
@@ -3276,15 +3487,15 @@ export const messages = {
     "event.leave.cancel": "Zrušit",
     "event.leave.leaving": "Opouštím…",
     "event.leave.done": "Opustil jsi tuto akci.",
-    "event.leave.requested": "Tvá žádost o odchod byla odeslána. Organizátor odstraní tvůj záznam, shody a média — může to chvíli trvat.",
+    "event.leave.requested": "Tvá žádost o odchod byla odeslána. Organizátor odstraní tvůj záznam, shody a média. Může to chvíli trvat.",
     "event.leave.queued": "Tvá žádost o odchod je uložena a odešle se po opětovném připojení. Zatím jsi neodešel.",
-    "event.leave.failed": "Nepodařilo se odejít — zkus to znovu.",
+    "event.leave.failed": "Nepodařilo se odejít, zkus to znovu.",
     "event.latest": "Nejnovější",
 
     // Cesta k připravenosti (redesign §4.1)
     "readiness.title": "Připravujeme vás",
     "readiness.progress": "{done} z {total}",
-    "readiness.allSet": "Vše je hotovo — spojení jsou připravena",
+    "readiness.allSet": "Vše je hotovo: spojení jsou připravena",
     "readiness.step.joined": "Připojeno",
     "readiness.step.backup": "Záloha zajištěna",
     "readiness.step.intro": "Představení odesláno",
@@ -3303,18 +3514,28 @@ export const messages = {
     "readiness.hint.empty":
       "Tvůj profil je prázdný, párování nemá z čeho vycházet a v ničích návrzích se neobjevíš. Stačí věta o sobě nebo pár dovedností.",
     "readiness.cta.matches": "Zobrazit spojení",
+    "readiness.cta.rerecord": "Nahrát představení znovu",
+    "readiness.lastChecked": "Naposledy ověřeno v {time}.",
+    "readiness.checkAgain": "Ověřit znovu",
+    "readiness.checking": "Ověřuje se…",
+    "readiness.cta.editProfile": "Upravit profil",
+    "readiness.hint.failed":
+      "Koordinátorovi se nepodařilo sestavit váš profil. Když ho upravíte a uložíte, odešle se znovu.",
+    "readiness.hint.failedMedia":
+      "Vaši nahrávku se nepodařilo zpracovat. Obvykle pomůže nahrát novou.",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuální krok",
+    "readiness.state.failed": "Vyžaduje vaši pozornost",
     "readiness.state.upcoming": "Nadcházející",
 
     "event.organizerAdmin": "Administrační rozhraní akce",
     "event.recordIntro": "Nahrajte své představení",
     "event.recordIntro.body":
-      "Spojení vznikají z představení — nahrajte to své, abyste se v nich objevili.",
+      "Spojení vznikají z představení. Nahrajte to své, abyste se v nich objevili.",
     "event.seeWhosHere": "Podívejte se, kdo tu je",
     "event.peopleToMeet": "Lidé, které byste měli poznat",
     "event.recordOrUpdate": "Nahrát / aktualizovat představení",
-    "event.requestSent": "Žádost odeslána — čeká se na schválení.",
+    "event.requestSent": "Žádost odeslána, čeká se na schválení.",
     "event.requestSent.body":
       "Organizátor vás pustí dovnitř; vraťte se sem. Jakmile vás schválí, akce se vám otevře.",
     "event.checkStatus": "Zkontrolovat stav",
@@ -3323,7 +3544,7 @@ export const messages = {
       "Schválí vás organizátor (nebo okamžitě pomocí pozvánkového odkazu).",
     "event.install.title": "Přidejte si Nostrautiku na plochu",
     "event.install.body":
-      "Během akce ji budete otevírat často — jedno klepnutí je lepší než hledání mezi kartami.",
+      "Během akce ji budete otevírat často. Jedno klepnutí je lepší než hledání mezi kartami.",
     "event.install.install": "Instalovat",
     "event.install.notNow": "Teď ne",
     "event.install.iosHint":
@@ -3333,7 +3554,9 @@ export const messages = {
     "event.posts": "Příspěvky",
     "event.pinned": "Připnuté",
     "event.attendeesSection": "Kdo tu je",
-    "event.attendeesSection.count": "Zatím {n} lidí",
+    "event.attendeesSection.count.one": "Zatím {n} člověk",
+    "event.attendeesSection.count.few": "Zatím {n} lidé",
+    "event.attendeesSection.count.many": "Zatím {n} lidí",
     "event.allPosts": "Všechny příspěvky ›",
     "event.report": "Zpráva z akce",
     "event.offline.title": "Dostupné offline",
@@ -3343,8 +3566,10 @@ export const messages = {
     "event.offline.downloadingShort": "Stahuji…",
     "event.offline.downloading": "Stahuji… ({n} z {total})",
     "event.offline.ready": "Připraveno k použití offline.",
-    "event.offline.partial": "Uloženo, ale některé části se nestáhly — zkuste to znovu.",
+    "event.offline.partial": "Uloženo, ale některé části se nestáhly. Zkuste to znovu.",
     "event.offline.noSw": "Data jsou uložena, ale obrazovky aplikace se zatím neuložily. Znovu otevřete aplikaci (nebo obnovte stránku) a stáhněte znovu, aby se otevřela i bez signálu.",
+    "event.offline.storageFull":
+      "Zařízení nemá volné místo, takže se nic neukládá pro offline použití. Uvolněte místo a stáhněte to znovu.",
     "event.offline.stored": "Přidáno {size} do zařízení",
     "event.offline.persisted": "ponecháno v tomto zařízení",
     "event.offline.mediaNote": "zvuk/video se nestahuje předem",
@@ -3381,14 +3606,14 @@ export const messages = {
     "post.editor.imagePreview": "náhled úvodního obrázku",
     "cropper.title": "Umístěte obrázek",
     "cropper.hint": "Přetažením posunete, posuvníkem přiblížíte. Uloží se přesně to, co vidíte.",
-    "cropper.viewportLabel": "Náhled oříznutí — posouvejte tažením nebo šipkami",
+    "cropper.viewportLabel": "Náhled oříznutí: posouvejte tažením nebo šipkami",
     "cropper.zoom": "Přiblížení",
     "cropper.use": "Použít",
     "cropper.cancel": "Zrušit",
-    "cropper.decodeError": "Tento obrázek se nepodařilo otevřít — může jít o formát HEIC nebo nepodporovaný formát. Zkuste JPEG nebo PNG.",
+    "cropper.decodeError": "Tento obrázek se nepodařilo otevřít: může jít o formát HEIC nebo nepodporovaný formát. Zkuste JPEG nebo PNG.",
     "post.replyingTo": "Odpověď na",
     "post.quote.unavailable": "Citovaný příspěvek není dostupný",
-    "post.editor.contentPlaceholder": "Napište příspěvek — Markdown je podporován.",
+    "post.editor.contentPlaceholder": "Napište příspěvek. Markdown je podporován.",
     "post.editor.visibility": "Kdo ho může číst",
     "post.editor.public": "Veřejný",
     "post.editor.public.hint": "kdokoli, v jakémkoli Nostr klientovi",
@@ -3400,9 +3625,12 @@ export const messages = {
     "post.editor.preview": "Náhled",
     "post.editor.nothingToPreview": "Zatím není co zobrazit.",
     "post.editor.bytes": "{n} bajtů",
+    "post.editor.bytes.one": "{n} bajt",
+    "post.editor.bytes.few": "{n} bajty",
+    "post.editor.bytes.many": "{n} bajtů",
     "post.editor.byteCount": "{used} / {max} bajtů",
     "post.editor.tooLong":
-      "Příliš dlouhé pro příspěvek jen pro členy — limit je {max} bajtů Markdownu. Zkraťte přibližně o {over} bajtů.",
+      "Příliš dlouhé pro příspěvek jen pro členy: limit je {max} bajtů Markdownu. Zkraťte přibližně o {over} bajtů.",
     "post.editor.publishing": "Zveřejňování…",
     "post.editor.publish": "Zveřejnit příspěvek",
     "post.editor.saveEdit": "Uložit úpravu",
@@ -3411,17 +3639,16 @@ export const messages = {
     // Připojení
     "join.title": "Připojit se: {title}",
     "join.retention": "Data z této akce se smažou {days} dní po jejím skončení.",
-    "join.wentWrong": "Něco se pokazilo.",
     "join.loading": "Načítání akce…",
     "join.youreIn": "Jste uvnitř",
     "join.recordIntro": "Nahrát představení",
     "join.whyIntro.summary": "Proč nahrát představení?",
-    "join.whyIntro.intro": "Nepovinné, ale doporučené — pomůže to v několika ohledech:",
-    "join.whyIntro.matches": "Lepší shody — čím víc o sobě prozradíte, tím má párování s čím pracovat.",
+    "join.whyIntro.intro": "Nepovinné, ale doporučené. Pomůže to v několika ohledech:",
+    "join.whyIntro.matches": "Lepší shody: čím víc o sobě prozradíte, tím má párování s čím pracovat.",
     "join.whyIntro.vibe":
-      "Pocit, s kým byste si sedli — ostatní si mohou přehrát vaše představení a zjistit, jestli byste si sedli. Párování není jen o projektech a dovednostech — je to i pocit, který AI sama o sobě nedokáže zachytit.",
+      "Pocit, s kým byste si sedli: ostatní si mohou přehrát vaše představení a zjistit, jestli byste si sedli. Párování není jen o projektech a dovednostech, je to i pocit, který AI sama o sobě nedokáže zachytit.",
     "join.whyIntro.recognize":
-      "Poznáte se navzájem — video představení znamená, že své shody opravdu poznáte, když je potkáte v davu.",
+      "Poznáte se navzájem: video představení znamená, že své shody opravdu poznáte, když je potkáte v davu.",
     "join.goToOverview": "Přejít na přehled akce",
     "join.seeWhosHere": "Podívejte se, kdo tu je",
     "join.backupIdentity": "Zazálohujte si novou identitu",
@@ -3439,43 +3666,43 @@ export const messages = {
     "join.noName": "(ve vašem profilu na Nostru není nastaveno jméno)",
     "join.aboutYou": "O vás",
     "join.fromProfile":
-      "Z vašeho profilu na Nostru — neměníme ho. Chcete-li ho upravit, udělejte to ve své Nostr aplikaci a zobrazí se to tady.",
+      "Z vašeho profilu na Nostru. Neměníme ho. Chcete-li ho upravit, udělejte to ve své Nostr aplikaci a zobrazí se to tady.",
     "join.inviteRecognized": "Pozvánka rozpoznána",
-    "join.displayNameEvent": "(pro tuto akci — váš Nostr profil zůstává beze změny)",
+    "join.displayNameEvent": "(pro tuto akci, váš Nostr profil zůstává beze změny)",
     "join.profile.failed.title": "Nepodařilo se načíst váš profil",
     "join.profile.failed.body":
       "Nepodařilo se spojit s relaji a načíst váš Nostr profil. Zkuste to znovu nebo jednoduše zadejte jméno pro tuto akci.",
     "join.profile.retry": "Zkusit znovu",
     "join.profile.empty":
-      "Zatím nemáte veřejný Nostr profil. Zadejte jméno pro tuto akci — váš Nostr profil se nemění.",
-    "join.publicNote": "Jméno, fotka a bio jsou veřejné — všechno ostatní zůstává uvnitř akce.",
+      "Zatím nemáte veřejný Nostr profil. Zadejte jméno pro tuto akci. Váš Nostr profil se nemění.",
+    "join.publicNote": "Jméno, fotka a bio jsou veřejné, všechno ostatní zůstává uvnitř akce.",
     "join.photoPublic": "veřejné",
     "join.photoAdd": "Fotka",
     "join.photoTap": "klepnutím přidáte",
     "join.displayNamePublic": "(veřejné)",
     "join.namePlaceholder": "Jak vás mají lidé znát?",
     "join.aboutOptional": "(volitelné)",
-    "join.aboutEvent": "(pro tuto akci — tvůj Nostr profil se nemění)",
+    "join.aboutEvent": "(pro tuto akci, tvůj Nostr profil se nemění)",
     "join.about.placeholder": "Věta či dvě o tom, čemu se věnuješ.",
     "join.empty.badge": "Zatím není co párovat",
     "join.empty.hint":
-      "Takto se připojit můžeš, ale párování nemá z čeho vycházet — přidej větu o sobě nebo pár dovedností a opravdu tě s někým spojíme.",
-    "join.concreteHint": "Další dvě pole určí, koho byste měli poznat — buďte konkrétní.",
+      "Takto se připojit můžeš, ale párování nemá z čeho vycházet: přidej větu o sobě nebo pár dovedností a opravdu tě s někým spojíme.",
+    "join.concreteHint": "Další dvě pole určí, koho byste měli poznat. Buďte konkrétní.",
     "join.skills": "Dovednosti",
-    "join.skills.hint": "— oddělte čárkami",
+    "join.skills.hint": "(oddělte čárkami)",
     "join.skills.placeholder": "kryptografie, rust, design",
     "join.lookingFor": "Co hledáte?",
     "join.lookingFor.placeholder": "spoluzakladatele, spolupracovníky…",
     "join.rsvpPublic": "Zveřejnit veřejnou účast (ostatní uvidí, že se zúčastním)",
     "join.reuse.title": "Použít vaše předchozí představení?",
     "join.reuse.body":
-      "Už máte představovací video ({duration}s). Přineste ho na tuto akci místo opětovného nahrávání — spojení vznikají z představení.",
+      "Už máte představovací video ({duration}s). Přineste ho na tuto akci místo opětovného nahrávání. Spojení vznikají z představení.",
     "join.reuse.reuse": "Použít znovu",
-    "join.reuse.reuse.hint": "— nejrychlejší, zrcadlí existující video",
+    "join.reuse.reuse.hint": "(nejrychlejší, zrcadlí existující video)",
     "join.reuse.fresh": "Čerstvá kopie",
-    "join.reuse.fresh.hint": "— znovu se nahraje, takže není propojitelné mezi akcemi",
+    "join.reuse.fresh.hint": "(znovu se nahraje, takže není propojitelné mezi akcemi)",
     "join.reuse.new": "Nahraji nové",
-    "join.reuse.new.hint": "— později, na stránce akce",
+    "join.reuse.new.hint": "(později, na stránce akce)",
     "join.sending": "Odesílání…",
     "join.send": "Odeslat žádost o připojení",
     "join.createAndJoin": "Vytvořit identitu a připojit se",
@@ -3490,13 +3717,13 @@ export const messages = {
     "record.uploaded":
       "Nahráno ✓ Vaše {kind} je zašifrováno a sdíleno s účastníky této akce.",
     "record.done.queued":
-      "Uloženo v tomto zařízení ✓ Vaše {kind} je zašifrováno a odešle se, jakmile se znovu připojíte k relay — zatím se k akci nedostalo.",
+      "Uloženo v tomto zařízení ✓ Vaše {kind} je zašifrováno a odešle se, jakmile se znovu připojíte k relay. Zatím se k akci nedostalo.",
     "record.done.introPublished":
       "Zveřejněno ✓ Vaše {kind} je zašifrováno a sdíleno s účastníky této akce.",
     "record.done.introProcessing":
-      "Odesláno ✓ Vaše {kind} je zašifrováno a na cestě — koordinátor jej právě zpracovává.",
+      "Odesláno ✓ Vaše {kind} je zašifrováno a na cestě. Koordinátor jej právě zpracovává.",
     "record.done.talkModeration":
-      "Odesláno ✓ Vaše {kind} je zašifrováno a odevzdáno — zobrazí se po schválení organizátorem.",
+      "Odesláno ✓ Vaše {kind} je zašifrováno a odevzdáno. Zobrazí se po schválení organizátorem.",
     "record.kind.intro": "představení",
     "record.kind.talk": "přednáška",
     "record.backToEvent": "Zpět na akci",
@@ -3509,7 +3736,7 @@ export const messages = {
     "record.role.join": "Připojit se k akci",
     "record.reuse.title": "Znovu použít předchozí představení",
     "record.reuse.body":
-      "Vyberte si představení, které jste nahráli nebo napsali na jiné akci — použijte ho tak, jak je, nebo si vytvořte čerstvou kopii, která není propojitelná mezi akcemi.",
+      "Vyberte si představení, které jste nahráli nebo napsali na jiné akci: použijte ho tak, jak je, nebo si vytvořte čerstvou kopii, která není propojitelná mezi akcemi.",
     "record.reuse.reuse": "Použít znovu",
     "record.reuse.fresh": "Čerstvá kopie",
     "record.reuse.videoLabel": "Video",
@@ -3521,29 +3748,35 @@ export const messages = {
     "record.uploading": "Nahrávání…",
     "record.useThis": "Použít toto",
     "record.limit": "Limit: {sec}s. Nahrávání se na limitu tvrdě zastaví.",
-    "record.limit.unlimited": "Bez limitu — nahrávání běží, dokud ho nezastavíte.",
+    "record.limit.unlimited": "Bez limitu: nahrávání běží, dokud ho nezastavíte.",
     "record.timeLeft": " · zbývá {sec}s",
     "record.elapsed": " · zatím nahráno {sec}s",
     "record.stop": "■ Zastavit",
     "record.enableCamera": "Povolit kameru",
     "record.record": "● Nahrávat",
     "record.error.camera": "Pro nahrávání je potřeba přístup ke kameře/mikrofonu. {reason}",
-    "record.deviceError.denied.camera": "Přístup ke kameře byl zablokován. Povolte kameru a mikrofon pro tuto stránku v panelu s adresou a zkuste to znovu — nebo nahrajte zvuk či napište představení.",
-    "record.deviceError.denied.mic": "Přístup k mikrofonu byl zablokován. Povolte mikrofon pro tuto stránku v panelu s adresou a zkuste to znovu — nebo napište představení.",
+    "record.deviceError.denied.camera": "Přístup ke kameře byl zablokován. Povolte kameru a mikrofon pro tuto stránku v panelu s adresou a zkuste to znovu, nebo nahrajte zvuk či napište představení.",
+    "record.deviceError.denied.mic": "Přístup k mikrofonu byl zablokován. Povolte mikrofon pro tuto stránku v panelu s adresou a zkuste to znovu, nebo napište představení.",
     "record.deviceError.absent.camera": "Na tomto zařízení se nenašla kamera. Zkuste zařízení s kamerou, nebo nahrajte zvuk či napište představení.",
     "record.deviceError.absent.mic": "Na tomto zařízení se nenašel mikrofon. Zkuste jiné zařízení, nebo napište představení.",
     "record.deviceError.busy.camera": "Vaši kameru používá jiná aplikace nebo karta. Zavřete ji a zkuste to znovu.",
     "record.deviceError.busy.mic": "Váš mikrofon používá jiná aplikace nebo karta. Zavřete ji a zkuste to znovu.",
-    "record.deviceError.unsupported.camera": "Nahrávání tento prohlížeč nepodporuje. Zkuste novější Chrome, Safari nebo Firefox — nebo napište představení.",
-    "record.deviceError.unsupported.mic": "Nahrávání tento prohlížeč nepodporuje. Zkuste novější prohlížeč — nebo napište představení.",
+    "record.deviceError.unsupported.camera": "Nahrávání tento prohlížeč nepodporuje. Zkuste novější Chrome, Safari nebo Firefox, nebo napište představení.",
+    "record.deviceError.unsupported.mic": "Nahrávání tento prohlížeč nepodporuje. Zkuste novější prohlížeč, nebo napište představení.",
     "record.deviceError.unknown.camera": "Kameru se nepodařilo spustit. Zkuste to znovu, nebo nahrajte zvuk či napište představení.",
     "record.deviceError.unknown.mic": "Mikrofon se nepodařilo spustit. Zkuste to znovu, nebo napište představení.",
 
     // Účastníci
     "attendees.title": "Lidé",
     "attendees.decrypting": "Dešifrování seznamu…",
-    "attendees.empty":
-      "Nejsou vidět žádní účastníci. Seznam je zašifrován pro schválené účastníky — pokud jste se ještě nepřipojili, je to proto; pokud vás právě schválili, za chvíli obnovte stránku.",
+    "attendees.empty.notApproved":
+      "Seznam účastníků je zašifrovaný pro schválené účastníky a toto zařízení zatím nemá klíč. Připojte se k akci, nebo pokud vás právě schválili, chvíli počkejte a zkuste to znovu.",
+    "attendees.empty.none":
+      "V seznamu zatím nikdo není. Lidé se tu objeví, jakmile je organizátor schválí; pokud schválili právě vás, váš vlastní záznam může přijít s minutovým zpožděním.",
+    "attendees.empty.unreachable":
+      "Nepodařilo se spojit s relayi, které drží seznam účastníků, takže nevíme, kdo tu je. Wi-Fi na místě je často blokuje. Zkuste to znovu nebo přepněte síť.",
+    "attendees.empty.staleKey":
+      "Lidé tu jsou, ale toto zařízení seznam nepřečte. Váš přístupový klíč je zastaralý, což se stává poté, co organizátor někoho odebere. Zkuste to za chvíli znovu; pokud to přetrvává, ověřte si u organizátora, zda jste stále na seznamu.",
     "attendees.backToEvent": "Zpět na akci",
     "attendees.count.one": "{n} účastník",
     "attendees.count.few": "{n} účastníci",
@@ -3595,12 +3828,12 @@ export const messages = {
     "profile.authored.introText": "Textové představení",
     "profile.authored.introText.hint": "Krátké psané představení, použije se, když nemáte nahrávku.",
     "profile.authored.cancel": "Zrušit",
-    "profile.authored.saved.hint": "Odeslána nová revize — nahrazuje to, co jste napsali dříve.",
+    "profile.authored.saved.hint": "Odeslána nová revize. Nahrazuje to, co jste napsali dříve.",
     "profile.generated.title": "Vygenerováno z vašeho představení",
     "profile.generated.hint":
       "Koordinátor akce to sestavil z vašeho představení. Kterékoli pole opravte, skryjte, nebo skryjte vše najednou.",
     "profile.generated.none":
-      "Zatím žádný AI profil — objeví se po zpracování vašeho představení (nebo je skrytý).",
+      "Zatím žádný AI profil. Objeví se po zpracování vašeho představení (nebo je skrytý).",
     "profile.hide.all": "Skrýt celý AI profil (zobrazit jen to, co jste napsali)",
     "profile.field.summary": "Shrnutí",
     "profile.field.skills": "Dovednosti",
@@ -3608,7 +3841,7 @@ export const messages = {
     "profile.field.offers": "Umím pomoci s",
     "profile.field.seeks": "Hledám",
     "profile.field.hide": "Skrýt",
-    "profile.field.hidden": "Skryto — toto pole se nezobrazí.",
+    "profile.field.hidden": "Skryto: toto pole se nezobrazí.",
     "profile.field.listPlaceholder": "Jedno na řádek",
     "profile.field.listHint": "Jedna položka na řádek.",
     "profile.report.title": "Nahlásit problém (volitelné)",
@@ -3627,7 +3860,7 @@ export const messages = {
     "attendee.recentPosts": "Nedávné příspěvky",
     "attendee.name": "Účastník",
     "attendee.error.badNpub": "neplatný npub",
-    "attendee.error.badNpub.body": "Tento odkaz na profil není platný — zkontrolujte ho a zkuste to znovu.",
+    "attendee.error.badNpub.body": "Tento odkaz na profil není platný. Zkontrolujte ho a zkuste to znovu.",
     "attendee.translated": "Přeloženo",
     "attendee.showOriginal": "zobrazit originál",
     "attendee.showTranslation": "zobrazit překlad",
@@ -3644,10 +3877,10 @@ export const messages = {
     "matches.seeWhosHere": "Podívejte se, kdo tu je",
     "matches.fetching": "Načítání vašich spojení…",
     "matches.none":
-      "Zatím žádná spojení — objeví se, jakmile koordinátor zpracuje pár účastníků. Vraťte se brzy.",
+      "Zatím žádná spojení. Objeví se, jakmile koordinátor zpracuje pár účastníků. Vraťte se brzy.",
     "matches.none.noIntro":
-      "Zatím žádná spojení — koordinátor začíná od vašeho profilu na Nostru a příspěvků, zkuste to za pár minut. Nahrané představení vaše spojení výrazně zlepší.",
-    "matches.rankedNote": "Seřazeno podle toho, kolik by vám setkání přineslo — i s odůvodněním.",
+      "Zatím žádná spojení. Koordinátor začíná od vašeho profilu na Nostru a příspěvků, zkuste to za pár minut. Nahrané představení vaše spojení výrazně zlepší.",
+    "matches.rankedNote": "Seřazeno podle toho, kolik by vám setkání přineslo, i s odůvodněním.",
     "matches.live": "vaše představení je odesláno, takže tato jsou aktuální",
     "matches.band.strong": "Silná shoda",
     "matches.band.good": "Dobrá shoda",
@@ -3664,7 +3897,7 @@ export const messages = {
     "matches.similar": "podobnost {pct}%",
     "matches.complementary": "doplňkovost {pct}%",
     "matches.name": "Účastník",
-    "matches.role.loggedOut": "Přihlaste se, abyste viděli, s kým se setkat — vaše shody jsou vázané na váš účet.",
+    "matches.role.loggedOut": "Přihlaste se, abyste viděli, s kým se setkat. Vaše shody jsou vázané na váš účet.",
     "matches.role.login": "Přihlásit se",
     "matches.role.visitor": "Shody jsou pro členy. Připojte se k akci a získejte osobní seznam lidí, se kterými se vyplatí setkat.",
     "matches.role.join": "Připojit se k akci",
@@ -3677,35 +3910,44 @@ export const messages = {
     "me.title.new": "Teď jste uživatelem Nostru",
     "me.title.profile": "Váš profil na Nostru",
     "me.new.body":
-      "Vlastníte skutečnou identitu na Nostru — účet, který neovládá žádná firma a nikdo vám ho nemůže vzít. Váš profil i lidé, které sledujete, s ním putují do celého ekosystému aplikací.",
+      "Vlastníte skutečnou identitu na Nostru: účet, který neovládá žádná firma a nikdo vám ho nemůže vzít. Váš profil i lidé, které sledujete, s ním putují do celého ekosystému aplikací.",
     "me.handle": "Vaše veřejná adresa (npub)",
-    "me.handle.body": "Sdílejte ji volně — takto vás lidé najdou a začnou sledovat. (Je bezpečné ji zveřejnit.)",
+    "me.handle.body": "Sdílejte ji volně: takto vás lidé najdou a začnou sledovat. (Je bezpečné ji zveřejnit.)",
     "me.copied": "Zkopírováno ✓",
     "me.copyNpub": "Kopírovat npub",
     "me.signedInVia": "Přihlášen(a) přes {method}.",
-    "me.keyInSigner": "Váš klíč žije ve vašem podpisovači — zazálohujte si ho tam.",
+    "me.keyInSigner": "Váš klíč žije ve vašem podpisovači. Zazálohujte si ho tam.",
     "me.takeAnywhere": "Vezměte si to kamkoli",
     "me.takeAnywhere.body":
-      "Toto jsou nezávislé aplikace na Nostru — jako různí klienti pro stejný účet. Zkopírujte si klíč níže, otevřete některou z nich, zvolte „přihlásit se klíčem“ a vložte ho tam — váš profil i lidé, které sledujete, tam už jsou.",
+      "Toto jsou nezávislé aplikace na Nostru, jako různí klienti pro stejný účet. Zkopírujte si klíč níže, otevřete některou z nich, zvolte „přihlásit se klíčem“ a vložte ho tam. Váš profil i lidé, které sledujete, tam už jsou.",
     "me.backupKey": "Zazálohujte si klíč",
     "me.logout": "Odhlásit se",
-    "me.logout.warnUnsent":
-      "Máte {n} neodeslaných akcí čekajících na odeslání. Odhlášením se zahodí — nezveřejní se. Přesto se odhlásit?",
+    "me.logout.warnUnsent.one":
+      "Máte {n} neodeslanou akci čekající na odeslání. Odhlášením se zahodí. Nezveřejní se. Přesto se odhlásit?",
+    "me.logout.warnUnsent.few":
+      "Máte {n} neodeslané akce čekající na odeslání. Odhlášením se zahodí. Nezveřejní se. Přesto se odhlásit?",
+    "me.logout.warnUnsent.many":
+      "Máte {n} neodeslaných akcí čekajících na odeslání. Odhlášením se zahodí. Nezveřejní se. Přesto se odhlásit?",
     "me.logout.confirmDiscard": "Odhlásit a zahodit",
     "me.logout.cancel": "Zůstat přihlášen",
+    "me.logout.keyLoss.title": "Odhlášení vymaže váš klíč z tohoto zařízení",
+    "me.logout.keyLoss.body":
+      "Tuto Nostr identitu vám vytvořila tato aplikace a klíč je uložený jen v tomto zařízení. Zatím jste si ho nikam neuložili. Odhlášením se nenávratně smaže. Nikdo ho neobnoví: přijdete o profil, o akce, do kterých jste se zapojili, i o své zprávy.",
+    "me.logout.keyLoss.backup": "Nejprve si uložte klíč",
+    "me.logout.keyLoss.confirm": "Odhlásit se a smazat klíč",
 
     // Karta zálohy
-    "backup.noKey": "Váš klíč žije ve vašem podpisovači — zazálohujte si ho tam. Tady není co exportovat.",
-    "backup.copied": "Zkopírováno ✓ — teď ho vložte do Nostr aplikace",
+    "backup.noKey": "Váš klíč žije ve vašem podpisovači. Zazálohujte si ho tam. Tady není co exportovat.",
+    "backup.copied": "Zkopírováno ✓, teď ho vložte do Nostr aplikace",
     "backup.copyKey": "Kopírovat můj tajný klíč",
-    "backup.stage.copied": "Tajný klíč zkopírován. Kopírování ještě není záloha — uložte ho na bezpečné místo.",
+    "backup.stage.copied": "Tajný klíč zkopírován. Kopírování ještě není záloha. Uložte ho na bezpečné místo.",
     "backup.stage.iSavedIt": "Uložil jsem ho na bezpečné místo",
     "backup.stage.saved": "Uloženo na bezpečném místě",
     "backup.stage.confirming": "Potvrzuje se záloha…",
     "backup.stage.confirmed": "Záloha potvrzena ✓",
-    "backup.stage.confirmFailed": "Nepodařilo se zaznamenat značku zálohy — zkuste znovu.",
+    "backup.stage.confirmFailed": "Nepodařilo se zaznamenat značku zálohy, zkuste znovu.",
     "backup.stage.retry": "Zopakovat",
-    "backup.warning.a": "Toto je váš soukromý klíč. Je jako vaše heslo —",
+    "backup.warning.a": "Toto je váš soukromý klíč. Je jako vaše heslo:",
     "backup.warning.keepSecret": "držte ho v tajnosti",
     "backup.warning.b":
       ", kdokoli ho má, ovládá váš účet. Chcete-li použít jinou Nostr aplikaci, zvolte tam „přihlásit se klíčem / nsec“ a vložte tento klíč.",
@@ -3750,6 +3992,9 @@ export const messages = {
       "Zatím žádné zprávy. Otevřete něčí profil v seznamu účastníků akce a klepněte na Napsat zprávu, čímž zahájíte konverzaci. Zprávy jsou koncově šifrované a fungují i s jinými Nostr aplikacemi na zprávy.",
     "dm.youPrefix": "Vy: ",
     "dm.unread": "{n} nepřečtených přímých zpráv",
+    "dm.unread.one": "{n} nepřečtená přímá zpráva",
+    "dm.unread.few": "{n} nepřečtené přímé zprávy",
+    "dm.unread.many": "{n} nepřečtených přímých zpráv",
     "dm.markAllRead": "Označit vše jako přečtené",
     "dm.encryptedActivity": "Nová šifrovaná aktivita ve schránce",
     "chats.groupSection": "Skupinové chaty",
@@ -3760,10 +4005,10 @@ export const messages = {
     "dmchat.login": "Přihlásit se",
     "dmchat.invalidLink": "Neplatný odkaz na profil.",
     "dmchat.title": "Konverzace",
-    "dmchat.e2e": "Koncově šifrováno (NIP-17) — čitelné i v jiných Nostr aplikacích na zprávy.",
+    "dmchat.e2e": "Koncově šifrováno (NIP-17), čitelné i v jiných Nostr aplikacích na zprávy.",
     "dmchat.sharedEvents": "Také se účastní:",
     "dmchat.decrypting": "Dešifrování…",
-    "dmchat.empty": "Zatím žádné zprávy — pozdravte se.",
+    "dmchat.empty": "Zatím žádné zprávy. Pozdravte se.",
     "dmchat.signerSlow":
       "Čeká se, až podpisovač podepíše a zašifruje… pokud používáte Amber nebo bunker, ujistěte se, že je dostupný.",
     "dmchat.placeholder": "Napište zprávu…",
@@ -3775,20 +4020,20 @@ export const messages = {
     "admin.done": "Hotovo ✓",
     "admin.notOrganizer.title": "Na tomto zařízení nemáte organizátorské klíče této akce.",
     "admin.notOrganizer.body":
-      "Organizátorské klíče žijí na zařízení, které akci vytvořilo — neodvozují se z vašeho přihlášení. Chcete-li administrovat odsud, nechte si je udělit na npub tohoto zařízení:",
+      "Organizátorské klíče žijí na zařízení, které akci vytvořilo. Neodvozují se z vašeho přihlášení. Chcete-li administrovat odsud, nechte si je udělit na npub tohoto zařízení:",
     "admin.yourNpub": "Váš npub",
     "admin.copyNpub": "Kopírovat npub",
     "admin.copied": "Zkopírováno ✓",
     "admin.person.copyId": "Zkopírovat Nostr id této osoby (nprofile)",
-    "admin.person.copyIdFailed": "Kopírování selhalo — označte a zkopírujte ručně:",
+    "admin.person.copyIdFailed": "Kopírování selhalo. Označte a zkopírujte ručně:",
     "admin.grant.step1":
       "Na zařízení, kterým jste akci vytvořili, otevřete Administrace → Spoluorganizátoři.",
     "admin.grant.step2": "Vložte tento npub a přidejte ho.",
     "admin.grant.step3":
-      "Nechte tuto stránku otevřenou — po doručení oprávnění se tady automaticky odemkne.",
+      "Nechte tuto stránku otevřenou. Po doručení oprávnění se tady automaticky odemkne.",
     "admin.grant.waiting": "Každých pár sekund se kontroluje, zda udělení dorazilo…",
     "admin.grant.waitingSigner":
-      "Čeká se na připojení podepisovače — kontrola začne, jakmile se připojí.",
+      "Čeká se na připojení podepisovače. Kontrola začne, jakmile se připojí.",
     "admin.grant.notChecking": "Automatická kontrola se zastavila.",
     "admin.grant.lastChecked": "Naposledy zkontrolováno v {time}.",
     "admin.grant.checkNow": "Zkontrolovat nyní",
@@ -3802,14 +4047,14 @@ export const messages = {
     "admin.section.operations": "Provoz",
     "admin.enrollSelf.title": "Přidejte se na vlastní akci",
     "admin.enrollSelf.body":
-      "Tuto akci jste vytvořili, ale ještě nejste jejím účastníkem. Přidejte se, abyste se zobrazili v seznamu lidí, byli spárováni a — pokud je zapnutý skupinový chat — byli do něj přidáni. Samotné organizátorství vás do seznamu nezařadí.",
+      "Tuto akci jste vytvořili, ale ještě nejste jejím účastníkem. Přidejte se, abyste se zobrazili v seznamu lidí, byli spárováni a (pokud je zapnutý skupinový chat) byli do něj přidáni. Samotné organizátorství vás do seznamu nezařadí.",
     "admin.noEidKey.title": "Klíč organizátora není na tomto zařízení",
     "admin.noEidKey.body":
       "Na tomto zařízení máte roli organizátora, ale ne podpisový klíč (E_id), takže odsud nelze zveřejňovat administrátorské akce. Otevřete akci na zařízení, kde jste ji vytvořili, nebo obnovte zálohu klíče z toho zařízení, a pak se vraťte.",
     "admin.enrollSelf.action": "Přidat se jako účastník",
     "admin.enrollSelf.busy": "Připojování…",
     "admin.enrollSelf.sent":
-      "Připojeno ✓ — s připojeným koordinátorem vás během pár sekund přidá do seznamu lidí a skupinového chatu. Obnovte stránku a zkontrolujte to.",
+      "Připojeno ✓. S připojeným koordinátorem vás během pár sekund přidá do seznamu lidí a skupinového chatu. Obnovte stránku a zkontrolujte to.",
     "admin.section.communicate": "Komunikace",
     "admin.section.people": "Lidé",
     "admin.section.setup": "Nastavení akce",
@@ -3836,7 +4081,7 @@ export const messages = {
     "admin.metadata.saved": "Uloženo ✓",
     "admin.page.title": "Menu a rozložení",
     "admin.page.body":
-      "Přizpůsobte stránku akce: menu odkazů (na příspěvky nebo jakoukoli URL) a sekce zobrazené pod hlavičkou. Položky jen pro členy jsou zašifrovány — návštěvníci ani nevidí, že existují.",
+      "Přizpůsobte stránku akce: menu odkazů (na příspěvky nebo jakoukoli URL) a sekce zobrazené pod hlavičkou. Položky jen pro členy jsou zašifrovány: návštěvníci ani nevidí, že existují.",
     "admin.page.menu": "Menu",
     "admin.page.moveUp": "Posunout nahoru",
     "admin.page.moveDown": "Posunout dolů",
@@ -3852,7 +4097,7 @@ export const messages = {
     "admin.page.type.pinned": "Připnuté příspěvky",
     "admin.page.type.attendees": "Náhled účastníků",
     "admin.page.pinPost": "Připnout příspěvek…",
-    "admin.page.attendees.hint": "Náhled seznamu účastníků — vidí ho jen členové.",
+    "admin.page.attendees.hint": "Náhled seznamu účastníků. Vidí ho jen členové.",
     "admin.page.membersOnlySection": "Sekce jen pro členy",
     "admin.page.feeds": "Příspěvky z jiných účtů",
     "admin.page.feeds.body":
@@ -3875,7 +4120,7 @@ export const messages = {
     "admin.page.saved": "Zveřejněno ✓",
     "admin.theme.title": "Vzhled",
     "admin.theme.body":
-      "Vlastní CSS pro stránky této akce (max 32 KB). Platí jen při prohlížení této akce — nikdy pro zbytek aplikace.",
+      "Vlastní CSS pro stránky této akce (max 32 KB). Platí jen při prohlížení této akce, nikdy pro zbytek aplikace.",
     "admin.theme.placeholder": ":root { --accent: #ff6b00; }",
     "admin.theme.byteCount": "{used} / {max} bajtů",
     "admin.theme.tooBig": "příliš velké na zveřejnění",
@@ -3887,7 +4132,7 @@ export const messages = {
     "admin.coordinator.title": "AI koordinátor",
     "admin.coordinator.attached": "Připojen:",
     "admin.coordinator.noActivity": "zatím žádná aktivita",
-    "admin.coordinator.idle": " · ticho — koordinátor publikuje, jen když má co dělat",
+    "admin.coordinator.idle": " · ticho: koordinátor publikuje, jen když má co dělat",
     "admin.coordinator.recomputing": "Přepočítávání…",
     "admin.coordinator.recompute": "↻ Přepočítat všechna spojení",
     "admin.coordinator.attachedOk":
@@ -3903,7 +4148,7 @@ export const messages = {
     "admin.coordinator.lastSeen": "Naposledy viděn:",
     "admin.coordinator.test": "Otestovat spojení",
     "admin.coordinator.testing": "Testuje se…",
-    "admin.coordinator.testOk": "Koordinátor je dostupný — oznámení a aktivita nalezeny.",
+    "admin.coordinator.testOk": "Koordinátor je dostupný: oznámení a aktivita nalezeny.",
     "admin.coordinator.testFail": "Koordinátor nedostupný (žádné oznámení ani nedávná aktivita).",
     "admin.coordinator.resend": "Znovu odeslat grant",
     "admin.coordinator.resending": "Odesílá se…",
@@ -3919,7 +4164,7 @@ export const messages = {
     "admin.coordinator.paste": "Nebo vložte npub koordinátora (pokročilé)",
     "admin.coordinator.terms": "Podmínky",
     "admin.coordinator.unverified":
-      "Koordinátoři si tyto záznamy zveřejňují sami; připojte jen takového, kterému důvěřujete — dokáže číst obsah akce.",
+      "Koordinátoři si tyto záznamy zveřejňují sami; připojte jen takového, kterému důvěřujete. Dokáže číst obsah akce.",
     "admin.coordinator.nonPrivate": "opouští TEE",
     "admin.coordinator.feat.matching": "Párování",
     "admin.coordinator.feat.talks": "Přednášky",
@@ -3929,7 +4174,7 @@ export const messages = {
     "admin.billing.checkout": "Otevřít platbu",
     "admin.coorg.title": "Spoluorganizátoři",
     "admin.coorg.body":
-      "Přidejte někoho podle jeho npub a sdílejte plnou organizátorskou kontrolu — může upravovat akci, schvalovat účastníky a spravovat koordinátora. (Jejich klíče jsou jim zabaleny jako dárek (gift wrap); přístup získají, až příště otevřou akci.)",
+      "Přidejte někoho podle jeho npub a sdílejte plnou organizátorskou kontrolu: může upravovat akci, schvalovat účastníky a spravovat koordinátora. (Jejich klíče jsou jim zabaleny jako dárek (gift wrap); přístup získají, až příště otevřou akci.)",
     "admin.coorg.placeholder": "npub1… (spoluorganizátor)",
     "admin.coorg.adding": "Přidávání…",
     "admin.coorg.add": "Přidat spoluorganizátora",
@@ -3942,14 +4187,14 @@ export const messages = {
     "admin.invites.copyLink": "Kopírovat odkaz",
     "admin.invites.shared.title": "Sdílený vstupní kód (jeden QR pro celý sál)",
     "admin.invites.shared.body":
-      "Jeden kód, který naskenují všichni — dej ho na úvodní snímek a lidé se připojí bez čekání na schválení. Tajemstvím je odkaz: vědět o akci nestačí.",
+      "Jeden kód, který naskenují všichni: dej ho na úvodní snímek a lidé se připojí bez čekání na schválení. Tajemstvím je odkaz: vědět o akci nestačí.",
     "admin.invites.shared.uses": "Počet lidí",
     "admin.invites.shared.hours": "Platnost (hodiny)",
     "admin.invites.shared.generate": "Vytvořit sdílený kód",
     "admin.invites.shared.usesHint":
-      "0 znamená bez limitu. Kdo ho naskenuje, může odkaz poslat dál, proto nech okno krátké — po vypršení se opozdilci dostanou do fronty na schválení, nejsou odmítnuti.",
+      "0 znamená bez limitu. Kdo ho naskenuje, může odkaz poslat dál, proto nech okno krátké. Po vypršení se opozdilci dostanou do fronty na schválení, nejsou odmítnuti.",
     "admin.invites.shared.ephemeral":
-      "Tento kód existuje jen v tomto okně — nikde se neukládá. Ukaž nebo zkopíruj ho dřív, než stránku zavřeš.",
+      "Tento kód existuje jen v tomto okně. Nikde se neukládá. Ukaž nebo zkopíruj ho dřív, než stránku zavřeš.",
     "admin.invites.copyAll": "Kopírovat všechny odkazy (po řádcích)",
     "admin.invites.copiedAll": "Vše zkopírováno ✓",
     "admin.invites.download": "Stáhnout jako .txt",
@@ -3961,6 +4206,12 @@ export const messages = {
     "admin.requests.approving": "Schvalování…",
     "admin.requests.approveAll": "Schválit všechny ({n})",
     "admin.requests.invite": "pozvánka",
+    "admin.requests.withdrew": "Tato osoba po odeslání žádosti požádala o odchod. Schválením ji nyní znovu přijmete.",
+    "admin.requests.withdrew.purge": "Tato osoba po odeslání žádosti požádala o odchod a o smazání svých údajů. Schválením ji nyní znovu přijmete.",
+    "admin.people.withdrew":
+      "Tato osoba požádala o odchod. Její aplikace už odstranila představení i média, takže ze seznamu ji odstraní až zrušení přístupu tady.",
+    "admin.people.withdrew.purge":
+      "Tato osoba požádala o odchod a o smazání svých údajů. Její aplikace už odstranila představení i média, takže ze seznamu ji odstraní až zrušení přístupu tady.",
     "admin.requests.video.one": "{n} video",
     "admin.requests.video.few": "{n} videa",
     "admin.requests.video.many": "{n} videí",
@@ -3974,9 +4225,9 @@ export const messages = {
     "admin.approvedTag": "Schváleno ✓",
     "admin.reprocess": "Zpracovat znovu",
     "common.close": "Zavřít",
-    "common.copyFailed": "Nepodařilo se zkopírovat automaticky — označte text a zkopírujte jej ručně.",
+    "common.copyFailed": "Nepodařilo se zkopírovat automaticky. Označte text a zkopírujte jej ručně.",
     "admin.person.details": "Podrobnosti",
-    "admin.person.title": "{name} — podrobnosti",
+    "admin.person.title": "{name}: podrobnosti",
     "admin.person.profile": "Odeslaný profil",
     "admin.person.noIntake": "Pro tuto osobu nejsou k dispozici žádné odeslané údaje.",
     "admin.person.intro": "Představení",
@@ -4007,12 +4258,12 @@ export const messages = {
     "admin.requests.bulkSummary": "{approved} schváleno, {retry} vyžaduje opakování",
     "admin.requests.bulk.queued": "Ve frontě…",
     "admin.requests.bulk.publishing": "Zveřejňuje se…",
-    "admin.requests.bulk.failed": "Nepodařilo se schválit — zkuste znovu.",
+    "admin.requests.bulk.failed": "Nepodařilo se schválit, zkuste znovu.",
     "admin.requests.bulk.retry": "Zopakovat",
     "admin.people.organizer": "Organizátor",
     "admin.people.failed": "Zpracování selhalo",
     "admin.people.intakeUnavailable":
-      "Údaje o přihlášce nedostupné (žádost je starší než okno synchronizace) — ovládání funguje.",
+      "Údaje o přihlášce nedostupné (žádost je starší než okno synchronizace). Ovládání funguje.",
     "admin.requests.reviewed": "Zkontrolováno",
     "admin.requests.reject": "Odmítnout",
     "admin.requests.reject.confirm":
@@ -4073,9 +4324,20 @@ export const messages = {
     // Chyby z knihovny
     "error.followListGuard":
       "Nepodařilo se načíst váš seznam sledovaných z relayů, proto je sledování pozastaveno, aby se nepřepsal. Zkuste to za chvíli znovu.",
-    "error.signerTimeout": "Váš podpisovač neodpověděl — zkontrolujte, že je online, a zkuste to znovu.",
+    "error.signerTimeout": "Váš podpisovač neodpověděl. Zkontrolujte, že je online, a zkuste to znovu.",
+    "error.extensionMissing":
+      "Vaše rozšíření pro Nostr není dostupné. Stále jste přihlášen; odemkněte ho nebo zapněte a zkuste to znovu.",
+    "boot.badRecoveryLink":
+      "Tento obnovovací odkaz nenesl použitelný klíč. Vyžádejte si nový nebo se přihlaste jinak.",
+    "join.loadFailed.body": "Událost se nepodařilo načíst, takže se zatím není k čemu připojit.",
+    "join.waiting.checking": "Ověřujeme každých {sec} sekund…",
+    "join.waiting.checked": "Naposledy ověřeno v {time} · ověřujeme každých {sec} sekund.",
+    "join.waiting.canClose": "Klidně to zavřete. Až se vrátíte, ukážeme, že jste uvnitř.",
+    "matches.none.why":
+      "Spojení se objeví, až se zpracuje vaše představení a organizátor spustí párování.",
+    "matches.checkAgain": "Ověřit znovu",
     "error.signerRelaysUnreachable":
-      "Váš podpisovač neodpověděl — nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
+      "Váš podpisovač neodpověděl: nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
     "error.badBunkerLink": "Tohle nevypadá jako platný bunker odkaz.",
     "error.badEventLink":
       "Tento odkaz na akci vypadá neplatně. Otevřete ho prosím znovu z pozvánky nebo ze seznamu akcí.",
@@ -4093,8 +4355,16 @@ export const messages = {
     "settings.theme.system": "Systémový",
     "settings.theme.light": "Světlý",
     "settings.theme.dark": "Tmavý",
+    "settings.privacy": "Soukromí",
+    "settings.externalImages": "Načítat profilové fotky z cizích serverů",
+    "settings.externalImages.hint": "Profilové fotky a bannery událostí jsou uložené tam, kde si zvolil ten, kdo je nastavil. Načtení prozradí tomu serveru vaši IP adresu a čas, kdy jste se dívali. Vypnutím se místo nich zobrazí iniciály a generovaná grafika. Nic jiného se nezmění.",
     "settings.about": "O aplikaci",
-    "settings.about.hint": "Diagnostika sestavení — přiložte ji při hlášení problému.",
+    "settings.about.hint": "Diagnostika sestavení. Přiložte ji při hlášení problému.",
+    "settings.about.release": "Vydání",
+    "settings.about.app": "Aplikace",
+    "settings.about.protocol": "Protokol",
+    "settings.about.commit": "Commit",
+    "settings.about.built": "Sestaveno",
 
     // Přístupnost (A2)
     "a11y.skipToContent": "Přeskočit na obsah",
@@ -4106,6 +4376,7 @@ export const messages = {
     "nav.people": "Lidé",
     "nav.matches": "Spojení",
     "nav.chat": "Chat",
+    "nav.messages": "Zprávy",
     "nav.talks": "Přednášky",
     "nav.updates": "Novinky",
     "nav.more": "Více",
@@ -4128,37 +4399,55 @@ export const messages = {
       "Tento chat je koncově šifrovaný (MLS/Marmot). Provozuje ho koordinátor akce, který ho může číst, a každé zařízení vidí jen zprávy odeslané od chvíle, kdy se připojilo.",
     "chat.setup": "Nastavujeme váš zabezpečený chat… připojíte se, jakmile vás koordinátor přidá.",
     "chat.setupSlow":
-      "Stále čekáte na přidání. Do skupinového chatu vás přidává koordinátor — pokud to nezmizí, může být offline; ověřte to u organizátora. Můžete počkat, nebo to zkusit znovu.",
+      "Stále čekáte na přidání. Do skupinového chatu vás přidává koordinátor. Pokud to nezmizí, může být offline; ověřte to u organizátora. Můžete počkat, nebo to zkusit znovu.",
+    "chat.refused.deviceCap":
+      "Koordinátor toto zařízení odmítl: váš účet už používá nejvyšší povolený počet chatovacích zařízení pro tuto akci. Odeberte jedno níže v \u201eZařízení v chatu\u201c a zkuste to znovu.",
+    "chat.refused.boundElsewhere":
+      "Koordinátor toto zařízení odmítl: jeho chatovací klíč už patří jinému účtu na této akci. Vymazáním dat této stránky v tomto prohlížeči se vytvoří nový klíč zařízení.",
+    "chat.refused.proof":
+      "Koordinátor nedokázal ověřit, že toto zařízení vlastní svůj chatovací klíč. Odhlaste se a znovu přihlaste na tomto zařízení a pak chat otevřete.",
+    "chat.refused.keyPackage":
+      "Koordinátor nedokázal použít šifrovací klíč tohoto zařízení. Požádejte o opětovné přidání do tohoto chatu, aby se zveřejnil nový.",
+    "chat.refused.other":
+      "Koordinátor toto zařízení odmítl. Požádejte o opětovné přidání do tohoto chatu nebo to ověřte u organizátora.",
     "chat.retry": "Zkusit znovu",
     "chat.empty": "Zatím žádné zprávy. Pozdravte se.",
     "chat.jumpToLatest": "Nové zprávy ↓",
     "chat.compose.placeholder": "Zpráva",
     "chat.send": "Odeslat",
     "chat.checking": "Kontrola vašeho přístupu…",
-    "chat.sendFailed": "Odeslání se nezdařilo. Možná jste byli z tohoto chatu odebráni, nebo vypadlo spojení.",
+    "chat.sendFailed": "Odeslání se nezdařilo: toto zařízení už není v chatu. Požádejte o opětovné přidání.",
+    "chat.sendFailedTransport":
+      "Odeslání se nezdařilo: nepodařilo se spojit s relayi. Text tu zůstal, zkuste to znovu.",
+    "chat.sendRetry": "Zkusit znovu",
+    "chat.evicted.title": "Už nejste v tomto chatu",
+    "chat.evicted.body":
+      "Nové zprávy se na toto zařízení nedostanou, dokud vás znovu nepřidají. Všechno výše je to, co vám přišlo, dokud jste byli uvnitř.",
+    "chat.sending": "Odesílá se…",
     "chat.rejoin": "Znovu se připojit do chatu",
     "chat.rejoining": "Připojujeme…",
     "chat.rejoinRequested":
-      "Požádali jsme o opětovné přidání — obvykle to trvá do minuty. Zpráva vám zůstává v okénku, odešlete ji, až bude chat zpět.",
+      "Požádali jsme o opětovné přidání. Obvykle to trvá do minuty. Zpráva vám zůstává v okénku, odešlete ji, až bude chat zpět.",
     "chat.rejoinFailed": "Žádost o opětovné připojení se nezdařila. Zkontrolujte spojení a zkuste to znovu.",
     "chat.rejoinHint": "Pořád nic ani po dalším pokusu? Požádejte o opětovné přidání do tohoto chatu.",
     "chat.unavailable": "Skupinový chat není pro tuto akci dostupný, nebo ještě nejste členem.",
     "chat.backToEvent": "Zpět na akci",
     "chat.handoff.link.title": "Použijte tento chat ve Whitenoise (nebo jiném klientovi Marmot)",
     "chat.handoff.link.body":
-      "Máte tam už identitu? Vložte její npub níže a autorizujte ji — automaticky se připojí do tohoto chatu, žádný klíč neopouští toto zařízení.",
+      "Máte tam už identitu? Vložte její npub níže a autorizujte ji. Automaticky se připojí do tohoto chatu, žádný klíč neopouští toto zařízení.",
     "chat.handoff.link.placeholder": "npub nebo hex pubkey",
     "chat.handoff.link.button": "Autorizovat",
     "chat.handoff.link.authorizing": "Autorizuji…",
     "chat.handoff.link.success":
-      "Autorizováno. Otevřete to v daném klientovi — připojí se, jakmile se najde jeho key package. Pokud se to po pár minutách nestane, autorizujte znovu — tím se vyhledávání zopakuje.",
+      "Autorizováno. Otevřete to v daném klientovi: připojí se, jakmile se najde jeho key package. Pokud se to po pár minutách nestane, autorizujte znovu, tím se vyhledávání zopakuje.",
     "chat.handoff.link.badNpub": "Zadejte npub nebo 64znakový hex pubkey",
     "chat.handoff.link.relaysHint": "Relaye této akce, pro případ, že se stále nepřipojí:",
     "chat.devices.manage.title": "Zařízení v chatu",
     "chat.devices.manage.body":
-      "Zařízení přihlášená do chatu této akce vaším účtem. Každé má vlastní klíč a do skupiny se připojuje samostatně — chcete-li přidat telefon nebo jiný prohlížeč, otevřete tam tuto akci a přihlaste se. Odeberte ta, která už nepoužíváte. Historie začíná od připojení daného zařízení.",
+      "Zařízení přihlášená do chatu této akce vaším účtem. Každé má vlastní klíč a do skupiny se připojuje samostatně. Chcete-li přidat telefon nebo jiný prohlížeč, otevřete tam tuto akci a přihlaste se. Odeberte ta, která už nepoužíváte. Historie začíná od připojení daného zařízení.",
     "chat.devices.thisDevice": "Toto zařízení",
     "chat.devices.added": "Přidáno {date}",
+    "chat.devices.lastActive": "Naposledy aktivní {date}",
     "chat.devices.rename": "Přejmenovat",
     "chat.devices.renameLabel": "Název zařízení",
     "chat.devices.renameSave": "Uložit",
@@ -4168,16 +4457,18 @@ export const messages = {
     "chat.devices.revokeYes": "Odebrat",
     "chat.devices.revokeNo": "Zrušit",
     "chat.devices.loading": "Načítají se vaše zařízení…",
-    "chat.devices.none": "Zatím žádná zařízení — otevřením chatu této akce přidáte toto.",
-    "chat.devices.updated": "Uloženo — seznam se aktualizuje, jakmile to koordinátor zpracuje.",
+    "chat.devices.none": "Zatím žádná zařízení. Otevřením chatu této akce přidáte toto.",
+    "chat.devices.updated": "Uloženo. Seznam se aktualizuje, jakmile to koordinátor zpracuje.",
+    "chat.devices.queued": "Uloženo, ale zatím se to nedostalo na relay. Odešle se to, až budete online.",
     "chat.devices.actionFailed": "Nepodařilo se uložit. Zkontrolujte připojení nebo podepisovač a zkuste to znovu.",
     "chat.members.title": "V tomto chatu",
+    "chat.members.attested": "(registrovaná zařízení, místnost se zatím neozvala)",
     "chat.members.devices.one": "{n} zařízení",
     "chat.members.devices.few": "{n} zařízení",
     "chat.members.devices.many": "{n} zařízení",
     "chat.otherTab.title": "Chat je otevřený v jiné kartě",
     "chat.otherTab.body":
-      "Chat této akce je aktivní v jiné kartě nebo okně. Chcete-li posílat zprávy, použijte jej tam — nejnovější zprávy se zobrazují i zde.",
+      "Chat této akce je aktivní v jiné kartě nebo okně. Chcete-li posílat zprávy, použijte jej tam. Nejnovější zprávy se zobrazují i zde.",
     "chat.display.label": "Styl chatu",
     "chat.display.bubbles": "Bubliny",
     "chat.display.irc": "IRC",
@@ -4221,14 +4512,14 @@ export const messages = {
     "talks.edit": "Upravit / nahradit přednášku",
     "talks.favorite.add": "Přidat přednášku k oblíbeným",
     "talks.favorite.remove": "Odebrat z oblíbených",
-    "talks.editing": "Upravujete svou přednášku — nová nahrávka nahradí tu současnou.",
+    "talks.editing": "Upravujete svou přednášku. Nová nahrávka nahradí tu současnou.",
     "talks.source.label": "Video přednášky",
     "talks.source.record": "Nahrát",
     "talks.source.upload": "Nahrát soubor",
     "talks.source.url": "Vložit URL",
     "talks.url.label": "URL videa",
     "talks.url.placeholder": "YouTube odkaz nebo přímá .mp4 URL",
-    "talks.url.hint": "Vložte neveřejný YouTube odkaz nebo přímou URL videa (.mp4). Odkaz je šifrovaný pro akci; soubor zůstává tam, kde ho hostujete — ideální pro přednášky příliš velké na nahrání.",
+    "talks.url.hint": "Vložte neveřejný YouTube odkaz nebo přímou URL videa (.mp4). Odkaz je šifrovaný pro akci; soubor zůstává tam, kde ho hostujete, ideální pro přednášky příliš velké na nahrání.",
     "talks.url.invalid": "Zadejte platnou https YouTube nebo video (.mp4) URL.",
     "talks.url.detectedYoutube": "Rozpoznáno: YouTube video",
     "talks.url.detectedVideo": "Rozpoznáno: přímý videosoubor",
@@ -4242,7 +4533,7 @@ export const messages = {
     "talks.external.gate.title": "Tato přednáška se přehrává z jiné stránky",
     "talks.external.gate.host": "Přehrávání se spojí s:",
     "talks.external.gate.note":
-      "Samotný odkaz na akci je šifrovaný, ale načtení videa připojí vaše zařízení přímo k tomuto hostiteli — sdílíte s ním svou IP adresu a údaje prohlížeče. Načtěte jen pokud mu důvěřujete.",
+      "Samotný odkaz na akci je šifrovaný, ale načtení videa připojí vaše zařízení přímo k tomuto hostiteli, sdílíte s ním svou IP adresu a údaje prohlížeče. Načtěte jen pokud mu důvěřujete.",
     "talks.external.gate.load": "Načíst video",
     "talks.field.title": "Název přednášky",
     "talks.field.title.placeholder": "např. Důkazy s nulovou znalostí pro začátečníky",
@@ -4260,12 +4551,12 @@ export const messages = {
     "admin.retention.unit": "dní po skončení akce",
     "admin.retention.consequence":
       "Adresář, spárování a přednášky se z relayů smažou {n} dní po skončení akce. Mazání je podle nejlepší snahy.",
-    "admin.retention.consequenceOff": "Žádné automatické mazání — data účastníků se uchovávají trvale.",
+    "admin.retention.consequenceOff": "Žádné automatické mazání: data účastníků se uchovávají trvale.",
     "admin.retention.invalid": "Zadejte celý počet dní (1 nebo více), nebo pole nechte prázdné pro žádné mazání.",
     "admin.retention.save": "Uložit nastavení mazání",
     "admin.relays.title": "Relaye události",
     "admin.relays.body":
-      "Relaye, na které se tato událost publikuje a kde ji lze najít. Změna ovlivní pouze tuto událost — stávající účastníci fungují na původních relayích, dokud se neobnoví. Nové události použijí výchozí relaye aplikace automaticky.",
+      "Relaye, na které se tato událost publikuje a kde ji lze najít. Změna ovlivní pouze tuto událost. Stávající účastníci fungují na původních relayích, dokud se neobnoví. Nové události použijí výchozí relaye aplikace automaticky.",
     "admin.relays.placeholder": "wss://relay.example.com",
     "admin.relays.hint": "Jeden relay na řádek. Musí začínat wss:// (ws:// je povoleno pouze pro localhost).",
     "admin.relays.save": "Uložit relaye",
@@ -4342,14 +4633,14 @@ export const messages = {
     "record.disclosure.confirmText":
       "Rozumím, že koordinátor a jeho AI poskytovatel zpracují tento text, aby vytvořili můj profil a spojení.",
     "record.disclosure.textProviders":
-      "Jeho nakonfigurovaný AI poskytovatel dostane váš text, aby vytvořil váš profil a spojení. Nic se nenahrává ani nepřepisuje — z vašeho zařízení neodchází žádný zvuk.",
+      "Jeho nakonfigurovaný AI poskytovatel dostane váš text, aby vytvořil váš profil a spojení. Nic se nenahrává ani nepřepisuje. Z vašeho zařízení neodchází žádný zvuk.",
 
     // Editor představení se záložkami (F1.4): video · zvuk · text
     "record.mode.label": "Jak se chcete představit?",
     "record.mode.video": "Video",
     "record.mode.audio": "Zvuk",
     "record.mode.text": "Text",
-    "record.audio.hint": "Nahrajte krátké mluvené představení — kamera není potřeba.",
+    "record.audio.hint": "Nahrajte krátké mluvené představení. Kamera není potřeba.",
     "record.audio.enableMic": "Povolit mikrofon",
     "record.audio.record": "● Nahrát zvuk",
     "record.micReady": "Mikrofon připraven ✓",
@@ -4361,7 +4652,7 @@ export const messages = {
     "record.chooseVideoFile": "Vybrat video soubor",
     "record.text.title": "Napište své představení",
     "record.text.hint":
-      "Místo nahrávání napište své představení — do spojení vstupuje stejně jako mluvené.",
+      "Místo nahrávání napište své představení. Do spojení vstupuje stejně jako mluvené.",
     "record.text.placeholder":
       "Řekněte ostatním účastníkům, kdo jste, co děláte a koho byste chtěli potkat…",
     "record.text.count": "{n} / {max}",
@@ -4381,7 +4672,7 @@ export const messages = {
     "report.print": "Tisk / uložit PDF",
     "report.loading": "Sestavujeme vaši zprávu…",
     "report.empty":
-      "Zatím není co shrnout — průběžně označujte lidi, které jste potkali nebo chcete potkat, oblíbené přednášky a poznámky.",
+      "Zatím není co shrnout: průběžně označujte lidi, které jste potkali nebo chcete potkat, oblíbené přednášky a poznámky.",
     "report.empty.people": "Přejít na Lidi",
     "report.followAll": "Sledovat všechny",
     "report.copyNpubs": "Kopírovat npub-y",
@@ -4389,7 +4680,7 @@ export const messages = {
     "report.downloadNpubs": "Stáhnout .txt",
     "report.followConfirm.title": "Sledovat na Nostru",
     "report.followConfirm.body":
-      "Odznačte každého, koho raději sledovat nechcete. Přidá se to k vašemu stávajícímu seznamu sledovaných — nikdy jej nenahradí.",
+      "Odznačte každého, koho raději sledovat nechcete. Přidá se to k vašemu stávajícímu seznamu sledovaných. Nikdy jej nenahradí.",
     "report.followSelected": "Sledovat {n}",
     "report.following": "Sleduji…",
     "report.cancel": "Zrušit",
@@ -4410,11 +4701,13 @@ export const messages = {
     "report.switch.body":
       "Tato akce vám vytvořila Nostr klíč. Zálohujte si jej a používejte v jakékoli Nostr aplikaci.",
     "report.switch.action": "Zálohovat a objevit Nostr",
-    "nav.matches.new": "{n} nových spojení",
-    "event.approvedBanner": "Jste schváleni — vítejte.",
+    "nav.matches.new.one": "{n} nové spojení",
+    "nav.matches.new.few": "{n} nová spojení",
+    "nav.matches.new.many": "{n} nových spojení",
+    "event.approvedBanner": "Jste schváleni, vítejte.",
     "event.approvedBanner.dismiss": "Zavřít",
     "event.viewAsVisitor": "Zobrazit jako návštěvník",
-    "event.viewAsVisitor.active": "Náhled veřejného zobrazení — části jen pro členy jsou skryté.",
+    "event.viewAsVisitor.active": "Náhled veřejného zobrazení. Části jen pro členy jsou skryté.",
     "event.viewAsVisitor.exit": "Ukončit náhled",
     "event.duplicate": "Duplikovat akci",
     "event.duplicate.copyOf": "Kopie: {title}",
@@ -4429,17 +4722,17 @@ export const messages = {
     // jen podle e-mailu; „označení“ je spojka mezi aplikací a jeho tabulkou).
     "admin.invites.exports": "Exporty",
     "admin.invites.exports.intro":
-      "Dva exporty s velmi odlišnou životností. Samotné kódy existují jen po dobu, kdy je tato stránka otevřená — nikde se neukládají, ani v zařízení, ani na relayi — takže je lze exportovat pouze nyní. To, kdo se už připojil, se dá zjistit ze seznamu pozvánek zveřejněného pro tuto akci, takže tento export funguje i po měsících.",
+      "Dva exporty s velmi odlišnou životností. Samotné kódy existují jen po dobu, kdy je tato stránka otevřená (nikde se neukládají, ani v zařízení, ani na relayi) takže je lze exportovat pouze nyní. To, kdo se už připojil, se dá zjistit ze seznamu pozvánek zveřejněného pro tuto akci, takže tento export funguje i po měsících.",
     "admin.invites.exportCodes.title": "Kódy k rozeslání",
     "admin.invites.exportCodes.body":
-      "Jeden řádek na každý právě vygenerovaný kód, včetně jeho označení. Označení si spárujte s kupujícím ve vlastním seznamu — aplikace e-mailové adresy nikdy nevidí.",
+      "Jeden řádek na každý právě vygenerovaný kód, včetně jeho označení. Označení si spárujte s kupujícím ve vlastním seznamu. Aplikace e-mailové adresy nikdy nevidí.",
     "admin.invites.exportCodes.unavailable":
       "Momentálně není co exportovat. Pozvánkové kódy jsou jednorázová tajemství, která se nikde neukládají, takže je lze exportovat jen ve stejné session, ve které vznikly. Pro lidi, kterým ještě musíte napsat, vygenerujte novou dávku výše.",
     "admin.invites.exportCodes.warning":
-      "Soubor obsahuje živé pozvánkové kódy — kdo ho získá, může se připojit. Zacházejte s ním jako se seznamem hesel.",
+      "Soubor obsahuje živé pozvánkové kódy: kdo ho získá, může se připojit. Zacházejte s ním jako se seznamem hesel.",
     "admin.invites.format": "Formát",
-    "admin.invites.format.csv": "CSV — označení, kód a odkaz",
-    "admin.invites.format.txt": "Text — jen odkazy, jeden na řádek",
+    "admin.invites.format.csv": "CSV: označení, kód a odkaz",
+    "admin.invites.format.txt": "Text: jen odkazy, jeden na řádek",
     "admin.invites.downloadCsv": "Stáhnout jako CSV",
     "admin.invites.exportUsed.title": "Kdo se už připojil",
     "admin.invites.exportUsed.body":
@@ -4452,7 +4745,7 @@ export const messages = {
     "admin.invites.scope.unused": "Jen nepoužité kódy",
     "admin.invites.usedCount": "Použito {used} z {total} kódů",
     "admin.invites.usedNote":
-      "Když se kód jednou zobrazí jako použitý, zůstane použitý. Staré žádosti o připojení z relayů postupně mizí, takže tento počet může jen růst — nikdy vám mylně neřekne, že je kód ještě volný.",
+      "Když se kód jednou zobrazí jako použitý, zůstane použitý. Staré žádosti o připojení z relayů postupně mizí, takže tento počet může jen růst. Nikdy vám mylně neřekne, že je kód ještě volný.",
     "admin.invites.exportBusy": "Kontrolujeme nové registrace…",
   },
 } as const;

@@ -9,16 +9,16 @@ single product release.
 
 | Field | Source | Bump when |
 |---|---|---|
-| Product release | `package.json` (root) `version` + the git tag/SHA | Any deploy — it labels the release, not any one package. |
+| Product release | `package.json` (root) `version` + the git tag/SHA | Any deploy: it labels the release, not any one package. |
 | `@nostrautica/app` | `packages/app/package.json` | The PWA changes (UI, client logic, service worker). Also the SW-precache input. |
 | `@nostrautica/protocol` | `packages/protocol/package.json` | The shared protocol **package API** (types/schemas/helpers) changes. |
 | `@nostrautica/coordinator` | `packages/coordinator/package.json` | The coordinator **package API/behavior** changes. |
 | Wire protocol `v` | `PROTOCOL_VERSION` in `packages/protocol/src/schemas.ts` | The **on-the-wire payload contract** changes. This is deliberately separate: package versions can move without a wire change, and a wire change is a compatibility event for every peer. Currently `2`. |
-| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `2`. |
+| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `5`. |
 
 Do **not** infer compatibility from equal or unequal package versions. Compatibility
 is defined by the wire protocol version (and the protocol registry,
-`docs/PROTOCOL-REGISTRY.md`) and by the specific tested release commit — never by a
+`docs/PROTOCOL-REGISTRY.md`) and by the specific tested release commit: never by a
 package number.
 
 ## Store schema migrations (`SCHEMA_VERSION`)
@@ -29,22 +29,34 @@ O3). It has two parts:
 - **Baseline DDL** runs unconditionally on every read-write open. Every statement is
   idempotent (`CREATE TABLE IF NOT EXISTS`, `ALTER … ADD COLUMN` guarded against
   "column exists"), so it brings *any* historical database up to full column
-  completeness regardless of exactly which columns a past binary had added — this
+  completeness regardless of exactly which columns a past binary had added. This
   matters because many pre-v2 databases were all stamped `user_version = 1` with
   differing column sets.
 - **Numbered migrations** carry the downgrade-incompatible boundaries. Each runs in a
-  single transaction and advances `PRAGMA user_version` at its boundary. Version `2`
-  is the first such boundary (it adds the audit C3/C5 tables — inbound rate accounting
-  and the reference-count tables for retention deletion).
+  single transaction and advances `PRAGMA user_version` at its boundary.
+
+The boundaries so far (`MIGRATIONS` in `db.ts`): keep this list in step with the
+code, because it is what an operator reads before deciding a rollback is safe:
+
+| `user_version` | Migration | What it changes |
+|---|---|---|
+| `2` | `applyRemediationDDL` | Adds the audit C3/C5 tables: inbound rate accounting, and the reference-count tables retention deletion needs. The first downgrade-incompatible boundary. |
+| `3` | `applyMembershipSubjectMerge` | Re-keys `command_watermarks`: the separate `pubkey:` and `withdraw:` subject namespaces merge into one membership subject, so an approve and a withdrawal for the same person are ordered against each other instead of in parallel. |
+| `4` | `applyArtifactLegacyQuarantine` | Adds `pipeline_artifacts.quarantined_at` and stamps every artifact that no `artifact_refs` row owns, so pre-ownership artifacts can be garbage-collected after a grace window instead of growing forever. |
+| `5` | `applyInviteUsagePerRedeemer` | Re-keys `invite_usage` on `(coordinate, invite_pubkey, used_by)` so a reusable invite code records one row per redeemer. Required by the `uses`/`exp` invite fields. |
+
+Adding a migration means: append to `MIGRATIONS`, bump `SCHEMA_VERSION`, and add a
+row above. A migration is **one-way**: once applied, no older binary will open the
+file (see the refusal below), so take the backup first (operator guide §7).
 
 The open path **refuses** a database whose `user_version` is greater than the binary's
 `SCHEMA_VERSION` (a database written by a newer coordinator), with a clear operator
 message to upgrade the coordinator first. From v2 onward the same refusal applies at
-`Store` open **and** at backup verify/restore (`schemaTooNew`) — an older binary can no
+`Store` open **and** at backup verify/restore (`schemaTooNew`): an older binary can no
 longer silently open or restore a database a newer binary has migrated. The residual
 risk that a *pre-remediation* (pre-v2) binary rewrites the marker back to `1` is
 inherent to those old binaries and unfixable from here; the operational rule is simply
-**do not run superseded binaries against a migrated database** — take the pre-upgrade
+**do not run superseded binaries against a migrated database**. Take the pre-upgrade
 backup (operator guide §7) so a rollback restores a schema the old binary accepts.
 
 ## The release manifest
@@ -68,10 +80,10 @@ backup (operator guide §7) so a rollback restores a schema the old binary accep
 - **Coordinator:** `packages/coordinator/src/release.ts` computes it at startup,
   logs it (`[coordinator] nostrautica-coordinator <releaseId> …`), and appends the
   release id to its kind-31611 announcement's `about` text (the announce wire schema
-  has no version field, so this is the natural place — the schema is unchanged).
+  has no version field, so this is the natural place: the schema is unchanged).
 - **Backups:** every `backup` snapshot's `.meta.json` records the release id.
 
-`NOSTRAUTICA_RELEASE_ID` overrides the computed id — set it in the coordinator's
+`NOSTRAUTICA_RELEASE_ID` overrides the computed id: set it in the coordinator's
 service environment on a host that runs from rsync'd source without `.git`, so the
 logged/announced id is the real release rather than the `v<pkg>` fallback.
 `NOSTRAUTICA_BUILD_TIMESTAMP` similarly pins the timestamp.
@@ -80,7 +92,7 @@ logged/announced id is the real release rather than the `v<pkg>` fallback.
 
 The PWA's service-worker precache revision for the shell is `releaseManifest.releaseId`
 (a git identity), **not** `Date.now()`. The same commit + `BASE_PATH` therefore builds
-the **same** revision — a rebuild no longer looks like a new release — while every
+the **same** revision (a rebuild no longer looks like a new release), while every
 real release changes it, which is what drives the auto-update + refresh mechanism.
 
 ## Where to find the deployed revision

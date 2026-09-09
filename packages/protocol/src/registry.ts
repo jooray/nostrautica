@@ -2,11 +2,11 @@
  * The typed custom-kind registry (audit §13.1 Option A): the compiled,
  * single-source-of-truth index of every custom event kind Nostrautica defines.
  * It identifies each kind's constant, number, class, content-schema export,
- * author/recipient, and sealing — and the reference tables in
+ * author/recipient, and sealing, and the reference tables in
  * `docs/PROTOCOL-REGISTRY.md` are GENERATED from it (`pnpm gen:registry`), with
  * a test that fails if the committed doc drifts from this source.
  *
- * `docs/PROTOCOL-NIP.md` stays the handwritten normative spec — this file only
+ * `docs/PROTOCOL-NIP.md` stays the handwritten normative spec; this file only
  * governs the mechanical allocation/table surface, not the security rationale.
  *
  * Invariants asserted in registry.test.ts:
@@ -43,7 +43,7 @@ import {
   KIND_ATTENDEE_WITHDRAWAL,
 } from "./kinds.js";
 
-/** Typed sealing/protection class — the machine-checkable field. */
+/** Typed sealing/protection class: the machine-checkable field. */
 export type Sealing = "public" | "eck" | "nip44" | "self-encrypt" | "gift-wrap";
 
 export interface CustomKindEntry {
@@ -175,7 +175,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     author: "`E_id`",
     protection: "Public sections + optional ECK-encrypted `private`; `d` = event `d`",
     notes:
-      "Official menu and layout, plus `sources` — long-form feeds by other npubs the organizer folds into this event's official posts. Latest valid page wins.",
+      "Official menu and layout, plus `sources`: long-form feeds by other npubs the organizer folds into this event's official posts. Latest valid page wins.",
   },
   {
     constant: "KIND_EVENT_THEME",
@@ -187,7 +187,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     author: "`E_id`",
     protection: "Public raw CSS; `d` = event `d`",
     notes:
-      "Organizer-controlled presentation. Not a secret-safe rendering boundary — clients must not render it on routes carrying secrets.",
+      "Organizer-controlled presentation. Not a secret-safe rendering boundary: clients must not render it on routes carrying secrets.",
   },
   {
     constant: "KIND_TALK",
@@ -232,7 +232,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "profileSubmissionContentSchema",
     sealing: "gift-wrap",
     author: "Attendee account → `E_inbox`",
-    notes: "Carries `rev` (required) — the primary ordering key over `(rev, created_at, id)` (§3.3).",
+    notes: "Carries `rev` (required): the primary ordering key over `(rev, created_at, id)` (§3.3).",
   },
   {
     constant: "KIND_KEY_GRANT",
@@ -252,7 +252,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "coordinatorGrantContentSchema",
     sealing: "gift-wrap",
     author: "`E_id` → coordinator",
-    notes: "Carries `gen` (required, strictly increasing per coordinate) — install authorization rules in §3.5.",
+    notes: "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5.",
   },
   {
     constant: "KIND_ADMIN_COMMAND",
@@ -324,7 +324,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "withdrawalContentSchema",
     sealing: "gift-wrap",
     author: "Attendee account → `E_inbox`",
-    notes: "Attendee-initiated removal — same effect chain as an organizer `revoke`, without organizer action.",
+    notes: "Attendee-initiated removal: the same effect chain as an organizer `revoke`, without organizer action.",
   },
 ] as const;
 
@@ -348,20 +348,20 @@ export function renderRegistryDoc(): string {
     .map((e) => `| ${e.kind} | ${e.name} | ${e.author} | ${e.notes} |`)
     .join("\n");
 
-  return `<!-- GENERATED FILE — do not edit by hand.
+  return `<!-- GENERATED FILE: do not edit by hand.
      Source of truth: packages/protocol/src/registry.ts (CUSTOM_KIND_REGISTRY).
      Regenerate with \`pnpm gen:registry\`. The prose sections live in
      renderRegistryDoc(); the tables are generated from the typed registry. -->
 # Nostrautica Protocol Registry
 
 **Status:** Compact index of every custom event kind. **\`docs/PROTOCOL-NIP.md\` is the
-normative specification** — full per-kind content schemas, cryptographic constructions,
+normative specification**: full per-kind content schemas, cryptographic constructions,
 ordering rules, and rationale live there; this document is a quick-reference table,
 generated from the typed \`CUSTOM_KIND_REGISTRY\` in \`packages/protocol/src/registry.ts\`.
 
 **Ordering (PROTOCOL-NIP.md §3.1):** for any two events sharing (kind, author, \`d\`), the
 event with the higher \`created_at\` wins; on a tie, the event with the lexicographically
-lowest \`id\` wins. This rule applies everywhere — the app and the coordinator, fetch paths
+lowest \`id\` wins. This rule applies everywhere, in the app and the coordinator, fetch paths
 and streaming subscriptions alike. Sender-mutable rumors (profile submissions,
 corrections, talk submissions) additionally carry an explicit \`rev\`/\`revision\` field that
 is the primary ordering key; the sender-chosen timestamp is only a tie-break (§3.3).
@@ -402,7 +402,7 @@ user-private (§4.1):
 | \`nostrautica:blindseed\` | The 32-byte seed the blinded-\`d\` construction derives from. |
 | \`nostrautica:dmread\` | Per-peer DM read positions, synced across the account's devices (§7.2). Replaceable, so writers must read-merge-write (per-peer maximum), never overwrite. |
 
-(\`nostrautica:\`-prefixed strings also appear as device-local \`localStorage\`/cache keys —
+(\`nostrautica:\`-prefixed strings also appear as device-local \`localStorage\`/cache keys,
 theme, language, correction revisions, watch progress. Those are not relay records and are
 not listed here.)
 

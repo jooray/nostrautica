@@ -1,10 +1,61 @@
+<script lang="ts" module>
+  import type { RelayHealth } from "$lib/nostr/ndk.js";
+
+  /**
+   * Why the roster is empty. The page used to have exactly two states — "error
+   * thrown" and "everything else" — so ONE string ("No attendees visible … if
+   * you haven't joined yet, that's why; if you were just approved, refresh in a
+   * moment") had to cover three unrelated situations. It was actively wrong for
+   * the most likely reader: an approved attendee standing in the venue whose
+   * Wi-Fi blocks WSS. Nothing threw — `streamDirectory` simply never heard back —
+   * so they were told they probably hadn't joined an event they were standing in.
+   *
+   * `hasKey` is the honest membership signal: `streamDirectory` returns undefined
+   * when there is no ECK on this device, which is exactly "not approved (yet)".
+   * Relay reachability comes from the same signal the connectivity banner uses,
+   * so "the venue Wi-Fi is lying" is diagnosed the same way everywhere.
+   *
+   * Pure so the three-way split is unit-testable without a browser.
+   */
+  export type RosterEmptyReason = "loading" | "notApproved" | "staleKey" | "unreachable" | "none";
+  export function rosterEmptyReason(s: {
+    /**
+     * Directory entries arrived that this device could not decrypt (audit EV-9).
+     * Outranks everything except `loading`: it is positive evidence that people
+     * ARE here, which makes every other empty-state sentence false.
+     */
+    undecryptable?: number;
+    loading: boolean;
+    /** An ECK is present, i.e. streamDirectory handed back a live stream. */
+    hasKey: boolean;
+    /** navigator.onLine. */
+    online: boolean;
+    relay: RelayHealth;
+  }): RosterEmptyReason {
+    if (s.loading) return "loading";
+    if (!s.hasKey) return "notApproved";
+    // Entries came back and none of them opened. Holding an ECK (`hasKey`) says
+    // nothing about whether it is the CURRENT one — a revoked member, or one whose
+    // grant for a rotation has not landed, holds a stale key and decrypts nothing.
+    // They were shown "Nobody is on the list yet", which is a claim about the
+    // event, and the wrong one: the people are there, this device cannot read them.
+    if ((s.undecryptable ?? 0) > 0) return "staleKey";
+    // "connected" is the only state that licenses the claim "the list really is
+    // empty" — idle/connecting/failed all mean we never got an answer worth
+    // believing, and offline settles it outright.
+    if (!s.online || s.relay !== "connected") return "unreachable";
+    return "none";
+  }
+</script>
+
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { npubEncode } from "nostr-tools/nip19";
   import type { DirectoryEntryContent, PerEventSettings } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
-  import { connectNdk } from "$lib/nostr/ndk.js";
+  import { connectNdk, relayHealth } from "$lib/nostr/ndk.js";
+  import { online } from "$lib/stores/online.svelte.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { streamDirectory, fetchMatches, cachedDirectory, type DirectoryStream } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, cachedProfiles, cachedFollowSet, type ProfileMeta } from "$lib/events/social.js";
@@ -65,6 +116,20 @@
   let activeFilters = $state<Set<FilterKey>>(new Set());
   let loading = $state(cachedEntries.length === 0);
   let error = $state<unknown>(null);
+  // Whether the LAST completed pass had an event key (see rosterEmptyReason).
+  // Starts true so a cache-painted roster never flashes "you're not approved".
+  let hasKey = $state(true);
+  /** Entries that arrived and would not decrypt under this device's ECK (EV-9). */
+  let undecryptableCount = $state(0);
+  // Relay health as of the last settled pass. Sampled rather than read live so
+  // the empty state doesn't flicker between reasons on the connectivity poll.
+  let relayAtSettle = $state<RelayHealth>("connecting");
+  // Whether the user has touched the sort control. `loadSocial` flips the sort to
+  // "matches" when scores land, which is right on a cold open and wrong at every
+  // other moment: it runs in parallel with the roster stream, so it re-ordered
+  // the list under a finger already reaching for a row, and it overrode a sort
+  // the user had just chosen by hand.
+  let sortTouched = $state(false);
 
   if (cachedEntries.length) perfMark("Attendees", "cache-paint");
 
@@ -143,7 +208,8 @@
         fetchMatches(signer, c)
           .then((list) => {
             scores = new Map((list?.matches ?? []).map((m) => [m.pubkey, m.score]));
-            if (scores.size > 0) sortBy = "matches";
+            // Only ever an OPENING default, never an override of a human choice.
+            if (scores.size > 0 && !sortTouched) sortBy = "matches";
           })
           .catch(() => {}),
       );
@@ -160,7 +226,8 @@
       const social = loadSocial(ctx);
       stream?.stop();
       // Progressive roster: entries render as each relay answers; profiles are
-      // fetched incrementally for the pubkeys that just appeared.
+      // fetched incrementally for the pubkeys that just appeared. A missing
+      // stream means no ECK on this device — the honest "not approved" signal.
       stream = await streamDirectory(ctx, (list) => {
         entries = list;
         loading = false;
@@ -174,11 +241,18 @@
             .catch(() => {});
         }
       });
+      hasKey = stream !== undefined;
       await Promise.allSettled([social, stream?.ready]);
+      // Read AFTER the stream settles: this is the count of entries that arrived
+      // and would not open under this device's ECK (EV-9).
+      undecryptableCount = stream?.undecryptable() ?? 0;
     } catch (e) {
       error = e;
     } finally {
       loading = false;
+      // Sampled once the pass has settled, so the empty-state reason is stable
+      // rather than re-classifying itself on every connectivity poll.
+      relayAtSettle = relayHealth();
       perfMark("Attendees", "network-settled");
     }
   }
@@ -232,7 +306,16 @@
     } else if (sortBy === "follows") {
       list.sort((a, b) => Number(followSet.has(b.pubkey)) - Number(followSet.has(a.pubkey)));
     } else {
-      list.sort((a, b) => nameOf(a.pubkey, a.profile.about).localeCompare(nameOf(b.pubkey, b.profile.about)));
+      // Collate in the ACTIVE locale, not the host's default. Slovak and Czech
+      // order č/š/ž after c/s/z rather than lumping them in with the base letter
+      // (and ch sorts after h in both), so a locale-less localeCompare put a
+      // Slovak roster in an order a Slovak reader reads as "random".
+      list.sort((a, b) =>
+        nameOf(a.pubkey, a.profile.about).localeCompare(
+          nameOf(b.pubkey, b.profile.about),
+          i18n.locale,
+        ),
+      );
     }
     return list;
   });
@@ -257,6 +340,17 @@
   function open(pubkey: string) {
     router.go({ name: "attendee", naddr, npub: npubEncode(pubkey) });
   }
+
+  // Which of the three empty states to render (see rosterEmptyReason above).
+  const emptyReason = $derived(
+    rosterEmptyReason({
+      loading,
+      hasKey,
+      undecryptable: undecryptableCount,
+      online: online.isOnline,
+      relay: relayAtSettle,
+    }),
+  );
 </script>
 
 <h1 class="disp">{t("attendees.title")}</h1>
@@ -266,13 +360,32 @@
 {:else if loading}
   <p class="muted">{t("attendees.decrypting")}</p>
 {:else if entries.length === 0}
-  <div class="card">
+  <!-- Three different facts, three different cards. The only one that offers a
+       retry is the one a retry can actually fix; the other two get the action
+       that matches their situation. -->
+  <div class="card" class:warn={emptyReason === "unreachable"} role={emptyReason === "unreachable" ? "alert" : undefined}>
     <p class="muted">
-      {t("attendees.empty")}
+      {#if emptyReason === "unreachable"}
+        {t("attendees.empty.unreachable")}
+      {:else if emptyReason === "staleKey"}
+        {t("attendees.empty.staleKey")}
+      {:else if emptyReason === "notApproved"}
+        {t("attendees.empty.notApproved")}
+      {:else}
+        {t("attendees.empty.none")}
+      {/if}
     </p>
-    <button class="btn" onclick={() => router.go({ name: "event", naddr })}>
-      {t("attendees.backToEvent")}
-    </button>
+    <div class="row" style="flex-wrap:wrap">
+      {#if emptyReason !== "notApproved"}
+        <!-- No "Retrying…" label: `load()` flips `loading` synchronously, so the
+             branch above ("Decrypting the roster…") takes over the whole screen
+             before this button could ever render a busy state. -->
+        <button class="btn inline" onclick={() => void load()}>{t("error.state.retry")}</button>
+      {/if}
+      <button class="btn inline" onclick={() => router.go({ name: "event", naddr })}>
+        {t("attendees.backToEvent")}
+      </button>
+    </div>
   </div>
 {:else}
   <div class="stack" style="gap:0.6rem">
@@ -303,12 +416,25 @@
   </div>
 
   <div class="row" style="justify-content:space-between;flex-wrap:wrap;margin-top:0.5rem">
-    <p class="muted" role="status" aria-live="polite">
+    <!-- Deliberately NOT a live region. This count changes on every keystroke in
+         the search box, and role="status" (which implies aria-live="polite")
+         made a screen reader re-announce "Showing 41 people… 12 people… 4
+         people…" between every letter, drowning out the typing itself. The
+         number is right there next to the field for anyone who wants it. -->
+    <p class="muted">
       {hasFilters ? tp("attendees.showing", visible.length) : tp("attendees.count", entries.length)}
     </p>
     <div class="row" role="group" aria-label={t("attendees.sort.label")}>
       {#each ["matches", "follows", "name"] as const as s (s)}
-        <button class="btn inline" aria-pressed={sortBy === s} class:primary={sortBy === s} onclick={() => (sortBy = s)}>{t(sortLabels[s])}</button>
+        <button
+          class="btn inline"
+          aria-pressed={sortBy === s}
+          class:primary={sortBy === s}
+          onclick={() => {
+            sortTouched = true;
+            sortBy = s;
+          }}>{t(sortLabels[s])}</button
+        >
       {/each}
     </div>
   </div>

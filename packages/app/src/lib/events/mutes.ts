@@ -12,10 +12,11 @@
  * The merge helpers are pure (no relay I/O) so the read/merge/write invariants
  * are unit-tested directly.
  */
-import { KIND_MUTE_LIST } from "@nostrautica/protocol";
+import { KIND_MUTE_LIST, pickLatest } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { VerifiedEvent } from "nostr-tools/pure";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 
 export type Tag = string[];
@@ -61,20 +62,32 @@ export function removeMute(state: MuteListState, pubkey: string): MuteListState 
   return { publicTags: drop(state.publicTags), privateTags: drop(state.privateTags) };
 }
 
-/** Fetch the latest kind-10000, decrypting the self-encrypted private items. */
+/**
+ * Fetch the latest kind-10000, decrypting the self-encrypted private items.
+ *
+ * THROWS when a list exists whose content cannot be decrypted. It used to
+ * swallow that and return the public tags with `privateTags: []`, which reads as
+ * a correct fail-soft until you follow it into `setMuted`: the very next step is
+ * a merge-and-republish, and an empty private list re-encrypts to `content: ""`.
+ * One NIP-46 round-trip that timed out while the user tapped "mute" therefore
+ * wiped every private mute they had — silently, and irrecoverably, since
+ * kind-10000 is replaceable and muting is exactly the thing people do not
+ * re-notice until the person they blocked is back in their feed. "Couldn't read
+ * it" and "there is nothing in it" have to be different answers here.
+ */
 export async function fetchMuteList(signer: AppSigner): Promise<MuteListState> {
   const pubkey = await signer.getPublicKey();
   const events = await fetchEvents({ kinds: [KIND_MUTE_LIST], authors: [pubkey] });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Pin to the user's own key before the latest-wins pick: `authors` is a request
+  // a relay may ignore, and now that an undecryptable list is fatal rather than
+  // ignored, a foreign kind-10000 with a high created_at would otherwise wedge
+  // mute/unmute permanently. Only the user's own list is self-decryptable anyway.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
   if (!latest) return { ...EMPTY_MUTE_LIST };
   let privateTags: Tag[] = [];
   if (latest.content) {
-    try {
-      const parsed = JSON.parse(await signer.nip44Decrypt(pubkey, latest.content));
-      if (Array.isArray(parsed)) privateTags = parsed.filter((t) => Array.isArray(t)) as Tag[];
-    } catch {
-      // Undecryptable content is foreign/corrupt — keep public items, don't guess.
-    }
+    const parsed = JSON.parse(await signer.nip44Decrypt(pubkey, latest.content));
+    if (Array.isArray(parsed)) privateTags = parsed.filter((t) => Array.isArray(t)) as Tag[];
   }
   return { publicTags: (latest.tags as Tag[]) ?? [], privateTags };
 }

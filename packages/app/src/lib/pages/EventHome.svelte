@@ -33,6 +33,7 @@
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
+  import { cachePersistenceDegraded } from "$lib/cache/persist.js";
   import { naddrToCoordinate, parseCoordinate, type MergedSection } from "@nostrautica/protocol";
   import {
     buildOfflinePack,
@@ -43,6 +44,7 @@
     type PackStep,
   } from "$lib/events/offline-pack.js";
   import { formatBytes } from "$lib/util/bytes.js";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
@@ -51,7 +53,7 @@
   import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import { visitorPreview } from "$lib/stores/visitor-preview.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -65,7 +67,16 @@
   // render below additionally refuses to show a card belonging to another
   // coordinate, so neither a slow load nor a future caller can reintroduce it.
   if (readinessStore.coordinate !== cachedCtx?.coordinate) readinessStore.reset();
-  let error = $state<string | null>(null);
+  // Raw thrown value, not a pre-stringified message: ErrorState categorizes it
+  // into a plain-language headline and hides the technical text behind a
+  // disclosure, which is what every other page in the app already does.
+  let error = $state<unknown>(null);
+  /** A load pass is in flight (drives the retry button's disabled state). */
+  let loadingPage = $state(false);
+  /** Backstop for a first load that never returns — mirrors Home's SCAN_GUARD_MS. */
+  const LOAD_GUARD_MS = 12_000;
+  /** Monotonic pass token so a stalled load can't clobber the retry that replaced it. */
+  let loadToken = 0;
   let approved = $state(false);
   let organizer = $state(false);
   let requestPending = $state(false); // join request sent, approval not landed yet (P2)
@@ -156,6 +167,49 @@
   // interval so an approval lands on its own; cleared on destroy/approval.
   let grantPoll: ReturnType<typeof setInterval> | undefined;
   onDestroy(() => clearInterval(grantPoll));
+
+  /**
+   * Re-check the journey's network inputs (directory entry, match list) and the
+   * gift-wrap scan that carries the coordinator's own-status notices.
+   *
+   * On demand and on return to the tab, NOT on a timer. For a NIP-46 identity every
+   * one of these steps is a signer round-trip — Amber pops a dialog — so a 20-second
+   * background poll would trade "the card is stale" for "the phone asks permission
+   * three times a minute". The user-visible cost of a stale card was that people
+   * reloaded the page, which re-runs the whole boot path; a button that costs one
+   * directory read is strictly cheaper than the thing they were already doing.
+   */
+  let refreshingReadiness = false;
+  async function refreshReadiness() {
+    const c = ctx;
+    const signer = session.signer;
+    if (!c || !signer || refreshingReadiness) return;
+    refreshingReadiness = true;
+    try {
+      // The 21606 "your pipeline failed / recovered" notices arrive as gift wraps,
+      // so without this the journey would re-derive from the same stale statuses.
+      await receiveGrants(signer).catch(() => {});
+      await readinessStore.load(c, signer);
+    } finally {
+      refreshingReadiness = false;
+    }
+  }
+
+  // Coming back to the tab is the moment a person actually wants a fresh answer,
+  // and it is naturally rate-limited by them looking away. Bounded by a floor so
+  // flipping between tabs doesn't re-run it on every switch.
+  const READINESS_REVISIT_MS = 60_000;
+  function onVisible() {
+    if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+    const at = readinessStore.lastCheckedAt;
+    if (at !== undefined && Date.now() - at < READINESS_REVISIT_MS) return;
+    if (readinessStore.coordinate !== ctx?.coordinate) return;
+    void refreshReadiness();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisible);
+    onDestroy(() => document.removeEventListener("visibilitychange", onVisible));
+  }
 
   function startGrantPolling() {
     if (grantPoll) return;
@@ -326,7 +380,33 @@
     if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
   }
 
-  onMount(async () => {
+  /**
+   * The whole first-paint pass, extracted from onMount so the error state can
+   * actually retry it (spec: this is the FIRST screen a newcomer sees after
+   * tapping an invite link — "Loading event…" with no way forward is the worst
+   * possible first impression, and it was reachable simply by opening the link
+   * on venue Wi-Fi that blocks WSS).
+   */
+  async function loadEventPage() {
+    // Token-guarded (same idea as event-shell.svelte.ts): when the 12s guard
+    // fires, the ORIGINAL pass is still out there — it was never cancellable, it
+    // just stopped being believed. If it later settles it must not re-raise its
+    // error over a retry the user has already started, nor clear the retry's
+    // in-flight flag. Only the newest pass owns `error` / `loadingPage`.
+    const token = ++loadToken;
+    loadingPage = true;
+    error = null;
+    // Backstop for a `loadEventContext` that never settles at all — same shape
+    // and budget as Home.svelte's SCAN_GUARD_MS. `loadEventContext` awaits relay
+    // reads with no timeout of their own, so a silently-dropped socket parked the
+    // page on "Loading event…" indefinitely with no retry and nothing announced.
+    // Timeout-shaped message on purpose: `categorizeError` then classifies it as
+    // `timeout`, reusing ErrorState's existing vocabulary (see ScanIncompleteError).
+    const guard = setTimeout(() => {
+      if (ctx || token !== loadToken) return; // header is up, or superseded
+      error = new Error("Timed out waiting for this event to load.");
+      loadingPage = false;
+    }, LOAD_GUARD_MS);
     try {
       await connectNdk();
       // The grant scan doesn't need the event context — run both in parallel.
@@ -365,14 +445,21 @@
       if (approved && !hadEck) await refetchAfterEck(ctx);
       if (page) await loadSectionData(page);
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      // Only a failure that left us with NOTHING is a page-level error. Once the
+      // header is painted from `ctx`, a later section/post failure must not
+      // replace the whole event with an error card.
+      if (!ctx && token === loadToken) error = e;
     } finally {
+      clearTimeout(guard);
+      if (token === loadToken) loadingPage = false;
       bodyLoading = false;
       // Role resolution is set only by successful custody/approval reads above.
       // A keystore failure must not turn the default state into "visitor".
       perfMark("EventHome", "network-settled");
     }
-  });
+  }
+
+  onMount(loadEventPage);
 
   // The identity can arrive AFTER this page mounted, and nothing recomputed the
   // page when it did: the only other caller of `readinessStore.load` is the
@@ -513,8 +600,11 @@
     const resolved = resolveTarget(ctx, target);
     if (!resolved) return;
     if (resolved.type === "post") router.go({ name: "post", naddr, d: resolved.d });
-    else if (resolved.type === "url") window.open(resolved.href, "_blank", "noopener");
-    else window.open(`https://njump.me/${resolved.naddr}`, "_blank", "noopener");
+    // `noreferrer` as well as `noopener`: these hrefs come from the organizer's own
+    // 31608 page model, so the destination is chosen by someone other than us, and
+    // there is no reason to hand it the URL of the event page the reader was on.
+    else if (resolved.type === "url") window.open(resolved.href, "_blank", "noopener,noreferrer");
+    else window.open(`https://njump.me/${resolved.naddr}`, "_blank", "noopener,noreferrer");
   }
 
   async function promptInstall() {
@@ -627,6 +717,15 @@
   let packSteps = $state<PackStep[]>([]);
   let packPersisted = $state<boolean | null>(null);
   const packDone = $derived(offlinePack ? packComplete(offlinePack) : false);
+  /**
+   * Persistence is failing for lack of space. Re-read on every cache-hydration
+   * bump, which is the only thing that moves during a visit — the flag is set by a
+   * refused write, and a write happens on essentially every fetch this page makes.
+   */
+  const storageFull = $derived.by(() => {
+    void cacheHydration.version;
+    return cachePersistenceDegraded();
+  });
   // What THIS pack added, not the browser's origin-wide (on Firefox: whole
   // eTLD+1 group) usage figure this line used to show. Omitted below 100 KB so a
   // re-download that changed nothing doesn't claim a footprint it didn't add.
@@ -700,13 +799,14 @@
   }
 </script>
 
-{#if error}
-  <div class="card warn">
-    <strong>{t("event.loadFailed")}</strong>
-    <span class="muted">{error}</span>
-  </div>
+{#if error && !ctx}
+  <!-- role="alert" + a working retry, via the shared surface (ErrorState). The
+       old card was a bare `class="warn"` div with the raw error text in it: not
+       announced, not categorized, and with no way to try again short of a manual
+       reload the newcomer has no reason to think of. -->
+  <ErrorState {error} body="event.loadFailed.body" onRetry={loadEventPage} retrying={loadingPage} />
 {:else if !ctx}
-  <p class="muted">{t("event.loading")}</p>
+  <p class="muted" role="status" aria-live="polite">{t("event.loading")}</p>
 {:else}
   <EventHeader {ctx} status={overviewStatus} />
 
@@ -726,12 +826,18 @@
 
   <!-- Own-pipeline failure notices (21606 → attendee, NIP §6.3): modest, per stage. -->
   {#each ownPoison as st (st.stage)}
+    <!-- The stage decides the sentence. A chat-device refusal ("chat_attestation")
+         used to fall through to "your profile couldn't be processed", which sent
+         the reader to re-submit a profile that was never the problem — the whole
+         explanation lives on the Chat page, which is where this points them. -->
     <div class="card warn" role="status">
       <strong>{t("event.ownStatus.title")}</strong>
       <span class="muted"
         >{st.stage === "process_talk"
           ? t("event.ownStatus.talk")
-          : t("event.ownStatus.submission")}</span
+          : st.stage === "chat_attestation"
+            ? t("event.ownStatus.chat")
+            : t("event.ownStatus.submission")}</span
       >
     </div>
   {/each}
@@ -793,7 +899,13 @@
        a module singleton, so without it a card derived for the PREVIOUS event
        renders here, CTA and all. -->
   {#if readinessStore.readiness && readinessStore.coordinate === ctx.coordinate && !previewing}
-    <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
+    <ReadinessJourney
+      readiness={readinessStore.readiness}
+      {naddr}
+      lastCheckedAt={readinessStore.lastCheckedAt}
+      onRefresh={session.signer ? refreshReadiness : undefined}
+      refreshing={readinessStore.loading}
+    />
   {/if}
 
   {#if recoverResult === "restored"}
@@ -853,6 +965,16 @@
       {#if packNotes}
         <p class="muted" role="status" aria-live="polite" style="margin:0.4rem 0 0;font-size:0.78rem">
           {packNotes}
+        </p>
+      {/if}
+      {#if storageFull}
+        <!-- INFRA-12: the browser refused a write for lack of space. The in-memory
+             mirror still answers reads, so nothing looks broken THIS session — the
+             next boot is simply cold, every morning, with no signal anywhere. This
+             card is where a user is already thinking about local storage, so it is
+             where the one sentence belongs. -->
+        <p class="muted" role="status" style="margin:0.4rem 0 0;font-size:0.78rem">
+          {t("event.offline.storageFull")}
         </p>
       {/if}
     </div>
@@ -927,7 +1049,7 @@
           <strong>{t("event.attendeesSection")}</strong>
           {#if rosterCount !== undefined}
             <p class="muted" style="margin:0.25rem 0 0.5rem">
-              {t("event.attendeesSection.count", { n: rosterCount })}
+              {tp("event.attendeesSection.count", rosterCount)}
             </p>
           {/if}
           <button class="btn inline" onclick={() => router.go({ name: "attendees", naddr })}>

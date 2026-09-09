@@ -102,7 +102,9 @@ export async function fetchCoordinatorStatuses(
   for (const wrap of wraps) {
     let rumor: Rumor;
     try {
-      rumor = unwrapRumor(wrap, eidSk);
+      // NIP §5/§6.1 per-recipient allowlist: E_id receives 21606 statuses here.
+      // Anything else sealed to this key is not this reader's to interpret.
+      rumor = unwrapRumor(wrap, eidSk, [KIND_COORDINATOR_STATUS]);
     } catch {
       continue; // not ours / malformed
     }

@@ -247,3 +247,84 @@ describe("deriveReadiness — an empty profile is its own problem", () => {
     expect(r.steps.find((s) => s.id === "intro")?.hintKey).toBe("readiness.hint.intro");
   });
 });
+
+describe("processing failure (LEAD-1: the journey could not say \"failed\")", () => {
+  // Before this, `deriveReadiness` declared a "failed" state and never emitted it:
+  // a poisoned process_attendee leaves a directory entry with no ai_profile, which
+  // reads as `processed: false`, which rendered "Processing — the coordinator is
+  // building your profile" forever, with no CTA, next to a banner saying it had
+  // failed.
+  it("media failure → processing failed, hint + CTA point at re-recording", () => {
+    const r = deriveReadiness(
+      base({
+        processed: false,
+        matchesAvailable: false,
+        processingFailed: { stage: "process_attendee", errorCategory: "media_processing", retryable: true },
+      }),
+    );
+    expect(stateOf(r, "processing")).toBe("failed");
+    expect(r.steps.find((s) => s.id === "processing")?.hintKey).toBe("readiness.hint.failedMedia");
+    expect(r.primary?.labelKey).toBe("readiness.cta.rerecord");
+    expect(r.primary?.route).toEqual({ name: "record", naddr: "naddr1xyz", talk: false });
+  });
+
+  it("non-media failure → processing failed, CTA points at the profile editor", () => {
+    for (const errorCategory of ["provider_contract", "processing_error", "internal", undefined]) {
+      const r = deriveReadiness(
+        base({
+          processed: false,
+          matchesAvailable: false,
+          processingFailed: { stage: "process_attendee", errorCategory },
+        }),
+      );
+      expect(stateOf(r, "processing")).toBe("failed");
+      expect(r.steps.find((s) => s.id === "processing")?.hintKey).toBe("readiness.hint.failed");
+      expect(r.primary?.labelKey).toBe("readiness.cta.editProfile");
+      expect(r.primary?.route).toEqual({ name: "myProfile", naddr: "naddr1xyz" });
+    }
+  });
+
+  it("a failed step outranks an optional intro nudge for the single primary CTA", () => {
+    const r = deriveReadiness(
+      base({
+        hasIntro: false, // "intro" is action-required and sits EARLIER in the list
+        processed: false,
+        matchesAvailable: false,
+        processingFailed: { stage: "process_attendee", errorCategory: "media_fetch" },
+      }),
+    );
+    expect(stateOf(r, "intro")).toBe("action-required");
+    expect(r.primary?.labelKey).toBe("readiness.cta.rerecord");
+  });
+
+  it("a confirmed ai_profile still wins: a later failure never un-builds a built profile", () => {
+    const r = deriveReadiness(
+      base({ processed: true, processingFailed: { stage: "process_attendee", errorCategory: "media_fetch" } }),
+    );
+    expect(stateOf(r, "processing")).toBe("complete");
+  });
+
+  it("the monotonic latch is not defeated by a failure notice", () => {
+    const r = deriveReadiness(
+      base({
+        processed: false,
+        matchesAvailable: false,
+        latched: new Set<ReadinessStepId>(["processing"]),
+        processingFailed: { stage: "process_attendee", errorCategory: "media_fetch" },
+      }),
+    );
+    expect(stateOf(r, "processing")).toBe("complete");
+  });
+
+  it("a non-member is never offered the processing CTA", () => {
+    const r = deriveReadiness(
+      base({
+        role: "pending",
+        processed: false,
+        matchesAvailable: false,
+        processingFailed: { stage: "process_attendee", errorCategory: "media_fetch" },
+      }),
+    );
+    expect(r.primary).toBeUndefined();
+  });
+});

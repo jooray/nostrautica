@@ -309,3 +309,60 @@ describe("lockEventKeysForLogout / unlockEventKeysForLogin (audit UX-6)", () => 
     expect(await loadEventKeys(COORD)).toBeDefined(); // A's plaintext untouched
   });
 });
+
+/**
+ * Retained pre-rotation inbox secrets must survive a merge (2026-09-04 audit).
+ *
+ * `priorEinboxNsecs` exists so an organizer can still read submissions sealed to
+ * an E_inbox that a coordinator detach rotated away. `mergeEventKeys`
+ * reconstructs the record field by field and simply omitted it, so the merge
+ * silently discarded exactly the history the field exists for — and the reachable
+ * path is ordinary: a grant writes a live record before the login unlock restores
+ * the snapshot, so the two views merge with the restored keys as the fallback.
+ */
+describe("mergeEventKeys keeps retired inbox secrets (audit 2026-09-04)", () => {
+  let mem: ReturnType<typeof memBackend>;
+  beforeEach(() => {
+    mem = memBackend();
+    __setKeystoreBackend(mem.backend);
+    setActiveOwner(A);
+  });
+
+  const selfEncrypt = async (pt: string) => `enc:${pt}`;
+  const selfDecrypt = async (ct: string) => {
+    if (!ct.startsWith("enc:")) throw new Error("bad ciphertext");
+    return ct.slice(4);
+  };
+
+  it("unions both sides rather than dropping the snapshot's", async () => {
+    // A detach retired an inbox secret; that record goes into the logout snapshot.
+    await saveEventKeys({ ...organizerKeys(), priorEinboxNsecs: ["a".repeat(64)] });
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
+
+    // On the next login a grant lands FIRST, writing a live record that knows
+    // nothing about the retired secret — this is what makes the unlock a merge.
+    await saveEventKeys({ ...organizerKeys(), priorEinboxNsecs: ["b".repeat(64)] });
+    await unlockEventKeysForLogin(selfDecrypt);
+
+    const merged = await loadEventKeys(COORD);
+    expect(merged?.priorEinboxNsecs?.sort()).toEqual(["a".repeat(64), "b".repeat(64)]);
+  });
+
+  it("keeps the snapshot's secret when the live record has none", async () => {
+    await saveEventKeys({ ...organizerKeys(), priorEinboxNsecs: ["a".repeat(64)] });
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
+    await saveEventKeys(organizerKeys()); // live record, no prior secrets
+    await unlockEventKeysForLogin(selfDecrypt);
+
+    expect((await loadEventKeys(COORD))?.priorEinboxNsecs).toEqual(["a".repeat(64)]);
+  });
+
+  it("de-duplicates rather than accumulating the same secret twice", async () => {
+    await saveEventKeys({ ...organizerKeys(), priorEinboxNsecs: ["a".repeat(64)] });
+    await lockEventKeysForLogout(selfEncrypt, selfDecrypt);
+    await saveEventKeys({ ...organizerKeys(), priorEinboxNsecs: ["a".repeat(64)] });
+    await unlockEventKeysForLogin(selfDecrypt);
+
+    expect((await loadEventKeys(COORD))?.priorEinboxNsecs).toEqual(["a".repeat(64)]);
+  });
+});

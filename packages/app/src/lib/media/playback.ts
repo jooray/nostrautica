@@ -134,7 +134,7 @@ export async function resolveMediaUrl(
       // network traffic (the download itself is capped too — this just fails fast).
       if (descriptor.size > MAX_MEDIA_DOWNLOAD_BYTES) {
         throw new Error(
-          `This media claims to be ${Math.round(descriptor.size / 1024 / 1024)} MB — over the ${Math.round(MAX_MEDIA_DOWNLOAD_BYTES / 1024 / 1024)} MB limit, not downloading it.`,
+          `This media claims to be ${Math.round(descriptor.size / 1024 / 1024)} MB, over the ${Math.round(MAX_MEDIA_DOWNLOAD_BYTES / 1024 / 1024)} MB limit, not downloading it.`,
         );
       }
       const ciphertext = await downloadBlob(descriptor.url, descriptor.x, {

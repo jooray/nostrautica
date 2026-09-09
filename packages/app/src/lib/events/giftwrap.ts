@@ -23,6 +23,7 @@ import type { Event as NostrEvent, UnsignedEvent } from "nostr-tools/pure";
 import {
   KIND_GIFT_WRAP,
   KIND_SEAL,
+  assertNip44CiphertextCeiling,
   assertVerifiedSeal,
   finalizeUnwrappedRumor,
   nip44Encrypt,
@@ -33,10 +34,25 @@ import type { AppSigner } from "$lib/signer/types.js";
 
 const DAY = 24 * 60 * 60;
 
-/** A timestamp randomized up to 2 days into the past (NIP-59). */
+/**
+ * A timestamp randomized up to 2 days into the past (NIP-59).
+ *
+ * `crypto.getRandomValues`, not `Math.random` (audit PROTO-2). This offset is a
+ * PRIVACY parameter — it is what stops the wrap's `created_at` from revealing
+ * when its author actually sent it — and V8's `Math.random` is an xorshift PRNG
+ * whose internal state is recoverable from a handful of outputs. Someone
+ * collecting an author's wraps could therefore predict the rest of the sequence
+ * and subtract the offset back off. It is one call on a path that already does
+ * Schnorr signing and NIP-44, so the stronger source is free.
+ */
 function randomPastTimestamp(): number {
   const now = Math.floor(Date.now() / 1000);
-  return now - Math.floor(Math.random() * 2 * DAY);
+  const buf = new Uint32Array(1);
+  crypto.getRandomValues(buf);
+  // Scale a uniform 32-bit draw onto [0, 2 days) — no modulo bias, since the
+  // range is not a divisor of 2^32.
+  const offset = Math.floor((buf[0]! / 2 ** 32) * 2 * DAY);
+  return now - offset;
 }
 
 export interface WrapInput {
@@ -114,9 +130,20 @@ export async function signerUnwrap(
   if (!verifyEvent(wrap as unknown as NostrEvent)) {
     throw new Error("gift wrap signature is invalid");
   }
+  // Bound BOTH ciphertexts before delegating (audit PROTO-1). `nip44Decrypt` here
+  // is the USER'S SIGNER: for NIP-07 that hands the raw string to a browser
+  // extension, and for NIP-46 it ships the whole thing to a bunker over a relay
+  // and waits. Nothing on this path had an upper bound — the protocol's ceiling
+  // guards only its own in-process decrypts — so a few thousand kind-1059 events
+  // `#p`-tagged at someone, each with an 800 KB `content`, stall that signer
+  // session through the ordinary DM and grant scans. Anything past the ceiling
+  // cannot be a valid encryption of a legal plaintext, so refusing it costs
+  // nothing correct.
+  assertNip44CiphertextCeiling(wrap.content);
   const sealJson = await signer.nip44Decrypt(wrap.pubkey, wrap.content);
   const seal: unknown = JSON.parse(sealJson);
   assertVerifiedSeal(seal);
+  assertNip44CiphertextCeiling(seal.content);
   const rumorJson = await signer.nip44Decrypt(seal.pubkey, seal.content);
   const rumor: unknown = JSON.parse(rumorJson);
   return finalizeUnwrappedRumor(rumor, seal.pubkey);

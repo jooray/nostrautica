@@ -10,6 +10,9 @@ import {
   BATCH_SYSTEM_PROMPT,
   REVERSE_BATCH_SYSTEM_PROMPT,
   BATCH_SCORE_SCHEMA,
+  batchMaxTokens,
+  BATCH_TOKENS_BASE,
+  BATCH_TOKENS_PER_CANDIDATE,
   type BatchCandidate,
   type EventContextForScoring,
 } from "./scoring.js";
@@ -216,7 +219,13 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
     }
   });
 
-  it("clamps and rescales scores to [0,1] (0-10 / 0-100 scales, out-of-range)", async () => {
+  it("clamps and rescales scores to [0,1] on a scale read from the WHOLE response", async () => {
+    // Scale detection is per RESPONSE, not per field (2026-09-04 audit). Per field
+    // it produced two indefensible results: `10 → 1.0` next to `10.5 → 0.105`, and
+    // a genuinely 0-100-scale `5` read as `0.5` — ten times too high, silently and
+    // permanently, because nothing in a lone `5` distinguishes the two scales.
+    // A batch gives ten rows to read the scale from, and one value above 10
+    // settles it for all of them.
     const llm = new MockLlm(() => ({
       matches: [
         { index: 1, similarity: 8, complementarity: 85, score: 9, reasoning_for_target: "You should say hi." },
@@ -226,13 +235,98 @@ describe("batched scoring (spec §9.3/§16.2, BP3)", () => {
     const cands = candidates(2);
     const { scores } = await scoreBatch(llm, "m", EVENT, profile("t"), cands, () => 0.999999);
     // rng ~1 keeps Fisher–Yates order identical → index 1 = cand0, 2 = cand1.
+    // The response's maximum is 85, so the whole response is read as 0-100. The
+    // first row mixes scales within itself and is therefore not coherent under ANY
+    // reading — what changed is that we no longer MANUFACTURE coherence for it by
+    // guessing a different scale for each of its three fields.
     const s1 = scores.get("cand0")!;
-    expect(s1.score).toBeCloseTo(0.9);
-    expect(s1.similarity).toBeCloseTo(0.8);
+    expect(s1.score).toBeCloseTo(0.09);
+    expect(s1.similarity).toBeCloseTo(0.08);
     expect(s1.complementarity).toBeCloseTo(0.85);
     const s2 = scores.get("cand1")!;
-    expect(s2.similarity).toBe(0);
-    expect(s2.score).toBeCloseTo(0.2);
+    expect(s2.similarity).toBe(0); // negatives still clamp to 0
+    expect(s2.score).toBeCloseTo(0.02);
+  });
+
+  it("a coherent 0-10 response rescales by 10, and 10 does not become 0.1", async () => {
+    const llm = new MockLlm(() => ({
+      matches: [
+        { index: 1, similarity: 7, complementarity: 8, score: 10, reasoning_for_target: "Go." },
+        { index: 2, similarity: 1, complementarity: 2, score: 3, reasoning_for_target: "Maybe." },
+      ],
+    }));
+    const { scores } = await scoreBatch(llm, "m", EVENT, profile("t"), candidates(2), () => 0.999999);
+    expect(scores.get("cand0")!.score).toBeCloseTo(1.0);
+    expect(scores.get("cand1")!.score).toBeCloseTo(0.3);
+  });
+
+  it("a low-scoring 0-100 response is read as 0-100 because a SIBLING row gives the scale away", async () => {
+    // The case per-field detection could never get right: on its own, `5` reads as
+    // 0.5 under either scale. One row above 10 anywhere in the response settles it,
+    // and this is the whole reason the scale is read per response.
+    const llm = new MockLlm(() => ({
+      matches: [
+        { index: 1, similarity: 5, complementarity: 5, score: 5, reasoning_for_target: "Weak fit." },
+        { index: 2, similarity: 60, complementarity: 70, score: 65, reasoning_for_target: "Strong fit." },
+      ],
+    }));
+    const { scores } = await scoreBatch(llm, "m", EVENT, profile("t"), candidates(2), () => 0.999999);
+    expect(scores.get("cand0")!.score).toBeCloseTo(0.05);
+    expect(scores.get("cand1")!.score).toBeCloseTo(0.65);
+  });
+
+  /**
+   * The 2026-09-04 audit finding, and the most expensive of the batch: a row was
+   * accepted on the strength of a non-empty `reasoning_for_target` alone, and
+   * `normalizeScore` mapped a string / null / NaN / missing value onto 0. So a
+   * model answering `"score": "0.85"` — strings for a `number` schema field, which
+   * several OpenAI-compatible gateways do — persisted every pair in the batch at
+   * 0.00 with entirely plausible reasoning beside it. `missing` was empty so
+   * nothing retried, and `selectPairsToScore` never re-selects a direction whose
+   * row is current and scored: permanent until an organizer recompute, with no
+   * symptom but match lists that felt arbitrary.
+   */
+  describe("a row without three real numbers is missing, not zero", () => {
+    it("stringified numbers leave the whole batch unscored rather than persisting 0.00", async () => {
+      const llm = new MockLlm(() => ({
+        matches: [
+          { index: 1, similarity: "0.4", complementarity: "0.9", score: "0.85", reasoning_for_target: "Great fit." },
+          { index: 2, similarity: "0.2", complementarity: "0.3", score: "0.25", reasoning_for_target: "Some overlap." },
+        ],
+      }));
+      const { scores, missing } = await scoreBatch(llm, "m", EVENT, profile("t"), candidates(2), () => 0.999999);
+      expect(scores.size).toBe(0);
+      // In `missing`, so the coordinator's "retry the unscored remainder" fires.
+      expect(missing.sort()).toEqual(["cand0", "cand1"]);
+    });
+
+    it("drops only the offending row: null, NaN and a missing field each", async () => {
+      const llm = new MockLlm(() => ({
+        matches: [
+          { index: 1, similarity: 0.4, complementarity: 0.9, score: null, reasoning_for_target: "null score." },
+          { index: 2, similarity: 0.4, complementarity: 0.9, reasoning_for_target: "no score field." },
+          { index: 3, similarity: Number.NaN, complementarity: 0.9, score: 0.5, reasoning_for_target: "NaN similarity." },
+          { index: 4, similarity: 0.4, complementarity: 0.9, score: 0.8, reasoning_for_target: "All three real." },
+        ],
+      }));
+      const { scores, missing } = await scoreBatch(llm, "m", EVENT, profile("t"), candidates(4), () => 0.999999);
+      expect([...scores.keys()]).toEqual(["cand3"]);
+      expect(scores.get("cand3")!.score).toBeCloseTo(0.8);
+      expect(missing.sort()).toEqual(["cand0", "cand1", "cand2"]);
+    });
+
+    it("the reverse batch is just as strict (same shared parser)", async () => {
+      const llm = new MockLlm(() => ({
+        matches: [
+          { index: 1, similarity: "0.4", complementarity: "0.9", score: "0.85", reasoning_for_target: "You should meet them." },
+        ],
+      }));
+      const { scores, missing } = await scoreReverseBatch(
+        llm, "m", EVENT, profile("shared"), candidates(1), () => 0.999999,
+      );
+      expect(scores.size).toBe(0);
+      expect(missing).toEqual(["cand0"]);
+    });
   });
 
   it("partial batch failure: missing/malformed/duplicate entries never poison the rest", async () => {
@@ -736,5 +830,27 @@ describe("reverseSystemPrompt — the language reminder is inside the icebreaker
     // reverting a measured fix, which is exactly how the regression it fixes got in.
     const mod = await import("./scoring.js");
     expect(mod.REVERSE_BATCH_SYSTEM_PROMPT).toContain("Return one entry per target");
+  });
+});
+
+/**
+ * The batch completion budget (2026-09-04 audit). `batchMaxTokens` exists because
+ * the provider default of 4096 truncates a production-sized batch mid-JSON, which
+ * fails the WHOLE batch rather than one row.
+ */
+describe("batchMaxTokens — a batch must not be cut off at the provider default", () => {
+  it("clears the 4096 default at the production batch size of 10", () => {
+    expect(batchMaxTokens(10)).toBeGreaterThan(4096);
+    // At least the 12000 the benchmark harness measured and pinned.
+    expect(batchMaxTokens(10)).toBeGreaterThanOrEqual(12000);
+  });
+
+  it("scales with the batch, so raising batch_size cannot silently re-create the cliff", () => {
+    expect(batchMaxTokens(20)).toBeGreaterThan(batchMaxTokens(10));
+    expect(batchMaxTokens(20) - batchMaxTokens(10)).toBe(10 * BATCH_TOKENS_PER_CANDIDATE);
+  });
+
+  it("never returns a budget below the single-candidate floor", () => {
+    expect(batchMaxTokens(0)).toBe(BATCH_TOKENS_BASE + BATCH_TOKENS_PER_CANDIDATE);
   });
 });

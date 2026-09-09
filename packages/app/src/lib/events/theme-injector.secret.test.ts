@@ -10,6 +10,8 @@
  * elements and `querySelector('style[data-…]')`.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as mod from "./theme-injector.js";
+import * as secretMod from "$lib/stores/secret-surface.svelte.js";
 
 class FakeEl {
   tagName: string;
@@ -83,23 +85,25 @@ const HOSTILE_CSS = `
 // guards see it.
 let head: FakeEl;
 let body: FakeEl;
-let mod: typeof import("./theme-injector.js");
-let secretMod: typeof import("$lib/stores/secret-surface.svelte.js");
 
 describe("§13.3 event theme is suppressed while a secret is in the DOM", () => {
-  beforeEach(async () => {
+  // Statically imported, and NOT reset between tests. Both modules touch
+  // `document` only from inside functions, so importing them before the stub is
+  // installed is safe — and the per-test `vi.resetModules()` that used to force a
+  // re-import made vitest re-transform them for every test. That cost ~6s of a 10s
+  // hook budget in isolation and tipped over it under full-suite load, which made
+  // this file flake for reasons that had nothing to do with what it asserts. The
+  // two explicit resets below already give each test clean module state.
+  beforeEach(() => {
     const fake = makeFakeDocument();
     head = fake.head;
     body = fake.body;
     vi.stubGlobal("document", fake.document);
-    mod = await import("./theme-injector.js");
-    secretMod = await import("$lib/stores/secret-surface.svelte.js");
     mod.clearEventTheme();
     secretMod.__resetSecretSurfaceForTests();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.resetModules();
   });
 
   const themeStyle = () => head.query("style", "data-event-theme");

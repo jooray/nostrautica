@@ -5,9 +5,14 @@
  * IndexedDB).
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { cacheHydration } from "./hydration.svelte.js";
 import {
   __setPersistBackend,
   __resetPersistForTests,
+  __enforceCacheBudgetForTests,
+  __setCacheBudgetForTests,
+  cacheStats,
+  cachePersistenceDegraded,
   setActiveCacheOwner,
   activeCacheOwner,
   cacheGet,
@@ -227,6 +232,50 @@ describe("persist hydration generation fence (H-5)", () => {
   });
 });
 
+describe("late hydration never paints over a fresher entry (INFRA-N-4)", () => {
+  beforeEach(() => __resetPersistForTests());
+
+  it("keeps the newer in-memory record when the bulk read lands with an older one", async () => {
+    // Boot no longer awaits the bulk read (§7.4.5), so by the time it lands the app
+    // has been running for up to 1.5 s and has very likely written fresher entries
+    // — a just-fetched event context, a submission's write-through. Overwriting
+    // those with what was on disk when the read STARTED paints stale over fresh,
+    // and pages re-read on the hydration bump, so they actively pick the stale copy
+    // up until the next revalidation.
+    let release!: (v: Array<[string, CacheEntry]>) => void;
+    const gate = new Promise<Array<[string, CacheEntry]>>((r) => (release = r));
+    __setPersistBackend({ getAll: () => gate, put: async () => {}, delete: async () => {} });
+    const p = hydrateAppCache();
+
+    // The app fetches and writes while the bulk read is still in flight.
+    setActiveCacheOwner(A);
+    cacheSet("dir", ["fresh"], 100);
+
+    release([
+      [`${A}\x1fdir`, { at: 10, data: ["stale-from-disk"] }],
+      [`${A}\x1fother`, { at: 10, data: ["only-on-disk"] }],
+    ]);
+    await p;
+
+    expect(cacheGet<string[]>("dir")?.data).toEqual(["fresh"]);
+    // Entries the app has NOT touched still hydrate — this is a latest-wins rule,
+    // not a "skip everything once anything is in memory" rule.
+    expect(cacheGet<string[]>("other")?.data).toEqual(["only-on-disk"]);
+  });
+
+  it("still takes the disk copy when it is the newer one (another tab wrote it)", async () => {
+    let release!: (v: Array<[string, CacheEntry]>) => void;
+    const gate = new Promise<Array<[string, CacheEntry]>>((r) => (release = r));
+    __setPersistBackend({ getAll: () => gate, put: async () => {}, delete: async () => {} });
+    const p = hydrateAppCache();
+    setActiveCacheOwner(A);
+    cacheSet("dir", ["older"], 10);
+    release([[`${A}\x1fdir`, { at: 100, data: ["newer-from-disk"] }]]);
+    await p;
+    expect(cacheGet<string[]>("dir")?.data).toEqual(["newer-from-disk"]);
+  });
+});
+
 describe("persist hydrate + prune", () => {
   beforeEach(() => __resetPersistForTests());
 
@@ -255,14 +304,213 @@ describe("persist hydrate + prune", () => {
     vi.useRealTimers();
   });
 
-  it("pruneCache drops entries older than 30 days", async () => {
+  /**
+   * Eviction runs on `touchedAt` (last use), never on `at` (the source event's
+   * created_at). This test asserted the opposite until 2026-09-04, which is why the
+   * bug survived: most writers stamp `at` with the source event's timestamp, so
+   * pruning on `at` evicted every record of an event configured more than 30 days
+   * before it happened — on every boot, permanently, exactly at the venue where the
+   * cache matters most.
+   */
+  it("pruneCache keeps a current record derived from an OLD event (the 2026-09-04 regression)", async () => {
     __setPersistBackend(memBackend().backend);
     setActiveCacheOwner(A);
-    const nowSec = Math.floor(Date.now() / 1000);
-    cacheSet("fresh", "keep", nowSec);
-    cacheSet("stale", "drop", nowSec - 31 * 24 * 60 * 60);
+    const old = Math.floor(Date.now() / 1000) - 60 * 24 * 60 * 60;
+    // A conference configured two months ago and untouched since: `at` is ancient,
+    // but we are caching it right now, so it must survive.
+    cacheSet("ctx", "keep", old);
+    await pruneCache();
+    expect(cacheGet("ctx")?.data).toBe("keep");
+  });
+
+  it("pruneCache drops entries not touched in 30 days", async () => {
+    vi.useFakeTimers();
+    __setPersistBackend(memBackend().backend);
+    setActiveCacheOwner(A);
+    // Written 31 days ago and never read or rewritten since.
+    vi.setSystemTime(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000));
+    cacheSet("stale", "drop");
+    vi.useRealTimers();
+    cacheSet("fresh", "keep");
     await pruneCache();
     expect(cacheGet("fresh")?.data).toBe("keep");
     expect(cacheGet("stale")).toBeUndefined();
+  });
+
+  it("a read refreshes the eviction clock, so data still in use never ages out", async () => {
+    vi.useFakeTimers();
+    __setPersistBackend(memBackend().backend);
+    setActiveCacheOwner(A);
+    vi.setSystemTime(new Date(Date.now() - 31 * 24 * 60 * 60 * 1000));
+    cacheSet("used", "keep");
+    vi.useRealTimers();
+    expect(cacheGet("used")?.data).toBe("keep"); // touches it
+    await pruneCache();
+    expect(cacheGet("used")?.data).toBe("keep");
+  });
+});
+
+/**
+ * The 1500 ms hydration bound exists for slow/broken IndexedDB — i.e. exactly
+ * the devices where it actually fires. Firing it used to LOSE the wake-up:
+ * `done()` marked hydrated, then short-circuited on `settled`, so when the real
+ * `getAll()` finally landed and filled the mirror, `cacheHydration.version`
+ * never bumped again. Pages that had already read the cold mirror never re-read
+ * it, and the cache sat fully populated and entirely unused for that whole boot.
+ */
+describe("hydration wakes pages even when the bound fired first", () => {
+  beforeEach(() => __resetPersistForTests());
+
+  it("bumps the hydration signal AGAIN when the slow read finally lands", async () => {
+    vi.useFakeTimers();
+    try {
+      let deliver!: (rows: Array<[string, CacheEntry]>) => void;
+      const backend: PersistBackend = {
+        getAll: () =>
+          new Promise<Array<[string, CacheEntry]>>((resolve) => {
+            deliver = resolve;
+          }),
+        put: async () => {},
+        delete: async () => {},
+      };
+      __setPersistBackend(backend);
+
+      const before = cacheHydration.version;
+      const p = hydrateAppCache();
+      // The bound fires: boot is unblocked with a mirror that is still empty.
+      await vi.advanceTimersByTimeAsync(1600);
+      await expect(p).resolves.toBeUndefined();
+      const afterBound = cacheHydration.version;
+      expect(afterBound).toBeGreaterThan(before);
+      setActiveCacheOwner(A);
+      expect(cacheGet("dir")).toBeUndefined(); // cold, as the pages saw it
+
+      // …and now the real read lands.
+      deliver([[`${A}\x1fdir`, { at: 10, data: ["seed"] }]]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cacheGet<string[]>("dir")?.data).toEqual(["seed"]);
+      // The signal MUST move again, or nothing re-reads the now-warm mirror.
+      expect(cacheHydration.version).toBeGreaterThan(afterBound);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * `pruneCache` was age-only, and the IDB put swallowed every error including the
+ * one it was guaranteed to meet: QuotaExceededError. A heavy user who reads
+ * everything they store never ages anything out, so the store grew until the
+ * browser started refusing writes — silently, while the in-memory mirror kept
+ * reporting the data as cached. Perfect behaviour all session, stone-cold boot
+ * every morning, nothing logged.
+ */
+describe("cache size budget + quota reporting", () => {
+  beforeEach(() => {
+    __resetPersistForTests();
+    __setCacheBudgetForTests();
+  });
+
+  it("evicts the LEAST RECENTLY USED entries when over the entry cap", () => {
+    __setPersistBackend(memBackend().backend);
+    __setCacheBudgetForTests({ entries: 3 });
+    setActiveCacheOwner(A);
+    vi.useFakeTimers();
+    try {
+      for (const k of ["a", "b", "c", "d", "e"]) {
+        cacheSet(k, k);
+        vi.setSystemTime(Date.now() + 2000); // each write a couple of seconds later
+      }
+      // "a" and "b" are the oldest-touched, so they go first.
+      expect(__enforceCacheBudgetForTests()).toBe(2);
+      expect(cacheGet("a")).toBeUndefined();
+      expect(cacheGet("b")).toBeUndefined();
+      expect(cacheGet<string>("e")?.data).toBe("e");
+      expect(cacheStats().entries).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps an entry that is still being READ, however old the write was", () => {
+    __setPersistBackend(memBackend().backend);
+    __setCacheBudgetForTests({ entries: 2 });
+    setActiveCacheOwner(A);
+    vi.useFakeTimers();
+    try {
+      cacheSet("old-but-used", 1);
+      vi.setSystemTime(Date.now() + 60_000);
+      cacheSet("mid", 2);
+      vi.setSystemTime(Date.now() + 60_000);
+      cacheSet("new", 3);
+      // A read is a use: it refreshes the eviction clock (mirror-only).
+      vi.setSystemTime(Date.now() + 60_000);
+      expect(cacheGet("old-but-used")).toBeDefined();
+
+      __enforceCacheBudgetForTests();
+      expect(cacheGet("old-but-used")).toBeDefined(); // survived on last-use
+      expect(cacheGet("mid")).toBeUndefined(); // the genuinely idle one went
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("evicts on a byte budget too, not just an entry count", () => {
+    __setPersistBackend(memBackend().backend);
+    __setCacheBudgetForTests({ bytes: 600 });
+    setActiveCacheOwner(A);
+    cacheSet("big1", "x".repeat(400));
+    cacheSet("big2", "y".repeat(400));
+    cacheSet("big3", "z".repeat(400));
+    expect(__enforceCacheBudgetForTests()).toBeGreaterThan(0);
+    expect(cacheStats().bytes).toBeLessThanOrEqual(600);
+  });
+
+  it("reports a QuotaExceededError instead of swallowing it, and frees space", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const quotaError = Object.assign(new Error("full"), { name: "QuotaExceededError" });
+      const deleted: string[][] = [];
+      __setPersistBackend({
+        async getAll() {
+          return [];
+        },
+        async put() {
+          throw quotaError;
+        },
+        async delete(keys) {
+          deleted.push(keys);
+        },
+      });
+      __setCacheBudgetForTests({ entries: 2 });
+      setActiveCacheOwner(A);
+      expect(cachePersistenceDegraded()).toBe(false);
+
+      cacheSet("k1", "v1");
+      cacheSet("k2", "v2");
+      cacheSet("k3", "v3");
+      // The rejections are fire-and-forget; let their handlers run.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(cachePersistenceDegraded()).toBe(true);
+      expect(warn).toHaveBeenCalled();
+      expect(deleted.flat().length).toBeGreaterThan(0); // it made room
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("pruneCache enforces the size budget, not only the 30-day age cutoff", async () => {
+    __setPersistBackend(memBackend().backend);
+    __setCacheBudgetForTests({ entries: 2 });
+    setActiveCacheOwner(A);
+    // Everything written and read today: age alone can never bound this.
+    cacheSet("p1", "1");
+    cacheSet("p2", "2");
+    cacheSet("p3", "3");
+    cacheSet("p4", "4");
+    await pruneCache();
+    expect(cacheStats().entries).toBe(2);
   });
 });

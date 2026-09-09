@@ -10,6 +10,7 @@
    * deduped, pinned to the top with a subtle divider; everything else follows
    * alphabetically by displayed name. Keyboard: ↑/↓ move, Enter selects, Esc closes.
    */
+  import { tick } from "svelte";
   import { LANGUAGES } from "@nostrautica/protocol";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 
@@ -92,6 +93,15 @@
   let inputEl = $state<HTMLInputElement | null>(null);
   let listEl = $state<HTMLUListElement | null>(null);
   let rootEl = $state<HTMLDivElement | null>(null);
+  let triggerEl = $state<HTMLButtonElement | null>(null);
+  /**
+   * The query the highlight-reset effect has already accounted for. The effect
+   * below must fire when the user TYPES and not when the list opens — tracking
+   * `filtered` fired on both, so openList's "highlight the current language" was
+   * overwritten with 0 microseconds later and opening the picker never showed
+   * you which language you were already on.
+   */
+  let resetForQuery = "";
 
   const selected = $derived(options.find((o) => o.code === value));
   const selectedLabel = $derived(selected?.label ?? value);
@@ -105,21 +115,40 @@
   function openList() {
     open = true;
     query = "";
+    resetForQuery = "";
     active = Math.max(
       0,
       filtered.findIndex((o) => o.code === value),
     );
+    scrollActiveIntoView(); // the current language may be far down a 180-item list
     queueMicrotask(() => inputEl?.focus());
   }
 
-  function close() {
+  /**
+   * Close and hand focus back to the trigger — the same contract the app's modals
+   * get from focus-trap.ts. The trigger is destroyed while the picker is open
+   * ({#if !open}), so focus was living on the input that just disappeared and the
+   * browser dropped it to <body>: a keyboard user's next Tab restarted from the
+   * top of the page, and a screen-reader user lost their place entirely.
+   * `await tick()` is what makes this work — the button does not exist yet at the
+   * moment `open` is set to false.
+   *
+   * `restoreFocus` is false for the click-outside path only: there the user has
+   * already aimed at something else on the page, and yanking focus back to the
+   * trigger would fight them for it.
+   */
+  async function close(restoreFocus = true) {
     open = false;
     query = "";
+    resetForQuery = "";
+    if (!restoreFocus) return;
+    await tick();
+    triggerEl?.focus();
   }
 
   function choose(code: string) {
     value = code;
-    close();
+    void close();
   }
 
   function scrollActiveIntoView() {
@@ -151,13 +180,16 @@
       if (pick) choose(pick.code);
     } else if (e.key === "Escape") {
       e.preventDefault();
-      close();
+      void close();
     }
   }
 
-  // Reset the highlight to the top whenever the filtered set changes.
+  // Reset the highlight to the top when the user CHANGES THE QUERY — not merely
+  // when `filtered` is recomputed, which also happens on open (see resetForQuery).
   $effect(() => {
-    void filtered;
+    const q = query;
+    if (q === resetForQuery) return;
+    resetForQuery = q;
     active = 0;
   });
 </script>
@@ -168,13 +200,14 @@
     // the race where opening re-renders the trigger away before a click's window
     // handler runs — a detached target would otherwise read as "outside".
     const target = e.target as Node;
-    if (open && rootEl && target.isConnected && !rootEl.contains(target)) close();
+    if (open && rootEl && target.isConnected && !rootEl.contains(target)) void close(false);
   }}
 />
 
 <div class="lang" bind:this={rootEl}>
   {#if !open}
     <button
+      bind:this={triggerEl}
       type="button"
       {id}
       class="lang-trigger"

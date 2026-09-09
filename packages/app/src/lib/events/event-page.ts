@@ -29,8 +29,10 @@ import {
   type ExternalFeed,
   type MergedMenuItem,
   type MergedSection,
+  pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
@@ -86,7 +88,13 @@ export async function fetchEventPage(
     { kinds: [KIND_EVENT_PAGE], authors: [pubkey], "#d": [identifier] },
     ctx.config.relays,
   );
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary: the filter's `authors` is a request, not a guarantee (see
+  // the same note in posts.ts `matchesFeed`), and a 31608 is not decorative — it
+  // defines the event's menu targets AND the `sources` list, i.e. WHICH npubs get
+  // folded into the official feed. An unpinned read lets any relay in the event's
+  // set repoint every menu link and inject arbitrary authors into the posts page,
+  // which then renders their articles as the event's own. Only E_id may author it.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
   if (!latest) return undefined;
   let content;
   try {

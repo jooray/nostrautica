@@ -27,12 +27,21 @@ import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { decode as nip19Decode } from "nostr-tools/nip19";
 import {
   bytesToHex,
+  bytesToBase64,
+  base64ToBytes,
   makeCoordinate,
   inviteHash,
+  generateEck,
+  eckEncrypt,
+  eckDecrypt,
   KIND_INVITE_LIST,
+  KIND_ROSTER,
   type InviteListContent,
+  type RosterContent,
   type ChatBackend,
-} from "@nostrautica/protocol";
+  wrapRumor,
+  KIND_JOIN_REQUEST,
+  KIND_ATTENDEE_WITHDRAWAL,} from "@nostrautica/protocol";
 import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
@@ -40,19 +49,40 @@ const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
   fetchEventsRelayOnly: vi.fn(),
   publishSigned: vi.fn(),
 }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly, publishSigned }));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  fetchEvents,
+  fetchEventsRelayOnly,
+  publishSigned,
+  isAcceptedRelayUrl: (value: string) => value.startsWith("wss://"),
+}));
+// The relay fixtures below are unsigned plain objects; NDK does the signature
+// checking in production and `onlyVerified` is the re-check at the authority
+// boundary. The real `onlyByAuthors` is deliberately kept — the author pin on the
+// roster and the invite list is part of what these tests assert.
+vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("$lib/nostr/verify.js")>()),
+  onlyVerified: <T,>(events: T[]) => events,
+}));
 
-import { generateInvites, updateEventConfig } from "./organizer.js";
+import {
+  approveAttendee,
+  generateInvites,
+  revokeAttendeeClient,
+  updateEventConfig,
+  type PendingRequest,
+  fetchPending,} from "./organizer.js";
 import {
   __setKeystoreBackend,
   setActiveOwner,
   saveEventKeys,
+  loadEventKeys,
   type EventKeys,
   type KeystoreBackend,
   type LockedEventKeys,
 } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
+import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
 
 const OWNER = "b".repeat(64);
 const EID_SK = generateSecretKey();
@@ -156,6 +186,12 @@ function pubkeyFromLink(link: string): string {
 beforeEach(() => {
   __setKeystoreBackend(memKeystore());
   setActiveOwner(OWNER);
+  // The roster/invite-list writers keep an owner-scoped "this device has seen a
+  // published X" tripwire in the persistent cache, so each test starts from a
+  // device that has never seen either — otherwise test order would decide whether
+  // an empty relay answer counts as a first publish or a lost read.
+  __resetPersistForTests();
+  setActiveCacheOwner(OWNER);
   fetchEvents.mockReset();
   fetchEventsRelayOnly.mockReset().mockResolvedValue([]); // no monotonic collision
   publishSigned.mockReset().mockResolvedValue(undefined);
@@ -165,6 +201,7 @@ beforeEach(() => {
 afterEach(() => {
   __setKeystoreBackend(null);
   setActiveOwner(null);
+  __resetPersistForTests();
   vi.unstubAllGlobals();
 });
 
@@ -253,11 +290,360 @@ describe("generateInvites label numbering", () => {
       getPublicKey(nip19Decode(sk.nsec).data as Uint8Array),
     );
 
+    // Feed the just-published list back, the way relays would: the second batch
+    // is for the SAME event, and an empty answer after this device has published
+    // a list is now treated as a lost read rather than "no codes issued yet"
+    // (see "invite list read-modify-write safety" below).
+    const first: InviteListContent = JSON.parse(publishSigned.mock.calls[0][0].content);
+    fetchEvents.mockResolvedValue([publishedInviteListEvent(first.invites, 2000)]);
+
     // English is the implicit default (the 31600 omits the tag too), so an
     // ordinary event's links stay byte-identical to what earlier builds emitted.
     const enCtx = { ...ctx, config: { ...ctx.config, lang: "en" } } as EventContext;
     const [en] = await generateInvites({} as AppSigner, enCtx, 1, "https://app.example/");
     expect(en.link).not.toContain("lang=");
+  });
+});
+
+/**
+ * Invite-list republish safety.
+ *
+ * `generateInvites` is a read-modify-write over a REPLACEABLE event: it publishes
+ * `fetchPublishedInvites() + the new hashes`, and `publishMonotonic` adjusts
+ * created_at without ever merging content. The reader used to answer `[]` for a
+ * missing list, an unparseable one, and a relay that simply didn't answer — so
+ * minting one more code during a relay hiccup silently revoked every code already
+ * handed out (hashes on a replaceable event; there is no other copy) and
+ * restarted labelling at `invite-1`, which corrupts the label↔email join the
+ * usage report is built on.
+ */
+describe("invite list read-modify-write safety", () => {
+  /** A 31601 answered by someone who is not E_id. */
+  function foreignInviteListEvent(invites: { h: string; label?: string }[], createdAt = 9000) {
+    return {
+      ...publishedInviteListEvent(invites, createdAt),
+      pubkey: getPublicKey(generateSecretKey()),
+    };
+  }
+
+  it("refuses to regenerate when the published list exists but can't be parsed", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([
+      { ...publishedInviteListEvent(issuedBatch(3)), content: "{ truncated" },
+    ]);
+
+    await expect(
+      generateInvites({} as AppSigner, ctx, 1, "https://app.example/"),
+    ).rejects.toThrow(/invite list/i);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("refuses to regenerate when a list this device has published comes back empty", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([publishedInviteListEvent(issuedBatch(12))]);
+    await generateInvites({} as AppSigner, ctx, 1, "https://app.example/");
+    expect(publishSigned).toHaveBeenCalledTimes(1); // the merged 13-entry list
+
+    // Venue Wi-Fi: the next read answers with nothing at all. That is NOT "no
+    // codes have ever been issued" — this device published 13 of them a moment
+    // ago — and publishing over it would revoke all 13.
+    publishSigned.mockClear();
+    fetchEvents.mockResolvedValue([]);
+    await expect(
+      generateInvites({} as AppSigner, ctx, 1, "https://app.example/"),
+    ).rejects.toThrow(/invite list/i);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("still publishes the first batch on an event that has never had one", async () => {
+    // The other side of the same coin: an empty read on a device that has never
+    // seen a list is a genuine first publish and must not be blocked.
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    const generated = await generateInvites({} as AppSigner, ctx, 2, "https://app.example/");
+    expect(generated.map((g) => g.label)).toEqual(["invite-1", "invite-2"]);
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a 31601 by another key instead of laundering it into an E_id-signed list", async () => {
+    // `authors` is a request a relay may ignore, and this list is not just read —
+    // it is merged into a new 31601 and signed by E_id. An injected list would
+    // therefore turn the injector's own codes into genuinely published invite
+    // hashes, i.e. codes that auto-approve joins to this event.
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ours = issuedBatch(2);
+    const theirs = issuedBatch(5);
+    fetchEvents.mockResolvedValue([
+      foreignInviteListEvent(theirs), // newer, so it would win an unpinned pick
+      publishedInviteListEvent(ours, 1000),
+    ]);
+
+    const generated = await generateInvites({} as AppSigner, ctx, 1, "https://app.example/");
+
+    expect(generated[0].label).toBe("invite-3"); // numbered off OUR two, not their five
+    const content: InviteListContent = JSON.parse(publishSigned.mock.calls[0][0].content);
+    expect(content.invites.map((i) => i.h)).toEqual([
+      ...ours.map((i) => i.h),
+      inviteHash(getPublicKey(nip19Decode(generated[0].nsec).data as Uint8Array)),
+    ]);
+  });
+});
+
+/**
+ * Roster republish safety (the 2026-08 venue-Wi-Fi class of incident).
+ *
+ * Every roster write here is a whole-index rewrite stamped `max(now, base + 1)`,
+ * so it ALWAYS wins the replaceable-event race. `loadRoster` used to answer both
+ * of its failure modes — nothing came back, and came back but wouldn't decrypt —
+ * with an empty roster, which meant one bad read published "this event has one
+ * attendee" over the real index for everybody. Through revoke it was worse:
+ * `remaining` came out empty, so nobody was re-granted the rotated ECK and every
+ * attendee lost the directory and all future members-only content in one click.
+ */
+describe("roster read-modify-write safety", () => {
+  // Real curve points: these are gift-wrap recipients, so a "1".repeat(64)
+  // placeholder fails inside nip44 rather than in the code under test.
+  const ALICE = getPublicKey(generateSecretKey());
+  const BOB = getPublicKey(generateSecretKey());
+  const CAROL = getPublicKey(generateSecretKey());
+  const ECK_BYTES = generateEck();
+
+  function organizerKeysWithEck(): EventKeys {
+    return { ...organizerKeys(), eck: [{ id: 1, key: bytesToBase64(ECK_BYTES) }] };
+  }
+
+  function rosterEvent(
+    attendees: { pubkey: string; d: string; role: "attendee" | "organizer" }[],
+    createdAt = 5000,
+    content?: string,
+  ) {
+    return {
+      id: `roster-${createdAt}`,
+      kind: KIND_ROSTER,
+      pubkey: EID_PUBKEY,
+      created_at: createdAt,
+      tags: [["d", IDENTIFIER], ["a", COORD], ["eck", "1"], ["v", "2"]],
+      content:
+        content ??
+        eckEncrypt(ECK_BYTES, JSON.stringify({ v: 2, eck_current: 1, attendees })),
+    };
+  }
+
+  function request(pubkey: string): PendingRequest {
+    return { attendeePubkey: pubkey, name: "N", message: "", rsvpPublic: false, rumorCreatedAt: 1 };
+  }
+
+  /** The roster this run actually published, decrypted. */
+  function publishedRoster(): RosterContent {
+    const ev = publishSigned.mock.calls
+      .map((c) => c[0] as { kind: number; content: string })
+      .find((e) => e.kind === KIND_ROSTER)!;
+    return JSON.parse(eckDecrypt(ECK_BYTES, ev.content)) as RosterContent;
+  }
+
+  beforeEach(async () => {
+    await saveEventKeys(organizerKeysWithEck(), OWNER);
+    fetchEvents.mockResolvedValue([]); // DM relay-list lookup behind the grant wrap
+  });
+
+  it("publishes the read roster plus the new attendee when the read succeeded", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }]),
+    ]);
+
+    await approveAttendee({} as AppSigner, ctx, request(BOB));
+
+    expect(publishedRoster().attendees.map((a) => a.pubkey)).toEqual([ALICE, BOB]);
+  });
+
+  it("aborts the approval when the roster came back undecryptable", async () => {
+    // A roster exists; we just can't read it (wrong/rotated ECK, garbled payload).
+    // Publishing an empty one over it is not a degraded outcome, it is deletion.
+    fetchEventsRelayOnly.mockResolvedValue([rosterEvent([], 5000, "not-a-ciphertext")]);
+
+    await expect(approveAttendee({} as AppSigner, ctx, request(BOB))).rejects.toThrow(
+      /couldn't read/i,
+    );
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("aborts the approval when a roster this device has already seen comes back empty", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }]),
+    ]);
+    await approveAttendee({} as AppSigner, ctx, request(BOB));
+
+    // Wi-Fi drops between two approvals in the same session. An empty answer here
+    // cannot be "this event has no roster" — we read and rewrote one seconds ago.
+    publishSigned.mockClear();
+    fetchEventsRelayOnly.mockResolvedValue([]);
+    await expect(approveAttendee({} as AppSigner, ctx, request(CAROL))).rejects.toThrow(
+      /couldn't read/i,
+    );
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("still publishes the first roster on an event that has never had one", async () => {
+    // The genuine first approval must keep working — the tripwire only fires once
+    // this device has actually seen or written a roster for the event.
+    fetchEventsRelayOnly.mockResolvedValue([]);
+
+    await approveAttendee({} as AppSigner, ctx, request(BOB));
+
+    expect(publishedRoster().attendees.map((a) => a.pubkey)).toEqual([BOB]);
+  });
+
+  it("refuses to revoke against a roster that doesn't list the person being revoked", async () => {
+    // Revoke rebuilds the roster from `remaining` and re-grants the rotated ECK to
+    // exactly those people, so a stale or partial read doesn't produce a smaller
+    // rotation — it locks everyone it failed to see out of the event for good.
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }]),
+    ]);
+
+    await expect(revokeAttendeeClient({} as AppSigner, ctx, BOB)).rejects.toThrow(/roster/i);
+    expect(publishSigned).not.toHaveBeenCalled();
+
+    // And the ECK must NOT have been rotated by the aborted attempt: a new version
+    // current on this device but granted to nobody would encrypt every later post
+    // under a key no attendee holds.
+    expect((await loadEventKeys(COORD))?.eck).toHaveLength(1);
+  });
+
+  it("revokes normally when the roster does list them", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    // The rotated roster keeps Alice (re-keyed) and drops Bob.
+    const rotated = publishSigned.mock.calls
+      .map((c) => c[0] as { kind: number; content: string; tags: string[][] })
+      .find((e) => e.kind === KIND_ROSTER)!;
+    const keys = await loadEventKeys(COORD);
+    const newEck = keys!.eck.find((v) => v.id === 2)!;
+    const content = JSON.parse(
+      eckDecrypt(base64ToBytes(newEck.key), rotated.content),
+    ) as RosterContent;
+    expect(content.attendees.map((a) => a.pubkey)).toEqual([ALICE]);
+  });
+
+  /**
+   * Revoke mints ECK v(n+1) and re-encrypts the roster and every directory entry
+   * under it — and used to persist that key ONLY on this device. Every other path
+   * that mints an ECK writes the durable 30078 backup; this one never did. So a
+   * coordinator-less organizer who revoked someone and later cleared site data (or
+   * moved to a new phone) restored a backup holding only ECK v1, leaving the
+   * event's own owner permanently unable to read their own roster and directory.
+   * Rotation is forward-only, so there is no way back from that.
+   */
+  it("writes the rotated ECK to the organizer's durable backup", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+
+    // `writeEventKeysBackup` correctly does nothing without BOTH event secrets, so
+    // seed a complete custody record — the shared fixture carries no E_inbox key.
+    const withInbox = await loadEventKeys(COORD);
+    await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64) }, OWNER);
+
+    // The backup is self-encrypted through the SIGNER and published monotonically,
+    // so this needs a signer that can actually do both.
+    const encrypted: string[] = [];
+    const signer = {
+      getPublicKey: async () => ALICE,
+      nip44Encrypt: async (_pk: string, plaintext: string) => {
+        encrypted.push(plaintext);
+        return `enc:${plaintext}`;
+      },
+      signEvent: async (e: unknown) => e,
+    } as unknown as AppSigner;
+
+    await revokeAttendeeClient(signer, ctx, BOB, new Uint8Array(32).fill(7));
+
+    const keys = await loadEventKeys(COORD);
+    const newEck = keys!.eck.find((v) => v.id === 2)!;
+    // The backup payload carries the NEW key, not just the old one.
+    expect(encrypted.join(" ")).toContain(newEck.key);
+  });
+
+  it("still revokes, loudly, when no blinding key is available", async () => {
+    // Better a rotation the organizer is warned about than a refusal that leaves a
+    // revoked attendee holding a live key.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    expect((await loadEventKeys(COORD))?.eck).toHaveLength(2);
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/only on this device/i);
+    warn.mockRestore();
+  });
+});
+
+/**
+ * Withdrawals on an event with no coordinator (2026-09-04 audit).
+ *
+ * `withdrawAttendee` publishes a 21610 to E_inbox and reports success on the
+ * relay ack — but the only handler for that kind is the coordinator's. Without
+ * one the rumor sat unread forever: the attendee was told they had left, deleted
+ * their self-copy and their media, and stayed in the roster and directory with
+ * their ECK still on their device.
+ */
+describe("fetchPending surfaces withdrawals", () => {
+  const EINBOX_SK = generateSecretKey();
+  const ATTENDEE_SK = generateSecretKey();
+  const ATTENDEE = getPublicKey(ATTENDEE_SK);
+  const inboxCtx = {
+    ...ctx,
+    config: { ...ctx.config, inbox: getPublicKey(EINBOX_SK) },
+  } as EventContext;
+
+  const joinWrap = (createdAt: number) =>
+    wrapRumor(ATTENDEE_SK, getPublicKey(EINBOX_SK), {
+      kind: KIND_JOIN_REQUEST,
+      created_at: createdAt,
+      content: { v: 2, a: COORD, name: "Ann", message: "hi", rsvp_public: false },
+      tags: [["a", COORD]],
+    });
+  const withdrawWrap = (createdAt: number, deleteData: boolean) =>
+    wrapRumor(ATTENDEE_SK, getPublicKey(EINBOX_SK), {
+      kind: KIND_ATTENDEE_WITHDRAWAL,
+      created_at: createdAt,
+      content: { v: 2, a: COORD, delete_data: deleteData },
+      tags: [["a", COORD]],
+    });
+
+  beforeEach(async () => {
+    await saveEventKeys({ ...organizerKeys(), einboxNsecHex: bytesToHex(EINBOX_SK) }, OWNER);
+  });
+
+  it("marks an attendee whose withdrawal is newer than their join", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([joinWrap(100), withdrawWrap(200, true)]);
+
+    const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
+    const who = pending.find((p) => p.attendeePubkey === ATTENDEE);
+    expect(who?.withdrawn).toBe(true);
+    expect(who?.withdrawalRequestedPurge).toBe(true);
+  });
+
+  it("does not let a stale withdrawal shadow a later re-join", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
+
+    const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
+    expect(pending.find((p) => p.attendeePubkey === ATTENDEE)?.withdrawn).toBeUndefined();
   });
 });
 

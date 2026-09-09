@@ -71,7 +71,7 @@ export async function prepareAvatarImage(file: Blob): Promise<Blob> {
   try {
     bitmap = await createImageBitmap(file);
   } catch {
-    throw new Error("That photo couldn't be read — please choose a different one.");
+    throw new Error("That photo couldn't be read. Please choose a different one.");
   }
   try {
     // Cover-crop math (same construction as cropScaleImage): center-crop the
@@ -93,7 +93,7 @@ export async function prepareAvatarImage(file: Blob): Promise<Blob> {
     if (!blob) throw new Error("canvas encode failed");
     return blob;
   } catch {
-    throw new Error("That photo couldn't be processed — please choose a different one.");
+    throw new Error("That photo couldn't be processed. Please choose a different one.");
   } finally {
     bitmap?.close?.();
   }

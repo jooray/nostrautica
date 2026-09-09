@@ -11,8 +11,10 @@
 import type { LlmProvider, ModelInfo, PaymentStrategy, TokenUsage } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
+  parseModelJson,
   PROVIDER_TIMEOUTS,
   providerHttpError,
+  readJsonCapped,
   withProviderTimeout,
   withUncancellableDeadline,
 } from "./http.js";
@@ -38,9 +40,14 @@ export class RoutstrLlm implements LlmProvider {
       "Routstr GET /models",
       PROVIDER_TIMEOUTS.metadata,
       (signal) =>
+        // Byte-capped body reads throughout this adapter, not just deadline-bounded
+        // ones: a Routstr node is DISCOVERED from an untrusted kind-38421
+        // announcement, so the operator never chose the host these bytes come from,
+        // and an unbounded `res.json()` inside the 120s completion deadline is an
+        // OOM of the single-threaded daemon (see PROVIDER_BODY_LIMITS).
         guardedProviderFetch(`${this.base()}/models`, { signal }, this.opts.net ?? {}, async (res) => {
           if (!res.ok) throw await providerHttpError(res, "Routstr GET /models");
-          return (await res.json()) as { data?: any[] };
+          return await readJsonCapped<{ data?: any[] }>(res, "Routstr GET /models");
         }),
     );
     return (body.data ?? []).map((m) => ({
@@ -55,7 +62,7 @@ export class RoutstrLlm implements LlmProvider {
   async info(): Promise<any> {
     return withProviderTimeout("Routstr GET /info", PROVIDER_TIMEOUTS.metadata, (signal) =>
       guardedProviderFetch(`${this.base()}/info`, { signal }, this.opts.net ?? {}, async (res) =>
-        res.ok ? await res.json() : {},
+        res.ok ? await readJsonCapped(res, "Routstr GET /info") : {},
       ),
     );
   }
@@ -111,7 +118,7 @@ export class RoutstrLlm implements LlmProvider {
               if (!res.ok) {
                 throw await providerHttpError(res, "Routstr chat/completions");
               }
-              const parsed = (await res.json()) as any;
+              const parsed = await readJsonCapped<any>(res, "Routstr chat/completions");
               // Change proofs (if any) come back in response headers — settle the wallet.
               await this.opts.payment.settle(res.headers);
               return parsed;
@@ -130,9 +137,32 @@ export class RoutstrLlm implements LlmProvider {
     if (typeof content !== "string") {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
     }
+    // Both of these landed on the Venice path (PIPE-1, PIPE-13) and not here, and
+    // Routstr routes to the SAME open-weight models over the same OpenAI-compatible
+    // shape, so both failures are equally reachable through it.
+    //
+    // A response cut off at the token ceiling is unparseable JSON, and without this
+    // it is indistinguishable in the logs from a model that emitted garbage — the
+    // two want opposite responses (raise the budget vs. fix the prompt). Checked
+    // BEFORE the parse so the diagnosis survives a truncation that happens to land
+    // on a syntactically complete prefix.
+    const finish = body.choices?.[0]?.finish_reason;
+    if (finish === "length") {
+      throw new ProviderContractError(
+        this.id,
+        req.schemaName,
+        req.model,
+        `response truncated at the ${req.maxTokens ?? 4096}-token ceiling (finish_reason=length)`,
+      );
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(content);
+      // Lenient only in the ways a model actually malforms JSON — a ```json fence,
+      // a leading sentence. A bare JSON.parse is what makes MODEL-BAKEOFF.md's
+      // quality-and-cost winner unadoptable: it fences its output despite
+      // `strict: true`, so it fails almost every production call while
+      // benchmarking at zero format failures.
+      parsed = parseModelJson(content);
     } catch {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "output was not valid JSON");
     }

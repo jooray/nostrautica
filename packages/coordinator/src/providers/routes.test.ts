@@ -57,7 +57,13 @@ describe("resolveRoleRoutes — per-role provider instances (H-1)", () => {
     const routes = await resolveRoleRoutes(cfg, { providers: { venice, routstr }, logger: silent });
     const privacy = disclosureFromRoutes(routes);
     expect(privacy).toEqual({
-      stt: "private",
+      // Every LLM role here was checked against the provider's own catalogue.
+      // `stt` was not — it used to be a hardcoded "private" sitting in the same
+      // object, indistinguishable to a reader from the four that were verified,
+      // and it is a public claim about where an attendee's recorded voice goes.
+      // The STT model is not in the LLM catalogue (same reason `embed` is exempt
+      // from the not-found warning), so it says what it actually knows.
+      stt: "unverified",
       summary: "private",
       match: "non-private", // routstr non-private model, verified from the catalogue
       embed: "non-private",
@@ -150,5 +156,42 @@ describe("catalogue is fetched once per distinct provider", () => {
     });
     await resolveRoleRoutes(cfg, { providers: { venice }, logger: silent });
     expect(veniceCalls).toBe(1);
+  });
+});
+
+describe("disclosureFromRoutes — the STT tier is not asserted for free (2026-09-04 audit)", () => {
+  async function routesFor() {
+    const venice = new MockLlm(() => ({}), {
+      id: "venice",
+      models: [{ id: "v", private: true }],
+    });
+    const cfg = config({
+      summary: { provider: "venice", model: "v" },
+      match: { provider: "venice", model: "v" },
+      embed: { provider: "venice", model: "v" },
+      translate: { provider: "venice", model: "v" },
+    });
+    return resolveRoleRoutes(cfg, { providers: { venice }, logger: silent });
+  }
+
+  it("reports stt as unverified when no caller established a tier", async () => {
+    expect(disclosureFromRoutes(await routesFor()).stt).toBe("unverified");
+  });
+
+  it("uses the tier a caller HAS established", async () => {
+    const privacy = disclosureFromRoutes(await routesFor(), {
+      provider: "venice-stt",
+      model: "openai/whisper-large-v3",
+      privacy: "private",
+    });
+    expect(privacy.stt).toBe("private");
+  });
+
+  it("a descriptor with no tier is still unverified — passing one is not a claim", async () => {
+    const privacy = disclosureFromRoutes(await routesFor(), {
+      provider: "venice-stt",
+      model: "openai/whisper-large-v3",
+    });
+    expect(privacy.stt).toBe("unverified");
   });
 });

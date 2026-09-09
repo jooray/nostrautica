@@ -11,15 +11,28 @@
  *
  * sessionStorage (not localStorage): scoped to the tab, gone when the tab
  * closes — the code should not outlive the session that's using it.
+ *
+ * Keyed by OWNER as well as coordinate. The code is a single-use nsec that
+ * auto-approves whoever redeems it, and keying it by coordinate alone meant an
+ * account switch in the same tab handed A's unredeemed invite to B, who would
+ * then join on it. Scoping the key also avoids clearing a code the same user is
+ * mid-flow on, which a wipe-on-switch would.
  */
-function key(coordinate: string): string {
-  return `nostrautica:invite:${coordinate}`;
+function key(coordinate: string, owner: string | null): string {
+  return `nostrautica:invite:${owner ?? "anon"}:${coordinate}`;
+}
+
+let inviteOwner: string | null = null;
+
+/** Point invite storage at `pubkey` (or nothing, when signed out). */
+export function setInviteOwner(pubkey: string | null): void {
+  inviteOwner = pubkey;
 }
 
 /** Persist the invite code for this event (best-effort; private mode → no-op). */
 export function storeInvite(coordinate: string, nsec: string): void {
   try {
-    sessionStorage.setItem(key(coordinate), nsec);
+    sessionStorage.setItem(key(coordinate, inviteOwner), nsec);
   } catch {
     /* storage unavailable — the code just lives in memory for this page */
   }
@@ -28,7 +41,7 @@ export function storeInvite(coordinate: string, nsec: string): void {
 /** The persisted invite code for this event, or undefined. */
 export function loadInvite(coordinate: string): string | undefined {
   try {
-    return sessionStorage.getItem(key(coordinate)) ?? undefined;
+    return sessionStorage.getItem(key(coordinate, inviteOwner)) ?? undefined;
   } catch {
     return undefined;
   }
@@ -37,7 +50,7 @@ export function loadInvite(coordinate: string): string | undefined {
 /** Drop the persisted invite code (after confirmed submission or cancel). */
 export function clearInvite(coordinate: string): void {
   try {
-    sessionStorage.removeItem(key(coordinate));
+    sessionStorage.removeItem(key(coordinate, inviteOwner));
   } catch {
     /* nothing to clear */
   }

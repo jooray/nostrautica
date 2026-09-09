@@ -3,7 +3,7 @@
 **Status:** Executable runbook for the current implementation. Every command below
 is real; the expected output is what a healthy run prints. This does not remove
 the known replay, ordering, billing, and stale-work limitations documented in the
-protocol NIP and the audit — it tells you how to run, verify, back up, restore,
+protocol NIP and the audit: it tells you how to run, verify, back up, restore,
 upgrade, roll back, and detach the coordinator safely.
 
 The coordinator is a headless Nostr client (`@nostrautica/coordinator`). It has one
@@ -18,13 +18,22 @@ nostrautica-coordinator verify-backup <file> [--allow-unsigned] [--config coordi
 nostrautica-coordinator restore <file> [--force] [--allow-unsigned] [--config coordinator.toml]
 ```
 
-Two environment variables locate runtime state (both optional, with the defaults
-shown):
+Environment variables the daemon reads (all optional, defaults shown):
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `NOSTRAUTICA_COORDINATOR_DB` | `coordinator.sqlite` | SQLite database path |
-| `NOSTRAUTICA_COORDINATOR_NSEC` | — | coordinator identity (nsec or hex); or use `identity.ncryptsec_file` in the TOML |
+| `NOSTRAUTICA_COORDINATOR_NSEC` |: | coordinator identity (nsec or hex); or use `identity.ncryptsec_file` in the TOML |
+| `NOSTRAUTICA_COORDINATOR_CONFIG` | first CLI arg, else `coordinator.toml` | config file path; the `--config` flag wins over it |
+| `NOSTRAUTICA_COORDINATOR_PASSPHRASE` |, | **required** when identity comes from `identity.ncryptsec_file`; without it startup fails with `NOSTRAUTICA_COORDINATOR_PASSPHRASE required to decrypt key` |
+| `NOSTRAUTICA_RELEASE_ID` | `git describe`, else `v<pkg version>` | pins the release id a build with no `.git` reports (rsync/container deploys) |
+| `NOSTRAUTICA_GIT_SHA` | `git rev-parse HEAD`, else `unknown` | same, for the commit |
+| `NOSTRAUTICA_BUILD_TIMESTAMP` | commit date, else `unknown` | same, for the build time |
+| *(the key named by `providers.venice.api_key_env`)* |, | the provider API key; the name is yours to choose in the TOML |
+
+Set at least one of `NOSTRAUTICA_RELEASE_ID` / `NOSTRAUTICA_GIT_SHA` on a deploy
+that ships source without `.git`, or the daemon logs a provenance warning at
+startup and a running instance cannot be tied back to a build.
 
 ---
 
@@ -43,11 +52,11 @@ Run under a dedicated unprivileged service account (`nostrautica`), never root.
 Keep the identity material, Cashu wallet, provider credentials, and the SQLite
 database readable only by that account (`chmod 600`, `chown nostrautica`).
 
-**The database is only partially encrypted at rest — file permissions are your main
+**The database is only partially encrypted at rest: file permissions are your main
 protection (audit C7).** Key material (`E_inbox` nsec, ECKs), Cashu proofs, and
 selected MLS/pipeline values are NIP-44-encrypted under the coordinator identity, but
-the attendee-derived data the coordinator materializes — profiles, AI profiles,
-transcripts, corrections, summaries, pair reasoning, and talk data — is stored as
+the attendee-derived data the coordinator materializes, profiles, AI profiles,
+transcripts, corrections, summaries, pair reasoning, and talk data: is stored as
 **plaintext SQLite fields**. `chmod 600` is access control, **not** encryption:
 anyone who can read the database file (a disk image, a stray copy, an unencrypted
 backup) reads that attendee content *without* the coordinator identity key. Encrypt
@@ -57,8 +66,8 @@ run it on an encrypted filesystem with separate key custody.
 
 ## 2. Provision
 
-Create `coordinator.toml` (see `packages/coordinator/local-test.toml` for the full
-shape). Provision the identity **once** and keep it stable — the coordinator's
+Create `coordinator.toml` (copy `packages/coordinator/coordinator.example.toml`,
+which is the checked-in template with every key documented). Provision the identity **once** and keep it stable. The coordinator's
 pubkey is the root of trust every installed event's key custody is encrypted
 under, so rotating it strands every event.
 
@@ -80,18 +89,18 @@ Two security knobs (both under `[security]`, both safe defaults):
 
 | Key | Default | Purpose |
 |---|---|---|
-| `security.allow_insecure_urls` | `false` | **Dev only.** Permits `http://`/`ws://` schemes and loopback/private hosts for provider URLs and relays — for a local test stack (self-signed Blossom proxy, `nak serve` on localhost). **Never set on a public coordinator.** |
+| `security.allow_insecure_urls` | `false` | **Dev only.** Permits `http://`/`ws://` schemes and loopback/private hosts for provider URLs and relays, for a local test stack (self-signed Blossom proxy, `nak serve` on localhost). **Never set on a public coordinator.** |
 | `security.relay_allowlist` | `[]` (empty) | When non-empty, any relay URL taken from untrusted event input (event config `relays`, grant `config_relays`, inbox NIP-65 lists, key-package discovery) is dropped unless its host is listed. Empty = accept any *public* `wss://` host (still SSRF-guarded). Set this for a public coordinator that should only ever connect to known relays. |
 
 Beyond syntactic checks, relay WebSocket connections are SSRF-guarded at connect
 time (DNS-pinned, private/rebinding/mixed-answer addresses refused), the same
 protection HTTP media fetches already had.
 
-## 3. Verify before starting — `doctor`
+## 3. Verify before starting: `doctor`
 
 `doctor` is **genuinely read-only** (audit O2): it opens SQLite with a read-only
 connection and never migrates the schema, encrypts legacy columns, changes the
-journal mode, or bumps `user_version` — a doctor run leaves an old-schema database
+journal mode, or bumps `user_version`, a doctor run leaves an old-schema database
 byte-identical. It parses config, loads the identity, integrity-checks the database,
 proves the protected rows decrypt under the identity, confirms ffmpeg/ffprobe, probes
 every default relay, and does a read-only provider auth check. It never publishes,
@@ -106,10 +115,10 @@ nostrautica-coordinator doctor --config coordinator.toml
 Expected output on a healthy host:
 
 ```
-[doctor] nostrautica-coordinator v0.1.0 (schema v2)
+[doctor] nostrautica-coordinator v0.2.0 (schema v5)
   [ok]   config parse — coordinator.toml
   [ok]   identity load — npub1...
-  [ok]   database integrity — 3 event(s), schema v2
+  [ok]   database integrity — 3 event(s), schema v5
   [ok]   protected-row decryption — 3 event row(s) decrypt under the identity
   [ok]   ffmpeg/ffprobe
   [ok]   relays — 4/4 reachable
@@ -123,7 +132,7 @@ database on first run is a `[warn]`, not a failure.
 ## 4. Start (systemd, sandboxed)
 
 The daemon processes attacker-controlled media through ffmpeg, so it MUST run under
-sandboxing and resource limits (audit O5). **Use the checked-in canonical unit** —
+sandboxing and resource limits (audit O5). **Use the checked-in canonical unit**, 
 do not hand-write your own and do not run the coordinator from a detached shell
 script. The repo ships one tested, hardened unit,
 `packages/coordinator/nostrautica-coordinator.service`, built for an
@@ -131,12 +140,12 @@ script. The repo ships one tested, hardened unit,
 `WorkingDirectory=/home` + `ProtectHome=true` contradiction (which could make the
 code unreadable):
 
-- **Code:** `/opt/nostrautica` — read-only under `ProtectSystem=strict`.
-- **State:** `/var/lib/nostrautica` via `StateDirectory=nostrautica` — the only
+- **Code:** `/opt/nostrautica`, read-only under `ProtectSystem=strict`.
+- **State:** `/var/lib/nostrautica` via `StateDirectory=nostrautica`, the only
   writable path (SQLite lives here; if you use `providers.routstr.wallet_db`, give it
   an **absolute** path under `/var/lib/nostrautica`, since the working dir is
   read-only).
-- **Config:** `/etc/nostrautica/{coordinator.toml,coordinator.env}` — the env file
+- **Config:** `/etc/nostrautica/{coordinator.toml,coordinator.env}`, the env file
   holds `NOSTRAUTICA_COORDINATOR_NSEC` etc.
 
 Install and verify it:
@@ -162,21 +171,21 @@ capabilities, `RestrictAddressFamilies`, `SystemCallFilter=@system-service`) plu
 
 One deliberate exception: `MemoryDenyWriteExecute` is **left off** (commented in the
 unit). V8's JIT maps writable-then-executable pages and Node crashes under it
-(it would require `node --jitless`, far too slow). Do **not** "harden" it back on —
+(it would require `node --jitless`, far too slow). Do **not** "harden" it back on, 
 it breaks the daemon.
 
 The unit's `ExecStartPre` runs the read-only `doctor` (§3) as a preflight gate.
 Healthy startup logs the identity, per-role provider routes, the single-daemon
 lock, and `running — watching for installs, submissions, admin commands`. **Test
-ffmpeg under these restrictions before production** — `PrivateTmp` in particular
+ffmpeg under these restrictions before production**, `PrivateTmp` in particular
 must not break the audio pipeline (the daemon sweeps its own temp dirs at boot).
 
-A second daemon on the same database fails fast with the single-daemon-lock error
-— never run two against one SQLite file. Prefer the canonical systemd unit over any
+A second daemon on the same database fails fast with the single-daemon-lock error:
+never run two against one SQLite file. Prefer the canonical systemd unit over any
 detached restart script: a script that SIGTERMs the old daemon and immediately
 starts a replacement can leave *no* daemon running (the old process holds the
 single-daemon lock while it drains for up to 30 s, so the replacement can't acquire
-it) — systemd, waiting for the old unit to stop before starting the new one, avoids
+it), systemd, waiting for the old unit to stop before starting the new one, avoids
 that race.
 
 ### 4b. Alternative: the user-scoped unit (code and state under `/home`)
@@ -215,7 +224,7 @@ How it differs from the system unit, and why:
 - **`Restart=always`, not `on-failure`.** A production outage (2026-07-25) had the
   daemon exit with nothing in its log and stay dead for 29 minutes; a clean `code 0`
   exit could not be ruled out, and `on-failure` ignores those. The start limit
-  (5 starts / 5 min) still stops a genuine crash loop — supervision buys resilience,
+  (5 starts / 5 min) still stops a genuine crash loop, supervision buys resilience,
   not a diagnosis, so a persistently broken daemon still ends up stopped and still
   needs a human in the journal.
 - **Output still goes to the log file** (`StandardOutput=`/`StandardError=` set to
@@ -230,7 +239,7 @@ How it differs from the system unit, and why:
   memory/tasks/fd caps. In a per-user manager the capability drop and `PrivateTmp`
   require user namespaces (systemd implicitly enables `PrivateUsers=`), and the
   memory/tasks caps require those cgroup controllers to be delegated to
-  `user@.service` — the unit's header says what to check and what to comment out if
+  `user@.service`: the unit's header says what to check and what to comment out if
   a host lacks either.
 - **No `ExecStartPre` doctor gate.** `doctor` is read-only and safe as a gate (§3),
   but it probes relays and provider auth, so gating *automatic* restarts on it lets
@@ -240,10 +249,10 @@ How it differs from the system unit, and why:
 Whichever unit you use, the daemon now makes its own lifecycle explicit in the log:
 `[coordinator] START pid … — nostrautica-coordinator <release>` on every start, a
 `FATAL — uncaughtException|unhandledRejection …` line with a stack for the two paths
-that kill Node without going through the normal fatal handler, `SIGTERM received —
+that kill Node without going through the normal fatal handler, `SIGTERM received, 
 draining in-flight work…` for an intentional stop, and a final one-line
 `EXIT code <n> (pid …, up …s)` backstop on *every* exit. An `EXIT` line with no
-`FATAL` or signal line above it means nothing in the daemon asked to stop — read the
+`FATAL` or signal line above it means nothing in the daemon asked to stop, read the
 journal for the code and signal.
 
 Note that the unit and a detached restart script cannot both own the lifecycle: as
@@ -252,7 +261,7 @@ instance holds the single-daemon lock and the unit's copy fails to acquire it. P
 the deploy at `systemctl --user restart nostrautica-coordinator` before enabling the
 unit.
 
-## 5. Back up — `backup`
+## 5. Back up: `backup`
 
 The database is more than a cache. Relay-backed records and derived artifacts are
 usually reconstructible (at relay/provider cost), but the job/dedupe/invite-claim
@@ -266,13 +275,13 @@ nostrautica-coordinator backup /home/nostrautica/backups/$(date +%F-%H%M).sqlite
 ```
 
 `backup` takes a crash-consistent snapshot via `VACUUM INTO` (WAL snapshot
-isolation, so it is safe to run against the live daemon — it records
+isolation, so it is safe to run against the live daemon: it records
 `quiesced: false` when a daemon is up), runs `integrity_check`, proves every
 protected `E_inbox`/ECK row decrypts under the loaded identity, and writes a
 `<dest>.meta.json` sidecar with the schema version, coordinator pubkey, release
 revision, event count, the snapshot's SHA-256 (a **corruption** check), and an
 **HMAC-SHA256 authentication tag** keyed from the coordinator identity secret over
-the canonical manifest — which includes that checksum, so the tag authenticates the
+the canonical manifest, which includes that checksum, so the tag authenticates the
 snapshot digest too (audit C10). The tag is what makes tampering detectable:
 recomputing the plain SHA-256 after altering a snapshot no longer passes, because
 forging the tag requires the coordinator identity key. Expected:
@@ -280,28 +289,27 @@ forging the tag requires the coordinator identity key. Expected:
 ```
 [backup] wrote .../2026-07-23-0400.sqlite (+ .../2026-07-23-0400.sqlite.meta.json)
   coordinator   npub1...
-  release       v0.1.0
-  schema        v2
+  release       v0.2.0
+  schema        v5
   events        3
   checksum      a3c0e0b7...
-  auth          hmac-sha256 (a1b2c3d4...)
   quiesced      true
 [backup] OK
 ```
 
 Keep the snapshot **and** its `.meta.json` together, encrypt them at rest, and keep
 the coordinator identity that decrypts the protected columns. A backup you have
-never verified and restored is not a recovery plan — schedule a periodic drill
+never verified and restored is not a recovery plan, schedule a periodic drill
 (§9).
 
 **Backups outlive deletion.** When an attendee withdraws or an event's retention
 window expires, the coordinator performs an event-wide local purge of its own copies
 (profiles, AI profiles, transcripts, pair reasoning, talks, summaries) and deletes
 the relay records across all historical ECK versions (audit C5). It **cannot** reach
-your external backup files — a snapshot taken *before* a purge still contains the
+your external backup files: a snapshot taken *before* a purge still contains the
 purged data, so honoring a deletion means **rotating and expiring old backups**
 yourself. One nuance of the purge: content-addressed payloads shared by dedupe are
-**reference-counted** — a payload still referenced by *another* event survives this
+**reference-counted**: a payload still referenced by *another* event survives this
 event's purge and is dropped only when its last reference is gone.
 
 Verify a backup any time, off-host, without touching production:
@@ -315,8 +323,8 @@ nostrautica-coordinator verify-backup /path/to/snapshot.sqlite --config coordina
 failed gate (corruption-check mismatch, integrity failure, wrong identity, newer
 schema, **or a missing/invalid authentication tag**). Authentication is
 **fail-closed**: a snapshot whose HMAC tag is *present but invalid* (tampered) is
-**always** refused and cannot be overridden. A **legacy unsigned** backup — one
-written before C10, with no tag at all — is also refused by default; pass
+**always** refused and cannot be overridden. A **legacy unsigned** backup (one
+written before C10, with no tag at all) is also refused by default; pass
 `--allow-unsigned` to `verify-backup`/`restore` to accept such a pre-signing backup
 deliberately. Re-run `backup` on the current binary to produce an authenticated
 snapshot and retire the unsigned ones.
@@ -325,8 +333,8 @@ snapshot and retire the unsigned ones.
 
 Restore refuses to run against a live daemon (it must hold the single-daemon
 lock), refuses a snapshot from a newer schema than the binary understands, refuses
-a tampered snapshot and (by default) an unsigned legacy one — pass `--allow-unsigned`
-to accept a pre-C10 backup deliberately (§5) — and refuses to overwrite an existing
+a tampered snapshot and (by default) an unsigned legacy one: pass `--allow-unsigned`
+to accept a pre-C10 backup deliberately (§5), and refuses to overwrite an existing
 database without `--force`.
 
 ```sh
@@ -355,10 +363,10 @@ sudo systemctl start nostrautica-coordinator
 migration has been designed and tested. Schema migrations are **numbered, ordered,
 and transactional** (see `docs/VERSIONING.md`): they run in place on the first
 read-write open and advance `PRAGMA user_version` at each boundary (the schema is at
-`v2`). A newer binary reads and upgrades an older database, but an older binary now
+`v5`). A newer binary reads and upgrades an older database, but an older binary now
 **refuses to open *or* restore a database written by a newer one** (`user_version`
 greater than the binary's `SCHEMA_VERSION`) with a clear "upgrade the coordinator"
-message — the downgrade guard applies at open time, not only at restore. This is
+message, the downgrade guard applies at open time, not only at restore. This is
 exactly why you take a pre-upgrade backup below: it is a schema the old binary still
 accepts if you roll back (§8).
 
@@ -375,7 +383,7 @@ nostrautica-coordinator restore /home/nostrautica/backups/pre-upgrade-<date>.sql
 sudo systemctl start nostrautica-coordinator
 ```
 
-This is why §7 takes a backup *before* the upgrade — it is your rollback point.
+This is why §7 takes a backup *before* the upgrade. It is your rollback point.
 
 ## 9. Recovery, MLS admin, and detach
 
@@ -392,12 +400,12 @@ approved while chat was offline is promoted on the next install/config reload).
 This is deliberate recovery insurance: if the coordinator's DB (hence its MLS
 admin state) is lost and no backup exists, an **organizer's own device is still a
 group admin** and can add/remove members and rotate metadata. There is nothing to
-enroll by hand — promotion is automatic for organizer-role attendees. Keeping a
+enroll by hand: promotion is automatic for organizer-role attendees. Keeping a
 current backup is still the primary recovery path; organizer co-admin is the
 backstop when a backup is unavailable.
 
 **Detach / reassignment.** Coordinator detachment has known implementation limits.
-A config edit alone is not a verified immediate erasure of coordinator custody —
+A config edit alone is not a verified immediate erasure of coordinator custody, 
 after an operational detach, verify subscriptions closed, stored event state, and
 the coordinator logs. Before decommissioning, define who retains group
 administration and confirm the handoff.

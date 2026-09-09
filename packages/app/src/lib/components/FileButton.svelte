@@ -32,7 +32,22 @@
   let input = $state<HTMLInputElement | null>(null);
 </script>
 
-<button type="button" class={cls} {style} {disabled} onclick={() => input?.click()}>
+<!--
+  `value = ""` before opening the dialog. A file input fires `change` only when the
+  selection CHANGES, so picking the same file twice — after a failed upload, or
+  after cropping and wanting the original back — did nothing at all, with no
+  feedback of any kind. Clearing it first makes every pick a change.
+-->
+<button
+  type="button"
+  class={cls}
+  {style}
+  {disabled}
+  onclick={() => {
+    if (input) input.value = "";
+    input?.click();
+  }}
+>
   {@render children()}
 </button>
 <input

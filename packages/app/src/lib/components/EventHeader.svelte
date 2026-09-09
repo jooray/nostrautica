@@ -10,6 +10,7 @@
   // banner it becomes the background under the wash and the constellation is
   // suppressed.
   import type { EventContext } from "$lib/events/event-context.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import { eventConstellation } from "$lib/events/constellation.js";
@@ -38,8 +39,15 @@
     }
   });
   const constellation = $derived(eventConstellation(eventPubkey));
-  const icon = $derived(ctx.icon || defaultEventIcon(ctx.title, ctx.title));
-  const hasBanner = $derived(!!ctx.banner);
+  // The banner and icon are URLs the ORGANIZER chose, fetched by every attendee
+  // who opens the event (audit SEC-17). Organizer-authored is not the same as
+  // trusted — anyone can create an event — and the fetch discloses each
+  // attendee's IP and the moment they looked. https-only, no referrer; when the
+  // viewer has turned off-origin images off, the generated constellation and the
+  // default icon stand in.
+  const iconSrc = $derived(safeImageSrc(ctx.icon) ?? defaultEventIcon(ctx.title, ctx.title));
+  const bannerSrc = $derived(safeImageSrc(ctx.banner));
+  const hasBanner = $derived(!!bannerSrc);
 
   function fmtDate(unixSec: number): string {
     return new Date(unixSec * 1000).toLocaleDateString(undefined, {
@@ -63,7 +71,7 @@
   role={link ? "link" : undefined}
 >
   {#if hasBanner}
-    <img class="banner-bg" src={ctx.banner} alt="" />
+    <img class="banner-bg" src={bannerSrc} alt="" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
   {/if}
   <div class="wash" aria-hidden="true"></div>
   {#if !hasBanner}
@@ -77,7 +85,7 @@
 
   <div class="inner" class:on-banner={hasBanner}>
     {#if compact}
-      <img class="icon" src={icon} alt="" />
+      <img class="icon" src={iconSrc} alt="" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
       <span class="kname">{ctx.title}</span>
       {#if status}
         <span class="badge {status.tone === 'neutral' ? '' : status.tone}">{t(status.labelKey)}</span>

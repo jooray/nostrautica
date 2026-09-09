@@ -8,10 +8,13 @@
   import SignInOptions from "$lib/components/SignInOptions.svelte";
   import LanguageSwitch from "$lib/components/LanguageSwitch.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
-  let error = $state<string | null>(null);
+  /** Raw thrown value: ErrorState categorizes it and keeps the technical
+   *  text behind a disclosure, as every other async surface does. */
+  let error = $state<unknown>(null);
   let busy = $state(false);
   let showExisting = $state(false);
   let newName = $state("");
@@ -50,7 +53,7 @@
         }
         // Stay so the freshly-generated key's backup card shows.
       } catch (e) {
-        error = e instanceof Error ? e.message : String(e);
+        error = e;
       } finally {
         busy = false;
       }
@@ -81,7 +84,10 @@
   <h1>{t("login.welcome")}</h1>
 
   {#if error}
-    <div class="card warn"><strong>{t("login.failed")}</strong> {error}</div>
+    <!-- Announced and categorized, like every other async failure surface (Q3/A6).
+         A raw thrown string in an unannounced card is invisible to a screen reader
+         and unreadable to everyone else. -->
+    <ErrorState {error} body="login.failed" />
   {/if}
 
   <!-- Nostr users are first-class citizens: their purple sign-in comes first,
@@ -98,7 +104,16 @@
 
   <div class="or-divider">{t("login.or")}</div>
 
-  <div class="card">
+  <!-- The card IS the form (see Join.svelte for the same change): Enter on the
+       name field creates the identity, and the on-screen keyboard shows a "go"
+       key instead of a newline. -->
+  <form
+    class="card"
+    onsubmit={(e) => {
+      e.preventDefault();
+      createNew();
+    }}
+  >
     <h2>{t("login.createHeading")}</h2>
     <p class="muted">{t("login.createSub")}</p>
     <div class="row" style="gap:0.75rem;align-items:center;margin-bottom:0.5rem">
@@ -118,10 +133,16 @@
       <div class="muted" style="font-size:0.85rem">{t("login.photoAdd")} <span class="badge">{t("login.photoPublic")}</span><br />{t("login.photoTap")}</div>
     </div>
     <label for="nm">{t("login.yourName")}</label>
-    <input id="nm" bind:value={newName} placeholder={t("login.namePlaceholder")} />
-    <button class="btn primary" style="margin-top:0.75rem" onclick={createNew} disabled={busy}>
+    <input
+      id="nm"
+      bind:value={newName}
+      placeholder={t("login.namePlaceholder")}
+      autocomplete="name"
+      enterkeyhint="go"
+    />
+    <button class="btn primary" type="submit" style="margin-top:0.75rem" disabled={busy}>
       {busy ? t("login.creating") : t("login.createMyIdentity")}
     </button>
-  </div>
+  </form>
 
 {/if}

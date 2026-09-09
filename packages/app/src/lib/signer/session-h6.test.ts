@@ -66,7 +66,10 @@ vi.mock("$lib/chat/identity.js", () => ({
 vi.mock("$lib/stores/recent-events.svelte.js", () => ({
   recentEvents: { clear: vi.fn(), setOwner: vi.fn() },
 }));
-vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent: vi.fn() }));
+vi.mock("$lib/stores/join-sent.svelte.js", () => ({
+  clearAllJoinSent: vi.fn(),
+  setJoinSentOwner: vi.fn(),
+}));
 
 import { session } from "./session.svelte.js";
 

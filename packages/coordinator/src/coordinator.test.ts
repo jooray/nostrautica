@@ -10,6 +10,7 @@ import {
   base64ToBytes,
   bytesToHex,
   eckDecrypt,
+  eckEncrypt,
   nip44Decrypt,
   blindedD,
   wrapRumor,
@@ -36,6 +37,7 @@ import {
   keyGrantContentSchema,
   coordinatorStatusContentSchema,
   unwrapRumor,
+  RUMOR_MAX_CLOCK_SKEW_SEC,
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
@@ -141,6 +143,11 @@ interface Counters {
   reverseCalls: { sharedRole?: string; targetRoles: (string | undefined)[] }[];
   /** When set, the NEXT batch containing a candidate of this role omits that entry once. */
   dropRoleOnce?: string;
+  /** When set, EVERY batch (forward and reverse) comes back with entries missing —
+   *  a persistently incomplete model response, which drives the retry-budget test.
+   *  Both directions, because the reverse batch writes the same directed rows and
+   *  would otherwise quietly satisfy the forward batch's retry. */
+  dropAllScores?: boolean;
   /** How many profile-translation calls the pipeline made. */
   translateCalls: number;
   /** When set, every batch-scoring call throws — drives the batch FAILED log line. */
@@ -228,6 +235,7 @@ function makeLlm(counters: Counters): MockLlm {
         const chunk = chunks[i + 1]!;
         const role = roleOf(chunk);
         call.candidateRoles.push(role);
+        if (counters.dropAllScores) continue;
         if (role && counters.dropRoleOnce === role) {
           // Simulate the model skipping this candidate (partial batch failure).
           counters.dropRoleOnce = undefined;
@@ -252,6 +260,7 @@ function makeLlm(counters: Counters): MockLlm {
         const chunk = chunks[i + 1]!;
         const role = roleOf(chunk);
         call.targetRoles.push(role);
+        if (counters.dropAllScores) continue;
         // reasoning addressed to the TARGET about meeting the shared person.
         matches.push(scoreEntry(index, role, sharedRole, sharedUpdated || chunk.includes("(updated)")));
       }
@@ -349,6 +358,10 @@ async function setup(
       perEventDurationSec: number;
       perAttendeeCalls: number;
       perEventCalls: number;
+      daemonBytes?: number;
+      daemonDurationSec?: number;
+      daemonCalls?: number;
+      daemonWindowHours?: number;
     };
     /** C2 race hook: awaited by the injected transcribe BEFORE it returns, so a test
      *  can pause a specific revision's STT/LLM mid-flight and interleave a newer one. */
@@ -1216,6 +1229,38 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
       content: "", id: "cfg-2", sig: "",
     } as any;
     await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    await h.coordinator.jobs.drain();
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
+  });
+
+  it("a config edit whose matrix publish fails is RETRIED durably, not silently lost (CORE-N-2)", async () => {
+    // The applied-config watermark moved to this 31600 before its outward effects
+    // ran, and `subscribeEventConfig`'s callback swallowed the throw. So a relay
+    // hiccup during an organizer's visibility change left the coordinator believing
+    // the new config was live, with the matrix never published — and a redelivery of
+    // the same 31600 rejected by `supersedes`, so nothing could ever fix it.
+    const h = await setup(0, { matchVisibility: "pair" });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const newer = {
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100,
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"], ["match_visibility", "event"]],
+      content: "", id: "cfg-2", sig: "",
+    } as any;
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+    // The config itself IS applied (state + DB); only the effect failed.
+    expect(JSON.parse(h.store.getEvent(h.coordinate)!.config_json).matchVisibility).toBe("event");
+
+    // Redelivering the identical 31600 correctly changes nothing — it does not
+    // supersede. The durable job is what recovers it.
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+
+    h.transport.failPublishes = 0;
     await h.coordinator.jobs.drain();
     expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
   });
@@ -2873,16 +2918,139 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
 });
 
 describe("audit COORD-11 — rumor freshness + coordinator-inbox backfill", () => {
-  it("drops a rumor future-dated > 15 min past the coordinator's clock", async () => {
+  it("CLAMPS a rumor future-dated past the skew allowance instead of dropping it", async () => {
+    // This used to assert the opposite, and the opposite was wrong. The spec's
+    // remedy for a future-dated rumor inside the reasonable horizon is to CLAMP
+    // it for ordering (§3.1 / PROTO-8) — which is exactly what the protocol
+    // library does to the identical input (`finalizeUnwrappedRumor`). The
+    // coordinator instead DROPPED it and marked both the rumor and its wrap
+    // permanently seen, so:
+    //
+    //  - the two conforming implementations disagreed about whether the same
+    //    rumor exists at all, and
+    //  - an attendee whose phone clock is 20 minutes fast had every join request
+    //    silently discarded forever — unrecoverable even by a rescan, with no
+    //    error and nothing in the organizer's pending list.
+    //
+    // Here the daemon clock runs 1h BEHIND the wall clock, so a freshly stamped
+    // join is ~1h "in the future" from the daemon's point of view: the shape of
+    // a real skewed-clock attendee. It must be admitted.
     const h = await setup();
     const sk = generateSecretKey();
-    // The protocol layer clamps a future-dated rumor to wall-now+15min (PROTO-8);
-    // the coordinator re-checks against its OWN clock at ingestion (defense in
-    // depth). With the daemon clock 1h behind the wall clock, a fresh rumor
-    // (real-time stamped) is >15 min ahead of it → dropped with a log.
     h.clock.t = Date.now() - 60 * 60_000;
     const { pubkey } = await joinOnly(h, sk, "future");
-    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined(); // dropped
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeDefined();
+  });
+
+  it("still drops a rumor dated past the unreasonable-horizon bound, and marks it seen", async () => {
+    // Past a full day ahead no honest clock explains it, so the rumor is rejected
+    // outright — and THIS is the case where marking it seen is right, since it can
+    // never become valid and a rescan would only re-drop it.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const { pubkey, wrap } = await joinOnly(h, sk, "way-future", {
+      created_at: Math.floor(h.clock.t / 1000) + 3 * 86400,
+    });
+    expect(h.store.getAttendee(h.coordinate, pubkey)).toBeUndefined();
+    expect(h.store.isRumorSeen(wrap.id)).toBe(true);
+  });
+
+  it("a clamped rumor's ORDERING uses the clamped timestamp, not the sender's", async () => {
+    // Clamping must still do the job dropping was meant to do: a future-dated
+    // submission must not win the §3.3 (rev, created_at, id) order against a later
+    // honest one purely because the sender wrote a bigger number. Same rev, so
+    // created_at decides — and the future-dated one's is clamped down to
+    // now + the skew allowance, which a submission sent 30 minutes later then
+    // still beats. Under the old drop-everything behavior the first submission
+    // never existed at all, so this ordering was untested and untestable.
+    const h = await setup({ matching: "off" });
+    const sk = generateSecretKey();
+    const pubkey = getPublicKey(sk);
+    const inboxPk = getPublicKey(h.einboxSk);
+    await joinOnly(h, sk, "skewed");
+    const submitAt = (created_at: number, about: string) =>
+      h.coordinator.handleInboxWrap(
+        h.coordinate,
+        wrapRumor(sk, inboxPk, {
+          kind: KIND_PROFILE_SUBMISSION,
+          content: {
+            v: 2,
+            rev: 1,
+            profile: { about, skills: [], looking_for: "", links: [] },
+            media: [],
+            intro_text: about,
+          },
+          tags: [["a", h.coordinate]],
+          created_at,
+        }) as any,
+      );
+
+    const nowSec = Math.floor(h.clock.t / 1000);
+    await submitAt(nowSec + 6 * 3600, "from-the-future");
+    const skewed = h.store.getAttendee(h.coordinate, pubkey)!;
+    // Accepted (not dropped), but stored under the CLAMPED ordering key.
+    expect(skewed.profile_json).toContain("from-the-future");
+    expect(skewed.profile_created_at).toBeLessThanOrEqual(nowSec + RUMOR_MAX_CLOCK_SKEW_SEC);
+    // A later honest submission at the same rev now supersedes it.
+    h.clock.t += 30 * 60_000;
+    await submitAt(Math.floor(h.clock.t / 1000), "honest-and-later");
+    expect(h.store.getAttendee(h.coordinate, pubkey)!.profile_json).toContain("honest-and-later");
+  });
+
+  /**
+   * Per-recipient rumor allowlist (NIP §5/§6.1).
+   *
+   * The two dispatch chains happen to have disjoint `if/else` branches today, so
+   * a misdirected rumor already ends up doing nothing — but "nothing happens
+   * because no branch matched" is handler layout, not a boundary: adding one
+   * `else if` to the wrong dispatcher silently widens what a key accepts, and
+   * E_inbox is a PUBLIC address any attendee can seal to while the coordinator's
+   * own key is what installs events and executes admin commands.
+   *
+   * What these assert is therefore where the rejection HAPPENS. A rumor of a kind
+   * this key does not accept is refused at the unwrap, so it is treated exactly
+   * like a wrap addressed to someone else: no rate accounting, no dispatch, and
+   * nothing written to the durable seen ledger. Previously it crossed the unwrap
+   * intact, was rate-accounted, ran through processRumorWithRetry, and — because
+   * a no-op dispatch "succeeds" — was recorded as a HANDLED rumor.
+   */
+  it("refuses a 21603 install grant sealed to an event's E_inbox (§6.1)", async () => {
+    const h = await setup();
+    const attackerSk = generateSecretKey();
+    const inboxPk = getPublicKey(h.einboxSk);
+    const evilCoordinate = makeCoordinate(getPublicKey(attackerSk), "evil");
+    const wrap = wrapRumor(attackerSk, inboxPk, {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2,
+        a: evilCoordinate,
+        gen: 1,
+        inbox_nsec: bytesToHex(generateSecretKey()),
+        eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        config_relays: [],
+      },
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.getEvent(evilCoordinate)).toBeUndefined();
+    // Rejected AT THE UNWRAP: never acknowledged in the durable ledger.
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
+    // …while a kind this key DOES accept, on the same inbox, is acknowledged —
+    // so the difference above is the allowlist and not some unrelated early exit.
+    const { wrap: joinWrap } = await joinOnly(h, generateSecretKey(), "legit");
+    expect(h.store.isRumorSeen(joinWrap.id)).toBe(true);
+  });
+
+  it("refuses a 21600 join request sealed to the coordinator's own key (§6.1)", async () => {
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const wrap = wrapRumor(attendeeSk, getPublicKey(h.coordSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "wrong door", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.getAttendee(h.coordinate, getPublicKey(attendeeSk))).toBeUndefined();
+    expect(h.store.isRumorSeen(wrap.id)).toBe(false);
   });
 
   it("startup backfills the coordinator inbox's FULL history (since=0)", async () => {
@@ -3112,6 +3280,42 @@ describe("D5 §9 — persisted billing state machine (§13.4)", () => {
     expect(s?.billing?.checkout_url).toBe("https://pay/x");
   });
 
+  it("a RESTORE whose billing status publish fails is still LISTENING (CORE-N-4)", async () => {
+    // `reevaluateBilling` publishes a 21606 on a state transition, and a publish
+    // every relay refuses REJECTS. It used to run BEFORE `subscribeEventInbox`, so
+    // it unwound out of installEvent with the event row already written and no
+    // subscription open.
+    //
+    // On the GRANT path the in-memory wrap retry papers over it (attempt 1 persists
+    // the billing state, so attempt 2 sees no transition and doesn't republish). The
+    // startup RESTORE path has no retry: `start()` catches per event and logs
+    // "restore of X failed — skipping". A relay outage at boot — precisely when a
+    // restore runs — therefore dropped an installed event for the whole life of the
+    // process, silently. Billing enforcement does not depend on this publish
+    // landing (`assertSpendAllowed` gates spend at job execution), so listening
+    // first costs nothing.
+    const h = await setup(0, { evaluateBilling: overTier(), skipAutoInstall: true });
+    h.transport.failPublishes = 99;
+    await h.coordinator
+      .installEvent({
+        coordinate: h.coordinate,
+        inboxSkHex: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+        configRelays: ["wss://test"],
+        gen: 1,
+        source: "restore",
+      })
+      .catch(() => {}); // exactly what start() does
+    h.transport.failPublishes = 0;
+
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    const inboxPk = getPublicKey(h.einboxSk);
+    expect(h.transport.subs.some((sub) => !sub.closed && sub.filter?.["#p"]?.includes(inboxPk))).toBe(true);
+    // And it can actually take a join, which is the whole point of listening.
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined();
+  });
+
   it("revoke, detach and roster/status paths are NOT blocked by billing", async () => {
     const h = await setup(0, { evaluateBilling: overTier() });
     const aSk = generateSecretKey();
@@ -3229,6 +3433,65 @@ describe("H-2 §8 — usage budgets gate paid processing", () => {
     await admin(h, "recompute", {});
     await h.coordinator.jobs.drain();
     expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  /**
+   * SEC-7. The budgets above are lifetime AND per-installation, so they bound what
+   * one event can spend and say nothing about what many can. Install is
+   * protocol-level and `allowedEidPubkeys` is empty by default, so anyone can
+   * self-install up to `maxEvents` events; with the shipped defaults that is 50 ×
+   * 20,000 provider calls against the operator's one API key. The daemon-wide
+   * ceiling is the only thing that bounds the total.
+   */
+  it("a daemon-wide ceiling parks paid work even when the event's own budget is untouched", async () => {
+    // Every per-event/per-attendee limit unlimited: nothing but the daemon ceiling
+    // can park anything here, so a park proves the daemon gate fired.
+    const budgets = { ...generous, daemonCalls: 1, daemonWindowHours: 24 };
+    const h = await setup(0, { budgets });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+    const s = lastCoordinatorStatus(h);
+    expect(s?.error_category).toBe("budget_exceeded");
+    // The organizer is told they are parked, NOT how much the daemon has spent.
+    // Anyone can install, so that number would be a spend read-out for whoever is
+    // probing the ceiling.
+    expect(s?.billing?.reason ?? "").not.toMatch(/daemon|\d/);
+  });
+
+  it("the daemon ceiling releases itself as the rolling window advances", async () => {
+    const budgets = { ...generous, daemonCalls: 1, daemonWindowHours: 24 };
+    const h = await setup(0, { budgets });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+
+    // No config raise, no organizer action — just time. This is what makes the
+    // ceiling rolling rather than an all-time number that would park a busy
+    // coordinator forever with no way out but an operator edit.
+    h.clock.t += 25 * 3_600_000;
+    // What the boot path and the 10-minute timer both call.
+    (h.coordinator as any).daemonCeilingSweep();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  it("does not release work parked for billing or a per-event budget", async () => {
+    // Under the daemon ceiling, but over the attendee's own call budget. The sweep
+    // runs every 10 minutes across every event; if it resumed by state rather than
+    // by park reason it would hand a billing-blocked event free provider calls.
+    const budgets = { ...generous, perAttendeeCalls: 1, daemonCalls: 1_000_000 };
+    const h = await setup(0, { budgets });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const parked = h.store.waitingJobCount(h.coordinate);
+    expect(parked).toBeGreaterThan(0);
+
+    (h.coordinator as any).daemonCeilingSweep();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(parked);
   });
 
   it("actual downloaded bytes (not declared size) accrue to the per-attendee budget", async () => {
@@ -3696,6 +3959,73 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
     const authoredByB = dirB.every((e) => e.pubkey === coordPkB);
     expect(authoredByB).toBe(true);
   });
+
+  /**
+   * Handover must not accept a roster just because it decrypts (2026-09-04 audit).
+   *
+   * 31604's `d` is the event's PUBLIC `d`, so anyone can publish at that address,
+   * and the ECK is held by every approved attendee — and `tryEckDecrypt` walks
+   * every version in custody, so a REVOKED attendee's old key opens their forgery
+   * too. Accepting on decryptability alone let an attendee plant a roster naming
+   * pubkeys they control and have the incoming coordinator grant those pubkeys the
+   * event's key material.
+   */
+  it("refuses a roster planted by an attendee, and grants that attendee's picks nothing", async () => {
+    const h = await setup();
+    const aliceSk = generateSecretKey();
+    const alicePk = await join(h, aliceSk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // Alice is an approved attendee, so she holds the ECK. She publishes her own
+    // 31604 at the event's public `d`, far-dated so it wins newest-wins, listing a
+    // pubkey she controls as an organizer.
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const mallorySk = generateSecretKey();
+    const malloryPk = getPublicKey(mallorySk);
+    const forged = {
+      v: 2,
+      eck_current: 1,
+      attendees: [{ pubkey: malloryPk, d: "forged-d", role: "organizer" }],
+    };
+    h.transport.seed.push({
+      kind: KIND_ROSTER,
+      pubkey: alicePk,
+      created_at: h.clock.t + 3600,
+      id: "forged-roster",
+      sig: "",
+      tags: [["d", identifier]],
+      content: eckEncrypt(h.eck, JSON.stringify(forged)),
+    } as any);
+
+    const coordSkB = generateSecretKey();
+    const coordPkB = getPublicKey(coordSkB);
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b2", sig: "", content: "",
+      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+    } as any);
+
+    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
+    await coordB.installEvent({
+      coordinate: h.coordinate,
+      inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"],
+      gen: 2,
+      source: "grant",
+      backfill: "full",
+    });
+    await coordB.jobs.drain();
+
+    // Mallory is nowhere in B's state, and never received a key grant.
+    expect(storeB.getAttendee(h.coordinate, malloryPk)).toBeUndefined();
+    const grantsToMallory = h.transport.published.filter(
+      (e) => e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === malloryPk),
+    );
+    expect(grantsToMallory).toHaveLength(0);
+
+    // The genuine attendee, reconstructed from A's real roster, is unaffected.
+    expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
+  });
 });
 
 // ── NIP §6.2 — match icebreakers (31605) ─────────────────────────────────────
@@ -4112,28 +4442,172 @@ describe("audit C9 — relay handover is make-before-break", () => {
 });
 
 describe("audit R4 — the coordinator's own inbox is rate-gated before durable accounting", () => {
-  it("drops a single sender's flood past the per-sender window WITHOUT marking the excess seen", async () => {
-    const h = await setup();
+  /** 40 distinct admin-command wraps from one sender, inside one 60s rate window. */
+  function flood(h: Harness, senderSk: Uint8Array) {
     const coordPub = getPublicKey(h.coordSk);
     const baseSec = Math.floor(h.clock.t / 1000);
-    // 40 distinct admin commands from ONE sender (E_id) in a single rate window.
-    // MAX_RUMORS_PER_SENDER_WINDOW is 30, so 30 are accepted and 10 are rate-dropped.
-    const wraps = Array.from({ length: 40 }, (_, i) =>
-      wrapRumor(h.eidSk, coordPub, {
+    return Array.from({ length: 40 }, (_, i) =>
+      wrapRumor(senderSk, coordPub, {
         kind: KIND_ADMIN_COMMAND,
         content: { v: 2, a: h.coordinate, cmd: "recompute" },
-        created_at: baseSec + i, // distinct rumor ids, all within the same 60s window
+        created_at: baseSec + i, // distinct rumor ids, all within the same window
       }),
     );
+  }
+
+  it("drops a STRANGER's flood past the per-sender window WITHOUT marking the excess seen", async () => {
+    const h = await setup();
+    const wraps = flood(h, generateSecretKey());
     for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
 
     const seen = wraps.map((w) => h.store.isRumorSeen((w as any).id));
-    const acceptedCount = seen.filter(Boolean).length;
     // Exactly the per-sender window was accepted (and marked seen); the rest were
     // dropped and left UNSEEN — so a flood cannot grow the durable seen ledger (R4).
-    expect(acceptedCount).toBe(30);
+    expect(seen.filter(Boolean)).toHaveLength(30);
     expect(seen.slice(0, 30).every(Boolean)).toBe(true);
     expect(seen.slice(30).some(Boolean)).toBe(false);
+  });
+
+  it("does NOT drop an installed event's own organizer past that window (2026-09-09 audit)", async () => {
+    // "Approve all" on a room of forty sends one 21604 per attendee, serially, from
+    // the event's E_id. Under the flat per-sender cap the last ten were dropped —
+    // and left unseen, so nothing recovered them short of a restart — while the app
+    // reported every one of them confirmed, because the PUBLISH had succeeded. Ten
+    // people stayed in the pending queue with nobody aware of it.
+    const h = await setup();
+    const wraps = flood(h, h.eidSk); // the E_id of an event this daemon has installed
+    for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
+    expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
+  });
+});
+
+describe("P1 #14 — the periodic inbox rescan makes \"left unseen\" recoverable", () => {
+  // Half a dozen places in coordinator.ts drop a wrap and leave it UNSEEN with the
+  // comment "recovered by a later backfill rescan": the per-sender rate gate, the
+  // per-event budget, the inbound queue cap, and the give-up arm of
+  // processRumorWithRetry. There was no later rescan. The only one that ever ran
+  // was at startup, so every one of those paths actually meant "until the next
+  // deploy" — and separately, a reconnected subscription resumes from
+  // `since = lastEmitted + 1`, which NIP-59's up-to-two-days-in-the-past
+  // `created_at` randomisation puts most replayable wraps below.
+  it("picks up a join request the live subscription never delivered", async () => {
+    // The shape of "a relay was down when we subscribed, or dropped the event":
+    // the wrap exists on the relay and the daemon has simply never seen it. Before
+    // the rescan the only recovery was a restart's boot backfill.
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const attendeePubkey = getPublicKey(attendeeSk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, attendeePubkey);
+    const joinWrap = wrapRumor(attendeeSk, getPublicKey(h.einboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Someone at the door", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    h.transport.seed.push(joinWrap as any); // on the relay, never delivered to us
+    expect(h.store.getAttendee(h.coordinate, attendeePubkey)).toBeUndefined();
+
+    await h.coordinator.rescanInboxes();
+    expect(h.store.getAttendee(h.coordinate, attendeePubkey)?.status).toBe("approved");
+  });
+
+  it("recovers submissions the per-sender rate gate dropped, once the window has passed", async () => {
+    const h = await setup();
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    const inboxPk = getPublicKey(h.einboxSk);
+    // 40 revisions from one identity inside one 60s window: 30 are accepted, the
+    // rest are rate-dropped and deliberately left UNSEEN.
+    const wraps = Array.from({ length: 40 }, (_, i) =>
+      wrapRumor(attendeeSk, inboxPk, {
+        kind: KIND_PROFILE_SUBMISSION,
+        content: {
+          v: 2,
+          rev: 100 + i,
+          profile: { about: `edit ${i}`, skills: ["zk"], looking_for: "", links: [] },
+          media: [],
+        },
+        tags: [["a", h.coordinate]],
+      }),
+    );
+    for (const w of wraps) await h.coordinator.handleInboxWrap(h.coordinate, w as any);
+    const droppedUnseen = wraps.filter((w) => !h.store.isRumorSeen((w as any).id));
+    expect(droppedUnseen.length).toBeGreaterThan(0);
+
+    h.transport.seed.push(...(wraps as any));
+    h.clock.t += 61_000; // the 60s rate window has passed; the burst has subsided
+
+    await h.coordinator.rescanInboxes();
+    expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
+    // The newest edit is the one that stuck (§3.3 revision ordering, unchanged).
+    expect(h.store.getAttendee(h.coordinate, pk)!.profile_rev).toBe(139);
+  });
+
+  it("is idempotent — a rescan that finds nothing new changes nothing", async () => {
+    const h = await setup();
+    const before = h.transport.published.length;
+    await h.coordinator.rescanInboxes();
+    await h.coordinator.rescanInboxes();
+    expect(h.transport.published.length).toBe(before);
+  });
+});
+
+describe("PIPE-9 — one corrupt row costs one attendee, not the whole roster", () => {
+  // `publishDirectory` read four JSON columns the coordinator wrote itself with a
+  // bare `JSON.parse`. They are not untrusted input — they were schema-validated on
+  // the way in — so the only way they go bad is a partial write, a manual edit or a
+  // disk fault. But `publishDirectory` sits on the approval, submission, correction
+  // and handover-backfill paths, and a throw there is one the caller retries
+  // forever against data that will never parse: the wrap is left unseen, every
+  // rescan re-runs it, and the attendee's entry never publishes again. Treating the
+  // row as absent costs them the derived half of their entry instead.
+  it("still publishes a directory entry when the stored profile is unparseable", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    h.store.upsertAttendee({
+      coordinate: h.coordinate,
+      pubkey: pk,
+      profileJson: "{not json",
+      now: h.clock.t,
+    });
+    const before = h.transport.published.filter((e) => e.kind === 31603).length;
+
+    // A correction is the shortest path to publishDirectory that also reports
+    // whether the handler completed (the rumor is marked seen only on success).
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 1, hidden: true },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    expect(h.transport.published.filter((e) => e.kind === 31603).length).toBeGreaterThan(before);
+  });
+
+  it("keeps the pipeline running for the rest of the event", async () => {
+    const h = await setup();
+    const aSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+
+    h.store.upsertAttendee({
+      coordinate: h.coordinate,
+      pubkey: aPk,
+      profileJson: "{not json",
+      now: h.clock.t,
+    });
+    await admin(h, "reprocess", { pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    // The reprocess RAN rather than failing into the retry schedule: nothing is
+    // pending or waiting for this attendee, and no job is queued to try again.
+    expect(h.store.pendingJobCount()).toBe(0);
+    expect(h.store.poisonJobs()).toHaveLength(0);
   });
 });
 
@@ -4274,6 +4748,91 @@ describe("audit C1 — commands resume to full completion after a partial failur
     expect(h.store.getTranscript(x)).toBeUndefined();
     expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
     expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("complete");
+  });
+
+  it("correction: a directory-publish failure resumes on the SAME rumor instead of reading as stale", async () => {
+    // CORE-N-3. `handleCorrection` writes the attendee row and THEN publishes. When
+    // the publish failed, processRumorWithRetry re-ran the handler — and the strict
+    // §3.3 revision guard at the top rejected the very correction it had just
+    // stored as "stale", returning early. The wrapper then recorded success and
+    // marked the rumor seen forever: the correction was stored and never published,
+    // so the attendee's edit silently did not appear, with nothing in the log.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 1, hidden: true },
+      tags: [["a", h.coordinate]],
+    });
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false); // left for a retry
+    expect(h.store.getAttendee(h.coordinate, pk)!.correction_rev).toBe(1); // already stored
+
+    const publishedBefore = h.transport.published.length;
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    // The resume actually republished the directory entry — the point of the retry.
+    expect(h.transport.published.length).toBeGreaterThan(publishedBefore);
+  });
+
+  it("matching-off submission: a directory-publish failure resumes on the SAME rumor", async () => {
+    // Same shape. `ae89ccb` fixed the approved+matching-ON path by enqueuing the
+    // pipeline job before publishing; with matching OFF `enqueueProcess` returns
+    // immediately, so the directory publish is the only effect and the stale-guard
+    // trap was untouched.
+    const h = await setup(0, { matching: "off" });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: {
+        v: 2,
+        rev: 7,
+        profile: { about: "an edit that must not vanish", skills: ["zk"], looking_for: "", links: [] },
+        media: [],
+      },
+      tags: [["a", h.coordinate]],
+    });
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)!.profile_rev).toBe(7);
+
+    const publishedBefore = h.transport.published.length;
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    expect(h.transport.published.length).toBeGreaterThan(publishedBefore);
+  });
+
+  it("a genuinely older correction is still refused (the resume path is same-rumor only)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const nowSec = Math.floor(h.clock.t / 1000);
+    const newer = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 5, hidden: true },
+      tags: [["a", h.coordinate]],
+      created_at: nowSec,
+    });
+    const older = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 2, hidden: false },
+      tags: [["a", h.coordinate]],
+      created_at: nowSec - 10,
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, newer as any);
+    await h.coordinator.handleInboxWrap(h.coordinate, older as any);
+    expect(h.store.getAttendee(h.coordinate, pk)!.correction_rev).toBe(5);
   });
 
   it("attach: an install that throws mid-chat-setup RESUMES on the same grant (gen-check allows it)", async () => {
@@ -4869,6 +5428,28 @@ describe("prod 2026-07-24 — an organizer recompute must actually re-run the sc
       expect(h.store.pairsFor(h.coordinate, a).map((r) => r.other)).toEqual([b]);
       expect(h.store.pairsFor(h.coordinate, b).map((r) => r.other)).toEqual([a]);
     }
+  });
+
+  it("a persistently incomplete batch gets the 3-attempt contract budget, not 26 (PIPE-N-2)", async () => {
+    // The `retryBudget` comment says a missing candidate "is nominally a contract
+    // error but does clear on a re-roll", and gives contract errors three attempts.
+    // The throw was a plain `Error`, so it never reached that budget: it rode the
+    // default ~26-attempt three-day schedule, which for a batch is 26 fully billed
+    // LLM calls asking the same question.
+    const h = await setup();
+    h.counters.dropAllScores = true; // the model never returns a complete batch
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    // Three attempts, spaced by the default 1s/10s head of the backoff schedule.
+    // Under the old plain-Error throw the job would still be `pending` here, with
+    // 23 more billed attempts and three days to go.
+    for (const gap of [0, 1_000, 10_000, 100_000]) {
+      h.clock.t += gap;
+      await h.coordinator.jobs.drain();
+    }
+    const poisoned = h.store.poisonJobs().filter((j) => j.type === "score_batch");
+    expect(poisoned.length).toBeGreaterThan(0);
+    expect(poisoned[0]!.attempts).toBe(3);
   });
 
   it("logs a per-batch outcome line with elapsed ms, and a FAILED line when a batch throws", async () => {

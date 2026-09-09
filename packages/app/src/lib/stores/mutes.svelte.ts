@@ -19,6 +19,9 @@ const MUTES_KEY = "mutes";
 class Mutes {
   muted = $state<Set<string>>(new Set());
   private loadedFor: string | null = null;
+  /** The identity this store is scoped to; distinct from `loadedFor`, which
+   *  tracks whether a fetch has completed for it. */
+  private scopedTo: string | null = null;
   private loading = false;
 
   /** Lazily load the muted set for `signer`'s identity (idempotent per pubkey). */
@@ -40,6 +43,24 @@ class Mutes {
     } finally {
       this.loading = false;
     }
+  }
+
+  /**
+   * Point the store at `pubkey` (or nothing, on logout), dropping the previous
+   * identity's set. Idempotent for the same owner, so a session restore keeps what
+   * it loaded.
+   *
+   * `load()` does re-fetch for a new pubkey, but it is async and driven from the
+   * pages that need it — so between an account switch and that fetch landing, B's
+   * Matches page filtered by A's mute list and quietly hid people from them.
+   */
+  setOwner(pubkey: string | null): void {
+    if (this.scopedTo === pubkey) return;
+    this.scopedTo = pubkey;
+    this.muted = new Set();
+    // Not `= pubkey`: that would tell `load()` this identity was already fetched
+    // and it would never load, leaving the new owner permanently muting nobody.
+    this.loadedFor = null;
   }
 
   isMuted(pubkey: string): boolean {

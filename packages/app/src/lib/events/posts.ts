@@ -29,6 +29,7 @@ import {
   supersedes,
 } from "@nostrautica/protocol";
 import { fetchEvents, type Filter } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
@@ -78,6 +79,23 @@ function tag(tags: string[][], name: string): string | undefined {
 }
 
 /**
+ * `published_at` is the feed's sort key and it is entirely author-controlled — a
+ * cleartext NIP-23 tag on the article, or a field inside a 31607's ciphertext.
+ * Nothing on the wire bounds it, so an article dated 2099 pins itself to the top
+ * of the event's posts page and stays there forever. That is not hypothetical
+ * spam: `sources` deliberately folds OTHER npubs' long-form into the official
+ * feed, so every curated author gets a permanent top slot for free, and the
+ * organizer's own newest post is pushed under it.
+ *
+ * A future date is therefore taken as "no usable publication time" and the post
+ * sorts by when the reader actually received it, which is the honest answer and
+ * degrades to normal ordering the moment the claimed date is real.
+ */
+function clampPublishedAt(claimed: number, receivedAt: number): number {
+  return Math.min(claimed || receivedAt, Math.floor(Date.now() / 1000));
+}
+
+/**
  * Dedupe by `d` keeping the highest created_at ACROSS BOTH KINDS (30023 and
  * 31607) — an edit of either kind supersedes older revisions at that address.
  * Keyed per author so attendee posts can't collide with each other.
@@ -113,7 +131,7 @@ export function toEventPost(
       summary: tag(e.tags, "summary"),
       image: tag(e.tags, "image"),
       content: e.content,
-      publishedAt: Number(tag(e.tags, "published_at")) || e.created_at,
+      publishedAt: clampPublishedAt(Number(tag(e.tags, "published_at")), e.created_at),
       editedAt: e.created_at,
       source,
       authorPubkey: e.pubkey,
@@ -140,7 +158,7 @@ export function toEventPost(
         summary: post.summary,
         image: post.image,
         content: post.content,
-        publishedAt: post.published_at,
+        publishedAt: clampPublishedAt(post.published_at, e.created_at),
         editedAt: e.created_at,
         author: post.author,
       };
@@ -210,10 +228,15 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   );
   const keys = await loadEventKeys(ctx.coordinate);
   const eck = keys?.eck ?? [];
+  // Authority boundary: `authors: [E_id]` is a request, not a guarantee — the
+  // same reason `matchesFeed` re-checks `pubkey` below. This is the OFFICIAL
+  // feed, rendered with no author attribution at all, so a 30023 answered by any
+  // relay in the event's set would appear on the event page as something the
+  // organizer wrote. Re-verify and pin to E_id before the per-`d` dedupe, so an
+  // injected event can't even win an address against a genuine post.
+  const own = onlyByAuthors(onlyVerified(events), [pubkey]) as unknown as RawPostEvent[];
   const posts = newestFirst(
-    dedupePostsByD(events as unknown as RawPostEvent[]).map((e) =>
-      toEventPost(e, eck, "event"),
-    ),
+    dedupePostsByD(own).map((e) => toEventPost(e, eck, "event")),
   );
   cachePosts(ctx.coordinate, "event", posts);
   return posts;
@@ -409,10 +432,21 @@ export async function fetchPostByD(
     { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors, "#d": [d] },
     relays,
   );
+  // The list view runs every candidate through `matchesFeed`; this read must too,
+  // or the single-post route is a hole straight through the organizer's curation.
+  // The query widens `authors` to the declared feeds, and a relay may answer it
+  // with anything — an article by an npub nobody declared, or one by a declared
+  // npub that the feed's own hashtag/date bounds exclude. On the posts page those
+  // are filtered out; opened by `d` (a shared link, a menu target, a cold device
+  // with no cached feed) they used to render as part of the event's official feed,
+  // labelled with the curated feed's name.
+  const candidates = (events as unknown as RawPostEvent[]).filter(
+    (e) => e.pubkey === eid || sources.some((src) => matchesFeed(e, src)),
+  );
   // `d` is only unique per AUTHOR, so a multi-author query can return more than
   // one winner. The event's own post takes the address — an external feed can
   // never shadow what E_id published at the same `d`.
-  const winners = dedupePostsByD(events as unknown as RawPostEvent[]);
+  const winners = dedupePostsByD(candidates);
   const winner = winners.find((e) => e.pubkey === eid) ?? winners[0];
   if (!winner) return undefined;
   if (winner.pubkey !== eid) {

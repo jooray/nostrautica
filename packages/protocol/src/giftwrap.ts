@@ -12,7 +12,7 @@ import { wrapEvent } from "nostr-tools/nip59";
 import { getEventHash, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import type { Event as NostrEvent } from "nostr-tools/pure";
 import type { RumorKind } from "./kinds.js";
-import { KIND_GIFT_WRAP, KIND_SEAL } from "./kinds.js";
+import { KIND_GIFT_WRAP, KIND_SEAL, RUMOR_KINDS } from "./kinds.js";
 import { nip44Decrypt } from "./crypto.js";
 
 /**
@@ -24,8 +24,22 @@ import { nip44Decrypt } from "./crypto.js";
  */
 export const RUMOR_MAX_CLOCK_SKEW_SEC = 15 * 60;
 
+/**
+ * The horizon past which a future-dated rumor stops being "a wrong clock" and
+ * becomes garbage (NIP §3.1). Between {@link RUMOR_MAX_CLOCK_SKEW_SEC} and this,
+ * the spec's remedy is to CLAMP for ordering — the rumor still exists, it just
+ * gains no ordering advantage — because the alternative (dropping) silently
+ * discards the join request of an attendee whose phone is 20 minutes fast, with
+ * no error anywhere and nothing in the organizer's pending list. Past a full day
+ * no honest clock explains it, so a consumer may reject outright.
+ */
+export const RUMOR_MAX_FUTURE_SEC = 24 * 60 * 60;
+
 const HEX32 = /^[0-9a-f]{64}$/;
 const HEX64_SIG = /^[0-9a-f]{128}$/;
+
+/** O(1) membership test for the global rumor-kind allowlist (NIP §5). */
+const RUMOR_KIND_SET: ReadonlySet<number> = new Set<number>(RUMOR_KINDS);
 
 /**
  * Structural validation of a just-decrypted rumor (audit PROTO-2): a hand-rolled
@@ -33,8 +47,22 @@ const HEX64_SIG = /^[0-9a-f]{128}$/;
  * consumers (e.g. a missing `tags` TypeErrors in `rumor.tags.find`). Reject
  * anything that isn't a well-formed unsigned event before it crosses the unwrap
  * boundary.
+ *
+ * `allowedKinds` enforces NIP §5's "nothing else may appear in a wrap". The
+ * default is the full {@link RUMOR_KINDS} registry — no kind outside the
+ * 21600-block (plus NIP-17's kind 14) may ever cross this boundary, which
+ * `RumorKind` alone could not guarantee because the type is erased at runtime and
+ * every seal arrives as `unknown` JSON. A caller SHOULD narrow it further to the
+ * kinds THIS key is a legitimate recipient of: the per-recipient rule is what
+ * keeps a 21603 install grant from being accepted on an event's E_inbox key and a
+ * 21600 join from being accepted on the coordinator's own key. Without it those
+ * are kept apart only by which branch of a dispatch if/else the rumor happens to
+ * fall into — an accident of handler layout rather than an enforced boundary.
  */
-function assertRumorShape(raw: unknown): asserts raw is Rumor {
+function assertRumorShape(
+  raw: unknown,
+  allowedKinds: readonly number[] = RUMOR_KINDS,
+): asserts raw is Rumor {
   if (typeof raw !== "object" || raw === null) {
     throw new Error("rumor is not an object");
   }
@@ -48,8 +76,17 @@ function assertRumorShape(raw: unknown): asserts raw is Rumor {
   if (typeof r.kind !== "number" || !Number.isInteger(r.kind) || r.kind < 0) {
     throw new Error("rumor kind is not a non-negative integer");
   }
-  if (typeof r.created_at !== "number" || !Number.isFinite(r.created_at)) {
-    throw new Error("rumor created_at is not a finite number");
+  if (!(allowedKinds === RUMOR_KINDS ? RUMOR_KIND_SET.has(r.kind) : allowedKinds.includes(r.kind))) {
+    throw new Error(`rumor kind ${r.kind} is not accepted on this key`);
+  }
+  // Integer AND non-negative, not merely finite. `getEventHash` serializes
+  // whatever number it is given, so a rumor carrying `created_at: 1.5` or
+  // `-1e15` reproduces its own id perfectly and sails past the id check below —
+  // then poisons every consumer that does integer arithmetic on it (retention
+  // sweeps, `since` windows, the §3.4 per-subject watermark, which a hugely
+  // negative value can never be moved past). NIP-01 timestamps are unix seconds.
+  if (typeof r.created_at !== "number" || !Number.isInteger(r.created_at) || r.created_at < 0) {
+    throw new Error("rumor created_at is not a non-negative integer");
   }
   if (
     !Array.isArray(r.tags) ||
@@ -179,8 +216,9 @@ export function rumorEffectiveCreatedAt(
 export function finalizeUnwrappedRumorEnvelope(
   raw: unknown,
   sealPubkey: string,
+  allowedKinds?: readonly RumorKind[],
 ): UnwrappedRumor {
-  assertRumorShape(raw);
+  assertRumorShape(raw, allowedKinds);
   const rumor = raw;
   if (rumor.pubkey !== sealPubkey) {
     throw new Error("rumor/seal author mismatch");
@@ -212,8 +250,12 @@ export function finalizeUnwrappedRumorEnvelope(
  * so the caller's decrypted object is never altered. Ordering-correct consumers
  * that also need the untouched authenticated rumor should call the Envelope form.
  */
-export function finalizeUnwrappedRumor(raw: unknown, sealPubkey: string): Rumor {
-  const { rumor, effectiveCreatedAt } = finalizeUnwrappedRumorEnvelope(raw, sealPubkey);
+export function finalizeUnwrappedRumor(
+  raw: unknown,
+  sealPubkey: string,
+  allowedKinds?: readonly RumorKind[],
+): Rumor {
+  const { rumor, effectiveCreatedAt } = finalizeUnwrappedRumorEnvelope(raw, sealPubkey, allowedKinds);
   return effectiveCreatedAt === rumor.created_at
     ? rumor
     : { ...rumor, created_at: effectiveCreatedAt };
@@ -237,6 +279,13 @@ export function wrapRumor(
   recipientPubkey: string,
   input: RumorInput,
 ): GiftWrap {
+  // `RumorKind` is erased at runtime and this is the one place the whole system
+  // MINTS a wrap, so re-assert the §5 allowlist here too: a kind outside it
+  // produces a wrap that every conforming reader must discard, which surfaces
+  // as "my join request vanished" rather than as the caller's bug it is.
+  if (!RUMOR_KIND_SET.has(input.kind)) {
+    throw new Error(`kind ${input.kind} may not be gift-wrapped (NIP §5)`);
+  }
   const rumorEvent: {
     kind: number;
     content: string;
@@ -269,9 +318,16 @@ export function wrapRumor(
  * which `rumor.pubkey` is a trustworthy authenticated identity the 21603/21604
  * `seal-author == E_id` and attendee-action checks depend on (mirrored by the
  * app's `signerUnwrap`).
+ *
+ * `allowedKinds` (NIP §5) narrows what this KEY will accept — pass the kinds this
+ * recipient is a legitimate destination for, not the global registry.
  */
-export function unwrapRumor(wrap: GiftWrap, recipientSk: Uint8Array): Rumor {
-  const { rumor, effectiveCreatedAt } = unwrapRumorEnvelope(wrap, recipientSk);
+export function unwrapRumor(
+  wrap: GiftWrap,
+  recipientSk: Uint8Array,
+  allowedKinds?: readonly RumorKind[],
+): Rumor {
+  const { rumor, effectiveCreatedAt } = unwrapRumorEnvelope(wrap, recipientSk, allowedKinds);
   return effectiveCreatedAt === rumor.created_at
     ? rumor
     : { ...rumor, created_at: effectiveCreatedAt };
@@ -288,6 +344,7 @@ export function unwrapRumor(wrap: GiftWrap, recipientSk: Uint8Array): Rumor {
 export function unwrapRumorEnvelope(
   wrap: GiftWrap,
   recipientSk: Uint8Array,
+  allowedKinds?: readonly RumorKind[],
 ): UnwrappedRumor {
   if (wrap.kind !== KIND_GIFT_WRAP) {
     throw new Error(`not a gift wrap (kind ${wrap.kind})`);
@@ -302,7 +359,7 @@ export function unwrapRumorEnvelope(
   const rumor: unknown = JSON.parse(
     nip44Decrypt(recipientSk, seal.pubkey, seal.content),
   );
-  return finalizeUnwrappedRumorEnvelope(rumor, seal.pubkey);
+  return finalizeUnwrappedRumorEnvelope(rumor, seal.pubkey, allowedKinds);
 }
 
 /** Parse a rumor's JSON content into a typed value (caller validates with zod). */

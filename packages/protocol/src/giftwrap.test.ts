@@ -9,8 +9,20 @@ import {
   rumorPayload,
   giftwrapSince,
   RUMOR_MAX_CLOCK_SKEW_SEC,
+  RUMOR_MAX_FUTURE_SEC,
 } from "./giftwrap.js";
-import { KIND_JOIN_REQUEST, KIND_GIFT_WRAP, KIND_SEAL } from "./kinds.js";
+import {
+  KIND_JOIN_REQUEST,
+  KIND_GIFT_WRAP,
+  KIND_SEAL,
+  KIND_COORDINATOR_GRANT,
+  KIND_ADMIN_COMMAND,
+  RUMOR_KINDS,
+  EVENT_INBOX_RUMOR_KINDS,
+  COORDINATOR_RUMOR_KINDS,
+  ORGANIZER_RUMOR_KINDS,
+  ATTENDEE_RUMOR_KINDS,
+} from "./kinds.js";
 import { joinRequestContentSchema } from "./schemas.js";
 
 /**
@@ -444,5 +456,146 @@ describe("unwrap envelope preserves authenticated fields (audit R19)", () => {
       now + RUMOR_MAX_CLOCK_SKEW_SEC - 1,
     );
     expect(rumorEffectiveCreatedAt(now + 10 * 86400, now)).toBe(now + RUMOR_MAX_CLOCK_SKEW_SEC);
+  });
+});
+
+describe("rumor-kind allowlist (NIP §5)", () => {
+  /** A hand-rolled rumor of `kind` whose id correctly hashes its own contents. */
+  function rumorOfKind(senderSk: Uint8Array, kind: number) {
+    const unsigned = {
+      pubkey: getPublicKey(senderSk),
+      created_at: 1,
+      kind,
+      tags: [],
+      content: "{}",
+    };
+    return { ...unsigned, id: getEventHash(unsigned as any) };
+  }
+
+  it("rejects a wrapped kind outside RUMOR_KINDS", () => {
+    // "Nothing else may appear in a wrap" (§5). RUMOR_KINDS existed but was
+    // enforced nowhere: assertRumorShape accepted any non-negative integer kind,
+    // and `wrapRumor`'s RumorKind type is erased at runtime. So a kind-1 note or a
+    // kind-30078 app-data blob sealed to an inbox crossed the unwrap boundary
+    // intact and was only ever discarded by a consumer's own `if (kind === …)`.
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    for (const kind of [1, 0, 30078, 31600, 21611]) {
+      const wrap = wrapRawRumor(senderSk, recipientPk, rumorOfKind(senderSk, kind));
+      expect(() => unwrapRumor(wrap as any, recipientSk)).toThrow(
+        /kind .* is not accepted on this key/,
+      );
+    }
+  });
+
+  it("accepts every kind in the registry by default", () => {
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    for (const kind of RUMOR_KINDS) {
+      const wrap = wrapRawRumor(senderSk, recipientPk, rumorOfKind(senderSk, kind));
+      expect(unwrapRumor(wrap as any, recipientSk).kind).toBe(kind);
+    }
+  });
+
+  it("enforces the PER-RECIPIENT allowlist (§6.1)", () => {
+    // The concrete pairing this closes: an event's E_inbox is a public address any
+    // attendee can seal to, and a 21603 install grant carries the E_inbox secret
+    // and every ECK. The coordinator's own key is the reverse — it installs events
+    // and runs admin commands and has no business parsing a join request. Before
+    // this, the two were kept apart only by which dispatch if/else the rumor fell
+    // into, so one misplaced `else if` silently widened what a key accepts.
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    const wrapOf = (kind: number) =>
+      wrapRawRumor(senderSk, recipientPk, rumorOfKind(senderSk, kind)) as any;
+
+    // E_inbox key: attendee-authored kinds only.
+    expect(unwrapRumor(wrapOf(KIND_JOIN_REQUEST), recipientSk, EVENT_INBOX_RUMOR_KINDS).kind).toBe(
+      KIND_JOIN_REQUEST,
+    );
+    expect(() =>
+      unwrapRumor(wrapOf(KIND_COORDINATOR_GRANT), recipientSk, EVENT_INBOX_RUMOR_KINDS),
+    ).toThrow(/21603 is not accepted on this key/);
+    expect(() =>
+      unwrapRumor(wrapOf(KIND_ADMIN_COMMAND), recipientSk, EVENT_INBOX_RUMOR_KINDS),
+    ).toThrow(/21604 is not accepted on this key/);
+
+    // Coordinator's own key: install/command/attestation only.
+    expect(
+      unwrapRumor(wrapOf(KIND_COORDINATOR_GRANT), recipientSk, COORDINATOR_RUMOR_KINDS).kind,
+    ).toBe(KIND_COORDINATOR_GRANT);
+    expect(() =>
+      unwrapRumor(wrapOf(KIND_JOIN_REQUEST), recipientSk, COORDINATOR_RUMOR_KINDS),
+    ).toThrow(/21600 is not accepted on this key/);
+
+    // The envelope form enforces it identically (the coordinator's path).
+    expect(() =>
+      unwrapRumorEnvelope(wrapOf(KIND_JOIN_REQUEST), recipientSk, COORDINATOR_RUMOR_KINDS),
+    ).toThrow(/21600 is not accepted on this key/);
+  });
+
+  it("every per-recipient set is a subset of RUMOR_KINDS, and inbox/coordinator are disjoint", () => {
+    const registry = new Set<number>(RUMOR_KINDS);
+    for (const set of [
+      EVENT_INBOX_RUMOR_KINDS,
+      COORDINATOR_RUMOR_KINDS,
+      ORGANIZER_RUMOR_KINDS,
+      ATTENDEE_RUMOR_KINDS,
+    ]) {
+      for (const k of set) expect(registry.has(k)).toBe(true);
+    }
+    // The separation the coordinator depends on: no kind is legitimate on BOTH
+    // the public per-event inbox and the coordinator's own privileged key.
+    for (const k of EVENT_INBOX_RUMOR_KINDS) {
+      expect((COORDINATOR_RUMOR_KINDS as readonly number[]).includes(k)).toBe(false);
+    }
+  });
+
+  it("wrapRumor refuses to mint a wrap of a non-rumor kind", () => {
+    // The type says RumorKind, but the type is erased — a JS caller (or a cast)
+    // could mint a wrap every conforming reader must then discard, which shows up
+    // as "my submission vanished" rather than as the caller's bug.
+    expect(() =>
+      wrapRumor(generateSecretKey(), getPublicKey(generateSecretKey()), {
+        kind: 1 as any,
+        content: {},
+      }),
+    ).toThrow(/may not be gift-wrapped/);
+  });
+});
+
+describe("rumor created_at bounds", () => {
+  it("rejects a non-integer or negative created_at", () => {
+    // These reproduce their own id perfectly — getEventHash serializes whatever
+    // number it is handed — so the id check never catches them, and `Number.isFinite`
+    // alone let them through into retention sweeps, `since` windows and the §3.4
+    // watermark (which a hugely negative value can never be advanced past).
+    const senderSk = generateSecretKey();
+    const recipientSk = generateSecretKey();
+    const recipientPk = getPublicKey(recipientSk);
+    for (const created_at of [1.5, -1, -1e15, NaN, Infinity]) {
+      const unsigned = {
+        pubkey: getPublicKey(senderSk),
+        created_at,
+        kind: KIND_JOIN_REQUEST,
+        tags: [],
+        content: "{}",
+      };
+      const rumor = { ...unsigned, id: getEventHash(unsigned as any) };
+      expect(() =>
+        unwrapRumor(wrapRawRumor(senderSk, recipientPk, rumor) as any, recipientSk),
+      ).toThrow(/created_at is not a non-negative integer/);
+    }
+  });
+
+  it("RUMOR_MAX_FUTURE_SEC is the drop horizon, well past the clamp allowance", () => {
+    // The two bounds have different jobs: inside the skew allowance a rumor is
+    // CLAMPED (it still exists — a 20-minute-fast phone still gets to join);
+    // past the horizon no honest clock explains it and a consumer may reject.
+    expect(RUMOR_MAX_FUTURE_SEC).toBeGreaterThan(RUMOR_MAX_CLOCK_SKEW_SEC);
+    expect(RUMOR_MAX_FUTURE_SEC).toBe(86400);
   });
 });

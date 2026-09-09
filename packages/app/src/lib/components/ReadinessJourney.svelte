@@ -9,7 +9,30 @@
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
 
-  let { readiness, naddr }: { readiness: Readiness; naddr: string } = $props();
+  let {
+    readiness,
+    naddr,
+    lastCheckedAt,
+    onRefresh,
+    refreshing = false,
+  }: {
+    readiness: Readiness;
+    naddr: string;
+    /** Epoch ms of the last completed network refresh, or undefined. */
+    lastCheckedAt?: number;
+    /** Re-check the journey's network inputs. Omitted ⇒ no footer is rendered. */
+    onRefresh?: () => void;
+    refreshing?: boolean;
+  } = $props();
+
+  /** "14:32" in the viewer's locale — a clock time, not a countdown: the card is
+   *  refreshed on demand and on return to the tab, not on a timer, so a "next check
+   *  in Ns" would be a promise nothing keeps. */
+  const checkedLabel = $derived(
+    lastCheckedAt === undefined
+      ? undefined
+      : new Date(lastCheckedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+  );
 
   // The primary CTA's route carries the naddr readiness was DERIVED from, while
   // every other button here uses the `naddr` prop. Those must be the same event:
@@ -24,9 +47,15 @@
     return target !== undefined && target !== naddr ? undefined : p;
   });
 
-  function stepClass(i: number): "done" | "cur" | "todo" {
+  // "fail" is its own class, not a variant of "cur": a step the coordinator has
+  // REPORTED as stopped must not look like one that is merely in progress — that
+  // was the whole complaint (a stepper saying "building your profile" beside a
+  // banner saying it had failed). It also carries its hint whether or not it
+  // happens to be the current step.
+  function stepClass(i: number): "done" | "fail" | "cur" | "todo" {
     const s = readiness.steps[i]!;
     if (s.state === "complete") return "done";
+    if (s.state === "failed") return "fail";
     if (i === readiness.currentIndex) return "cur";
     return "todo";
   }
@@ -34,9 +63,11 @@
     const cls = stepClass(i);
     return cls === "done"
       ? t("readiness.state.done")
-      : cls === "cur"
-        ? t("readiness.state.current")
-        : t("readiness.state.upcoming");
+      : cls === "fail"
+        ? t("readiness.state.failed")
+        : cls === "cur"
+          ? t("readiness.state.current")
+          : t("readiness.state.upcoming");
   }
 </script>
 
@@ -68,17 +99,19 @@
     <ol class="steps">
       {#each readiness.steps as step, i (step.id)}
         {@const cls = stepClass(i)}
-        <li class="step {cls}" aria-current={cls === "cur" ? "step" : undefined}>
+        <li class="step {cls}" aria-current={cls === "cur" || cls === "fail" ? "step" : undefined}>
           <span class="rail" aria-hidden="true">
             <span class="knob">
-              {#if cls === "done"}<Icon name="check" size={13} />{:else if cls === "cur"}<span class="dot"></span>{/if}
+              {#if cls === "done"}<Icon name="check" size={13} />{:else if cls === "fail"}<span class="bang">!</span>{:else if cls === "cur"}<span class="dot"></span>{/if}
             </span>
             {#if i < readiness.steps.length - 1}<span class="line"></span>{/if}
           </span>
           <span class="body">
             <span class="lab">{t(step.labelKey)}</span>
             <span class="visually-hidden">{stateLabel(i)}</span>
-            {#if cls === "cur" && step.hintKey}<span class="hint">{t(step.hintKey)}</span>{/if}
+            {#if (cls === "cur" || cls === "fail") && step.hintKey}
+              <span class="hint" class:bad={cls === "fail"}>{t(step.hintKey)}</span>
+            {/if}
           </span>
         </li>
       {/each}
@@ -99,6 +132,14 @@
       <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
         {t("event.seeWhosHere")}
       </button>
+    {/if}
+    {#if onRefresh}
+      <p class="checked" role="status">
+        {#if checkedLabel}<span class="muted">{t("readiness.lastChecked", { time: checkedLabel })}</span>{/if}
+        <button class="btn inline ghost" onclick={onRefresh} disabled={refreshing}>
+          {refreshing ? t("readiness.checking") : t("readiness.checkAgain")}
+        </button>
+      </p>
     {/if}
   {/if}
 </div>
@@ -170,6 +211,16 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 4px var(--accent-soft);
   }
+  .step.fail .knob {
+    background: var(--warn);
+    border-color: var(--warn);
+    color: #fff;
+  }
+  .bang {
+    font-size: 0.8rem;
+    font-weight: 700;
+    line-height: 1;
+  }
   .body {
     padding-bottom: 0.5rem;
     display: flex;
@@ -187,5 +238,16 @@
   .hint {
     font-size: 0.8rem;
     color: var(--accent);
+  }
+  .hint.bad {
+    color: var(--warn);
+  }
+  .checked {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin: 0.75rem 0 0;
+    font-size: 0.8rem;
   }
 </style>

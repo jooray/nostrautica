@@ -8,8 +8,15 @@
 import { describe, it, expect } from "vitest";
 import { MockLlm } from "../providers/mock.js";
 import { ProviderContractError } from "../providers/types.js";
-import { buildAiProfile, summarizeNostr, translateProfileFields, nostrInputsHash } from "./profile.js";
-import { MAX_ABOUT, MAX_LOOKING_FOR, type AttendeeProfile } from "@nostrautica/protocol";
+import { buildAiProfile, summarizeNostr, translateProfileFields, nostrInputsHash, AI_PROFILE_SCHEMA } from "./profile.js";
+import {
+  aiProfileSchema,
+  MAX_ABOUT,
+  MAX_LOOKING_FOR,
+  MAX_SKILL,
+  MAX_SKILLS,
+  type AttendeeProfile,
+} from "@nostrautica/protocol";
 
 const matchModel = { provider: "mock", model: "mock-strong" };
 const summaryModel = { provider: "mock", model: "mock-cheap" };
@@ -291,5 +298,79 @@ describe("Q9 — translateProfileFields validates provider output", () => {
       skills: null,
     }));
     await expect(translateProfileFields(llm, summaryModel, "sk", fields)).resolves.toBeUndefined();
+  });
+});
+
+/**
+ * The protocol's SIZE caps are no longer a reason to throw the profile away
+ * (2026-09-04 audit).
+ *
+ * `aiProfileResponseSchema` was `aiProfileSchema`, whose caps are hard `.max()`s,
+ * so one 201-character skill cost the attendee their whole ai_profile — and with
+ * it their directory entry and every match they would have had. Worse, the JSON
+ * schema we SEND (`AI_PROFILE_SCHEMA`) carried no `maxLength`/`maxItems` at all,
+ * so the model was never told the bound it was being punished for missing, and
+ * `sanitizeAiProfile` truncates to those same bounds immediately afterwards
+ * anyway. Deterministic for a given (prompt, model), so every retry re-billed the
+ * identical over-long skill all the way to poison.
+ */
+describe("ai_profile bounds are enforced by truncation, not by discarding the answer", () => {
+  const over = {
+    summary: "s".repeat(MAX_ABOUT + 500),
+    skills: ["ok", "x".repeat(MAX_SKILL + 1)],
+    interests: Array(MAX_SKILLS + 7).fill("i"),
+    offers: ["o"],
+    seeks: ["k"],
+  };
+
+  it("truncates an over-long field instead of failing the whole stage", async () => {
+    const llm = new MockLlm(() => over);
+    const out = await buildAiProfile(llm, matchModel, { transcripts: ["hi"], profile: attendee });
+    expect(out.summary.length).toBe(MAX_ABOUT);
+    expect(out.skills[1]!.length).toBe(MAX_SKILL);
+    expect(out.skills[0]).toBe("ok"); // the good item is untouched
+    expect(out.interests).toHaveLength(MAX_SKILLS);
+  });
+
+  it("the result still satisfies the protocol schema every reader parses with", async () => {
+    // The bound has to be enforced SOMEWHERE: an over-cap value encrypts and
+    // publishes fine and then fails directoryEntryContentSchema.parse in every
+    // reader, silently removing the attendee from the directory for everyone.
+    const llm = new MockLlm(() => over);
+    const out = await buildAiProfile(llm, matchModel, { transcripts: ["hi"], profile: attendee });
+    expect(() => aiProfileSchema.parse(out)).not.toThrow();
+  });
+
+  it("the schema we SEND states the bounds, so the model is told them up front", async () => {
+    expect(AI_PROFILE_SCHEMA.properties.summary.maxLength).toBe(MAX_ABOUT);
+    for (const field of ["skills", "interests", "offers", "seeks"] as const) {
+      expect(AI_PROFILE_SCHEMA.properties[field].maxItems).toBe(MAX_SKILLS);
+      expect(AI_PROFILE_SCHEMA.properties[field].items.maxLength).toBe(MAX_SKILL);
+    }
+  });
+
+  it("a MISSING or WRONG-TYPED field is still a contract error", async () => {
+    // Deliberately not softened. The size caps were an argument about how much
+    // text; a `skills` that is not an array is a stage that did not do its job,
+    // and there is nothing safe to guess. (Contrast the translation stage, which
+    // is a decoration and coerces far more liberally.)
+    const { seeks: _seeks, ...missing } = over;
+    await expect(
+      buildAiProfile(new MockLlm(() => missing), matchModel, { transcripts: [], profile: attendee }),
+    ).rejects.toBeInstanceOf(ProviderContractError);
+    await expect(
+      buildAiProfile(new MockLlm(() => ({ ...over, skills: 42 })), matchModel, {
+        transcripts: [],
+        profile: attendee,
+      }),
+    ).rejects.toBeInstanceOf(ProviderContractError);
+  });
+
+  it("does not let the model smuggle in a `translations` block", async () => {
+    // The caller attaches translations after this validation; anything the model
+    // puts there would bypass the translate role entirely.
+    const llm = new MockLlm(() => ({ ...goodProfile, translations: { lang: "sk", about: "nope" } }));
+    const out = await buildAiProfile(llm, matchModel, { transcripts: ["hi"], profile: attendee });
+    expect(out.translations).toBeUndefined();
   });
 });

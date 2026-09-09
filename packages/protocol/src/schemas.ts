@@ -31,7 +31,7 @@ export class NewerProtocolVersionError extends Error {
   readonly newerVersion: number;
   constructor(newerVersion: number) {
     super(
-      `payload requires protocol v${newerVersion}; this client speaks v${PROTOCOL_VERSION} — update required`,
+      `payload requires protocol v${newerVersion}; this client speaks v${PROTOCOL_VERSION}. Update required`,
     );
     this.name = "NewerProtocolVersionError";
     this.newerVersion = newerVersion;
@@ -143,6 +143,29 @@ function httpsUrl(maxLen?: number) {
   }, "must be an https URL");
 }
 
+/** Chars per URL, anywhere one is accepted. */
+export const MAX_URL = 2048;
+/**
+ * Mirror URLs per media descriptor. The coordinator walks these SERIALLY as fetch
+ * fallbacks with a per-attempt timeout, so an uncapped array turned one submission
+ * into an unbounded run of downloads on a strictly serial job worker. Eight is
+ * generous for real mirroring — the app publishes two or three.
+ */
+export const MAX_MEDIA_URLS = 8;
+/**
+ * Hard per-file ceiling on an encrypted media blob, in bytes.
+ *
+ * Lives here because THREE places have to agree and two of them did not: the
+ * app's upload precheck and playback refusal (250 MiB), the coordinator's
+ * declared-size screen (250 MiB), and the coordinator's ACTUAL download cap,
+ * which was 200 MiB. A file in the 200–250 MiB band therefore passed the app,
+ * passed the screen, and then died after streaming 200 MiB — as a plain error
+ * rather than a media-policy rejection, so it failed the whole attendee job and
+ * retried, burning 400 MiB of egress per attempt while the attendee was never
+ * matched. One constant, imported by all three, is what stops that recurring.
+ */
+export const MAX_MEDIA_FILE_BYTES = 250 * 1024 * 1024;
+
 // ── Media descriptor (spec §6.2) ─────────────────────────────────────────────
 // `.strict()` (Q6): a media descriptor drives coordinator fetch + ffmpeg, so an
 // unexpected field is rejected rather than silently ignored. Key/nonce lengths are
@@ -150,14 +173,23 @@ function httpsUrl(maxLen?: number) {
 const mediaDescriptorBase = z
   .object({
     kind: z.enum(["intro", "talk"]),
-    url: z.array(httpsUrl()).min(1),
+    url: z.array(httpsUrl(MAX_URL)).min(1).max(MAX_MEDIA_URLS),
     x: hex32, // sha256 of ciphertext
     ox: hex32, // sha256 of plaintext
     // v2 (NIP §8): a real blob is at least 1 byte — AES-GCM always emits ≥ the
     // 16-byte tag — so `size: 0` is no longer a valid descriptor.
     size: z.number().int().min(1),
     m: z.string(), // mime type
-    duration: z.number().nonnegative().optional(),
+    // `.finite()` is load-bearing, not decoration. A MediaRecorder WebM carries
+    // no Duration element, so `HTMLMediaElement.duration` reads `Infinity` until
+    // a seek forces the browser to measure it — and the recorder path used to
+    // hand that straight through. Zod accepts Infinity for a plain
+    // `z.number().nonnegative()`, so the descriptor validated, and then
+    // `JSON.stringify({duration: Infinity})` emits `null`: the coordinator saw a
+    // structurally invalid submission, marked it permanently unprocessable and
+    // dropped it, while the attendee's screen said the intro had been saved.
+    // Reject it here so no such descriptor can be built, uploaded or published.
+    duration: z.number().finite().nonnegative().optional(),
     "encryption-algorithm": z.literal("aes-gcm"),
     "decryption-key": base64Bytes(32, "decryption-key"), // 32 bytes b64
     "decryption-nonce": base64Bytes(12, "decryption-nonce"), // 12 bytes b64
@@ -243,7 +275,6 @@ export const MAX_LOOKING_FOR = 2000;
 export const MAX_SKILLS = 50; // skills array items
 export const MAX_SKILL = 200; // chars per skill
 export const MAX_LINKS = 20; // profile links array items
-export const MAX_URL = 2048; // chars per URL
 export const MAX_INVITE_LABEL = 100;
 export const MAX_INVITES = 10000; // 31601 invites array items
 export const MAX_REASONING = 2000; // per-match reasoning
@@ -266,13 +297,25 @@ export const MAX_TITLE = 300; // members-post title
 export const MAX_POST_BODY = 100_000; // members-post markdown body
 export const MAX_NOTES = 2000; // per-event private note map entries
 export const MAX_NOTE = 5000; // chars per per-event private note
+/** Transcript entries per directory entry — one per media descriptor, plus slack. */
+export const MAX_TRANSCRIPTS = 20;
+/** Sections in a 31608 event page. That kind is PUBLIC, so the NIP-44 ceiling
+ *  that incidentally bounds every ECK-encrypted payload does not apply here. */
+export const MAX_PAGE_SECTIONS = 50;
+/** Pinned naddr refs per event page; each one costs the client a fetch. */
+export const MAX_PINNED_REFS = 50;
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
   about: z.string().max(MAX_ABOUT).default(""),
   skills: z.array(z.string().max(MAX_SKILL)).max(MAX_SKILLS).default([]),
   looking_for: z.string().max(MAX_LOOKING_FOR).default(""),
-  links: z.array(z.string().url().max(MAX_URL)).max(MAX_LINKS).default([]),
+  // `httpsUrl`, not `z.string().url()`: zod's `.url()` accepts `javascript:`,
+  // `data:` and `file:` (verified against the installed version). The render path
+  // drops non-http(s) today, so this was never a live XSS — but the value is
+  // STORED, republished in every directory entry, and fed to the model, and the
+  // schema comment above claims to be the https-only boundary. Now it is.
+  links: z.array(httpsUrl(MAX_URL)).max(MAX_LINKS).default([]),
 });
 export type AttendeeProfile = z.infer<typeof attendeeProfileSchema>;
 
@@ -487,6 +530,19 @@ export type CoordinatorGrantContent = z.infer<
  *  issued, so an old revoke/recompute can never re-execute from a backfill/restore. */
 export const ADMIN_COMMAND_TTL_SEC = 172_800; // 48 hours
 
+/**
+ * Key ceiling on an admin command's `args` (bounds tightening).
+ *
+ * `args` is a free-form bag because the seven commands take different shapes, but
+ * it is DURABLE: `handleAdmin` records the operation (args included) in the
+ * ordered-ops table, retained per §3.4 so an old command can never re-execute.
+ * An unbounded `z.record` meant one 21604 could write an arbitrarily wide object
+ * into that table forever. No real command uses more than two keys
+ * (`{ pubkey, talk_d }`); twelve leaves room for several rounds of additive
+ * fields without ever making the row a storage-amplification target.
+ */
+export const MAX_ADMIN_ARGS = 12;
+
 export const adminCommandContentSchema = z.object({
   v: version,
   a: z.string(),
@@ -494,7 +550,10 @@ export const adminCommandContentSchema = z.object({
   // carry { pubkey, talk_d }. `detach` (NIP §3.5) uninstalls the coordinator from
   // the event (no args) with the same effects as a config-based detach.
   cmd: z.enum(["approve", "recompute", "reprocess", "revoke", "talk_publish", "talk_reject", "detach"]),
-  args: z.record(z.unknown()).default({}),
+  args: z
+    .record(z.unknown())
+    .refine((o) => Object.keys(o).length <= MAX_ADMIN_ARGS, `at most ${MAX_ADMIN_ARGS} args`)
+    .default({}),
   // Replay horizon (NIP §3.4, required): unix seconds after which the command is
   // void. The coordinator skips an expired command on live delivery AND on backfill.
   expires: z.number().int(),
@@ -635,8 +694,15 @@ export type WithdrawalContent = z.infer<typeof withdrawalContentSchema>;
 
 // ── 21605 Organizer Grant rumor content (co-organizer, full key custody) ─────
 export const organizerGrantContentSchema = z.object({
+  // 31923 event coordinate (audit R18), for the same reason 21602/21603 use it —
+  // and more urgently. A 21605 hands over STRICTLY MORE than either of those: full
+  // E_id custody, the E_inbox secret, and every ECK version. An alias kind
+  // (`1:<E_id>:<d>`) parsed as a plain string would let the same author address a
+  // second, divergent namespace for the same event — one whose per-coordinate
+  // accounting, key custody and revocation state are tracked separately from the
+  // real one — off a grant that looks legitimate at every other check.
   v: version,
-  a: z.string(), // coordinate
+  a: eventCoordinate,
   eid_nsec: secretKeyHex, // E_id secret (hex) — lets a co-organizer edit the event
   einbox_nsec: secretKeyHex, // E_inbox secret (hex) — read submissions + approve
   eck: z.array(eckVersionSchema),
@@ -691,7 +757,7 @@ export const directoryEntryContentSchema = z
     // Published transcripts (audit A1): the nonvisual consumption path. Each ties
     // to a media blob by `x`; the refine below rejects any that don't reference
     // live media, so a re-record (new `x`) can't surface a stale transcript.
-    transcripts: z.array(mediaTranscriptSchema).optional(),
+    transcripts: z.array(mediaTranscriptSchema).max(MAX_TRANSCRIPTS).optional(),
     // Echoes the authored text intro (spec F1) for display when there's no blob.
     intro_text: z.string().max(MAX_INTRO_TEXT).optional(),
     updated_at: z.number().int(),
@@ -856,7 +922,11 @@ export const membersPostContentSchema = z.object({
   v: version,
   title: z.string().max(MAX_TITLE),
   summary: z.string().max(MAX_MESSAGE).optional(),
-  image: z.string().max(MAX_URL).optional(),
+  // https-only, like every other URL field (C3 / APPR-1). A members post is rendered
+  // as markdown with this as its header image, so a bare `z.string()` accepted
+  // `javascript:` and `data:` here while the sibling `links`/media URLs on the very
+  // same screen were scheme-checked at the boundary.
+  image: httpsUrl(MAX_URL).optional(),
   published_at: z.number().int(),
   author: hex32.optional(),
   content: z.string().max(MAX_POST_BODY), // markdown
@@ -874,7 +944,7 @@ export const postsSectionSchema = z.object({
 });
 export const pinnedSectionSchema = z.object({
   type: z.literal("pinned"),
-  refs: z.array(z.string()), // naddr refs
+  refs: z.array(z.string().max(MAX_URL)).max(MAX_PINNED_REFS), // naddr refs
 });
 export const attendeesSectionSchema = z.object({
   type: z.literal("attendees"), // roster preview — renders only for members
@@ -944,7 +1014,7 @@ const pos = z.number().int().nonnegative();
 
 export const eventPagePrivateSchema = z.object({
   v: version,
-  menu: z.array(menuItemSchema.extend({ pos })).default([]),
+  menu: z.array(menuItemSchema.extend({ pos })).max(MAX_PAGE_SECTIONS).default([]),
   sections: z
     .array(
       z.discriminatedUnion("type", [
@@ -953,6 +1023,7 @@ export const eventPagePrivateSchema = z.object({
         attendeesSectionSchema.extend({ pos }),
       ]),
     )
+    .max(MAX_PAGE_SECTIONS)
     .default([]),
 });
 export type EventPagePrivate = z.infer<typeof eventPagePrivateSchema>;
@@ -1094,7 +1165,10 @@ export const coordinatorAnnounceSchema = z.object({
   v: version,
   name: z.string().min(1).max(120),
   about: z.string().max(2000).optional(),
-  picture: z.string().max(2048).optional(),
+  // https-only, matching `checkout_url`/`terms_url` on this same announcement: the
+  // discovery UI renders it as the coordinator's avatar next to those links, and a
+  // 31611 is read from ANY relay before its author is trusted for anything.
+  picture: httpsUrl(2048).optional(),
   operator: z.string().max(200).optional(),
   relays: z.array(z.string()).max(MAX_RELAYS).default([]),
   features: z

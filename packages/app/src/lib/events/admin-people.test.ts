@@ -203,3 +203,86 @@ describe("filterPeople (UX-A6)", () => {
     expect(filterPeople(people, "all", pk("b").slice(0, 6)).map((p) => p.name)).toEqual(["Bob"]);
   });
 });
+
+/**
+ * An APPROVED member's withdrawal has to reach the organizer (EV-5 residue).
+ *
+ * The 09-04 fix made `fetchPending` parse 21610s and flag the matching pending
+ * request, which covers someone who withdraws before they were ever approved.
+ * It missed the case the finding is actually about. A withdrawal comes from a
+ * member — and `visiblePending` correctly filters approved people out of the
+ * pending queue, which is the only place that notice was rendered. So the one
+ * person whose withdrawal matters was the one nobody could see asking.
+ *
+ * On a coordinator-less event this is the whole mechanism: nothing else consumes
+ * a 21610. The attendee's client has already deleted their Blossom blobs and
+ * their 31602 self-copy and told them the request was sent, so they are gone
+ * whether or not the organizer ever notices; the roster just keeps saying
+ * otherwise, and their ECK keeps working.
+ */
+describe("EV-5 — an approved member's withdrawal is visible on their card", () => {
+  it("flags a roster member who asked to leave", () => {
+    const a = pk("a");
+    const people = buildApprovedPeople({
+      roster: roster([a]),
+      sessionApproved: new Set(),
+      revoked: new Set(),
+      known: [req(a, 100, { withdrawn: true, withdrawalRequestedPurge: true })],
+    });
+    expect(people).toHaveLength(1);
+    expect(people[0]!.withdrawn).toBe(true);
+    expect(people[0]!.withdrawalRequestedPurge).toBe(true);
+    // Still in the roster and still revocable — that is the point: the organizer
+    // has to act for the roster to catch up with what already happened.
+    expect(people[0]!.inRoster).toBe(true);
+    expect(people[0]!.revoked).toBe(false);
+  });
+
+  it("leaves a member who never withdrew unflagged", () => {
+    const a = pk("a");
+    const people = buildApprovedPeople({
+      roster: roster([a]),
+      sessionApproved: new Set(),
+      revoked: new Set(),
+      known: [req(a, 100)],
+    });
+    expect(people[0]!.withdrawn).toBe(false);
+    expect(people[0]!.withdrawalRequestedPurge).toBe(false);
+  });
+
+  it("flags a member whose intake has aged out of the gift-wrap window", () => {
+    // The ordinary case for a real event: you join when the invite goes out and
+    // withdraw a week later, so only the 21610 is inside the 3-day inbox window.
+    // `fetchPending` now synthesizes a nameless entry for exactly this, and the
+    // name comes back from the directory.
+    const a = pk("a");
+    const people = buildApprovedPeople({
+      roster: roster([a]),
+      sessionApproved: new Set(),
+      revoked: new Set(),
+      known: [
+        {
+          attendeePubkey: a,
+          name: "",
+          message: "",
+          rsvpPublic: false,
+          rumorCreatedAt: 500,
+          withdrawn: true,
+          withdrawalRequestedPurge: false,
+        },
+      ],
+      directory: [
+        {
+          v: 2,
+          pubkey: a,
+          name: "Sam",
+          profile: { about: "", skills: [], looking_for: "", links: [] },
+          media: [],
+          updated_at: 1,
+        } as unknown as DirectoryEntryContent,
+      ],
+    });
+    expect(people[0]!.withdrawn).toBe(true);
+    expect(people[0]!.name).toBe("Sam");
+  });
+});

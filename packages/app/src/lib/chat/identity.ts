@@ -77,12 +77,46 @@ export interface ChatIdentity {
 // ── Persistence (IndexedDB via the shared marmot KV backend) ──────────────────
 const DEVICE_KEY_NS = "__chat_device_key__";
 const CLIENT_ID_NS = "__chat_client_id__";
+const DEVICE_LABEL_NS = "__chat_device_label__";
 
 function deviceKeyKey(account: string): string {
   return `${DEVICE_KEY_NS}\x1f${account}`;
 }
 function clientIdKey(chatPubkey: string): string {
   return `${CLIENT_ID_NS}\x1f${chatPubkey}`;
+}
+function deviceLabelKey(chatPubkey: string): string {
+  return `${DEVICE_LABEL_NS}\x1f${chatPubkey}`;
+}
+
+/**
+ * The label the USER chose for this device, if they ever renamed it.
+ *
+ * The coordinator's `upsertChatKey` does `label = COALESCE(excluded.label, …)`, so
+ * whatever an attestation carries WINS. Every chat open re-attests (that is how a
+ * device heals), and every re-attest carried `defaultDeviceLabel()` — so renaming
+ * "Chrome on macOS" to "Work laptop" held only until the next chat open, at which
+ * point the rename silently reverted and there was nothing on either side to
+ * explain it.
+ *
+ * The label is local, not restored across devices, and deliberately not part of
+ * the chat identity: it is a display preference, and losing it just means the
+ * device goes back to being called what the browser says it is.
+ */
+export async function loadDeviceLabel(chatPubkey: string): Promise<string | undefined> {
+  const stored = await marmotKvBackend()
+    .get(deviceLabelKey(chatPubkey))
+    .catch(() => undefined);
+  return typeof stored === "string" && stored.trim() ? stored : undefined;
+}
+
+/** Remember a user-chosen device label so later re-attests carry it, not the UA guess. */
+export async function saveDeviceLabel(chatPubkey: string, label: string): Promise<void> {
+  const trimmed = label.trim();
+  if (!trimmed) return;
+  await marmotKvBackend()
+    .set(deviceLabelKey(chatPubkey), trimmed)
+    .catch(() => {});
 }
 
 /** Load the persisted chat device key for an account, or undefined. */
@@ -152,7 +186,7 @@ async function ensureChatDeviceKeyInner(account: string): Promise<Uint8Array> {
   // unreachable right now: refuse, and let the caller retry once the signer is back.
   if (await marmotKvBackend().get(lockedKey(account))) {
     throw new Error(
-      "chat identity is locked and could not be unlocked — signer unavailable; not minting a new device key",
+      "chat identity is locked and could not be unlocked: signer unavailable; not minting a new device key",
     );
   }
   // Genuinely fresh device (no local key, no locked snapshot): mint this device's
@@ -177,6 +211,51 @@ async function ensureClientId(chatPubkey: string): Promise<string> {
 const LOCKED_NS = "__chat_locked__";
 function lockedKey(account: string): string {
   return `${LOCKED_NS}\x1f${account}`;
+}
+
+/**
+ * Chunked at-rest format for the logout snapshot: NIP-44 pieces joined by `.`
+ * (base64 never contains a dot, so the split is exact). The prefix keeps old
+ * single-blob snapshots readable with no migration.
+ *
+ * This exists because NIP-44 has a hard 65,535-byte plaintext ceiling, and this
+ * snapshot is the whole chat identity — device key, MLS group state, key packages
+ * AND the full decrypted message history. A few hundred messages clears it easily.
+ * Past the ceiling the encrypt threw into a catch that left EVERYTHING in
+ * plaintext: nothing deleted, nothing encrypted, and nothing said. So the
+ * shared-device protection was off precisely for the accounts that had used chat
+ * most. The coordinator hit the same ceiling on its own MLS state in the
+ * 2026-08-04 incident and fixed it with this shape; this is the side that wasn't.
+ *
+ * The ceiling itself is right and stays — it is NIP-44's interop limit, and it
+ * guards every payload that goes on the wire. It was never meant for a blob this
+ * device writes and reads back with its own key.
+ */
+const LOCK_CHUNK_PREFIX = "nip44c:";
+/** Largest plaintext handed to one encrypt call; under the ceiling with room to spare. */
+const LOCK_CHUNK_BYTES = 60_000;
+
+/** Split on UTF-8 byte length without ever cutting a surrogate pair. */
+function chunkByBytes(text: string, maxBytes: number): string[] {
+  const enc = new TextEncoder();
+  if (enc.encode(text).length <= maxBytes) return [text];
+  const out: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    // Walk forward in code POINTS so a chunk boundary never lands mid-pair.
+    let end = start;
+    let bytes = 0;
+    for (const ch of text.slice(start)) {
+      const size = enc.encode(ch).length;
+      if (bytes + size > maxBytes) break;
+      bytes += size;
+      end += ch.length;
+    }
+    if (end === start) end = start + 1; // pathological maxBytes — never loop forever
+    out.push(text.slice(start, end));
+    start = end;
+  }
+  return out;
 }
 
 /** JSON-safe round-trip for values that may hold a `Uint8Array` anywhere in
@@ -208,6 +287,11 @@ async function chatKeysFor(account: string): Promise<string[]> {
     for (const k of await backend.keysWithPrefix(identityPrefix(chatPubkey))) keys.add(k);
     keys.add(deviceKeyKey(account));
     keys.add(clientIdKey(chatPubkey));
+    // Not a secret (the label is published in the roster for members to read), but
+    // it belongs to this account's chat identity, so it rides the same snapshot —
+    // otherwise a logout/login would silently revert a rename the way the missing
+    // label persistence used to.
+    keys.add(deviceLabelKey(chatPubkey));
   }
   return [...keys];
 }
@@ -233,11 +317,22 @@ export async function lockChatIdentityForLogout(
   try {
     const dump: Record<string, unknown> = {};
     for (const key of keys) dump[key] = await backend.get(key);
-    const ciphertext = await encrypt(JSON.stringify(dump, replacer));
-    await backend.set(lockedKey(account), ciphertext);
+    const plaintext = JSON.stringify(dump, replacer);
+    const pieces = chunkByBytes(plaintext, LOCK_CHUNK_BYTES);
+    const stored =
+      pieces.length === 1
+        ? await encrypt(plaintext)
+        : LOCK_CHUNK_PREFIX + (await Promise.all(pieces.map((p) => encrypt(p)))).join(".");
+    await backend.set(lockedKey(account), stored);
     for (const key of keys) await backend.del(key);
-  } catch {
-    /* left in plaintext (e.g. signer unreachable) — retried next logout */
+  } catch (err) {
+    // Left in plaintext (e.g. signer unreachable) — retried next logout. Say so:
+    // this used to be entirely silent, so an account whose snapshot never locked
+    // looked identical to one that had no chat state at all.
+    console.warn(
+      "[chat] could not lock chat identity on logout — MLS state left in place for the next attempt:",
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
 
@@ -263,7 +358,14 @@ export async function unlockChatIdentityForLogin(
     const ciphertext = await backend.get(lockedKey(account));
     if (typeof ciphertext !== "string") return;
     try {
-      const dump = JSON.parse(await decrypt(ciphertext), reviver) as Record<string, unknown>;
+      const plaintext = ciphertext.startsWith(LOCK_CHUNK_PREFIX)
+        ? (
+            await Promise.all(
+              ciphertext.slice(LOCK_CHUNK_PREFIX.length).split(".").map((c) => decrypt(c)),
+            )
+          ).join("")
+        : await decrypt(ciphertext);
+      const dump = JSON.parse(plaintext, reviver) as Record<string, unknown>;
       for (const [key, value] of Object.entries(dump)) await backend.set(key, value);
       await backend.del(lockedKey(account));
     } catch {
@@ -380,7 +482,7 @@ export function buildChatKeyProfile(
   const npub = npubEncode(identity.account);
   const content = JSON.stringify({
     name,
-    about: `Nostrautica MLS chat key for a Nostrautica event — not a person. Follow ${npub} for the main account this belongs to. Messages are end-to-end encrypted.`,
+    about: `Nostrautica MLS chat key for a Nostrautica event, not a person. Follow ${npub} for the main account this belongs to. Messages are end-to-end encrypted.`,
     ...(accountPicture ? { picture: accountPicture } : {}),
   });
   return identity.eventSigner.signEvent({

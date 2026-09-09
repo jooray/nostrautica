@@ -117,6 +117,36 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.pendingJobCount()).toBe(1);
   });
 
+  it("a park NOTIFIES, exactly like a poison does (PIPE-N-4)", async () => {
+    // The park path returned without calling `onPoison`, so nothing was published
+    // at all: the organizer's Admin view showed nothing wrong, and the attendee's
+    // screen said "processing" indefinitely. A park is reached only after the
+    // three-day tail ran out — it means "this outage outlasted every retry and now
+    // needs a human" — which is the same fact to a reader as a poison.
+    const store = new Store();
+    const clock = fixedClock();
+    const notified: { parked?: { reason: string }; attempts: number }[] = [];
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      maxAttempts: 2,
+      baseBackoffMs: 100,
+      onPoison: (info) => notified.push(info),
+      poisonExempt: (err) => (String(err).includes("insufficient balance") ? "out of credit" : undefined),
+    });
+    runner.register("paid", async () => {
+      throw new Error("provider billing: insufficient balance (402)");
+    });
+    runner.enqueue("paid", "k", { coordinate: "31923:abc:evt" });
+    await runner.drain();
+    clock.advance(100);
+    await runner.drain();
+
+    expect(store.waitingJobCount()).toBe(1); // still parked, not discarded
+    expect(notified).toHaveLength(1);
+    expect(notified[0]!.parked?.reason).toBe("out of credit");
+    expect(notified[0]!.attempts).toBe(2);
+  });
+
   it("still poisons a failure that is genuinely about the job, not the account", async () => {
     const store = new Store();
     const clock = fixedClock();
@@ -342,9 +372,63 @@ describe("shutdown abort (audit C11)", () => {
     runner.abort();
     await drainP;
     // The aborted job was neither poisoned nor retried — it is still claimable
-    // (left 'running' with its lease for the next start's stranded-lease recovery).
+    // (released back to `pending`, runnable at once; see the next case).
     expect(store.poisonJobs()).toHaveLength(0);
     expect(store.pendingJobCount()).toBe(1);
+  });
+
+  it("an aborted job is claimable IMMEDIATELY on restart, not after the lease expires", async () => {
+    // The deploy case. The abort branch used to leave the row `running` and call
+    // that "claimable for restart" — but both recovery paths (claimNextJob's
+    // stranded arm and reclaimExpiredLeases) require `lease_until <= now`, and the
+    // heartbeat had just pushed the lease to now + 5 minutes. So a deploy landing
+    // mid-job idled that attendee's pipeline for up to five minutes past the
+    // restart while the fresh daemon logged "recovered 0 stranded job(s)".
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, leaseMs: 5 * 60_000 });
+    runner.register("slow", async (_p, { signal }) => {
+      await new Promise((r) => setTimeout(r, 5));
+      signal.throwIfAborted();
+    });
+    runner.enqueue("slow", "k", { coordinate: "c" });
+    const drainP = runner.drain();
+    runner.abort();
+    await drainP;
+
+    // What a restarting daemon does, at the SAME instant (no clock advance).
+    const fresh = new JobRunner(store, { now: clock.now, leaseMs: 5 * 60_000 });
+    expect(fresh.recoverStrandedJobs()).toBe(0); // nothing stranded — it was released
+    let ran = 0;
+    fresh.register("slow", async () => {
+      ran++;
+    });
+    await fresh.drain();
+    expect(ran).toBe(1);
+
+    const row = store.claimNextJob(clock.now(), "probe", 1000);
+    expect(row).toBeUndefined(); // it completed; nothing left to claim
+  });
+
+  it("the release consumes no retry and clears the lease", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, maxAttempts: 3, baseBackoffMs: 100 });
+    runner.register("slow", async (_p, { signal }) => {
+      await new Promise((r) => setTimeout(r, 5));
+      signal.throwIfAborted();
+    });
+    runner.enqueue("slow", "k", {});
+    const drainP = runner.drain();
+    runner.abort();
+    await drainP;
+
+    const row = (store as any).db.prepare("SELECT * FROM jobs WHERE dedupe_key = 'k'").get();
+    expect(row.state).toBe("pending");
+    expect(row.attempts).toBe(0); // a shutdown is not the job's fault
+    expect(row.next_run_at).toBe(0); // no backoff — run it now
+    expect(row.lease_until).toBeNull();
+    expect(row.worker_token).toBeNull();
   });
 });
 
@@ -427,5 +511,85 @@ describe("JobRunner — a job that does not run says so", () => {
     release();
     await running;
     out.mockRestore();
+  });
+});
+
+/**
+ * Per-error retry budgets (2026-09-04 audit).
+ *
+ * The default schedule spends ~26 attempts over three days. That is right for a
+ * failure that may clear on its own and exactly wrong for a deterministic one:
+ * the same prompt and model produce the same malformed shape every time, so the
+ * tail is three fully billed days of re-asking an answered question.
+ *
+ * Prod at the time of the audit held two attendees poisoned since mid-July on
+ * error_category=provider_contract, plus one that cleared only after 27 attempts.
+ */
+describe("JobRunner — a deterministic failure must not buy the full paid tail", () => {
+  class DeterministicError extends Error {}
+
+  it("poisons a classified error at its short budget, not at maxAttempts", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const poisoned: number[] = [];
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      onPoison: (info) => poisoned.push(info.attempts),
+      retryBudget: (err) => (err instanceof DeterministicError ? 3 : undefined),
+    });
+    let calls = 0;
+    runner.register("det", async () => {
+      calls++;
+      throw new DeterministicError("output was not valid JSON");
+    });
+    runner.enqueue("det", "k", {});
+    for (let i = 0; i < 30; i++) {
+      await runner.drain();
+      clock.advance(5 * 24 * 60 * 60_000); // past any backoff
+    }
+    expect(calls).toBe(3);
+    expect(poisoned).toEqual([3]);
+  });
+
+  it("leaves an unclassified error on the long tail", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      retryBudget: (err) => (err instanceof DeterministicError ? 3 : undefined),
+    });
+    let calls = 0;
+    runner.register("transient", async () => {
+      calls++;
+      throw new Error("relay unreachable");
+    });
+    runner.enqueue("transient", "k", {});
+    for (let i = 0; i < 6; i++) {
+      await runner.drain();
+      clock.advance(5 * 60 * 60_000);
+    }
+    expect(calls).toBeGreaterThan(3);
+  });
+
+  it("can only tighten the budget, never extend past maxAttempts", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, {
+      now: clock.now,
+      maxAttempts: 2,
+      baseBackoffMs: 1,
+      retryBudget: () => 99,
+    });
+    let calls = 0;
+    runner.register("capped", async () => {
+      calls++;
+      throw new Error("boom");
+    });
+    runner.enqueue("capped", "k", {});
+    for (let i = 0; i < 10; i++) {
+      await runner.drain();
+      clock.advance(60_000);
+    }
+    expect(calls).toBe(2);
   });
 });

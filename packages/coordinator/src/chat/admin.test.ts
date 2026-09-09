@@ -7,6 +7,7 @@ import {
   makeChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
+  type CoordinatorStatusContent,
 } from "@nostrautica/protocol";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][] };
@@ -47,8 +48,29 @@ class FakeMls implements ChatMls {
   async isEligible(): Promise<boolean> {
     return this.eligible;
   }
-  async evaluateKeyPackage(): Promise<{ eligible: boolean; reasons: string[] }> {
-    return { eligible: this.eligible, reasons: this.eligible ? [] : this.ineligibleReasons };
+  /**
+   * Membership-aware, because the REAL library is
+   * (`packages/vendor/marmot-ts/lib/core/key-package-eligibility.js`): it pushes
+   * "already a member" onto `reasons` whenever the credential pubkey is in the
+   * group, and returns `eligible: reasons.length === 0`. So a member is ALWAYS
+   * ineligible.
+   *
+   * This double used to return a fixed `this.eligible` with no membership
+   * awareness — modelling a library that cannot exist — which is exactly why the
+   * re-enrolment repair could be unreachable in production while its trajectory
+   * test passed. Any future change to the add path is now tested against the
+   * shape the real library actually has.
+   */
+  async evaluateKeyPackage(
+    group: string,
+    kp: AnyEvent,
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }> {
+    const alreadyMember = this.members.get(group)?.has(kp.pubkey) ?? false;
+    const reasons = [
+      ...(alreadyMember ? ["already a member"] : []),
+      ...(this.eligible ? [] : this.ineligibleReasons),
+    ];
+    return { eligible: reasons.length === 0, reasons, alreadyMember };
   }
   async isMember(group: string, pubkey: string): Promise<boolean> {
     return this.members.get(group)?.has(pubkey) ?? false;
@@ -93,7 +115,23 @@ function kpEvent(pubkey: string, id: string): AnyEvent {
 const COORDINATOR = "c".repeat(64);
 
 /** Build an admin whose key-package fetch returns the pre-seeded events per author. */
-function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = [], log?: (m: string) => void) {
+function makeAdmin(
+  store: Store,
+  mls: FakeMls,
+  kps: AnyEvent[] = [],
+  log?: (m: string) => void,
+  extra?: {
+    enqueueSync?: (coordinate: string, pubkey: string, reenrolling?: string) => void;
+    withMemberLock?: (coordinate: string, pubkey: string, fn: () => Promise<void>) => Promise<void>;
+    fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
+    onRosterChanged?: (coordinate: string) => void;
+    notifyAttendee?: (
+      coordinate: string,
+      accountPubkey: string,
+      content: CoordinatorStatusContent,
+    ) => void;
+  },
+) {
   const now = () => 1000;
   return new MarmotAdmin({
     store,
@@ -101,8 +139,13 @@ function makeAdmin(store: Store, mls: FakeMls, kps: AnyEvent[] = [], log?: (m: s
     now,
     log,
     coordinatorPubkey: COORDINATOR,
-    fetchKeyPackages: async (_coordinate, authors) =>
-      kps.filter((e) => authors.includes(e.pubkey)),
+    enqueueSync: extra?.enqueueSync,
+    withMemberLock: extra?.withMemberLock,
+    onRosterChanged: extra?.onRosterChanged,
+    notifyAttendee: extra?.notifyAttendee,
+    fetchKeyPackages:
+      extra?.fetchKeyPackages ??
+      (async (_coordinate, authors) => kps.filter((e) => authors.includes(e.pubkey))),
   });
 }
 
@@ -525,6 +568,31 @@ describe("MarmotAdmin — add on approve / key package (§4.2)", () => {
     expect(mls.invited).toEqual([]);
   });
 
+  /**
+   * The mirror image of the re-enrolment repair (2026-09-04 audit): a key package
+   * refused for a REAL reason must still be refused and still be consumed, so we
+   * do not re-evaluate it on every relay replay. Only the "already a member"-only
+   * refusal is special, because that is the condition the repair exists to fix.
+   */
+  it("a genuinely ineligible key package is still refused and still consumed", async () => {
+    const logs: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.eligible = false;
+    mls.ineligibleReasons = ["cipher suite 0x0002 ≠ group 0x0001"];
+    const kp = kpEvent(CHATKEY, "kp-badsuite");
+    const admin = makeAdmin(store, mls, [kp], (m) => logs.push(m));
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.backfillApproved(COORD);
+
+    expect(mls.invited).toEqual([]);
+    expect(store.isKpConsumed(COORD, kp.id)).toBe(true);
+    expect(logs.find((l) => l.includes("ineligible"))).toContain("cipher suite");
+  });
+
   it("the 30443 watcher adds an authorized author and ignores an unauthorized one", async () => {
     const store = freshStore();
     const mls = new FakeMls();
@@ -931,5 +999,327 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
     store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 3 });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     expect(mls.admins.get("mls-1")!.sort()).toEqual([COORDINATOR, CHATKEY].sort());
+  });
+});
+
+/**
+ * Attestation-path durability (MLS-R4, 2026-09-04).
+ *
+ * The approval path has durable `chat_sync_member` retries; the attestation path
+ * called `syncMember` inline and only logged a failure. Since the rumor is marked
+ * seen either way, a transient relay failure stranded the member in "setting up"
+ * until a restart or another manual Rejoin.
+ *
+ * A key-package fetch that throws is the realistic trigger — an invite failure is
+ * already caught per key package inside `syncMember`, deliberately, so one bad
+ * peer cannot take down the loop.
+ */
+describe("the startup backfill takes the same per-member lock the live paths do", () => {
+  // CHAT-N-5. `backfillApproved` walked a roster SNAPSHOT calling `syncMember` and
+  // took no lock, while every live path (approve, revoke, attestation) serializes
+  // on `member:<pubkey>`. An attestation or a revoke arriving for the same member
+  // mid-walk could therefore interleave with the backfill's add, so the two
+  // orderings could land in either sequence — a revoked device left in the group,
+  // or a legitimate rejoin undone. The window widened once install started
+  // subscribing to the event inbox BEFORE ensureChat, which is the right delivery
+  // order and means live traffic really can arrive during a backfill.
+  it("wraps every member's sync in withMemberLock", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const locked: string[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      withMemberLock: async (_c: string, pubkey: string, fn: () => Promise<void>) => {
+        locked.push(pubkey);
+        await fn();
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.backfillApproved(COORD);
+    expect(locked).toEqual([ACCOUNT]);
+    expect(mls.invited).toEqual([CHATKEY]); // and the sync still happened
+  });
+});
+
+describe("a failed attestation sync is retried, not just logged", () => {
+  it("queues durable work when the inline sync throws", async () => {
+    const logs: string[] = [];
+    const queued: Array<{ coordinate: string; pubkey: string; reenrolling?: string }> = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], (m) => logs.push(m), {
+      enqueueSync: (coordinate, pubkey, reenrolling) => queued.push({ coordinate, pubkey, reenrolling }),
+      fetchKeyPackages: async () => {
+        throw new Error("simulated relay outage");
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    const ok = await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+
+    // The attestation itself is still accepted and the binding recorded — only the
+    // group add is deferred.
+    expect(ok).toBe(true);
+    // `reenrolling` must ride along. Without it the retry is a PLAIN add, and the
+    // eligibility gate refuses it because the stale leaf is still there ("already a
+    // member" / "likely rotated for another event") — which is exactly the state
+    // this attestation exists to repair. The user pressed Rejoin, saw "requested",
+    // and stayed out; the inline attempt's transient failure had quietly turned the
+    // durable retry into a no-op.
+    expect(queued).toEqual([{ coordinate: COORD, pubkey: ACCOUNT, reenrolling: CHATKEY }]);
+    expect(logs.some((l) => l.includes("queued for durable retry"))).toBe(true);
+  });
+
+  it("the queued retry actually REPAIRS the member — a plain add would be refused", async () => {
+    // The behavioural half of the finding. `tryAddKeyPackage` refuses to drop a
+    // leaf it still holds unless `reenrolling` names that very device, so a retry
+    // that lost the flag is a no-op dressed as work: the user pressed Rejoin, the
+    // inline attempt failed transiently, the durable retry ran, and they were still
+    // out with nothing further queued.
+    const store = freshStore();
+    const mls = new FakeMls();
+    const queued: Array<{ pubkey: string; reenrolling?: string }> = [];
+    let failFetch = true;
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      enqueueSync: (_c, pubkey, reenrolling) => queued.push({ pubkey, reenrolling }),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // Rejoin: the device rotated its key package and attested — but the relay is
+    // down for the inline sync, so it is queued.
+    const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")], undefined, {
+      enqueueSync: (_c, pubkey, reenrolling) => queued.push({ pubkey, reenrolling }),
+      fetchKeyPackages: async () => {
+        if (failFetch) throw new Error("simulated relay outage");
+        return [kpEvent(CHATKEY, "kp2")];
+      },
+    });
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(queued).toHaveLength(1);
+    expect(mls.removed).toEqual([]); // nothing repaired yet
+
+    // The job runner comes back with what it was given.
+    failFetch = false;
+    await admin2.syncMember(COORD, ACCOUNT, { reenrolling: queued[0]!.reenrolling });
+    expect(mls.removed).toEqual([[CHATKEY]]);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
+  it("says so plainly when there is no queue to fall back on", async () => {
+    const logs: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], (m) => logs.push(m), {
+      fetchKeyPackages: async () => {
+        throw new Error("simulated relay outage");
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(logs.some((l) => l.includes("no retry queue"))).toBe(true);
+  });
+});
+
+/**
+ * The 31604 roster is the ONLY channel a client can read the device list from:
+ * `ChatHandoffCard` renders `devicesForAccount(roster)` and re-fetches ~4s after
+ * every action. Nothing on the attestation or chat-revoke paths published one, so
+ * every device-management action visibly undid itself in front of the user — a
+ * revoked device reappeared, a rename reverted, a newly-added device stayed a raw
+ * pubkey — until an UNRELATED approval happened to republish. The app even carried
+ * a comment claiming the coordinator republished here. It did not.
+ */
+describe("MarmotAdmin — roster republish on every chat_keys change", () => {
+  function setup(extra: Parameters<typeof makeAdmin>[4] = {}) {
+    const published: string[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      ...extra,
+      onRosterChanged: (c) => published.push(c),
+    });
+    return { published, store, mls, admin };
+  }
+
+  it("republishes when a device binds (op:add)", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("republishes for a still-PENDING attendee too — the roster is how the device list renders", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("republishes when a device is revoked (op:revoke)", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    published.length = 0;
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT)).toBe(true);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("republishes when an attendee is removed from the chat entirely", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    published.length = 0;
+
+    await admin.handleRevoke(COORD, ACCOUNT);
+
+    expect(published).toEqual([COORD]);
+  });
+
+  it("does NOT republish for a rejected attestation — nothing changed", async () => {
+    const { published, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    // A stranger: no attendee row at all.
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+    expect(published).toEqual([]);
+
+    // And an enrolled attendee whose proof doesn't verify.
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    expect(
+      await admin.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { deviceSk: null }), CREATED_AT),
+    ).toBe(false);
+    expect(published).toEqual([]);
+  });
+});
+
+/**
+ * A refused attestation used to be a log line and nothing else. The device had
+ * published a key package, sent its 21607, and then sat in "setting up your secure
+ * chat" forever — while the app's only hint said the coordinator might be offline,
+ * which for a device-cap or rebind refusal points at exactly the wrong thing. The
+ * reasons were already computed; they are now sealed to the attendee over the same
+ * 21606 channel a failed talk/submission already uses.
+ */
+describe("MarmotAdmin — telling the attendee WHY their device was refused", () => {
+  function setup() {
+    const notices: { account: string; content: CoordinatorStatusContent }[] = [];
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      notifyAttendee: (_c, account, content) => notices.push({ account, content }),
+    });
+    return { notices, store, mls, admin };
+  }
+
+  it("names the device cap, addressed to the attendee, not retryable", async () => {
+    const { notices, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    // Fill the cap with keys that are not CHATKEY/CHATKEY2.
+    for (let i = 0; i < MAX_CHAT_KEYS_PER_ACCOUNT; i++) {
+      store.upsertChatKey({
+        coordinate: COORD,
+        accountPubkey: ACCOUNT,
+        chatPubkey: `${i}`.repeat(64),
+        status: "active",
+        now: 1,
+      });
+    }
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.account).toBe(ACCOUNT);
+    expect(notices[0]!.content.error_category).toBe("chat_device_cap_reached");
+    expect(notices[0]!.content.stage).toBe("chat_attestation");
+    expect(notices[0]!.content.pubkey).toBe(ACCOUNT);
+    // Waiting cannot clear a cap hit; saying "retryable" would keep them staring
+    // at the spinner instead of removing a device.
+    expect(notices[0]!.content.retryable).toBe(false);
+  });
+
+  it("names a chat key already bound to a different account", async () => {
+    const { notices, store, admin } = setup();
+    const other = "b".repeat(64);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: other, status: "approved", now: 1 });
+    store.upsertChatKey({
+      coordinate: COORD,
+      accountPubkey: other,
+      chatPubkey: CHATKEY,
+      status: "active",
+      now: 1,
+    });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+
+    expect(notices.map((n) => n.content.error_category)).toEqual(["chat_key_bound_to_other_account"]);
+  });
+
+  it("names a proof of possession that does not verify", async () => {
+    const { notices, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(
+      await admin.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { deviceSk: null }), CREATED_AT),
+    ).toBe(false);
+
+    expect(notices.map((n) => n.content.error_category)).toEqual(["chat_proof_invalid"]);
+  });
+
+  it("names an unusable key package — the most invisible refusal of the lot", async () => {
+    // The attestation SUCCEEDS (the device is bound, listed in the roster, and the
+    // UI shows it), and then the add fails and the key package is marked consumed
+    // so no later pass reconsiders it. Nothing else in the system says a word.
+    const { notices, store, mls, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    mls.eligible = false;
+    mls.ineligibleReasons = ["unsupported ciphersuite"];
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(notices.map((n) => n.content.error_category)).toEqual(["chat_key_package_ineligible"]);
+    expect(notices[0]!.account).toBe(ACCOUNT);
+  });
+
+  it("says nothing to a stranger — an unenrolled sender must not make us publish", async () => {
+    // Otherwise anyone who can reach the inbox can drive gift-wrap publishes.
+    const { notices, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
+
+    expect(notices).toEqual([]);
+  });
+
+  it("says nothing when the attestation is accepted", async () => {
+    const { notices, store, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(notices).toEqual([]);
   });
 });

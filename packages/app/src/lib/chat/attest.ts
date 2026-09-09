@@ -72,12 +72,23 @@ export interface SendAttestationInput {
  * safe to call repeatedly; the coordinator dedupes. Throws if the event has no
  * coordinator (the attestation has no recipient then), or if an add is missing the
  * device secret needed for the proof.
+ *
+ * @returns `true` when the wrap reached at least one relay, `false` when it only
+ * made it into the durable outbox (offline, or every relay refused it).
+ *
+ * That distinction used to be discarded: `publishAccountGiftWrap` already returns
+ * it, and this function threw it away, so "the coordinator has your attestation"
+ * and "it is sitting in the outbox waiting for a network" were the same silent
+ * success to every caller. They are not the same thing at all — the second means
+ * the device will sit in "setting up your secure chat" until the outbox drains,
+ * with nothing anywhere saying so. Callers that can act on it (a queued rename,
+ * a queued rejoin) now can.
  */
 export async function sendChatKeyAttestation(
   accountSigner: AppSigner,
   ctx: EventContext,
   input: SendAttestationInput,
-): Promise<void> {
+): Promise<boolean> {
   const coordinator = ctx.config.coordinator;
   if (!coordinator) throw new Error("chat attestation requires a coordinator");
   const account = await accountSigner.getPublicKey();
@@ -104,7 +115,7 @@ export async function sendChatKeyAttestation(
     tags: [["a", ctx.coordinate]],
     created_at: createdAt, // the rumor's created_at must equal what the proof signs
   });
-  await publishAccountGiftWrap(wrap as never, coordinator, ctx.config.relays);
+  return publishAccountGiftWrap(wrap as never, coordinator, ctx.config.relays);
 }
 
 /**

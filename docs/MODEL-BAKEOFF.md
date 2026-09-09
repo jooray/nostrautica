@@ -1,16 +1,15 @@
-# Model bake-off — GLM 5.3 Flash vs DeepSeek V4 Flash 0731
+# Model bake-off: GLM 5.3 Flash vs DeepSeek V4 Flash 0731
 
 **Question.** Venice shipped `z-ai-glm-5-3-flash` (GLM 5.3 Flash) on 2026-08-26.
 Production scores matches with `deepseek-v4-flash-0731`. Is the new model better,
 and is it deployable?
 
 **Short answer.** It is meaningfully better at the actual task and ~11% cheaper,
-and it is **not deployable today** — `providers/venice.ts` cannot drive it as
+and it is **not deployable today**, `providers/venice.ts` cannot drive it as
 coded. Both blockers are in the provider, not the model. See
 [Deployability](#deployability-two-hard-blockers).
 
-This is also the first run of a **repeatable** suite. Adding the next model —
-Qwen 3.8 Flash when it lands, or anything after — is one command, and the
+This is also the first run of a **repeatable** suite. Adding the next model (Qwen 3.8 Flash when it lands, or anything after) is one command, and the
 subjective grades recorded here carry forward instead of being thrown away. The
 harness lives in `benchmarks/matching/`; `benchmarks/matching/README.md` has the
 operating instructions.
@@ -40,7 +39,7 @@ and `bakeoff-report.mjs` refuses to print a table whose rows were measured under
 different prompt bytes.
 
 Both models were run on the same day, from the same machine, against the same
-fixture, with the two runs overlapping in time — so neither got a quiet hour
+fixture, with the two runs overlapping in time, so neither got a quiet hour
 that the other did not.
 
 ---
@@ -69,7 +68,7 @@ GLM 5.3 Flash answers any request carrying `disable_thinking` with:
 HTTP 400 {"error":"Reasoning is mandatory for this endpoint and cannot be disabled."}
 ```
 
-Not intermittent — every request. `reasoning_effort: "none"` is rejected the same
+Not intermittent, every request. `reasoning_effort: "none"` is rejected the same
 way, even though `GET /models` advertises `"none"` as a supported effort for this
 model. What works is omitting `disable_thinking` and keeping
 `strip_thinking_response: true`: reasoning still runs and is still billed
@@ -78,7 +77,7 @@ stripped from the response.
 
 Pointing production at this model id today produces a 400 on every match, which
 surfaces as a startup model-verification failure or a matching run that scores
-nothing — not as a degraded match.
+nothing, not as a degraded match.
 
 ### 2. Output is fenced, and production does not parse leniently
 
@@ -103,9 +102,9 @@ prints any model below 100% as BLOCKED regardless of its recall.
 
 ### 2b. The strict schema is not honoured at all on the harder shape
 
-On the reverse (icebreaker) batch — the same call production makes, K=10, strict
+On the reverse (icebreaker) batch (the same call production makes, K=10, strict
 `json_schema` with `additionalProperties: false` and a required root object
-`{matches: [...]}` — GLM 5.3 Flash answers with **at least three different
+`{matches: [...]}`) GLM 5.3 Flash answers with **at least three different
 top-level shapes**, and adds an `entry_name` property the schema forbids:
 
 | shape returned | declared? |
@@ -118,14 +117,14 @@ top-level shapes**, and adds an `entry_name` property the schema forbids:
 
 This one nearly poisoned the benchmark rather than merely failing it. The
 icebreaker harness read `value.matches`, which on the two undeclared shapes is
-`undefined` — so those calls contributed **zero graded openers**, and GLM would
+`undefined`, so those calls contributed **zero graded openers**, and GLM would
 have posted a near-perfect attribution rate on a sample it had quietly been
 excused from. A result that looks like a result is worse than an error. Sampling
 the raw response cache mid-run showed roughly **half** of GLM's calls were being
 dropped this way.
 
-`icebreaker-run.mjs` now takes the entries wherever the model put them — so
-quality is measured on everything it wrote — and counts the deviation separately.
+`icebreaker-run.mjs` now takes the entries wherever the model put them (so
+quality is measured on everything it wrote), and counts the deviation separately.
 `bakeoff-report.mjs` lists it as a blocker: in production `validateProviderValue`
 rejects these outright.
 
@@ -139,7 +138,7 @@ section is post-fix.
 `GET /models` reports `privacy: "anonymized"` for `z-ai-glm-5-3-flash` and
 `privacy: "private"` for `deepseek-v4-flash-0731`. The current deployment sets
 `models.match.require_private = false` (see `coordinator.example.toml`), so this
-does not block adoption mechanically — but moving from a private-tier model to an
+does not block adoption mechanically, but moving from a private-tier model to an
 anonymized one is a deliberate downgrade of that property, not a side effect, and
 should be decided rather than inherited.
 
@@ -164,8 +163,8 @@ Bold marks the better value, **including the one column GLM loses catastrophical
 ### Scoring quality: GLM 5.3 Flash wins, and by more the harder the task gets
 
 On the eval subset it is ahead but not dramatically so (r@1 0.80 vs 0.75, both
-seeds, identically). On the full 190-pair ranking — 20 candidates per target
-instead of ~6 — the gap opens: **r@1 0.80 vs 0.65**.
+seeds, identically). On the full 190-pair ranking (20 candidates per target
+instead of ~6) the gap opens: **r@1 0.80 vs 0.65**.
 
 The mechanism is score discrimination, not luck. Mean weak-pair score is 0.25 for
 GLM against 0.37 for DeepSeek, so strong–weak separation is 0.64 vs 0.55 on the
@@ -191,30 +190,30 @@ The means hide a real difference in *failure mode*, and it is the more useful
 finding:
 
 - **DeepSeek's failures are emptiness and invention.** Five of its fifteen
-  icebreakers were flagged `generic` — correct, sendable, and containing nothing
-  about the person they were sent to ("Hey Yusuf — I'm looking for a low-stakes
+  icebreakers were flagged `generic`: correct, sendable, and containing nothing
+  about the person they were sent to ("Hey Yusuf, I'm looking for a low-stakes
   side project... Got any suggestions for where to start?"). Three invented
   facts, the worst handing a sender someone else's entire persona.
 - **GLM's failures are Slovak.** Three of its fifteen were flagged
   `awkward-lang`: `v súkromí scéne` (broken word order), `vypotím históriu siete`
-  (wrong verb — "sweat out" rather than "recount"), a doubled `si si`, an
+  (wrong verb, "sweat out" rather than "recount"), a doubled `si si`, an
   untranslated `hallway`, and switching between `ty` and `vy` mid-message. The
   content underneath was correct every time. Its one severe failure was a full
-  role inversion — a message addressed to its own sender.
+  role inversion, a message addressed to its own sender.
 
 For a project that runs Slovak-language events, that is not a tie. GLM writes
 better English prose and shakier Slovak, and the Slovak defects are the kind a
 native reader notices in the first line.
 
 Both models handled the fixture's hardest ownership traps correctly more often
-than not — including the case the whole attribution benchmark exists for, where
+than not: including the case the whole attribution benchmark exists for, where
 the recipient's profile advertises branding work on the *sender's* own artifact
-(`"si robila branding k môjmu Quillfeather Press"` — his imprint, her branding,
+(`"si robila branding k môjmu Quillfeather Press"`, his imprint, her branding,
 correctly assigned).
 
 ### Attribution errors: pooled they tie, per language they do not
 
-Attribution errors are the failure this arm exists for — the reader's own book,
+Attribution errors are the failure this arm exists for, the reader's own book,
 app or project handed back to them as the other person's work. They are graded by
 string match against each persona's invented artifact, not by a judge.
 
@@ -223,7 +222,7 @@ Pooled over both languages:
 | model | attribution errors | rate | 95% CI | vs baseline |
 |---|---|---|---|---|
 | z-ai-glm-5-3-flash | 8 / 2621 | 0.30% | [0.13%, 0.60%] | p = 0.374 |
-| deepseek-v4-flash-0731 | 17 / 2821 | 0.60% | [0.35%, 0.96%] | — |
+| deepseek-v4-flash-0731 | 17 / 2821 | 0.60% | [0.35%, 0.96%] |, |
 
 A tie. But the pooled row is hiding the single significant result in this run,
 because **the two models fail in opposite languages**:
@@ -244,14 +243,14 @@ the live incident this whole arm was built after happened at a **Slovak** event.
 as a drill-down, so the next model cannot hide the same way.
 
 (The permutation test shuffles CLUSTERS, because openers inside one LLM call are
-correlated — a batch that inverts roles tends to invert several entries at once.
+correlated: a batch that inverts roles tends to invert several entries at once.
 Getting the cluster right is not cosmetic: reconstructing it from
 (target, candidate, rep) split each reverse-shape call into ten clusters, which
 discarded the correlation the test exists to respect and reported p = 0.0008 for
 the Slovak row instead of 0.016. Every row now carries a `callId` stamped by the
 run that produced it, so the cluster is recorded rather than inferred.)
 
-Neither model produced a single third-party briefing in ~5,400 openers — the
+Neither model produced a single third-party briefing in ~5,400 openers, the
 "You're a cypherpunk and she studies X, ask her about Y" failure that shipped to
 a live event in July. The R3 prompt is holding on both.
 
@@ -259,14 +258,14 @@ a live event in July. The R3 prompt is holding on both.
 
 GLM is both **cheaper and faster**, which is not the usual trade:
 
-- **$0.249 vs $0.281 per 100 attendees** — despite burning reasoning tokens
+- **$0.249 vs $0.281 per 100 attendees**: despite burning reasoning tokens
   DeepSeek does not (285/call scoring, up to 3,244/call on the Slovak icebreaker
   batch). Its lower per-token price more than covers them.
 - **16.1s vs 22.1s** p50 per K=10 call, measured serially, and **71.4 vs 41.6
   output tokens/sec**.
 
-Two caveats on the speed number. The icebreaker arm — a K=10 reverse batch
-producing 30 openers — takes both models 60–95s per call, and there GLM's
+Two caveats on the speed number. The icebreaker arm (a K=10 reverse batch
+producing 30 openers) takes both models 60–95s per call, and there GLM's
 reasoning tokens do cost real wall-clock. And GLM returned a run of HTTP 500
 `Inference processing failed` under sustained load on that arm (9 retries; the
 harness's backoff absorbed them), which DeepSeek never did. One afternoon is not
@@ -275,7 +274,7 @@ next model that ships.
 
 ---
 
-## Verdict (final — the language leak is fixed in the prompt; no model change)
+## Verdict (final: the language leak is fixed in the prompt; no model change)
 
 1. **The Slovak-English leak is fixed and shipped.** One sentence, repeating the
    output language inside the icebreaker block: **15/144 → 1/96 calls fully
@@ -288,14 +287,14 @@ next model that ships.
    a defect forcing the choice.
 3. **GLM 5.3 Flash wins on quality and is still not adoptable**: 68% of its
    icebreaker calls return a shape the schema forbids, and tolerating that in
-   `venice.ts` costs more than the model is worth. Revisit if z.ai fixes it — it
+   `venice.ts` costs more than the model is worth. Revisit if z.ai fixes it. It
    is one command.
 4. **No Qwen. No Minimax.**
 
 The original round-1 reasoning follows.
 
-**Do not switch today.** Not because GLM 5.3 Flash is worse — on the thing this
-benchmark actually measures it is clearly better, and cheaper, and faster — but
+**Do not switch today.** Not because GLM 5.3 Flash is worse (on the thing this
+benchmark actually measures it is clearly better, and cheaper, and faster), but
 because `providers/venice.ts` cannot call it at all. Every request 400s on
 `disable_thinking`, and if that were fixed, ~96% of the responses that came back
 would fail `JSON.parse`.
@@ -303,14 +302,14 @@ would fail `JSON.parse`.
 **What adopting it would take**, in order of increasing appetite:
 
 1. **Make `disable_thinking` per-model.** The coordinator sends it
-   unconditionally. It needs to be a capability lookup — Venice's `GET /models`
+   unconditionally. It needs to be a capability lookup. Venice's `GET /models`
    already advertises `reasoningEffortOptions`, though note that GLM 5.3 Flash
    advertises `"none"` and rejects it, so the catalogue cannot be trusted alone;
    detect on the 400 as `benchmarks/matching/model-profiles.mjs` does.
 2. **Parse leniently in `venice.ts`.** Stripping a ` ```json ` fence before
    `JSON.parse` is a few lines and would have made this model usable. It is
-   defensible on its own merits — the benchmark harness has parsed leniently
-   since the beginning precisely because models do this — but it is a change to
+   defensible on its own merits (the benchmark harness has parsed leniently
+   since the beginning precisely because models do this), but it is a change to
    the provider contract and belongs in its own commit with its own tests.
 3. **Tolerate an undeclared response shape, or don't.** Accepting
    `{entries: [...]}` and bare arrays where the schema said `{matches: [...]}` is
@@ -318,14 +317,14 @@ would fail `JSON.parse`.
    provider that cannot tell a model's mistake from a model's answer.
 
 **If (1) and (2) land**, GLM 5.3 Flash is worth a real trial: better ranking,
-better English prose, cheaper, faster, and — in Slovak — significantly fewer
+better English prose, cheaper, faster, and (in Slovak) significantly fewer
 attribution errors than what is deployed today (0.10% vs 1.00%, p = 0.016).
 
 The honest tension for a Slovak-language event is that those two Slovak results
 point opposite ways: GLM gets **who owns what** right far more often, and writes
 **clumsier sentences** while doing it (`v súkromí scéne`, `vypotím`, ty/vy drift).
 Handing someone else's project to the wrong person is the worse failure of the
-two — it is the one that actually shipped and was noticed — but awkward phrasing
+two (it is the one that actually shipped and was noticed), but awkward phrasing
 is the one every attendee sees. If GLM is trialled, the Slovak prose is what to
 watch, and it may be promptable in a way an attribution bug is not.
 
@@ -338,7 +337,7 @@ it still holds.
 
 ---
 
-## Round 2 (same day): two Qwen models, Minimax — and a live production defect
+## Round 2 (same day): two Qwen models, Minimax, and a live production defect
 
 `minimax-m3-preview` and `openai-gpt-oss-120b` are **out before the first arm**:
 both answer `400 "response_format is not supported by this model"`, and
@@ -355,8 +354,8 @@ pre-flight check. Two Qwen models passed the probe and got the full suite.
 Neither Qwen is adoptable. `qwen3-6-35b-a3b` is the most instructive failure in
 the whole exercise: it is the fastest thing tested by a factor of three (4.4 s,
 205 output tok/s), perfectly behaved on format (100% strict JSON, declared shape
-every time), and it **hands people each other's work 5.4% of the time** — nine
-times the deployed model's rate — while producing the only non-zero briefing rate
+every time), and it **hands people each other's work 5.4% of the time** (nine
+times the deployed model's rate), while producing the only non-zero briefing rate
 anything has recorded here. Every cheap metric said yes; the one arm that costs
 real calls to run said no.
 
@@ -365,9 +364,9 @@ real calls to run said no.
 Blind judging kept turning up Slovak-event openers written in **English**, or in
 **Czech**. A 15-item sample cannot tell 20% from 47%, so this became a measured
 column: `language-adherence.mjs` classifies every saved opener by exclusive
-markers — letters and function words that exist in one language and not the other
+markers: letters and function words that exist in one language and not the other
 (`ř/ě/ů` and `jsem/který/tvůj` for Czech; `ľ/ĺ/ŕ/ô/ä` and `som/ktorý/tvoj` for
-Slovak) — and anything with no marker either way is reported as `undecided`
+Slovak), and anything with no marker either way is reported as `undecided`
 rather than folded into the pass rate. It is pinned against messages a human
 already graded.
 
@@ -393,7 +392,7 @@ the id it replaced wrote English in **0 of 3372** on the same prompt, bucket and
 fixture.
 
 Those opener counts are the wrong unit for a test, and the first version of this
-section used them anyway — reporting p = 9.5 × 10⁻⁵⁰. That number was inflated by
+section used them anyway, reporting p = 9.5 × 10⁻⁵⁰. That number was inflated by
 about forty-eight orders of magnitude, and the reason is written on the tin of
 `stats.mjs`: **openers inside one call are not independent.** They are especially
 not independent here, because the failure turns out to be *entirely whole-call*:
@@ -404,23 +403,23 @@ not independent here, because the failure turns out to be *entirely whole-call*:
 | `deepseek-v4-flash-0731` (deployed) | 48 | **3 (6.3%)** | **0** |
 
 Three responses out of forty-eight came back with every single opener in English,
-and forty-five with none. Nothing in between. At the call level — the unit the
-correlation permits — that is **3/48 vs 0/176, Fisher exact p = 0.0094**, with a
+and forty-five with none. Nothing in between. At the call level (the unit the
+correlation permits) that is **3/48 vs 0/176, Fisher exact p = 0.0094**, with a
 95% interval on the deployed rate of **[1.3%, 17.2%]**. Real, and much less
 precisely located than the opener count pretended.
 
 The whole-call shape matters for more than the arithmetic. This is not a model
 drifting out of Slovak word by word; it is a model ignoring the OUTPUT LANGUAGE
-block outright on a whole response, which is a far more promptable defect — and,
+block outright on a whole response, which is a far more promptable defect, and,
 for the reader, a worse one: when it fires, every icebreaker that person receives
 in that batch is unusable, not one in fifteen. Samples:
 
-> Yusuf — I founded Ironwood Assembly and I'm thrilled you did its branding. I'm scouting early freedom-tech teams to back; what's the most promising one you've seen?
+> Yusuf: I founded Ironwood Assembly and I'm thrilled you did its branding. I'm scouting early freedom-tech teams to back; what's the most promising one you've seen?
 
-> Hi Yusuf — I run Petrichor Fund and I'm curious how you'd grow a grant programme's reach. What's the ethical way to get the word out?
+> Hi Yusuf: I run Petrichor Fund and I'm curious how you'd grow a grant programme's reach. What's the ethical way to get the word out?
 
 The 2026-08-04 deprecation swap was re-benchmarked before it shipped, and the
-comparison was fair on every axis that existed at the time — recall, separation,
+comparison was fair on every axis that existed at the time, recall, separation,
 position bias, format failures. Output language was not one of them, because
 nothing had ever needed it. It is a column now, and `bakeoff-report.mjs` flags
 any model below 95% as a blocker.
@@ -428,12 +427,12 @@ any model below 95% as a blocker.
 **This is a live defect, not a benchmark curiosity**, though state it carefully:
 about **6% of reverse batches** come back entirely in English, so the people
 affected get *all* of their openers in the wrong language rather than an
-occasional one. The confidence interval is wide (1.3–17.2%) — 48 calls is a small
+occasional one. The confidence interval is wide (1.3–17.2%): 48 calls is a small
 denominator, and the honest next step is more repeats, not a bigger claim.
 
 It is also plausibly promptable. `languageInstruction(lang)` already names
 icebreakers explicitly ("write every reasoning string **and every icebreaker**"),
-so this is a model disobeying an instruction rather than a gap in one — but a
+so this is a model disobeying an instruction rather than a gap in one, but a
 whole-response failure usually responds to placement and salience, and the
 previous model id hitting 0/176 on the identical prompt proves the target is
 reachable on this fixture. Testable against this arm for about $0.20 without
@@ -462,13 +461,13 @@ So it went through the same suite:
 | Venice privacy tier | anonymized | **private** |
 
 Read carefully, because two of these rows are noise and the rest are not. The
-recall difference is 15 vs 13 hits out of 20 on a single seed — do not spend it.
+recall difference is 15 vs 13 hits out of 20 on a single seed. Do not spend it.
 Separation is a tie. Attribution genuinely favours 0731 and does not survive a
 test either.
 
-What is real: **output language** — 0/176 calls fully English versus 3/48, Fisher
+What is real: **output language**, 0/176 calls fully English versus 3/48, Fisher
 exact p = 0.0094 at the call level (see the correction above; the opener-level
-p-value this document first reported was not a valid test) — plus **2× the
+p-value this document first reported was not a valid test), plus **2× the
 throughput** and **20% cheaper**. The August swap bought a statistically
 invisible attribution improvement and a private-tier badge, and paid for it with
 a language regression nobody was measuring and half the speed.
@@ -477,7 +476,7 @@ a language regression nobody was measuring and half the speed.
 
 ## Fixing it: placement beats wording, and not in the direction you would guess
 
-The trailing OUTPUT LANGUAGE block was never missing the point — it already says
+The trailing OUTPUT LANGUAGE block was never missing the point. It already says
 "write every reasoning string **and every icebreaker**" in the target language,
 and the previous model id obeyed it 176 times out of 176 on the identical prompt.
 So the target was known to be reachable and the question was placement.
@@ -487,7 +486,7 @@ the live prompt (verified by hash against `dist`):
 
 | arm | change | calls fully English |
 |---|---|---|
-| **L0** | control — the live prompt | 9/48 (18.8%) |
+| **L0** | control, the live prompt | 9/48 (18.8%) |
 | **L1** | requirement hoisted to the TOP, as a pass/fail condition | 16/48 (33.3%) |
 | **L2** | requirement repeated **inside the icebreaker block** | **1/48 (2.1%)** |
 | **L3** | both | 14/48 (29.2%) |
@@ -498,14 +497,14 @@ intuitive move was the wrong one, which is a good argument for measuring prompt
 changes rather than reasoning about them.
 
 **The control also disagreed with itself.** L0 scored 9/48 here and the same
-bytes scored 3/48 in the earlier run — a 3× swing hours apart. That is why this
+bytes scored 3/48 in the earlier run, a 3× swing hours apart. That is why this
 went to a confirmation round rather than straight to production: at 96 calls per
 arm the control settles at 12/96 and L2 at 1/96, **Fisher exact p = 0.0025**.
 Pooling every draw of the live prompt ever taken: **15/144 (10.4%) vs 1/96
 (1.0%), p = 0.0032**.
 
 Attribution errors are unchanged across all four arms (0.4–0.7%, 99.4% clean),
-which is the thing that had to not regress — a language fix that traded away
+which is the thing that had to not regress: a language fix that traded away
 attribution accuracy would not be a fix.
 
 Shipped as `reverseSystemPrompt(lang)` in `packages/coordinator/src/matching/
@@ -542,7 +541,7 @@ icebreaker prompt.
 Recall@k says the right person is ranked first. It says nothing about whether the
 sentence shown to that attendee is one a human would send, and that is the half
 that decides whether the product feels good. The 2026-07 round judged prose by
-hand, once, on a pack built by a one-off script — and those grades died with the
+hand, once, on a pack built by a one-off script, and those grades died with the
 run, so this round could not reuse them.
 
 `judge-pack.mjs` fixes that by making an item's id the **SHA-256 of its text**:
@@ -550,7 +549,7 @@ run, so this round could not reuse them.
 - grading is append-only. Regenerating the pack with a third model in it leaves
   every existing grade attached to the exact text it was given for, and only
   genuinely new items show up as ungraded. Adding the fourth model is cheap.
-- a full re-grade over the whole dataset — a better judge, a changed rubric — is
+- a full re-grade over the whole dataset (a better judge, a changed rubric) is
   `node judge-pack.mjs --regrade-all`. That is the only way to compare prose
   across models fairly, because it puts every model in front of the same judge on
   the same day. **The grades in this document were produced by a small model and
@@ -560,8 +559,7 @@ run, so this round could not reuse them.
   `key.json` holds the mapping and is joined only afterwards, by
   `judge-report.mjs`.
 
-Samples are stratified — reasoning by hidden gold label, icebreakers by language
-— because a judge shown twenty gold-strong pairs grades every model 5/5. The
+Samples are stratified (reasoning by hidden gold label, icebreakers by language) because a judge shown twenty gold-strong pairs grades every model 5/5. The
 text that separates models is what they write about two people with little to say
 to each other.
 

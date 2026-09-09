@@ -5,19 +5,52 @@
  *
  * Servers see only AES-GCM ciphertext + sizes/hashes (spec §4.2).
  */
-import { sha256Hex } from "@nostrautica/protocol";
+import { sha256Hex,
+  MAX_MEDIA_FILE_BYTES,
+} from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { buildAuthEvent, authHeader } from "./auth.js";
 
 /**
  * Operation timeouts (UX-7): a hung Blossom server must never wedge Record's
- * "Uploading…" or MediaPlayer's "Decrypting…" forever. Uploads get the biggest
- * budget — videos can be large on slow links; preflights are small/fast, so a
- * server that can't answer promptly is simply skipped.
+ * "Uploading…" or MediaPlayer's "Decrypting…" forever. Preflights are small and
+ * fast, so a server that can't answer promptly is simply skipped.
  */
 export const PREFLIGHT_TIMEOUT_MS = 10_000;
-export const UPLOAD_TIMEOUT_MS = 60_000;
 export const MIRROR_TIMEOUT_MS = 30_000;
+
+/**
+ * Uploads, like downloads, are bounded by PROGRESS — not by one wall clock.
+ *
+ * This is the same defect the download path was rewritten away from (see
+ * DOWNLOAD_STALL_TIMEOUT_MS below), and it bites harder here because uplinks
+ * are several times slower than downlinks: 15 MB of ciphertext on venue Wi-Fi
+ * does not fit in a 60-second budget, so the PUT was killed mid-body, and
+ * `uploadAndMirror` then re-uploaded the whole blob to the next candidate server
+ * and blew the same budget again — the attendee waited through several full
+ * uploads to be told every server had failed, when the only thing that had
+ * failed was the stopwatch.
+ *
+ *  - {@link UPLOAD_CONNECT_TIMEOUT_MS} bounds getting started: no bytes
+ *    acknowledged at all means a dead/unreachable server, skipped promptly.
+ *  - {@link UPLOAD_STALL_TIMEOUT_MS} bounds the SILENCE between upload-progress
+ *    events and resets on each one, so a slow-but-moving upload runs to
+ *    completion however long it takes.
+ *  - {@link UPLOAD_RESPONSE_TIMEOUT_MS} covers the gap after the last byte is
+ *    sent, when the server is hashing and storing what may be hundreds of MB
+ *    and legitimately says nothing while it does.
+ */
+export const UPLOAD_CONNECT_TIMEOUT_MS = 20_000;
+export const UPLOAD_STALL_TIMEOUT_MS = 30_000;
+export const UPLOAD_RESPONSE_TIMEOUT_MS = 120_000;
+
+/**
+ * Whole-request budget for the no-XMLHttpRequest fallback below. Nothing there
+ * reports how much of the body has gone out, so there is no stall to measure and
+ * this stays a plain total. Browsers all have XHR; this path exists for
+ * non-browser contexts (SSR, tests), which do not upload attendee video.
+ */
+export const UPLOAD_TIMEOUT_MS = 60_000;
 
 /**
  * Downloads are bounded by PROGRESS, not by total wall clock.
@@ -170,36 +203,207 @@ export interface BlobDescriptor {
   type: string;
 }
 
+/** How much of an upload's ciphertext has gone out, for a progress indicator. */
+export interface UploadProgress {
+  /** Ciphertext bytes handed to the network so far for the CURRENT server. */
+  sent: number;
+  /** Total ciphertext bytes — always known here (we hold the buffer). */
+  total: number;
+  /** Which server the bytes are going to; a fallback restarts the count at 0. */
+  server: string;
+}
+
+export interface UploadOptions {
+  /** Fires once at 0 bytes, then as the body goes out, then once at `total`. */
+  onProgress?: (progress: UploadProgress) => void;
+}
+
+/**
+ * Module-level upload-progress channel.
+ *
+ * Record's composer is several layers above the socket (Record → submit.ts's
+ * uploadMedia → uploadAndMirror → upload), and threading a callback through
+ * every one of them to draw one progress bar is a lot of plumbing for a screen
+ * that only ever runs ONE upload at a time — the submit button is disabled for
+ * its whole duration. `playback.ts` already does exactly this for downloads.
+ * A subscriber gets every upload's progress; `server` says which.
+ */
+const uploadProgressListeners = new Set<(progress: UploadProgress) => void>();
+
+/** Subscribe to upload progress; returns the unsubscribe. */
+export function onUploadProgress(cb: (progress: UploadProgress) => void): () => void {
+  uploadProgressListeners.add(cb);
+  return () => uploadProgressListeners.delete(cb);
+}
+
+interface PutResult {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  /** The server's X-Reason header, when it sent one. */
+  reason: string | null;
+  body: string;
+}
+
+/**
+ * PUT the bytes with XMLHttpRequest, spending the three budgets above.
+ *
+ * XHR rather than fetch because `upload.onprogress` is the only broadly
+ * available way to see the request BODY moving: streaming a fetch request body
+ * needs `duplex: "half"` plus an HTTP/2 origin and is still not available
+ * everywhere, and without progress events there is nothing to reset a stall
+ * timer against — which is the whole point of this rewrite.
+ */
+function xhrPut(
+  url: string,
+  headers: Record<string, string>,
+  body: Uint8Array,
+  label: string,
+  emit: (sent: number) => void,
+): Promise<PutResult> {
+  return new Promise<PutResult>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+
+    const done = () => {
+      settled = true;
+      if (timer) clearTimeout(timer);
+    };
+    const fail = (message: string) => {
+      if (settled) return;
+      done();
+      // Abort re-enters as onabort, which the `settled` guard swallows.
+      try {
+        xhr.abort();
+      } catch {
+        /* already finished */
+      }
+      reject(new Error(message));
+    };
+    /** (Re)arm the single deadline. Each phase replaces the previous budget. */
+    const arm = (ms: number, message: string) => {
+      if (settled) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => fail(message), ms);
+    };
+
+    xhr.open("PUT", url, true);
+    for (const [name, value] of Object.entries(headers)) xhr.setRequestHeader(name, value);
+
+    xhr.upload.onprogress = (e) => {
+      arm(UPLOAD_STALL_TIMEOUT_MS, `${label} stalled: no data sent for ${UPLOAD_STALL_TIMEOUT_MS}ms`);
+      emit(e.loaded);
+    };
+    xhr.upload.onload = () => {
+      // Body fully sent; the server is now hashing/storing it, which for a large
+      // blob is legitimately a long silence — a different budget, not a stall.
+      emit(body.length);
+      arm(
+        UPLOAD_RESPONSE_TIMEOUT_MS,
+        `${label} timed out after ${UPLOAD_RESPONSE_TIMEOUT_MS}ms waiting for a response`,
+      );
+    };
+    xhr.onprogress = () => arm(UPLOAD_RESPONSE_TIMEOUT_MS, `${label} stalled reading the response`);
+    xhr.onload = () => {
+      if (settled) return;
+      done();
+      resolve({
+        ok: xhr.status >= 200 && xhr.status < 300,
+        status: xhr.status,
+        statusText: xhr.statusText,
+        reason: xhr.getResponseHeader("X-Reason"),
+        body: xhr.responseText ?? "",
+      });
+    };
+    xhr.onerror = () => fail(`${label} failed: network error`);
+    xhr.ontimeout = () => fail(`${label} timed out`);
+    xhr.onabort = () => fail(`${label} was aborted`);
+
+    arm(
+      UPLOAD_CONNECT_TIMEOUT_MS,
+      `${label} timed out after ${UPLOAD_CONNECT_TIMEOUT_MS}ms (no connection)`,
+    );
+    emit(0);
+    xhr.send(body as unknown as XMLHttpRequestBodyInit);
+  });
+}
+
+/** Fallback PUT for contexts without XMLHttpRequest — no body progress. */
+async function fetchPut(
+  url: string,
+  headers: Record<string, string>,
+  body: Uint8Array,
+  label: string,
+  emit: (sent: number) => void,
+): Promise<PutResult> {
+  emit(0);
+  const res = await fetchWithTimeout(
+    url,
+    { method: "PUT", headers, body: body as unknown as BodyInit },
+    UPLOAD_TIMEOUT_MS,
+    label,
+  );
+  emit(body.length);
+  return {
+    ok: res.ok,
+    status: res.status,
+    statusText: res.statusText,
+    reason: res.headers.get("X-Reason"),
+    body: await res.text(),
+  };
+}
+
 /** BUD-02 upload: PUT the ciphertext bytes. Returns the stored blob URL. */
 export async function upload(
   signer: AppSigner,
   server: string,
   ciphertext: Uint8Array,
   contentType = "application/octet-stream",
+  opts: UploadOptions = {},
 ): Promise<BlobDescriptor> {
   const sha256 = sha256Hex(ciphertext);
   const auth = await buildAuthEvent(signer, { verb: "upload", sha256 });
-  const res = await fetchWithTimeout(
+  const total = ciphertext.length;
+  const emit = (sent: number) => {
+    const progress: UploadProgress = { sent: Math.min(sent, total), total, server };
+    opts.onProgress?.(progress);
+    for (const listener of uploadProgressListeners) {
+      try {
+        listener(progress);
+      } catch {
+        /* a broken subscriber must never fail the upload */
+      }
+    }
+  };
+  const put = typeof XMLHttpRequest === "undefined" ? fetchPut : xhrPut;
+  const res = await put(
     `${trimServer(server)}/upload`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: authHeader(auth),
-        "Content-Type": contentType,
-      },
-      body: ciphertext as unknown as BodyInit,
-    },
-    UPLOAD_TIMEOUT_MS,
+    { Authorization: authHeader(auth), "Content-Type": contentType },
+    ciphertext,
     `Upload to ${server}`,
+    emit,
   );
   if (!res.ok) {
-    throw new Error(
-      `Upload to ${server} failed: ${res.status} ${res.headers.get("X-Reason") ?? res.statusText}`,
-    );
+    throw new Error(`Upload to ${server} failed: ${res.status} ${res.reason ?? res.statusText}`);
   }
-  const blob = (await res.json()) as { url?: string; sha256?: string; size?: number };
+  let blob: { url?: string } = {};
+  try {
+    blob = JSON.parse(res.body) as { url?: string };
+  } catch {
+    // BUD-02 says the response is a blob descriptor, but a server that answers
+    // 200 with something else still stored the blob at its content address.
+  }
+  // Take the server's URL only if it actually points at OUR blob (audit MED-9).
+  // Blossom is content-addressed, so a descriptor URL that does not carry the
+  // sha256 we uploaded is either a broken server or one substituting a different
+  // blob — and this URL goes straight into the media descriptor other people
+  // fetch from. The coordinator re-verifies the hash on download and would reject
+  // the substitute, but the app's own players would have followed it, and there
+  // is no reason to publish a pointer we can already tell is wrong.
+  const serverUrl = blob.url?.includes(sha256) ? blob.url : undefined;
   return {
-    url: blob.url ?? `${trimServer(server)}/${sha256}`,
+    url: serverUrl ?? `${trimServer(server)}/${sha256}`,
     sha256,
     size: ciphertext.length,
     type: contentType,
@@ -253,6 +457,7 @@ export async function uploadAndMirror(
   servers: string[],
   ciphertext: Uint8Array,
   contentType: string,
+  opts: UploadOptions = {},
 ): Promise<{ urls: string[]; sha256: string; primary: string }> {
   if (servers.length === 0) throw new Error("no Blossom servers configured");
   let primary: BlobDescriptor | undefined;
@@ -260,7 +465,7 @@ export async function uploadAndMirror(
   const errors: string[] = [];
   for (let i = 0; i < servers.length; i++) {
     try {
-      primary = await upload(signer, servers[i]!, ciphertext, contentType);
+      primary = await upload(signer, servers[i]!, ciphertext, contentType, opts);
       rest = servers.slice(i + 1);
       break;
     } catch (e) {
@@ -310,7 +515,7 @@ export async function deleteBlob(
  * point at a multi-GB endpoint, and a whole-file `arrayBuffer()` would take the
  * tab down. 250 MB is far above any legit intro/talk video.
  */
-export const MAX_MEDIA_DOWNLOAD_BYTES = 250 * 1024 * 1024;
+export const MAX_MEDIA_DOWNLOAD_BYTES = MAX_MEDIA_FILE_BYTES;
 
 /** How much of a blob's ciphertext has arrived, for a progress indicator. */
 export interface DownloadProgress {
@@ -357,12 +562,12 @@ async function readCapped(
 ): Promise<Uint8Array> {
   const contentLength = Number(res.headers.get("content-length") ?? 0);
   if (contentLength > maxBytes) {
-    throw new Error(`blob is ${contentLength} bytes — over the ${maxBytes}-byte cap (${url})`);
+    throw new Error(`blob is ${contentLength} bytes, over the ${maxBytes}-byte cap (${url})`);
   }
   // Content-Length first; a cross-origin response that doesn't expose it still
   // has the descriptor's own ciphertext size to show a real percentage against.
   const total = contentLength > 0 ? contentLength : opts.expectedSize;
-  const stalled = `Download from ${url} stalled — no data for ${DOWNLOAD_STALL_TIMEOUT_MS}ms`;
+  const stalled = `Download from ${url} stalled: no data for ${DOWNLOAD_STALL_TIMEOUT_MS}ms`;
 
   const reader = res.body?.getReader();
   if (!reader) {
@@ -377,7 +582,7 @@ async function readCapped(
       ),
     );
     if (bytes.length > maxBytes) {
-      throw new Error(`blob is ${bytes.length} bytes — over the ${maxBytes}-byte cap (${url})`);
+      throw new Error(`blob is ${bytes.length} bytes, over the ${maxBytes}-byte cap (${url})`);
     }
     return bytes;
   }
@@ -396,7 +601,7 @@ async function readCapped(
     received += value.byteLength;
     if (received > maxBytes) {
       await reader.cancel().catch(() => {});
-      throw new Error(`blob passed the ${maxBytes}-byte download cap — aborted (${url})`);
+      throw new Error(`blob passed the ${maxBytes}-byte download cap and was aborted (${url})`);
     }
     chunks.push(value);
     opts.onProgress?.({ received, total });

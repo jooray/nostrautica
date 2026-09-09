@@ -11,7 +11,13 @@ import type { Store, JobRow, EnqueueOutcome } from "../store/db.js";
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn; signal: AbortSignal }) => Promise<void>;
 /** Returns what the enqueue did, so a caller can summarize a dispatch (see
  *  {@link JobRunner.enqueue}); most callers ignore it. */
-export type EnqueueFn = (type: string, dedupeKey: string, payload: unknown) => EnqueueOutcome;
+export type EnqueueFn = (
+  type: string,
+  dedupeKey: string,
+  payload: unknown,
+  /** Epoch ms before which the job must not run (default: runnable immediately). */
+  notBefore?: number,
+) => EnqueueOutcome;
 
 /** `[hh:mm:ss] ` prefix, matching coordinator.ts's `log()`. */
 function stamp(): string {
@@ -32,12 +38,15 @@ export class ParkJobError extends Error {
   }
 }
 
-/** A poisoned job, surfaced so the coordinator can notify the organizer (Q12). */
+/** A poisoned job, surfaced so the coordinator can notify the organizer (Q12).
+ *  `parked` marks the {@link JobRunnerOptions.poisonExempt} variant: the job was
+ *  NOT discarded, but it has stopped and needs someone to act. */
 export interface PoisonInfo {
   type: string;
   payload: any;
   attempts: number;
   error: string;
+  parked?: { reason: string };
 }
 
 export interface JobRunnerOptions {
@@ -72,6 +81,25 @@ export interface JobRunnerOptions {
    * classification is injected by the coordinator.
    */
   poisonExempt?: (err: unknown) => string | undefined;
+  /**
+   * Consulted on every failure: return a SHORTER attempt cap for this error, or
+   * undefined for the default tail.
+   *
+   * The default schedule spends ~26 attempts over three days, which is right for a
+   * failure that might clear on its own — a relay outage, a provider hiccup. It is
+   * exactly wrong for a DETERMINISTIC failure, where the same prompt and the same
+   * model will produce the same malformed shape every time: those spent three fully
+   * billed days re-asking a question already answered, and only then poisoned.
+   *
+   * Prod evidence (2026-09-04): two attendees sat poisoned since mid-July on
+   * `process_attendee` with error_category=provider_contract, and a third cleared
+   * only after 27 attempts. The classification already existed — it was computed
+   * for the organizer's status notice and then thrown away.
+   *
+   * Injected rather than inferred here: the runner deliberately knows nothing about
+   * providers, same as {@link poisonExempt}.
+   */
+  retryBudget?: (err: unknown) => number | undefined;
 }
 
 /** 1s, 10s, 100s, six tries ~1h apart, then every 4h until ~3 days have elapsed. */
@@ -98,6 +126,7 @@ export class JobRunner {
   private readonly now: () => number;
   private readonly onPoison?: (info: PoisonInfo) => void;
   private readonly poisonExempt?: (err: unknown) => string | undefined;
+  private readonly retryBudget?: (err: unknown) => number | undefined;
 
   constructor(private readonly store: Store, opts: JobRunnerOptions = {}) {
     this.backoffSchedule =
@@ -110,6 +139,7 @@ export class JobRunner {
     this.now = opts.now ?? (() => Date.now());
     this.onPoison = opts.onPoison;
     this.poisonExempt = opts.poisonExempt;
+    this.retryBudget = opts.retryBudget;
   }
 
   /** Backoff for the Nth failed attempt (1-indexed); the last schedule entry repeats. */
@@ -131,8 +161,8 @@ export class JobRunner {
    * existed the only symptom was a dispatch log followed by silence forever
    * (production incident 2026-07-24).
    */
-  enqueue(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
-    const outcome = this.store.enqueueJob(type, dedupeKey, payload);
+  enqueue(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
+    const outcome = this.store.enqueueJob(type, dedupeKey, payload, notBefore);
     if (outcome === "done" || outcome === "poison") {
       console.warn(
         `[${stamp()}] [job] ${type} enqueue DISCARDED — dedupe key already '${outcome}': ${dedupeKey.slice(0, 120)} — this work will NOT run`,
@@ -171,10 +201,22 @@ export class JobRunner {
     return this.abortController.signal;
   }
 
-  /** Abort the in-flight handler (audit C11): fired after the graceful-drain window
-   *  expires so a blocked provider/media call unwinds. The caller MUST then await the
-   *  outstanding drain promise before closing transport/store/lock. Idempotent. */
+  /**
+   * Abort the in-flight handler (audit C11): fired after the graceful-drain window
+   * expires so a blocked provider/media call unwinds. The caller MUST then await the
+   * outstanding drain promise before closing transport/store/lock. Idempotent.
+   *
+   * Also stops claiming, which `main.ts` already did on its own line before calling
+   * this. It has to be here rather than only at the call site: once the signal is
+   * aborted, every job the drain loop goes on to claim is handed an already-aborted
+   * signal, so the loop would spin through the whole queue handing out cancellations
+   * — and now that an aborted job is RELEASED back to `pending` (runnable at once)
+   * instead of left `running` under an unexpired lease, that spin is on the same row
+   * forever, up to `maxIterations`. Aborting and continuing to claim is not a
+   * combination anything wants.
+   */
   abort(reason = "coordinator shutting down"): void {
+    this.stopping = true;
     if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
   }
 
@@ -281,12 +323,25 @@ export class JobRunner {
       }
     } catch (err) {
       const ms = this.now() - startedAt;
-      // A shutdown abort (audit C11) is not a real failure: leave the job `running`
-      // with its lease so it is neither retried-toward-poison nor lost — the next
-      // start's stranded-lease recovery reclaims it. Consumes no retry.
+      // A shutdown abort (audit C11) is not a real failure: hand the row straight
+      // back to the queue, runnable NOW and with its retry counter untouched.
+      //
+      // This used to just `return`, leaving the row `running` and calling that
+      // "claimable for restart". It was not: `claimNextJob`'s stranded-job arm and
+      // `reclaimExpiredLeases` BOTH require `lease_until <= now`, and the heartbeat
+      // had pushed that lease to `now + leaseMs` less than a third of a lease ago.
+      // A deploy landing mid-job therefore idled that attendee's pipeline for up to
+      // the full five-minute lease past the restart, while the fresh daemon logged
+      // "recovered 0 stranded job(s)" — the gap had no explanation anywhere.
+      // `releaseJob` preserves the documented "consumes no retry" contract (unlike
+      // failJob) and does not park it out of reach (unlike parkJob).
       if (this.abortController.signal.aborted) {
+        const released = this.store.releaseJob(job.id, token);
         console.log(
-          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms — left claimable for restart`,
+          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms — ` +
+            (released
+              ? "released back to the queue, runnable immediately on restart (no retry consumed)"
+              : "lease already lost — another worker owns the row"),
         );
         return;
       }
@@ -302,7 +357,10 @@ export class JobRunner {
         return;
       }
       const attempts = job.attempts + 1;
-      const poison = attempts >= this.maxAttempts;
+      // A deterministic failure gets a short cap; everything else keeps the long
+      // tail. Never longer than the default — this may only tighten.
+      const budget = Math.min(this.retryBudget?.(err) ?? this.maxAttempts, this.maxAttempts);
+      const poison = attempts >= budget;
       const backoff = this.backoffForAttempt(attempts);
       const msg = err instanceof Error ? err.message : String(err);
       // Out of retries, but the failure says the provider account is empty rather
@@ -318,11 +376,29 @@ export class JobRunner {
           console.warn(
             `[${stamp()}] [job] ${job.type} #${job.id} PARKED instead of poisoned after ${attempts} attempt(s)${parked ? "" : " [lease lost — not applied]"}: ${parkReason} — ${msg.slice(0, 200)}`,
           );
+          // Tell somebody. This park is reached only after the retry tail ran out
+          // — three days — so it means "this outage outlasted every retry", and
+          // the work now sits waiting for a human (a provider top-up, an organizer
+          // reprocess). It used to return here without calling `onPoison`, so no
+          // 21606 went out at all: the organizer's Admin view showed nothing wrong
+          // and the attendee's screen said "processing" indefinitely. Same
+          // notification as a poison, with the reason attached — it is the same
+          // fact to the reader ("this stopped and needs you"), and it stays inside
+          // the frozen 21606 schema.
+          if (parked && this.onPoison) {
+            this.onPoison({
+              type: job.type,
+              payload: safeParse(job.payload),
+              attempts,
+              error: msg,
+              parked: { reason: parkReason },
+            });
+          }
           return;
         }
       }
       console.warn(
-        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? "POISONED" : `failed (retry ${attempts}/${this.maxAttempts}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
+        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? `POISONED after ${attempts}/${budget}` : `failed (retry ${attempts}/${budget}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
       );
       const owned = this.store.failJob(job.id, attempts, this.now() + backoff, msg, poison, token);
       // Only surface the poison if we still owned the lease (a stale worker whose

@@ -4,12 +4,21 @@
  * legacy plaintext rows, and idempotency of that migration.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DatabaseSync } from "node:sqlite";
 import { generateSecretKey } from "nostr-tools/pure";
 import { bytesToHex } from "@nostrautica/protocol";
-import { Store, acquireDaemonLock, inspectDatabaseReadOnly, SCHEMA_VERSION } from "./db.js";
+import {
+  Store,
+  acquireDaemonLock,
+  inspectDatabaseReadOnly,
+  inspectPipelineReadOnly,
+  SCHEMA_VERSION,
+  DEFAULT_BUSY_TIMEOUT_MS,
+} from "./db.js";
 
 const ENC_PREFIX = "nip44:";
 
@@ -779,6 +788,76 @@ describe("reference-counted purge (audit C5)", () => {
 });
 
 /**
+ * Daemon-wide usage accounting (audit SEC-7). The per-event/per-attendee counters
+ * are lifetime and scoped to one installation, which is exactly why they cannot
+ * see the abuse they leave open: install is protocol-level, so an attacker gets
+ * `max_events` separate lifetime budgets against one provider key. These rows are
+ * the total across all of them, and the two properties that matter are that the
+ * window rolls (so a busy coordinator lets itself out) and that nothing an
+ * installer can trigger resets it.
+ */
+describe("SEC-7 daemon-wide usage window", () => {
+  const HOUR = 3_600_000;
+  const T0 = 1_700_000_000_000;
+
+  it("sums every event's spend and rolls old buckets out of the window", () => {
+    const store = new Store();
+    store.addUsage("31923:eid:a", "pk1", { calls: 3, bytes: 10 }, T0);
+    store.addUsage("31923:eid:b", "pk2", { calls: 4, bytes: 20 }, T0);
+    // Two different events, one total.
+    expect(store.getDaemonUsage(T0, 24)).toEqual({ bytes: 30, durationSec: 0, calls: 7 });
+
+    // 30 hours later the original spend has aged out of a 24h window, while a
+    // fresh call inside it still counts.
+    store.addUsage("31923:eid:a", "pk1", { calls: 1 }, T0 + 30 * HOUR);
+    expect(store.getDaemonUsage(T0 + 30 * HOUR, 24)).toEqual({ bytes: 0, durationSec: 0, calls: 1 });
+    // A wider window still sees both.
+    expect(store.getDaemonUsage(T0 + 30 * HOUR, 48).calls).toBe(8);
+  });
+
+  it("keeps the total when an event is purged — a purge must not reset the ceiling", () => {
+    const store = new Store();
+    const c = "31923:eid:doomed";
+    store.addUsage(c, "pk", { calls: 5, bytes: 100 }, T0);
+    store.purgeEventArtifacts(c);
+    // The event's own counters are gone with the event...
+    expect(store.getEventUsage(c)).toEqual({ bytes: 0, durationSec: 0, calls: 0 });
+    // ...but the daemon-wide window is not something an installer gets to clear by
+    // detaching and reinstalling, or the ceiling would be a formality.
+    expect(store.getDaemonUsage(T0, 24)).toEqual({ bytes: 100, durationSec: 0, calls: 5 });
+  });
+
+  it("prunes buckets far outside any window it can be asked for", () => {
+    const store = new Store();
+    store.addUsage("31923:eid:a", "pk", { calls: 1 }, T0);
+    store.addUsage("31923:eid:a", "pk", { calls: 1 }, T0 + 24 * 8 * HOUR);
+    // The eight-day-old bucket is gone, so the table cannot grow without bound on
+    // a daemon that runs for a year.
+    expect(store.getDaemonUsage(T0 + 24 * 8 * HOUR, 24 * 7).calls).toBe(1);
+  });
+
+  it("releases only jobs parked by the daemon ceiling", () => {
+    const store = new Store();
+    const c = "31923:eid:a";
+    store.enqueueJob("work", "k1", { coordinate: c });
+    store.enqueueJob("work", "k2", { coordinate: c });
+    const a = store.claimNextJob(1, "w", 60_000)!;
+    store.parkJob(a.id, "daemon budget exceeded: daemon calls 9 ≥ 9 in 24h", "w");
+    const b = store.claimNextJob(1, "w", 60_000)!;
+    store.parkJob(b.id, "billing blocked for " + c, "w");
+    expect(store.waitingJobCount(c)).toBe(2);
+
+    // A daemon-ceiling release runs across every event on a timer. If it resumed
+    // by state rather than by park reason it would hand billing-blocked and
+    // over-budget events free provider calls every ten minutes.
+    expect(store.resumeDaemonParkedJobs()).toBe(1);
+    expect(store.waitingJobCount(c)).toBe(1);
+    // Idempotent: the resumed row's reason is cleared, so a second sweep is a no-op.
+    expect(store.resumeDaemonParkedJobs()).toBe(0);
+  });
+});
+
+/**
  * The job queue's memory of finished work (production incident 2026-07-24). The
  * dedupe key is what stops a re-delivered rumor or a mid-pipeline restart from
  * paying twice — but a TERMINAL row keeps that key for 30 days, so the same key
@@ -976,5 +1055,442 @@ describe("Store at-rest values larger than one NIP-44 plaintext", () => {
     store.marmotKvSet("group-state", "legacy", "written by the old binary");
     expect(rawKv(store, "group-state", "legacy").startsWith(ENC_PREFIX)).toBe(true);
     expect(store.marmotKvGet("group-state", "legacy")).toBe("written by the old binary");
+  });
+});
+
+/**
+ * Job SQL matched the wrong rows for organizer-chosen identifiers (2026-09-04).
+ *
+ * The app's own slug generator only emits `[a-z0-9-]`, so both bugs are latent
+ * there — but `parseCoordinate` accepts any identifier, so a third-party-authored
+ * 31923 reaches them.
+ */
+describe("job matching survives an organizer-chosen identifier", () => {
+  const tmp = () => mkdtempSync(join(tmpdir(), "nostrautica-db-"));
+
+  it("supersedePendingJobs cancels the older revision when the id contains an underscore", () => {
+    // `LIKE` has no default escape character in SQLite, so escaping `_` without an
+    // ESCAPE clause matched the backslash LITERALLY and the delete hit nothing —
+    // leaving the coordinator to pay for a recording the attendee had replaced.
+    const store = new Store(":memory:");
+    const prefix = "proc:31923:pk:my_event-ab12:";
+    store.enqueueJob("process_attendee", `${prefix}r1`, { coordinate: "c" });
+    store.enqueueJob("process_attendee", `${prefix}r2`, { coordinate: "c" });
+    expect(store.supersedePendingJobs(prefix, `${prefix}r2`)).toBe(1);
+  });
+
+  it("supersedePendingJobs does not reach across a different prefix", () => {
+    const store = new Store(":memory:");
+    store.enqueueJob("process_attendee", "proc:31923:pk:a_b:r1", { coordinate: "c" });
+    store.enqueueJob("process_attendee", "proc:31923:pk:other:r1", { coordinate: "c" });
+    expect(store.supersedePendingJobs("proc:31923:pk:a_b:", "keep")).toBe(1);
+    expect(store.waitingJobCount()).toBe(0);
+  });
+
+  it("resumeWaitingJobs matches one coordinate exactly, never every parked job", () => {
+    // A `%` in the identifier made `payload LIKE '%\"coordinate\":\"<coord>\"%'` match
+    // EVERY parked row, so unblocking one event resumed paid work parked for other
+    // events that were still billing-blocked — a cross-tenant spend-gate bypass.
+    const store = new Store(":memory:");
+    const wild = "31923:pk:party-%";
+    const other = "31923:pk:other-event";
+    store.enqueueJob("process_attendee", "k1", { coordinate: wild });
+    store.enqueueJob("process_attendee", "k2", { coordinate: other });
+    for (const key of ["k1", "k2"]) {
+      const job = store.claimNextJob(Date.now(), `w-${key}`, 60_000);
+      store.parkJob(job!.id, "budget", `w-${key}`);
+    }
+    expect(store.waitingJobCount(other)).toBe(1);
+    expect(store.resumeWaitingJobs(wild)).toBe(1); // not 2
+    expect(store.waitingJobCount(other)).toBe(1); // the other event stays parked
+  });
+
+  it("resumeWaitingJobs still matches an identifier containing a quote", () => {
+    // The mirror-image failure: a `\"` is JSON-escaped in the stored payload but was
+    // not in the pattern, so that event's parked work never resumed at all.
+    const store = new Store(":memory:");
+    const quoted = '31923:pk:say-"hi"';
+    store.enqueueJob("process_attendee", "q1", { coordinate: quoted });
+    const job = store.claimNextJob(Date.now(), "w", 60_000);
+    store.parkJob(job!.id, "budget", "w");
+    expect(store.resumeWaitingJobs(quoted)).toBe(1);
+  });
+
+  void tmp;
+});
+
+
+// ── SQLITE_BUSY handling ─────────────────────────────────────────────────────
+describe("lock contention (busy_timeout)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-busy-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("sets a non-zero busy timeout by default", () => {
+    // SQLite defaults to 0 — the first contended statement throws SQLITE_BUSY
+    // immediately. A busy error out of claimNextJob propagates through
+    // JobRunner.drain() into main.ts's loop and EXITS THE DAEMON, so a momentary
+    // overlap with an operator's backup used to be able to kill the coordinator.
+    const store = new Store(tmpDb());
+    const row = (store as any).db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
+    expect(row.timeout).toBe(DEFAULT_BUSY_TIMEOUT_MS);
+    store.close();
+  });
+
+  it("a contended write WAITS for the configured timeout instead of failing instantly", () => {
+    const path = tmpDb();
+    const holder = new Store(path);
+    const waiter = new Store(path, undefined, { busyTimeoutMs: 400 });
+    // The holder takes (and keeps) the write lock.
+    (holder as any).db.exec("BEGIN IMMEDIATE");
+    (holder as any).db.prepare("INSERT INTO jobs (type, dedupe_key, payload) VALUES ('t','held','{}')").run();
+    const started = Date.now();
+    expect(() => waiter.enqueueJob("t", "waiter", {})).toThrow();
+    const elapsed = Date.now() - started;
+    // With busy_timeout = 0 (the unfixed behaviour) this returns in ~0ms.
+    expect(elapsed).toBeGreaterThanOrEqual(300);
+    (holder as any).db.exec("ROLLBACK");
+    waiter.close();
+    holder.close();
+  });
+
+  it("busyTimeoutMs: 0 restores the fail-fast behaviour (the control for the test above)", () => {
+    const path = tmpDb();
+    const holder = new Store(path);
+    const waiter = new Store(path, undefined, { busyTimeoutMs: 0 });
+    (holder as any).db.exec("BEGIN IMMEDIATE");
+    (holder as any).db.prepare("INSERT INTO jobs (type, dedupe_key, payload) VALUES ('t','held','{}')").run();
+    const started = Date.now();
+    expect(() => waiter.enqueueJob("t", "waiter", {})).toThrow();
+    expect(Date.now() - started).toBeLessThan(250);
+    (holder as any).db.exec("ROLLBACK");
+    waiter.close();
+    holder.close();
+  });
+});
+
+// ── backup must not migrate the database it is snapshotting ──────────────────
+describe("Store({ migrate: false }) — the snapshot open (§13.2)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-nomig-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("leaves user_version exactly as found, where a normal open would migrate it", async () => {
+    const path = tmpDb();
+    // A database written by an OLDER binary — the routine case on the box, where the
+    // deploy rsyncs source and the operator's binary is ahead of the file.
+    const seed = new Store(path);
+    seed.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION - 1}`);
+    raw.close();
+
+    const snapshotOpen = new Store(path, undefined, { migrate: false });
+    expect(snapshotOpen.schemaVersion()).toBe(SCHEMA_VERSION - 1);
+    snapshotOpen.close();
+    // Still v(N-1) on disk: a schema migration is ONE-WAY, so backup applying one
+    // would destroy the very pre-migration rollback point it is being taken for.
+    expect(inspectDatabaseReadOnly(path).userVersion).toBe(SCHEMA_VERSION - 1);
+
+    // A normal open is what DOES migrate — the behaviour backup must not have.
+    const daemonOpen = new Store(path);
+    expect(daemonOpen.schemaVersion()).toBe(SCHEMA_VERSION);
+    daemonOpen.close();
+  });
+
+  it("still refuses a database written by a NEWER binary", async () => {
+    const path = tmpDb();
+    const seed = new Store(path);
+    seed.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+    raw.close();
+    expect(() => new Store(path, undefined, { migrate: false })).toThrow(/NEWER coordinator/);
+  });
+});
+
+// ── file modes ───────────────────────────────────────────────────────────────
+describe("store file permissions", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it("the SQLite file and its WAL sidecars are owner-only", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-mode-"));
+    dirs.push(dir);
+    const path = join(dir, "coordinator.sqlite");
+    const store = new Store(path);
+    // Force the -wal/-shm into existence before checking them.
+    store.enqueueJob("t", "k", {});
+    const { statSync } = await import("node:fs");
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const st = statSync(path + suffix);
+      // Only the per-event key columns are encrypted at rest (F1) — attendee names,
+      // profiles, transcripts, match scores and the Cashu journal are cleartext here,
+      // so the file mode is the only thing protecting them.
+      expect(st.mode & 0o077).toBe(0);
+    }
+    store.close();
+  });
+});
+
+// ── shutdown release ─────────────────────────────────────────────────────────
+describe("releaseJob (shutdown abort)", () => {
+  it("returns the row to pending, runnable NOW, with attempts untouched", () => {
+    const store = new Store();
+    store.enqueueJob("process_attendee", "k", { coordinate: "c", pubkey: "p" });
+    const now = 1_000_000;
+    const job = store.claimNextJob(now, "worker-1", 5 * 60_000)!;
+    expect(job.lease_until).toBe(now + 5 * 60_000);
+
+    expect(store.releaseJob(job.id, "worker-1")).toBe(true);
+
+    // Immediately claimable at the SAME instant. Left `running` (the old behaviour)
+    // it would have stayed unclaimable until its lease expired five minutes later,
+    // because claimNextJob's stranded arm requires lease_until <= now.
+    const again = store.claimNextJob(now, "worker-2", 5 * 60_000);
+    expect(again?.id).toBe(job.id);
+    expect(again?.attempts).toBe(0); // consumed no retry
+  });
+
+  it("refuses a worker that has lost its lease", () => {
+    const store = new Store();
+    store.enqueueJob("t", "k", {});
+    const job = store.claimNextJob(1000, "worker-1", 60_000)!;
+    expect(store.releaseJob(job.id, "stale-worker")).toBe(false);
+  });
+});
+
+// ── poisoned process_talk had no remedy at all ───────────────────────────────
+describe("clearAttendeeJobMemo covers process_talk", () => {
+  it("frees a POISONED talk job whose dedupe key is content-addressed on the media hash", () => {
+    const store = new Store();
+    const coordinate = "31923:aaaa:evt";
+    const pubkey = "b".repeat(64);
+    // The key a re-submission of the SAME recording reproduces exactly.
+    const key = `talk:${coordinate}:${pubkey}:my-talk:${"c".repeat(64)}`;
+    store.enqueueJob("process_talk", key, { coordinate, pubkey, talkD: "my-talk" });
+    const job = store.claimNextJob(1000, "w", 60_000)!;
+    store.failJob(job.id, 26, 2000, "provider contract", true, "w");
+    expect(store.enqueueJob("process_talk", key, { coordinate, pubkey })).toBe("poison");
+
+    expect(store.clearAttendeeJobMemo(coordinate, pubkey)).toBe(1);
+    expect(store.enqueueJob("process_talk", key, { coordinate, pubkey })).toBe("enqueued");
+  });
+
+  it("still leaves another attendee's talk row alone", () => {
+    const store = new Store();
+    const coordinate = "31923:aaaa:evt";
+    const mine = "b".repeat(64);
+    const theirs = "d".repeat(64);
+    store.enqueueJob("process_talk", "t:theirs", { coordinate, pubkey: theirs });
+    const job = store.claimNextJob(1000, "w", 60_000)!;
+    store.failJob(job.id, 3, 2000, "x", true, "w");
+    expect(store.clearAttendeeJobMemo(coordinate, mine)).toBe(0);
+    expect(store.enqueueJob("process_talk", "t:theirs", { coordinate, pubkey: theirs })).toBe("poison");
+  });
+});
+
+// ── a rollback that throws must not eat the original exception ───────────────
+describe("guarded ROLLBACK in the purge paths", () => {
+  /** A db façade whose ROLLBACK throws the way SQLite does after an auto-rollback. */
+  function withHostileRollback(store: Store, failOn: RegExp): void {
+    const real = (store as any).db;
+    (store as any).db = {
+      prepare(sql: string) {
+        if (failOn.test(sql)) throw new Error("the original failure");
+        return real.prepare(sql);
+      },
+      exec(sql: string) {
+        if (sql === "ROLLBACK") throw new Error("cannot rollback - no transaction is active");
+        return real.exec(sql);
+      },
+    };
+  }
+
+  it("purgeEventArtifacts surfaces the ORIGINAL error, not the rollback complaint", () => {
+    const store = new Store();
+    withHostileRollback(store, /DELETE FROM attendees/);
+    expect(() => store.purgeEventArtifacts("31923:a:e")).toThrow("the original failure");
+  });
+
+  it("purgeAttendeeArtifacts surfaces the ORIGINAL error, not the rollback complaint", () => {
+    const store = new Store();
+    withHostileRollback(store, /DELETE FROM attendees/);
+    expect(() => store.purgeAttendeeArtifacts("31923:a:e", "p".repeat(64))).toThrow("the original failure");
+  });
+});
+
+// ── doctor's pipeline read ───────────────────────────────────────────────────
+describe("inspectPipelineReadOnly (doctor)", () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  function tmpDb(): string {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-pipe-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  }
+
+  it("reports queue depth, the poisoned rows, and the last completion", () => {
+    const path = tmpDb();
+    const store = new Store(path);
+    const coordinate = "31923:aaaa:evt";
+    const pubkey = "e".repeat(64);
+
+    store.enqueueJob("process_attendee", "poisoned", { coordinate, pubkey });
+    const bad = store.claimNextJob(1_000, "w", 60_000)!;
+    store.failJob(bad.id, 26, 2_000, "provider returned a malformed profile", true, "w");
+    store.recordJobStatus({
+      coordinate,
+      stage: "process_attendee",
+      pubkey,
+      state: "poison",
+      attempts: 26,
+      error_category: "provider_contract",
+      retryable: 1,
+      updated_at: 5_000,
+    });
+
+    store.enqueueJob("score_batch", "finished", { coordinate });
+    const good = store.claimNextJob(2_000, "w2", 60_000)!;
+    store.completeJob(good.id, "w2");
+
+    store.enqueueJob("publish_matches", "waiting-one", { coordinate });
+    store.close();
+
+    const p = inspectPipelineReadOnly(path);
+    expect(p.counts.poison).toBe(1);
+    expect(p.counts.done).toBe(1);
+    expect(p.counts.pending).toBe(1);
+    expect(p.poisonJobs).toHaveLength(1);
+    expect(p.poisonJobs[0]!.type).toBe("process_attendee");
+    expect(p.poisonJobs[0]!.coordinate).toBe(coordinate);
+    expect(p.poisonJobs[0]!.pubkey).toBe(pubkey);
+    expect(p.poisonStatuses).toHaveLength(1);
+    expect(p.poisonStatuses[0]!.error_category).toBe("provider_contract");
+    expect(p.lastCompletedStartedAt).toBe(2_000);
+    expect(p.oldestPending?.type).toBe("publish_matches");
+  });
+
+  it("leaves the file byte-identical (same audit-O2 contract as the schema read)", () => {
+    const path = tmpDb();
+    const store = new Store(path);
+    store.enqueueJob("t", "k", { coordinate: "c" });
+    store.close();
+    const before = readFileSync(path);
+    inspectPipelineReadOnly(path);
+    expect(readFileSync(path).equals(before)).toBe(true);
+  });
+
+  it("tolerates a database that predates the pipeline tables", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-pipe-old-"));
+    dirs.push(dir);
+    const path = join(dir, "old.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("CREATE TABLE events (coordinate TEXT PRIMARY KEY)");
+    raw.close();
+    const p = inspectPipelineReadOnly(path);
+    expect(p.counts).toEqual({});
+    expect(p.poisonJobs).toEqual([]);
+    expect(p.lastCompletedStartedAt).toBeNull();
+  });
+});
+
+/**
+ * A schema migration takes its own rollback point (audit OPS-2).
+ *
+ * A pending migration makes the file unreadable to every older binary — the
+ * "written by a NEWER coordinator, refusing to open" refusal is exactly that seen
+ * from the other side — so the only way back is a copy of the file as it stands
+ * before it runs. CLAUDE.md documented taking one by hand before any push that
+ * bumps SCHEMA_VERSION, and nothing enforced it: a ritual performed under deploy
+ * pressure by whoever happens to be pushing, where the one time it is skipped is
+ * the one time it is needed.
+ */
+describe("pre-migration backup (audit OPS-2)", () => {
+  const tmp = () => join(mkdtempSync(join(tmpdir(), "nostrautica-migrate-")), "coordinator.sqlite");
+  const backupsIn = (dbPath: string) =>
+    readdirSync(dirname(dbPath)).filter((f) => f.endsWith(".bak"));
+
+  it("writes one, named for the version the file CONTAINS, when a migration is pending", () => {
+    const path = tmp();
+    // A v1 database: the baseline shape, nothing beyond it.
+    const seed = new DatabaseSync(path);
+    seed.exec("PRAGMA user_version = 1");
+    seed.close();
+
+    new Store(path).close();
+
+    const backups = backupsIn(path);
+    expect(backups).toHaveLength(1);
+    // `.v1-…`, not `.v5-…`: it holds v1, which is what a restore needs to know.
+    // The first hand-taken v4→v5 backup was labelled `pre-v5` while holding v4.
+    expect(backups[0]).toMatch(/\.v1-\d{8}T\d{6}\.bak$/);
+
+    // And it is a real, readable database still at the old version.
+    const restored = new DatabaseSync(join(dirname(path), backups[0]!), { readOnly: true });
+    const uv = (restored.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    restored.close();
+    expect(uv).toBe(1);
+  });
+
+  it("writes nothing when the database is already current", () => {
+    const path = tmp();
+    new Store(path).close(); // creates + migrates to SCHEMA_VERSION
+    const after = backupsIn(path).length;
+    new Store(path).close(); // reopen: nothing pending
+    expect(backupsIn(path).length).toBe(after);
+  });
+
+  it("never writes one for an in-memory database", () => {
+    // No file, nothing to roll back to, and no directory to litter.
+    expect(() => new Store(":memory:").close()).not.toThrow();
+  });
+});
+
+/**
+ * `docs/VERSIONING.md` is the page an operator reads before deciding a rollback is
+ * safe, and the migration it describes is ONE-WAY. It said "Currently `2`" while
+ * the code was at 5 and production was at 5, with three substantive migrations
+ * documented nowhere (audit DOC-1). A number in prose drifts silently; this is the
+ * same guard `packages/protocol/src/registry.test.ts` already gives the protocol
+ * registry.
+ */
+describe("docs/VERSIONING.md: schema version drift guard", () => {
+  const docPath = fileURLToPath(new URL("../../../../docs/VERSIONING.md", import.meta.url));
+  const doc = readFileSync(docPath, "utf8");
+
+  it("the documented `SCHEMA_VERSION` (Store schema row, 'Currently `N`.') matches the code", () => {
+    const row = doc.split("\n").find((l) => l.startsWith("| Store schema "));
+    expect(row, "Store schema row in the versions table").toBeDefined();
+    const m = row!.match(/Currently `(\d+)`\./);
+    expect(m, `a 'Currently \`N\`.' clause in: ${row}`).not.toBeNull();
+    expect(Number(m![1])).toBe(SCHEMA_VERSION);
+  });
+
+  it("every schema version from 2 through SCHEMA_VERSION has a row in the migration history table", () => {
+    for (let v = 2; v <= SCHEMA_VERSION; v++) {
+      expect(doc, `no '| \`${v}\` |' row documenting migration to version ${v}`).toMatch(
+        new RegExp("\\|\\s*`" + v + "`\\s*\\|"),
+      );
+    }
   });
 });

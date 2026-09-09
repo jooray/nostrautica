@@ -195,7 +195,7 @@ export async function buildOfflinePack(
       throw new Error(
         readiness.controlled
           ? "entry shell assets are not all in Cache Storage yet"
-          : "no service worker controls the page — app code can't be cached offline",
+          : "no service worker controls the page, so app code can't be cached offline",
       );
     }
     return readiness.cached;
@@ -210,7 +210,7 @@ export async function buildOfflinePack(
   // reconnect.
   await run("modules", false, async () => {
     if (!controlled) {
-      throw new Error("no service worker control — route chunks can't be cached offline");
+      throw new Error("no service worker control, so route chunks can't be cached offline");
     }
     const warmed = await warmRouteModules(PARTICIPANT_OFFLINE_ROUTES);
     if (warmed < PARTICIPANT_OFFLINE_ROUTES.length) {

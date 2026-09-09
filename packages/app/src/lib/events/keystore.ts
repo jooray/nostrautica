@@ -139,7 +139,7 @@ function openDb(): Promise<IDBDatabase> {
     req.onblocked = () =>
       reject(
         new Error(
-          "event key store upgrade is blocked by another open tab — close the app's other tabs and retry",
+          "event key store upgrade is blocked by another open tab. Close the app's other tabs and retry",
         ),
       );
   });
@@ -446,6 +446,24 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
     eck: [...byId.values()].sort((a, b) => a.id - b.id),
     eidNsecHex: primary.eidNsecHex ?? fallback.eidNsecHex,
     einboxNsecHex: primary.einboxNsecHex ?? fallback.einboxNsecHex,
+    // UNION, not "primary wins". These are retired E_inbox secrets kept so the
+    // organizer can still read submissions sealed to a PRE-ROTATION inbox, and
+    // this function reconstructs the record field by field — so omitting them,
+    // as it did, silently discarded exactly the history the field exists for.
+    //
+    // The reachable path: a detach rotates E_inbox and retains the old secret;
+    // on the next login some grant writes a live record before
+    // `unlockEventKeysForLogin` restores the snapshot, so `existing` is truthy
+    // and this merge runs with the restored keys as `fallback`. Every join
+    // request and submission sealed to the old inbox becomes unreadable, with
+    // nothing to say so. Losing key custody is the one outcome this module
+    // exists to prevent, so it unions both sides and de-duplicates.
+    ...(() => {
+      const prior = [
+        ...new Set([...(primary.priorEinboxNsecs ?? []), ...(fallback.priorEinboxNsecs ?? [])]),
+      ];
+      return prior.length > 0 ? { priorEinboxNsecs: prior } : {};
+    })(),
     // The install generation only grows, so keep the higher of the two views —
     // never let a stale snapshot regress a re-attach's newer generation.
     coordinatorGen: Math.max(primary.coordinatorGen ?? 0, fallback.coordinatorGen ?? 0) || undefined,

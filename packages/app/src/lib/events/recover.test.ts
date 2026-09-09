@@ -173,6 +173,60 @@ describe("recoverEventKeys round-trip", () => {
   });
 });
 
+/**
+ * Two backups for one coordinate is ORDINARY (audit EV-10): one is written on
+ * every ECK rotation and again on attach. Relays return them in whatever order
+ * they like, and `restore()` unions the ECK versions but takes the SECRETS
+ * first-writer-wins — so decrypting a stale backup first pinned a superseded
+ * E_inbox as current, and joins sealed to the inbox the published 31600 actually
+ * names became unreadable.
+ */
+describe("recoverEventKeys prefers the NEWEST backup per coordinate", () => {
+  beforeEach(() => {
+    fetchEvents.mockReset();
+    resetRecoveryGuard();
+  });
+
+  it("restores the newer inbox secret even when the relay returns the stale one first", async () => {
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const pubkey = owner;
+
+    const eidSk = generateSecretKey();
+    const coordinate = makeCoordinate(getPublicKey(eidSk), "cypherpunk-2026");
+    const staleInbox = bytesToHex(generateSecretKey());
+    const freshInbox = bytesToHex(generateSecretKey());
+
+    const mk = async (einbox: string, created_at: number) => ({
+      kind: KIND_APP_DATA,
+      pubkey,
+      created_at,
+      tags: [["d", "nostrautica:eventkeys:blinded-opaque"]],
+      content: await organizer.nip44Encrypt(
+        pubkey,
+        JSON.stringify({
+          v: 2,
+          a: coordinate,
+          eid_nsec: bytesToHex(eidSk),
+          einbox_nsec: einbox,
+          eck: [{ id: 1, key: bytesToBase64(generateEck()) }],
+        } satisfies EventKeysBackup),
+      ),
+    });
+
+    // Relay order puts the STALE one first — which is the whole bug.
+    fetchEvents.mockResolvedValue([await mk(staleInbox, 1000), await mk(freshInbox, 2000)]);
+
+    const mem = memBackend();
+    __setKeystoreBackend(mem.backend);
+    setActiveOwner(owner);
+
+    await recoverEventKeys(organizer);
+    const keys = await loadEventKeys(coordinate);
+    expect(keys?.einboxNsecHex).toBe(freshInbox);
+  });
+});
+
 describe("recoverEventKeys is bounded and reports its outcome", () => {
   beforeEach(() => {
     fetchEvents.mockReset();

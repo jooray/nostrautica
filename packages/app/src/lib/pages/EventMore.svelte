@@ -53,7 +53,11 @@
       list.push({ icon: "horn", label: t("nav.updates"), go: { name: "posts", naddr } });
     }
     if (session.loggedIn) {
-      list.push({ icon: "chat", label: t("nav.chat"), go: { name: "dm" } });
+      // "Messages", not "Chat": this row opens DIRECT messages, while the nav
+      // bar's Chat tab opens the event GROUP chat. Both rendered t("nav.chat"),
+      // so the app showed one label pointing at two different destinations —
+      // and the participant guide calls this one Messages anyway.
+      list.push({ icon: "chat", label: t("nav.messages"), go: { name: "dm" } });
     }
     if (eventShell.isOrganizer) {
       list.push({ icon: "sliders", label: t("more.manageEvent"), go: { name: "admin", naddr } });
@@ -98,13 +102,23 @@
   {/each}
 </div>
 
-<div class="card privacy">
-  <strong>{t("more.eventPrivacy")}</strong>
-  <p class="muted">{t("more.eventPrivacy.body")}</p>
-  <button class="btn inline" onclick={() => router.go({ name: "join", naddr })}>
-    {t("more.eventPrivacy.link")}
-  </button>
-</div>
+<!-- Visitors only. The card's whole promise is "the join screen explains this",
+     and that is true only while the join screen still renders the join form: an
+     approved member lands on Join's "You're in!" branch, a pending one on the
+     "request sent" branch, and NEITHER contains a word about privacy. Since
+     every reader of this card inside an event they belong to is by definition
+     approved, the link was broken for essentially its entire audience. Members
+     already get the declared-retention line on the event overview, which is the
+     part that is actually about their data. -->
+{#if eventShell.effectiveRole === "visitor"}
+  <div class="card privacy">
+    <strong>{t("more.eventPrivacy")}</strong>
+    <p class="muted">{t("more.eventPrivacy.body")}</p>
+    <button class="btn inline" onclick={() => router.go({ name: "join", naddr })}>
+      {t("more.eventPrivacy.link")}
+    </button>
+  </div>
+{/if}
 
 <style>
   .identity {

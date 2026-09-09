@@ -9,6 +9,8 @@ import { z } from "zod";
 import { sha256Hex, utf8ToBytes, languageName, hasAiProfileContent } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
+import { fenceUntrusted, fenceUntrustedList } from "../pipeline/fencing.js";
+import { promptRevision } from "../pipeline/prompt-revision.js";
 
 /**
  * Lenient envelope validation for batch-score output (audit finding Q9). This
@@ -34,11 +36,81 @@ export interface PairScore {
   reasoningForB: string;
 }
 
-/** Clamp to [0,1], rescaling values the model returned on a 0-10 / 0-100 scale. */
-function normalizeScore(v: number): number {
-  let x = typeof v === "number" && isFinite(v) ? v : 0;
-  if (x > 1) x = x > 10 ? x / 100 : x / 10;
-  return Math.max(0, Math.min(1, x));
+/** The three numeric fields every scored row must carry. */
+interface RawTriple {
+  score: number;
+  similarity: number;
+  complementarity: number;
+}
+
+/**
+ * The row's three numbers, or `undefined` if ANY of them is not a finite number
+ * (2026-09-04 audit).
+ *
+ * `normalizeScore` used to map a string, a null, a NaN or a missing field onto 0
+ * and carry on. A row is otherwise accepted on the strength of a non-empty
+ * `reasoning_for_target`, so a model that answered `"score": "0.85"` — strings,
+ * which several OpenAI-compatible gateways emit for a `number` schema field —
+ * persisted EVERY pair in the batch at 0.00 with entirely plausible reasoning
+ * beside it. Nothing retried, because `missing` was empty; nothing re-selected
+ * them, because `selectPairsToScore` skips a direction whose row is current and
+ * scored. The zeros were permanent until an organizer ran a recompute, and the
+ * only visible symptom was match lists that looked arbitrary.
+ *
+ * Rejecting the row instead leaves the candidate in `missing`, which the
+ * coordinator already turns into "retry the unscored remainder".
+ *
+ * Deliberately not coerced from a numeric STRING: the whole point is that we
+ * cannot tell a model's mistake from its answer, and a retry costs one call while
+ * a wrong-but-plausible 0.00 costs the attendee their matches.
+ */
+function rawTriple(m: RawBatchMatch): RawTriple | undefined {
+  const { score, similarity, complementarity } = m;
+  if (
+    typeof score !== "number" || !Number.isFinite(score) ||
+    typeof similarity !== "number" || !Number.isFinite(similarity) ||
+    typeof complementarity !== "number" || !Number.isFinite(complementarity)
+  ) {
+    return undefined;
+  }
+  return { score, similarity, complementarity };
+}
+
+/**
+ * The divisor that puts a whole RESPONSE on the 0-1 scale the prompt asked for.
+ *
+ * Scale detection used to be per FIELD, and it produced two indefensible results:
+ *
+ *   - `10 → 1.0` but `10.5 → 0.105`. A hair's width apart, a factor of ten out.
+ *   - a genuinely 0-100-scale `5` → `0.5`, i.e. ten times too high, silently and
+ *     forever — there is nothing in a lone `5` to tell the two scales apart.
+ *
+ * A scale is a property of the ANSWER, not of one number in it, and a batch gives
+ * us ten rows to read it from. Taking the maximum across every accepted row in the
+ * response resolves the second case outright (a 0-100 batch practically always
+ * contains one value above 10, and one is enough) and makes the first a property
+ * of the whole response rather than a per-field coin flip. It also stops a mixed
+ * row like `{similarity: 8, complementarity: 85, score: 9}` being silently
+ * repaired into three coherent-looking numbers that were never coherent: the
+ * per-field guess is what MANUFACTURED that coherence.
+ *
+ * What remains, honestly: a response whose every value is ≤ 1 could be a 0-10
+ * scale where nobody scored above 0.1. That reading is not recoverable from the
+ * data and the prompt explicitly asks for 0.0-1.0, so it is read as 0-1.
+ */
+function responseScaleDivisor(rows: readonly RawTriple[]): number {
+  let max = 0;
+  for (const r of rows) {
+    max = Math.max(max, r.score, r.similarity, r.complementarity);
+  }
+  if (max <= 1) return 1;
+  if (max <= 10) return 10;
+  return 100;
+}
+
+/** Rescale by the response's detected scale and clamp to [0,1]. */
+function normalizeScore(v: number, divisor: number): number {
+  return Math.max(0, Math.min(1, v / divisor));
 }
 
 /** Canonical hash of an ai_profile, for pair-cache invalidation (spec §9.3). */
@@ -67,22 +139,54 @@ export function profileHash(profile: AiProfile): string {
  */
 export const hasProfileContent = hasAiProfileContent;
 
-/** inputs_hash = sha256(sorted(profileA_hash, profileB_hash)) — order-independent. */
-export function pairInputsHash(hashA: string, hashB: string): string {
+/**
+ * Prompt+schema fingerprint for the two scoring prompts (audit PIPE-3). Declared
+ * lazily because both prompts are defined further down this file.
+ */
+let matchRevision: string | undefined;
+export function matchPromptRevision(): string {
+  matchRevision ??= promptRevision(
+    BATCH_SYSTEM_PROMPT,
+    REVERSE_BATCH_SYSTEM_PROMPT,
+    BATCH_SCORE_SCHEMA,
+  );
+  return matchRevision;
+}
+
+/**
+ * inputs_hash = sha256(sorted(profileA_hash, profileB_hash) + prompt + model) —
+ * order-independent in the pair, which is what makes a directed score reusable
+ * from either side.
+ *
+ * `modelKey` and the prompt fingerprint were BOTH missing (audit PIPE-3), which
+ * made this the worst of the four content-addressed stages: the two profile
+ * hashes change when the attendees change, and nothing at all changed when the
+ * thing doing the scoring changed. Editing the matching prompt, or pointing the
+ * `match` role at a different model, left every cached pair score in place and
+ * every lookup hitting it — so the edit deployed, cost nothing, and did nothing,
+ * with no way to tell from the outside.
+ */
+export function pairInputsHash(hashA: string, hashB: string, modelKey = ""): string {
   const [x, y] = hashA < hashB ? [hashA, hashB] : [hashB, hashA];
-  return sha256Hex(utf8ToBytes(`${x}|${y}`));
+  return sha256Hex(utf8ToBytes(`${x}|${y}|${matchPromptRevision()}|${modelKey}`));
 }
 
 function profileText(p: AiProfile, name?: string): string {
+  // Every value below is attendee-authored, and it is being pasted between the
+  // delimiters this prompt asks the model to trust — `--- CANDIDATE n ---`,
+  // `TARGET ATTENDEE:`. Fence it (audit SEC-15) so a bio cannot open a section of
+  // its own and invent a candidate, or forge a boundary and steal the target's
+  // work. The prompt scaffolding itself is untouched: BP3 is benchmark-validated.
+  const f = fenceUntrusted;
   return [
     // B1: without a Name line the model cannot address anyone correctly and
     // falls back to inventing one (it copied "Elena" from the prompt example).
-    ...(name ? [`Name: ${name}`] : []),
-    `Summary: ${p.summary}`,
-    `Skills: ${p.skills.join(", ")}`,
-    `Interests: ${p.interests.join(", ")}`,
-    `Offers: ${p.offers.join(", ")}`,
-    `Seeks: ${p.seeks.join(", ")}`,
+    ...(name ? [`Name: ${f(name)}`] : []),
+    `Summary: ${f(p.summary)}`,
+    `Skills: ${fenceUntrustedList(p.skills).join(", ")}`,
+    `Interests: ${fenceUntrustedList(p.interests).join(", ")}`,
+    `Offers: ${fenceUntrustedList(p.offers).join(", ")}`,
+    `Seeks: ${fenceUntrustedList(p.seeks).join(", ")}`,
   ].join("\n");
 }
 
@@ -149,6 +253,27 @@ export interface DirectedScore {
 /** Icebreaker bounds (NIP §6.2): ≤ 3 entries, ≤ 280 chars each. */
 export const MAX_ICEBREAKERS = 3;
 export const MAX_ICEBREAKER_LEN = 280;
+
+/**
+ * Completion budget for one batch scoring call (2026-09-04 audit).
+ *
+ * A batch returns one entry per candidate, and each entry carries reasoning plus up
+ * to {@link MAX_ICEBREAKERS} openers of up to {@link MAX_ICEBREAKER_LEN} chars. At
+ * the production batch size of 10 that does not fit in the provider default of
+ * 4096, and a truncated body is not a lost ROW — it is unparseable JSON, so the
+ * whole batch fails and rides the full paid retry schedule. `icebreaker-run.mjs`
+ * measured this and pins 12000; deriving it per call keeps a larger batch_size from
+ * silently re-creating the same cliff.
+ *
+ * Non-English events hit the ceiling first (worse token-per-character ratio), and a
+ * model that refuses `disable_thinking` spends reasoning tokens from the same
+ * budget — hence the deliberately generous per-candidate allowance.
+ */
+export const BATCH_TOKENS_BASE = 2000;
+export const BATCH_TOKENS_PER_CANDIDATE = 1000;
+export function batchMaxTokens(candidateCount: number): number {
+  return BATCH_TOKENS_BASE + BATCH_TOKENS_PER_CANDIDATE * Math.max(1, candidateCount);
+}
 
 /**
  * Coerce a raw model `icebreakers` value into a bounded string[] (NIP §6.2):
@@ -413,10 +538,12 @@ function shuffle<T>(arr: readonly T[], rng: () => number): T[] {
 
 /** EVENT/ABOUT/TOPICS header shared by both batch shapes; empty lines dropped. */
 function eventBlock(event: EventContextForScoring): string[] {
+  // Organizer-authored, which is a lower-risk source than an attendee bio but not
+  // a trusted one — anyone can create an event (audit SEC-15).
   return [
-    `EVENT: ${event.title}`,
-    event.summary ? `ABOUT: ${event.summary}` : "",
-    event.hashtags.length ? `TOPICS: ${event.hashtags.join(", ")}` : "",
+    `EVENT: ${fenceUntrusted(event.title)}`,
+    event.summary ? `ABOUT: ${fenceUntrusted(event.summary)}` : "",
+    event.hashtags.length ? `TOPICS: ${fenceUntrustedList(event.hashtags).join(", ")}` : "",
   ].filter(Boolean);
 }
 
@@ -473,6 +600,72 @@ export function buildBatchUserBlock(
 }
 
 /**
+ * Turn a batch response's `matches` into directed scores, in ONE pass over the
+ * rows and a second over the ones that survived it.
+ *
+ * Two passes are needed because the scale is a property of the whole response
+ * (see {@link responseScaleDivisor}) and cannot be applied until every usable row
+ * has been read. Shared by the forward and reverse batches, which had identical
+ * copies of this logic differing only in whether a dropped entry is called a
+ * "candidate" or a "target".
+ *
+ * Every rejection here leaves the subject in the caller's `missing` list, which
+ * the coordinator turns into "retry the unscored remainder" — a row is never
+ * persisted on a guess.
+ */
+function collectDirectedScores<T extends BatchCandidate>(
+  matches: readonly RawBatchMatch[],
+  ordered: readonly T[],
+  subjectWord: "candidate" | "target",
+): { scores: Map<string, DirectedScore>; misattributed: string[] } {
+  const misattributed: string[] = [];
+  // Keyed by the RESOLVED subject, not the raw index: an entry may be repaired
+  // onto a different one, and two entries must never claim the same person.
+  const seen = new Set<string>();
+  const accepted: { id: string; raw: RawTriple; reasoning: string; icebreakers?: string[] }[] = [];
+
+  for (const m of matches) {
+    const idx = Number(m?.index);
+    // 1-based index into `ordered`; ignore out-of-range / duplicate / malformed.
+    if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
+    if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
+    // All three numbers must be real numbers before anything is persisted — a
+    // plausible sentence beside three unusable scores is the worst of both worlds.
+    const raw = rawTriple(m);
+    if (!raw) continue;
+    const resolved = resolveEntry(ordered, idx, m.entry_name);
+    if (!resolved) {
+      misattributed.push(`entry ${idx}: name echo matched no single ${subjectWord} — dropped`);
+      continue;
+    }
+    if (resolved.corrected) misattributed.push(resolved.corrected);
+    const subject = resolved.subject;
+    if (seen.has(subject.id)) continue;
+    seen.add(subject.id);
+    const icebreakers = normalizeIcebreakers(m.icebreakers);
+    accepted.push({
+      id: subject.id,
+      raw,
+      reasoning: m.reasoning_for_target,
+      ...(icebreakers ? { icebreakers } : {}),
+    });
+  }
+
+  const divisor = responseScaleDivisor(accepted.map((a) => a.raw));
+  const scores = new Map<string, DirectedScore>();
+  for (const a of accepted) {
+    scores.set(a.id, {
+      score: normalizeScore(a.raw.score, divisor),
+      similarity: normalizeScore(a.raw.similarity, divisor),
+      complementarity: normalizeScore(a.raw.complementarity, divisor),
+      reasoning: a.reasoning,
+      ...(a.icebreakers ? { icebreakers: a.icebreakers } : {}),
+    });
+  }
+  return { scores, misattributed };
+}
+
+/**
  * Score one target against K candidates in a single LLM call. Per-candidate parse:
  * a malformed/missing candidate is reported in `missing` and never poisons the rest
  * of the batch (the caller retries it individually or in the next batch).
@@ -501,38 +694,14 @@ export async function scoreBatch(
     schemaName: "batch_score",
     model,
     temperature: 0.3,
+    maxTokens: batchMaxTokens(ordered.length),
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
     signal,
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
-  // Keyed by the RESOLVED candidate, not the raw index: an entry may be repaired
-  // onto a different candidate, and two entries must never claim the same person.
-  const seen = new Set<string>();
-  const misattributed: string[] = [];
-  for (const m of matches) {
-    const idx = Number(m?.index);
-    // 1-based index into `ordered`; ignore out-of-range / duplicate / malformed.
-    if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
-    if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
-    const resolved = resolveEntry(ordered, idx, m.entry_name);
-    if (!resolved) {
-      misattributed.push(`entry ${idx}: name echo matched no single candidate — dropped`);
-      continue;
-    }
-    if (resolved.corrected) misattributed.push(resolved.corrected);
-    const cand = resolved.subject;
-    if (seen.has(cand.id)) continue;
-    seen.add(cand.id);
-    const icebreakers = normalizeIcebreakers(m.icebreakers);
-    scores.set(cand.id, {
-      score: normalizeScore(m.score),
-      similarity: normalizeScore(m.similarity),
-      complementarity: normalizeScore(m.complementarity),
-      reasoning: m.reasoning_for_target,
-      ...(icebreakers ? { icebreakers } : {}),
-    });
-  }
+  const { scores: parsed, misattributed } = collectDirectedScores(matches, ordered, "candidate");
+  for (const [id, score] of parsed) scores.set(id, score);
 
   const missing = candidates.filter((c) => !scores.has(c.id)).map((c) => c.id);
   return { scores, missing, ...(misattributed.length ? { misattributed } : {}) };
@@ -802,39 +971,19 @@ export async function scoreReverseBatch(
     schemaName: "reverse_batch_score",
     model,
     temperature: 0.3,
+    maxTokens: batchMaxTokens(ordered.length),
     validate: (raw) => batchScoreResponseSchema.parse(raw) as { matches?: RawBatchMatch[] },
     signal,
   });
 
   const matches = Array.isArray(value?.matches) ? value.matches : [];
-  const seen = new Set<string>();
-  const misattributed: string[] = [];
-  for (const m of matches) {
-    const idx = Number(m?.index);
-    if (!Number.isInteger(idx) || idx < 1 || idx > ordered.length) continue;
-    if (typeof m.reasoning_for_target !== "string" || m.reasoning_for_target === "") continue;
-    // Same index/echo agreement as the forward batch. It matters at least as much
-    // here: this shape prints the recipient first and leaves each writer as item n
-    // of a numbered list, which the block comment above records as the arrangement
-    // the model already mixes up more often.
-    const resolved = resolveEntry(ordered, idx, m.entry_name);
-    if (!resolved) {
-      misattributed.push(`entry ${idx}: name echo matched no single target — dropped`);
-      continue;
-    }
-    if (resolved.corrected) misattributed.push(resolved.corrected);
-    const tgt = resolved.subject;
-    if (seen.has(tgt.id)) continue;
-    seen.add(tgt.id);
-    const icebreakers = normalizeIcebreakers(m.icebreakers);
-    scores.set(tgt.id, {
-      score: normalizeScore(m.score),
-      similarity: normalizeScore(m.similarity),
-      complementarity: normalizeScore(m.complementarity),
-      reasoning: m.reasoning_for_target,
-      ...(icebreakers ? { icebreakers } : {}),
-    });
-  }
+  // Same index/echo agreement, numeric strictness and per-response scale as the
+  // forward batch (see {@link collectDirectedScores}). The echo check matters at
+  // least as much here: this shape prints the recipient first and leaves each
+  // writer as item n of a numbered list, which the block comment above records as
+  // the arrangement the model already mixes up more often.
+  const { scores: parsed, misattributed } = collectDirectedScores(matches, ordered, "target");
+  for (const [id, score] of parsed) scores.set(id, score);
 
   const missing = targets.filter((t) => !scores.has(t.id)).map((t) => t.id);
   return { scores, missing, ...(misattributed.length ? { misattributed } : {}) };

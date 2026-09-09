@@ -8,7 +8,7 @@
     cachedEventContext,
     type EventContext,
   } from "$lib/events/event-context.js";
-  import { sendJoinRequest } from "$lib/events/join.js";
+  import { sendJoinRequest, joinPollGapMs } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
@@ -40,6 +40,7 @@
   import { t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
   import { recoverFromStaleChunk } from "$lib/stale-chunk.js";
 
@@ -82,7 +83,29 @@
   // Render instantly from cache (e.g. arriving from the event page), refresh after.
   // svelte-ignore state_referenced_locally -- naddr is constant for this instance ({#key} remounts on change)
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
-  let error = $state<string | null>(null);
+  /**
+   * Raw thrown value, not a pre-stringified message: `ErrorState` turns it into a
+   * plain-language headline and keeps the technical text behind a disclosure, which
+   * is what every other page already does. This one rendered `{error}` verbatim in
+   * a bare `card warn` — no `role="alert"`, no retry, above the h1.
+   */
+  let error = $state<unknown>(null);
+  /** A load pass is in flight (drives the retry button's disabled state). */
+  let loadingPage = $state(false);
+  /**
+   * Backstop for a first load that never returns, mirroring EventHome's.
+   *
+   * The UX-3 fix gave EventHome a 12 s guard, an `ErrorState` and a working retry
+   * on the grounds that it is "the FIRST screen a newcomer sees after tapping an
+   * invite link". It is not: invite links are `#/e/<naddr>/join?code=`
+   * (`organizer.ts`), so the first screen is THIS one — and it had a bare
+   * "Loading event…" with no timeout, no retry, and no way out but a reload the
+   * newcomer has no reason to think of. On venue Wi-Fi that blocks WSS it is a
+   * spinner forever.
+   */
+  const LOAD_GUARD_MS = 12_000;
+  /** Monotonic pass token so a stalled load can't clobber the retry that replaced it. */
+  let loadToken = 0;
   let busy = $state(false);
   let sent = $state(false);
   let sentQueued = $state(false); // join request is in the offline outbox (UX-15)
@@ -184,7 +207,21 @@
     }
   }
 
-  onMount(async () => {
+  async function loadJoinPage() {
+    // Token-guarded (same shape as EventHome): when the 12 s guard fires the
+    // ORIGINAL pass is still out there — it was never cancellable, it just stopped
+    // being believed. If it later settles it must not re-raise its error over a
+    // retry the user has already started, nor clear the retry's in-flight flag.
+    const token = ++loadToken;
+    loadingPage = true;
+    error = null;
+    // Timeout-shaped message on purpose: `categorizeError` then classifies it as
+    // `timeout`, reusing ErrorState's existing vocabulary.
+    const guard = setTimeout(() => {
+      if (ctx || token !== loadToken) return; // the form is up, or superseded
+      error = new Error("Timed out waiting for this event to load.");
+      loadingPage = false;
+    }, LOAD_GUARD_MS);
     try {
       await connectNdk();
       // The grant scan doesn't need the event context — run both in parallel.
@@ -219,9 +256,17 @@
         void pollForGrant();
       }
     } catch (e) {
-      if (!ctx) error = e instanceof Error ? e.message : String(e);
+      // Only a failure that left us with NOTHING is a page-level error: once the
+      // form is painted from `ctx`, a later grant-scan failure must not replace the
+      // whole join screen with an error card.
+      if (!ctx && token === loadToken) error = e;
+    } finally {
+      clearTimeout(guard);
+      if (token === loadToken) loadingPage = false;
     }
-  });
+  }
+
+  onMount(loadJoinPage);
 
   // Poll for the ECK grant while the page is open — invite codes are usually
   // instant, manual approval can land minutes later, and the user shouldn't have
@@ -229,15 +274,31 @@
   // (or the mount-time restore plus a fresh submit) never stacks two loops
   // (audit UX-2).
   let polling = false;
+  /**
+   * When the last approval check completed (epoch ms), so the waiting screen can
+   * show that something is actually happening.
+   *
+   * The screen said "we'll let you know" and then had nothing that moved for as
+   * long as the person kept it open. Manual approval can take minutes; with no
+   * evidence of a live check, the reasonable inference is that it is stuck, and
+   * the only affordances on offer are "send again" and a reload.
+   */
+  let lastCheckedAt = $state<number | null>(null);
+  /** The current gap between checks, surfaced so the copy can name it. */
+  let pollIntervalSec = $state(5);
   async function pollForGrant() {
     if (!ctx || !session.signer || polling) return;
     polling = true;
+    const startedAt = Date.now();
     try {
       const coordinate = ctx.coordinate;
       const fast = code ? 10 : 0; // 1.5s cadence first, then relax to 5s
       for (let i = 0; !approved && !destroyed; i++) {
-        await new Promise((r) => setTimeout(r, i < fast ? 1500 : 5000));
+        const gapMs = joinPollGapMs(i, fast, Date.now() - startedAt);
+        pollIntervalSec = Math.round(gapMs / 1000);
+        await new Promise((r) => setTimeout(r, gapMs));
         await receiveGrants(session.signer).catch(() => {});
+        lastCheckedAt = Date.now();
         approved = await isApproved(coordinate);
       }
       if (approved) {
@@ -248,6 +309,13 @@
       polling = false;
     }
   }
+
+  /** "14:32" in the viewer's locale — a clock time, not a countdown. */
+  const checkedLabel = $derived(
+    lastCheckedAt === null
+      ? ""
+      : new Date(lastCheckedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+  );
 
   // Post-approval routing (U1): lead with "Record your intro" unless one already
   // exists, in which case "Go to event overview" is the primary action.
@@ -428,7 +496,7 @@
       // Post-deploy stale shell: missing hashed chunk mid-submit. Reload once
       // rather than strand the user on "Něco se pokazilo" + TypeError (PWA §10.2).
       if (recoverFromStaleChunk(e)) return;
-      error = e instanceof Error ? e.message : String(e);
+      error = e;
     } finally {
       busy = false;
     }
@@ -436,14 +504,23 @@
 </script>
 
 {#if error}
-  <div class="card warn">
-    <strong>{t("join.wentWrong")}</strong>
-    <span class="muted">{error}</span>
-  </div>
+  <!-- Was a bare `card warn` with the raw thrown string in it, above the h1: not
+       announced, not categorized, and with no way forward but a reload the
+       newcomer has no reason to think of. With NOTHING loaded the error IS the
+       page and carries the retry; once the form is up it is just a notice about
+       the action that failed. -->
+  <ErrorState
+    {error}
+    body={ctx ? undefined : "join.loadFailed.body"}
+    onRetry={ctx ? undefined : loadJoinPage}
+    retrying={loadingPage}
+  />
 {/if}
 
 {#if !ctx}
-  <p class="muted">{t("join.loading")}</p>
+  {#if !error}
+    <p class="muted" role="status" aria-live="polite">{t("join.loading")}</p>
+  {/if}
 {:else if approved}
   <h1>{t("join.youreIn")}</h1>
   <div class="card stack">
@@ -493,6 +570,18 @@
       {:else}
         {t("join.waiting.manual")}
       {/if}
+    </p>
+    <!-- Something that moves. Approval can take minutes, and a screen with no
+         evidence of a live check reads as stuck — the only affordances on offer
+         were "send again" and a reload, neither of which helps. -->
+    <p class="muted" role="status" aria-live="polite" style="margin:0 0 0.75rem">
+      {#if lastCheckedAt}
+        {t("join.waiting.checked", { time: checkedLabel, sec: pollIntervalSec })}
+      {:else}
+        {t("join.waiting.checking", { sec: pollIntervalSec })}
+      {/if}
+      <br />
+      {t("join.waiting.canClose")}
     </p>
     <div class="stack">
       <button class="btn primary" onclick={() => router.go({ name: "event", naddr })}>
@@ -546,7 +635,18 @@
   {/if}
 
   {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
-  <div class="card stack">
+  <!-- A real <form> (the card element itself), not a bare div + onclick: Enter in
+       any field submits, and the browser gives the on-screen keyboard a "go" key
+       and treats these fields as one group. Until this existed the only <form> in
+       the whole app was the chat composer, so every newcomer typing their name
+       had to reach for a button that Enter would not press. -->
+  <form
+    class="card stack"
+    onsubmit={(e) => {
+      e.preventDefault();
+      void submit();
+    }}
+  >
     {#if session.loggedIn}
       <!-- Existing Nostr user: kind-0 shown read-only; a load-state machine (UX-O1)
            separates loaded / no-public-profile / failed so a relay error never
@@ -557,7 +657,8 @@
         <div class="card warn" style="margin:0">
           <strong>{t("join.profile.failed.title")}</strong>
           <p class="muted" style="margin:0.25rem 0 0.5rem">{t("join.profile.failed.body")}</p>
-          <button class="btn inline" onclick={() => void loadExistingProfile()}>
+          <!-- type="button": inside the <form> now, an untyped button submits. -->
+          <button type="button" class="btn inline" onclick={() => void loadExistingProfile()}>
             {t("join.profile.retry")}
           </button>
         </div>
@@ -588,6 +689,8 @@
             id="edn"
             bind:value={eventDisplayName}
             placeholder={t("join.namePlaceholder")}
+            autocomplete="name"
+            enterkeyhint="go"
             aria-invalid={errName}
             aria-describedby={describedBy("edn", errName)}
           />
@@ -629,6 +732,8 @@
           id="n"
           bind:value={newName}
           placeholder={t("join.namePlaceholder")}
+          autocomplete="name"
+          enterkeyhint="go"
           aria-invalid={errName}
           aria-describedby={describedBy("n", errName)}
         />
@@ -690,13 +795,19 @@
       </div>
     {/if}
 
-    <button
-      class="btn primary"
-      onclick={submit}
-      disabled={busy || profileLoading || (session.loggedIn && !canSubmitLoggedIn(profileState, eventDisplayName))}
-    >
+    <!-- Check on submit, don't disable (Record.svelte:601 documents moving away
+         from exactly this gate). The old `disabled` included
+         `!canSubmitLoggedIn(...)`, but `showErrors` is set only INSIDE submit() —
+         unreachable behind a disabled button — so a signed-in user whose kind-0
+         is empty or failed to load got a permanently grey button, no field error
+         and no ErrorSummary: a dead end with no stated reason. submit() already
+         validates and focuses the offending field, so let it run.
+         `profileLoading` stays: that state renders "Fetching your profile…" right
+         above, so the disabled button is explained, and the name field it would
+         validate isn't in the DOM yet. -->
+    <button class="btn primary" type="submit" disabled={busy || profileLoading}>
       {busy ? t("join.sending") : session.loggedIn ? t("join.send") : t("join.createAndJoin")}
     </button>
-  </div>
+  </form>
 
 {/if}

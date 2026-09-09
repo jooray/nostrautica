@@ -6,6 +6,7 @@ import {
   talkSubmissionContentSchema,
   talkContentSchema,
   mediaDescriptorSchema,
+  mediaDescriptorDraftSchema,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
   keyGrantContentSchema,
@@ -46,6 +47,7 @@ import {
   MAX_LINKS,
   MAX_URL,
   MAX_INVITE_LABEL,
+  MAX_ADMIN_ARGS,
   MAX_INVITES,
   MAX_REASONING,
   MAX_MATCHES,
@@ -73,6 +75,8 @@ import {
   isNewerVersionTag,
   readEventVersionTag,
   NewerProtocolVersionError,
+  MAX_MEDIA_URLS,
+  MAX_MEDIA_FILE_BYTES,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -1197,6 +1201,26 @@ describe("media descriptor tightening (NIP §8, v2)", () => {
       mediaDescriptorSchema.parse({ ...noDuration, m: "video/webm", duration: 12 }).duration,
     ).toBe(12);
   });
+
+  it("rejects a non-finite duration (Infinity from a MediaRecorder WebM)", () => {
+    // A WebM written by MediaRecorder has no Duration element, so the recorder
+    // page read `Infinity` off the <video> element and put it in the descriptor.
+    // `z.number().nonnegative()` alone accepted that, and JSON.stringify then
+    // serialized it as `null` — a submission the coordinator could only reject
+    // as permanently unprocessable, silently, after the UI said "saved".
+    expect(() =>
+      mediaDescriptorSchema.parse({ ...descriptor, duration: Number.POSITIVE_INFINITY }),
+    ).toThrow(/duration/);
+    expect(() =>
+      mediaDescriptorDraftSchema.parse({
+        ...descriptor,
+        url: [],
+        duration: Number.POSITIVE_INFINITY,
+      }),
+    ).toThrow(/duration/);
+    // The exact wire symptom this guards: Infinity does not survive JSON.
+    expect(JSON.parse(JSON.stringify({ duration: Number.POSITIVE_INFINITY })).duration).toBeNull();
+  });
 });
 
 describe("21608 correction overrides are bounded (NIP §8, v2)", () => {
@@ -1359,5 +1383,163 @@ describe("hasAiProfileContent — one shared definition of an empty AI profile",
 
   it("translations alone are not content — they restate authored fields, and there were none", () => {
     expect(hasAiProfileContent({ ...empty, translations: { lang: "sk", about: "ahoj" } })).toBe(false);
+  });
+});
+
+/**
+ * Unbounded arrays and unconstrained URL schemes (2026-09-04 audit).
+ *
+ * Every one of these is reachable from an attacker-authored event: the media
+ * descriptor drives the coordinator's serial fetch loop, the profile is
+ * republished in every directory entry and fed to the model, and the event page
+ * is a PUBLIC kind, so the NIP-44 ceiling that incidentally bounds every
+ * ECK-encrypted payload does not apply to it at all.
+ */
+describe("bounds on attacker-influenced arrays and URLs", () => {
+  const descriptor = (over: Record<string, unknown>) => ({
+    kind: "intro",
+    url: ["https://b.example/x"],
+    x: "a".repeat(64),
+    ox: "b".repeat(64),
+    size: 100,
+    m: "video/webm",
+    duration: 30, // required for audio/video media
+    "encryption-algorithm": "aes-gcm",
+    "decryption-key": Buffer.alloc(32).toString("base64"),
+    "decryption-nonce": Buffer.alloc(12).toString("base64"),
+    ...over,
+  });
+
+  it("caps mirror URLs per media descriptor", () => {
+    const many = Array.from({ length: MAX_MEDIA_URLS + 1 }, (_, i) => `https://b.example/${i}`);
+    expect(mediaDescriptorSchema.safeParse(descriptor({ url: many })).success).toBe(false);
+    expect(
+      mediaDescriptorSchema.safeParse(descriptor({ url: many.slice(0, MAX_MEDIA_URLS) })).success,
+    ).toBe(true);
+  });
+
+  it("caps the length of a single mirror URL", () => {
+    const long = "https://b.example/" + "a".repeat(MAX_URL);
+    expect(mediaDescriptorSchema.safeParse(descriptor({ url: [long] })).success).toBe(false);
+  });
+
+  it("rejects non-https schemes in profile links", () => {
+    // zod's `.url()` accepts all three of these; the schema comment has always
+    // claimed to be the https-only boundary, and now it is.
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "file:///etc/passwd"]) {
+      expect(attendeeProfileSchema.safeParse({ links: [bad] }).success).toBe(false);
+    }
+    expect(attendeeProfileSchema.safeParse({ links: ["https://ok.example"] }).success).toBe(true);
+  });
+});
+
+/**
+ * One media ceiling, three consumers (2026-09-04 audit).
+ *
+ * The app's upload precheck and the coordinator's declared-size screen both said
+ * 250 MiB while the coordinator's ACTUAL download cap was 200 MiB. A file in that
+ * band passed both checks and then died after streaming 200 MiB — as a plain
+ * error rather than a media-policy rejection, so it failed the whole attendee job
+ * and retried, burning 400 MiB of egress per attempt while the attendee was never
+ * matched. This constant exists so the three cannot drift apart again.
+ */
+describe("MAX_MEDIA_FILE_BYTES is the single media ceiling", () => {
+  it("is a sane per-file bound", () => {
+    expect(MAX_MEDIA_FILE_BYTES).toBe(250 * 1024 * 1024);
+  });
+
+  it("leaves room under the coordinator's per-submission aggregate", () => {
+    // The coordinator allows 500 MiB across up to 4 descriptors, so a single file
+    // at the ceiling must not already exceed the aggregate.
+    expect(MAX_MEDIA_FILE_BYTES).toBeLessThan(500 * 1024 * 1024);
+  });
+});
+
+/**
+ * Bounds and scheme checks that had drifted apart from their own siblings
+ * (2026-09-04 audit). Each of these was the ONE field in its schema that took a
+ * looser type than the field next to it.
+ */
+describe("field bounds parity with sibling fields", () => {
+  const hex = "a".repeat(64);
+  const b64_32 = "A".repeat(43) + "=";
+  const coord = "31923:" + hex + ":ev";
+  const organizerGrant = (a: string) => ({
+    v: 2,
+    a,
+    eid_nsec: hex,
+    einbox_nsec: hex,
+    eck: [{ id: 1, key: b64_32 }],
+    config_relays: [],
+    granted_by: hex,
+  });
+
+  it("21605 organizer grant requires a canonical 31923 coordinate (R18)", () => {
+    // 21602 and 21603 already used `eventCoordinate`; 21605 took a plain string
+    // while granting strictly MORE than either — full E_id custody, the E_inbox
+    // secret and every ECK. An alias kind against the same author (`1:<E_id>:<d>`)
+    // opens a second namespace for the same event whose custody and revocation
+    // state are tracked separately from the real one.
+    expect(organizerGrantContentSchema.parse(organizerGrant(coord)).a).toBe(coord);
+    for (const bad of ["1:" + hex + ":ev", "31600:" + hex + ":ev", "not-a-coordinate", hex]) {
+      expect(organizerGrantContentSchema.safeParse(organizerGrant(bad)).success).toBe(false);
+    }
+  });
+
+  it("21604 admin command args are bounded in key count", () => {
+    // `args` is stored durably in the ordered-ops table (§3.4 retention), so an
+    // unbounded record let one command write an arbitrarily wide row forever.
+    const cmd = (args: Record<string, unknown>) => ({
+      v: 2,
+      a: coord,
+      cmd: "approve" as const,
+      args,
+      expires: 2_000_000_000,
+    });
+    const wide = Object.fromEntries(
+      Array.from({ length: MAX_ADMIN_ARGS + 1 }, (_, i) => [`k${i}`, i]),
+    );
+    expect(adminCommandContentSchema.safeParse(cmd(wide)).success).toBe(false);
+    const atLimit = Object.fromEntries(
+      Array.from({ length: MAX_ADMIN_ARGS }, (_, i) => [`k${i}`, i]),
+    );
+    expect(adminCommandContentSchema.safeParse(cmd(atLimit)).success).toBe(true);
+    // The real shape (two keys) is unaffected, as is the default.
+    expect(adminCommandContentSchema.safeParse(cmd({ pubkey: hex, talk_d: "t1" })).success).toBe(
+      true,
+    );
+    expect(
+      adminCommandContentSchema.parse({ v: 2, a: coord, cmd: "recompute", expires: 1 }).args,
+    ).toEqual({});
+  });
+
+  it("31607 members-post `image` is https-only, like every other URL field", () => {
+    const post = (image: string) => ({
+      v: 2,
+      title: "t",
+      image,
+      published_at: 1,
+      content: "body",
+    });
+    expect(membersPostContentSchema.safeParse(post("https://cdn.example/x.png")).success).toBe(true);
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "http://cdn.example/x.png", "x"]) {
+      expect(membersPostContentSchema.safeParse(post(bad)).success).toBe(false);
+    }
+    // Still optional — a post with no header image parses.
+    expect(
+      membersPostContentSchema.safeParse({ v: 2, title: "t", published_at: 1, content: "b" })
+        .success,
+    ).toBe(true);
+  });
+
+  it("31611 announcement `picture` is https-only, like its checkout_url/terms_url siblings", () => {
+    const announce = (picture: string) => ({ v: 2, name: "coord", picture });
+    expect(coordinatorAnnounceSchema.safeParse(announce("https://x.example/a.png")).success).toBe(
+      true,
+    );
+    for (const bad of ["javascript:alert(1)", "data:text/html,x", "http://x.example/a.png"]) {
+      expect(coordinatorAnnounceSchema.safeParse(announce(bad)).success).toBe(false);
+    }
+    expect(coordinatorAnnounceSchema.safeParse({ v: 2, name: "coord" }).success).toBe(true);
   });
 });

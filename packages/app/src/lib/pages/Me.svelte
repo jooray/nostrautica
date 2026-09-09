@@ -1,3 +1,35 @@
+<script lang="ts" module>
+  /**
+   * What logging out actually costs this identity, worst consequence first.
+   *
+   * `session.logout()` calls `clearKeystore()`, which `del()`s the raw secret
+   * key. For an identity the APP generated, that is the only copy in existence
+   * unless the person has already saved it somewhere — so for the majority
+   * persona (a newcomer who tapped "create my identity" at an event and never
+   * opened the backup card) one tap on a red button was permanent, silent
+   * account loss. The old guard only asked for confirmation when the outbox
+   * happened to be non-empty, i.e. it protected a queued DM but not the key.
+   *
+   * "Backed up" is `backupNag.done` — the same self-reported, owner-scoped
+   * marker Home.svelte's backup nudge reads, set by BackupCard's explicit
+   * "I saved it somewhere safe". Pure so the precedence is unit-testable.
+   */
+  export type LogoutRisk = "none" | "unsent" | "keyLoss";
+  export function logoutRisk(o: {
+    /** The key is held by THIS app (method "local"), not by an external signer. */
+    localKey: boolean;
+    /** The user has confirmed they saved it somewhere safe. */
+    backedUp: boolean;
+    unsentCount: number;
+  }): LogoutRisk {
+    // Key loss outranks unsent items: losing a queued follow is annoying, losing
+    // the only copy of the key is unrecoverable. The key-loss panel still names
+    // the unsent items too, so nothing is hidden by the ordering.
+    if (o.localKey && !o.backedUp) return "keyLoss";
+    return o.unsentCount > 0 ? "unsent" : "none";
+  }
+</script>
+
 <script lang="ts">
   // The hand-off moment (spec §5.4 item 4): "Your Nostr profile is ready."
   // The full "You're a Nostr user now" payoff is ONLY for keys we just created —
@@ -9,9 +41,10 @@
   import { router } from "$lib/router/router.svelte.js";
   import BackupCard from "$lib/components/BackupCard.svelte";
   import NostrichIcon from "$lib/components/NostrichIcon.svelte";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp } from "$lib/i18n/i18n.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
   import { countQueuedForOwner } from "$lib/nostr/publish-queue.js";
+  import { backupNag } from "$lib/stores/backup-nag.svelte.js";
 
   const clients = [
     { name: "Primal", url: "https://primal.net" },
@@ -33,20 +66,26 @@
     }
   }
 
-  // Logout with an unsent-actions guard (audit U1). Logging out DISCARDS this
-  // account's still-queued outbox items (a shared-device safety measure), so warn
-  // first when any exist — otherwise a queued join/DM/follow would vanish silently.
-  let confirmingLogout = $state(false);
+  // Logout guard (audit U1 + the key-loss hole it left open — see logoutRisk
+  // above). Logging out DISCARDS this account's still-queued outbox items AND
+  // deletes an app-held secret key, so ask first whenever either is true, naming
+  // whichever consequence is worse in plain words.
+  let logoutStage = $state<LogoutRisk>("none");
   let unsentCount = $state(0);
   async function requestLogout() {
     unsentCount = session.pubkey
       ? await countQueuedForOwner(session.pubkey).catch(() => 0)
       : 0;
-    if (unsentCount > 0) confirmingLogout = true;
-    else void session.logout();
+    const risk = logoutRisk({
+      localKey: session.signer?.method === "local",
+      backedUp: backupNag.done,
+      unsentCount,
+    });
+    if (risk === "none") void session.logout();
+    else logoutStage = risk;
   }
   function confirmLogout() {
-    confirmingLogout = false;
+    logoutStage = "none";
     void session.logout();
   }
 </script>
@@ -91,7 +130,7 @@
       <BackupCard />
       <div class="stack" style="margin-top:0.75rem">
         {#each clients as c (c.name)}
-          <a class="btn" href={c.url} target="_blank" rel="noopener">{c.name} ↗</a>
+          <a class="btn" href={c.url} target="_blank" rel="noopener noreferrer">{c.name} ↗</a>
         {/each}
       </div>
     </div>
@@ -104,11 +143,37 @@
   {/if}
 
   <div class="card">
-    {#if confirmingLogout}
-      <p role="alert">{t("me.logout.warnUnsent", { n: unsentCount })}</p>
+    {#if logoutStage === "keyLoss"}
+      <!-- The unrecoverable branch. Everything here exists because the button
+           below deletes the only copy of a key this app made: the consequence is
+           spelled out (no "are you sure?"), the way OUT of the situation (the
+           same BackupCard the rest of the app uses) is offered first and is the
+           visually primary action, and the destructive button is worded as what
+           it does rather than as "Log out". -->
+      <!-- role="alert" on the WRAPPER, not on the <h2>: putting it on the heading
+           would replace the heading role rather than add to it, and the whole
+           paragraph — not just its title — is what has to be heard. -->
+      <div role="alert">
+        <h2>{t("me.logout.keyLoss.title")}</h2>
+        <p>{t("me.logout.keyLoss.body")}</p>
+        {#if unsentCount > 0}
+          <!-- Both consequences apply; ordering picked the headline, not the facts. -->
+          <p class="muted">{tp("me.logout.warnUnsent", unsentCount)}</p>
+        {/if}
+      </div>
+      <div class="card" style="background:var(--bg-elev2)">
+        <div class="field-label" style="margin-top:0">{t("me.logout.keyLoss.backup")}</div>
+        <BackupCard />
+      </div>
+      <div class="row" style="gap:0.5rem;flex-wrap:wrap">
+        <button class="btn" onclick={() => (logoutStage = "none")}>{t("me.logout.cancel")}</button>
+        <button class="btn danger" onclick={confirmLogout}>{t("me.logout.keyLoss.confirm")}</button>
+      </div>
+    {:else if logoutStage === "unsent"}
+      <p role="alert">{tp("me.logout.warnUnsent", unsentCount)}</p>
       <div class="row" style="gap:0.5rem;flex-wrap:wrap">
         <button class="btn danger" onclick={confirmLogout}>{t("me.logout.confirmDiscard")}</button>
-        <button class="btn" onclick={() => (confirmingLogout = false)}>{t("me.logout.cancel")}</button>
+        <button class="btn" onclick={() => (logoutStage = "none")}>{t("me.logout.cancel")}</button>
       </div>
     {:else}
       <button class="btn danger" onclick={requestLogout}>{t("me.logout")}</button>

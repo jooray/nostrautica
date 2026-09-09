@@ -96,6 +96,20 @@ export interface AdminPerson {
   revoked: boolean;
   /** In the roster (durably approved) vs. approved-just-now / revoked only. */
   inRoster: boolean;
+  /**
+   * This member sent a 21610 asking to leave, and nothing has acted on it.
+   *
+   * Only reachable on a coordinator-less event: with a coordinator attached the
+   * daemon performs the whole revoke chain itself and republishes a roster this
+   * person is no longer in, so they never reach this list. Without one, the rumor
+   * has no consumer at all — and `visiblePending` correctly filters approved
+   * people out of the pending queue, which is where the only existing withdrawal
+   * notice lived. So the one person whose withdrawal actually matters, an
+   * APPROVED member, was the one nobody could see asking.
+   */
+  withdrawn: boolean;
+  /** They also asked for their data to be purged (`delete_data`). */
+  withdrawalRequestedPurge: boolean;
 }
 
 export interface BuildPeopleParams {
@@ -172,6 +186,8 @@ export function buildApprovedPeople(params: BuildPeopleParams): AdminPerson[] {
       op: opStateFor(pubkey, statuses),
       revoked: revoked.has(pubkey),
       inRoster: rosterByPk.has(pubkey),
+      withdrawn: !!req?.withdrawn,
+      withdrawalRequestedPurge: !!req?.withdrawalRequestedPurge,
     };
   });
 }

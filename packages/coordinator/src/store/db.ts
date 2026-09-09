@@ -17,6 +17,7 @@
  * one-way, idempotent, logged.
  */
 import { DatabaseSync } from "node:sqlite";
+import { chmodSync } from "node:fs";
 import { brotliCompressSync, brotliDecompressSync, constants as zlibConstants } from "node:zlib";
 import { selfEncrypt, selfDecrypt, sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 
@@ -73,6 +74,17 @@ const AT_REST_PACK_THRESHOLD = AT_REST_CHUNK;
  * an open refuses a database whose `user_version` exceeds this constant.
  */
 export const SCHEMA_VERSION = 5;
+
+/** How many hourly `daemon_usage` buckets to keep (audit SEC-7). Comfortably more
+ *  than the longest window a ceiling can ask for, so a rolling read never sees a
+ *  bucket that pruning removed early; old rows are dropped on every write. */
+const DAEMON_USAGE_RETENTION_HOURS = 24 * 7;
+
+/** Park-reason prefix that marks a job parked by the daemon-wide ceiling (audit
+ *  SEC-7). It is the ONLY thing that distinguishes such a job from one waiting on
+ *  billing or a per-event budget, so the sweep that releases them can be scoped —
+ *  shared between the thrower and the sweeper so the two cannot drift apart. */
+export const DAEMON_PARK_REASON = "daemon budget exceeded";
 
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
@@ -299,7 +311,7 @@ function applyMembershipSubjectMerge(db: DatabaseSync): void {
   for (const r of rows) {
     const pk = r.subject.slice(r.subject.indexOf(":") + 1);
     const newSubject = `member:${pk}`;
-    const key = `${r.coordinate} ${newSubject}`;
+    const key = `${r.coordinate}\u0000${newSubject}`;
     const cur = winners.get(key);
     const wins =
       !cur ||
@@ -409,7 +421,7 @@ const MIGRATIONS: Migration[] = [
  * transaction, advancing `user_version` at each boundary. Read-only inspection
  * (doctor, audit O2) must NOT go through here — it uses {@link inspectDatabaseReadOnly}.
  */
-function migrate(db: DatabaseSync): void {
+function migrate(db: DatabaseSync, path?: string): void {
   const uv = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   if (uv > SCHEMA_VERSION) {
     throw new Error(
@@ -417,6 +429,18 @@ function migrate(db: DatabaseSync): void {
     );
   }
   applyBaselineDDL(db);
+  // A pending migration is about to make this file unreadable to every older
+  // binary — the refusal above is exactly that, seen from the other side — so the
+  // ONLY way back is a copy of the file as it is right now (audit OPS-2).
+  //
+  // CLAUDE.md documents taking one by hand before any push that bumps
+  // SCHEMA_VERSION. Nothing enforced that, and it is a ritual performed under
+  // deploy pressure by whoever happens to be pushing: the one time it is skipped
+  // is the one time it is needed. Taking it here means it cannot be skipped, and
+  // it costs nothing on the overwhelmingly common path where there is nothing to
+  // migrate.
+  const pending = MIGRATIONS.some((m) => m.version > uv);
+  if (pending && path && path !== ":memory:") writePreMigrationBackup(db, path, uv);
   for (const m of MIGRATIONS) {
     if (m.version <= uv) continue;
     db.exec("BEGIN IMMEDIATE");
@@ -436,6 +460,34 @@ function migrate(db: DatabaseSync): void {
   // Stamp the current version even when there were no pending migrations (a fresh
   // database whose baseline already matches, or one already at SCHEMA_VERSION).
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+/**
+ * Copy the database as it stands, before a migration makes it unreadable to older
+ * binaries (audit OPS-2). Named for the version the file CONTAINS, not the one it
+ * is about to become — the first hand-taken v4→v5 backup was labelled `pre-v5`
+ * while holding v4, which is precisely the read-it-backwards trap you do not want
+ * at restore time.
+ *
+ * `.backup`, not a file copy: the daemon runs in WAL mode, and a plain copy of the
+ * main file can miss committed pages still sitting in the `-wal`.
+ *
+ * Best-effort by design. A backup that cannot be written (a full disk, a read-only
+ * mount) must not stop a coordinator from starting — but it is loud, because the
+ * operator has just lost their rollback point and the deploy is going ahead anyway.
+ */
+function writePreMigrationBackup(db: DatabaseSync, path: string, fromVersion: number): void {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
+  const out = `${path}.v${fromVersion}-${stamp}.bak`;
+  try {
+    db.exec(`VACUUM INTO '${out.replace(/'/g, "''")}'`);
+    console.log(`[store] pre-migration backup of v${fromVersion} written to ${out}`);
+  } catch (e) {
+    console.error(
+      `[store] COULD NOT write the pre-migration backup to ${out} (${e instanceof Error ? e.message : e}) — ` +
+        `migrating to v${SCHEMA_VERSION} anyway, but this schema change is ONE-WAY and you now have no rollback point`,
+    );
+  }
 }
 
 /**
@@ -497,6 +549,136 @@ export function inspectDatabaseReadOnly(
       installedEventCount,
       decryptedRows,
     };
+  } finally {
+    db.close();
+  }
+}
+
+/** One poisoned queue row, as `doctor` renders it. */
+export interface PoisonJobSummary {
+  id: number;
+  type: string;
+  attempts: number;
+  /** `$.coordinate` / `$.pubkey` lifted out of the payload, when present. */
+  coordinate: string | null;
+  pubkey: string | null;
+  last_error: string | null;
+  /** When the final (poisoning) attempt was claimed — the closest thing the row
+   *  carries to "how long has this been dead". Null on a never-claimed row. */
+  claimed_at: number | null;
+}
+
+/** One organizer-visible poison status row, as `doctor` renders it. */
+export interface PoisonStatusSummary {
+  coordinate: string;
+  stage: string;
+  pubkey: string | null;
+  attempts: number;
+  error_category: string;
+  updated_at: number;
+}
+
+/** What {@link inspectPipelineReadOnly} reports. All timestamps are ms epoch. */
+export interface PipelineInspection {
+  /** Row count per job state; absent states are omitted. */
+  counts: Partial<Record<JobState, number>>;
+  /** The `pending` row that has waited longest, with the time it becomes runnable. */
+  oldestPending: { id: number; type: string; next_run_at: number; attempts: number } | null;
+  /** The `running` row claimed longest ago, with its lease. A lease already in the
+   *  past means the worker holding it died — the row is stranded, not working. */
+  oldestRunning: { id: number; type: string; claimed_at: number | null; lease_until: number | null } | null;
+  /** Poisoned queue rows, newest-numbered first, capped. */
+  poisonJobs: PoisonJobSummary[];
+  /** Poison rows in `job_status` (what the organizer sees), most recent first, capped. */
+  poisonStatuses: PoisonStatusSummary[];
+  /** `claimed_at` of the most recently STARTED `done` row — the closest thing the
+   *  schema records to "when did this pipeline last finish anything". Null if none. */
+  lastCompletedStartedAt: number | null;
+}
+
+/**
+ * Read-only pipeline/queue inspection for `doctor` (companion to
+ * {@link inspectDatabaseReadOnly}, same audit-O2 contract: a READ-ONLY connection,
+ * no migration, the file left byte-identical).
+ *
+ * `doctor` checked config, identity, database integrity, ffmpeg, relays and the
+ * provider, and then printed "all checks passed" over a queue in which two
+ * attendees had been poisoned since mid-July. Every one of those checks is about
+ * whether the daemon CAN work; none of them was about whether it IS working. This
+ * is the missing half: what is queued, what is stuck, what poisoned and how long
+ * ago, and whether anything has completed recently.
+ *
+ * Tolerant of a database that predates any of these tables (a first-run file): a
+ * missing table yields empty/zero rather than an error, because "the pipeline has
+ * never run" is a legitimate state, not a failed check.
+ */
+export function inspectPipelineReadOnly(path: string, opts: { limit?: number } = {}): PipelineInspection {
+  const limit = opts.limit ?? 5;
+  const db = new DatabaseSync(path, { readOnly: true });
+  /** Any query here may hit a table this database is too old to have. */
+  const safe = <T>(fn: () => T, fallback: T): T => {
+    try {
+      return fn();
+    } catch {
+      return fallback;
+    }
+  };
+  try {
+    const counts: Partial<Record<JobState, number>> = {};
+    for (const r of safe(
+      () => db.prepare("SELECT state, COUNT(*) AS c FROM jobs GROUP BY state").all() as { state: JobState; c: number }[],
+      [],
+    )) {
+      counts[r.state] = Number(r.c);
+    }
+    const oldestPending =
+      safe(
+        () =>
+          db
+            .prepare(
+              "SELECT id, type, next_run_at, attempts FROM jobs WHERE state = 'pending' ORDER BY next_run_at ASC, id ASC LIMIT 1",
+            )
+            .get() as { id: number; type: string; next_run_at: number; attempts: number } | undefined,
+        undefined,
+      ) ?? null;
+    const oldestRunning =
+      safe(
+        () =>
+          db
+            .prepare(
+              "SELECT id, type, claimed_at, lease_until FROM jobs WHERE state = 'running' ORDER BY claimed_at ASC, id ASC LIMIT 1",
+            )
+            .get() as { id: number; type: string; claimed_at: number | null; lease_until: number | null } | undefined,
+        undefined,
+      ) ?? null;
+    const poisonJobs = safe(
+      () =>
+        db
+          .prepare(
+            `SELECT id, type, attempts, last_error, claimed_at,
+                    json_extract(payload, '$.coordinate') AS coordinate,
+                    json_extract(payload, '$.pubkey') AS pubkey
+               FROM jobs WHERE state = 'poison' ORDER BY id DESC LIMIT ?`,
+          )
+          .all(limit) as unknown as PoisonJobSummary[],
+      [],
+    );
+    const poisonStatuses = safe(
+      () =>
+        db
+          .prepare(
+            `SELECT coordinate, stage, pubkey, attempts, error_category, updated_at
+               FROM job_status WHERE state = 'poison' ORDER BY updated_at DESC LIMIT ?`,
+          )
+          .all(limit) as unknown as PoisonStatusSummary[],
+      [],
+    );
+    const lastCompletedStartedAt = safe(
+      () =>
+        (db.prepare("SELECT MAX(claimed_at) AS t FROM jobs WHERE state = 'done'").get() as { t: number | null }).t,
+      null,
+    );
+    return { counts, oldestPending, oldestRunning, poisonJobs, poisonStatuses, lastCompletedStartedAt };
   } finally {
     db.close();
   }
@@ -576,6 +758,17 @@ export const MATCH_JOB_TYPES = [
   "score_reverse_batch",
   "publish_matches",
 ] as const;
+
+/**
+ * Per-attendee pipeline job types whose dedupe-key memory an organizer `reprocess`
+ * must clear (see {@link Store.clearAttendeeJobMemo}). Both carry `$.coordinate` +
+ * `$.pubkey` in their payload, which is what makes a single per-attendee delete
+ * possible. `process_talk` belongs here even though a talk is per-`talk_d`: a
+ * poisoned talk row is otherwise UNRECOVERABLE, because its dedupe key is
+ * content-addressed on the media hash and a re-submission of the same recording
+ * reproduces it exactly.
+ */
+export const ATTENDEE_JOB_TYPES = ["process_attendee", "process_talk"] as const;
 
 /** A Cashu payment reservation in the durable journal (audit finding H8). */
 export type CashuJournalState = "in_flight" | "settled" | "ambiguous";
@@ -1000,23 +1193,119 @@ CREATE TABLE IF NOT EXISTS usage (
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (coordinate, pubkey)
 );
+
+-- Daemon-wide usage in hourly buckets (audit SEC-7). The per-event and
+-- per-attendee budgets above are LIFETIME counters scoped to one installation,
+-- so they cannot see the shape of the attack they leave open: install is
+-- protocol-level and allowed_eid_pubkeys is empty by default, so anyone can
+-- self-install up to security.max_events events and spend each one's full
+-- budget against the operator's single provider key. This table is the total
+-- across every installation, bucketed by hour so the ceiling can be a rolling
+-- window rather than an all-time number that would eventually park a busy
+-- daemon forever. Purely additive: an older binary that doesn't know it simply
+-- doesn't read it, which is why this needs no schema-version bump.
+CREATE TABLE IF NOT EXISTS daemon_usage (
+  hour INTEGER PRIMARY KEY,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  duration_sec INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
 `;
+
+/**
+ * How long a statement waits for a lock before failing with SQLITE_BUSY.
+ *
+ * SQLite's default is 0 — the FIRST contended statement throws immediately. That
+ * default is wrong for this daemon in a way that costs availability rather than
+ * correctness: `backup`/`doctor`/`restore` and the daemon share one file, WAL keeps
+ * readers out of the writer's way but NOT writers out of each other's, and a
+ * `SQLITE_BUSY` thrown out of `claimNextJob` propagates through `JobRunner.drain()`
+ * into `main.ts`'s loop, past `main().catch`, and EXITS THE PROCESS. A momentary
+ * overlap with an operator's `VACUUM INTO` would therefore kill the coordinator.
+ * Five seconds is far longer than any lock this store actually holds (every write
+ * transaction here is a handful of statements), so a wait that hits the limit is a
+ * genuine stuck writer and still surfaces as an error rather than hanging forever.
+ */
+export const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
+
+export interface StoreOptions {
+  /**
+   * Run schema migrations + the legacy-plaintext encryption pass on open (default
+   * true — what the daemon wants).
+   *
+   * `false` opens the database EXACTLY as it is on disk: no baseline DDL, no
+   * numbered migration, no in-place re-encryption. That mode exists for `backup`
+   * (§13.2). A schema migration is ONE-WAY — afterwards the store refuses to open
+   * under any older binary — so a backup taken with a newer binary than the file
+   * must NOT migrate it: that would both mutate a database a running older daemon
+   * is using AND destroy the very pre-migration rollback point the runbook takes
+   * the backup for. A newer-than-this-binary database is still refused, since
+   * reading it could mis-handle columns this build doesn't know.
+   */
+  migrate?: boolean;
+  /** Lock wait before SQLITE_BUSY; see {@link DEFAULT_BUSY_TIMEOUT_MS}. */
+  busyTimeoutMs?: number;
+}
+
+/**
+ * Tighten the SQLite file (and its WAL sidecars) to owner-only.
+ *
+ * These files hold attendee names, profiles, AI profiles, transcripts, match
+ * scores and the Cashu payment journal in CLEARTEXT — only the per-event key
+ * columns are encrypted at rest (F1). Until now they were created under whatever
+ * umask the daemon inherited, which on a stock Debian/systemd user unit is 022,
+ * i.e. world-readable. `providers/cashu.ts` already writes its wallet with
+ * `{ mode: 0o600 }`; the database that holds strictly more is what this closes.
+ *
+ * Best-effort by design: a chmod failure (an exotic filesystem, a file owned by
+ * another user after a botched restore) must never stop the daemon from starting —
+ * the operator has bigger problems than permissions at that point.
+ */
+function tightenDbFileModes(path: string): void {
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try {
+      chmodSync(path + suffix, 0o600);
+    } catch {
+      /* absent or not chmod-able — best effort */
+    }
+  }
+}
 
 export class Store {
   private db: DatabaseSync;
   /** Coordinator identity secret; when set, event-key columns are encrypted at rest. */
   private readonly identitySk?: Uint8Array;
 
-  constructor(path = ":memory:", identitySk?: Uint8Array) {
+  constructor(path = ":memory:", identitySk?: Uint8Array, opts: StoreOptions = {}) {
     this.identitySk = identitySk;
     this.db = new DatabaseSync(path);
-    this.db.exec("PRAGMA journal_mode = WAL;");
-    // Refuse a newer database, apply the idempotent baseline shape, and run every
-    // pending numbered migration transactionally (audit O3). Doctor's read-only
-    // inspection (audit O2) deliberately does NOT come through here.
-    migrate(this.db);
-    // Migration (F1): encrypt any legacy plaintext event-key rows in place.
-    if (this.identitySk) this.encryptPlaintextKeyRows();
+    // Wait for a contended lock instead of failing the statement instantly. MUST be
+    // the first pragma: everything below (including `journal_mode = WAL`, which
+    // takes an exclusive lock briefly) can itself hit a busy database.
+    this.db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(opts.busyTimeoutMs ?? DEFAULT_BUSY_TIMEOUT_MS))};`);
+    if (opts.migrate === false) {
+      // Snapshot mode: touch nothing. Not even `journal_mode`, which rewrites the
+      // header of a non-WAL file. The one check kept is the newer-database refusal,
+      // because that is about whether we can READ the file correctly.
+      const uv = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+      if (uv > SCHEMA_VERSION) {
+        this.db.close();
+        throw new Error(
+          `database schema v${uv} was written by a NEWER coordinator than this binary (v${SCHEMA_VERSION}); refusing to open`,
+        );
+      }
+    } else {
+      this.db.exec("PRAGMA journal_mode = WAL;");
+      // Refuse a newer database, apply the idempotent baseline shape, and run every
+      // pending numbered migration transactionally (audit O3). Doctor's read-only
+      // inspection (audit O2) deliberately does NOT come through here.
+      migrate(this.db, path);
+      // Migration (F1): encrypt any legacy plaintext event-key rows in place.
+      if (this.identitySk) this.encryptPlaintextKeyRows();
+    }
+    // Owner-only, after WAL/`-shm` exist so the sidecars are covered too.
+    if (path !== ":memory:") tightenDbFileModes(path);
   }
 
   close(): void {
@@ -2068,7 +2357,18 @@ export class Store {
       this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
-      this.db.exec("ROLLBACK");
+      // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
+      // the transaction back itself (any error that aborts the statement AND the
+      // transaction — a constraint violation on a deferred FK, SQLITE_FULL,
+      // SQLITE_BUSY on the commit). A bare `exec("ROLLBACK")` then throws "cannot
+      // rollback - no transaction is active", and because that throw happens inside
+      // the catch it REPLACES `e` — the caller/log gets a misleading complaint about
+      // transaction state and the actual purge failure is gone.
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* no active txn — SQLite already rolled back */
+      }
       throw e;
     }
   }
@@ -2176,7 +2476,18 @@ export class Store {
       this.db.prepare("DELETE FROM marmot_groups WHERE coordinate = ?").run(coordinate);
       this.db.exec("COMMIT");
     } catch (e) {
-      this.db.exec("ROLLBACK");
+      // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
+      // the transaction back itself (any error that aborts the statement AND the
+      // transaction — a constraint violation on a deferred FK, SQLITE_FULL,
+      // SQLITE_BUSY on the commit). A bare `exec("ROLLBACK")` then throws "cannot
+      // rollback - no transaction is active", and because that throw happens inside
+      // the catch it REPLACES `e` — the caller/log gets a misleading complaint about
+      // transaction state and the actual purge failure is gone.
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        /* no active txn — SQLite already rolled back */
+      }
       throw e;
     }
   }
@@ -2363,12 +2674,13 @@ export class Store {
    * batches were logged as dispatched, no row was created, nothing ever ran, and
    * not one line said so (production incident 2026-07-24).
    */
-  enqueueJob(type: string, dedupeKey: string, payload: unknown): EnqueueOutcome {
+  /** `notBefore` (epoch ms) delays first execution; 0/omitted means "runnable now". */
+  enqueueJob(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
     const info = this.db
       .prepare(
-        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', 0)",
+        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', ?)",
       )
-      .run(type, dedupeKey, JSON.stringify(payload));
+      .run(type, dedupeKey, JSON.stringify(payload), notBefore);
     if (Number(info.changes) > 0) return "enqueued";
     const row = this.db.prepare("SELECT state FROM jobs WHERE dedupe_key = ?").get(dedupeKey) as
       | { state: JobState }
@@ -2418,19 +2730,28 @@ export class Store {
    * own enqueue hit the poisoned key and vanished. Their profiles were
    * unrecoverable through the UI.
    *
+   * Covers BOTH per-attendee pipeline job types (see {@link ATTENDEE_JOB_TYPES}).
+   * `process_talk` was originally excluded and had NO remedy at all: its dedupe key
+   * is content-addressed on the media hash (`talk:<coordinate>:<pubkey>:<talk_d>:<x>`),
+   * so a speaker who re-submits THE SAME recording after a poisoned run lands on the
+   * same key and the enqueue is silently discarded. `recompute` skips it
+   * (MATCH_JOB_TYPES), `reprocess` skipped it too, and the only remaining remedies
+   * were "re-record the talk so the hash changes" or hand-editing SQLite on the host.
+   *
    * Narrow on purpose: one attendee, terminal rows only. `pending`/`running`/
    * `waiting` rows are live work that must keep coalescing.
    */
   clearAttendeeJobMemo(coordinate: string, pubkey: string): number {
+    const placeholders = ATTENDEE_JOB_TYPES.map(() => "?").join(",");
     const info = this.db
       .prepare(
         `DELETE FROM jobs
            WHERE state IN ('done','poison')
-             AND type = 'process_attendee'
+             AND type IN (${placeholders})
              AND json_extract(payload, '$.coordinate') = ?
              AND json_extract(payload, '$.pubkey') = ?`,
       )
-      .run(coordinate, pubkey);
+      .run(...ATTENDEE_JOB_TYPES, coordinate, pubkey);
     return Number(info.changes);
   }
 
@@ -2517,6 +2838,35 @@ export class Store {
   }
 
   /**
+   * Hand a claimed job straight back to the queue, runnable IMMEDIATELY and with
+   * its retry counter untouched (shutdown abort, audit C11).
+   *
+   * The shutdown-abort branch in `pipeline/jobs.ts` used to just `return`, leaving
+   * the row `running` on the theory that it was "claimable for restart". It was
+   * not, for FIVE MINUTES: both paths that pick a stranded job up
+   * ({@link claimNextJob}'s `state = 'running'` arm and {@link reclaimExpiredLeases})
+   * require `lease_until <= now`, and the heartbeat had extended that lease to
+   * `now + leaseMs` at most a third of a lease ago. So a deploy that landed while an
+   * attendee's `process_attendee` was mid-flight left that attendee's pipeline idle
+   * for up to five minutes past the restart, while the new daemon reported
+   * "recovered 0 stranded job(s)" — nothing in the log connected the two.
+   *
+   * Distinct from {@link failJob} (consumes a retry, sets a backoff, can poison) and
+   * from {@link parkJob} (moves to `waiting`, which is never claimed until an
+   * unblock): a shutdown is not the job's fault and not a block, so this preserves
+   * the documented "consumes no retry" contract and asks for immediate re-execution.
+   * Only the lease owner may release; returns false if the lease was already lost.
+   */
+  releaseJob(id: number, workerToken?: string): boolean {
+    const sql =
+      "UPDATE jobs SET state = 'pending', next_run_at = 0, worker_token = NULL, lease_until = NULL WHERE id = ?" +
+      (workerToken ? " AND worker_token = ?" : "");
+    const args: unknown[] = [id];
+    if (workerToken) args.push(workerToken);
+    return this.db.prepare(sql).run(...(args as any)).changes > 0;
+  }
+
+  /**
    * Reset jobs whose lease expired back to `pending` (audit H1 startup/periodic
    * sweep). `claimNextJob` already treats an expired-running job as claimable, so
    * this is mainly to make recovery prompt and observable at startup. Returns the
@@ -2570,11 +2920,43 @@ export class Store {
    * Returns the number of jobs resumed.
    */
   resumeWaitingJobs(coordinate: string): number {
+    // `json_extract`, not a LIKE over the raw payload. The pattern form was wrong in
+    // BOTH directions, and an event identifier is organizer-chosen:
+    //   - an identifier containing `%` made the pattern match EVERY parked job in
+    //     the table, so unblocking one event resumed paid work parked for other
+    //     events that were still billing-blocked or over budget — a cross-tenant
+    //     spend-gate bypass;
+    //   - an identifier containing `"` or `\` is JSON-escaped in the stored payload
+    //     but was not in the pattern, so nothing matched and that event's parked
+    //     work never resumed when payment cleared, silently.
+    // `clearMatchJobMemo`/`clearAttendeeJobMemo` already do it this way.
     const info = this.db
       .prepare(
-        "UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL WHERE state = 'waiting' AND payload LIKE ?",
+        "UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL WHERE state = 'waiting' AND json_extract(payload, '$.coordinate') = ?",
       )
-      .run(`%"coordinate":"${coordinate}"%`);
+      .run(coordinate);
+    return Number(info.changes);
+  }
+
+  /**
+   * Re-enqueue jobs parked specifically by the DAEMON-WIDE ceiling (audit SEC-7),
+   * across every coordinate. Scoped by the park reason rather than resuming all
+   * waiting jobs, because a daemon-ceiling sweep must not un-park work that is
+   * waiting on a billing block or a per-event budget — those have their own,
+   * unrelated release conditions.
+   *
+   * Safe to call on a schedule and after a restart: a resumed row has its
+   * `last_error` cleared, so it is no longer matched and a second sweep resumes
+   * nothing. That is also what makes the release survive a restart — the marker
+   * lives in the row, not in a process-local latch.
+   */
+  resumeDaemonParkedJobs(): number {
+    const info = this.db
+      .prepare(
+        `UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL
+         WHERE state = 'waiting' AND last_error LIKE '${DAEMON_PARK_REASON}%'`,
+      )
+      .run();
     return Number(info.changes);
   }
 
@@ -2585,8 +2967,10 @@ export class Store {
     }
     return (
       this.db
-        .prepare("SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND payload LIKE ?")
-        .get(`%"coordinate":"${coordinate}"%`) as any
+        .prepare(
+          "SELECT COUNT(*) AS c FROM jobs WHERE state = 'waiting' AND json_extract(payload, '$.coordinate') = ?",
+        )
+        .get(coordinate) as any
     ).c;
   }
 
@@ -2600,9 +2984,19 @@ export class Store {
    * compare-and-set logic already discards their stale writes. Returns count deleted.
    */
   supersedePendingJobs(prefix: string, keepKey: string): number {
+    // `ESCAPE '\\'` is REQUIRED, not decorative: SQLite's LIKE has no default escape
+    // character, so the backslashes this pattern inserts were matched literally and
+    // the clause selected nothing. Verified against node:sqlite — for a prefix
+    // containing `_`, the escaped pattern matched 0 rows where the unescaped one
+    // matched 2. The consequence was that a new submission revision stopped
+    // cancelling the older revision's pending job, so the coordinator paid to
+    // download, transcribe and profile a recording the attendee had already
+    // replaced. Latent for app-created events (the slug generator only emits
+    // [a-z0-9-]) and reachable through a third-party-authored 31923, which
+    // `parseCoordinate` accepts.
     const info = this.db
       .prepare(
-        "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? AND dedupe_key != ?",
+        "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? ESCAPE '\\' AND dedupe_key != ?",
       )
       .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
     return Number(info.changes);
@@ -2637,6 +3031,53 @@ export class Store {
         calls: delta.calls ?? 0,
         now,
       });
+    // Every spend is also daemon-wide spend (audit SEC-7). Folding it in HERE
+    // rather than at the call sites is deliberate: there are four of them and
+    // they will grow, and a daemon ceiling that a future call site forgets to
+    // feed is worse than no ceiling, because it reads as protection.
+    this.addDaemonUsage(delta, now);
+  }
+
+  /** Accumulate one hour's daemon-wide usage and drop buckets older than
+   *  {@link DAEMON_USAGE_RETENTION_HOURS}, so the table stays a fixed handful of
+   *  rows however long the daemon runs. */
+  private addDaemonUsage(delta: { bytes?: number; durationSec?: number; calls?: number }, now: number): void {
+    const hour = Math.floor(now / 3_600_000);
+    this.db
+      .prepare(
+        `INSERT INTO daemon_usage (hour, bytes, duration_sec, calls, updated_at)
+         VALUES (:hour, :bytes, :duration_sec, :calls, :now)
+         ON CONFLICT(hour) DO UPDATE SET
+           bytes = bytes + excluded.bytes,
+           duration_sec = duration_sec + excluded.duration_sec,
+           calls = calls + excluded.calls,
+           updated_at = excluded.updated_at`,
+      )
+      .run({
+        hour,
+        bytes: delta.bytes ?? 0,
+        duration_sec: delta.durationSec ?? 0,
+        calls: delta.calls ?? 0,
+        now,
+      });
+    this.db.prepare("DELETE FROM daemon_usage WHERE hour < ?").run(hour - DAEMON_USAGE_RETENTION_HOURS);
+  }
+
+  /**
+   * Daemon-wide usage over the trailing `windowHours` (default 24), summed across
+   * every installed event. The window is bucket-aligned: a bucket is counted whole
+   * once its hour is inside the window, so the effective span is between
+   * `windowHours` and `windowHours + 1` — the ceiling is an abuse guard, not a
+   * billing meter, and an hour of slack is cheaper than per-event timestamps.
+   */
+  getDaemonUsage(now: number, windowHours = 24): { bytes: number; durationSec: number; calls: number } {
+    const from = Math.floor(now / 3_600_000) - windowHours + 1;
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(bytes),0) AS bytes, COALESCE(SUM(duration_sec),0) AS duration_sec, COALESCE(SUM(calls),0) AS calls FROM daemon_usage WHERE hour >= ?",
+      )
+      .get(from) as { bytes: number; duration_sec: number; calls: number };
+    return { bytes: row.bytes, durationSec: row.duration_sec, calls: row.calls };
   }
 
   /** Cumulative usage for one attendee (defaults to zeros when none recorded). */
@@ -3125,6 +3566,6 @@ export function talkContentHash(fields: {
   } catch {
     speakers = [];
   }
-  const canonical = [fields.mediaX, fields.title, fields.description, speakers.join(","), fields.lang].join(" ");
+  const canonical = [fields.mediaX, fields.title, fields.description, speakers.join(","), fields.lang].join("\u0000");
   return sha256Hex(utf8ToBytes(canonical));
 }

@@ -13,6 +13,7 @@ import {
   selfDecrypt,
   blindedD,
   blindedDLiteral,
+  collidesWithBlindedDMessage,
   aesGcmEncrypt,
   aesGcmDecrypt,
   sha256Hex,
@@ -101,6 +102,71 @@ describe("blinded d-tags", () => {
     const key = generateEck();
     expect(blindedDLiteral(key, "library")).toBe(blindedDLiteral(key, "library"));
     expect(blindedDLiteral(key, "library")).not.toBe(blindedD(key, coord, attendee));
+  });
+});
+
+/**
+ * blinded-d domain separation.
+ *
+ * `blindedD` and `blindedDLiteral` share ONE HMAC key and neither prefixes a
+ * tag, so the only thing keeping their message spaces apart is the SHAPE of the
+ * strings each is called with — `<kind>:<hex64>:<d>|<hex64>` for the former,
+ * a word-initial literal for the latter. That is a real separation but an
+ * accidental one, and the textbook fix (a distinct constant tag per function) is
+ * deliberately not applied: the derived value IS the published `d` of every
+ * 31602/31603/31605/31610 record, so re-deriving it makes every live event's
+ * directory entries, match lists, reuse library and talks unaddressable — a
+ * wire-visible break of a frozen format to close a collision no caller can reach.
+ *
+ * These tests are the substitute: they pin the current inputs as non-overlapping,
+ * so a future literal that happens to look like a coordinate fails loudly here
+ * rather than silently addressing another record's `d`.
+ */
+describe("blinded-d domain separation", () => {
+  const coord = makeCoordinate("a".repeat(64), "myevent");
+  const attendee = "b".repeat(64);
+
+  /** Every literal `blindedDLiteral` is called with anywhere in the codebase. */
+  const LITERALS = [
+    "library", // media/submit.ts — the cross-event reuse library entry
+    "chat-device-key", // chat/legacy-cleanup.ts — the legacy device-key entry
+    `talk|${coord}|${attendee}|talk-1`, // nostr/publisher.ts — per-talk blinded d
+  ];
+
+  it("no literal in use is shaped like a blindedD message", () => {
+    for (const literal of LITERALS) {
+      expect(collidesWithBlindedDMessage(literal)).toBe(false);
+    }
+    // The shape rule itself is right: a real blindedD message DOES match, so the
+    // guard above is not vacuously true.
+    expect(collidesWithBlindedDMessage(`${coord}|${attendee}`)).toBe(true);
+    // And the trap it exists to catch — a "literal" that is really a coordinate.
+    expect(collidesWithBlindedDMessage(`31923:${"a".repeat(64)}:ev|${attendee}`)).toBe(true);
+  });
+
+  it("no literal in use collides with a per-attendee blinded d under the same key", () => {
+    // The empirical half: derive both families under one key and assert the
+    // outputs are disjoint. `talk|…` embeds a coordinate and a pubkey, which is
+    // exactly the near-miss worth pinning.
+    const key = generateEck();
+    const literalDs = LITERALS.map((l) => blindedDLiteral(key, l));
+    const coordinateDs = [
+      blindedD(key, coord, attendee),
+      blindedD(key, coord, "c".repeat(64)),
+      blindedD(key, makeCoordinate("a".repeat(64), "other"), attendee),
+    ];
+    for (const l of literalDs) expect(coordinateDs).not.toContain(l);
+    expect(new Set([...literalDs, ...coordinateDs]).size).toBe(
+      literalDs.length + coordinateDs.length,
+    );
+  });
+
+  it("a literal that IS a coordinate message derives the same d — which is why the shape rule is pinned", () => {
+    // The collision is genuinely reachable if a caller ever passes a
+    // coordinate-shaped literal: same key, same message, same HMAC, same `d`.
+    // Nothing in the derivation prevents it; only the test above does.
+    const key = generateEck();
+    expect(blindedDLiteral(key, `${coord}|${attendee}`)).toBe(blindedD(key, coord, attendee));
   });
 });
 
@@ -209,18 +275,18 @@ describe("NIP-44 plaintext ceiling (65,535 bytes, PROTO-3)", () => {
   const tooBig = "x".repeat(65_536); // 65,536 UTF-8 bytes
 
   it("eckEncrypt rejects an over-ceiling plaintext", () => {
-    expect(() => eckEncrypt(generateEck(), tooBig)).toThrow(/ceiling is 65535/);
+    expect(() => eckEncrypt(generateEck(), tooBig)).toThrow(/over the 65535-byte ceiling/);
   });
 
   it("nip44Encrypt rejects an over-ceiling plaintext", () => {
     const sender = generateSecretKey();
     expect(() =>
       nip44Encrypt(sender, getPublicKey(generateSecretKey()), tooBig),
-    ).toThrow(/ceiling is 65535/);
+    ).toThrow(/over the 65535-byte ceiling/);
   });
 
   it("selfEncrypt rejects an over-ceiling plaintext", () => {
-    expect(() => selfEncrypt(generateSecretKey(), tooBig)).toThrow(/ceiling is 65535/);
+    expect(() => selfEncrypt(generateSecretKey(), tooBig)).toThrow(/over the 65535-byte ceiling/);
   });
 
   it("a plaintext exactly at the ceiling still round-trips", () => {

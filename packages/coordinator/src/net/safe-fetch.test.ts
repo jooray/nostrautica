@@ -187,3 +187,43 @@ describe("safeFetch", () => {
     ).rejects.toMatchObject({ retryable: false });
   });
 });
+
+/**
+ * IPv4 smuggled inside an IPv6 literal (2026-09-04 audit).
+ *
+ * The guard decoded ONLY the dotted mapped form, `::ffff:a.b.c.d`. That check is
+ * dead for anything URL-derived, because WHATWG `URL` normalizes the dotted form
+ * to hex on parse — so every mapped literal that reached the guard was in the one
+ * shape it could not match, fell through the hextet rules (whose high bits are all
+ * zero), and was ALLOWED. An attendee could point a media descriptor at
+ * `https://[::ffff:a9fe:a9fe]/…` and have the coordinator connect to cloud
+ * metadata.
+ */
+describe("isBlockedAddress — embedded IPv4 in IPv6 (audit 2026-09-04)", () => {
+  it("blocks the HEX mapped forms a URL actually produces", () => {
+    expect(new URL("https://[::ffff:127.0.0.1]/").hostname).toBe("[::ffff:7f00:1]"); // the premise
+    expect(isBlockedAddress("::ffff:7f00:1")).toBe(true); // loopback
+    expect(isBlockedAddress("::ffff:a9fe:a9fe")).toBe(true); // 169.254.169.254 metadata
+    expect(isBlockedAddress("::ffff:a00:1")).toBe(true); // 10.0.0.1 private
+    expect(isBlockedAddress("::ffff:c0a8:1")).toBe(true); // 192.168.0.1 private
+  });
+
+  it("still blocks the dotted forms", () => {
+    expect(isBlockedAddress("::ffff:127.0.0.1")).toBe(true);
+    expect(isBlockedAddress("::ffff:169.254.169.254")).toBe(true);
+  });
+
+  it("blocks IPv4-compatible and IPv4-translated constructions too", () => {
+    expect(isBlockedAddress("::7f00:1")).toBe(true); // ::127.0.0.1
+    expect(isBlockedAddress("::ffff:0:7f00:1")).toBe(true); // ::ffff:0:127.0.0.1
+  });
+
+  it("fails closed on an unrecognised shape in the same space", () => {
+    expect(isBlockedAddress("::dead:7f00:1")).toBe(true);
+  });
+
+  it("still allows a genuinely public mapped address and ordinary global IPv6", () => {
+    expect(isBlockedAddress("::ffff:808:808")).toBe(false); // 8.8.8.8
+    expect(isBlockedAddress("2606:4700:4700::1111")).toBe(false);
+  });
+});

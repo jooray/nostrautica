@@ -9,11 +9,19 @@
  */
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { WebSocket } from "ws";
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
-import { loadConfig, resolveIdentity, veniceApiKey } from "./config.js";
-import { Store, acquireDaemonLock, inspectDatabaseReadOnly, SCHEMA_VERSION, type DaemonLock } from "./store/db.js";
+import { loadConfig, resolveIdentity, veniceApiKey, spendExposure, type UnknownConfigKey } from "./config.js";
+import {
+  Store,
+  acquireDaemonLock,
+  inspectDatabaseReadOnly,
+  inspectPipelineReadOnly,
+  SCHEMA_VERSION,
+  type DaemonLock,
+  type PipelineInspection,
+} from "./store/db.js";
+import { GuardedWebSocket, setRelayConnectPolicy } from "./net/relay-guard.js";
 import { createBackup, verifyBackup, restoreBackup, metaPathFor, verifyPassed } from "./store/backup.js";
 import { verifyFfmpeg } from "./pipeline/audio.js";
 import { VeniceLlm } from "./providers/venice.js";
@@ -77,8 +85,36 @@ function cmdBackup(args: string[]): number {
     console.log("[backup] a daemon appears to be running — taking a live WAL-consistent snapshot");
   }
 
-  const store = new Store(db, sk);
+  if (!existsSync(db)) {
+    console.error(`[backup] FAILED: no database at ${db} — nothing to back up`);
+    lock?.release();
+    return 1;
+  }
+
+  // `{ migrate: false }` is the whole point of this line (§13.2 + the runbook's
+  // "back up the coordinator DB BEFORE a schema migration").
+  //
+  // A plain `new Store(db, sk)` runs `migrate()` and the legacy-plaintext encryption
+  // pass in its constructor. On the box, the deploy rsyncs SOURCE and then restarts,
+  // so an operator's binary is routinely NEWER than the file on disk — and taking a
+  // backup would then apply a ONE-WAY schema migration (afterwards no older binary
+  // will open the file at all) to the database a RUNNING OLDER DAEMON is using, with
+  // no pre-migration snapshot, which is precisely the artifact the operator was
+  // trying to create. `doctor` was given `inspectDatabaseReadOnly` for this exact
+  // reason; `backup` never got the same treatment.
+  //
+  // Opened read-WRITE, not `readOnly: true`: SQLite cannot open a WAL database
+  // read-only unless it can use the `-shm`, and `VACUUM INTO` still has to read a
+  // consistent snapshot. What matters is that nothing here MUTATES it.
+  const store = new Store(db, sk, { migrate: false });
   try {
+    const onDisk = store.schemaVersion();
+    if (onDisk < SCHEMA_VERSION) {
+      console.log(
+        `[backup] on-disk schema is v${onDisk}, this binary is v${SCHEMA_VERSION} — snapshotting v${onDisk} AS-IS ` +
+          "(no migration applied). This is your pre-migration rollback point; the daemon migrates on its next start.",
+      );
+    }
     const meta = createBackup({
       srcStore: store,
       destPath: dest,
@@ -180,6 +216,16 @@ function cmdRestore(args: string[]): number {
 }
 
 // ── doctor ───────────────────────────────────────────────────────────────────
+/**
+ * `GuardedWebSocket`, not a raw `ws.WebSocket` (audit C4 consistency). This was the
+ * ONE relay connection in the codebase that was not address-pinned: every other one
+ * goes through the guarded implementation nostr-tools was handed in `nostr/client.ts`.
+ * The URLs are operator-authored, so the exposure was small — but a doctor run is
+ * exactly when an operator is pasting a relay URL they are unsure about, and "the
+ * health check connects to hosts the daemon would refuse" is a difference nobody
+ * should have to remember. `setRelayConnectPolicy` is called by the caller first so
+ * a dev config's `allow_insecure_urls` still reaches a local `nak serve`.
+ */
 async function checkRelay(url: string, timeoutMs = 4000): Promise<boolean> {
   return await new Promise((resolve) => {
     let done = false;
@@ -193,7 +239,7 @@ async function checkRelay(url: string, timeoutMs = 4000): Promise<boolean> {
       }
       resolve(ok);
     };
-    const ws = new WebSocket(url);
+    const ws = new GuardedWebSocket(url);
     const t = setTimeout(() => finish(false), timeoutMs);
     t.unref?.();
     ws.on("open", () => finish(true));
@@ -201,27 +247,214 @@ async function checkRelay(url: string, timeoutMs = 4000): Promise<boolean> {
   });
 }
 
+/** `3d 4h` / `12m` / `40s` — a duration an operator reads without doing arithmetic. */
+function fmtAge(ms: number): string {
+  if (!Number.isFinite(ms)) return "unknown";
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+/** One rendered doctor line. `fail` is the only level that moves the exit code. */
+export interface DoctorCheck {
+  level: "ok" | "warn" | "fail";
+  label: string;
+  detail: string;
+}
+
+/** A poisoned row this old is stale enough that nobody is watching it (see below). */
+export const STALE_POISON_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Render the PIPELINE half of a doctor run.
+ *
+ * `doctor` checked config, identity, database integrity, ffmpeg, relays and the
+ * provider — every one of them a question about whether the daemon CAN work — and
+ * then printed "all checks passed" while two attendees had been sitting poisoned
+ * since mid-July. Seven weeks. Nothing in the tool would ever have said so; the only
+ * place that state existed was a `job_status` row and a 21606 notice in an organizer's
+ * app. These are the questions about whether it IS working.
+ *
+ * Nothing here FAILS the run. An old poisoned job is a thing an operator must be told
+ * about, not a reason to block an `ExecStartPre` and refuse to start the daemon —
+ * that would turn one stuck attendee into a total outage. Warnings are the right
+ * severity precisely because the summary line already distinguishes them from "ok".
+ *
+ * Pure and exported so the rendering is testable without a live database.
+ */
+export function pipelineChecks(
+  p: PipelineInspection,
+  opts: { now: number; daemonRunning: boolean },
+): DoctorCheck[] {
+  const out: DoctorCheck[] = [];
+  const c = p.counts;
+  const pending = c.pending ?? 0;
+  const running = c.running ?? 0;
+  const waiting = c.waiting ?? 0;
+  const poison = c.poison ?? 0;
+  const done = c.done ?? 0;
+
+  out.push({
+    level: "ok",
+    label: "daemon",
+    detail: opts.daemonRunning
+      ? "a coordinator holds the single-daemon lock (running)"
+      : "no daemon holds the single-daemon lock — the coordinator is NOT running on this database",
+  });
+
+  out.push({
+    level: "ok",
+    label: "job queue",
+    detail: `${pending} pending, ${running} running, ${waiting} waiting (parked), ${poison} poisoned, ${done} done`,
+  });
+
+  if (p.oldestPending) {
+    const j = p.oldestPending;
+    const overdueMs = opts.now - j.next_run_at;
+    if (overdueMs >= 0) {
+      // Runnable and still sitting there. With a live daemon that drains every
+      // second, anything beyond a couple of minutes means the loop is blocked by a
+      // handler that never returns — the 2026-07-24 shape.
+      out.push({
+        level: opts.daemonRunning && overdueMs > 5 * 60_000 ? "warn" : "ok",
+        label: "oldest pending job",
+        detail: `${j.type} #${j.id} has been runnable for ${fmtAge(overdueMs)} (attempt ${j.attempts + 1})`,
+      });
+    } else {
+      out.push({
+        level: "ok",
+        label: "oldest pending job",
+        detail: `${j.type} #${j.id} backing off, next run in ${fmtAge(-overdueMs)} (attempt ${j.attempts + 1})`,
+      });
+    }
+  }
+
+  if (p.oldestRunning) {
+    const j = p.oldestRunning;
+    const age = j.claimed_at === null ? null : opts.now - j.claimed_at;
+    const leaseExpired = j.lease_until !== null && j.lease_until <= opts.now;
+    out.push({
+      level: leaseExpired || !opts.daemonRunning ? "warn" : "ok",
+      label: "running job",
+      detail:
+        `${j.type} #${j.id}${age === null ? "" : ` claimed ${fmtAge(age)} ago`}` +
+        (j.lease_until === null
+          ? " (no lease)"
+          : leaseExpired
+            ? ` — lease EXPIRED ${fmtAge(opts.now - j.lease_until)} ago, the worker is gone and the row is stranded`
+            : ` (lease valid for another ${fmtAge(j.lease_until - opts.now)})`),
+    });
+  }
+
+  if (waiting > 0) {
+    out.push({
+      level: "warn",
+      label: "parked jobs",
+      detail: `${waiting} job(s) in 'waiting' — blocked on billing/budget; an organizer reprocess/recompute after an unblock resumes them`,
+    });
+  }
+
+  // Poisoned QUEUE rows. Anything older than a day has plainly not been noticed by
+  // anyone, which is the entire failure mode this check exists for.
+  if (poison > 0) {
+    const stale = p.poisonJobs.filter((j) => j.claimed_at !== null && opts.now - j.claimed_at > STALE_POISON_MS);
+    out.push({
+      level: "warn",
+      label: "poisoned jobs",
+      detail:
+        `${poison} job(s) in 'poison' — terminal, nothing will re-run them` +
+        (stale.length > 0 ? `; ${stale.length} older than a day (unnoticed)` : ""),
+    });
+    for (const j of p.poisonJobs) {
+      const age = j.claimed_at === null ? "unknown age" : `${fmtAge(opts.now - j.claimed_at)} ago`;
+      out.push({
+        level: "warn",
+        label: `  poison #${j.id}`,
+        detail:
+          `${j.type} after ${j.attempts} attempt(s), ${age}` +
+          (j.coordinate ? ` — ${j.coordinate}` : "") +
+          (j.pubkey ? ` / ${j.pubkey.slice(0, 8)}…` : "") +
+          (j.last_error ? `: ${j.last_error.slice(0, 160)}` : ""),
+      });
+    }
+  }
+
+  // The organizer-visible half (audit Q12): what the event's status notice shows.
+  for (const st of p.poisonStatuses) {
+    const age = opts.now - st.updated_at;
+    out.push({
+      level: "warn",
+      label: "  poison status",
+      detail:
+        `${st.stage} on ${st.coordinate}${st.pubkey ? ` / ${st.pubkey.slice(0, 8)}…` : ""} ` +
+        `(${st.error_category}, ${st.attempts} attempt(s)) — ${fmtAge(age)} ago` +
+        (age > STALE_POISON_MS ? " [STALE: over a day old]" : ""),
+    });
+  }
+
+  out.push({
+    level: p.lastCompletedStartedAt === null && (pending > 0 || running > 0) ? "warn" : "ok",
+    label: "last completed job",
+    detail:
+      p.lastCompletedStartedAt === null
+        ? "none — this pipeline has never completed a job"
+        : `started ${fmtAge(opts.now - p.lastCompletedStartedAt)} ago`,
+  });
+
+  return out;
+}
+
 async function cmdDoctor(args: string[]): Promise<number> {
   const configPath = configPathFromArgs(args);
   let failures = 0;
+  let warnings = 0;
   const pass = (label: string, detail = "") => console.log(`  [ok]   ${label}${detail ? ` — ${detail}` : ""}`);
   const fail = (label: string, detail = "") => {
     failures++;
     console.log(`  [FAIL] ${label}${detail ? ` — ${detail}` : ""}`);
   };
-  const warn = (label: string, detail = "") => console.log(`  [warn] ${label}${detail ? ` — ${detail}` : ""}`);
+  const warn = (label: string, detail = "") => {
+    warnings++;
+    console.log(`  [warn] ${label}${detail ? ` — ${detail}` : ""}`);
+  };
 
   console.log(`[doctor] nostrautica-coordinator ${releaseId()} (schema v${SCHEMA_VERSION})`);
 
-  // 1. config parse
+  // 1. config parse. Unknown keys are collected rather than left to `loadConfig`'s
+  // own console.warn, so they land in doctor's report format — a mistyped or renamed
+  // key (`pricing.free_organizers` → `pricing.free_eids`) is a setting the operator
+  // believes is in effect and is not.
   let config: ReturnType<typeof loadConfig> | undefined;
+  const unknownKeys: UnknownConfigKey[] = [];
   try {
-    config = loadConfig(configPath);
+    config = loadConfig(configPath, { onUnknownKeys: (ks) => unknownKeys.push(...ks) });
     pass("config parse", configPath);
   } catch (e) {
     fail("config parse", e instanceof Error ? e.message : String(e));
     console.log("[doctor] cannot continue without a parseable config");
     return 1;
+  }
+  if (unknownKeys.length > 0) {
+    warn(
+      "config unknown key(s)",
+      `${unknownKeys.map((u) => u.path).join(", ")} — not in the schema, IGNORED (typo or renamed setting?)`,
+    );
+  }
+
+  // Spend exposure (audit SEC-7). Mirrors the startup gate exactly, including the
+  // escape hatch: doctor must agree with whether the daemon will actually boot,
+  // or it is worse than not checking.
+  const exposure = spendExposure(config);
+  if (!exposure) {
+    pass("spend exposure", "daemon-wide budget bounded (or installs restricted)");
+  } else if (config.security.allow_unbounded_spend) {
+    warn("spend exposure", `${exposure} — allowed by security.allow_unbounded_spend`);
+  } else {
+    fail("spend exposure", `${exposure} — the daemon will REFUSE TO START`);
   }
 
   // 2. identity load
@@ -266,7 +499,9 @@ async function cmdDoctor(args: string[]): Promise<number> {
     fail("ffmpeg/ffprobe", "not found on PATH — install ffmpeg (and ffprobe)");
   }
 
-  // 5. relay reachability summary
+  // 5. relay reachability summary. The connect policy has to be installed before the
+  // first guarded connection, or a dev config's local relay is refused by the guard.
+  setRelayConnectPolicy({ allowInsecure: config.security.allow_insecure_urls });
   const relays = config.relays.default;
   let reachable = 0;
   for (const url of relays) {
@@ -298,7 +533,45 @@ async function cmdDoctor(args: string[]): Promise<number> {
     else fail("Routstr config", "a role routes to Routstr but providers.routstr.node_url is unset");
   }
 
-  console.log(failures === 0 ? "[doctor] all checks passed" : `[doctor] ${failures} check(s) FAILED`);
+  // 7. pipeline / queue state — see `pipelineChecks` for why this exists.
+  if (existsSync(db)) {
+    // Whether a daemon is live, by the same probe `backup`/`restore` use. Taken and
+    // released immediately: doctor must never hold the lock against a starting daemon.
+    let daemonRunning = true;
+    try {
+      acquireDaemonLock(db).release();
+      daemonRunning = false;
+    } catch {
+      /* a daemon holds it */
+    }
+    try {
+      const pipeline = inspectPipelineReadOnly(db);
+      for (const chk of pipelineChecks(pipeline, { now: Date.now(), daemonRunning })) {
+        if (chk.level === "fail") fail(chk.label, chk.detail);
+        else if (chk.level === "warn") warn(chk.label, chk.detail);
+        else pass(chk.label, chk.detail);
+      }
+    } catch (e) {
+      // A warn, not a fail: an unreadable database has ALREADY failed check 3 above,
+      // and the pipeline report is diagnosis rather than a health gate — it must never
+      // be the thing that turns an `ExecStartPre` into a refusal to start the daemon.
+      warn("pipeline", e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  // Say "all checks passed" only when they all did. A run that lists two stale
+  // poison warnings and then signs off with "all checks passed" is the same
+  // reassurance-over-accuracy that let those two attendees sit unnoticed for seven
+  // weeks — the whole reason the pipeline checks above exist. Warnings still do not
+  // affect the exit code: this must never turn one stuck attendee into a refused
+  // service start.
+  const summary =
+    failures > 0
+      ? `[doctor] ${failures} check(s) FAILED` + (warnings > 0 ? `, ${warnings} warning(s)` : "")
+      : warnings > 0
+        ? `[doctor] no failures, but ${warnings} warning(s) need attention`
+        : "[doctor] all checks passed";
+  console.log(summary);
   return failures === 0 ? 0 : 1;
 }
 

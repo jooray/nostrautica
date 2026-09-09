@@ -236,3 +236,43 @@ describe("upLabelKey names the destination", () => {
     expect(upLabelKey(HOME)).toBe("nav.back");
   });
 });
+
+/**
+ * `goingBack` is latched before the navigation, and `window.location.hash = <the
+ * hash it already holds>` fires no `hashchange` at all — so a "back" that lands
+ * on the screen we are already on never gets consumed. The flag then swallows the
+ * NEXT genuine forward navigation: the screen being left is not pushed, and the
+ * in-app stack is one level short from then on.
+ *
+ * The trivially reachable trigger is the top-bar up button on Home —
+ * `parentOf(home)` is null, so up()'s target IS Home.
+ */
+describe("a back that goes nowhere must not latch goingBack", () => {
+  /**
+   * Land on Home with an empty stack, then take the no-op back. Afterwards a
+   * forward walk to Matches must still have Home on the stack, so back() from
+   * Matches goes to HOME. With the flag latched the walk is not pushed, the
+   * stack is empty, and back() falls through to matches' contextual PARENT (the
+   * event home) instead — a different screen, which is the user-visible damage.
+   */
+  function homeThenMatches(noOpBack: () => void) {
+    go(POSTS);
+    fw.navigate(buildHash(HOME)); // system back onto the stack top → pops it
+    expect(router.canGoBack).toBe(false); // stack is empty, we are on Home
+    noOpBack();
+    go(MATCHES);
+    router.back();
+    // Whatever back() pointed the hash at, let the browser deliver it.
+    fw.navigate(fw.win.location.hash);
+  }
+
+  it("up() on Home (whose parent is Home) does not eat the next navigation", () => {
+    homeThenMatches(() => router.up());
+    expect(router.route).toEqual(HOME);
+  });
+
+  it("back() with an empty stack on Home does not eat the next navigation", () => {
+    homeThenMatches(() => router.back());
+    expect(router.route).toEqual(HOME);
+  });
+});

@@ -115,14 +115,19 @@ export function chatInteropRelays(eventRelays: string[]): string[] {
  * with this list, so a pointer that knows only relay.nsec.app is degraded rather
  * than instantly fatal.
  *
- * Widened from two to three relays 2026-07-28. The whole redundancy argument is
- * "the signer publishes its ephemeral reply to ALL of these, any one open socket
- * is enough" — but kind-24133 replies are not replayable, so the reply only
- * lands if a socket we share with the signer is open in the exact window it
+ * Widened from two to FOUR relays over 2026-07-28. The whole redundancy argument
+ * is "the signer publishes its ephemeral reply to ALL of these, any one open
+ * socket is enough" — but kind-24133 replies are not replayable, so the reply
+ * only lands if a socket we share with the signer is open in the exact window it
  * publishes. With only two relays a single operator outage halves those odds
- * during the login-critical wait. `relay.nostr.net` is a third independent,
- * open-write operator already trusted in `DEFAULT_RELAYS` (probed 2026-07-21),
- * so it costs one more warm mobile socket for a materially wider reply surface.
+ * during the login-critical wait. `nos.lol` and `relay.nostr.net` are the third
+ * and fourth independent, open-write operators, both already trusted in
+ * `DEFAULT_RELAYS` (probed 2026-07-21), so each costs one more warm mobile
+ * socket for a materially wider reply surface.
+ *
+ * (This paragraph said "two to three" against a four-entry list until
+ * 2026-09-04 — a fourth relay was added without the comment following it. Count
+ * the array, not the prose, if they ever disagree again.)
  */
 export const NIP46_RELAYS = ENV_RELAYS ?? [
   "wss://nostr.cypherpunk.today",

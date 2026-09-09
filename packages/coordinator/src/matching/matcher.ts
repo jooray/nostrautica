@@ -33,18 +33,66 @@ export interface CandidatePair {
   inputsHash: string;
 }
 
-/** All other pubkeys, or a prefiltered subset above the threshold (spec §9.3). */
+/** A usable embedding is a non-empty vector — `cosine` returns 0 for anything else. */
+function hasEmbedding(a: AttendeeForMatching): boolean {
+  return Array.isArray(a.embedding) && a.embedding.length > 0;
+}
+
+/**
+ * All other pubkeys, or a prefiltered subset above the threshold (spec §9.3).
+ *
+ * `warn` defaults to console.warn rather than being required, because the one
+ * thing this must never do again is fail silently — see the fallback below.
+ */
 export function candidatesFor(
   target: AttendeeForMatching,
   attendees: AttendeeForMatching[],
   cfg: PrefilterConfig,
   rng: () => number = Math.random,
+  warn: (msg: string) => void = (m) => console.warn(m),
 ): string[] {
   const targetIndex = attendees.findIndex((a) => a.pubkey === target.pubkey);
   if (targetIndex < 0) return [];
+  const others = attendees.filter((a) => a.pubkey !== target.pubkey);
   if (attendees.length <= cfg.threshold) {
-    return attendees.filter((a) => a.pubkey !== target.pubkey).map((a) => a.pubkey);
+    return others.map((a) => a.pubkey);
   }
+
+  // Above the threshold the prefilter is the ONLY thing choosing who gets scored,
+  // so it has to actually be able to rank (2026-09-04 audit). It passed
+  // `a.embedding ?? []` straight through, and `cosine` returns 0 for an empty
+  // vector — so with embeddings missing every similarity was 0, the sort was
+  // stable, and "top-M by cosine similarity" silently degraded to "the first 30
+  // attendees in roster order". Deterministic, unlogged, and worst at exactly the
+  // events big enough to need the prefilter. It is not a hypothetical: the
+  // coordinator's `attachEmbeddings` returns early when the embed role's provider
+  // exposes no `embed()` at all, leaving the whole roster without vectors.
+  //
+  // The target's own vector is what everything is measured against, so without it
+  // nothing can be ranked; a candidate without one can still be ranked past (it
+  // simply sorts to the bottom, which is where an unknown belongs).
+  const rankable = hasEmbedding(attendees[targetIndex]!) && others.some(hasEmbedding);
+  if (!rankable) {
+    // Random rather than roster order: it costs exactly the same number of LLM
+    // calls as the prefilter it replaces, it is honest about not being a ranking,
+    // and it does not systematically favour whoever joined first. Scoring everyone
+    // would be the other defensible answer, but silently multiplying an event's
+    // matching bill by five because a config knob is wrong is its own incident.
+    const want = Math.min(cfg.topM + cfg.randomN, others.length);
+    warn(
+      `[match] prefilter has no usable embeddings for ${target.pubkey.slice(0, 8)} ` +
+        `(roster ${attendees.length} > threshold ${cfg.threshold}) — cosine ranking is meaningless, ` +
+        `falling back to ${want} RANDOM candidates. Check that models.embed points at a provider ` +
+        `with an embeddings endpoint; matches will be materially worse until it does.`,
+    );
+    const pool = [...others];
+    const picked: string[] = [];
+    for (let k = 0; k < want; k++) {
+      picked.push(pool.splice(Math.floor(rng() * pool.length), 1)[0]!.pubkey);
+    }
+    return picked;
+  }
+
   const embeddings = attendees.map((a) => a.embedding ?? []);
   const idxs = selectCandidates(targetIndex, embeddings, cfg, rng);
   return idxs.map((i) => attendees[i]!.pubkey);
@@ -60,15 +108,19 @@ export function selectPairsToScore(
   target: AttendeeForMatching,
   attendees: AttendeeForMatching[],
   cfg: PrefilterConfig,
+  /** "<provider>:<model>" for the `match` role, folded into the pair's inputs hash
+   *  so switching the scoring model actually re-scores (audit PIPE-3). */
+  matchModelKey = "",
   rng: () => number = Math.random,
+  warn?: (msg: string) => void,
 ): CandidatePair[] {
   const hashByPubkey = new Map(attendees.map((a) => [a.pubkey, a.profileHash]));
-  const candidatePubkeys = candidatesFor(target, attendees, cfg, rng);
+  const candidatePubkeys = candidatesFor(target, attendees, cfg, rng, warn);
   const pairs: CandidatePair[] = [];
   for (const other of candidatePubkeys) {
     const otherHash = hashByPubkey.get(other);
     if (!otherHash) continue;
-    const inputsHash = pairInputsHash(target.profileHash, otherHash);
+    const inputsHash = pairInputsHash(target.profileHash, otherHash, matchModelKey);
     // Directional idempotency: the target→other direction is pending unless a row
     // exists for the current inputs_hash AND that direction has been scored (its
     // reasoning is non-empty). A row seeded by the reverse (other→target) batch

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { decode, nprofileEncode } from "nostr-tools/nip19";
   import { KIND_PROFILE, hasAiProfileContent } from "@nostrautica/protocol";
   import type { DirectoryEntryContent, Match, PerEventSettings } from "@nostrautica/protocol";
@@ -143,7 +143,8 @@
         followsYou = (await fetchFollowersOf(me, [pubkey])).has(pubkey);
         blindingKey = await deriveBlindingKey(session.signer);
         settings = await loadPerEventSettings(session.signer, eventCtx, blindingKey);
-        noteDraft = settings.notes[pubkey] ?? "";
+        // Never over the top of something they're mid-way through writing.
+        if (!noteTouched) noteDraft = settings.notes[pubkey] ?? "";
       } else {
         followKnown = true;
       }
@@ -159,14 +160,72 @@
     }
   });
 
+  // These run from click handlers, which cannot await them. A rejection (signer
+  // said no, relay refused, blinding key gone) therefore became an unhandled
+  // promise rejection — invisible to the user and a paused debugger for anyone
+  // developing with "break on uncaught". Surface it through the same `error`
+  // channel the rest of the page already uses.
   async function toggle(list: "favorites" | "want_to_meet" | "met") {
     if (!session.signer || !ctx || !blindingKey) return;
-    settings = await toggleSetting(session.signer, ctx, blindingKey, list, pubkey);
+    try {
+      settings = await toggleSetting(session.signer, ctx, blindingKey, list, pubkey);
+    } catch (e) {
+      error = e;
+    }
+  }
+
+  /**
+   * The private note, saved as you type rather than on blur.
+   *
+   * `onblur` alone silently lost work: removing a focused element from the DOM
+   * does NOT fire blur, so navigating away mid-note (the back button, a tap on
+   * the bottom nav, the route swapping under a slow relay) discarded everything
+   * typed since the field was focused — with no indication it had ever been at
+   * risk. A debounce keeps the write rate sane; the visible "Saved" is there
+   * because a note that saves invisibly is a note the user re-types to be sure.
+   */
+  const NOTE_SAVE_DEBOUNCE_MS = 800;
+  let noteTimer: ReturnType<typeof setTimeout> | undefined;
+  let noteState = $state<"idle" | "saving" | "saved">("idle");
+  let noteSavedTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * The user has typed in this field. The mount pass paints the CACHED settings
+   * first (so the note appears instantly) and then overwrites `noteDraft` from
+   * the freshly loaded ones — which, if they've already started typing into the
+   * cache-painted field, throws their words away mid-sentence. Harmless while
+   * blur was the only save; with save-as-you-type it is the difference between
+   * a note that persists and one that is silently replaced by the old value.
+   */
+  let noteTouched = false;
+  onDestroy(() => {
+    clearTimeout(noteTimer);
+    clearTimeout(noteSavedTimer);
+  });
+
+  function noteChanged() {
+    noteTouched = true;
+    clearTimeout(noteTimer);
+    noteState = "saving";
+    noteTimer = setTimeout(() => void saveNote(), NOTE_SAVE_DEBOUNCE_MS);
+  }
+
+  /** Flush immediately — blur still fires when it fires, and it shouldn't wait. */
+  function flushNote() {
+    clearTimeout(noteTimer);
+    if (noteState === "saving") void saveNote();
   }
 
   async function saveNote() {
     if (!session.signer || !ctx || !blindingKey) return;
-    settings = await setNote(session.signer, ctx, blindingKey, pubkey, noteDraft);
+    try {
+      settings = await setNote(session.signer, ctx, blindingKey, pubkey, noteDraft);
+      noteState = "saved";
+      clearTimeout(noteSavedTimer);
+      noteSavedTimer = setTimeout(() => (noteState = "idle"), 2000);
+    } catch (e) {
+      noteState = "idle";
+      error = e;
+    }
   }
 
   async function toggleMute() {
@@ -445,10 +504,23 @@
     <div class="field-label" id="private-label">{t("attendee.private")}</div>
     <div class="row" style="flex-wrap:wrap" role="group" aria-labelledby="private-label">
       <!-- "Favorite" retired (user feedback 2026-07-16) — want-to-meet/met say it better. -->
-      <button class="btn inline" aria-pressed={has(settings.want_to_meet)} class:primary={has(settings.want_to_meet)} onclick={() => toggle("want_to_meet")}>{t("attendee.wantToMeet")}</button>
-      <button class="btn inline" aria-pressed={has(settings.met)} class:primary={has(settings.met)} onclick={() => toggle("met")}>{t("attendee.met")}</button>
+      <button class="btn inline" aria-pressed={has(settings.want_to_meet)} class:primary={has(settings.want_to_meet)} onclick={() => void toggle("want_to_meet")}>{t("attendee.wantToMeet")}</button>
+      <button class="btn inline" aria-pressed={has(settings.met)} class:primary={has(settings.met)} onclick={() => void toggle("met")}>{t("attendee.met")}</button>
     </div>
-    <textarea rows="2" placeholder={t("attendee.note.placeholder")} bind:value={noteDraft} onblur={saveNote}></textarea>
+    <label class="visually-hidden" for="private-note">{t("attendee.note.placeholder")}</label>
+    <textarea
+      id="private-note"
+      rows="2"
+      placeholder={t("attendee.note.placeholder")}
+      bind:value={noteDraft}
+      oninput={noteChanged}
+      onblur={flushNote}
+    ></textarea>
+    <!-- role="status", not aria-live on the textarea's own container: this
+         announces once per completed save, not per keystroke. -->
+    <span class="muted small" role="status">
+      {#if noteState === "saving"}{t("profile.saving")}{:else if noteState === "saved"}{t("profile.saved")}{/if}
+    </span>
   </div>
 {/if}
 

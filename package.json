@@ -8,7 +8,7 @@
   "engines": {
     "node": ">=22.5.0"
   },
-  "packageManager": "pnpm@11.12.0",
+  "packageManager": "pnpm@11.26.0",
   "scripts": {
     "build": "pnpm -r build",
     "test": "pnpm -r --filter=!@nostrautica/e2e test",
@@ -17,7 +17,7 @@
     "check": "pnpm lint && pnpm typecheck && pnpm test",
     "gen:registry": "pnpm --filter @nostrautica/protocol build && node scripts/gen-registry.mjs",
     "audit": "pnpm audit --audit-level high",
-    "e2e": "pnpm --filter @nostrautica/e2e test",
+    "e2e": "pnpm --filter @nostrautica/e2e test:e2e",
     "e2e:smoke": "node e2e/orchestrator.mjs smoke",
     "e2e:integration": "node e2e/orchestrator.mjs integration",
     "e2e:chat": "node e2e/orchestrator.mjs chat",

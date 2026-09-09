@@ -165,7 +165,10 @@
   }
   .drawer {
     width: min(30rem, 100vw);
-    max-height: 100vh;
+    /* dvh, like every other full-height surface in the app: on mobile Safari and
+       Chrome 100vh is the height WITHOUT the retracted URL bar, so the drawer
+       overflowed the viewport and its close button sat under the browser chrome. */
+    max-height: 100dvh;
     overflow-y: auto;
     background: var(--bg-elev, var(--bg));
     border-left: 1px solid var(--border);
@@ -255,8 +258,7 @@
     font-size: 0.75rem;
     white-space: nowrap;
   }
-  .badge.danger {
-    color: var(--danger);
-    border-color: var(--danger);
-  }
+  /* `.badge.danger` now lives in app.css next to .badge.ok/.warn/.accent, where
+     the rest of the semantic tones are — a scoped copy here only ever covered
+     this one drawer, and the tone is a global vocabulary item. */
 </style>

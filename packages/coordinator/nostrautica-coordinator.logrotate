@@ -1,0 +1,29 @@
+# Nostrautica coordinator daemon log.
+#
+# The systemd --user unit writes with `StandardOutput=append:`, which holds the
+# file open for the life of the process and never reopens it. So this MUST use
+# copytruncate: a rename-based rotation would leave the daemon writing to an
+# unlinked inode, and the live log would silently stop growing.
+#
+# Added 2026-09-04. The file had never been rotated since 2026-07-15 and had
+# reached ~37 MB at roughly 650 KB/day, on a filesystem that is 92% full and
+# shared with other services. `restart-coordinator.sh` greps this exact path for
+# the daemon's readiness marker, so the path must stay stable.
+#
+# No `delaycompress`: that exists for rename-based rotation, where the writer
+# still holds the old inode open. With copytruncate the rotated file is a COPY
+# that nothing has open, so it is safe to compress immediately — and delaying it
+# would keep a full uncompressed generation on a disk that has 12 GB free.
+#
+# Verified before enabling: the daemon's stdout fd carries O_APPEND (flags
+# 02102001), so after truncation its next write seeks to EOF — offset 0 of the
+# now-empty file — rather than leaving a 37 MB sparse hole.
+/home/nostrautica/log/nostrautica-coordinator.log {
+    daily
+    rotate 14
+    missingok
+    notifempty
+    compress
+    copytruncate
+    su nostrautica nostrautica
+}

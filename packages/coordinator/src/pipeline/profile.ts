@@ -10,7 +10,6 @@ import {
   sha256Hex,
   utf8ToBytes,
   languageName,
-  aiProfileSchema,
   MAX_SKILLS,
   MAX_SKILL,
   MAX_ABOUT,
@@ -19,16 +18,52 @@ import {
   type AttendeeProfile,
 } from "@nostrautica/protocol";
 import type { LlmProvider, ModelRef } from "../providers/types.js";
+import { fenceUntrusted, fenceUntrustedList } from "./fencing.js";
+import { promptRevision } from "./prompt-revision.js";
 
 // ── Provider-output response schemas (audit finding Q9) ──────────────────────
 // The model's raw JSON is validated at the provider boundary before it can enter
 // storage or publication. The AI profile reuses the shared protocol schema; the
 // translation/summary responses have their own local shapes.
 
-/** The AI never emits `translations` itself (the caller adds it), so validate the
- *  core fields with the shared schema — extra keys are stripped, missing/wrong
- *  types throw a ProviderContractError → retry/poison. */
-const aiProfileResponseSchema = aiProfileSchema;
+/**
+ * The AI never emits `translations` itself (the caller adds it), so only the core
+ * fields are validated — extra keys are stripped, and a MISSING or WRONG-TYPED
+ * field still throws a ProviderContractError, because a stage that did not return
+ * a `skills` array has not done its job and there is nothing safe to guess.
+ *
+ * What is no longer a rejection is being over the protocol's SIZE caps
+ * (2026-09-04 audit). This used to be `aiProfileSchema` itself, whose caps are
+ * hard `.max()`s — so one 201-character skill, or a 51st list item, threw away the
+ * attendee's whole ai_profile and with it their directory entry and every match
+ * they would have had. Three things made that indefensible:
+ *
+ *  - `AI_PROFILE_SCHEMA`, the JSON schema we actually SEND the provider, carried no
+ *    `maxLength`/`maxItems` at all, so the model was never told the bounds it was
+ *    being punished for missing. It is told now.
+ *  - `sanitizeAiProfile` truncates every one of these strings to 200 chars anyway,
+ *    immediately after validation — so the reject only ever prevented work that was
+ *    about to be undone.
+ *  - The failure is deterministic for a given (prompt, model): every retry re-bills
+ *    the same over-long skill, all the way to poison.
+ *
+ * Truncating instead is the same trade `coerceStringList` already makes for
+ * translations, and for the same reason: an over-cap value fails every reader's
+ * `directoryEntryContentSchema.parse`, silently removing the attendee from the
+ * directory for EVERYONE, so the bound has to be enforced somewhere — just not by
+ * discarding the answer.
+ */
+const boundedList = z
+  .array(z.string())
+  .transform((items) => items.slice(0, MAX_SKILLS).map((s) => s.slice(0, MAX_SKILL)));
+
+const aiProfileResponseSchema = z.object({
+  summary: z.string().transform((t) => t.slice(0, MAX_ABOUT)),
+  skills: boundedList,
+  interests: boundedList,
+  offers: boundedList,
+  seeks: boundedList,
+});
 
 /**
  * Liberal in what it accepts, because this stage is a DECORATION and the strict
@@ -122,16 +157,46 @@ const translationResponseSchema = z.object({
 
 const nostrSummaryResponseSchema = z.object({ summary: z.string() });
 
+/**
+ * The JSON schema sent to the provider. The `maxLength`/`maxItems` bounds are the
+ * protocol's own caps (2026-09-04 audit): they were absent, so the model was never
+ * told the limits its output was then validated against — and a model that is told
+ * "≤ 200 characters" in a strict `json_schema` mostly obeys, which is far cheaper
+ * than truncating after the fact. The truncation in `aiProfileResponseSchema`
+ * stays as the backstop for the models that do not.
+ */
 export const AI_PROFILE_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["summary", "skills", "interests", "offers", "seeks"],
   properties: {
-    summary: { type: "string", description: "2-3 sentence portrait of this person" },
-    skills: { type: "array", items: { type: "string" } },
-    interests: { type: "array", items: { type: "string" } },
-    offers: { type: "array", items: { type: "string" }, description: "what they can give others" },
-    seeks: { type: "array", items: { type: "string" }, description: "what they're looking for" },
+    summary: {
+      type: "string",
+      maxLength: MAX_ABOUT,
+      description: "2-3 sentence portrait of this person",
+    },
+    skills: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+    },
+    interests: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+    },
+    offers: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+      description: "what they can give others",
+    },
+    seeks: {
+      type: "array",
+      maxItems: MAX_SKILLS,
+      items: { type: "string", maxLength: MAX_SKILL },
+      description: "what they're looking for",
+    },
   },
 } as const;
 
@@ -141,6 +206,43 @@ const PROFILE_SYSTEM = [
   "Extract concrete skills, interests, what they can OFFER others, and what they SEEK.",
   "Be specific and grounded in the inputs; do not invent. Return strict JSON.",
 ].join(" ");
+
+/**
+ * The translation stage's system prompt, as a named builder rather than an inline
+ * template literal, so {@link promptRevision} can fingerprint it. Its only varying
+ * parts are the target language's name and code, which the artifact hash already
+ * carries separately.
+ */
+export function translationSystemPrompt(targetName: string, base: string): string {
+  return (
+    `Detect the language of the user-authored fields. If it is already ${targetName} (${base}), set` +
+    ` needs_translation=false and omit the translated fields. Otherwise set needs_translation=true and` +
+    ` translate each non-empty field into ${targetName} (${base}), preserving meaning and proper nouns.` +
+    " Return strict JSON."
+  );
+}
+
+/** The nostr-summary stage's system prompt; `langNote` is empty for English. */
+export function nostrSummarySystemPrompt(langNote: string): string {
+  return (
+    "Summarize what this person is interested in and works on, based on their public posts. 2-3 sentences." +
+    langNote
+  );
+}
+
+/**
+ * Prompt+schema fingerprints for the three artifacts this module produces
+ * (audit PIPE-3). Folded into each artifact's inputs hash below, so editing a
+ * prompt actually invalidates what that prompt produced.
+ *
+ * The language-varying prompts are fingerprinted with PLACEHOLDER language
+ * arguments on purpose: the real language is hashed separately by every caller,
+ * and baking it in here would give two English events different fingerprints for
+ * an identical prompt.
+ */
+const AI_PROFILE_REVISION = promptRevision(PROFILE_SYSTEM, AI_PROFILE_SCHEMA);
+// TRANSLATION_REVISION and NOSTR_SUMMARY_REVISION are declared beside their own
+// schemas further down, since a module-scope const cannot read one declared later.
 
 /**
  * Output-language instruction for the profile summary (attendee-facing, spec §9.3).
@@ -180,7 +282,10 @@ export function profileInputsHash(inputs: ProfileInputs, modelKey = ""): string 
     n: inputs.nostrSummary ?? "",
     lang: (inputs.lang ?? "en").toLowerCase(),
     m: modelKey,
-    schema: "ai_profile.v1",
+    // The prompt that produces this artifact, fingerprinted from its source. This
+    // was the hand-written string "ai_profile.v1", which nobody ever bumped — so
+    // every prompt edit since kept serving profiles built by the previous one.
+    schema: AI_PROFILE_REVISION,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -193,7 +298,7 @@ export function translationInputsHash(fields: TranslationInput, targetLang: stri
     skills: fields.skills,
     lang: (targetLang || "en").toLowerCase(),
     m: modelKey,
-    schema: "profile_translation.v1",
+    schema: TRANSLATION_REVISION,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -204,10 +309,18 @@ export async function buildAiProfile(
   inputs: ProfileInputs,
   signal?: AbortSignal,
 ): Promise<AiProfile> {
+  // Everything here is written or spoken by the person being profiled, and it is
+  // being pasted under headers the model reads as structure — including the `---`
+  // that separates one transcript from the next. Fence it (audit SEC-15): a bio
+  // saying "PUBLIC NOSTR ACTIVITY:" followed by invented history would otherwise
+  // be read as this daemon's own attestation of that history.
+  const p = inputs.profile;
   const user = [
-    inputs.transcripts.length ? `INTRO/TALK TRANSCRIPT:\n${inputs.transcripts.join("\n---\n")}` : "",
-    `SELF-DESCRIBED PROFILE:\nAbout: ${inputs.profile.about}\nSkills: ${inputs.profile.skills.join(", ")}\nLooking for: ${inputs.profile.looking_for}`,
-    inputs.nostrSummary ? `PUBLIC NOSTR ACTIVITY:\n${inputs.nostrSummary}` : "",
+    inputs.transcripts.length
+      ? `INTRO/TALK TRANSCRIPT:\n${inputs.transcripts.map(fenceUntrusted).join("\n---\n")}`
+      : "",
+    `SELF-DESCRIBED PROFILE:\nAbout: ${fenceUntrusted(p.about)}\nSkills: ${fenceUntrustedList(p.skills).join(", ")}\nLooking for: ${fenceUntrusted(p.looking_for)}`,
+    inputs.nostrSummary ? `PUBLIC NOSTR ACTIVITY:\n${fenceUntrusted(inputs.nostrSummary)}` : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -255,6 +368,11 @@ export const PROFILE_TRANSLATION_SCHEMA = {
   },
 } as const;
 
+const TRANSLATION_REVISION = promptRevision(
+  translationSystemPrompt("«lang»", "«code»"),
+  PROFILE_TRANSLATION_SCHEMA,
+);
+
 interface RawTranslation {
   source_lang?: string;
   needs_translation?: boolean;
@@ -292,17 +410,17 @@ export async function translateProfileFields(
   const user = [
     `TARGET LANGUAGE: ${targetName} (${base})`,
     "USER-AUTHORED FIELDS:",
-    `About: ${fields.about}`,
-    `Looking for: ${fields.looking_for}`,
-    `Skills: ${fields.skills.join(", ")}`,
+    // The name of this section says what it is; fence it anyway (audit SEC-15).
+    // The output here is republished verbatim as the attendee's translated
+    // directory entry, so a field that talks the model out of translating and
+    // into writing something else publishes that something else.
+    `About: ${fenceUntrusted(fields.about)}`,
+    `Looking for: ${fenceUntrusted(fields.looking_for)}`,
+    `Skills: ${fenceUntrustedList(fields.skills).join(", ")}`,
   ].join("\n");
 
   const { value } = await llm.completeStructured<RawTranslation>({
-    system:
-      `Detect the language of the user-authored fields. If it is already ${targetName} (${base}), set` +
-      ` needs_translation=false and omit the translated fields. Otherwise set needs_translation=true and` +
-      ` translate each non-empty field into ${targetName} (${base}), preserving meaning and proper nouns.` +
-      " Return strict JSON.",
+    system: translationSystemPrompt(targetName, base),
     user,
     schema: PROFILE_TRANSLATION_SCHEMA,
     schemaName: "profile_translation",
@@ -334,6 +452,11 @@ export const NOSTR_SUMMARY_SCHEMA = {
   },
 } as const;
 
+const NOSTR_SUMMARY_REVISION = promptRevision(
+  nostrSummarySystemPrompt("«langNote»"),
+  NOSTR_SUMMARY_SCHEMA,
+);
+
 export interface NostrPost {
   kind: number;
   content: string;
@@ -349,6 +472,8 @@ export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en",
     lang: (lang || "en").toLowerCase(),
     ids: posts.map((p) => `${p.kind}:${p.created_at}:${p.content}`),
     m: modelKey,
+    // This one had no prompt field at ALL, unlike its two siblings.
+    schema: NOSTR_SUMMARY_REVISION,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -378,12 +503,15 @@ export async function summarizeNostr(
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   if (posts.length === 0) return undefined;
+  // Public Nostr posts: authored by the attendee, but ALSO by anyone the attendee
+  // can get to post — the least trusted input the daemon reads (audit SEC-15).
+  const clean = (t: string) => fenceUntrusted(t).replace(/\s+/g, " ").slice(0, 300);
   const lines = posts.slice(0, 100).flatMap((p) => {
     if (p.kind === 0) {
       const bio = extractProfileBio(p.content);
-      return bio ? [`- Profile bio: ${bio.replace(/\s+/g, " ").slice(0, 300)}`] : [];
+      return bio ? [`- Profile bio: ${clean(bio)}`] : [];
     }
-    return [`- ${p.content.replace(/\s+/g, " ").slice(0, 300)}`];
+    return [`- ${clean(p.content)}`];
   });
   if (lines.length === 0) return undefined;
   const user = ["Recent public posts by this person (newest first):", ...lines].join("\n");
@@ -393,9 +521,7 @@ export async function summarizeNostr(
       ? ""
       : ` The posts may be in any language; write the summary in ${languageName(base)} (${base}).`;
   const { value } = await llm.completeStructured<{ summary: string }>({
-    system:
-      "Summarize what this person is interested in and works on, based on their public posts. 2-3 sentences." +
-      langNote,
+    system: nostrSummarySystemPrompt(langNote),
     user,
     schema: NOSTR_SUMMARY_SCHEMA,
     schemaName: "nostr_summary",

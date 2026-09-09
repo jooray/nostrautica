@@ -19,11 +19,12 @@
   import { buildDeviceAccountMap, chatMembers } from "$lib/chat/members.js";
   import type { RosterContent } from "@nostrautica/protocol";
   import { evaluateChatGate } from "$lib/chat/gate.js";
-  import { chatSession } from "$lib/chat/session.svelte.js";
+  import { chatSession, ChatUnroutableError } from "$lib/chat/session.svelte.js";
   import { fillHeight } from "$lib/components/fill-height.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import type { MessageKey } from "$lib/i18n/messages.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
@@ -31,6 +32,7 @@
   import type { ChatMessage } from "$lib/chat/messages.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
+  import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -52,6 +54,8 @@
   let ctx = $state<EventContext | null>(cachedEventContext(naddr) ?? null);
   let error = $state<unknown>(null);
   let sendError = $state<string | null>(null);
+  /** The last send failed because this device is out of the group, not on the wire. */
+  let sendUnroutable = $state(false);
   let rejoinError = $state<string | null>(null);
   let rejoined = $state(false);
   let draft = $state("");
@@ -90,7 +94,18 @@
   // one person show as one member and one name/colour (NIP §10.1 dedupe).
   let roster = $state<RosterContent | undefined>(undefined);
   const deviceAccountMap = $derived(buildDeviceAccountMap(roster));
-  const members = $derived(chatMembers(roster));
+  // Real MLS membership when the session can see the group, roster `chat_keys`
+  // (i.e. who ATTESTED) when it can't — the two disagree in both directions, so
+  // the header says which one is on screen rather than passing one off as the
+  // other. The coordinator's own admin leaf is in the group too and is excluded:
+  // it is disclosed above ("coordinator-read"), not a person in the room.
+  const memberList = $derived(
+    chatMembers(roster, {
+      groupDevices: chatSession.memberDevices,
+      exclude: ctx?.config.coordinator ? [ctx.config.coordinator] : [],
+    }),
+  );
+  const members = $derived(memberList.members);
   function accountOf(pubkey: string): string {
     return deviceAccountMap.get(pubkey) ?? pubkey;
   }
@@ -170,10 +185,16 @@
     untrack(() => void chatSession.ensure(naddr, context, signer, owner).catch(() => {}));
   });
 
-  const phase = $derived.by<"loading" | "setup" | "ready" | "unavailable">(() => {
+  const phase = $derived.by<"loading" | "setup" | "evicted" | "ready" | "unavailable">(() => {
     if (error || chatSession.error) return "unavailable";
     if (gate === "loading") return "loading";
     if (gate === "unavailable") return "unavailable";
+    // "evicted" is NOT a kind of "setup": setup is a room that hasn't happened
+    // yet, whose remedy is waiting (and, once slow, Rejoin). Eviction is a room
+    // that stopped, whose remedy is Rejoin and only Rejoin — and whose history is
+    // still on screen, so the setup empty-state that carries the escalation would
+    // never render for it.
+    if (chatSession.phase === "evicted") return "evicted";
     return chatSession.phase === "ready" ? "ready" : "setup";
   });
 
@@ -201,6 +222,7 @@
   // retrying the send fixes it — the coordinator has to add this device again.
   async function rejoin() {
     sendError = null;
+    sendUnroutable = false;
     rejoinError = null;
     rejoined = false;
     try {
@@ -221,16 +243,23 @@
     if (!text || sending || readOnly) return;
     sending = true;
     sendError = null;
+    sendUnroutable = false;
     try {
       await chatSession.send(text);
       draft = "";
       // A message got through — retire any leftover recovery notice.
       rejoined = false;
       rejoinError = null;
-    } catch {
+    } catch (e) {
       // Bug 5: surface the failure instead of silently swallowing it. A revoked
       // (removed) attendee's send lands here once they've lost the group locally.
-      sendError = t("chat.sendFailed");
+      // Which of the two it was decides what to OFFER: Rejoin revokes this device,
+      // rotates its key package and re-attests — an MLS epoch change and a roster
+      // republish. Right for a lost membership, wrong for a dropped socket, where
+      // the message is still in the composer and pressing Send again is the whole
+      // remedy.
+      sendUnroutable = e instanceof ChatUnroutableError;
+      sendError = sendUnroutable ? t("chat.sendFailed") : t("chat.sendFailedTransport");
     } finally {
       sending = false;
     }
@@ -346,6 +375,34 @@
   function devicesLabel(n: number): string {
     return tp("chat.members.devices", n);
   }
+
+  // ── why setup is stuck, when the coordinator actually told us ───────────────
+  // A refused 21607 (device cap, a chat key bound to someone else, a bad proof of
+  // possession, an unusable key package) used to be a line in the coordinator's
+  // log and nothing else: this device sat in "setting up your secure chat" with a
+  // generic "it may be offline, check with the organizer" hint that pointed at the
+  // wrong thing entirely. The coordinator now seals the reason to the affected
+  // attendee over the same 21606 channel a failed talk/submission already uses
+  // (`stage: "chat_attestation"`), and the grant scan records it here.
+  const CHAT_STAGE = "chat_attestation";
+  const refusal = $derived.by(() => {
+    if (!ctx) return undefined;
+    const notice = ownStatusStore
+      .poison(ctx.coordinate)
+      .filter((s) => s.stage === CHAT_STAGE)
+      .sort((a, b) => b.at - a.at)[0];
+    if (!notice) return undefined;
+    // The category is a stable sanitized class, never free text — an unknown one
+    // (a newer coordinator) falls back to a generic line rather than rendering a
+    // raw identifier at the user.
+    const known: Record<string, MessageKey> = {
+      chat_device_cap_reached: "chat.refused.deviceCap",
+      chat_key_bound_to_other_account: "chat.refused.boundElsewhere",
+      chat_proof_invalid: "chat.refused.proof",
+      chat_key_package_ineligible: "chat.refused.keyPackage",
+    };
+    return t(known[notice.error_category ?? ""] ?? "chat.refused.other");
+  });
 </script>
 
 <div class="chat-head">
@@ -381,6 +438,24 @@
 {:else if phase === "loading"}
   <p class="muted">{t("chat.checking")}</p>
 {:else}
+  {#if phase === "evicted"}
+    <!-- Above the messages, not inside the empty state: an evicted member still
+         has their whole decrypted history on screen, so the empty state — where
+         the Rejoin escalation used to live — never renders for them. They saw a
+         normal-looking room in which nothing new ever arrived. -->
+    <div class="card warn" role="alert">
+      <strong>{t("chat.evicted.title")}</strong>
+      <p class="muted" style="margin:0.3rem 0 0.6rem">{t("chat.evicted.body")}</p>
+      <button class="btn primary" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
+        {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+      </button>
+      {#if rejoinError}
+        <p class="send-error" role="alert" style="margin:0.5rem 0 0">{rejoinError}</p>
+      {:else if rejoined}
+        <p class="muted rejoin-note" role="status" style="margin:0.5rem 0 0">{t("chat.rejoinRequested")}</p>
+      {/if}
+    </div>
+  {/if}
   <div class="display-toggle" role="group" aria-label={t("chat.display.label")}>
     <button
       class="btn inline"
@@ -404,7 +479,11 @@
        collapse into one member, with a subtle "N devices" affix. -->
   {#if members.length > 0}
     <details class="members" bind:open={showMembers}>
-      <summary>{t("chat.members.title")} · {members.length}</summary>
+      <summary>
+        {t("chat.members.title")} · {members.length}{#if memberList.source === "attested"}
+          <span class="msource">{t("chat.members.attested")}</span>
+        {/if}
+      </summary>
       <ul>
         {#each members as mem (mem.account)}
           <li>
@@ -435,8 +514,14 @@
       <div class="empty">
         {#if phase === "setup"}
           <p class="muted">{t("chat.setup")}</p>
+          {#if refusal}
+            <!-- We know exactly why, so say it instead of the generic hint. -->
+            <p class="muted" style="margin-top:0.5rem" role="status">{refusal}</p>
+          {/if}
           {#if setupSlow}
-            <p class="muted" style="margin-top:0.5rem">{t("chat.setupSlow")}</p>
+            {#if !refusal}
+              <p class="muted" style="margin-top:0.5rem">{t("chat.setupSlow")}</p>
+            {/if}
             <button class="btn inline" style="margin-top:0.25rem" onclick={retryChat}>
               {t("chat.retry")}
             </button>
@@ -519,7 +604,7 @@
         bind:value={draft}
         rows="1"
         placeholder={t("chat.compose.placeholder")}
-        disabled={phase === "setup"}
+        disabled={phase === "setup" || phase === "evicted"}
         onkeydown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
@@ -527,7 +612,12 @@
           }
         }}
       ></textarea>
-      <button class="send" type="submit" disabled={!draft.trim() || sending || phase === "setup"} aria-label={t("chat.send")}>
+      <button
+        class="send"
+        type="submit"
+        disabled={!draft.trim() || sending || phase === "setup" || phase === "evicted"}
+        aria-label={t("chat.send")}
+      >
         <Icon name="send" size={20} />
       </button>
     </form>
@@ -539,9 +629,19 @@
        coordinator's welcome lands. -->
   {#if sendError}
     <p class="send-error" role="alert">{sendError}</p>
-    <button class="btn inline" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
-      {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
-    </button>
+    {#if sendUnroutable}
+      <button class="btn inline" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
+        {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+      </button>
+    {:else}
+      <!-- A transport failure. The text is still in the composer, so the remedy is
+           the button that is already there — say so rather than offering an epoch
+           change for a dropped socket. Rejoin stays available in the handoff card
+           below for anyone whose retries keep failing. -->
+      <button class="btn inline" disabled={sending} onclick={() => void send()}>
+        {sending ? t("chat.sending") : t("chat.sendRetry")}
+      </button>
+    {/if}
   {/if}
   {#if rejoinError}
     <p class="send-error" role="alert">{rejoinError}</p>
@@ -644,6 +744,11 @@
   .members .mname {
     font-weight: 600;
     overflow-wrap: anywhere;
+  }
+  .members .msource {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--text-dim);
   }
   .members .devcount {
     font-size: 0.72rem;

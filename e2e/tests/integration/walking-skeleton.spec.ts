@@ -54,9 +54,20 @@ test.describe(RELAY_UP ? "walking skeleton" : "walking skeleton (needs relay —
     await expect(attendee.getByText("Attendee One")).toBeVisible({ timeout: 15_000 });
 
     // An outsider cannot see the roster (no ECK).
+    //
+    // Assert the SECURITY property first — the roster's contents are absent — and
+    // only then the explanation. This assertion used to be `/no attendees visible/i`,
+    // a string `7824c96` removed on 2026-09-04 when the one-size-fits-all empty
+    // state was split into three (not-approved / nobody-yet / relays-unreachable).
+    // Nothing updated the spec, so from that day the test could not pass, and the
+    // one check that an outsider is actually locked out was failing for a reason
+    // that had nothing to do with whether they are.
     const outsiderCtx = await browser.newContext();
     const outsider = await newUser(outsiderCtx, "Otto Outsider");
     await outsider.goto(`/#/e/${naddr}/attendees`);
-    await expect(outsider.getByText(/no attendees visible/i)).toBeVisible();
+    await expect(outsider.getByText(/encrypted for approved attendees/i)).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(outsider.getByText("Attendee One")).toHaveCount(0);
   });
 });

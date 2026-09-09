@@ -16,6 +16,13 @@ const { fetchEvents, publishMonotonic } = vi.hoisted(() => ({
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents }));
 vi.mock("$lib/nostr/monotonic.js", () => ({ publishMonotonic }));
+// Fixtures are unsigned; NDK verifies signatures in production and `onlyVerified`
+// is the belt-and-braces re-check at the authority boundary. The real
+// `onlyByAuthors` is kept — the own-key pin is part of what's under test.
+vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("$lib/nostr/verify.js")>()),
+  onlyVerified: <T,>(events: T[]) => events,
+}));
 
 import {
   addPrivateMute,
@@ -96,6 +103,8 @@ describe("fetch/merge/write round-trip", () => {
   it("decrypts existing private items and preserves unknown public tags on write", async () => {
     fetchEvents.mockResolvedValue([
       {
+        id: "a1",
+        pubkey: PK,
         kind: KIND_MUTE_LIST,
         created_at: 10,
         tags: [["t", "keepme"]],
@@ -121,11 +130,66 @@ describe("fetch/merge/write round-trip", () => {
 
   it("unmute leaves content empty when no private items remain", async () => {
     fetchEvents.mockResolvedValue([
-      { kind: KIND_MUTE_LIST, created_at: 10, tags: [], content: `enc:${JSON.stringify([["p", PK]])}` },
+      {
+        id: "a1",
+        pubkey: PK,
+        kind: KIND_MUTE_LIST,
+        created_at: 10,
+        tags: [],
+        content: `enc:${JSON.stringify([["p", PK]])}`,
+      },
     ]);
     const store = { content: "sentinel" };
     const muted = await setMuted(signer(store), PK, false);
     expect(muted.has(PK)).toBe(false);
     expect(store.content).toBe(""); // empty private → empty content, not stale ciphertext
+  });
+
+  it("refuses to republish when the existing private items can't be decrypted", async () => {
+    // A NIP-46 signer that times out mid-tap used to be indistinguishable from
+    // "there is nothing private in this list": fetchMuteList swallowed the failure
+    // and returned privateTags: [], and the very next step re-encrypted that empty
+    // list over the user's real one — every private mute gone, silently, with no
+    // second copy anywhere (kind-10000 is replaceable).
+    fetchEvents.mockResolvedValue([
+      {
+        id: "a1",
+        pubkey: PK,
+        kind: KIND_MUTE_LIST,
+        created_at: 10,
+        tags: [["t", "keepme"]],
+        content: `enc:${JSON.stringify([["p", OTHER]])}`,
+      },
+    ]);
+    const store = { content: "sentinel" };
+    const flaky = {
+      ...signer(store),
+      nip44Decrypt: async () => {
+        throw new Error("bunker timed out");
+      },
+    };
+
+    await expect(setMuted(flaky, PK, true)).rejects.toThrow(/bunker timed out/);
+    expect(publishMonotonic).not.toHaveBeenCalled();
+    expect(store.content).toBe("sentinel"); // nothing signed, nothing overwritten
+  });
+
+  it("ignores a kind-10000 by another key, so it can't wedge mute/unmute", async () => {
+    // The pin has to be here as well as in the relay filter: an undecryptable list
+    // is now fatal, so a foreign kind-10000 answered at a high created_at would
+    // otherwise mean this identity could never mute anyone again.
+    fetchEvents.mockResolvedValue([
+      { id: "ff", pubkey: OTHER, kind: KIND_MUTE_LIST, created_at: 9_000, tags: [], content: "junk" },
+      {
+        id: "a1",
+        pubkey: PK,
+        kind: KIND_MUTE_LIST,
+        created_at: 10,
+        tags: [],
+        content: `enc:${JSON.stringify([["p", OTHER]])}`,
+      },
+    ]);
+    const list = await fetchMuteList(signer({ content: "" }));
+    expect(list.privateTags).toEqual([["p", OTHER]]);
   });
 });

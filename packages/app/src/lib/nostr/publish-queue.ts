@@ -14,7 +14,13 @@
  *  - PERMANENT-FAILURE POLICY: each durable flush attempt bumps a counter; after
  *    `MAX_FLUSH_ATTEMPTS` an item is parked in a terminal `failed` state instead
  *    of being retried forever, and surfaced in the outbox UI for the user to
- *    retry or discard.
+ *    retry or discard. Those attempts are rationed by TIME, not by flush calls
+ *    (FLUSH_BACKOFF_MS) — the flush fires on every `online` event, and venue
+ *    captive portals flap several times a minute.
+ *  - PER-RELAY CONVERGENCE: a publish succeeds at the first relay that acks, so
+ *    both the live path (`queueUndelivered`) and the durable redelivery
+ *    (`flushQueueCore`) read `publishSigned`'s per-relay outcomes and keep
+ *    carrying the event to whichever relays still don't have it.
  *
  * Storage is behind an injectable backend seam (mirroring keystore/persist) so
  * the queue logic is unit-testable without IndexedDB; production uses IndexedDB.
@@ -30,6 +36,13 @@ export interface QueuedItem {
   queuedAt: number;
   /** Durable flush attempts so far (not the in-session publishOrQueue retries). */
   attempts: number;
+  /**
+   * When the most recent durable flush attempt ran. Drives the per-item backoff
+   * (see FLUSH_BACKOFF_MS) so `attempts` is spent on elapsed time rather than on
+   * how many times the browser happened to fire `online`. Absent on items
+   * written by a pre-backoff build.
+   */
+  lastAttemptAt?: number;
   /** Terminal: exhausted `MAX_FLUSH_ATTEMPTS`, awaiting user retry/discard. */
   failed?: boolean;
   /** Message from the most recent failed flush (audit §7.4.7 Sync Status). */
@@ -83,6 +96,13 @@ export interface OutboxBackend {
   getAll(): Promise<QueuedItem[]>;
   put(item: QueuedItem): Promise<void>;
   delete(id: string): Promise<void>;
+  /**
+   * Read ONE row by event id. Optional so the in-memory test backends need not
+   * implement it (`getOne` below falls back to a scan) — production implements
+   * it because the alternative is a full-store `getAll()` + deserialize on every
+   * successful publish just to answer "is this event already queued?".
+   */
+  get?(id: string): Promise<QueuedItem | undefined>;
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -99,37 +119,86 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
+/**
+ * ONE long-lived connection instead of open/close around every operation.
+ *
+ * Every method here used to `indexedDB.open()` and `db.close()` on its own, so a
+ * flush of N items cost 2N+2 open/close cycles (getAll, then a put-or-delete per
+ * item, then the closing getAll). On a low-end phone during an "approve all"
+ * burst — the organizer taps twenty approvals, each fanning out into several
+ * signed events — that is hundreds of connection handshakes competing with the
+ * signer round trips for the same main thread.
+ *
+ * A cached handle is safe as long as it is DROPPED when the browser takes it
+ * away: `onclose` fires when the connection is force-closed (storage cleared,
+ * tab discarded and restored) and `onversionchange` when another tab wants to
+ * upgrade the schema — in both cases the next call must open a fresh one rather
+ * than issue transactions against a dead handle.
+ */
+let dbHandle: Promise<IDBDatabase> | null = null;
+
+function db(): Promise<IDBDatabase> {
+  if (dbHandle) return dbHandle;
+  const opening = openDb().then((conn) => {
+    const forget = () => {
+      if (dbHandle === opening) dbHandle = null;
+    };
+    conn.onclose = forget;
+    conn.onversionchange = () => {
+      conn.close();
+      forget();
+    };
+    return conn;
+  });
+  dbHandle = opening;
+  // A failed open must not be cached, or the outbox is dead for the page's life.
+  opening.catch(() => {
+    if (dbHandle === opening) dbHandle = null;
+  });
+  return opening;
+}
+
+/** Resolve when the transaction commits; reject on its error/abort. */
+function txDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
 const indexedDbBackend: OutboxBackend = {
   async getAll() {
-    const db = await openDb();
-    const items = await new Promise<QueuedItem[]>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readonly");
+    const conn = await db();
+    return new Promise<QueuedItem[]>((resolve, reject) => {
+      const tx = conn.transaction(STORE, "readonly");
       const req = tx.objectStore(STORE).getAll();
       req.onsuccess = () => resolve(req.result as QueuedItem[]);
       req.onerror = () => reject(req.error);
     });
-    db.close();
-    return items;
+  },
+  // Point read instead of a full-store scan + deserialize. `queueUndelivered`
+  // runs on EVERY successful publish and only ever wants one row.
+  async get(id) {
+    const conn = await db();
+    return new Promise<QueuedItem | undefined>((resolve, reject) => {
+      const tx = conn.transaction(STORE, "readonly");
+      const req = tx.objectStore(STORE).get(id);
+      req.onsuccess = () => resolve(req.result as QueuedItem | undefined);
+      req.onerror = () => reject(req.error);
+    });
   },
   async put(item) {
-    const db = await openDb();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).put(item);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    db.close();
+    const conn = await db();
+    const tx = conn.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).put(item);
+    await txDone(tx);
   },
   async delete(id) {
-    const db = await openDb();
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(STORE, "readwrite");
-      tx.objectStore(STORE).delete(id);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    db.close();
+    const conn = await db();
+    const tx = conn.transaction(STORE, "readwrite");
+    tx.objectStore(STORE).delete(id);
+    await txDone(tx);
   },
 };
 
@@ -181,6 +250,63 @@ async function withFlushLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
 // ── Queue operations ─────────────────────────────────────────────────────────
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** One row by event id, using the backend's point read when it has one. */
+async function getOne(id: string): Promise<QueuedItem | undefined> {
+  if (!backend) return undefined;
+  if (backend.get) return backend.get(id);
+  return (await backend.getAll()).find((i) => i.event.id === id);
+}
+
+/**
+ * The relays from a fan-out that still don't have the event AND could still take
+ * it. `publishSigned` resolves as soon as ONE relay acks, so its per-relay
+ * outcomes are the only place the other relays' answers exist — a caller that
+ * ignores them cannot tell "all four took it" from "one took it, three timed
+ * out". A refusal another attempt can never turn into an accept (kind not
+ * allowed, already have it) is not missing: see isRetryableRelayFailure.
+ *
+ * A non-array (a mocked or older `publishSigned` that resolves nothing) means
+ * "no per-relay detail available" — treated as fully delivered, because the
+ * alternative is re-sending an event forever on no evidence at all.
+ */
+function stillMissing(outcomes: RelayPublishOutcome[] | undefined): string[] {
+  if (!Array.isArray(outcomes)) return [];
+  return outcomes
+    .filter((o) => !o.ok && isRetryableRelayFailure(o.reason))
+    .map((o) => o.url);
+}
+
+/**
+ * How long an item waits after `queuedAt` before its Nth durable flush attempt.
+ *
+ * Attempts used to be spent per FLUSH, not per unit of time, and the flush runs
+ * on every `online` event. Captive-portal Wi-Fi at a venue flaps — the phone
+ * associates, the portal drops it, it re-associates — and five of those
+ * transitions inside a minute burned all five attempts against a network that
+ * was never actually usable, parking the user's join request as terminal
+ * `failed` behind a Retry button in a Sync Status panel most people never open.
+ *
+ * Gating on wall-clock instead means five attempts span at least fifteen
+ * minutes, which is long enough for a real network to appear. Indexed by
+ * `attempts`, so attempt 0 (the first) is always allowed immediately: a freshly
+ * queued item still goes out the moment connectivity returns.
+ */
+const FLUSH_BACKOFF_MS = [0, 15_000, 60_000, 5 * 60_000, 15 * 60_000];
+
+/**
+ * The clock the backoff runs from. `lastAttemptAt` when we have one, else
+ * `queuedAt` — measuring from `queuedAt` alone would leave an item queued
+ * yesterday (its whole schedule already in the past) able to burn all five
+ * attempts in one minute of flapping, which is the exact failure this closes.
+ * `lastAttemptAt` is absent on items written by an older build; those get one
+ * immediate attempt and are then on the real schedule.
+ */
+function readyToFlush(item: QueuedItem, now: number): boolean {
+  const attempts = item.attempts ?? 0;
+  const wait = FLUSH_BACKOFF_MS[Math.min(attempts, FLUSH_BACKOFF_MS.length - 1)] ?? 0;
+  return now >= (item.lastAttemptAt ?? item.queuedAt) + wait;
+}
 
 // Backoff between publish attempts within a live session. NDK's "not enough
 // relays received the event" is usually transient under concurrent publishes,
@@ -254,12 +380,12 @@ async function queueUndelivered(
   outcomes: RelayPublishOutcome[],
 ): Promise<void> {
   try {
-    if (!backend || !Array.isArray(outcomes)) return;
-    const missing = outcomes
-      .filter((o) => !o.ok && isRetryableRelayFailure(o.reason))
-      .map((o) => o.url);
+    if (!backend) return;
+    const missing = stillMissing(outcomes);
     if (missing.length === 0) return;
-    const existing = (await backend.getAll()).find((i) => i.event.id === event.id);
+    // A point read, not a full-store scan: this runs on every successful publish
+    // and only ever asks about this one event id.
+    const existing = await getOne(event.id);
     // An item already waiting to be sent in full outranks topping up stragglers:
     // it targets every relay anyway, and the store is keyed by event id, so
     // writing over it would narrow that publish to this partial relay set.
@@ -306,8 +432,20 @@ export async function flushQueue(): Promise<FlushResult> {
 async function flushQueueCore(): Promise<FlushResult> {
   if (!backend) return { sent: 0, remaining: 0, failed: 0 };
   const active = activeCacheOwner();
+  const now = Date.now();
   const items = (await backend.getAll()).sort((a, b) => a.queuedAt - b.queuedAt);
   let sent = 0;
+  // Tallied as we go rather than re-reading the whole store afterwards: the
+  // closing `getAll()` was a second full-store deserialize per flush purely to
+  // count rows we had just written ourselves.
+  let remaining = 0;
+  let failedCount = 0;
+  /** Record an item's post-flush state for the FlushResult (U1 visibility rules). */
+  const tally = (item: QueuedItem, stillQueued: boolean, isFailed: boolean) => {
+    if (!stillQueued || item.partial) return; // convergence work is not user-visible
+    if (isFailed) failedCount++;
+    else remaining++;
+  };
   for (const item of items) {
     // U1 migration: a legacy ownerless item (queued before U1) has no attribution,
     // so we cannot know which account signed it. Dropping is the safe choice — the
@@ -321,11 +459,49 @@ async function flushQueueCore(): Promise<FlushResult> {
     // Only ever publish the ACTIVE account's items. Another account's queued items
     // stay untouched and invisible until that identity is active again (U1).
     if (!ownedBy(item, active)) continue;
-    if (item.failed) continue; // terminal — never auto-retried
+    if (item.failed) {
+      tally(item, true, true); // terminal — never auto-retried
+      continue;
+    }
+    // Attempts are spent on TIME, not on flush calls (see FLUSH_BACKOFF_MS): a
+    // burst of `online` events from a flapping captive portal must not exhaust
+    // an item's five attempts inside a minute.
+    if (!readyToFlush(item, now)) {
+      tally(item, true, false);
+      continue;
+    }
     try {
-      await publishSigned(item.event, item.relays);
-      await backend.delete(item.event.id);
+      const missing = stillMissing(await publishSigned(item.event, item.relays));
+      if (missing.length === 0) {
+        await backend.delete(item.event.id);
+        sent++;
+        continue;
+      }
+      // The event IS out — `publishSigned` only resolves once a relay acked — but
+      // some of this item's targets still don't have it. Deleting here is what the
+      // straggler redelivery used to do, which made the redelivery itself 1-of-N:
+      // an item carrying an event to three relays that missed it was dropped the
+      // moment ONE of them accepted, and the other two never got it. Nobody could
+      // learn of it either, because a `partial` item is deliberately invisible in
+      // the outbox. So narrow the target set to what is still missing and keep
+      // going; the action itself counts as sent.
       sent++;
+      const attempts = (item.attempts ?? 0) + 1;
+      if (attempts >= MAX_FLUSH_ATTEMPTS) {
+        // Same policy as an unreachable straggler below: give up quietly.
+        await backend.delete(item.event.id).catch(() => {});
+        continue;
+      }
+      await backend
+        .put({
+          ...item,
+          relays: missing,
+          attempts,
+          lastAttemptAt: now,
+          failed: false,
+          partial: true,
+        })
+        .catch(() => {});
     } catch (e) {
       const attempts = (item.attempts ?? 0) + 1;
       const failed = attempts >= MAX_FLUSH_ATTEMPTS;
@@ -338,15 +514,13 @@ async function flushQueueCore(): Promise<FlushResult> {
         continue;
       }
       const lastError = e instanceof Error ? e.message : String(e);
-      await backend.put({ ...item, attempts, failed, lastError }).catch(() => {});
+      await backend
+        .put({ ...item, attempts, lastAttemptAt: now, failed, lastError })
+        .catch(() => {});
+      tally(item, true, failed);
     }
   }
-  const after = (await backend.getAll()).filter((i) => ownedBy(i, active) && !i.partial);
-  return {
-    sent,
-    remaining: after.filter((i) => !i.failed).length,
-    failed: after.filter((i) => i.failed).length,
-  };
+  return { sent, remaining, failed: failedCount };
 }
 
 /**
@@ -392,8 +566,13 @@ export async function discardQueuedForOwner(owner: string): Promise<number> {
  */
 export async function retryFailed(id: string): Promise<FlushResult> {
   if (backend) {
-    const item = (await backend.getAll()).find((i) => i.event.id === id);
-    if (item?.failed) await backend.put({ ...item, failed: false, attempts: 0 });
+    const item = await getOne(id);
+    // `lastAttemptAt` is cleared along with the counter: the user asking again IS
+    // the signal that it's worth another try now, so the backoff must not make an
+    // explicit Retry sit and do nothing.
+    if (item?.failed) {
+      await backend.put({ ...item, failed: false, attempts: 0, lastAttemptAt: undefined });
+    }
   }
   return flushQueue();
 }
@@ -419,12 +598,18 @@ export function installQueueFlusher(): void {
   // (a terminal-failed item is not retried, so it doesn't keep the sweep busy).
   setInterval(() => {
     const active = activeCacheOwner();
+    const now = Date.now();
     void backend
       ?.getAll()
       .then((items) => {
         // Only sweep when the ACTIVE account has something non-terminal pending —
-        // another account's queued items must not keep the flusher busy (U1).
-        if (items.some((i) => !i.failed && ownedBy(i, active))) void flushQueue();
+        // another account's queued items must not keep the flusher busy (U1) —
+        // and only when at least one of them is actually due (FLUSH_BACKOFF_MS),
+        // so a backed-off item doesn't take the flush lock every minute to
+        // decide it has nothing to do.
+        if (items.some((i) => !i.failed && ownedBy(i, active) && readyToFlush(i, now))) {
+          void flushQueue();
+        }
       })
       .catch(() => {});
   }, FLUSH_INTERVAL_MS);

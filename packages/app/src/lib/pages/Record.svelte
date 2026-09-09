@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, tick } from "svelte";
   import { MAX_INTRO_TEXT, UNLIMITED_SEC, type MediaDescriptor } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -27,7 +27,9 @@
   import type { PublishOutcome } from "$lib/nostr/publish-queue.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import { classifyTalkUrl } from "$lib/media/external.js";
-  import { checkMediaLimits, MAX_UPLOAD_BYTES } from "$lib/media/precheck.js";
+  import { checkMediaLimits, normalizeDurationSec, MAX_UPLOAD_BYTES } from "$lib/media/precheck.js";
+  import { onUploadProgress } from "$lib/blossom/client.js";
+  import { formatBytes } from "$lib/util/bytes.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import { validate, hasError, describedBy, type FieldError } from "$lib/stores/form-validation.js";
@@ -104,6 +106,15 @@
   let remaining = $state(0);
   let recorded = $state<{ blob: Blob; url: string; durationSec: number } | null>(null);
   let busy = $state(false);
+  // Live upload progress. A talk video is tens of MB and the upload used to be a
+  // static "Uploading…" with every control disabled for minutes — indistinguishable
+  // from a hung tab, so people reloaded the page and lost the take. These are fed
+  // by the Blossom client's progress channel (see trackUpload).
+  let uploadSent = $state(0);
+  let uploadTotal = $state(0);
+  const uploadPct = $derived(
+    uploadTotal > 0 ? Math.min(100, Math.round((uploadSent / uploadTotal) * 100)) : null,
+  );
   let done = $state(false);
   // Truthful completion state (audit U2): what actually happened to the relay
   // event — published, awaiting moderation, or only queued locally — never a flat
@@ -348,25 +359,52 @@
   }
 
   async function startRecording() {
+    error = null;
+    // A stream object outlives its tracks: iOS ENDS the camera/mic tracks when
+    // the tab is backgrounded (a phone call, switching apps to check the invite
+    // link), and nothing tells the page. The badge still said "Cam ready", and
+    // `new MediaRecorder(stream)` then threw a raw DOMException that bypassed
+    // the whole device-error mapping below. Re-acquire instead.
+    if (stream && !stream.getTracks().some((tr) => tr.readyState === "live")) stopStream();
     if (!stream) await (mode === "audio" ? enableMic() : enableCamera());
     if (!stream) return;
-    capture = new VideoCapture(mode === "audio" ? "audio" : "video");
-    recording = true;
     // `remaining` is seconds-left for a capped event; for an unlimited event
     // capture.start() instead counts elapsed seconds up from 0 (no hard-stop).
     remaining = 0;
     try {
+      capture = new VideoCapture(mode === "audio" ? "audio" : "video");
+      recording = true;
       const result = await capture.start(stream, maxSec, (r) => (remaining = r));
       recording = false;
+      const url = URL.createObjectURL(result.blob);
+      // `result.durationSec` is WALL CLOCK (capture.ts counts `Date.now()` from
+      // the start), which is not the same as how much media came out. iOS suspends
+      // a backgrounded tab's MediaRecorder, so answering a call mid-take produces a
+      // 40-second clip that reports four minutes — and the precheck below then
+      // tells the person their clip is over an event limit it is nowhere near.
+      // Read the real decoded duration where we can; `readDuration` already knows
+      // how to coax a finite answer out of MediaRecorder WebM (MED-3), and returns
+      // 0 when it cannot, which is when the wall clock is the best guess we have.
+      const decoded = await readDuration(url, mode === "audio").catch(() => 0);
       recorded = {
         blob: result.blob,
-        url: URL.createObjectURL(result.blob),
-        durationSec: result.durationSec,
+        url,
+        durationSec: decoded > 0 ? decoded : result.durationSec,
       };
-      stopMeter();
+      // stopStream(), not just stopMeter(): the take is done, so the camera light
+      // must go out NOW. It used to stay on through the review UI, the encrypt +
+      // upload, and every retry — minutes of a lit camera pointed at someone who
+      // believed they had stopped recording.
+      stopStream();
     } catch (e) {
       recording = false;
-      error = e;
+      // Same classification the getUserMedia paths use (§7.4.10): a MediaRecorder
+      // failure here is a DOMException too ("NotReadableError" when the device was
+      // grabbed by another app mid-take), and raw DOMException text is not an
+      // error message a person can act on.
+      error = new Error(
+        t(deviceErrorMessageKey(classifyDeviceError(e), mode === "audio") as MessageKey),
+      );
     }
   }
 
@@ -374,14 +412,48 @@
     capture?.stop();
   }
 
-  function reRecord() {
+  async function reRecord() {
     if (recorded) URL.revokeObjectURL(recorded.url);
     recorded = null;
+    error = null;
+    // The camera/mic were released the moment the take finished (above), so
+    // bring them back rather than dropping the user on an "Enable camera" button
+    // they already pressed once. `tick()` first: the recorder markup (and its
+    // `videoEl` binding) only exists after `recorded` is cleared.
+    await tick();
+    if (mode === "audio") await enableMic();
+    else await enableCamera();
+  }
+
+  /**
+   * The one length/size gate both composer paths go through (U13/R17). It used to
+   * be inline in `chooseFile` only, so a RECORDING skipped it entirely: on an
+   * event with a long or unlimited `maxTalkSec` the capture arms no hard stop, and
+   * a 40-minute take is 300-600 MB — it uploaded fine, the descriptor validated,
+   * and then playback.ts refused to play the speaker's own talk back to them,
+   * because MAX_UPLOAD_BYTES exists precisely to keep those two in step.
+   * Returns true when the media was rejected (and `error` set).
+   */
+  function rejectOverLimits(sizeBytes: number, durationSec: number): boolean {
+    const violation = checkMediaLimits({ sizeBytes, durationSec, maxSec });
+    if (!violation) return false;
+    error = new Error(
+      violation.kind === "duration"
+        ? t("record.error.tooLong", { limit: violation.limit, actual: violation.actual })
+        : t("record.error.tooLarge", { limitMb: Math.round(MAX_UPLOAD_BYTES / (1024 * 1024)) }),
+    );
+    return true;
   }
 
   /** File fallback (audit P2.8): use an existing clip instead of recording. */
   async function chooseFile(e: Event) {
-    const file = (e.target as HTMLInputElement).files?.[0];
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    // Clear the input BEFORE anything else: without this, picking the same file
+    // again fires no `change` event at all (the value didn't change), so "choose
+    // file" was a dead button for anyone re-picking after a rejected clip or a
+    // discarded take — a silent no-op with nothing on screen to explain it.
+    input.value = "";
     if (!file) return;
     stopStream();
     // Replacing a prior selection/recording: revoke its object URL first so
@@ -394,29 +466,100 @@
     } catch {
       /* duration is optional */
     }
-    // U13: reject a predictably-invalid file before the encrypt/upload round-trip.
+    // Reject a predictably-invalid file before the encrypt/upload round-trip.
     // The server checks stay authoritative; this just spares a doomed upload.
-    const violation = checkMediaLimits({ sizeBytes: file.size, durationSec, maxSec });
-    if (violation) {
+    if (rejectOverLimits(file.size, durationSec)) {
       URL.revokeObjectURL(url);
-      error = new Error(
-        violation.kind === "duration"
-          ? t("record.error.tooLong", { limit: violation.limit, actual: violation.actual })
-          : t("record.error.tooLarge", { limitMb: Math.round(MAX_UPLOAD_BYTES / (1024 * 1024)) }),
-      );
       return;
     }
     recorded = { blob: file, url, durationSec };
   }
 
+  /** How long to wait for the seek-to-end trick below before giving up. */
+  const DURATION_PROBE_MS = 4000;
+
+  /**
+   * Read a clip's duration in seconds; 0 means "couldn't tell".
+   *
+   * `HTMLMediaElement.duration` is `Infinity` for a WebM written by
+   * MediaRecorder — the format's Duration element is only writable once the
+   * stream ends, and MediaRecorder streams it — until a seek past the end forces
+   * the browser to measure the file itself. The old
+   * `resolve(Math.round(el.duration) || 0)` therefore resolved with `Infinity`
+   * (`|| 0` catches NaN and 0, not Infinity) for every in-browser recording:
+   * a capped event told the user "that clip is Infinity s", and an uncapped one
+   * put Infinity in the media descriptor, where JSON.stringify turned it into
+   * `null` and the coordinator dropped the submission as permanently
+   * unprocessable while the attendee's screen said it had been saved.
+   */
   function readDuration(url: string, audio: boolean): Promise<number> {
     return new Promise((resolve, reject) => {
       const el = document.createElement(audio ? "audio" : "video");
       el.preload = "metadata";
-      el.onloadedmetadata = () => resolve(Math.round(el.duration) || 0);
-      el.onerror = () => reject(new Error("metadata"));
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (raw: number) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        el.onloadedmetadata = null;
+        el.ondurationchange = null;
+        el.onerror = null;
+        // Detach the probe from the blob so a large picked file isn't held open
+        // by an off-DOM element until GC. removeAttribute + load(), not
+        // `src = ""`, which some browsers resolve to the document URL and then
+        // try to decode the page as media.
+        el.removeAttribute("src");
+        el.load();
+        resolve(normalizeDurationSec(raw));
+      };
+      el.onloadedmetadata = () => {
+        if (Number.isFinite(el.duration)) return finish(el.duration);
+        // Seek far past any real end: the browser walks the file to satisfy it,
+        // discovers the true length and fires `durationchange` with a finite
+        // value. Bounded by DURATION_PROBE_MS so a format that never resolves
+        // (or a browser that ignores the seek) degrades to "unknown" rather than
+        // leaving the composer waiting.
+        el.ondurationchange = () => {
+          if (Number.isFinite(el.duration)) finish(el.duration);
+        };
+        timer = setTimeout(() => finish(0), DURATION_PROBE_MS);
+        try {
+          el.currentTime = 1e101;
+        } catch {
+          finish(0);
+        }
+      };
+      el.onerror = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        reject(new Error("metadata"));
+      };
       el.src = url;
     });
+  }
+
+  /**
+   * Run an upload while mirroring the Blossom client's byte progress into the UI.
+   * The callback is subscribed at the module level rather than threaded down
+   * through submit.ts because only one upload runs at a time here — the submit
+   * button is disabled for its whole duration.
+   */
+  async function trackUpload<T>(run: () => Promise<T>): Promise<T> {
+    uploadSent = 0;
+    uploadTotal = 0;
+    const off = onUploadProgress((p) => {
+      uploadSent = p.sent;
+      uploadTotal = p.total;
+    });
+    try {
+      return await run();
+    } finally {
+      off();
+      uploadSent = 0;
+      uploadTotal = 0;
+    }
   }
 
   /** Submit a talk whose video is an external URL (YouTube / direct mp4). No
@@ -452,15 +595,16 @@
   async function submitRecorded() {
     if (!ctx || !session.signer || !recorded) return;
     if (!checkSubmit(false)) return;
-    busy = true;
+    const take = recorded;
+    // The size/duration gate the picked-file path has always had. A recording
+    // used to go straight to uploadMedia (see rejectOverLimits) — the ONE call
+    // site of checkMediaLimits was chooseFile.
     error = null;
+    if (rejectOverLimits(take.blob.size, take.durationSec)) return;
+    busy = true;
     try {
-      const descriptor = await uploadMedia(
-        session.signer,
-        ctx,
-        recorded.blob,
-        kind,
-        recorded.durationSec,
+      const descriptor = await trackUpload(() =>
+        uploadMedia(session.signer!, ctx!, take.blob, kind, take.durationSec),
       );
       await finishSubmitMedia(descriptor);
     } catch (e) {
@@ -520,7 +664,11 @@
     busy = true;
     error = null;
     try {
-      const prepared = await prepareReuse(session.signer, ctx, descriptor, fresh);
+      // A "fresh copy" re-encrypts and re-uploads the whole clip, so it deserves
+      // the same visible progress a new take gets.
+      const prepared = await trackUpload(() =>
+        prepareReuse(session.signer!, ctx!, descriptor, fresh),
+      );
       await finishSubmitMedia(prepared);
     } catch (e) {
       error = e;
@@ -632,6 +780,35 @@
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
 
 {#if error}<ErrorState {error} />{/if}
+
+<!-- Real byte progress while the ciphertext goes out — the same information the
+     download side already shows in MediaPlayer. Shown wherever an upload can be
+     started (a new take, or a "fresh copy" of a reused clip), because the
+     alternative was a disabled button and a static "Uploading…" for minutes on a
+     talk video, which is indistinguishable from a hung tab: people reloaded and
+     lost the take. Numbers only, no new translatable string — the button label
+     beside it carries the words. A progressbar, not a live region: the counter
+     changes many times a second and a polite region would announce every value. -->
+{#snippet uploadBar()}
+  {#if busy && uploadTotal > 0}
+    <div class="uploading">
+      <div
+        class="track"
+        role="progressbar"
+        aria-label={t("record.uploading")}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={uploadPct ?? undefined}
+        aria-valuetext="{formatBytes(uploadSent)} / {formatBytes(uploadTotal)}"
+      >
+        <div class="fill" style="width:{uploadPct ?? 0}%"></div>
+      </div>
+      <span class="muted bytes" aria-hidden="true">
+        {formatBytes(uploadSent)} / {formatBytes(uploadTotal)}
+      </span>
+    </div>
+  {/if}
+{/snippet}
 
 {#if done}
   <div class="card" class:warn={doneQueued} role="status">
@@ -809,6 +986,7 @@
           </div>
         {/each}
       </div>
+      {@render uploadBar()}
     </div>
   {/if}
 
@@ -885,9 +1063,14 @@
         <div class="row">
           <button class="btn" onclick={reRecord} disabled={busy}>{t("record.reRecord")}</button>
           <button class="btn primary" onclick={submitRecorded} disabled={busy}>
-            {busy ? t("record.uploading") : t("record.useThis")}
+            {busy && uploadPct !== null
+              ? `${t("record.uploading")} ${uploadPct}%`
+              : busy
+                ? t("record.uploading")
+                : t("record.useThis")}
           </button>
         </div>
+        {@render uploadBar()}
       {:else if showRecorder}
         {#if mode === "audio"}
           <p class="muted">{t("record.audio.hint")}</p>
@@ -971,6 +1154,34 @@
     height: 100%;
     background: var(--accent);
     transition: width 80ms linear;
+  }
+  .uploading {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.5rem;
+  }
+  .uploading .track {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--bg-elev2);
+    overflow: hidden;
+  }
+  .uploading .fill {
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    background: var(--accent-bg);
+    transition: width 0.2s linear;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .uploading .fill {
+      transition: none;
+    }
+  }
+  .bytes {
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
   }
   .gallery {
     display: grid;

@@ -58,7 +58,7 @@ function assertNip44Ceiling(plaintext: string): void {
   const bytes = utf8ToBytes(plaintext).length;
   if (bytes > NIP44_MAX_PLAINTEXT_BYTES) {
     throw new Error(
-      `NIP-44 plaintext is ${bytes} bytes — the ceiling is 65535`,
+      `NIP-44 plaintext is ${bytes} bytes, over the 65535-byte ceiling`,
     );
   }
 }
@@ -78,10 +78,23 @@ const NIP44_MAX_CIPHERTEXT_B64 =
     (1 + 32 + (2 + nip44v2.utils.calcPaddedLen(NIP44_MAX_PLAINTEXT_BYTES)) + 32) / 3,
   ) * 4;
 
-function assertNip44CiphertextCeiling(ciphertext: string): void {
+/**
+ * Reject a NIP-44 payload that cannot be a valid encryption of a within-ceiling
+ * plaintext, BEFORE handing it to anything that has to work to find out.
+ *
+ * Exported because the app's gift-wrap unwrap delegates decryption to the user's
+ * signer rather than doing it here (PROTO-1): for NIP-07 that hands the raw
+ * string to a browser extension, and for NIP-46 it ships the whole thing to a
+ * remote bunker over a relay and waits. A few thousand kind-1059 events
+ * `#p`-tagged at someone, each carrying an 800 KB `content`, are enough to stall
+ * that signer session through the ordinary DM and grant scans — with no upper
+ * bound anywhere on the path, because the ceiling only guarded the in-process
+ * decrypt functions below.
+ */
+export function assertNip44CiphertextCeiling(ciphertext: string): void {
   if (ciphertext.length > NIP44_MAX_CIPHERTEXT_B64) {
     throw new Error(
-      `NIP-44 ciphertext is ${ciphertext.length} base64 chars — the ceiling is ${NIP44_MAX_CIPHERTEXT_B64}`,
+      `NIP-44 ciphertext is ${ciphertext.length} base64 chars, over the ${NIP44_MAX_CIPHERTEXT_B64} ceiling`,
     );
   }
 }
@@ -140,6 +153,30 @@ export function selfDecrypt(sk: Uint8Array, ciphertext: string): string {
 
 // ── Blinded d-tags (spec §6.6) ───────────────────────────────────────────────
 // d = hex( hmac_sha256(key, message) )[0..32]  → first 32 hex chars (16 bytes)
+//
+// DOMAIN SEPARATION — read this before adding a new blinded-d caller.
+//
+// `blindedD` and `blindedDLiteral` share ONE HMAC key with NO tagged prefix, so
+// the only thing keeping their message spaces apart is the shape of the strings
+// each is called with. That separation is real but ACCIDENTAL, not designed:
+//
+//   blindedD        → "<kind>:<E_id hex64>:<event-d>|<attendee hex64>"
+//   blindedDLiteral → "library" | "chat-device-key" | "talk|<coord>|<pk>|<talk_d>"
+//
+// A coordinate always begins with decimal kind digits and a colon, and every
+// literal in the codebase begins with a letter, so no literal can ever collide
+// with a coordinate-shaped message. `crypto.test.ts` pins exactly that (the
+// "blinded-d domain separation" block), so a future literal shaped like a
+// coordinate — say `talkOf("31923:<pk>:d|<pk>")` — fails the suite loudly
+// instead of silently addressing another entry's `d`.
+//
+// The textbook fix is a distinct constant tag per function. It is deliberately
+// NOT applied: the `d` is the ADDRESS of already-published 31602/31603/31605/
+// 31610 records, so prefixing the message re-derives every one of them and every
+// live event's directory entries, match lists, reuse library and talks become
+// unaddressable — a wire-visible break of a frozen format, in exchange for
+// closing a collision that no current caller can reach. If a tagged derivation
+// is ever wanted it needs a `v` bump and a migration, not an edit here.
 
 function blindedDFromMessage(key: Uint8Array, message: string): string {
   const mac = hmac(sha256, key, utf8ToBytes(message));
@@ -149,6 +186,9 @@ function blindedDFromMessage(key: Uint8Array, message: string): string {
 /**
  * Blinded d-tag for a per-attendee addressable event.
  * `key` = the self-conversation-key (31602) or the current ECK (31603/31605).
+ *
+ * Message shape: `<coordinate>|<attendeePubkey>` — see the domain-separation note
+ * above; `blindedDLiteral` hashes into the SAME space with the same key.
  */
 export function blindedD(
   key: Uint8Array,
@@ -158,9 +198,25 @@ export function blindedD(
   return blindedDFromMessage(key, `${coordinate}|${attendeePubkey}`);
 }
 
-/** Blinded d-tag over a literal string, e.g. the reuse-library entry ("library"). */
+/**
+ * Blinded d-tag over a literal string, e.g. the reuse-library entry ("library").
+ *
+ * The literal MUST NOT be shaped like a `blindedD` message (`<kind>:<hex64>:…|<hex64>`)
+ * — same key, same hash, no tag prefix, so an identically-shaped literal addresses
+ * another record's `d`. See the domain-separation note above.
+ */
 export function blindedDLiteral(key: Uint8Array, literal: string): string {
   return blindedDFromMessage(key, literal);
+}
+
+/**
+ * True when `literal` is shaped like a {@link blindedD} message and therefore must
+ * NOT be passed to {@link blindedDLiteral}: `<digits>:<hex64>:<anything>|<hex64>`.
+ * Exported so the collision test can assert it over every literal the codebase
+ * actually uses rather than re-implementing the shape rule.
+ */
+export function collidesWithBlindedDMessage(literal: string): boolean {
+  return /^[0-9]+:[0-9a-f]{64}:.*\|[0-9a-f]{64}$/.test(literal);
 }
 
 // ── AES-256-GCM media encryption (spec §6.2) ─────────────────────────────────

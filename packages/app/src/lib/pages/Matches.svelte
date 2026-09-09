@@ -41,6 +41,15 @@
   // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
   let loading = $state(matches.length === 0);
   let error = $state<unknown>(null);
+  /**
+   * Backstop for a first load that never returns, and the token that keeps a
+   * stalled pass from clobbering the retry that replaced it. Same shape and budget
+   * as EventHome's: `fetchMatches`/`fetchDirectory` await relay reads with no
+   * timeout of their own, so a silently-dropped socket parked this page on
+   * "Fetching your matches…" forever, with no retry on the error state either.
+   */
+  const LOAD_GUARD_MS = 12_000;
+  let loadToken = 0;
   let noCoordinator = $state(false);
   // Explicit access states (audit UX-11): a logged-out or non-member deep link
   // used to render "No matches yet…" — indistinguishable from a member with an
@@ -69,7 +78,15 @@
     perfMark("Matches", "cache-paint");
   });
 
-  onMount(async () => {
+  async function loadMatches() {
+    const token = ++loadToken;
+    error = null;
+    loading = true;
+    const guard = setTimeout(() => {
+      if (token !== loadToken || matches.length > 0) return; // superseded, or painted
+      error = new Error("Timed out waiting for your matches.");
+      loading = false;
+    }, LOAD_GUARD_MS);
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
@@ -104,12 +121,15 @@
           .catch(() => {}),
       ]);
     } catch (e) {
-      error = e;
+      if (token === loadToken) error = e;
     } finally {
-      loading = false;
+      clearTimeout(guard);
+      if (token === loadToken) loading = false;
       perfMark("Matches", "network-settled");
     }
-  });
+  }
+
+  onMount(loadMatches);
 
   // Muted attendees never appear in your matches (U10).
   const visibleMatches = $derived(matches.filter((m) => !mutes.isMuted(m.pubkey)));
@@ -151,7 +171,7 @@
 <h1 class="disp">{t("matches.title")}</h1>
 
 {#if error}
-  <ErrorState {error} />
+  <ErrorState {error} onRetry={loadMatches} retrying={loading} />
 {:else if noCoordinator}
   <!-- Coordinator-unavailable: quiet state (NOT ErrorState — it's role="alert"). -->
   <div class="card">
@@ -194,7 +214,15 @@
         {t("readiness.cta.record")}
       </button>
     {:else}
+      <!-- "No matches yet" with nothing to do about it left the reader guessing at
+           which of the two waits they were in — their own intro still processing,
+           or the organizer not having run matching. Say both, and offer the check
+           that a reload was otherwise the only way to perform. -->
       <p class="muted">{t("matches.none")}</p>
+      <p class="muted">{t("matches.none.why")}</p>
+      <button class="btn" onclick={loadMatches} disabled={loading}>
+        {loading ? t("error.state.retrying") : t("matches.checkAgain")}
+      </button>
     {/if}
   </div>
 {:else}

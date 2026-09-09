@@ -14,9 +14,12 @@ import type {
 } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
+  PROVIDER_BODY_LIMITS,
   PROVIDER_TIMEOUTS,
   ProviderHttpError,
+  parseModelJson,
   providerHttpError,
+  readJsonCapped,
   withProviderTimeout,
   withUncancellableDeadline,
 } from "./http.js";
@@ -126,7 +129,7 @@ export class VeniceLlm implements LlmProvider {
           this.opts.net ?? {},
           async (res) => {
             if (!res.ok) throw await httpError(res, "Venice GET /models");
-            return (await res.json()) as { data?: any[] };
+            return await readJsonCapped<{ data?: any[] }>(res, "Venice GET /models");
           },
         ),
     );
@@ -234,7 +237,7 @@ export class VeniceLlm implements LlmProvider {
             if (!res.ok) {
               throw await httpError(res, "Venice chat/completions");
             }
-            const parsed = (await res.json()) as any;
+            const parsed = await readJsonCapped<any>(res, "Venice chat/completions");
             await this.opts.payment.settle(res.headers);
             return parsed;
           },
@@ -245,9 +248,28 @@ export class VeniceLlm implements LlmProvider {
     if (typeof content !== "string") {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
     }
+    // A response cut off at the token ceiling is unparseable JSON, and used to be
+    // indistinguishable in the logs from a model that emitted garbage — the two want
+    // opposite responses (raise the budget vs. fix the prompt), so name it. Checked
+    // BEFORE the parse so the diagnosis survives even if a truncation happens to
+    // land on a syntactically complete prefix.
+    const finish = body.choices?.[0]?.finish_reason;
+    if (finish === "length") {
+      throw new ProviderContractError(
+        this.id,
+        req.schemaName,
+        req.model,
+        `response truncated at the ${req.maxTokens ?? 4096}-token ceiling (finish_reason=length)`,
+      );
+    }
+    // Lenient only in the ways a model actually malforms JSON — a ```json fence, a
+    // leading sentence — and strict about everything else; see {@link parseModelJson}.
+    // Bare `JSON.parse` here is what makes docs/MODEL-BAKEOFF.md's quality-and-cost
+    // winner unadoptable: it fences its output despite `strict: true`, so it would
+    // fail ~96% of production calls while benchmarking at zero format failures.
     let parsed: unknown;
     try {
-      parsed = JSON.parse(content);
+      parsed = parseModelJson(content);
     } catch {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "output was not valid JSON");
     }
@@ -282,13 +304,65 @@ export class VeniceLlm implements LlmProvider {
           this.opts.net ?? {},
           async (res) => {
             if (!res.ok) throw await httpError(res, "Venice embeddings");
-            return (await res.json()) as { data?: { embedding: number[] }[] };
+            return await readJsonCapped<{ data?: { embedding?: unknown; index?: unknown }[] }>(
+              res,
+              "Venice embeddings",
+              // The largest body we legitimately read: a whole roster in one call.
+              PROVIDER_BODY_LIMITS.embedding,
+            );
           },
         ),
       callerSignal,
     );
     const embedModel = model ?? "text-embedding-bge-m3";
-    return (body.data ?? []).map((d, i) => {
+    const rows = body.data ?? [];
+
+    // COUNT first (2026-09-04 audit). A SHORT response used to be silently
+    // accepted: the caller does `embeddings[i]!` per roster miss, and a missing row
+    // makes that `undefined`, which is stored as `JSON.stringify(undefined)` — the
+    // literal string `undefined`, not JSON — and then throws inside `utf8ToBytes`
+    // on the next read. That fails `match_recompute` AND re-bills this embed call
+    // on every retry, for a fault that is invisible here.
+    if (rows.length !== texts.length) {
+      throw new ProviderContractError(
+        this.id,
+        "embeddings",
+        embedModel,
+        `expected ${texts.length} vectors, got ${rows.length}`,
+      );
+    }
+
+    // ORDER second. OpenAI's embeddings contract gives every row a 0-based `index`
+    // naming the input it belongs to, and does NOT promise the array is sorted;
+    // this used to map positionally and ignore `index` entirely. A gateway that
+    // reorders rows therefore handed attendee A's vector to attendee B — silently,
+    // with no error anywhere. Above the 50-attendee prefilter threshold that is not
+    // a cosmetic mixup: every attendee gets someone else's top-30 candidate set,
+    // and the only symptom is matches that feel subtly wrong.
+    //
+    // `index` is honoured when present and the position is used as the fallback (a
+    // gateway that omits it is the pre-existing behaviour, now at least length-
+    // checked). A duplicate or out-of-range `index` is a contract error rather than
+    // a last-write-wins overwrite, which would reintroduce the same silent swap.
+    const out = new Array<number[]>(texts.length);
+    const seen = new Set<number>();
+    rows.forEach((d, i) => {
+      const declared = d?.index;
+      const idx =
+        declared === undefined || declared === null
+          ? i
+          : typeof declared === "number" && Number.isInteger(declared)
+            ? declared
+            : -1;
+      if (idx < 0 || idx >= texts.length || seen.has(idx)) {
+        throw new ProviderContractError(
+          this.id,
+          "embeddings",
+          embedModel,
+          `row ${i}: unusable index ${String(declared)} (${seen.has(idx) ? "duplicate" : "out of range"})`,
+        );
+      }
+      seen.add(idx);
       const emb = d?.embedding;
       if (
         !Array.isArray(emb) ||
@@ -302,8 +376,9 @@ export class VeniceLlm implements LlmProvider {
           `row ${i}: malformed embedding vector`,
         );
       }
-      return emb;
+      out[idx] = emb;
     });
+    return out;
   }
 }
 
@@ -357,16 +432,27 @@ export class VeniceStt implements SttProvider {
           this.opts.net ?? {},
           async (res) => {
             if (!res.ok) throw await httpError(res, "Venice STT", "stt");
-            return (await res.json()) as { text?: unknown; language?: unknown };
+            return await readJsonCapped<{ text?: unknown; language?: unknown }>(res, "Venice STT");
           },
         ),
       opts?.signal,
     );
-    if (body.text !== undefined && typeof body.text !== "string") {
-      throw new ProviderContractError(this.id, "stt", opts?.model ?? "openai/whisper-large-v3", "text was not a string");
+    // An ABSENT `text` is a contract error, not an empty transcript (2026-09-04
+    // audit). It used to become `""`, and transcribe.ts caches a transcript by blob
+    // sha256 FOREVER — so one transient glitch on the provider's side permanently
+    // discarded an intro the attendee had recorded, indistinguishable from silence,
+    // with not one log line to say so. A wrong-TYPED `text` already threw; this is
+    // the same fault and gets the same treatment, so the job retries instead.
+    if (typeof body.text !== "string") {
+      throw new ProviderContractError(
+        this.id,
+        "stt",
+        opts?.model ?? "openai/whisper-large-v3",
+        body.text === undefined ? "response carried no `text` field" : "text was not a string",
+      );
     }
     return {
-      text: typeof body.text === "string" ? body.text : "",
+      text: body.text,
       language: typeof body.language === "string" ? body.language : undefined,
     };
   }

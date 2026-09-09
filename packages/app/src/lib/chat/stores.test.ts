@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import {
   InMemoryKvBackend,
+  IndexedDbKvBackend,
   namespacedStore,
   makeMarmotStores,
   MARMOT_NAMESPACES,
+  __resetMarmotIdbConnectionForTests,
 } from "./stores.js";
 import type { StoredKeyPackage, StoredInviteEntry } from "@internet-privacy/marmot-ts/client";
 
@@ -104,5 +106,212 @@ describe("makeMarmotStores", () => {
     expect(await b.getItem(coordA)).toBeNull();
     await b.setItem(coordA, "gid-other");
     expect(await a.getItem(coordA)).toBe("gid-a");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IndexedDbKvBackend: durability, not just "the request said ok"
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * A deliberately small IndexedDB double. It models the one behaviour that makes
+ * the production backend's old shape wrong: a REQUEST reports success while its
+ * TRANSACTION later aborts. That split is not a corner of the spec — it is how
+ * IndexedDB reports a commit-time failure (disk pressure, several quota paths),
+ * and the only correct completion signal is `transaction.oncomplete`.
+ *
+ * The real `fake-indexeddb` package would not help here: it implements a storage
+ * engine that works, and the failure under test is the engine failing at commit.
+ */
+class FakeIdb {
+  openCalls = 0;
+  /** Abort the transaction at commit time, AFTER every request reported success. */
+  failCommit = false;
+  /** Answer `open` with `blocked` (another tab holds an older version open). */
+  blockOpen = false;
+  data = new Map<string, unknown>();
+  /** Connections handed out, so a test can drive `versionchange` like a real tab. */
+  connections: FakeDb[] = [];
+
+  open(_name: string, _version: number): FakeIdbRequest {
+    this.openCalls++;
+    const req: FakeIdbRequest = { result: undefined };
+    queueMicrotask(() => {
+      if (this.blockOpen) {
+        req.onblocked?.();
+        return;
+      }
+      const db = new FakeDb(this);
+      this.connections.push(db);
+      req.result = db;
+      req.onupgradeneeded?.();
+      req.onsuccess?.();
+    });
+    return req;
+  }
+}
+
+interface FakeIdbRequest {
+  result: unknown;
+  onsuccess?: () => void;
+  onerror?: () => void;
+  onblocked?: () => void;
+  onupgradeneeded?: () => void;
+  error?: unknown;
+}
+
+class FakeDb {
+  objectStoreNames = { contains: () => true };
+  closed = false;
+  onversionchange?: () => void;
+  onclose?: () => void;
+  constructor(private readonly idb: FakeIdb) {}
+  createObjectStore(): void {}
+  close(): void {
+    this.closed = true;
+  }
+  transaction(_store: string, _mode: string): FakeTx {
+    if (this.closed) throw new Error("InvalidStateError: connection is closed");
+    return new FakeTx(this.idb);
+  }
+}
+
+class FakeTx {
+  error: unknown = null;
+  oncomplete?: () => void;
+  onabort?: () => void;
+  onerror?: () => void;
+  private readonly requests: FakeIdbRequest[] = [];
+  constructor(private readonly idb: FakeIdb) {
+    // Real transactions settle in a later task, after every request has run.
+    queueMicrotask(() =>
+      queueMicrotask(() => {
+        if (this.idb.failCommit) {
+          this.error = new Error("QuotaExceededError");
+          this.onabort?.();
+        } else {
+          this.oncomplete?.();
+        }
+      }),
+    );
+  }
+  objectStore(): FakeStore {
+    return new FakeStore(this.idb, this.requests);
+  }
+}
+
+class FakeStore {
+  constructor(
+    private readonly idb: FakeIdb,
+    private readonly requests: FakeIdbRequest[],
+  ) {}
+  private request(run: () => unknown): FakeIdbRequest {
+    const req: FakeIdbRequest = { result: undefined };
+    this.requests.push(req);
+    queueMicrotask(() => {
+      req.result = run();
+      // Success is reported EVEN WHEN the commit will later abort — that is the
+      // whole point of this double.
+      req.onsuccess?.();
+    });
+    return req;
+  }
+  get(key: string): FakeIdbRequest {
+    return this.request(() => this.idb.data.get(key));
+  }
+  put(value: unknown, key: string): FakeIdbRequest {
+    return this.request(() => {
+      // Staged, not committed. A real abort would roll this back; the double
+      // keeps it, so a test asserting on the RESOLUTION can't accidentally pass
+      // because the value vanished.
+      this.idb.data.set(key, value);
+      return undefined;
+    });
+  }
+  delete(key: string): FakeIdbRequest {
+    return this.request(() => {
+      this.idb.data.delete(key);
+      return undefined;
+    });
+  }
+  getAllKeys(): FakeIdbRequest {
+    return this.request(() => [...this.idb.data.keys()]);
+  }
+}
+
+describe("IndexedDbKvBackend (durability + connection lifecycle)", () => {
+  let fake: FakeIdb;
+  const g = globalThis as unknown as { indexedDB?: unknown; IDBKeyRange?: unknown };
+  const originalIdb = g.indexedDB;
+  const originalRange = g.IDBKeyRange;
+
+  beforeEach(() => {
+    fake = new FakeIdb();
+    g.indexedDB = fake;
+    g.IDBKeyRange = { bound: (lower: string, upper: string) => ({ lower, upper }) };
+    __resetMarmotIdbConnectionForTests();
+  });
+
+  afterEach(() => {
+    g.indexedDB = originalIdb;
+    g.IDBKeyRange = originalRange;
+    __resetMarmotIdbConnectionForTests();
+  });
+
+  it("round-trips through the real backend", async () => {
+    const backend = new IndexedDbKvBackend();
+    await backend.set("k", { n: 1 });
+    expect(await backend.get("k")).toEqual({ n: 1 });
+    await backend.del("k");
+    expect(await backend.get("k")).toBeUndefined();
+  });
+
+  // THE regression. `setItem` resolving on `req.onsuccess` means marmot records an
+  // MLS epoch as persisted that the transaction then threw away at commit. The next
+  // load restores the previous epoch and every message from the missing one is
+  // undecryptable — indistinguishable from eviction, except rejoining doesn't help
+  // because the next write fails the same way.
+  it("REJECTS a write whose transaction aborts at commit, even though the request succeeded", async () => {
+    const backend = new IndexedDbKvBackend();
+    fake.failCommit = true;
+    await expect(backend.set("epoch", { epoch: 7 })).rejects.toThrow(/QuotaExceeded/);
+  });
+
+  it("rejects a read from an aborted transaction rather than returning its staged value", async () => {
+    const backend = new IndexedDbKvBackend();
+    await backend.set("k", "value");
+    fake.failCommit = true;
+    await expect(backend.get("k")).rejects.toThrow(/QuotaExceeded/);
+  });
+
+  it("opens ONE connection and reuses it across operations", async () => {
+    const backend = new IndexedDbKvBackend();
+    await backend.set("a", 1);
+    await backend.set("b", 2);
+    await backend.get("a");
+    await backend.keysWithPrefix("");
+    expect(fake.openCalls).toBe(1);
+  });
+
+  it("closes and re-opens when another tab needs a version change", async () => {
+    const backend = new IndexedDbKvBackend();
+    await backend.set("a", 1);
+    expect(fake.openCalls).toBe(1);
+    // Another tab is upgrading: without this handler OUR connection keeps its
+    // `blocked` request pending forever and that tab's chat hangs with no error.
+    fake.connections[0].onversionchange?.();
+    expect(fake.connections[0].closed).toBe(true);
+    await backend.set("b", 2);
+    expect(fake.openCalls).toBe(2);
+  });
+
+  it("rejects (rather than hanging forever) when the open is blocked by another tab", async () => {
+    const backend = new IndexedDbKvBackend();
+    fake.blockOpen = true;
+    await expect(backend.get("k")).rejects.toThrow(/blocked/);
+    // The cached connection was dropped, so a retry after the other tab lets go
+    // actually re-opens instead of replaying the same rejected promise.
+    fake.blockOpen = false;
+    await backend.set("k", 1);
+    expect(await backend.get("k")).toBe(1);
   });
 });

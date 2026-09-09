@@ -6,6 +6,9 @@ import {
   upload,
   PREFLIGHT_TIMEOUT_MS,
   UPLOAD_TIMEOUT_MS,
+  UPLOAD_CONNECT_TIMEOUT_MS,
+  UPLOAD_STALL_TIMEOUT_MS,
+  onUploadProgress,
   MIRROR_TIMEOUT_MS,
   DOWNLOAD_TIMEOUT_MS,
   DOWNLOAD_STALL_TIMEOUT_MS,
@@ -36,7 +39,8 @@ describe("uploadAndMirror", () => {
         return new Response("nope", { status: 415 });
       }
       if (url.startsWith("https://good.example/upload")) {
-        return jsonResponse({ url: "https://good.example/deadbeef" });
+        // A conforming BUD-02 descriptor: content-addressed at our sha256.
+        return jsonResponse({ url: `https://good.example/${sha256Hex(new Uint8Array([1, 2, 3]))}` });
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -49,7 +53,7 @@ describe("uploadAndMirror", () => {
       "application/octet-stream",
     );
 
-    expect(result.primary).toBe("https://good.example/deadbeef");
+    expect(result.primary).toBe(`https://good.example/${sha256Hex(new Uint8Array([1, 2, 3]))}`);
     expect(calls[0]).toBe("PUT https://bad.example/upload");
     expect(calls[1]).toBe("PUT https://good.example/upload");
   });
@@ -69,6 +73,45 @@ describe("uploadAndMirror", () => {
         "application/octet-stream",
       ),
     ).rejects.toThrow(/bad-one\.example.*bad-two\.example/s);
+  });
+});
+
+/**
+ * The server's own descriptor URL goes straight into the media descriptor other
+ * people fetch from (audit MED-9). Blossom is content-addressed, so a URL that
+ * does not carry the sha256 we uploaded is a broken server or one substituting a
+ * different blob — and there is no reason to publish a pointer we can already
+ * tell is wrong. The coordinator re-verifies the hash on download and would
+ * reject the substitute, but the app's own players would have followed it.
+ */
+describe("upload descriptor URL is verified against our own hash", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const data = new Uint8Array([7, 7, 7]);
+
+  async function uploadWithServerUrl(serverUrl: unknown): Promise<string> {
+    const signer = LocalSigner.generate();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ url: serverUrl })),
+    );
+    const r = await uploadAndMirror(signer, ["https://s.example"], data, "application/octet-stream");
+    return r.primary;
+  }
+
+  it("keeps a URL that carries our sha256", async () => {
+    const good = `https://s.example/${sha256Hex(data)}.webm`;
+    expect(await uploadWithServerUrl(good)).toBe(good);
+  });
+
+  it("replaces a URL pointing at some OTHER blob with the content-addressed one", async () => {
+    expect(await uploadWithServerUrl("https://evil.example/someone-elses-blob")).toBe(
+      `https://s.example/${sha256Hex(data)}`,
+    );
+  });
+
+  it("falls back when the server answers 200 with no usable descriptor", async () => {
+    expect(await uploadWithServerUrl(undefined)).toBe(`https://s.example/${sha256Hex(data)}`);
   });
 });
 
@@ -297,14 +340,17 @@ describe("Blossom timeouts (UX-7)", () => {
     const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       calls.push(`${init?.method ?? "GET"} ${url}`);
+      // Conforming BUD-02 descriptors, i.e. content-addressed at our own sha256 —
+      // a URL that is not gets replaced by the content-addressed one (MED-9).
+      const addr = sha256Hex(new Uint8Array([1, 2, 3]));
       if (url.startsWith("https://primary.example/upload")) {
-        return Promise.resolve(jsonResponse({ url: "https://primary.example/deadbeef" }));
+        return Promise.resolve(jsonResponse({ url: `https://primary.example/${addr}` }));
       }
       if (url.startsWith("https://hung.example/mirror")) {
         return new Promise<Response>(() => {});
       }
       if (url.startsWith("https://good.example/mirror")) {
-        return Promise.resolve(jsonResponse({ url: "https://good.example/deadbeef" }));
+        return Promise.resolve(jsonResponse({ url: `https://good.example/${addr}` }));
       }
       throw new Error(`unexpected fetch ${url}`);
     });
@@ -324,9 +370,196 @@ describe("Blossom timeouts (UX-7)", () => {
 
     await vi.advanceTimersByTimeAsync(MIRROR_TIMEOUT_MS);
     const result = await p;
+    const addr = sha256Hex(new Uint8Array([1, 2, 3]));
     expect(result.urls).toEqual([
-      "https://primary.example/deadbeef",
-      "https://good.example/deadbeef",
+      `https://primary.example/${addr}`,
+      `https://good.example/${addr}`,
     ]);
+  });
+});
+
+/**
+ * The upload path's progress-aware budget. Uploads used to race the ENTIRE PUT —
+ * headers and body together — against one 60s clock, so 15 MB of ciphertext on
+ * venue Wi-Fi was killed mid-body and `uploadAndMirror` then re-uploaded the whole
+ * blob to the next server and blew the same budget again.
+ */
+describe("upload progress budgets (XHR path)", () => {
+  interface ProgressEvent_ {
+    loaded: number;
+    total: number;
+    lengthComputable: boolean;
+  }
+
+  /** A scriptable XMLHttpRequest: `script` drives the events after send(). */
+  class FakeXhr {
+    static script: (xhr: FakeXhr) => void = () => {};
+    /** sha256 of the payload the current test uploads, so `succeed()` can answer
+     *  with a CONFORMING content-addressed descriptor (MED-9). */
+    static addr = "";
+    static sent: Uint8Array[] = [];
+    upload: {
+      onprogress?: (e: ProgressEvent_) => void;
+      onload?: () => void;
+    } = {};
+    onload?: () => void;
+    onerror?: () => void;
+    onabort?: () => void;
+    ontimeout?: () => void;
+    onprogress?: () => void;
+    status = 0;
+    statusText = "";
+    responseText = "";
+    aborted = false;
+    reason: string | null = null;
+    open(): void {}
+    setRequestHeader(): void {}
+    getResponseHeader(name: string): string | null {
+      return name === "X-Reason" ? this.reason : null;
+    }
+    send(body: Uint8Array): void {
+      FakeXhr.sent.push(body);
+      queueMicrotask(() => FakeXhr.script(this));
+    }
+    abort(): void {
+      this.aborted = true;
+      this.onabort?.();
+    }
+    /** Answer 200 with a BUD-02 descriptor (content-addressed — see MED-9). */
+    succeed(url = `https://good.example/${FakeXhr.addr}`): void {
+      this.upload.onload?.();
+      this.status = 200;
+      this.responseText = JSON.stringify({ url });
+      this.onload?.();
+    }
+  }
+
+  function useFakeXhr(script: (xhr: FakeXhr) => void) {
+    FakeXhr.script = script;
+    FakeXhr.sent = [];
+    vi.stubGlobal("XMLHttpRequest", FakeXhr as unknown as typeof XMLHttpRequest);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("keeps going far past the old whole-request budget while bytes keep moving", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    const gap = UPLOAD_STALL_TIMEOUT_MS / 2;
+    const steps = 5;
+    // 5 × 15s = 75s of transfer: past UPLOAD_CONNECT_TIMEOUT_MS and past the old
+    // single UPLOAD_TIMEOUT_MS, which is exactly the failure being fixed.
+    expect(gap * steps).toBeGreaterThan(UPLOAD_TIMEOUT_MS);
+    useFakeXhr(async (xhr) => {
+      for (let i = 1; i <= steps; i++) {
+        await new Promise((r) => setTimeout(r, gap));
+        xhr.upload.onprogress?.({ loaded: i * 2, total: steps * 2, lengthComputable: true });
+      }
+      xhr.succeed();
+    });
+
+    const body = new Uint8Array(steps * 2);
+    FakeXhr.addr = sha256Hex(body);
+    const p = upload(signer, "https://slow.example", body);
+    await vi.advanceTimersByTimeAsync(gap * steps + 1);
+    await expect(p).resolves.toMatchObject({ url: `https://good.example/${FakeXhr.addr}` });
+  });
+
+  it("gives up on a server that stops accepting bytes mid-body", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    useFakeXhr((xhr) => {
+      xhr.upload.onprogress?.({ loaded: 2, total: 10, lengthComputable: true });
+      // …then silence forever.
+    });
+
+    const p = upload(signer, "https://stalls.example", new Uint8Array(10));
+    const assertion = expect(p).rejects.toThrow(/stalled/);
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_TIMEOUT_MS + 1);
+    await assertion;
+  });
+
+  it("skips a server that never connects, without waiting a whole transfer", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    useFakeXhr(() => {
+      /* never answers, never acknowledges a byte */
+    });
+
+    const p = upload(signer, "https://dead.example", new Uint8Array(10));
+    const assertion = expect(p).rejects.toThrow(/no connection/);
+    await vi.advanceTimersByTimeAsync(UPLOAD_CONNECT_TIMEOUT_MS + 1);
+    await assertion;
+  });
+
+  it("waits out a long store-side silence once the body is fully sent", async () => {
+    vi.useFakeTimers();
+    const signer = LocalSigner.generate();
+    // A big blob leaves the client quickly on a fast uplink, then the server
+    // hashes and stores it — a legitimate silence far longer than a stall.
+    const body = new Uint8Array(10);
+    FakeXhr.addr = sha256Hex(body);
+    useFakeXhr(async (xhr) => {
+      xhr.upload.onprogress?.({ loaded: 10, total: 10, lengthComputable: true });
+      xhr.upload.onload?.();
+      await new Promise((r) => setTimeout(r, UPLOAD_STALL_TIMEOUT_MS * 2));
+      xhr.status = 200;
+      xhr.responseText = JSON.stringify({ url: `https://good.example/${FakeXhr.addr}` });
+      xhr.onload?.();
+    });
+
+    const p = upload(signer, "https://slow-store.example", body);
+    await vi.advanceTimersByTimeAsync(UPLOAD_STALL_TIMEOUT_MS * 2 + 1);
+    await expect(p).resolves.toMatchObject({ url: `https://good.example/${FakeXhr.addr}` });
+  });
+
+  it("reports byte progress to the caller and to onUploadProgress subscribers", async () => {
+    const signer = LocalSigner.generate();
+    useFakeXhr((xhr) => {
+      xhr.upload.onprogress?.({ loaded: 4, total: 10, lengthComputable: true });
+      xhr.upload.onprogress?.({ loaded: 10, total: 10, lengthComputable: true });
+      xhr.succeed();
+    });
+
+    const own: Array<{ sent: number; total: number }> = [];
+    const subscribed: Array<{ sent: number; total: number; server: string }> = [];
+    const off = onUploadProgress((p) => subscribed.push(p));
+    await upload(signer, "https://good.example", new Uint8Array(10), "application/octet-stream", {
+      onProgress: (p) => own.push({ sent: p.sent, total: p.total }),
+    });
+    off();
+
+    // 0 before the first byte (so the bar starts at a truthful 0%), then each
+    // progress event, then `total` once the body is out.
+    expect(own).toEqual([
+      { sent: 0, total: 10 },
+      { sent: 4, total: 10 },
+      { sent: 10, total: 10 },
+      { sent: 10, total: 10 },
+    ]);
+    expect(subscribed).toEqual(own.map((p) => ({ ...p, server: "https://good.example" })));
+
+    // Unsubscribed listeners stop hearing about later uploads.
+    subscribed.length = 0;
+    await upload(signer, "https://good.example", new Uint8Array(10));
+    expect(subscribed).toEqual([]);
+  });
+
+  it("surfaces the server's X-Reason on a rejected upload", async () => {
+    const signer = LocalSigner.generate();
+    useFakeXhr((xhr) => {
+      xhr.upload.onload?.();
+      xhr.status = 413;
+      xhr.statusText = "Payload Too Large";
+      xhr.reason = "file too big";
+      xhr.onload?.();
+    });
+
+    await expect(upload(signer, "https://picky.example", new Uint8Array(10))).rejects.toThrow(
+      /413 file too big/,
+    );
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { generateSecretKey, getPublicKey, verifyEvent } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
 
@@ -190,6 +190,64 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
     await unlockChatIdentityForLogin(account, selfDecrypt);
     expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1 });
     expect(await stores.rewindStore.getItem("g1")).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  /**
+   * NIP-44 has a hard 65,535-byte plaintext ceiling, and this snapshot is the
+   * WHOLE chat identity — device key, MLS group state, key packages and the full
+   * decrypted message history. A few hundred messages clears it. Past the ceiling
+   * the encrypt threw into the catch and left everything in plaintext: nothing
+   * deleted, nothing encrypted, nothing said — so the shared-device protection was
+   * off precisely for the accounts that had used chat most.
+   */
+  it("locks state far larger than one NIP-44 plaintext, and reads it back", async () => {
+    const account = "d".repeat(64);
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, account);
+    // ~300 KB of history: comfortably several chunks.
+    const big = "x".repeat(300_000);
+    await stores.groupStateStore.setItem("g1", { epoch: 1, history: big } as never);
+
+    // A ceiling-enforcing encrypt, exactly like the real NIP-44 self-encrypt.
+    const ceilingEncrypt = async (pt: string) => {
+      const bytes = new TextEncoder().encode(pt).length;
+      if (bytes > 65_535) throw new Error(`NIP-44 plaintext is ${bytes} bytes, over the 65535-byte ceiling`);
+      return `enc:${pt}`;
+    };
+
+    await lockChatIdentityForLogout(account, ceilingEncrypt);
+    expect(await stores.groupStateStore.getItem("g1")).toBeNull(); // plaintext really gone
+
+    await unlockChatIdentityForLogin(account, selfDecrypt);
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1, history: big });
+  });
+
+  it("still reads a snapshot written in the old single-blob format", async () => {
+    const account = "e".repeat(64);
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, account);
+    await stores.groupStateStore.setItem("g1", { epoch: 7 } as never);
+    // Small state takes the single-shot path, which is the pre-chunking format.
+    await lockChatIdentityForLogout(account, selfEncrypt);
+    await unlockChatIdentityForLogin(account, selfDecrypt);
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 7 });
+  });
+
+  it("says so when the lock fails instead of silently leaving plaintext", async () => {
+    const account = "f".repeat(64);
+    const backend = marmotKvBackend();
+    const stores = makeMarmotStores(backend, account);
+    await stores.groupStateStore.setItem("g1", { epoch: 1 } as never);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await lockChatIdentityForLogout(account, async () => {
+      throw new Error("signer unreachable");
+    });
+
+    // State is deliberately left in place rather than lost — but no longer silently.
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 1 });
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("round-trips a remote-signer account's device key without forking its MLS identity", async () => {

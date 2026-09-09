@@ -54,7 +54,7 @@ describe("renderMarkdown — features", () => {
       "<p><strong>b</strong> <em>i</em> <code>c</code></p>",
     );
     expect(renderMarkdown("[t](https://x.example)")).toBe(
-      '<p><a href="https://x.example" target="_blank" rel="noopener">t</a></p>',
+      '<p><a href="https://x.example" target="_blank" rel="noopener noreferrer">t</a></p>',
     );
   });
 
@@ -115,14 +115,71 @@ describe("renderMarkdown — autolink stays out of emitted tags (audit APPR-6)",
   it("does not nest an <a> inside an emitted link's text", () => {
     const html = renderMarkdown("[a https://e.com b](https://ok)");
     expect(html).toBe(
-      '<p><a href="https://ok" target="_blank" rel="noopener">a https://e.com b</a></p>',
+      '<p><a href="https://ok" target="_blank" rel="noopener noreferrer">a https://e.com b</a></p>',
     );
   });
 
   it("still autolinks genuine bare urls around emitted tags", () => {
     const html = renderMarkdown("see https://a.com and ![x https://e.com](https://ok.png) done");
     expect(html).toBe(
-      '<p>see <a href="https://a.com" target="_blank" rel="noopener">https://a.com</a> and <img src="https://ok.png" alt="x https://e.com" loading="lazy" /> done</p>',
+      '<p>see <a href="https://a.com" target="_blank" rel="noopener noreferrer">https://a.com</a> and <img src="https://ok.png" alt="x https://e.com" loading="lazy" /> done</p>',
     );
+  });
+});
+
+
+/**
+ * Emitted HTML must never be re-read by a later pass (2026-09-04 audit).
+ *
+ * The renderer used to chain `.replace()` passes over the whole string, so each
+ * pass could rewrite the output of the ones before it. The image pass emitted an
+ * `alt="..."` built from source text, and the later emphasis and bare-URL passes
+ * then rewrote the inside of that attribute — producing an `href="` inside the
+ * `alt="`, terminating the attribute and injecting attributes onto the `<img>`.
+ *
+ * Never exploitable as script (an injected attribute name is forced to start with
+ * `https`, and SAFE_URL excludes the space an event handler needs), but the
+ * module's stated invariant — "the output can only contain the tags this module
+ * emits" — was simply false, and its content comes from any npub whose feed an
+ * organizer merged in.
+ */
+describe("renderMarkdown — emitted tags are opaque to later passes", () => {
+  it("does not let an image's alt text grow an href", () => {
+    const html = renderMarkdown("![a *b https://evil.com* c](https://e/x.png)");
+    // Exactly one tag, and it is the image.
+    expect(html.match(/<img /g)?.length).toBe(1);
+    expect(html).not.toContain("<a ");
+    expect(html).not.toContain("href=");
+    // The alt attribute is closed before anything else can start.
+    const alt = /alt="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(alt).not.toContain("<");
+    expect(alt).not.toContain("=");
+  });
+
+  it("does not put an emitted code span inside an alt attribute", () => {
+    const html = renderMarkdown("![a `code` b](https://e/x.png)");
+    const alt = /alt="([^"]*)"/.exec(html)?.[1] ?? "";
+    expect(alt).toBe("a code b");
+    expect(html).not.toContain("<code>");
+  });
+
+  it("does not autolink a URL that is already inside an emitted href", () => {
+    const html = renderMarkdown("[t](https://x.example/a?b=https://y.example)");
+    expect(html.match(/<a /g)?.length).toBe(1);
+  });
+
+  it("still renders emphasis inside link text, and code inside it", () => {
+    const html = renderMarkdown("[a *b* `c`](https://x.example)");
+    expect(html).toContain("<em>b</em>");
+    expect(html).toContain("<code>c</code>");
+    expect(html.match(/<a /g)?.length).toBe(1);
+  });
+
+  it("post content cannot forge a placeholder", () => {
+    // NUL is the sentinel; escapeHtml strips it, so a source NUL cannot become one.
+    const forged = "before " + String.fromCharCode(0) + "0" + String.fromCharCode(0) + " after";
+    const html = renderMarkdown(forged);
+    expect(html).not.toContain(String.fromCharCode(0));
+    expect(html).toContain("before 0 after");
   });
 });

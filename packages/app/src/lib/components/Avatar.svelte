@@ -5,6 +5,7 @@
   // always comes from the surrounding row/card text.
   import { npubEncode } from "nostr-tools/nip19";
   import { avatarGradient, initialsFor } from "$lib/identity/avatar.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let {
     pubkey,
@@ -29,7 +30,12 @@
     }
   });
   const initials = $derived(initialsFor(name, npub));
-  const showImage = $derived(!!picture && !broken);
+  // A profile picture is a URL the person being displayed chose, fetched by the
+  // VIEWER's browser (audit SEC-17). https-only, no referrer, and skipped
+  // entirely when the viewer has turned off-origin images off — the gradient and
+  // initials below are a complete fallback, so refusing costs nothing.
+  const src = $derived(safeImageSrc(picture));
+  const showImage = $derived(!!src && !broken);
 </script>
 
 <span
@@ -40,7 +46,14 @@
   {#if showImage}
     <!-- lazy + async: a long roster must not eagerly fetch/decode every photo
          (audit APPR-3 perf) -->
-    <img src={picture} alt="" loading="lazy" decoding="async" onerror={() => (broken = true)} />
+    <img
+      {src}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY}
+      onerror={() => (broken = true)}
+    />
   {:else}
     <span class="initials">{initials}</span>
   {/if}

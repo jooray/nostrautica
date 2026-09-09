@@ -18,7 +18,7 @@
  * network — they are pure filesystem + SQLite + local-crypto operations.
  */
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, copyFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, copyFileSync, rmSync, chmodSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { selfDecrypt } from "@nostrautica/protocol";
 import { Store, SCHEMA_VERSION, AT_REST_ENC_PREFIX } from "./db.js";
@@ -158,6 +158,19 @@ function inspectSnapshot(snapshotPath: string): {
   }
 }
 
+/**
+ * Owner-only mode on a backup artifact. Best-effort: a chmod failure must not throw
+ * away a snapshot that was otherwise written and verified successfully — the
+ * operator would be left with no backup at all over a permissions detail.
+ */
+function tightenBackupFileMode(path: string): void {
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    /* not chmod-able (exotic fs) — best effort */
+  }
+}
+
 export interface CreateBackupOpts {
   /** The LIVE store to snapshot (its own connection runs `VACUUM INTO`). */
   srcStore: Store;
@@ -193,6 +206,14 @@ export function createBackup(opts: CreateBackupOpts): BackupMetadata {
   opts.srcStore.verifyProtectedRowsDecrypt();
 
   opts.srcStore.backupTo(opts.destPath);
+  // Owner-only, IMMEDIATELY after the file exists and before anything is read back
+  // from it. A backup is only PARTIALLY encrypted: `selfEncrypt` covers the per-event
+  // inbox key and ECK columns and nothing else, so attendee names, profiles, AI
+  // profiles, transcripts, match scores and the Cashu payment journal all travel in
+  // cleartext. `VACUUM INTO` creates the destination under the process umask (0644 on
+  // a stock systemd unit), which for that content is the wrong default; file mode is
+  // the only protection these rows have.
+  tightenBackupFileMode(opts.destPath);
 
   const snap = inspectSnapshot(opts.destPath);
   if (snap.integrity !== "ok") {
@@ -218,7 +239,14 @@ export function createBackup(opts: CreateBackupOpts): BackupMetadata {
   // Authenticate the canonical manifest + snapshot digest (audit C10).
   meta.authAlg = "hmac-sha256";
   meta.authTag = computeAuthTag(meta, opts.identitySk);
-  writeFileSync(metaPathFor(opts.destPath), JSON.stringify(meta, null, 2) + "\n");
+  // `mode` on writeFileSync applies only when the file is CREATED, so an overwrite of
+  // an existing sidecar keeps its old (possibly wider) mode — hence the explicit
+  // chmod as well. The sidecar carries the authentication tag: world-readable it is
+  // not a disclosure of attendee data, but it is the value an attacker needs to know
+  // they must forge, and there is no reason for it to be looser than the snapshot.
+  const metaPath = metaPathFor(opts.destPath);
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", { mode: 0o600 });
+  tightenBackupFileMode(metaPath);
   return meta;
 }
 

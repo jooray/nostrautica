@@ -43,15 +43,16 @@ const modelRefSchema = z.object({
    * `strip_thinking_response` keeps them out of the content; budget for it.
    */
   disable_thinking: z.boolean().optional(),
-});
+}).strict();
 
 export const configSchema = z.object({
   identity: z
     .object({
       ncryptsec_file: z.string().optional(),
     })
+    .strict()
     .default({}),
-  relays: z.object({ default: z.array(z.string()).min(1) }),
+  relays: z.object({ default: z.array(z.string()).min(1) }).strict(),
   providers: z
     .object({
       venice: z
@@ -60,6 +61,7 @@ export const configSchema = z.object({
           require_private: z.boolean().default(true),
           base_url: z.string().optional(),
         })
+        .strict()
         .optional(),
       routstr: z
         .object({
@@ -68,14 +70,17 @@ export const configSchema = z.object({
           mint: z.string().optional(),
           wallet_db: z.string().optional(),
         })
+        .strict()
         .optional(),
     })
+    .strict()
     .default({}),
   stt: z
     .object({
       provider: z.enum(["venice-stt", "local-whisper"]).default("venice-stt"),
       model: z.string().default("openai/whisper-large-v3"),
     })
+    .strict()
     .default({}),
   models: z.object({
     summary: modelRefSchema,
@@ -88,16 +93,23 @@ export const configSchema = z.object({
       provider: "venice",
       model: "gemini-3-flash-preview",
     }),
-  }),
+  }).strict(),
   matching: z
     .object({
-      prefilter_threshold: z.number().default(50),
-      prefilter_top_m: z.number().default(30),
-      prefilter_random: z.number().default(10),
-      top_k: z.number().default(20),
+      // Counts of attendees/candidates, every one of them. They were bare
+      // `z.number()`, which accepts `-1` and `3.7` and hands them straight to
+      // `LIMIT`/slice arithmetic, where a negative silently means "no candidates"
+      // and a fraction means an off-by-a-fraction slice — a mistyped config that
+      // produces empty match lists rather than an error at load.
+      prefilter_threshold: z.number().int().nonnegative().default(50),
+      prefilter_top_m: z.number().int().nonnegative().default(30),
+      prefilter_random: z.number().int().nonnegative().default(10),
+      // Zero matches per attendee is not a configuration anyone means; it is a typo.
+      top_k: z.number().int().positive().default(20),
       /** Candidates per batched match-scoring call (benchmark winner: K=10). */
       batch_size: z.number().int().min(1).default(10),
     })
+    .strict()
     .default({}),
   // Public discovery announcement (kind 31611, docs/COORDINATOR-DISCOVERY-PLAN.md).
   // Published on boot so organizers can pick this coordinator instead of pasting
@@ -111,6 +123,7 @@ export const configSchema = z.object({
       operator: z.string().optional(),
       terms_url: z.string().optional(),
     })
+    .strict()
     .default({}),
   // Billing policy (Part 3). Payment is NOT handled here — this only shapes the
   // announce + the `billing` signal in the 21606 status. Default: free.
@@ -134,6 +147,7 @@ export const configSchema = z.object({
       // grace (straight to blocked). Keeps the evaluating→grace→blocked path real.
       grace_period_sec: z.number().int().nonnegative().optional(),
     })
+    .strict()
     .default({}),
   // Per-attendee / per-event usage budgets (spec §8, audit H-2). Generous abuse
   // ceilings, NOT product limits — exceeding one parks further paid processing for
@@ -151,7 +165,29 @@ export const configSchema = z.object({
       /** Provider spend attempts (paid job executions). Default 500 / attendee, 20k / event. */
       per_attendee_calls: z.number().int().nonnegative().default(500),
       per_event_calls: z.number().int().nonnegative().default(20_000),
+      /**
+       * DAEMON-WIDE rolling ceilings across every installed event (audit SEC-7).
+       * The limits above are lifetime and per-installation, which means they cap
+       * what ONE event can spend and say nothing about what fifty can. Install is
+       * protocol-level and `security.allowed_eid_pubkeys` is empty by default, so
+       * an attacker who self-installs up to `security.max_events` events gets
+       * `max_events ×` the per-event budget against the operator's single provider
+       * key — with the defaults, a million provider calls. These cap the total.
+       *
+       * Rolling (see `daemon_window_hours`), not lifetime: an all-time daemon
+       * ceiling would eventually park a legitimately busy coordinator forever with
+       * no way back except an operator edit. The defaults are 4× one event's whole
+       * lifetime budget per DAY — far above any plausible single-operator day, far
+       * below what fifty hostile installs would draw. 0 = unlimited (the old
+       * behaviour, for an operator who has their own spend cap at the provider).
+       */
+      daemon_bytes_per_window: z.number().int().nonnegative().default(200 * 1024 * 1024 * 1024),
+      daemon_duration_sec_per_window: z.number().int().nonnegative().default(800 * 3600),
+      daemon_calls_per_window: z.number().int().nonnegative().default(80_000),
+      /** Width of the daemon-wide rolling window, in hours. Default 24. */
+      daemon_window_hours: z.number().int().positive().max(24 * 7).default(24),
     })
+    .strict()
     .default({}),
   // Daemon-side security policy (audit COORD-3/COORD-20). Install is
   // protocol-level, so unsolicited 21603 grants are bounded here.
@@ -185,9 +221,22 @@ export const configSchema = z.object({
        * Blossom proxy, a `nak serve` on localhost) can run. Default false.
        */
       allow_insecure_urls: z.boolean().default(false),
+      /**
+       * Escape hatch for the startup spend-exposure check (audit SEC-7). A
+       * coordinator that ANNOUNCES itself publicly (kind 31611), accepts installs
+       * from any E_id (`allowed_eid_pubkeys` empty) and has every daemon-wide
+       * ceiling set to 0 is offering its provider key to the internet: the
+       * per-event budgets bound one installation, and anyone can create up to
+       * `max_events` of them. Startup normally ABORTS on that combination. Set
+       * true to boot anyway — for an operator whose spend cap lives at the
+       * provider (a prepaid key, a Cashu wallet with a fixed balance) rather than
+       * here, where an unbounded local ceiling is a deliberate choice.
+       */
+      allow_unbounded_spend: z.boolean().default(false),
     })
+    .strict()
     .default({}),
-});
+}).strict();
 
 export type CoordinatorConfig = z.infer<typeof configSchema>;
 
@@ -278,9 +327,90 @@ function validateConfigUrls(config: CoordinatorConfig): void {
   config.relays.default = config.relays.default.map((r, i) => ws(r, `relays.default[${i}]`));
 }
 
-export function loadConfig(path: string): CoordinatorConfig {
+/** A config key the schema does not know, as `[section] key` for the operator. */
+export interface UnknownConfigKey {
+  /** Dotted path of the containing table (`""` for the file's top level). */
+  section: string;
+  key: string;
+  /** `matching.top_kk` — what to grep the file for. */
+  path: string;
+}
+
+export interface LoadConfigOptions {
+  /**
+   * Called with EVERY unknown key found, instead of the default loud warning.
+   * `doctor` passes one so the finding lands in its own report format.
+   */
+  onUnknownKeys?: (keys: UnknownConfigKey[]) => void;
+}
+
+/**
+ * Remove the keys zod flagged as unrecognized from a parsed-TOML value, so the
+ * (strict) schema can then parse it. Mutates a shallow-cloned spine only where a
+ * deletion happens; the input is left alone.
+ */
+function pruneKeys(raw: unknown, issues: { path: (string | number)[]; keys: string[] }[]): unknown {
+  const clone = structuredClone(raw) as any;
+  for (const issue of issues) {
+    let node = clone;
+    for (const seg of issue.path) {
+      if (node == null || typeof node !== "object") break;
+      node = node[seg as any];
+    }
+    if (node == null || typeof node !== "object") continue;
+    for (const k of issue.keys) delete node[k];
+  }
+  return clone;
+}
+
+/**
+ * Load + validate coordinator.toml.
+ *
+ * Unknown keys are LOUD. The schema objects are `.strict()`, but an unknown key is
+ * reported and then dropped rather than fatal — a running production daemon must
+ * still be able to restart mid-incident with a config carrying one stray line.
+ *
+ * Silence here has already cost a real event. `pricing.free_organizers` was renamed
+ * to `pricing.free_eids` (spec §9 D5) and the example TOML kept the old spelling; an
+ * operator who uncommented it got no allowlist, no error, and no log — the key was
+ * simply dropped by a non-strict `z.object`. The event crossed `free_up_to_users`
+ * into `grace`, then `blocked`, and every paid job for it parked mid-event. Zod
+ * knows the offending key by name, which is exactly the message an operator needs;
+ * it was being discarded.
+ */
+export function loadConfig(path: string, opts: LoadConfigOptions = {}): CoordinatorConfig {
   const raw = parseToml(readFileSync(path, "utf8"));
-  const config = configSchema.parse(raw);
+  let parsed = configSchema.safeParse(raw);
+  if (!parsed.success) {
+    const unrecognized = parsed.error.issues.filter(
+      (i): i is typeof i & { keys: string[] } => i.code === "unrecognized_keys",
+    );
+    // Anything OTHER than an unknown key is a real validation failure (a missing
+    // section, a negative top_k, a wrong type) and still throws as before.
+    if (unrecognized.length === 0 || unrecognized.length !== parsed.error.issues.length) {
+      throw parsed.error;
+    }
+    const found: UnknownConfigKey[] = unrecognized.flatMap((i) =>
+      i.keys.map((k) => {
+        const section = i.path.join(".");
+        return { section, key: k, path: section ? `${section}.${k}` : k };
+      }),
+    );
+    if (opts.onUnknownKeys) {
+      opts.onUnknownKeys(found);
+    } else {
+      for (const u of found) {
+        console.warn(
+          `[config] UNKNOWN KEY ${u.path} in ${path} — not part of the coordinator schema, IGNORED. ` +
+            "Check for a typo or a renamed setting (e.g. pricing.free_organizers → pricing.free_eids); " +
+            "it is having no effect whatsoever.",
+        );
+      }
+    }
+    parsed = configSchema.safeParse(pruneKeys(raw, unrecognized));
+    if (!parsed.success) throw parsed.error;
+  }
+  const config = parsed.data;
   validateConfigUrls(config);
   return config;
 }
@@ -325,6 +455,35 @@ export type ModelRole = "summary" | "match" | "embed" | "translate";
 export function roleRequiresPrivate(config: CoordinatorConfig, role: ModelRole): boolean {
   return (
     config.models[role].require_private ?? config.providers.venice?.require_private ?? true
+  );
+}
+
+/**
+ * The startup spend-exposure check (audit SEC-7). Returns a message when the
+ * config leaves the operator's provider key unbounded to the public, else
+ * undefined.
+ *
+ * All three conditions have to hold at once, and each one alone is fine:
+ * announcing publicly is the point of a public coordinator; an empty
+ * `allowed_eid_pubkeys` is the default and is what makes it usable; and an
+ * unlimited daemon ceiling is reasonable for an operator whose spend cap is at
+ * the provider. Together they mean anyone who can read the announcement can
+ * install up to `max_events` events and spend `max_events ×` the per-event
+ * budget on the operator's single API key.
+ */
+export function spendExposure(config: CoordinatorConfig): string | undefined {
+  if (!config.coordinator.announce) return undefined;
+  if (config.security.allowed_eid_pubkeys.length > 0) return undefined;
+  const b = config.budgets;
+  const bounded =
+    b.daemon_bytes_per_window > 0 || b.daemon_duration_sec_per_window > 0 || b.daemon_calls_per_window > 0;
+  if (bounded) return undefined;
+  return (
+    "publicly announced + open to any installer + every daemon-wide budget set to 0: " +
+    `anyone can install up to security.max_events (${config.security.max_events}) events and spend ` +
+    `budgets.per_event_calls (${config.budgets.per_event_calls}) provider calls each against your API key. ` +
+    "Set one of budgets.daemon_*_per_window, or security.allowed_eid_pubkeys, or coordinator.announce = false " +
+    "— or security.allow_unbounded_spend = true if your spend cap lives at the provider."
   );
 }
 

@@ -940,7 +940,9 @@
       if (ctx.config.coordinator) {
         await sendAdminCommand(ctx, "revoke", { pubkey });
       } else {
-        await revokeAttendeeClient(session.signer, ctx, pubkey);
+        // Pass the blinding key: revoke mints a new ECK, and without this the
+        // rotated key never reaches the organizer's own 30078 backup.
+        await revokeAttendeeClient(session.signer, ctx, pubkey, await deriveBlindingKey(session.signer));
       }
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
@@ -1268,6 +1270,14 @@
       </div>
       <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">{t("admin.invites.shared.usesHint")}</p>
       {#if sharedInvite}
+        <!-- §13.3: this is an nsec on screen, as a QR AND as literal text, and it
+             is the HIGHEST-value one the app renders — a shared code with
+             `uses: 0` admits an unlimited number of attendees, where a per-person
+             code admits one. The per-person links below have always been inside a
+             secret surface; this one was added later and was not, so the
+             organizer's own 31609 stylesheet was live beside it and could read it
+             out with attribute selectors. -->
+        <SecretSurface>
         <div class="card" style="margin-top:0.75rem;text-align:center">
           <QrCode data={sharedInvite.link} size={512} />
           <p class="muted" style="margin:0.5rem 0 0;font-size:0.8rem;word-break:break-all">{sharedInvite.link}</p>
@@ -1280,6 +1290,7 @@
                persisted), so say so before the organizer closes it. -->
           <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">{t("admin.invites.shared.ephemeral")}</p>
         </div>
+        </SecretSurface>
       {/if}
     </details>
 

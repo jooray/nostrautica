@@ -100,10 +100,27 @@ export class ProviderHttpError extends Error {
     /** Credit/quota exhaustion rather than any other failure — see {@link isPaymentFailure}. */
     readonly payment: boolean,
     message: string,
+    /** The provider's own `Retry-After`, in seconds, when it sent one. */
+    readonly retryAfterSec?: number,
   ) {
     super(message);
     this.name = "ProviderHttpError";
   }
+}
+
+/**
+ * `Retry-After`, in seconds, from a rate-limited/unavailable response. Accepts
+ * both wire forms (delta-seconds and an HTTP-date) and clamps to something a job
+ * scheduler can act on — a provider asking us to wait a week is telling us
+ * something, but not something worth encoding as a literal delay.
+ */
+export function parseRetryAfter(res: Response, nowMs = Date.now()): number | undefined {
+  const raw = res.headers.get("retry-after");
+  if (!raw) return undefined;
+  const seconds = Number(raw.trim());
+  const value = Number.isFinite(seconds) ? seconds : (Date.parse(raw) - nowMs) / 1000;
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(Math.ceil(value), 3600);
 }
 
 /**
@@ -140,9 +157,13 @@ export async function providerHttpError(
   label: string,
   tag: "llm" | "stt" = "llm",
 ): Promise<ProviderHttpError> {
-  const raw = await res.text().catch(() => "");
+  // Capped, because this body is attacker-influenced too: only a 300-char excerpt
+  // is ever used, so reading an unbounded error body would be a free OOM on the
+  // failure path — the one path a hostile provider fully controls the timing of.
+  const raw = await readBodyCapped(res, PROVIDER_BODY_LIMITS.error, label).catch(() => "");
   const body = raw.replace(/\s+/g, " ").trim().slice(0, BODY_EXCERPT_MAX) || "(empty body)";
   const payment = isPaymentFailure(res.status, raw);
+  const retryAfterSec = parseRetryAfter(res);
   if (payment) {
     // Loud and specific: this one is fixed by topping up an account, not by
     // debugging the coordinator, and nothing else in the pipeline can tell the
@@ -156,10 +177,201 @@ export async function providerHttpError(
       body,
       true,
       `provider billing: insufficient balance (${res.status}) — ${label}: ${body}`,
+      retryAfterSec,
     );
   }
   console.warn(`[${stamp()}] [${tag}] provider error (${res.status}) — ${label}: ${body}`);
-  return new ProviderHttpError(label, res.status, body, false, `${label} failed: ${res.status} ${body}`);
+  return new ProviderHttpError(
+    label,
+    res.status,
+    body,
+    false,
+    `${label} failed: ${res.status} ${body}`,
+    retryAfterSec,
+  );
+}
+
+// ── response-size caps (2026-09-04 audit) ─────────────────────────────────────
+// `guardedProviderFetch` hands the raw `Response` to a handler and caps NOTHING,
+// unlike `safeFetch`, which streams every download under an explicit `maxBytes`.
+// Every provider handler used to finish with `res.json()`, which buffers whatever
+// the socket keeps sending. A provider that is hostile, compromised, or merely
+// broken can therefore hold the connection open inside the 120s completion
+// deadline and stream gigabytes into the heap of a SINGLE-THREADED daemon that
+// drains jobs serially: every event stops, and the OOM kill takes the in-flight
+// lease with it without writing a line anyone can read afterwards.
+//
+// This is not a hypothetical remote. A Routstr node is discovered from an
+// UNTRUSTED kind-38421 provider announcement, so the operator never chose the
+// host the bytes arrive from — the same threat model `safeFetch` was written for.
+//
+// The cap lives here rather than in `safe-fetch.ts` because `guardedProviderFetch`
+// deliberately hands the body to the caller (the deadline has to cover the body
+// read, so the read must happen inside the handler); the handler is the only place
+// that knows which response class it is reading.
+
+/** A provider response body exceeded the cap for its operation class. */
+export class ProviderResponseTooLargeError extends Error {
+  constructor(
+    readonly label: string,
+    readonly maxBytes: number,
+  ) {
+    super(`${label}: response body exceeded the ${maxBytes}-byte cap`);
+    this.name = "ProviderResponseTooLargeError";
+  }
+}
+
+/**
+ * Byte caps per response class — sized from what a LEGITIMATE answer can be, with
+ * an order of magnitude of headroom, because the cost of a cap that is too tight
+ * is a failed job and the cost of no cap at all is the whole daemon.
+ */
+export const PROVIDER_BODY_LIMITS = {
+  /** Model catalogues, /info, chat completions, STT transcripts. A K=10 scoring
+   *  response is a few tens of KB; a 25 MB audio file's transcript, well under 1 MB. */
+  json: 16 * 1024 * 1024,
+  /** Embeddings, which are legitimately the largest thing we read: one 1024-dim
+   *  bge-m3 vector renders to ~20 KB of JSON text, and a full roster is embedded
+   *  in ONE batched call (190 attendees ≈ 4 MB). */
+  embedding: 64 * 1024 * 1024,
+  /** A non-2xx body only ever becomes a 300-char log excerpt. */
+  error: 64 * 1024,
+} as const;
+
+/**
+ * Read a response body as text, aborting once `maxBytes` have arrived. Streamed
+ * (not `res.text()`) so the bytes are counted as they land rather than after the
+ * heap already holds them — the same shape as `safeFetch`'s internal `readCapped`,
+ * which is module-private there.
+ */
+async function readBodyCapped(res: Response, maxBytes: number, label: string): Promise<string> {
+  if (!res.body) {
+    // No stream to meter (a 204, or a synthetic Response in a test): the body is
+    // already in memory, so all we can do is refuse to hand on an over-cap one.
+    const text = await res.text();
+    if (Buffer.byteLength(text) > maxBytes) throw new ProviderResponseTooLargeError(label, maxBytes);
+    return text;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let out = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.length;
+    if (total > maxBytes) {
+      // Cancel rather than drain: the point is to stop paying for the bytes.
+      await reader.cancel().catch(() => {});
+      throw new ProviderResponseTooLargeError(label, maxBytes);
+    }
+    out += decoder.decode(value, { stream: true });
+  }
+  out += decoder.decode();
+  return out;
+}
+
+/**
+ * `res.json()` with a byte cap. Every provider handler must use this instead —
+ * see the note above. Call it INSIDE the `guardedProviderFetch` handler so the
+ * caller's deadline is still armed while the body streams.
+ */
+export async function readJsonCapped<T = unknown>(
+  res: Response,
+  label: string,
+  maxBytes: number = PROVIDER_BODY_LIMITS.json,
+): Promise<T> {
+  const text = await readBodyCapped(res, maxBytes, label);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${label}: response body was not valid JSON`);
+  }
+}
+
+// ── lenient model-output parsing (docs/MODEL-BAKEOFF.md adoption item 2) ──────
+
+function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+/**
+ * The span from the first `{`/`[` to the LAST matching closer, or undefined.
+ *
+ * First-to-LAST rather than the depth-counted first-complete-object the benchmark
+ * harness uses, deliberately: a depth counter stops at the first balanced value and
+ * would silently discard whatever follows it, which is exactly how a lenient parser
+ * turns "the model answered twice / kept talking" into a confident wrong answer.
+ * Taking the outermost span means trailing garbage stays inside the slice and the
+ * strict re-parse below still rejects it.
+ */
+function outermostJsonSpan(text: string): string | undefined {
+  const objStart = text.indexOf("{");
+  const arrStart = text.indexOf("[");
+  const start =
+    objStart < 0 ? arrStart : arrStart < 0 ? objStart : Math.min(objStart, arrStart);
+  if (start < 0) return undefined;
+  const close = text[start] === "[" ? "]" : "}";
+  const end = text.lastIndexOf(close);
+  if (end <= start) return undefined;
+  return text.slice(start, end + 1);
+}
+
+/** A complete ```-fence wrapping the whole response, capture group = its contents. */
+const WHOLE_FENCE = /^```[A-Za-z0-9_+.-]*[^\S\r\n]*\r?\n([\s\S]*?)\r?\n?[^\S\r\n]*```$/;
+
+/**
+ * Parse a model's `content` into JSON, tolerating a code fence or a leading
+ * sentence — but never tolerating a genuinely malformed response.
+ *
+ * `docs/MODEL-BAKEOFF.md` adoption item 2: the benchmark harness has parsed
+ * leniently since it was written, production has not, and the difference is the
+ * one thing keeping the bakeoff's quality-and-cost winner unadoptable.
+ * `z-ai-glm-5-3-flash` wraps its answer in a ``` ```json ``` fence DESPITE a strict
+ * `response_format: {type: "json_schema", strict: true}` — 3 of 82 scoring calls
+ * survived a bare `JSON.parse`, so it benchmarks at zero format failures and would
+ * fail ~96% of production calls.
+ *
+ * Three ordered attempts, each ending in a STRICT `JSON.parse`, so nothing here can
+ * accept something `JSON.parse` would reject:
+ *
+ *  1. The content as-is. A well-formed response takes this path and no rule below
+ *     can change its result — the ONLY way to add leniency without changing what
+ *     already works.
+ *  2. The inside of ONE complete fence (it must both open and close, and wrap the
+ *     whole response — a stray ``` mid-prose is not a fence).
+ *  3. The outermost `{…}`/`[…]` span, for a model that prefixes "Here is the JSON:".
+ *
+ * What it deliberately does NOT do: repair quotes, strip trailing commas, or accept
+ * the first of several values. A truncated response is still a parse failure here
+ * (and is named earlier and more precisely by the `finish_reason=length` check), and
+ * a model that emitted prose instead of JSON still fails loudly.
+ */
+export function parseModelJson(content: string): unknown {
+  const direct = tryParseJson(content);
+  if (direct.ok) return direct.value;
+
+  const trimmed = content.trim();
+  const fence = WHOLE_FENCE.exec(trimmed);
+  const inner = fence ? fence[1]!.trim() : undefined;
+
+  if (inner !== undefined) {
+    const unfenced = tryParseJson(inner);
+    if (unfenced.ok) return unfenced.value;
+  }
+
+  for (const text of inner !== undefined ? [inner, trimmed] : [trimmed]) {
+    const span = outermostJsonSpan(text);
+    if (span === undefined) continue;
+    const parsed = tryParseJson(span);
+    if (parsed.ok) return parsed.value;
+  }
+  throw new SyntaxError("no JSON value in the model's output");
 }
 
 /**

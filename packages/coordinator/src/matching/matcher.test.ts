@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { Store } from "../store/db.js";
 import { DEFAULT_PREFILTER } from "./prefilter.js";
 import {
+  candidatesFor,
   selectPairsToScore,
   recordPairScore,
   recordDirectedScore,
@@ -162,5 +163,83 @@ describe("directional per-pair persistence (batched matcher)", () => {
     }, 2);
     expect(buildMatchList(store, coord, B, 5, 10).matches).toHaveLength(0); // stale B→A gone
     expect(selectPairsToScore(store, coord, changed[1]!, changed, DEFAULT_PREFILTER)).toHaveLength(1);
+  });
+});
+
+/**
+ * The prefilter must not pretend to rank (2026-09-04 audit).
+ *
+ * `candidatesFor` passed `a.embedding ?? []` straight through, and `cosine`
+ * returns 0 for an empty vector. With embeddings missing, every similarity was 0,
+ * the sort was stable, and "top-M by cosine similarity" quietly became "the first
+ * 30 attendees in roster order" — deterministic, unlogged, and worst at exactly
+ * the events big enough to need a prefilter. The coordinator reaches this state
+ * for a whole roster whenever the embed role's provider exposes no `embed()`.
+ */
+describe("prefilter with no usable embeddings (2026-09-04 audit)", () => {
+  const cfg = { threshold: 5, topM: 3, randomN: 2 };
+  const pk = (i: number) => String(i).padStart(2, "0").repeat(32);
+  const roster = (n: number, withEmbeddings: boolean): AttendeeForMatching[] =>
+    Array.from({ length: n }, (_, i) => ({
+      pubkey: pk(i),
+      profileHash: `h${i}`,
+      ...(withEmbeddings ? { embedding: [Math.cos(i), Math.sin(i)] } : {}),
+    }));
+
+  function seededRng(seed: number) {
+    let s = seed;
+    return () => {
+      s = (s * 1103515245 + 12345) & 0x7fffffff;
+      return s / 0x7fffffff;
+    };
+  }
+
+  it("does not silently return the roster-order prefix when nobody has an embedding", () => {
+    const people = roster(20, false);
+    const warnings: string[] = [];
+    const picked = candidatesFor(people[0]!, people, cfg, seededRng(7), (m) => warnings.push(m));
+    // The old behaviour, exactly: the first topM in roster order, then the random
+    // tail drawn from what was left. This asserts we are NOT doing that any more.
+    const rosterOrderPrefix = people.slice(1, 1 + cfg.topM).map((a) => a.pubkey);
+    expect(picked.slice(0, cfg.topM)).not.toEqual(rosterOrderPrefix);
+    // Same call count as the prefilter it replaces — a silent 5x bill increase
+    // would be its own incident.
+    expect(picked).toHaveLength(cfg.topM + cfg.randomN);
+    expect(new Set(picked).size).toBe(picked.length); // no duplicates
+    expect(picked).not.toContain(people[0]!.pubkey); // never the target
+  });
+
+  it("says so, loudly, naming the config knob that fixes it", () => {
+    const people = roster(20, false);
+    const warnings: string[] = [];
+    candidatesFor(people[0]!, people, cfg, seededRng(1), (m) => warnings.push(m));
+    expect(warnings.join("\n")).toMatch(/no usable embeddings/);
+    expect(warnings.join("\n")).toMatch(/models\.embed/);
+  });
+
+  it("also fires when only the TARGET is missing its vector", () => {
+    // Everything is measured against the target's own vector, so without it
+    // nothing can be ranked — even with a fully embedded roster around it.
+    const people = roster(20, true);
+    delete people[0]!.embedding;
+    const warnings: string[] = [];
+    candidatesFor(people[0]!, people, cfg, seededRng(3), (m) => warnings.push(m));
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("stays silent and ranks normally when embeddings are present", () => {
+    const people = roster(20, true);
+    const warnings: string[] = [];
+    const picked = candidatesFor(people[0]!, people, cfg, seededRng(3), (m) => warnings.push(m));
+    expect(warnings).toEqual([]);
+    expect(picked.length).toBeGreaterThan(0);
+  });
+
+  it("stays silent below the threshold, where there is no prefilter to degrade", () => {
+    const people = roster(4, false); // 4 <= threshold 5 → everyone is scored anyway
+    const warnings: string[] = [];
+    const picked = candidatesFor(people[0]!, people, cfg, seededRng(3), (m) => warnings.push(m));
+    expect(warnings).toEqual([]);
+    expect(picked).toHaveLength(3);
   });
 });

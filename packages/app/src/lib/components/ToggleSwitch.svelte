@@ -33,6 +33,13 @@
     display: inline-flex;
     align-items: center;
     gap: 0.6rem;
+    /* The visible track is 44×24. A <label> activates its control from anywhere
+       inside it, so giving the label a 44px minimum height turns the whole band
+       around the track into the tap target and brings the switch up to the 44px
+       floor every .btn in this app already meets — without inflating the pill
+       itself, which is a deliberate 24px. Matters most in the Create/Admin
+       config forms, where these toggles sit in a dense stack. */
+    min-height: 44px;
     margin: 0;
     font-weight: 400;
     cursor: pointer;

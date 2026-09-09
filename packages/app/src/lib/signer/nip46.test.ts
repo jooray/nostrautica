@@ -566,3 +566,346 @@ describe("ordinary RPC validation and foreground recovery", () => {
     }
   });
 });
+
+/**
+ * `connectWithRecovery` settled only through its own internal `settle()`, but
+ * every caller bounded it from the OUTSIDE with `withTimeout`. That rejects the
+ * wrapper and leaves the inner promise pending forever, so `settle()` — the only
+ * thing that removes the visibilitychange listener and unsubscribes from
+ * `trackPoolHealth` — was never reached on a timeout or a cancel. The orphaned
+ * handler then calls connect()/ping() on a closed bunker every time the tab is
+ * foregrounded, and the 1 Hz health poll keeps polling a destroyed pool, for the
+ * rest of the page's life. They accumulate one per failed attempt.
+ */
+describe("a connect wait that times out tears itself down", () => {
+  const bunkerUri = `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`;
+
+  function stubDocument() {
+    let state: DocumentVisibilityState = "visible";
+    const doc = new EventTarget() as Document;
+    Object.defineProperty(doc, "visibilityState", { get: () => state });
+    vi.stubGlobal("document", doc);
+    return {
+      doc,
+      hide: () => {
+        state = "hidden";
+        doc.dispatchEvent(new Event("visibilitychange"));
+      },
+      show: () => {
+        state = "visible";
+        doc.dispatchEvent(new Event("visibilitychange"));
+      },
+    };
+  }
+
+  it("stops listening and stops polling once the connect deadline fires", async () => {
+    const d = stubDocument();
+    vi.useFakeTimers();
+    try {
+      const bunker = fakeBunker();
+      // The signer never answers: the connect request hangs forever.
+      bunker.sendRequest.mockReturnValue(neverSettles());
+      bunker.ping.mockReturnValue(neverSettles());
+      parseBunkerInput.mockResolvedValue({
+        pubkey: PUBKEY,
+        relays: ["wss://relay.example"],
+        secret: null,
+      });
+      fromBunker.mockReturnValue(bunker);
+
+      const pending = Nip46Signer.fromBunkerUri(bunkerUri);
+      const settled = pending.then(
+        () => "resolved",
+        () => "rejected",
+      );
+      // Past the 45 s connect budget.
+      await vi.advanceTimersByTimeAsync(46_000);
+      expect(await settled).toBe("rejected");
+
+      const sendsBefore = bunker.sendRequest.mock.calls.length;
+      const pingsBefore = bunker.ping.mock.calls.length;
+      // A later foreground handoff must not wake a wait that is over.
+      d.hide();
+      d.show();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bunker.sendRequest.mock.calls.length).toBe(sendsBefore);
+      expect(bunker.ping.mock.calls.length).toBe(pingsBefore);
+
+      // …and no 1 Hz poll survives against the destroyed pool.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("stops listening and stops polling when the wait is CANCELLED", async () => {
+    const d = stubDocument();
+    vi.useFakeTimers();
+    try {
+      const bunker = fakeBunker();
+      bunker.sendRequest.mockReturnValue(neverSettles());
+      bunker.ping.mockReturnValue(neverSettles());
+      parseBunkerInput.mockResolvedValue({
+        pubkey: PUBKEY,
+        relays: ["wss://relay.example"],
+        secret: null,
+      });
+      fromBunker.mockReturnValue(bunker);
+
+      const controller = new AbortController();
+      const pending = Nip46Signer.fromBunkerUri(bunkerUri, controller.signal);
+      const settled = pending.then(
+        () => "resolved",
+        (e: Error) => e.message,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      expect(await settled).toBe("Cancelled");
+
+      const sendsBefore = bunker.sendRequest.mock.calls.length;
+      d.hide();
+      d.show();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bunker.sendRequest.mock.calls.length).toBe(sendsBefore);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+/**
+ * The RPC lifecycle diverged from the two connect state machines beside it, and
+ * was missing what they had. Each of these is a distinct way that cost a user a
+ * duplicate Amber prompt or a wrong error.
+ */
+describe("RPC lifecycle parity with the connect paths", () => {
+  async function signerWithBunker(bunker = fakeBunker()) {
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://relay.example"],
+      secret: null,
+    });
+    fromBunker.mockReturnValue(bunker);
+    const signer = await Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`,
+    );
+    return { signer, bunker };
+  }
+
+  function stubDocument() {
+    let state: DocumentVisibilityState = "visible";
+    const doc = new EventTarget() as Document;
+    Object.defineProperty(doc, "visibilityState", { get: () => state });
+    vi.stubGlobal("document", doc);
+    return {
+      set: (next: DocumentVisibilityState) => {
+        state = next;
+        doc.dispatchEvent(new Event("visibilitychange"));
+      },
+    };
+  }
+
+  it("RACES the resumed attempt against the first, so a merely DELAYED reply wins", async () => {
+    // The common Amber case: the reply is late, not lost. The first attempt was
+    // ABANDONED (`void first.catch(…)`) and a fresh operation() issued, so the
+    // approval the user had already given was thrown away and the signer was
+    // prompted a second time. Replies are id-keyed, so racing is safe.
+    const d = stubDocument();
+    try {
+      const { signer, bunker } = await signerWithBunker();
+      let answerFirst!: (v: string) => void;
+      bunker.nip44Encrypt
+        .mockReturnValueOnce(new Promise<string>((r) => (answerFirst = r)))
+        .mockReturnValueOnce(new Promise(() => {})); // the retry never answers
+      const result = signer.nip44Encrypt(PUBKEY, "hello");
+
+      d.set("hidden");
+      d.set("visible"); // handoff → probe + retry
+      await Promise.resolve();
+      answerFirst("late-but-valid"); // attempt 1 finally replies
+      await expect(result).resolves.toBe("late-but-valid");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not fail a request that rejected while the tab was HIDDEN", async () => {
+    // A mobile browser killing the socket mid-publish rejected the RPC on the
+    // spot — i.e. it failed while the user was inside the signer app looking at
+    // the approval. connectWithRecovery has guarded against exactly this since
+    // it was written; the RPC path did not.
+    const d = stubDocument();
+    try {
+      const { signer, bunker } = await signerWithBunker();
+      let killFirst!: (e: Error) => void;
+      bunker.nip44Encrypt
+        .mockReturnValueOnce(new Promise<string>((_, rej) => (killFirst = rej)))
+        .mockResolvedValueOnce("ciphertext");
+      const result = signer.nip44Encrypt(PUBKEY, "hello");
+
+      d.set("hidden");
+      killFirst(new Error("WebSocket closed")); // socket reaped while backgrounded
+      await Promise.resolve();
+      d.set("visible"); // the user comes back having approved
+      await expect(result).resolves.toBe("ciphertext");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not count time spent inside the signer app against the RPC deadline", async () => {
+    // RPC_TIMEOUT_MS was wall-clock, so spending more than 60 s approving in
+    // Amber reported "your signer didn't respond" to someone who had approved.
+    const d = stubDocument();
+    vi.useFakeTimers();
+    try {
+      const { signer, bunker } = await signerWithBunker();
+      let answer!: (v: string) => void;
+      bunker.nip44Encrypt.mockReturnValue(new Promise<string>((r) => (answer = r)));
+      const result = signer.nip44Encrypt(PUBKEY, "hello");
+      const settled = result.then(
+        (v) => v,
+        (e: Error) => `rejected: ${e.message}`,
+      );
+
+      d.set("hidden"); // the user switches to the signer
+      await vi.advanceTimersByTimeAsync(5 * 60_000); // five minutes approving
+      d.set("visible");
+      answer("ciphertext");
+      expect(await settled).toBe("ciphertext");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("still reports a signer that is silent while the tab stays in the FOREGROUND", async () => {
+    const d = stubDocument();
+    vi.useFakeTimers();
+    try {
+      const { signer, bunker } = await signerWithBunker();
+      bunker.nip44Encrypt.mockReturnValue(neverSettles());
+      void d;
+      const settled = signer.nip44Encrypt(PUBKEY, "hello").then(
+        () => "resolved",
+        () => "rejected",
+      );
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(await settled).toBe("rejected");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("re-arms the resume signal, so a SECOND handoff still makes progress", async () => {
+    // `resumed` was one-shot: a user who bounced to the signer twice (glance,
+    // come back, realise it needs a PIN, go again — routine on Android) got no
+    // signal at all the second time and waited out the whole deadline.
+    const d = stubDocument();
+    try {
+      const { signer, bunker } = await signerWithBunker();
+      bunker.nip44Encrypt
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockResolvedValueOnce("ciphertext");
+      const result = signer.nip44Encrypt(PUBKEY, "hello");
+
+      d.set("hidden");
+      d.set("visible"); // first handoff
+      await Promise.resolve();
+      await Promise.resolve();
+      d.set("hidden");
+      d.set("visible"); // second handoff — used to be a no-op
+      await expect(result).resolves.toBe("ciphertext");
+      expect(bunker.nip44Encrypt).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("get_public_key is asked once, not once per caller", () => {
+  it("shares one in-flight RPC between concurrent first-time callers", async () => {
+    const bunker = fakeBunker();
+    let answer!: (pk: string) => void;
+    bunker.getPublicKey.mockReturnValue(new Promise<string>((r) => (answer = r)));
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://relay.example"],
+      secret: null,
+    });
+    fromBunker.mockReturnValue(bunker);
+    const signer = await Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`,
+    );
+
+    // Several things ask on first use (adopt, signEvent's own check, warmers).
+    // Each used to fire its own request — and a signer that prompts per request
+    // showed the user two or three approval dialogs for one login.
+    const all = Promise.all([signer.getPublicKey(), signer.getPublicKey(), signer.getPublicKey()]);
+    answer(PUBKEY);
+    expect(await all).toEqual([PUBKEY, PUBKEY, PUBKEY]);
+    expect(bunker.getPublicKey).toHaveBeenCalledTimes(1);
+  });
+
+  it("a FAILED lookup is retryable rather than cached", async () => {
+    const bunker = fakeBunker();
+    bunker.getPublicKey
+      .mockRejectedValueOnce(new Error("signer offline"))
+      .mockResolvedValueOnce(PUBKEY);
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://relay.example"],
+      secret: null,
+    });
+    fromBunker.mockReturnValue(bunker);
+    const signer = await Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`,
+    );
+    await expect(signer.getPublicKey()).rejects.toThrow(/signer offline/);
+    await expect(signer.getPublicKey()).resolves.toBe(PUBKEY);
+  });
+});
+
+/**
+ * A tab that goes hidden and never comes back must not leave the request — or
+ * the visibilitychange listener the foreground deadline owns — pending forever.
+ */
+describe("the foreground deadline still has a wall-clock ceiling", () => {
+  it("rejects a request whose tab never returns to the foreground", async () => {
+    let state: DocumentVisibilityState = "visible";
+    const doc = new EventTarget() as Document;
+    Object.defineProperty(doc, "visibilityState", { get: () => state });
+    vi.stubGlobal("document", doc);
+    vi.useFakeTimers();
+    try {
+      const bunker = fakeBunker();
+      parseBunkerInput.mockResolvedValue({
+        pubkey: PUBKEY,
+        relays: ["wss://relay.example"],
+        secret: null,
+      });
+      fromBunker.mockReturnValue(bunker);
+      const signer = await Nip46Signer.fromBunkerUri(
+        `bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`,
+      );
+      bunker.nip44Encrypt.mockReturnValue(neverSettles());
+      const settled = signer.nip44Encrypt(PUBKEY, "hello").then(
+        () => "resolved",
+        () => "rejected",
+      );
+      state = "hidden";
+      doc.dispatchEvent(new Event("visibilitychange"));
+      // Hours of hidden time: the foreground clock is paused, the ceiling is not.
+      await vi.advanceTimersByTimeAsync(60 * 60_000);
+      expect(await settled).toBe("rejected");
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+});

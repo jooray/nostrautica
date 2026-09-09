@@ -148,7 +148,7 @@
   }
   function npubList(): string {
     return allPeople()
-      .map((p) => `${p.npub}  ${p.name}${p.note ? `  — ${p.note}` : ""}`)
+      .map((p) => `${p.npub}  ${p.name}${p.note ? `  (${p.note})` : ""}`)
       .join("\n");
   }
   let copied = $state(false);

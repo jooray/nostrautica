@@ -13,6 +13,14 @@ import {
 const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
 vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
 vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue: vi.fn() }));
+// The fixtures below are unsigned plain objects. Signature checking is NDK's job
+// in production (ndk.ts pins validation to 1) and `onlyVerified` is re-applied at
+// the authority boundary as defense in depth — so stub THAT one and keep the real
+// `onlyByAuthors`, which is the half these tests are about.
+vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("$lib/nostr/verify.js")>()),
+  onlyVerified: <T,>(events: T[]) => events,
+}));
 
 import {
   dedupePostsByD,
@@ -163,6 +171,33 @@ describe("toEventPost", () => {
     expect(post.locked).toBe(true);
   });
 
+  it("clamps a future published_at so an article can't pin itself to the top forever", () => {
+    // `published_at` is the feed's sort key and it is entirely author-controlled.
+    // `sources` deliberately folds OTHER npubs' long-form into the official feed,
+    // so without a clamp every curated author gets a permanent top slot by dating
+    // an article 2099 — and the organizer's own newest post sits under it forever.
+    const now = Math.floor(Date.now() / 1000);
+    const year2099 = 4_070_908_800;
+    const article = {
+      ...pub("stuck", now - 86_400),
+      tags: [["d", "stuck"], ["title", "Pinned"], ["published_at", String(year2099)]],
+    };
+    const post = toEventPost(article, []);
+    expect(post.publishedAt).toBeLessThanOrEqual(now);
+    // A genuinely dated post is untouched — the clamp is a ceiling, not a rewrite.
+    expect(toEventPost(pub("normal", 1500), []).publishedAt).toBe(1500);
+
+    // Same for a 31607, where the date lives inside the ciphertext.
+    const eck = generateEck();
+    const granted: EckVersion[] = [{ id: 1, key: bytesToBase64(eck) }];
+    const members = toEventPost(
+      enc("secret", now - 86_400, eck, 1, { published_at: year2099 }),
+      granted,
+    );
+    expect(members.locked).toBe(false);
+    expect(members.publishedAt).toBeLessThanOrEqual(now);
+  });
+
   it("locks instead of throwing on a garbled ciphertext under the right id", () => {
     const eck = generateEck();
     const wrongKeySameId: EckVersion[] = [{ id: 1, key: bytesToBase64(generateEck()) }];
@@ -205,6 +240,28 @@ describe("fetchEventPosts cache write-through (§2.4)", () => {
     // Owner-scoped: a different identity does not see this feed.
     setActiveCacheOwner("2".repeat(64));
     expect(cachedEventPosts(ctx.coordinate)).toBeUndefined();
+  });
+
+  it("drops a 30023 by anyone but E_id, even though the filter asked for E_id", async () => {
+    // A relay filter is a REQUEST, not a guarantee (the same reason `matchesFeed`
+    // re-checks `pubkey`). This is the OFFICIAL feed and it renders with no author
+    // attribution at all, so an article any relay in the event's set chose to
+    // answer with would appear on the event page as something the organizer wrote.
+    setActiveCacheOwner(OWNER);
+    const impostor = { ...pub("x", 900, "Free tickets, send your nsec"), pubkey: OTHER };
+    fetchEvents.mockResolvedValue([impostor, pub("y", 100, "Ours")]);
+
+    const posts = await fetchEventPosts(ctx);
+
+    expect(posts.map((p) => p.title)).toEqual(["Ours"]);
+    // ...and it must be dropped BEFORE the per-`d` dedupe, or a newer forgery at
+    // an address E_id already published would take the address instead.
+    fetchEvents.mockResolvedValue([
+      { ...pub("shared", 9000, "Hijacked"), pubkey: OTHER },
+      pub("shared", 100, "The real one"),
+    ]);
+    const contested = await fetchEventPosts(ctx);
+    expect(contested.map((p) => p.title)).toEqual(["The real one"]);
   });
 
   it("latest-wins: an older re-fetch never regresses the cached feed", async () => {
@@ -452,6 +509,41 @@ describe("fetchPostByD with declared external feeds", () => {
     ]);
     const post = await fetchPostByD(ctx, "update-1", [{ pubkey: OFFICIAL }]);
     expect(post).toMatchObject({ title: "Ours", source: "event" });
+  });
+
+  it("re-applies the feed's own rules — by-`d` is not a way around the curation", async () => {
+    // The list view runs every candidate through `matchesFeed`; this read widens
+    // `authors` to the declared feeds and used to trust whatever came back. So the
+    // single-post route — a shared link, a menu target, any cold device with no
+    // cached feed — rendered articles the organizer's own curation excludes, under
+    // the curated feed's label, as part of the event's official feed.
+    const src = { pubkey: OFFICIAL, tags: ["kosice"], since: 1000, label: "Lunarpunk" };
+
+    // Right author, wrong hashtag: excluded on the posts page, so excluded here.
+    fetchEvents.mockResolvedValue([
+      ext(OFFICIAL, "off-topic", 1500, { hashtags: ["bratislava"] }),
+    ]);
+    expect(await fetchPostByD(ctx, "off-topic", [src])).toBeUndefined();
+
+    // Right author, published before the organizer's `since` (and edited after,
+    // which is exactly what gets past the relay-side filter).
+    fetchEvents.mockResolvedValue([
+      ext(OFFICIAL, "too-old", 1500, { hashtags: ["kosice"], publishedAt: 500 }),
+    ]);
+    expect(await fetchPostByD(ctx, "too-old", [src])).toBeUndefined();
+
+    // An author nobody declared, answered by a relay that ignored `authors`.
+    fetchEvents.mockResolvedValue([ext(OTHER, "sneaky", 1500, { hashtags: ["kosice"] })]);
+    expect(await fetchPostByD(ctx, "sneaky", [src])).toBeUndefined();
+
+    // ...and the article that DOES satisfy the declaration still resolves.
+    fetchEvents.mockResolvedValue([
+      ext(OFFICIAL, "kosice-1", 1500, { hashtags: ["kosice"], title: "Venue" }),
+    ]);
+    expect(await fetchPostByD(ctx, "kosice-1", [src])).toMatchObject({
+      title: "Venue",
+      feedLabel: "Lunarpunk",
+    });
   });
 
   it("without declared feeds it queries E_id alone, exactly as before", async () => {

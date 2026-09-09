@@ -39,7 +39,7 @@ vi.mock("$lib/media/submit.js", () => ({
   cacheSelfCopy: (...args: unknown[]) => cacheSelfCopy(...(args as [])),
 }));
 
-import { sendJoinRequest } from "./join.js";
+import { sendJoinRequest, joinPollGapMs, POLL_RELAX_AFTER_MS } from "./join.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 
@@ -107,5 +107,33 @@ describe("sendJoinRequest — 21601 profile submission carries a valid rev", () 
     expect(coordinate).toBe(ctx.coordinate);
     expect(self.profile).toEqual(profile);
     expect(self.rev).toBe(0);
+  });
+});
+
+/**
+ * The "waiting for approval" screen's check cadence (2026-09-09 audit, UX-N-2).
+ *
+ * It polled at a flat 5 s indefinitely, and — the part that actually mattered —
+ * showed nothing that moved while it did. Approval can take minutes; a screen with
+ * no evidence of a live check reads as stuck, and the only affordances on offer
+ * were "send again" and a reload, neither of which helps. The cadence is now named
+ * on screen, which means it has to be a value rather than a magic number here.
+ */
+describe("joinPollGapMs", () => {
+  it("checks near-instantly for the first few tries with an invite code", () => {
+    expect(joinPollGapMs(0, 10, 0)).toBe(1_500);
+    expect(joinPollGapMs(9, 10, 14_000)).toBe(1_500);
+  });
+
+  it("settles to five seconds once the fast tries are spent", () => {
+    expect(joinPollGapMs(10, 10, 15_000)).toBe(5_000);
+    // No invite code: manual approval is a person clicking a button, so it starts
+    // at the five-second cadence with no fast phase at all.
+    expect(joinPollGapMs(0, 0, 0)).toBe(5_000);
+  });
+
+  it("relaxes to a minute after three minutes of waiting", () => {
+    expect(joinPollGapMs(50, 0, POLL_RELAX_AFTER_MS)).toBe(5_000);
+    expect(joinPollGapMs(50, 0, POLL_RELAX_AFTER_MS + 1)).toBe(60_000);
   });
 });

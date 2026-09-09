@@ -21,6 +21,8 @@ import {
   KIND_GIFT_WRAP,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
+  KIND_ATTENDEE_WITHDRAWAL,
+  withdrawalContentSchema,
   KIND_KEY_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
@@ -51,6 +53,7 @@ import {
   KIND_COORDINATOR_GRANT,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
+  EVENT_INBOX_RUMOR_KINDS,
   ADMIN_COMMAND_TTL_SEC,
   type EventKeysBackup,
   type InviteProof,
@@ -69,7 +72,7 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
@@ -95,6 +98,40 @@ export function cachedCoordinatorLastSeen(coordinate: string): number | undefine
   return cacheGet<number>(coordSeenKey(coordinate))?.data;
 }
 
+// ── "This device has seen a published X" tripwire ─────────────────────────────
+//
+// Both read-modify-write republishes in this module — the 31604 roster and the
+// 31601 invite list — are WHOLE-DOCUMENT rewrites: what the read returned is what
+// gets published, and both publishers deliberately stamp the result NEWER than
+// what they read (buildRosterEvent's `base + 1`, publishMonotonic's tie-break
+// bump) so the rewrite always wins the replaceable-event race. Which means a lost
+// read is not a failed operation, it is silent destruction: one empty answer from
+// a struggling venue-Wi-Fi relay republishes as "this event has one attendee" or
+// "these three are the only invite codes", and that answer wins for everybody.
+//
+// On the wire, "no relay answered" and "nothing was ever published" are the same
+// event set: empty. What IS knowable is whether THIS device has seen one before —
+// so a mark is written whenever a read succeeds or a republish is built, and an
+// empty read AFTER a mark is a lost read, never a first publish. Persistent and
+// owner-scoped, because a flaky network is exactly what makes people reload.
+//
+// A tripwire, not a lock: an organizer's second device that has never loaded the
+// roster still cannot tell the two apart, and neither can a fresh browser profile.
+// It catches the sequence that actually bites (approve, Wi-Fi drops, approve
+// again), and it never blocks a genuine first publish.
+function seenKey(coordinate: string, what: "roster" | "invites"): string {
+  return `published:${what}:${coordinate}`;
+}
+function markPublished(coordinate: string, what: "roster" | "invites", at: number): void {
+  // Stamped with the wall clock, not `at`: this is a monotonic "we got this far"
+  // latch, and stamping it with a roster's own created_at would let an older
+  // roster's mark lose latest-wins and never land.
+  cacheSet(seenKey(coordinate, what), at, Math.floor(Date.now() / 1000));
+}
+function hasSeenPublished(coordinate: string, what: "roster" | "invites"): boolean {
+  return cacheGet<number>(seenKey(coordinate, what)) !== undefined;
+}
+
 export interface PendingRequest {
   attendeePubkey: string;
   name: string;
@@ -106,6 +143,16 @@ export interface PendingRequest {
   introText?: string;
   invite?: InviteProof;
   rumorCreatedAt: number;
+  /**
+   * This attendee sent a 21610 withdrawal that is NEWER than their join.
+   *
+   * Only meaningful on a coordinator-less event: with a coordinator attached, the
+   * daemon acts on the 21610 itself and the roster it republishes is the truth.
+   * Without one, nothing consumed the rumor at all — see the scan below.
+   */
+  withdrawn?: boolean;
+  /** `delete_data` from that withdrawal: the attendee asked for a data purge. */
+  withdrawalRequestedPurge?: boolean;
 }
 
 /** The publisher pubkey for directory/roster: coordinator if set, else E_id. */
@@ -161,13 +208,19 @@ export async function fetchPending(
   const unwrapAny = (wrap: GiftWrap) => {
     for (const sk of inboxSks) {
       try {
-        return unwrapRumor(wrap, sk);
+        // NIP §5/§6.1: E_inbox is a PUBLIC address anyone can seal to, so the
+        // organizer's read of it accepts only the attendee-authored kinds. A
+        // grant or an admin command sealed here is not an inbox rumor.
+        return unwrapRumor(wrap, sk, EVENT_INBOX_RUMOR_KINDS);
       } catch {
         /* try the next inbox secret */
       }
     }
     return undefined;
   };
+
+  /** Newest 21610 per attendee, by the same (created_at, lowest id) tie-break. */
+  const withdrawals = new Map<string, { id: string; created_at: number; deleteData: boolean }>();
 
   for (const wrap of wraps) {
     const rumor = unwrapAny(wrap);
@@ -201,6 +254,28 @@ export async function fetchPending(
           rumorCreatedAt: rumor.created_at,
         });
         joinRumorId.set(rumor.pubkey, rumor.id);
+      }
+    } else if (rumor.kind === KIND_ATTENDEE_WITHDRAWAL) {
+      // Nothing read these before. `withdrawAttendee` publishes a 21610 to
+      // E_inbox and reports success on the RELAY ACK — but the only handler for
+      // the kind is the coordinator's. On an event with no coordinator the
+      // rumor sat in the inbox unread forever: the attendee was told they had
+      // left, deleted their self-copy and their media, and stayed in the roster
+      // and the directory indefinitely, with their ECK still on their device.
+      // Surfacing it here at least puts the request in front of the organizer.
+      try {
+        const parsed = withdrawalContentSchema.parse(JSON.parse(rumor.content));
+        if (parsed.a !== ctx.coordinate) continue;
+        const prev = withdrawals.get(rumor.pubkey);
+        if (!prev || supersedes({ id: rumor.id, created_at: rumor.created_at }, prev)) {
+          withdrawals.set(rumor.pubkey, {
+            id: rumor.id,
+            created_at: rumor.created_at,
+            deleteData: parsed.delete_data ?? true,
+          });
+        }
+      } catch {
+        continue;
       }
     } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
       try {
@@ -236,6 +311,40 @@ export async function fetchPending(
       req.profile = sub.profile;
       req.media = sub.media;
       req.introText = sub.introText;
+    }
+  }
+  // Mark anyone whose newest withdrawal supersedes their newest join. Ordering
+  // matters: someone may withdraw and then re-join, and a stale withdrawal must
+  // not shadow the newer request.
+  for (const [pubkey, w] of withdrawals) {
+    let req = byAttendee.get(pubkey);
+    if (!req) {
+      // No join request for this person IN THIS WINDOW. That is the ordinary case,
+      // not an edge one: the inbox is read over the 3-day gift-wrap window, and
+      // somebody who joined when the invite went out and withdrew a week later has
+      // only the withdrawal inside it. Dropping it here meant their request reached
+      // nobody at all, while their client had already deleted their media and their
+      // 31602 self-copy and told them it was sent.
+      //
+      // Synthesized with no name/message on purpose: we genuinely do not have their
+      // intake, and `buildApprovedPeople` will fill in the name from the directory
+      // entry for anyone actually on the roster — which is who this is about.
+      req = {
+        attendeePubkey: pubkey,
+        name: "",
+        message: "",
+        rsvpPublic: false,
+        rumorCreatedAt: w.created_at,
+      };
+      byAttendee.set(pubkey, req);
+      req.withdrawn = true;
+      req.withdrawalRequestedPurge = w.deleteData;
+      continue;
+    }
+    const joinId = joinRumorId.get(pubkey) ?? "";
+    if (supersedes({ id: w.id, created_at: w.created_at }, { id: joinId, created_at: req.rumorCreatedAt })) {
+      req.withdrawn = true;
+      req.withdrawalRequestedPurge = w.deleteData;
     }
   }
   const result = [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
@@ -326,8 +435,14 @@ export async function approveAttendee(
     eidSk,
   );
 
-  // 3. Roster (31604): add this attendee, republish the whole index.
-  const { roster, at: rosterAt } = await loadRoster(ctx, eckBytes, keys.eck);
+  // 3. Roster (31604): add this attendee, republish the whole index. The whole
+  //    index — so if the read didn't establish who else is on it, this must not
+  //    publish at all (rosterForRewrite throws). Approving one person is never a
+  //    reason to remove the rest.
+  const { roster, at: rosterAt } = rosterForRewrite(
+    await loadRoster(ctx, eckBytes),
+    eck.id,
+  );
   if (!roster.attendees.some((a) => a.pubkey === req.attendeePubkey)) {
     roster.attendees.push({ pubkey: req.attendeePubkey, d: entryD, role });
   }
@@ -341,15 +456,33 @@ export async function approveAttendee(
 }
 
 /**
- * Fetch + decrypt the current roster (or an empty one if none exists yet).
- * This gates a read-modify-write republish (approveAttendee/revoke): it MUST
- * see the latest roster, including one this same client just published a
- * moment ago in a prior loop iteration (e.g. "Approve all"), or the republish
- * silently drops whoever was added last. `fetchEvents` goes through NDK's
- * cache-adapter-integrated subscription, which can resolve on EOSE before a
- * just-published/just-arrived event is surfaced (same hazard documented on
- * `fetchEventsRelayOnly` in ndk.ts) — use the relay-only variant here, same as
- * the other must-not-miss reads (grants, pending queue) already do.
+ * What a roster read actually found. The three cases are deliberately NOT
+ * collapsed into "a roster" the way this used to return `{roster, at}` for all
+ * of them, because two of them are indistinguishable from an empty roster and
+ * every caller here republishes what it is handed.
+ */
+export type RosterRead =
+  /** A 31604 came back and decrypted. `at` is its created_at, always > 0. */
+  | { state: "ok"; roster: RosterContent; at: number }
+  /**
+   * No 31604 came back at all. `suspect` is true when this device has seen one
+   * for this event before, i.e. the empty answer is a lost read and not the
+   * event's first roster (see the tripwire note above).
+   */
+  | { state: "absent"; suspect: boolean }
+  /** A 31604 came back but did not decrypt/parse under the ECK we hold. */
+  | { state: "unreadable"; at: number };
+
+/**
+ * Fetch + decrypt the current roster. This gates a read-modify-write republish
+ * (approveAttendee / revoke / rotate): it MUST see the latest roster, including
+ * one this same client just published a moment ago in a prior loop iteration
+ * (e.g. "Approve all"), or the republish silently drops whoever was added last.
+ * `fetchEvents` goes through NDK's cache-adapter-integrated subscription, which
+ * can resolve on EOSE before a just-published/just-arrived event is surfaced
+ * (same hazard documented on `fetchEventsRelayOnly` in ndk.ts) — use the
+ * relay-only variant here, same as the other must-not-miss reads (grants,
+ * pending queue) already do.
  *
  * Returns the base event's `at` (created_at) too: the republish must carry a
  * created_at STRICTLY GREATER than the roster it read, or a same-second RMW loop
@@ -357,29 +490,68 @@ export async function approveAttendee(
  * produces sibling replaceable events with equal created_at, and NIP-01's
  * tie-break (keep the lowest id) can leave a stale, fewer-attendee roster winning
  * — silently dropping the last-added attendee. See buildRosterEvent.
+ *
+ * It used to answer BOTH failure modes — nothing came back, and came back but
+ * would not decrypt — with `{roster: {attendees: []}, at: 0}`, and every caller
+ * then republished that empty roster at `max(now, 1)`, which by construction wins
+ * the race. So an organizer approving one person on venue Wi-Fi could publish a
+ * roster containing only that person and erase everyone else from People, for
+ * everyone. Through revoke it was worse: `remaining` came out empty, so nobody
+ * was re-granted the rotated ECK and every attendee lost the directory in one
+ * click. Hence the discriminated result — see {@link rosterForRewrite}, which is
+ * how all three write paths consume it.
  */
 export async function loadRoster(
   ctx: EventContext,
   eckBytes: Uint8Array,
-  eckVersions: EckVersion[],
-): Promise<{ roster: RosterContent; at: number }> {
+): Promise<RosterRead> {
   const publisher = directoryPublisher(ctx);
   const { identifier } = splitCoordinate(ctx.coordinate);
   const events = await fetchEventsRelayOnly(
     { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
     ctx.config.relays,
   );
-  // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  const currentId = eckVersions.reduce((m, v) => Math.max(m, v.id), 1);
-  const at = latest?.created_at ?? 0;
-  if (!latest) return { roster: { v: 2, eck_current: currentId, attendees: [] }, at };
+  // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7):
+  // re-verify and keep only the currently accepted authors before the §3.1
+  // latest-wins pick — the same read attendee.ts `fetchRoster` performs.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)));
+  if (!latest) {
+    return { state: "absent", suspect: hasSeenPublished(ctx.coordinate, "roster") };
+  }
+  const at = latest.created_at ?? 0;
   try {
     const { eckDecrypt } = await import("@nostrautica/protocol");
-    return { roster: JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent, at };
+    const roster = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    markPublished(ctx.coordinate, "roster", at);
+    return { state: "ok", roster, at };
   } catch {
-    return { roster: { v: 2, eck_current: currentId, attendees: [] }, at };
+    return { state: "unreadable", at };
   }
+}
+
+/**
+ * The message every roster write path fails with. One string, because the
+ * organizer's question is the same in all three cases ("why didn't that work?")
+ * and the honest answer is the same too: we could not establish who is currently
+ * on the roster, and rewriting it blind would remove people.
+ */
+const ROSTER_UNREADABLE =
+  "Couldn't read this event's current roster, so nothing was published. " +
+  "Rewriting it now would remove everyone already approved. " +
+  "Check your connection and try again.";
+
+/**
+ * Unwrap a {@link RosterRead} for a caller that is about to REPUBLISH the roster.
+ * Aborts unless we know what is on it; only a genuine first roster (nothing came
+ * back AND this device has never seen one) is allowed through as empty.
+ */
+function rosterForRewrite(
+  read: RosterRead,
+  eckCurrent: number,
+): { roster: RosterContent; at: number } {
+  if (read.state === "ok") return { roster: read.roster, at: read.at };
+  if (read.state === "unreadable" || read.suspect) throw new Error(ROSTER_UNREADABLE);
+  return { roster: { v: 2, eck_current: eckCurrent, attendees: [] }, at: 0 };
 }
 
 function buildRosterEvent(
@@ -396,6 +568,11 @@ function buildRosterEvent(
   // always wins the replaceable-event race — see loadRoster. Clamp to now so a
   // steady state (base far in the past) still uses the wall clock.
   const createdAt = Math.max(Math.floor(Date.now() / 1000), baseCreatedAt + 1);
+  // Arm the tripwire here rather than at each publish site: this is the single
+  // choke point every roster republish goes through, and by the time an event is
+  // built we have committed to it (publishOrQueue may durably queue it offline,
+  // which still means a roster exists for this event as far as we're concerned).
+  markPublished(ctx.coordinate, "roster", createdAt);
   return finalizeEvent(
     {
       kind: KIND_ROSTER,
@@ -647,10 +824,21 @@ export interface InviteOptions {
  * plaintext hash+label list is the only durable record that a given invite was
  * ever handed out.
  *
- * Returns `[]` rather than throwing on a missing/corrupt list, exactly as the
- * generate path always did — an unreadable list means "nothing published yet"
- * for numbering purposes, and the export layer unions with its own cache so an
- * empty answer can't erase labels it already knows (see invite-export.ts).
+ * THROWS when the list cannot be established, rather than answering `[]`. The
+ * old comment here reasoned only about the EXPORT layer — which unions with its
+ * own persistent cache, so an empty answer genuinely can't erase labels it
+ * already knows (see invite-export.ts) — and never followed the OTHER caller
+ * through to its publish. `generateInvites` republishes the 31601 with exactly
+ * what this returns plus the new hashes; `publishMonotonic` adjusts created_at
+ * and never merges content. So one unreachable relay while an organizer minted
+ * one more code silently revoked every code already handed out (they are hashes
+ * on a replaceable event — there is no other copy), and restarted labelling at
+ * `invite-1`, which also corrupts the label↔email join the usage report is built
+ * on. "Nothing published yet" and "we couldn't read it" must not be the same
+ * answer to a caller that is about to overwrite the thing.
+ *
+ * Nothing came back is only accepted as "confirmed absent" when this device has
+ * never seen a list for this event (see the tripwire note at the top).
  */
 export async function fetchPublishedInvites(
   ctx: EventContext,
@@ -663,14 +851,32 @@ export async function fetchPublishedInvites(
     },
     ctx.config.relays,
   );
-  const latest = pickLatest(existing);
-  if (!latest) return [];
-  try {
-    return inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
-  } catch {
+  // Authority boundary: `authors` is a request a relay may ignore, and this list
+  // is not just read — `generateInvites` MERGES it into a new 31601 and signs
+  // that with E_id. An injected list would therefore get laundered into genuinely
+  // published invite hashes, i.e. the injector's own codes would auto-approve.
+  const latest = pickLatest(onlyByAuthors(onlyVerified(existing), [ctx.config.eidPubkey]));
+  if (!latest) {
+    if (hasSeenPublished(ctx.coordinate, "invites")) throw new Error(INVITES_UNREADABLE);
     return [];
   }
+  let invites: { h: string; label?: string }[];
+  try {
+    invites = inviteListContentSchema.parse(JSON.parse(latest.content)).invites;
+  } catch {
+    // A list exists and we can't read it. Publishing over it would drop every
+    // code in it — including, if this is a newer-schema list from a newer build,
+    // codes this build simply doesn't understand yet.
+    throw new Error(INVITES_UNREADABLE);
+  }
+  markPublished(ctx.coordinate, "invites", latest.created_at ?? 0);
+  return invites;
 }
+
+const INVITES_UNREADABLE =
+  "Couldn't read this event's published invite list, so no codes were generated. " +
+  "Republishing it now would revoke every code already handed out. " +
+  "Check your connection and try again.";
 
 /**
  * Generate N invite codes (spec §6.5). Each code IS an nsec; the organizer
@@ -699,6 +905,10 @@ export async function generateInvites(
 
   // Merge with any already-published invite hashes (replaceable event) — this is
   // also what makes labels monotonic across batches (see fetchPublishedInvites).
+  // It throws rather than answering `[]` when it can't establish the published
+  // list, and that throw must stay unguarded: the republish below is a whole-
+  // document overwrite, so generating on a half-answered read is how every
+  // previously issued code gets revoked.
   const invites = await fetchPublishedInvites(ctx);
 
   const generated: GeneratedInvite[] = [];
@@ -737,7 +947,7 @@ export async function generateInvites(
   // Monotonic republish (audit P3): the invite list is addressable, and a
   // same-second regeneration must not lose the §3.1 tie-break and silently drop
   // the codes just added/revoked.
-  await publishMonotonic({
+  const { createdAt } = await publishMonotonic({
     kind: KIND_INVITE_LIST,
     author: ctx.config.eidPubkey,
     identifier,
@@ -753,6 +963,9 @@ export async function generateInvites(
         eidSk,
       ),
   });
+  // Arm the tripwire: from here on, an empty read for this event is a lost read,
+  // not "no codes have ever been issued".
+  markPublished(ctx.coordinate, "invites", createdAt);
   return generated;
 }
 
@@ -766,6 +979,13 @@ export async function revokeAttendeeClient(
   organizer: AppSigner,
   ctx: EventContext,
   removedPubkey: string,
+  /**
+   * The organizer's blinding key, so the rotated ECK reaches the durable 30078
+   * backup. Optional only so an existing caller cannot break; a caller that
+   * omits it gets a loud warning rather than silent key loss — see the write
+   * below.
+   */
+  blindingKey?: Uint8Array,
 ): Promise<void> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
@@ -793,17 +1013,62 @@ export async function revokeAttendeeClient(
     eidSk,
   );
 
-  // 2. Mint ECK v(n+1) and persist locally.
+  // 2. Read the current roster — BEFORE minting anything. This is the step that
+  //    decides who keeps access: `remaining` is the complete list of people who
+  //    get re-granted the rotated ECK and get their entry re-encrypted under it,
+  //    and everyone missing from it is, in effect, revoked too. On a lost read
+  //    `remaining` came out empty and one revoke click locked every attendee out
+  //    of the directory and all future members-only content, with the roster
+  //    republished as empty so the damage propagated to every other client.
+  //
+  //    The ECK mint deliberately happens AFTER this: a throw here must leave the
+  //    keystore untouched, or the aborted revoke would still have made a new ECK
+  //    version current locally, and this organizer's next post would be encrypted
+  //    under a key no attendee was ever granted.
+  const { roster, at: rosterAt } = rosterForRewrite(
+    await loadRoster(ctx, prevEckBytes),
+    prevEck.id,
+  );
+  if (!roster.attendees.some((a) => a.pubkey === removedPubkey)) {
+    // The person being revoked is not on the roster we just read, so it is not
+    // the roster this revoke was decided against — a stale or partial answer,
+    // or a roster already rewritten elsewhere. Rotating against it would strand
+    // whoever it does list. (A genuine double-revoke lands here too, and saying
+    // so is the correct outcome: there is nothing left to revoke.)
+    throw new Error(
+      "That attendee isn't on the roster we just read, so nothing was published. " +
+        "Reload the People list and try again.",
+    );
+  }
+  const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
+
+  // 3. Mint ECK v(n+1) and persist locally, then re-encrypt everyone else's
+  //    directory entry under it and re-grant to each.
   const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
   const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
   keys.eck = [...keys.eck, newEck];
   await saveEventKeys(keys);
+  // The new ECK must reach the DURABLE backup, not just this device.
+  //
+  // Every other path that mints an ECK writes the 30078 backup;  this one never
+  // did. So a coordinator-less organizer who revoked someone re-encrypted the
+  // roster and every directory entry under a key that existed only in this
+  // browser. Clear site data, or move to a new phone, and `recoverEventKeys`
+  // restores a backup still holding only ECK v1 — leaving the event's own owner
+  // permanently unable to read their own roster and directory. Forward-only
+  // rotation means there is no way back from that.
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
+      (e) => {
+        console.warn("[organizer] revoke rotated the ECK but its backup did not publish:", e);
+      },
+    );
+  } else {
+    console.warn(
+      "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
+    );
+  }
   const newEckBytes = base64ToBytes(newEck.key);
-
-  // 3. Read the current roster, drop the removed attendee, re-encrypt everyone
-  //    else's directory entry under the new ECK, and re-grant to each.
-  const { roster, at: rosterAt } = await loadRoster(ctx, prevEckBytes, keys.eck);
-  const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
   const publisher = directoryPublisher(ctx);
   const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
   const pubs: Promise<unknown>[] = [publishOrQueue(deletion, ctx.config.relays)];
@@ -881,6 +1146,13 @@ async function rotateEckAndInbox(
   if (!prevEck) throw new Error("no ECK available");
   const prevEckBytes = base64ToBytes(prevEck.key);
 
+  // Read the roster FIRST. Everything below is driven by it: only the people it
+  // lists get the new ECK, and the roster is republished as exactly that list. A
+  // lost read therefore doesn't produce a smaller rotation, it produces a
+  // coordinator swap that quietly locks the whole event out — nobody re-granted,
+  // an empty roster published over the real one. Same class as the revoke path.
+  const rosterRead = await loadRoster(ctx, prevEckBytes);
+
   // Mint the new ECK version and a fresh E_inbox keypair.
   const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
   const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
@@ -892,7 +1164,7 @@ async function rotateEckAndInbox(
 
   // Re-encrypt every attendee's directory entry under the new ECK (new blinded d),
   // republish the roster, and re-grant the new ECK set to each — no one removed.
-  const { roster, at: rosterAt } = await loadRoster(ctx, prevEckBytes, keys.eck);
+  const { roster, at: rosterAt } = rosterForRewrite(rosterRead, prevEck.id);
   const publisher = directoryPublisher(ctx);
   const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
   const pubs: Promise<unknown>[] = [];
@@ -937,7 +1209,17 @@ async function rotateEckAndInbox(
   if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
   keys.einboxNsecHex = newInboxNsecHex;
   await saveEventKeys(keys);
-  if (blindingKey) await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(() => {});
+  // Never silent (audit EV-11). The rotation has already happened locally; if the
+  // backup does not publish, the durable record of the new ECK and the new inbox
+  // simply is not there, and a later recovery on a fresh device restores an event
+  // whose roster and directory it cannot read.
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
+      (e: unknown) => {
+        console.warn("[organizer] ECK/inbox rotated but its backup did not publish:", e);
+      },
+    );
+  }
 
   return { newInboxNsecHex, newInboxPubkey, eck: eckAll };
 }
@@ -1110,7 +1392,12 @@ export async function attachCoordinator(
   //    — on this or a fresh device — increments past it instead of colliding.
   await saveEventKeys({ ...keys, coordinatorGen: gen });
   if (blindingKey) {
-    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch(() => {});
+    // Never silent (audit EV-11): without this backup the last-used coordinator
+    // generation is not durable, and the next attach reuses a colliding gen that
+    // the coordinator refuses.
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch((e: unknown) => {
+      console.warn("[organizer] attach recorded gen", gen, "but its backup did not publish:", e);
+    });
   }
 }
 

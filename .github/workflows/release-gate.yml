@@ -22,6 +22,12 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Assert one Node major and no mutable infrastructure tags
         run: node .github/scripts/check-pins.mjs
+      # The vendored MLS/Marmot engine is committed BUILT OUTPUT with no source and
+      # no lockfile entry, so nothing else in this gate looks at those bytes. This
+      # does not prove they match upstream — it makes a change to them impossible to
+      # land without someone deciding to.
+      - name: Assert the vendored crypto has not changed unnoticed
+        run: node scripts/vendor-manifest.mjs --check
 
   build:
     runs-on: ubuntu-latest
@@ -39,6 +45,44 @@ jobs:
       - run: pnpm --filter @nostrautica/protocol build
       - run: pnpm check
       - run: pnpm --filter @nostrautica/app build
+      # Build the app AGAIN the way production builds it (audit CI-1). The step
+      # above builds at base "/", which is the local-preview shape; the deployed
+      # site is served from a subdirectory and the post-receive hook on the build
+      # host runs `BASE_PATH=/app pnpm --filter @nostrautica/app build`. Anything
+      # that only breaks under a non-empty base — an absolute asset URL, a service
+      # worker registered outside its scope, a manifest start_url pointing at the
+      # domain root — passed this gate and broke production, because the gate had
+      # never once built the artifact production actually serves.
+      #
+      # The assertions matter as much as the build: a base-path regression usually
+      # SUCCEEDS at building and simply emits the wrong URLs, so a green `build` is
+      # not evidence. These check the three files whose paths are resolved at build
+      # time rather than by the browser.
+      - name: Production build (BASE_PATH=/app) with base-path assertions
+        run: |
+          set -euo pipefail
+          BASE_PATH=/app pnpm --filter @nostrautica/app build
+          out=packages/app/build
+          test -f "$out/index.html" || { echo "::error::no index.html emitted"; exit 1; }
+          # The manifest's URLs are RELATIVE by design so one artifact serves from
+          # any base. What must never appear is a root-absolute URL outside /app/:
+          # that resolves to the domain root and silently takes the installed PWA
+          # to the landing page instead of the app.
+          node -e '
+            const m = JSON.parse(require("node:fs").readFileSync("packages/app/build/manifest.webmanifest", "utf8"));
+            const urls = [m.start_url, m.scope, m.id, ...(m.icons ?? []).map((i) => i.src)].filter(Boolean);
+            const bad = urls.filter((u) => u.startsWith("/") && !u.startsWith("/app/"));
+            if (bad.length) {
+              console.error(`::error::manifest.webmanifest has root-absolute URL(s) outside /app/: ${bad.join(", ")}`);
+              process.exit(1);
+            }
+            console.log(`manifest URLs are base-relative or /app/-scoped: ${urls.join(" ")}`);
+          '
+          grep -q '/app/index.html' "$out/sw.js" \
+            || { echo "::error::service worker navigateFallback is not /app/-scoped — every deep link would fall back to the wrong shell"; exit 1; }
+          grep -q '/app/_app/' "$out/index.html" \
+            || { echo "::error::index.html does not reference /app/_app/ — the JS/CSS bundles would 404 in production"; exit 1; }
+          echo "base-path assertions passed"
       # High-severity dependency advisories fail the gate (audit R16 keeps this in CI).
       - run: pnpm audit --audit-level high
 
