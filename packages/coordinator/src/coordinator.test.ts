@@ -1233,6 +1233,33 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
   });
 
+  it("flipping the event language actually re-summarizes the attendees (audit B-11)", async () => {
+    // `applyConfigUpdate` asks for a rebuild per approved attendee when `lang` or
+    // `nostr_context` changes, because both are inputs to the derived AI content.
+    // The enqueue was keyed on the PROFILE hash alone — which hadn't changed —
+    // so every one of those collided with the already-`done` row and was
+    // discarded. The organizer switched the event to Slovak, the log said the
+    // enqueue was dropped, and not a single profile was rebuilt.
+    const h = await setup(0, { lang: "en" });
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const translationsBefore = h.counters.translateCalls;
+    expect(h.store.pendingJobCount()).toBe(0);
+
+    const newer = {
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100,
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"], ["lang", "sk"]],
+      content: "", id: "cfg-lang", sig: "",
+    } as any;
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    // The rebuild is really queued (not swallowed by a terminal row)…
+    expect(h.store.pendingJobCount()).toBeGreaterThan(0);
+    await h.coordinator.jobs.drain();
+    // …and it really re-ran the language-dependent stage.
+    expect(h.counters.translateCalls).toBeGreaterThan(translationsBefore);
+  });
+
   it("a config edit whose matrix publish fails is RETRIED durably, not silently lost (CORE-N-2)", async () => {
     // The applied-config watermark moved to this 31600 before its outward effects
     // ran, and `subscribeEventConfig`'s callback swallowed the throw. So a relay

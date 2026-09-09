@@ -2465,10 +2465,20 @@ export class Coordinator {
    * no provider billing — for an event that disabled AI matching.
    */
   private enqueueProcess(coordinate: string, pubkey: string): void {
-    if (this.events.get(coordinate)?.matching === "off") return;
+    const state = this.events.get(coordinate);
+    if (state?.matching === "off") return;
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
     const version = sha256Hex(utf8ToBytes(attendee?.profile_json ?? "")).slice(0, 16);
-    const key = `proc:${coordinate}:${pubkey}:${version}`;
+    // The key names every input the run derives from, not just the profile (audit
+    // B-11). The event's language and nostr-context depth are inputs too — the
+    // pipeline's own caches are keyed on them — so a config edit that changes either
+    // asks for a genuinely different result from the same profile. Keyed on the
+    // profile hash alone, `applyConfigUpdate`'s per-attendee re-enqueue collided with
+    // the already-`done` row and was discarded: an organizer flipping the event to
+    // Slovak got a log line saying the enqueue was dropped and not one re-summarized
+    // profile. Every attendee costs one reprocess per flip now, which is exactly
+    // what the flip means.
+    const key = `proc:${coordinate}:${pubkey}:${version}:l=${state?.lang ?? "?"}:n=${state?.nostrContextN ?? 0}`;
     // Coalesce superseded revisions (audit H-2): a new submission cancels this
     // attendee's still-pending/parked process_attendee jobs for OLDER revisions, so
     // the coordinator never pays to download+STT+profile a recording the attendee
