@@ -1737,6 +1737,109 @@ async function joinOnly(
   return { wrap, pubkey: attendeePubkey };
 }
 
+/**
+ * Audit B-1 / B-2 — a join is a membership transition and orders like one.
+ *
+ * `handleJoin` writes the attendee row, then AWAITS a relay round-trip
+ * (`fetchInviteHashes`) before writing the status its entitlement decision
+ * produced. That await is long enough for an organizer to approve the person
+ * sitting in front of them, and the second write was unconditional.
+ */
+describe("audit B-1/B-2 — join ordering against the rest of the membership chain", () => {
+  /** A join with NO invite proof → entitlement says "manual queue" → pending. */
+  async function joinNoInvite(h: Harness, attendeeSk: Uint8Array, name: string): Promise<void> {
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(attendeeSk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name, message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+  }
+
+  it("an approval landing mid-entitlement is not overwritten back to pending", async () => {
+    // Pre-fix: the row went approved (grant published, ECK really in the
+    // attendee's hands) and then back to `pending` when the stalled fetch
+    // resolved — so the roster, the admin list and the matching set all disagreed
+    // with what the attendee could actually decrypt, until something happened to
+    // touch the row again.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const realFetch = h.transport.fetch.bind(h.transport);
+    h.transport.fetch = async (filter: any) => {
+      if (filter.kinds?.includes(31601)) await gate; // hold the entitlement read open
+      return realFetch(filter);
+    };
+
+    const joining = joinNoInvite(h, sk, "mid-entitlement");
+    // The row is enrolled as `pending` before the fetch resolves (the 2026-07-29
+    // fix that this one builds on).
+    await vi.waitFor(() => expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending"));
+
+    // The organizer approves while the join is still parked in that fetch.
+    const approving = admin(h, "approve", { pubkey: pk });
+    release();
+    await Promise.all([joining, approving]);
+
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, sk).length).toBeGreaterThan(0); // and they really hold the ECK
+  });
+
+  it("a join older than an applied revoke does not resurrect the member as pending", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // The organizer revokes them; that command completes and owns `member:<pk>`.
+    await admin(h, "revoke", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+
+    // A DISTINCT join rumor from before the revoke turns up late (a slow relay, a
+    // backfill rescan). It must not undo the revoke's state.
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "late-duplicate", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+        created_at: Math.floor(h.clock.t / 1000) - 3600,
+      }) as any,
+    );
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+  });
+
+  it("a genuine re-join AFTER a revoke is newer, so it enrolls again as pending", async () => {
+    // The guard must not become "revoked is forever": a fresh join is a newer
+    // membership command and wins honestly, landing back in the manual queue
+    // (never straight to approved — a re-join needs the organizer again).
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: pk });
+
+    h.clock.t += 60_000;
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "second-chance", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+        created_at: Math.floor(h.clock.t / 1000),
+      }) as any,
+    );
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+  });
+});
+
 describe("audit COORD-2 — rumor handling is failure-safe", () => {
   it("a transient publish failure leaves the rumor unseen; the retry re-grants and recovers", async () => {
     const h = await setup();

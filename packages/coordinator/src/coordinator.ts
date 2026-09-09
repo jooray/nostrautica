@@ -241,6 +241,14 @@ const ENROLLMENT_WAIT_MAX_AGE_SEC = 5 * 60;
  */
 const MAX_ENROLLMENT_WAITS = Math.floor(INBOX_MAX_CONCURRENCY / 2);
 const INBOX_MAX_QUEUE = 2000;
+/**
+ * How old a 21600 join has to be before it counts as a LATE DELIVERY rather than a
+ * live request, for the one decision that cares (audit B-2): whether it may
+ * re-enroll an identity a completed revoke/withdrawal deliberately removed. See
+ * {@link Coordinator.handleJoinLocked} for why staleness, and not the ordering
+ * comparison alone, is what that guard turns on.
+ */
+const JOIN_STALE_AFTER_SEC = 5 * 60;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
 function effectiveMaxMediaSec(configured: number): number {
@@ -1850,7 +1858,10 @@ export class Coordinator {
       if (rumor.kind === KIND_JOIN_REQUEST) {
         const content = joinRequestContentSchema.parse(JSON.parse(rumor.content));
         log(`[join] request from ${short(rumor.pubkey)} ("${content.name}")`);
-        await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name);
+        await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name, {
+          createdAt: effectiveCreatedAt, // §3.4 membership ordering → the clamped value
+          rumorId: rumor.id,
+        });
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
@@ -2140,19 +2151,96 @@ export class Coordinator {
     await this.publishDirectory(state, pubkey);
   }
 
+  /**
+   * A join request (21600). Runs under the `member:<pubkey>` mutex every other
+   * membership transition takes (approve / revoke / withdrawal / chat attestation),
+   * because this handler AWAITS a relay round-trip (`fetchInviteHashes`) in the
+   * middle of deciding a status: an organizer approval landing in that window used
+   * to be overwritten back to `pending` by the upsert below, leaving the attendee
+   * holding a valid ECK while the DB, the roster view and the matching set all said
+   * "pending" (audit B-1).
+   *
+   * `order` is the join's clamped (created_at, rumor id). It is used as an ORDERING
+   * GUARD but deliberately does NOT claim the subject the way an admin command does
+   * (audit B-2). The guard: a join that does not supersede an already-COMPLETED
+   * membership command must not resurrect a row that command deliberately revoked
+   * or deleted — a distinct old join sitting on a slow relay would otherwise land
+   * after a revoke and quietly put the person back in the organizer's pending
+   * queue (and recreate a row a `delete_data` withdrawal had erased).
+   *
+   * Not claiming the subject is the deliberate half. Joins are attendee-authored and
+   * approvals are organizer-authored, so their `created_at`s come from two different
+   * clocks: if a join took the watermark, an organizer approving ten seconds later
+   * from a device whose clock is thirty seconds behind the attendee's would produce
+   * an approve that "does not supersede" the join — and it would be dropped, for
+   * every attendee whose phone runs fast. That is the venue-scale approve-all path,
+   * so the join stays outside the watermark and only reads it.
+   */
   private async handleJoin(
     state: EventState,
     attendeePubkey: string,
     tags: string[][],
     name: string,
+    order?: { createdAt: number; rumorId: string },
+  ): Promise<void> {
+    await this.withSubjectLock(state.coordinate, `member:${attendeePubkey}`, () =>
+      this.handleJoinLocked(state, attendeePubkey, tags, name, order),
+    );
+  }
+
+  private async handleJoinLocked(
+    state: EventState,
+    attendeePubkey: string,
+    tags: string[][],
+    name: string,
+    order?: { createdAt: number; rumorId: string },
   ): Promise<void> {
     // Already approved: this is a re-delivery after a mid-grant failure (the
     // rumor was left unseen, COORD-2) — grantAndPublish is idempotent
     // (replaceable events + deduped grants), so re-running repairs a lost grant.
+    // Ahead of the ordering guard below on purpose: it writes no status, so a
+    // stale join can only ever REPAIR an approval here, never regress one.
     const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     if (existing?.status === "approved") {
       await this.grantAndPublish(state, attendeePubkey);
       return;
+    }
+
+    // Ordering guard (audit B-2): a LATE-DELIVERED join older than the last
+    // fully-applied membership command for this subject must not undo it. Narrow on
+    // purpose — three conditions, all of them required:
+    //
+    //  - the row is revoked, or gone because a `delete_data` withdrawal erased it,
+    //    so a first-time join (no watermark at all) is untouched;
+    //  - the join is strictly OLDER than a COMPLETED membership command, so a
+    //    genuine re-join after a revoke is newer and wins honestly;
+    //  - and the join is not a live request: it was written more than
+    //    JOIN_STALE_AFTER_SEC ago, which is what makes it a re-delivery (a slow
+    //    relay, a backfill rescan) rather than someone pressing Join right now.
+    //
+    // The third condition is what keeps a clock disagreement from locking anyone
+    // out. Joins are attendee-authored and revokes usually organizer-authored, so
+    // their timestamps come from different clocks: without it, a member re-joining
+    // minutes after a revoke from a device whose clock happens to run behind the
+    // organizer's would look "older" and be silently dropped. With it, that only
+    // happens to a rumor that ALSO claims to be minutes old, which a live join is
+    // not. The log line says what happened, since a dropped join is otherwise
+    // indistinguishable from one that never arrived.
+    if (order && (existing?.status === "revoked" || !existing)) {
+      const op = this.deps.store.getCommandWatermark(state.coordinate, `member:${attendeePubkey}`);
+      const ageSec = Math.floor(this.now() / 1000) - order.createdAt;
+      if (
+        op &&
+        op.state === "complete" &&
+        op.rumor_id !== order.rumorId &&
+        order.createdAt < op.created_at &&
+        ageSec > JOIN_STALE_AFTER_SEC
+      ) {
+        log(
+          `[join] ignored stale join from ${short(attendeePubkey)}: written ${ageSec}s ago, before the applied membership command for this subject (${op.created_at}) — not resurrecting a revoked/withdrawn member. A fresh join request from them enrolls normally.`,
+        );
+        return;
+      }
     }
 
     // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
@@ -2224,10 +2312,24 @@ export class Coordinator {
       }
     }
 
+    // Never REGRESS a status decided while the fetch above was in flight (audit
+    // B-1). Entitlement can only ever promote to `approved`; when it says no, the
+    // row keeps whatever it says now. The mutex makes the organizer's approve wait
+    // its turn, so in practice this re-read agrees with the pre-fetch row — it is
+    // here because the failure it prevents (an attendee holding a granted ECK while
+    // every server-side view calls them pending) is silent, and because any future
+    // path that writes this row without the mutex would reintroduce it.
+    const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+    const status = decision.grant ? "approved" : (current?.status ?? "pending");
+    if (!decision.grant && current && current.status !== "pending") {
+      log(
+        `[join] ${short(attendeePubkey)}: status changed to '${current.status}' while entitlement was being resolved — keeping it (not overwriting with pending)`,
+      );
+    }
     this.deps.store.upsertAttendee({
       coordinate: state.coordinate,
       pubkey: attendeePubkey,
-      status: decision.grant ? "approved" : "pending",
+      status,
       // B1: keep the display name — match reasoning addresses people by name.
       displayName: name.trim() || null,
       now: this.now(),
