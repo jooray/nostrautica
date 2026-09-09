@@ -127,7 +127,17 @@ export async function recoverEventKeys(
     const restoredCoords: string[] = [];
     let candidates = 0; // eventkeys backups we saw
     let decrypted = 0; // …of which we could actually read
-    for (const e of events) {
+    // NEWEST FIRST (audit EV-10). Two 30078 backups per coordinate are ordinary —
+    // one is written on every ECK rotation and again on attach — and relays return
+    // them in whatever order they like. `restore()` unions the ECK versions but
+    // takes the SECRETS first-writer-wins, so decrypting a stale backup first pins
+    // a superseded E_inbox as current, and joins sealed to the inbox the published
+    // 31600 actually names become unreadable. Ordering here rather than grouping by
+    // coordinate because the coordinate only exists after the decrypt, and the
+    // decrypt is the thing the budget below is rationing: this way a truncated pass
+    // has spent its allowance on the newest backups rather than an arbitrary set.
+    const ordered = [...events].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+    for (const e of ordered) {
       const d = e.tags.find((t) => t[0] === "d")?.[1];
       if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
       candidates++;

@@ -1209,7 +1209,17 @@ async function rotateEckAndInbox(
   if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
   keys.einboxNsecHex = newInboxNsecHex;
   await saveEventKeys(keys);
-  if (blindingKey) await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(() => {});
+  // Never silent (audit EV-11). The rotation has already happened locally; if the
+  // backup does not publish, the durable record of the new ECK and the new inbox
+  // simply is not there, and a later recovery on a fresh device restores an event
+  // whose roster and directory it cannot read.
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
+      (e: unknown) => {
+        console.warn("[organizer] ECK/inbox rotated but its backup did not publish:", e);
+      },
+    );
+  }
 
   return { newInboxNsecHex, newInboxPubkey, eck: eckAll };
 }
@@ -1382,7 +1392,12 @@ export async function attachCoordinator(
   //    — on this or a fresh device — increments past it instead of colliding.
   await saveEventKeys({ ...keys, coordinatorGen: gen });
   if (blindingKey) {
-    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch(() => {});
+    // Never silent (audit EV-11): without this backup the last-used coordinator
+    // generation is not durable, and the next attach reuses a colliding gen that
+    // the coordinator refuses.
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch((e: unknown) => {
+      console.warn("[organizer] attach recorded gen", gen, "but its backup did not publish:", e);
+    });
   }
 }
 
