@@ -38,3 +38,29 @@ test("logged-out idle home does not claim relays are blocked", async ({ page }) 
   await expect(page.getByText(/no relay is reachable|network may be blocking/i)).toHaveCount(0);
   expect(sockets).toEqual([]);
 });
+
+/**
+ * The invite link's landing screen must offer a way out (2026-09-09 audit, UX-N-1).
+ *
+ * Invite links are `#/e/<naddr>/join?code=…` (organizer.ts), so Join — not
+ * EventHome — is the FIRST screen a newcomer sees. The UX-3 fix gave EventHome a
+ * 12 s guard, a categorized error and a working retry on exactly that reasoning,
+ * and the screen the link actually opens did not get it: a bare "Loading event…"
+ * with no timeout and no retry, which on venue Wi-Fi that blocks WSS is a spinner
+ * with no way forward but a reload the newcomer has no reason to think of.
+ *
+ * The smoke tier has no relay at all, which is precisely that condition.
+ */
+test("a join deep link with no reachable relay ends in a retryable error, not a spinner", async ({
+  page,
+}) => {
+  test.setTimeout(45_000);
+  await page.goto(
+    "/#/e/naddr1qqrxw6t5wd68yatcv4ex2mrp0yhxxmmdqgsx7arwsxvvdxvxpjrgnkjqu4rcs0v3rvkq6c9j5xk0aehz7uz2q0grqsqqqa28dhzjuf/join",
+  );
+  // It does start out loading — the guard is a backstop, not a replacement.
+  await expect(page.getByText(/loading event/i)).toBeVisible();
+  // …and then says something, with a button.
+  await expect(page.getByRole("alert")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("button", { name: /try again|retry/i })).toBeVisible();
+});

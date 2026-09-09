@@ -30,6 +30,26 @@ import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { loadSelfCopy, cacheSelfCopy } from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
+/**
+ * How long the "waiting for approval" screen waits before its next check, given
+ * the check number, how many fast checks it is allowed, and how long it has been
+ * waiting.
+ *
+ * Three cadences, because three different things are being waited on. An invite
+ * code is auto-approved server-side, so the first few checks are near-instant.
+ * Manual approval is a person clicking a button, so five seconds is right for the
+ * first few minutes. After that the person is waiting on a door that opens later,
+ * and a gift-wrap scan every five seconds — a relay round-trip, and for a remote
+ * signer a decrypt — is not something to keep doing for half an hour. The screen
+ * names the current gap rather than quietly slowing down.
+ */
+export const POLL_RELAX_AFTER_MS = 3 * 60_000;
+
+export function joinPollGapMs(check: number, fastChecks: number, waitedMs: number): number {
+  if (check < fastChecks) return 1_500;
+  return waitedMs > POLL_RELAX_AFTER_MS ? 60_000 : 5_000;
+}
+
 export interface JoinInput {
   name: string;
   message?: string;

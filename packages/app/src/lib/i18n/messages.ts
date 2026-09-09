@@ -472,7 +472,6 @@ export const messages = {
     // Join
     "join.title": "Join {title}",
     "join.retention": "This event's data is deleted {days} days after it ends.",
-    "join.wentWrong": "Something went wrong.",
     "join.loading": "Loading event…",
     "join.youreIn": "You're in",
     "join.recordIntro": "Record your intro",
@@ -1157,6 +1156,13 @@ export const messages = {
       "Your Nostr browser extension isn't available. Unlock or enable it, then try again — you're still signed in.",
     "boot.badRecoveryLink":
       "That recovery link didn't carry a usable key. Ask for a fresh one, or sign in another way.",
+    "join.loadFailed.body": "We couldn't load this event, so there's nothing to join yet.",
+    "join.waiting.checking": "Checking every {sec} seconds…",
+    "join.waiting.checked": "Last checked {time} · checking again every {sec} seconds.",
+    "join.waiting.canClose": "You can close this — we'll show you're in when you come back.",
+    "matches.none.why":
+      "Matches appear once your intro has been processed and the organizer has run matching.",
+    "matches.checkAgain": "Check again",
     // Same failure, but we know a signer relay refused the connection, so say which
     // one. A relay outage and a closed signer app produce the identical symptom
     // otherwise, and only one of the two is something the user can act on.
@@ -2024,7 +2030,6 @@ export const messages = {
     // Join
     "join.title": "Pripojiť sa: {title}",
     "join.retention": "Údaje z tohto podujatia sa vymažú {days} dní po jeho skončení.",
-    "join.wentWrong": "Niečo sa pokazilo.",
     "join.loading": "Načítava sa podujatie…",
     "join.youreIn": "Ste vnútri",
     "join.recordIntro": "Nahrať predstavenie",
@@ -2711,6 +2716,13 @@ export const messages = {
       "Vaše rozšírenie pre Nostr nie je dostupné. Odomknite ho alebo zapnite a skúste znova — stále ste prihlásený.",
     "boot.badRecoveryLink":
       "Tento obnovovací odkaz neniesol použiteľný kľúč. Vypýtajte si nový alebo sa prihláste inak.",
+    "join.loadFailed.body": "Podujatie sa nepodarilo načítať, takže sa zatiaľ nie je k čomu pripojiť.",
+    "join.waiting.checking": "Overujeme každých {sec} sekúnd…",
+    "join.waiting.checked": "Naposledy overené o {time} · overujeme každých {sec} sekúnd.",
+    "join.waiting.canClose": "Pokojne to zavri — keď sa vrátiš, ukážeme, že si vnútri.",
+    "matches.none.why":
+      "Spojenia sa objavia, keď sa spracuje tvoje predstavenie a organizátor spustí párovanie.",
+    "matches.checkAgain": "Overiť znova",
     "error.signerRelaysUnreachable":
       "Váš podpisovač neodpovedal: nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
     "error.badBunkerLink": "Toto nevyzerá ako platný bunker odkaz.",
@@ -3567,7 +3579,6 @@ export const messages = {
     // Připojení
     "join.title": "Připojit se: {title}",
     "join.retention": "Data z této akce se smažou {days} dní po jejím skončení.",
-    "join.wentWrong": "Něco se pokazilo.",
     "join.loading": "Načítání akce…",
     "join.youreIn": "Jste uvnitř",
     "join.recordIntro": "Nahrát představení",
@@ -4252,6 +4263,13 @@ export const messages = {
       "Vaše rozšíření pro Nostr není dostupné. Odemkněte ho nebo zapněte a zkuste to znovu — stále jste přihlášen.",
     "boot.badRecoveryLink":
       "Tento obnovovací odkaz nenesl použitelný klíč. Vyžádejte si nový nebo se přihlaste jinak.",
+    "join.loadFailed.body": "Událost se nepodařilo načíst, takže se zatím není k čemu připojit.",
+    "join.waiting.checking": "Ověřujeme každých {sec} sekund…",
+    "join.waiting.checked": "Naposledy ověřeno v {time} · ověřujeme každých {sec} sekund.",
+    "join.waiting.canClose": "Klidně to zavři — až se vrátíš, ukážeme, že jsi uvnitř.",
+    "matches.none.why":
+      "Spojení se objeví, až se zpracuje tvé představení a organizátor spustí párování.",
+    "matches.checkAgain": "Ověřit znovu",
     "error.signerRelaysUnreachable":
       "Váš podpisovač neodpověděl: nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
     "error.badBunkerLink": "Tohle nevypadá jako platný bunker odkaz.",
