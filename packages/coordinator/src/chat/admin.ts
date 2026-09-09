@@ -350,19 +350,33 @@ export class MarmotAdmin {
    * Sync one approved attendee into the group: fetch the current 30443s for each
    * of their authorized chat identities and add every valid, unconsumed one. This
    * one routine serves approval, multi-device, and eviction-heal.
+   *
+   * @returns false when a device was left OUT for a reason that can clear on its
+   * own — the MLS Add or its Welcome failed on the network, or the rotated key
+   * package hasn't propagated yet — so the caller can arrange another attempt
+   * (audit B-5). True means "nothing further to do for this member", which
+   * includes a device deliberately REFUSED (an ineligible key package, the device
+   * cap): those are reported to the owner and must not be retried forever.
+   *
+   * It does not throw for a single bad key package, deliberately: one undecodable
+   * proof version from a newer peer client must not take down a startup backfill
+   * that every other event's chat depends on (prod 2026-07-20). The boolean IS the
+   * containment — before it existed, the no-crash property silently doubled as
+   * "and no retry either".
    */
   async syncMember(
     coordinate: string,
     accountPubkey: string,
     opts?: { reenrolling?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const group = this.activeGroup(coordinate);
-    if (!group) return;
+    if (!group) return true;
     const attendee = this.store.getAttendee(coordinate, accountPubkey);
-    if (!attendee || attendee.status !== "approved") return;
+    if (!attendee || attendee.status !== "approved") return true;
     const authors = this.authorizedIdentities(coordinate, accountPubkey);
     const kps = await this.fetchKeyPackages(coordinate, authors);
     const authorized = new Set(authors);
+    let synced = true;
     for (const kp of kps) {
       if (!authorized.has(kp.pubkey)) continue; // relay returned an unrelated author
       // `reconcile`: this path is a DELIBERATE "bring this member up to date" —
@@ -371,13 +385,15 @@ export class MarmotAdmin {
       // consumed. `reenrolling` is narrower: it names the ONE device that just
       // attested for THIS event, and is the only thing that may drop a live leaf.
       // See tryAddKeyPackage.
-      await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, {
+      const ok = await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, {
         reconcile: true,
         reenrolling: opts?.reenrolling,
       });
+      if (!ok) synced = false;
     }
     // An approved organizer's device landing in the group must also be an admin.
     await this.maybeSyncAdmins(coordinate, accountPubkey);
+    return synced;
   }
 
   /**
@@ -423,9 +439,9 @@ export class MarmotAdmin {
     mlsGroupId: string,
     kp: AnyEvent,
     opts?: { reconcile?: boolean; reenrolling?: string },
-  ): Promise<void> {
+  ): Promise<boolean> {
     const consumed = this.store.isKpConsumed(coordinate, kp.id);
-    if (consumed && !opts?.reconcile) return;
+    if (consumed && !opts?.reconcile) return true;
     const member = await this.mls.isMember(mlsGroupId, kp.pubkey);
     // Passive watcher, and they're already in: nothing to do — and crucially, do
     // NOT record this key package as consumed. A client re-enrolling publishes its
@@ -436,7 +452,7 @@ export class MarmotAdmin {
     // the attestation one second later then found nothing to add). The id check is
     // only a dedupe, so leaving it unrecorded costs one local membership read per
     // relay replay and nothing else.
-    if (member && !opts?.reconcile) return;
+    if (member && !opts?.reconcile) return true;
     // Deliberate sync, they're in, and this key package is already spent: there is
     // nothing new to act on — UNLESS this device just attested re-enrolment for
     // this event, in which case the two sides disagree and the spent key package
@@ -452,10 +468,18 @@ export class MarmotAdmin {
     if (member && consumed) {
       if (opts?.reenrolling === kp.pubkey) {
         this.log(
-          `[chat] ${kp.pubkey.slice(0, 8)} attested re-enrolment in ${coordinate} but its newest visible 30443 ${kp.id.slice(0, 8)} is already consumed — the rotated key package has not propagated yet; will retry on the next sync`,
+          `[chat] ${kp.pubkey.slice(0, 8)} attested re-enrolment in ${coordinate} but its newest visible 30443 ${kp.id.slice(0, 8)} is already consumed — the rotated key package has not propagated yet; asking for another sync`,
         );
+        // NOT "nothing to do": the device says it holds no membership, we hold a
+        // leaf for it, and the artifact that resolves that disagreement simply
+        // hasn't arrived yet. It is a wait, so it needs an actual retry — the
+        // 30443 watcher can't provide one, because once the fresh key package
+        // lands its own `member && !reconcile` short-circuit returns immediately.
+        // Without this the user pressed Rejoin, saw "requested", and had to press
+        // it again AND win the propagation race.
+        return false;
       }
-      return;
+      return true;
     }
     // They're in and the key package is fresh — but a fresh key package is NOT by
     // itself evidence that this device left the room, because one 30443 slot is
@@ -469,7 +493,7 @@ export class MarmotAdmin {
       this.log(
         `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} but no re-enrolment attestation for this event (likely rotated for another event)`,
       );
-      return;
+      return true; // a deliberate keep, not a failure
     }
     const evaluation = this.mls.evaluateKeyPackage
       ? await this.mls.evaluateKeyPackage(mlsGroupId, kp)
@@ -504,7 +528,7 @@ export class MarmotAdmin {
       // attendee, so there is nobody to tell and nothing to publish.
       const owner = this.store.getChatKey(coordinate, kp.pubkey)?.account_pubkey;
       if (owner) this.notifyRefusal(coordinate, owner, "chat_key_package_ineligible");
-      return;
+      return true; // a REFUSAL, reported to the owner — retrying it forever helps nobody
     }
     if (consumed) {
       this.log(
@@ -535,6 +559,7 @@ export class MarmotAdmin {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
       this.store.markKpConsumed(coordinate, kp.id);
       this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
+      return true;
     } catch (e) {
       // A single malformed/incompatible key package (e.g. a proof version our
       // vendored marmot-ts can't decode yet, from a newer peer client) must
@@ -543,9 +568,17 @@ export class MarmotAdmin {
       // (prod incident 2026-07-20: an uncaught throw here during startup
       // backfill crashed the process). Left unconsumed, not ineligible, so
       // it's retried (and can succeed) once the library gains support.
+      //
+      // But "don't crash" is not "don't retry" (audit B-5). Returning normally
+      // here told every caller the member was synced: the attestation path only
+      // queued its durable `chat_sync_member` on a THROW, and the approval path's
+      // job completed successfully, so one transient relay or marmot failure left
+      // the member staring at "Setting up…" with the rumor marked seen and nothing
+      // anywhere re-driving it. The boolean carries the failure out instead.
       this.log(
         `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} invite FAILED: ${e instanceof Error ? e.message : e}`,
       );
+      return false;
     }
   }
 
@@ -555,9 +588,19 @@ export class MarmotAdmin {
    *  member's add — see {@link MarmotAdminDeps.withMemberLock}. */
   async backfillApproved(coordinate: string): Promise<void> {
     for (const a of this.store.approvedAttendees(coordinate)) {
-      const sync = () => this.syncMember(coordinate, a.pubkey);
+      let synced = true;
+      const sync = async () => {
+        synced = await this.syncMember(coordinate, a.pubkey);
+      };
       if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
       else await sync();
+      // A member the walk could not add gets a durable retry of their own (audit
+      // B-5), rather than being silently left out until the next restart — which,
+      // for chat being turned on mid-event, means until the event is over.
+      if (!synced && this.enqueueSync) {
+        this.log(`[chat] backfill could not add ${a.pubkey.slice(0, 8)} to ${coordinate} — queued for durable retry`);
+        this.enqueueSync(coordinate, a.pubkey);
+      }
     }
   }
 
@@ -656,7 +699,18 @@ export class MarmotAdmin {
         // until a restart or another manual Rejoin — while the rumor was marked
         // seen, so nothing re-drove it.
         try {
-          await this.syncMember(coordinate, accountPubkey, { reenrolling: content.chat_pubkey });
+          const synced = await this.syncMember(coordinate, accountPubkey, { reenrolling: content.chat_pubkey });
+          // A FALSE return is the same situation as a throw (audit B-5): the device
+          // is not in the group and the reason can clear on its own. It used to be
+          // invisible here, because `tryAddKeyPackage` catches its own invite
+          // failure — so this whole try/catch, and the durable retry it exists to
+          // queue, never fired for the most likely failure of all.
+          if (!synced && this.enqueueSync) {
+            this.log(
+              `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} did not complete — queued for durable retry`,
+            );
+            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey);
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           if (this.enqueueSync) {

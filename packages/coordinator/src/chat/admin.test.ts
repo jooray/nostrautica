@@ -883,6 +883,101 @@ describe("MarmotAdmin — watcher fast-path gate (audit COORD-17)", () => {
     expect(mls.invited).toEqual([CHATKEY, CHATKEY2]);
   });
 
+/**
+ * Audit B-5. `tryAddKeyPackage` catches its own `mls.invite` failure on purpose —
+ * one undecodable key package from a newer peer client must not abort a startup
+ * backfill that every other event's chat depends on (prod 2026-07-20). But it then
+ * returned normally, which told every caller the member was synced. The attestation
+ * path only queued its durable `chat_sync_member` on a THROW, so a transient relay
+ * or marmot failure left the member on "Setting up…" with the attestation rumor
+ * marked seen and nothing anywhere re-driving it. The no-crash property had
+ * silently become "and no retry either".
+ */
+describe("MarmotAdmin — a failed Add asks for a durable retry (audit B-5)", () => {
+  const kpFor = (pubkey: string, id: string) => kpEvent(pubkey, id);
+
+  it("syncMember reports false when the invite fails, without throwing", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.throwOnInvite.add(CHATKEY);
+    const admin = makeAdmin(store, mls, [kpFor(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await expect(admin.syncMember(COORD, ACCOUNT)).resolves.toBe(false);
+    expect(mls.members.get("mls-1")?.size ?? 0).toBe(0); // nobody added
+  });
+
+  it("an attestation whose inline sync fails queues the durable retry, carrying reenrolling", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.throwOnInvite.add(CHATKEY);
+    const retries: { coordinate: string; pubkey: string; reenrolling?: string }[] = [];
+    const admin = makeAdmin(store, mls, [kpFor(CHATKEY, "kp1")], undefined, {
+      enqueueSync: (coordinate, pubkey, reenrolling) => retries.push({ coordinate, pubkey, reenrolling }),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(retries).toEqual([{ coordinate: COORD, pubkey: ACCOUNT, reenrolling: CHATKEY }]);
+  });
+
+  it("a successful sync queues nothing", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const retries: string[] = [];
+    const admin = makeAdmin(store, mls, [kpFor(CHATKEY, "kp1")], undefined, {
+      enqueueSync: (_c, pubkey) => retries.push(pubkey),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(retries).toEqual([]);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+  });
+
+  it("a device REFUSED as ineligible is not retried (it is reported instead)", async () => {
+    // The boolean has to distinguish "failed, try again" from "refused, told the
+    // owner" — a permanent refusal retried forever is a spin, not a repair.
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.eligible = false;
+    mls.ineligibleReasons = ["cipher suite 0x0002 ≠ group 0x0001"];
+    const retries: string[] = [];
+    const refusals: string[] = [];
+    const admin = makeAdmin(store, mls, [kpFor(CHATKEY, "kp1")], undefined, {
+      enqueueSync: (_c, pubkey) => retries.push(pubkey),
+      notifyAttendee: (_c, _pk, content) => refusals.push(content.error_category ?? ""),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    expect(await admin.syncMember(COORD, ACCOUNT)).toBe(true); // nothing to retry
+    expect(retries).toEqual([]);
+    expect(refusals).toContain("chat_key_package_ineligible");
+  });
+
+  it("the startup backfill queues a retry for a member it could not add", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    mls.throwOnInvite.add(CHATKEY);
+    const retries: string[] = [];
+    const admin = makeAdmin(store, mls, [kpFor(CHATKEY, "kp1")], undefined, {
+      enqueueSync: (_c, pubkey) => retries.push(pubkey),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.backfillApproved(COORD);
+    expect(retries).toEqual([ACCOUNT]);
+  });
+});
+
 describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
   it("handleRevoke MLS-removes every attested chat key (and defensively the account key)", async () => {
     const store = freshStore();

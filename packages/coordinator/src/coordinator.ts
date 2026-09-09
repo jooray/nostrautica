@@ -911,9 +911,19 @@ export class Coordinator {
       await this.runEventJob(p.coordinate, signal, async () => {
         // `reenrolling` is absent on the approval path and on rows enqueued before
         // it was carried; both are plain adds, which is correct for them.
-        await this.marmot!.syncMember(p.coordinate, p.pubkey, {
+        const synced = await this.marmot!.syncMember(p.coordinate, p.pubkey, {
           ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
         });
+        // THROW on an incomplete sync (audit B-5), so this job is what its comment
+        // says it is: a durable retry. `syncMember` deliberately does not throw for
+        // one failed Add — one undecodable key package must not abort a whole
+        // backfill — so before it returned a verdict, the job completed
+        // successfully having added nobody, and the member stayed in "Setting up…"
+        // until a human intervened. The retry tail ends in poison → 21606, which is
+        // how the organizer finds out if it never resolves.
+        if (!synced) {
+          throw new Error(`chat sync for ${short(p.pubkey)} did not complete (a device was left out of the group)`);
+        }
       });
     });
     // Durable retry for a config edit whose outward effects (31606 matrix publish,
