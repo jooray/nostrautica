@@ -3458,6 +3458,50 @@ describe("D5 §9 — persisted billing state machine (§13.4)", () => {
     expect(h.llm.completeCalls).toBeGreaterThan(0);
   });
 
+  it("a failed unblock announcement still resumes the parked work (audit B-3)", async () => {
+    // The unblock did two things in the wrong order: persist `ok`, publish the
+    // 21606, THEN resume. A relay that refused the publish threw out of the
+    // function with `ok` already written and nothing resumed — and every later
+    // evaluation saw prev=ok, next=ok, `changed=false`, so the resume branch was
+    // never reached again. The event was billing-fine and its paid work sat
+    // `waiting` forever; the only remedy was an organizer recompute that nobody
+    // had a reason to run.
+    //
+    // Driven through the JOIN path on purpose: `recompute`/`reprocess` also call
+    // `resumeParkedWork` explicitly, so those two paths mask this entirely. Every
+    // other trigger — an attendee-count change, a revoke, an install — relies on
+    // the transition branch alone.
+    let over = true;
+    const h = await setup(0, {
+      evaluateBilling: (_eid, count) => (over && count >= 2 ? { state: "payment_required", reason: "x" } : { state: "ok" }),
+    });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design"); // count 2 → blocked
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+
+    // Payment resolved. The next attendee-count change re-evaluates → blocked→ok,
+    // but the relay refuses the 21606 that announces it (and ONLY that: the grant
+    // wraps to attendees must still go out, or the join fails for its own reasons).
+    over = false;
+    const eidPk = getPublicKey(h.eidSk);
+    h.transport.onPublish = (e) => {
+      if (e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === eidPk)) {
+        throw new Error("simulated relay outage (status wrap)");
+      }
+    };
+    await join(h, generateSecretKey(), "code").catch(() => {});
+    h.transport.onPublish = undefined;
+
+    // The durable state and the queue agree even though the announcement failed.
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("ok");
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+    // …and the work really runs now, without any further organizer action.
+    await h.coordinator.jobs.drain();
+    expect(h.llm.completeCalls).toBeGreaterThan(0);
+  });
+
   it("billing state persists across a coordinator restart", async () => {
     const h = await setup(0, { evaluateBilling: overTier() });
     await join(h, generateSecretKey(), "crypto");

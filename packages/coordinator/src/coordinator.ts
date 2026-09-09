@@ -5160,12 +5160,22 @@ export class Coordinator {
     const changed = (prev?.state ?? "evaluating") !== next;
     if (changed) {
       log(`[billing] ${coordinate}: ${prev?.state ?? "evaluating"} → ${next}${reason ? ` — ${reason}` : ""}`);
-      await this.emitBillingStatus(state, next, verdict, graceUntil);
       // Unblocked (→ ok/grace): re-enqueue paid work parked while blocked (H-2).
+      //
+      // BEFORE the 21606 publish, not after (audit B-3). The publish is a relay
+      // write and can throw; when it did, this function threw having already
+      // persisted `ok` but never having resumed — and the next evaluation saw
+      // prev=ok, next=ok, `changed=false`, so it never resumed either. The event
+      // was billing-fine and its paid work sat `waiting` forever, with the only
+      // remedy an organizer recompute nobody knew to run. Resuming first makes the
+      // durable state and the queue agree even when the announcement fails; the
+      // announcement is then retried by whatever drove this call (the throw is
+      // deliberately still propagated).
       if (next !== "blocked" && prev?.state === "blocked") {
         const resumed = this.deps.store.resumeWaitingJobs(coordinate);
         if (resumed > 0) log(`[billing] ${coordinate}: resumed ${resumed} parked job(s)`);
       }
+      await this.emitBillingStatus(state, next, verdict, graceUntil);
     }
     return next;
   }
