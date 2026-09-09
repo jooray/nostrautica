@@ -7,6 +7,15 @@
  * lands (the ECK grant is the real source of truth) or on an explicit re-send.
  */
 const KEY = "nostrautica:join-sent";
+/**
+ * Which identity the markers above belong to. They are stored under one global
+ * key, so without this stamp an account SWITCH — importing a key, or signing in
+ * as someone else without an explicit logout first — left the previous person's
+ * "Pending" markers in place: B sees "Request sent" on an event they have never
+ * touched, and Join shows them the waiting screen instead of the form. `logout()`
+ * cleared them; `adopt()`, which is the switch path, did not.
+ */
+const OWNER_KEY = "nostrautica:join-sent-owner";
 
 type Marker = { at: number };
 type Store = Record<string, Marker>;
@@ -47,11 +56,28 @@ export function clearJoinSent(coordinate: string): void {
   }
 }
 
+/**
+ * Point the markers at `pubkey` (or nothing, on logout), wiping them when the
+ * identity changes. Idempotent for the same owner, so a session restore keeps the
+ * pending join the user is actually waiting on.
+ */
+export function setJoinSentOwner(pubkey: string | null): void {
+  try {
+    if (localStorage.getItem(OWNER_KEY) === (pubkey ?? "")) return;
+    localStorage.removeItem(KEY);
+    if (pubkey) localStorage.setItem(OWNER_KEY, pubkey);
+    else localStorage.removeItem(OWNER_KEY);
+  } catch {
+    /* private mode — best effort */
+  }
+}
+
 /** Wipe every marker (audit UX-6: logout must not leave "Pending" ghosts
  *  visible to the next person on a shared device). */
 export function clearAllJoinSent(): void {
   try {
     localStorage.removeItem(KEY);
+    localStorage.removeItem(OWNER_KEY);
   } catch {
     /* private mode — best effort */
   }

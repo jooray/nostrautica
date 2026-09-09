@@ -33,7 +33,10 @@ import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
 import { discardQueuedForOwner } from "$lib/nostr/publish-queue.js";
 import { outbox } from "$lib/stores/outbox.svelte.js";
 import { recentEvents } from "$lib/stores/recent-events.svelte.js";
-import { clearAllJoinSent } from "$lib/stores/join-sent.svelte.js";
+import { clearAllJoinSent, setJoinSentOwner } from "$lib/stores/join-sent.svelte.js";
+import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
+import { mutes } from "$lib/stores/mutes.svelte.js";
+import { setInviteOwner } from "$lib/stores/invite-store.js";
 import { router } from "$lib/router/router.svelte.js";
 import { broadcastLogout } from "./session-broadcast.js";
 
@@ -232,6 +235,20 @@ class Session {
     setActiveOwner(pubkey);
     setActiveCacheOwner(pubkey);
     recentEvents.setOwner(pubkey);
+    // Stores that are NOT owner-keyed internally and survived an account switch
+    // (audit EV-16). `logout()` cleared some of them; `adopt()` is the OTHER way an
+    // identity changes — importing a key, or signing in as someone else without
+    // logging out first — and it cleared none. Each of these is idempotent for the
+    // same owner, so a session RESTORE keeps what it had. What leaked without them,
+    // on a shared device: A's private "your profile failed" notices rendered for B
+    // (and, since the readiness journey started deriving from them, B's own stepper
+    // saying B had failed), A's mute list silently hiding people from B, A's
+    // "Pending" join markers on events B has never opened, and A's unredeemed
+    // invite nsec — a single-use auto-approve credential — handed to B.
+    ownStatusStore.setOwner(pubkey);
+    mutes.setOwner(pubkey);
+    setJoinSentOwner(pubkey);
+    setInviteOwner(pubkey);
     // R21: the reactive outbox is owner-filtered but caches the PREVIOUS account's
     // items until its next poll. Clear it synchronously the moment the new owner is
     // scoped, then refresh so this account sees only its own queue — never a flash
@@ -467,6 +484,9 @@ class Session {
     // person on a shared device.
     recentEvents.setOwner(null);
     clearAllJoinSent();
+    ownStatusStore.setOwner(null);
+    mutes.setOwner(null);
+    setInviteOwner(null);
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;
@@ -509,6 +529,9 @@ class Session {
     clearBlindingCache();
     recentEvents.setOwner(null);
     clearAllJoinSent();
+    ownStatusStore.setOwner(null);
+    mutes.setOwner(null);
+    setInviteOwner(null);
     void Promise.resolve(this.signer?.close?.()).catch(() => {});
     this.signer = null;
     this.pubkey = null;

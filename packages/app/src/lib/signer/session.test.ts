@@ -51,15 +51,18 @@ vi.mock("$lib/chat/identity.js", () => ({
 
 // Not-owner-scoped localStorage residues (audit UX-6) — spied on so the wiring
 // test can assert logout() actually clears them.
-const { recentEventsClear, recentEventsSetOwner, clearAllJoinSent } = vi.hoisted(() => ({
-  recentEventsClear: vi.fn(),
-  recentEventsSetOwner: vi.fn(),
-  clearAllJoinSent: vi.fn(),
-}));
+const { recentEventsClear, recentEventsSetOwner, clearAllJoinSent, setJoinSentOwner } = vi.hoisted(
+  () => ({
+    recentEventsClear: vi.fn(),
+    recentEventsSetOwner: vi.fn(),
+    clearAllJoinSent: vi.fn(),
+    setJoinSentOwner: vi.fn(),
+  }),
+);
 vi.mock("$lib/stores/recent-events.svelte.js", () => ({
   recentEvents: { clear: recentEventsClear, setOwner: recentEventsSetOwner },
 }));
-vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent }));
+vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent, setJoinSentOwner }));
 
 import { consumeNsecFromHash, session } from "./session.svelte.js";
 import { Nip46Signer, Nip46IdentityMismatchError } from "./nip46.js";
