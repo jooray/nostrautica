@@ -43,3 +43,38 @@ describe("crop-geometry", () => {
     expect(cropRect(-50, -50, 2, 300, 300)).toEqual({ sx: 25, sy: 25, sw: 150, sh: 150 });
   });
 });
+
+/**
+ * The crop must describe the box the user actually framed (audit MED-13).
+ *
+ * `ImageCropper` used a fixed `VIEW_W = 300` both to lay the viewport out and to
+ * compute the crop, while `.viewport { max-width: 100% }` clamped the rendered
+ * WIDTH and not the height. On a 320px phone the content box is about 251px, so
+ * the user framed their photo in a 251×300 box and `confirm()` cropped a 300×300
+ * one: they got roughly 50px down each side they never saw, and the pan maths
+ * disagreed with the pointer by the same ratio.
+ *
+ * These pin the property the component now relies on — the geometry is a pure
+ * function of the viewport it is handed, so measuring it is sufficient.
+ */
+describe("crop geometry follows the viewport it is given (MED-13)", () => {
+  it("a narrower viewport crops a narrower region, not the nominal one", () => {
+    // Same image, same scale, same offset: only the box the user sees differs.
+    const wide = cropRect(0, 0, 1, 300, 300);
+    const narrow = cropRect(0, 0, 1, 251, 300);
+    expect(narrow.sw).toBeLessThan(wide.sw);
+    expect(narrow.sw).toBeCloseTo(251, 5);
+    expect(narrow.sh).toBeCloseTo(300, 5);
+  });
+
+  it("cover scale is computed against the real viewport too", () => {
+    // A tall image is scaled to cover the box's WIDTH, so the nominal 300 magnified
+    // it more than the 251 actually on screen — the other half of what shifted.
+    expect(coverScale(100, 1000, 251, 300)).toBeLessThan(coverScale(100, 1000, 300, 300));
+  });
+
+  it("centring puts the image in the middle of the box actually rendered", () => {
+    const { ox } = centerOffset(400, 400, 251, 300);
+    expect(ox).toBeCloseTo((251 - 400) / 2, 5);
+  });
+});

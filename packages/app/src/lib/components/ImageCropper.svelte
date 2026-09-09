@@ -25,8 +25,24 @@
     onCancel: () => void;
   } = $props();
 
-  const VIEW_W = 300; // logical viewport width in px; height derives from aspect
-  const viewH = $derived(VIEW_W / aspect);
+  /**
+   * The viewport's ACTUAL rendered width, measured rather than assumed.
+   *
+   * This was a fixed `VIEW_W = 300` used both to lay the element out and to
+   * compute the crop, while `.viewport { max-width: 100% }` clamped the rendered
+   * width and not the height. On a 320px phone the content box is ~251px, so the
+   * user framed their photo in a 251×300 box and `confirm()` cropped a 300×300
+   * one: they got roughly 50px down each side that they never saw, and the pan
+   * maths disagreed with the pointer by the same ratio. Every avatar and banner
+   * on a narrow phone came out framed differently from how it looked.
+   *
+   * 300 is the DESIRED width and stays the layout target; `viewW` is what the
+   * browser actually gave us, and everything geometric derives from that.
+   */
+  const VIEW_W = 300;
+  let measuredW = $state(0);
+  const viewW = $derived(measuredW > 0 ? measuredW : VIEW_W);
+  const viewH = $derived(viewW / aspect);
 
   let bitmap = $state<ImageBitmap | undefined>(undefined);
   let ready = $state(false);
@@ -41,7 +57,7 @@
     objectUrl = URL.createObjectURL(file);
     try {
       bitmap = await createImageBitmap(file);
-      baseScale = coverScale(bitmap.width, bitmap.height, VIEW_W, viewH);
+      baseScale = coverScale(bitmap.width, bitmap.height, viewW, viewH);
       center();
       ready = true;
     } catch {
@@ -60,11 +76,11 @@
   const dispH = $derived(bitmap ? bitmap.height * baseScale * zoom : 0);
 
   function center() {
-    ({ ox, oy } = centerOffset(dispW, dispH, VIEW_W, viewH));
+    ({ ox, oy } = centerOffset(dispW, dispH, viewW, viewH));
   }
   function clamp() {
     // The image must always cover the viewport (no empty edges).
-    ({ ox, oy } = clampOffset(ox, oy, dispW, dispH, VIEW_W, viewH));
+    ({ ox, oy } = clampOffset(ox, oy, dispW, dispH, viewW, viewH));
   }
   // Keyboard panning (audit §7.3.2): arrows nudge the crop for pointer-free use.
   function onViewportKey(e: KeyboardEvent) {
@@ -77,7 +93,7 @@
     const dir = map[e.key];
     if (!dir || !ready) return;
     e.preventDefault();
-    ({ ox, oy } = panBy(dir, ox, oy, dispW, dispH, VIEW_W, viewH));
+    ({ ox, oy } = panBy(dir, ox, oy, dispW, dispH, viewW, viewH));
   }
   $effect(() => {
     void zoom; // re-clamp when zoom changes
@@ -100,7 +116,7 @@
   }
   function onPointerMove(e: PointerEvent) {
     if (!dragging) return;
-    // Viewport is rendered at VIEW_W CSS px too (max-width guard below), so 1:1.
+    // The viewport is measured in CSS px, so pointer movement maps 1:1.
     ox = startOx + (e.clientX - startX);
     oy = startOy + (e.clientY - startY);
     clamp();
@@ -118,7 +134,7 @@
     const c2d = canvas.getContext("2d");
     if (!c2d) return onCancel();
     // Map the viewport region back into image space.
-    const { sx, sy, sw, sh } = cropRect(ox, oy, baseScale * zoom, VIEW_W, viewH);
+    const { sx, sy, sw, sh } = cropRect(ox, oy, baseScale * zoom, viewW, viewH);
     c2d.drawImage(bitmap, sx, sy, sw, sh, 0, 0, outWidth, outH);
     const type = file.type === "image/png" ? "image/png" : "image/jpeg";
     canvas.toBlob((b) => (b ? onConfirm(b) : onCancel()), type, 0.9);
@@ -160,6 +176,7 @@
       role="group"
       aria-label={t("cropper.viewportLabel")}
       tabindex="0"
+      bind:clientWidth={measuredW}
       style="width:{VIEW_W}px;height:{viewH}px"
       onpointerdown={onPointerDown}
       onpointermove={onPointerMove}
