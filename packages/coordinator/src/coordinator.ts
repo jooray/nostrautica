@@ -3749,8 +3749,32 @@ export class Coordinator {
           coordinate,
           pubkey,
         });
+        // Re-enqueue the speaker's untranscribed talks too (audit B-4).
+        // `clearAttendeeJobMemo` deliberately covers `process_talk` — a poisoned talk
+        // row is otherwise unrecoverable, because its dedupe key is content-addressed
+        // on the media hash and re-submitting the identical recording reproduces it
+        // exactly. But deleting that row was only half the repair: nothing re-created
+        // the job, so reprocess left the talk permanently transcript-less and the
+        // speaker's only remedy was to re-record. The talks are re-enqueued under the
+        // same key shape the submission path uses, which the delete above has just
+        // freed.
+        let talksQueued = 0;
+        for (const talk of this.deps.store.untranscribedTalksBySpeaker(coordinate, pubkey)) {
+          const x = parseStoredJson<MediaDescriptor>(talk.media_json, `${short(pubkey)} talk ${talk.talk_d} media`)?.x;
+          if (!x) continue; // no blob to fetch (defensive; the query already excludes external talks)
+          if (
+            this.jobs.enqueue("process_talk", `talk:${coordinate}:${pubkey}:${talk.talk_d}:${x}`, {
+              coordinate,
+              pubkey,
+              talkD: talk.talk_d,
+            }) === "enqueued"
+          ) {
+            talksQueued++;
+          }
+        }
         log(
-          `[admin] reprocess ${coordinate} ${short(pubkey)}: cleared ${forgotten} finished job row(s), enqueue ${outcome}`,
+          `[admin] reprocess ${coordinate} ${short(pubkey)}: cleared ${forgotten} finished job row(s), enqueue ${outcome}` +
+            (talksQueued > 0 ? `, re-queued ${talksQueued} untranscribed talk(s)` : ""),
         );
       }
     } else if (cmd === "revoke") {

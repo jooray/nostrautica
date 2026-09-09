@@ -2138,6 +2138,29 @@ export class Store {
       .run(status, publishedAt, publishedEckId ?? null, now, coordinate, pubkey, talkD);
   }
 
+  /**
+   * A speaker's talks that are still waiting for a transcript and could actually
+   * get one: Blossom media (never an `external_url` — those are never fetched, C3
+   * SSRF allowlist) that the speaker opted into matching, with no transcript
+   * attached and not rejected by the organizer. This is the set an organizer
+   * `reprocess` has to re-enqueue (audit B-4): `clearAttendeeJobMemo` deletes the
+   * poisoned `process_talk` row, but its dedupe key is content-addressed on the
+   * media hash, so nothing re-creates it — a re-submission of the identical
+   * recording reproduces the same key and is discarded.
+   */
+  untranscribedTalksBySpeaker(coordinate: string, pubkey: string): TalkRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM talks
+          WHERE coordinate = ? AND pubkey = ?
+            AND transcript_json IS NULL
+            AND external_url IS NULL
+            AND process_for_matching = 1
+            AND status != 'rejected'`,
+      )
+      .all(coordinate, pubkey) as unknown as TalkRow[];
+  }
+
   /** Every 'published' talk of an event (COORD-7: republish under a rotated ECK). */
   publishedTalksForEvent(coordinate: string): TalkRow[] {
     return this.db

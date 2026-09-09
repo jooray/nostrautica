@@ -1547,6 +1547,44 @@ async function admin(
   await h.coordinator.handleCoordinatorWrap(wrap as any);
 }
 
+describe("audit B-4 — reprocess repairs a poisoned TALK, not just the attendee profile", () => {
+  it("re-enqueues the speaker's untranscribed talk so a fixed outage can actually transcribe it", async () => {
+    // `clearAttendeeJobMemo` deliberately covers `process_talk`, because a poisoned
+    // talk row is otherwise unrecoverable: its dedupe key is content-addressed on
+    // the media hash, so re-submitting the identical recording reproduces the same
+    // key and the enqueue is discarded. Deleting the row was only half the repair —
+    // nothing re-created the job, so the organizer's reprocess left the talk
+    // transcript-less for good and the speaker's only remedy was to re-record
+    // something they had already recorded.
+    const opts = { talks: "on" as const, failTranscribe: true };
+    const h = await setup(0, opts);
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    const x = "ab".repeat(32);
+    await submitTalk(h, speakerSk, {
+      talkD: "t1",
+      title: "Zero-knowledge proofs",
+      media: talkMedia(700, x),
+      processForMatching: true,
+    });
+
+    // Burn the retry tail until the talk job poisons (STT/blob outage).
+    for (let i = 0; i < 30; i++) {
+      await h.coordinator.jobs.drain();
+      h.clock.t += 5 * 60 * 60_000;
+    }
+    expect(h.store.getTalk(h.coordinate, pk, "t1")?.transcript_json).toBeNull();
+    expect(h.store.jobStateCounts().poison).toBeGreaterThan(0);
+
+    // The outage is over and the organizer presses reprocess for this speaker.
+    opts.failTranscribe = false;
+    await admin(h, "reprocess", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+
+    expect(h.store.getTalk(h.coordinate, pk, "t1")?.transcript_json).not.toBeNull();
+  });
+});
+
 /** Every published 31610 talk entry (decrypted). */
 function publishedTalks(h: Harness) {
   return h.transport.published
