@@ -323,9 +323,29 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
     steps.push(matches);
   }
 
-  // Monotonic latch: any step that was ever complete stays complete.
+  // Monotonic latch: any step that was ever complete stays complete — unless we can
+  // see, right now, that there is nothing there (audit A-2).
+  //
+  // The latch exists so a finished step doesn't flicker back to "checking" when a
+  // later fetch fails offline: it outranks an ABSENCE of evidence, and it keeps
+  // outranking it (a stale cached 21606 poison notice plus an unreadable entry must
+  // not tell someone whose profile is fine that it failed — that is the
+  // `processed === undefined` case, and the latch still wins there).
+  //
+  // `processed === false` is not an absence of evidence. It means the attendee's
+  // directory entry WAS read and carries no ai_profile: nothing is built, they are
+  // absent from everyone's matches, and the coordinator has sealed them a 21606
+  // saying why. Latching over that produced a stepper reading 5 of 5 complete with
+  // `primary === undefined` — no next step, nothing to do — for exactly the person
+  // who most needed one: someone whose re-submission poisoned after a first pass had
+  // succeeded. The failure banner said so at the top of the same screen while the
+  // journey widget underneath said everything was fine.
+  //
+  // A confirmed ai_profile still wins outright (`processed === true` never yields
+  // `failed` above), so a later failure genuinely never un-builds a built profile.
+  const nothingBuilt = input.processed === false && !!input.processingFailed;
   for (const s of steps) {
-    if (input.latched.has(s.id)) {
+    if (input.latched.has(s.id) && !(s.state === "failed" && nothingBuilt)) {
       s.state = "complete";
       s.hintKey = undefined;
     }
