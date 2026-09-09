@@ -167,6 +167,49 @@
   let grantPoll: ReturnType<typeof setInterval> | undefined;
   onDestroy(() => clearInterval(grantPoll));
 
+  /**
+   * Re-check the journey's network inputs (directory entry, match list) and the
+   * gift-wrap scan that carries the coordinator's own-status notices.
+   *
+   * On demand and on return to the tab, NOT on a timer. For a NIP-46 identity every
+   * one of these steps is a signer round-trip — Amber pops a dialog — so a 20-second
+   * background poll would trade "the card is stale" for "the phone asks permission
+   * three times a minute". The user-visible cost of a stale card was that people
+   * reloaded the page, which re-runs the whole boot path; a button that costs one
+   * directory read is strictly cheaper than the thing they were already doing.
+   */
+  let refreshingReadiness = false;
+  async function refreshReadiness() {
+    const c = ctx;
+    const signer = session.signer;
+    if (!c || !signer || refreshingReadiness) return;
+    refreshingReadiness = true;
+    try {
+      // The 21606 "your pipeline failed / recovered" notices arrive as gift wraps,
+      // so without this the journey would re-derive from the same stale statuses.
+      await receiveGrants(signer).catch(() => {});
+      await readinessStore.load(c, signer);
+    } finally {
+      refreshingReadiness = false;
+    }
+  }
+
+  // Coming back to the tab is the moment a person actually wants a fresh answer,
+  // and it is naturally rate-limited by them looking away. Bounded by a floor so
+  // flipping between tabs doesn't re-run it on every switch.
+  const READINESS_REVISIT_MS = 60_000;
+  function onVisible() {
+    if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+    const at = readinessStore.lastCheckedAt;
+    if (at !== undefined && Date.now() - at < READINESS_REVISIT_MS) return;
+    if (readinessStore.coordinate !== ctx?.coordinate) return;
+    void refreshReadiness();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", onVisible);
+    onDestroy(() => document.removeEventListener("visibilitychange", onVisible));
+  }
+
   function startGrantPolling() {
     if (grantPoll) return;
     grantPoll = setInterval(() => {
@@ -843,7 +886,13 @@
        a module singleton, so without it a card derived for the PREVIOUS event
        renders here, CTA and all. -->
   {#if readinessStore.readiness && readinessStore.coordinate === ctx.coordinate && !previewing}
-    <ReadinessJourney readiness={readinessStore.readiness} {naddr} />
+    <ReadinessJourney
+      readiness={readinessStore.readiness}
+      {naddr}
+      lastCheckedAt={readinessStore.lastCheckedAt}
+      onRefresh={session.signer ? refreshReadiness : undefined}
+      refreshing={readinessStore.loading}
+    />
   {/if}
 
   {#if recoverResult === "restored"}

@@ -350,8 +350,18 @@ export const messages = {
     "readiness.hint.empty":
       "Your profile is empty, so matching has nothing to go on and you won't appear in anyone's matches. A line about yourself or a few skills is enough.",
     "readiness.cta.matches": "See your matches",
+    "readiness.cta.rerecord": "Record your intro again",
+    "readiness.lastChecked": "Last checked {time}.",
+    "readiness.checkAgain": "Check again",
+    "readiness.checking": "Checking…",
+    "readiness.cta.editProfile": "Edit your profile",
+    "readiness.hint.failed":
+      "The coordinator couldn't build your profile. Editing and saving it sends it again.",
+    "readiness.hint.failedMedia":
+      "Your recording couldn't be processed. Recording a new one usually fixes it.",
     "readiness.state.done": "Done",
     "readiness.state.current": "Current step",
+    "readiness.state.failed": "Needs your attention",
     "readiness.state.upcoming": "Upcoming",
 
     "event.organizerAdmin": "Organizer admin",
@@ -1887,8 +1897,18 @@ export const messages = {
     "readiness.hint.empty":
       "Tvoj profil je prázdny, párovanie nemá z čoho vychádzať a v ničích návrhoch sa neobjavíš. Stačí veta o sebe alebo pár zručností.",
     "readiness.cta.matches": "Zobraziť spojenia",
+    "readiness.cta.rerecord": "Nahrať predstavenie znova",
+    "readiness.lastChecked": "Naposledy overené o {time}.",
+    "readiness.checkAgain": "Overiť znova",
+    "readiness.checking": "Overuje sa…",
+    "readiness.cta.editProfile": "Upraviť profil",
+    "readiness.hint.failed":
+      "Koordinátorovi sa nepodarilo zostaviť tvoj profil. Keď ho upravíš a uložíš, odošle sa znova.",
+    "readiness.hint.failedMedia":
+      "Tvoju nahrávku sa nepodarilo spracovať. Zvyčajne pomôže nahrať novú.",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuálny krok",
+    "readiness.state.failed": "Vyžaduje tvoju pozornosť",
     "readiness.state.upcoming": "Nasleduje",
 
     "event.organizerAdmin": "Administračné rozhranie udalosti",
@@ -3416,8 +3436,18 @@ export const messages = {
     "readiness.hint.empty":
       "Tvůj profil je prázdný, párování nemá z čeho vycházet a v ničích návrzích se neobjevíš. Stačí věta o sobě nebo pár dovedností.",
     "readiness.cta.matches": "Zobrazit spojení",
+    "readiness.cta.rerecord": "Nahrát představení znovu",
+    "readiness.lastChecked": "Naposledy ověřeno v {time}.",
+    "readiness.checkAgain": "Ověřit znovu",
+    "readiness.checking": "Ověřuje se…",
+    "readiness.cta.editProfile": "Upravit profil",
+    "readiness.hint.failed":
+      "Koordinátorovi se nepodařilo sestavit tvůj profil. Když ho upravíš a uložíš, odešle se znovu.",
+    "readiness.hint.failedMedia":
+      "Tvou nahrávku se nepodařilo zpracovat. Obvykle pomůže nahrát novou.",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuální krok",
+    "readiness.state.failed": "Vyžaduje tvou pozornost",
     "readiness.state.upcoming": "Nadcházející",
 
     "event.organizerAdmin": "Administrační rozhraní akce",

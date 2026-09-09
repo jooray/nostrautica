@@ -44,6 +44,7 @@ import {
   hasIntro as hasIntroFrom,
 } from "$lib/media/submit.js";
 import { online } from "$lib/stores/online.svelte.js";
+import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 type Role = ReadinessInput["role"];
@@ -51,8 +52,39 @@ type Role = ReadinessInput["role"];
 /** The inputs the store gathers; everything else in ReadinessInput is from ctx. */
 type Gathered = Pick<
   ReadinessInput,
-  "role" | "backupAcked" | "hasIntro" | "profileEmpty" | "processed" | "matchesAvailable"
+  | "role"
+  | "backupAcked"
+  | "hasIntro"
+  | "profileEmpty"
+  | "processed"
+  | "matchesAvailable"
 >;
+
+/**
+ * The coordinator job whose failure the "Processing" step describes. Other
+ * attendee-scoped poisons (a talk, a chat device, a later matching stage) have
+ * their own banner and their own remedy on their own screen — folding them in
+ * here would tell someone whose PROFILE is fine that their profile failed.
+ */
+const PROCESSING_STAGE = "process_attendee";
+
+/**
+ * The attendee's own "your profile pipeline stopped" notice for this event, or
+ * `undefined`. Reads the reactive store (kept live by the grant scan) and, on a
+ * cold start, the persisted copy the store seeds from — the notice arrives on the
+ * gift-wrap scan, which is exactly the thing the local paint phase runs ahead of.
+ */
+function processingFailureFor(coordinate: string): ReadinessInput["processingFailed"] {
+  const notice = ownStatusStore
+    .poison(coordinate)
+    .find((s) => s.stage === PROCESSING_STAGE);
+  if (!notice) return undefined;
+  return {
+    stage: notice.stage,
+    errorCategory: notice.error_category,
+    retryable: notice.retryable,
+  };
+}
 
 // Persist the last derived readiness + the monotonic latch per coordinate
 // (owner-scoped, CACHING-PLAN §2.7) so the journey widget paints instantly on
@@ -107,6 +139,19 @@ class ReadinessStore {
    */
   coordinate = $state<string | undefined>(undefined);
   loading = $state(false);
+  /**
+   * Epoch ms of the last completed network refresh for `coordinate`, or
+   * `undefined` when only the local phase has run.
+   *
+   * The journey answers "what do I do next", and for an approved member nothing
+   * re-derived it after the first load — no interval, no subscription — so
+   * "Matches ready" and (now) "Processing failed" appeared only if the user
+   * happened to reload. They did reload, repeatedly, because the card gave no
+   * sign it was a snapshot. Surfacing when it was last checked, next to a
+   * refresh that costs one directory read instead of a whole boot, is the honest
+   * version of that.
+   */
+  lastCheckedAt = $state<number | undefined>(undefined);
   private latch = new Map<string, Set<ReadinessStepId>>();
   private token = 0;
   /**
@@ -135,6 +180,7 @@ class ReadinessStore {
     this.coordinate = undefined;
     this.refined = false;
     this.loading = false;
+    this.lastCheckedAt = undefined;
     this.activeContext = undefined;
     this.activeSigner = null;
     this.activeParts = undefined;
@@ -299,6 +345,7 @@ class ReadinessStore {
       if (tok !== this.token) return;
       this.commit(coord, this.derive(ctx, signer, parts));
       this.refined = true;
+      this.lastCheckedAt = Date.now();
     } finally {
       if (tok === this.token) this.loading = false;
     }
@@ -330,6 +377,11 @@ class ReadinessStore {
       online: online.isOnline,
       latched: this.latchFor(ctx.coordinate),
       ...parts,
+      // Read at DERIVE time, not gathered into `parts`: the notice arrives on the
+      // grant scan, which runs after (and independently of) the phases that build
+      // `parts`, so pinning it to a phase would paint a stale "still processing"
+      // for one whole refresh cycle after the failure landed.
+      processingFailed: processingFailureFor(ctx.coordinate),
     };
     return deriveReadiness(input);
   }

@@ -79,6 +79,21 @@ export interface ReadinessInput {
    */
   profileEmpty?: boolean;
   processed?: boolean; // undefined = unknown
+  /**
+   * The coordinator told THIS attendee their own pipeline stopped (a 21606 sealed
+   * to them, NIP §6.3 — `ownStatusStore.poison`). Positive evidence only:
+   * `undefined` means no failure notice has reached this device, never "it's
+   * fine". `stage` is the job type ("process_attendee" / "process_talk" / …),
+   * `errorCategory` the coordinator's sanitized class (see `errorCategory()` in
+   * the daemon: media_fetch / media_integrity / media_processing / provider_* / …).
+   *
+   * Without this the stepper had no way to say "failed" — `processed` is derived
+   * from "does the directory entry carry an ai_profile", which a poisoned job
+   * leaves false forever, so a stranded attendee read "Processing, the
+   * coordinator is building your profile" indefinitely while a separate banner on
+   * the same screen said it had failed.
+   */
+  processingFailed?: { stage?: string; errorCategory?: string; retryable?: boolean };
   matchesAvailable?: boolean; // undefined = unknown
   matchingEnabled: boolean;
   hasCoordinator: boolean;
@@ -116,12 +131,34 @@ const LABEL: Record<ReadinessStepId, MessageKey> = {
   matches: "readiness.step.matches",
 };
 
+/**
+ * Categories the coordinator emits when the failure is about the MEDIA the
+ * attendee uploaded rather than about their authored profile (`errorCategory()`
+ * in the daemon). These are the only ones where "re-record" is the useful next
+ * step; anything else (a provider contract error, a billing block, an internal
+ * fault) is not fixed by pointing a camera at yourself again.
+ */
+const MEDIA_ERROR_CATEGORIES = new Set(["media_fetch", "media_integrity", "media_processing"]);
+
+export function isMediaFailure(errorCategory?: string): boolean {
+  return errorCategory !== undefined && MEDIA_ERROR_CATEGORIES.has(errorCategory);
+}
+
 function primaryFor(
   id: ReadinessStepId,
   naddr: string,
   profileEmpty?: boolean,
+  processingFailed?: ReadinessInput["processingFailed"],
 ): { labelKey: MessageKey; route: Route } | undefined {
   switch (id) {
+    case "processing":
+      // Only reachable for a FAILED processing step (an in-progress one carries no
+      // CTA — see deriveReadiness). A media failure is fixed by re-recording; a
+      // failure in the derived-profile stage is not, so send those to the profile
+      // editor, whose re-submit re-drives the same pipeline.
+      return isMediaFailure(processingFailed?.errorCategory)
+        ? { labelKey: "readiness.cta.rerecord", route: { name: "record", naddr, talk: false } }
+        : { labelKey: "readiness.cta.editProfile", route: { name: "myProfile", naddr } };
     case "joined":
       return { labelKey: "readiness.cta.join", route: { name: "join", naddr } };
     case "backup":
@@ -240,6 +277,18 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
     let processing: ReadinessStep;
     if (input.processed === true) {
       processing = { id: "processing", state: "complete", labelKey: LABEL.processing };
+    } else if (input.processingFailed) {
+      // The coordinator said so, in a 21606 sealed to this attendee. It outranks
+      // the absence-of-ai_profile inference below, which cannot distinguish "still
+      // working" from "stopped working" and therefore always chose the former.
+      processing = {
+        id: "processing",
+        state: "failed",
+        labelKey: LABEL.processing,
+        hintKey: isMediaFailure(input.processingFailed.errorCategory)
+          ? "readiness.hint.failedMedia"
+          : "readiness.hint.failed",
+      };
     } else if (input.processed === false) {
       processing = {
         id: "processing",
@@ -291,11 +340,17 @@ export function deriveReadiness(input: ReadinessInput): Readiness {
   // step is "joined" — a pending/visitor user must never be pushed to back up or
   // record an intro when the actual blocker is joining/approval. Backup + intro
   // become primaries only once the viewer is a member.
+  // "failed" is actionable in exactly the way "action-required" is — something
+  // stopped and the person can do something about it — so it earns the same single
+  // primary CTA. It comes FIRST: a step the coordinator has reported as failed is a
+  // more urgent answer to "what do I do next" than an optional intro nudge further
+  // up the list. Without this a stranded attendee got `primary === undefined` and
+  // the one widget whose job is to name the next step named nothing.
   const actionStep = isMember
-    ? steps.find((s) => s.state === "action-required")
+    ? (steps.find((s) => s.state === "failed") ?? steps.find((s) => s.state === "action-required"))
     : steps.find((s) => s.id === "joined" && s.state === "action-required");
   const primary = actionStep
-    ? primaryFor(actionStep.id, input.naddr, input.profileEmpty)
+    ? primaryFor(actionStep.id, input.naddr, input.profileEmpty, input.processingFailed)
     : undefined;
 
   const matchesReady = steps.some((s) => s.id === "matches" && s.state === "complete");

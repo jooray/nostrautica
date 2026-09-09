@@ -2697,7 +2697,17 @@ export class Coordinator {
     }
     // The pipeline succeeded: clear any previously surfaced poison status for
     // this attendee's stages (audit COORD-15) so the organizer view recovers.
-    this.deps.store.clearPoisonStatuses(coordinate, pubkey);
+    // ANNOUNCE the clear as well as recording it (NIP §6.3 `state: "cleared"`).
+    // The DB update alone only fixes the ORGANIZER's Admin view, which reads the
+    // rows directly; the attendee has nothing but the 21606 they were sealed, and
+    // it is cached on their device — so without this the "your profile couldn't be
+    // processed" banner (and, since the readiness journey learned to say "failed",
+    // the stepper too) stayed on screen for good after the retry that fixed it.
+    if (this.deps.store.clearPoisonStatuses(coordinate, pubkey) > 0) {
+      await this.announceCleared(state, pubkey).catch((e) =>
+        log(`[status] could not announce cleared status for ${short(pubkey)}: ${e instanceof Error ? e.message : e}`),
+      );
+    }
     await this.publishDirectory(state, pubkey);
     // Nothing to match on: leaving already-cached pairs in place would keep this
     // person in other people's published lists, and any pair scored before (or,
@@ -4932,6 +4942,34 @@ export class Coordinator {
    * gift-wrap a 21606 status to E_id so it's visible from the Admin UI (app-side)
    * without server logs. `error_category` is a sanitized class, never attendee text.
    */
+  /**
+   * Announce that an attendee's previously-poisoned pipeline recovered (NIP §6.3,
+   * `state: "cleared"`). Sealed to the organizer AND to the attendee, mirroring
+   * {@link surfacePoison}, because both surfaces cache the poison notice and
+   * neither has any other way to learn it stopped being true.
+   *
+   * Best-effort by design: the recovery already happened and is recorded durably,
+   * so a relay failure here must not fail the pipeline run. The next successful
+   * run re-announces (the DB row is already `cleared`, so it won't — see the
+   * caller's `> 0` guard; a stuck banner past a relay outage is the residual cost,
+   * and it clears on the attendee's next real failure/success cycle).
+   */
+  private async announceCleared(state: EventState, pubkey: string): Promise<void> {
+    const content: import("@nostrautica/protocol").CoordinatorStatusContent = {
+      v: 2,
+      a: state.coordinate,
+      pubkey,
+      stage: "process_attendee",
+      state: "cleared",
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    };
+    const relays = this.accountRelays(state);
+    await this.publish(buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, content), relays);
+    await this.publish(buildCoordinatorStatus(this.deps.coordSk, pubkey, content), relays);
+    log(`[status] announced cleared process_attendee for ${short(pubkey)} to organizer + attendee`);
+  }
+
   private async surfacePoison(info: import("./pipeline/jobs.js").PoisonInfo): Promise<void> {
     const coordinate = typeof info.payload?.coordinate === "string" ? info.payload.coordinate : undefined;
     if (!coordinate) return;
