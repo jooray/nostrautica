@@ -729,6 +729,14 @@ export const myProfileContentSchema = z.object({
   // (survives a device change, unlike a device-local counter). Absent on the
   // reuse-library entry and on pre-rev self-copies (treated as "no submission yet").
   rev: z.number().int().nonnegative().optional(),
+  // The same thing for 21608 ai_profile CORRECTIONS, which carry their own §3.3
+  // `rev` and are ordered against the stored one by the coordinator. It was kept
+  // only in device-local storage, so a second device started again from 0 and every
+  // edit it made lost to the first device's stored rev — discarded server-side while
+  // the UI said "saved" (audit A-5). Same reasoning as `rev` above: this entry is
+  // the client's own durable per-event store, and it is self-encrypted, so nothing
+  // else on the wire reads it.
+  correction_rev: z.number().int().nonnegative().optional(),
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 

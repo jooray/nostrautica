@@ -39,7 +39,14 @@ import { t } from "$lib/i18n/i18n.svelte.js";
 // The self-copy (31602) and reuse library are decrypted private data, cached
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
 // readiness paint the last intro/library instantly instead of re-decrypting.
-type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string; rev?: number };
+type SelfCopy = {
+  profile?: AttendeeProfile;
+  media: MediaDescriptor[];
+  introText?: string;
+  rev?: number;
+  /** The last 21608 correction `rev` sent for this event (audit A-5). */
+  correctionRev?: number;
+};
 
 // Parameterized replaceable events created in the same wall-clock second must
 // not rely on the event-id tie-break to decide which edit survives. Keep each
@@ -72,6 +79,10 @@ function selfCopyKey(coordinate: string): string {
 /** Persisted high-water mark of the `rev` this device has ever SENT (NIP §3.3). */
 function selfRevKey(coordinate: string): string {
   return `selfrev:${coordinate}`;
+}
+/** The same, for 21608 ai_profile corrections (audit A-5). */
+function correctionRevKey(coordinate: string): string {
+  return `corrrev:${coordinate}`;
 }
 const MEDIALIB_KEY = "medialib";
 const TEXTLIB_KEY = "textlib";
@@ -163,7 +174,77 @@ export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
 export function cacheSelfCopy(coordinate: string, self: SelfCopy, at: number): void {
   cacheSet(selfCopyKey(coordinate), self, at);
   if (typeof self.rev === "number") nextRevFloor(coordinate, self.rev);
+  if (typeof self.correctionRev === "number") {
+    // Same high-water discipline as `rev`: raise, never lower (audit A-5).
+    const floor = Math.max(cacheGet<number>(correctionRevKey(coordinate))?.data ?? -1, self.correctionRev);
+    cacheSet(correctionRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
+  }
 }
+/** This device's persisted high-water mark for 21608 correction revs, or undefined. */
+export function cachedCorrectionRev(coordinate: string): number | undefined {
+  const stored = cacheGet<number>(correctionRevKey(coordinate))?.data;
+  return typeof stored === "number" ? stored : undefined;
+}
+
+/**
+ * Claim the next 21608 correction `rev` for this event, monotonic ACROSS DEVICES
+ * (audit A-5).
+ *
+ * The correction counter used to live only in this device's `localStorage`, so a
+ * second device (or a cleared profile) started again from 0 while the coordinator
+ * still held rev 3 from the first — and it orders corrections by
+ * `(rev, created_at, id)`, so every edit the new device made was discarded
+ * server-side while the UI reported "saved". Delivery had genuinely succeeded;
+ * application had not, and nothing told the user.
+ *
+ * The floor is therefore taken from BOTH the relay-backed 31602 self-copy (which
+ * survives a device change) and the local high-water mark, exactly as
+ * {@link nextRev} does for submissions: a failed or empty relay read can only fail
+ * to ADVANCE the counter, never roll it back. The returned `record` publishes the
+ * new value into the self-copy so the NEXT device sees it; the local mark is
+ * written before either, so a failed publish still can't reissue this rev.
+ */
+export async function claimCorrectionRev(
+  signer: AppSigner,
+  ctx: EventContext,
+  blindingKey: Uint8Array,
+): Promise<{ rev: number; record: () => Promise<void> }> {
+  const self = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
+  const floor = Math.max(cachedCorrectionRev(ctx.coordinate) ?? -1, self?.correctionRev ?? -1);
+  const rev = floor + 1;
+  // Wall clock as the cache timestamp, NOT `rev` — a revision counter read as a
+  // timestamp is 1970, and the 30-day prune then deletes the high-water mark on the
+  // next boot (the trap `nextRev` documents).
+  cacheSet(correctionRevKey(ctx.coordinate), rev, Math.floor(Date.now() / 1000));
+  return {
+    rev,
+    record: async () => {
+      const attendeePubkey = await signer.getPublicKey();
+      const selfD = blindedD(blindingKey, ctx.coordinate, attendeePubkey);
+      const key = selfCopyKey(ctx.coordinate);
+      const merged: SelfCopy = { ...(self ?? { media: [] }), correctionRev: rev };
+      const content = {
+        v: 2,
+        a: ctx.coordinate,
+        profile: merged.profile,
+        media: merged.media,
+        ...(merged.introText ? { intro_text: merged.introText } : {}),
+        ...(merged.rev !== undefined ? { rev: merged.rev } : {}),
+        correction_rev: rev,
+      };
+      const cipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(content));
+      const event = await signer.signEvent({
+        kind: KIND_MY_PROFILE,
+        created_at: nextReplaceableTimestamp(selfD, cacheGet<SelfCopy>(key)?.at),
+        tags: [["d", selfD]],
+        content: cipher,
+      });
+      await publishOrQueue(event);
+      cacheSelfCopy(ctx.coordinate, merged, event.created_at);
+    },
+  };
+}
+
 /** Cached reuse-library media (no network), or undefined. */
 export function cachedLibrary(): MediaDescriptor[] | undefined {
   return cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.data;
@@ -341,6 +422,10 @@ export async function submitProfileAndMedia(
   // 31602 self-copy (blinded d over the self-conversation key). Keeps the
   // attendee's own device holding their authored text intro too, and the `rev`
   // just sent so the next edit bumps from it.
+  // Carry the correction rev forward (audit A-5). Every submission REPLACES this
+  // 31602, and Zod strips what the schema doesn't name, so a submission that didn't
+  // re-emit it would erase the only cross-device record of the correction counter.
+  const carriedCorrectionRev = prevSelf?.correctionRev ?? cachedCorrectionRev(ctx.coordinate);
   const selfContent = {
     v: 2,
     a: ctx.coordinate,
@@ -348,6 +433,7 @@ export async function submitProfileAndMedia(
     profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
+    ...(carriedCorrectionRev !== undefined ? { correction_rev: carriedCorrectionRev } : {}),
   };
   const selfKey = selfCopyKey(ctx.coordinate);
   const selfD = blindedD(args.blindingKey, ctx.coordinate, attendeePubkey);
@@ -364,7 +450,7 @@ export async function submitProfileAndMedia(
     // persisted it. Write through before navigation can re-read stale intro state.
     cacheSelfCopy(
       ctx.coordinate,
-      { profile, media: args.media, introText, rev } satisfies SelfCopy,
+      { profile, media: args.media, introText, rev, correctionRev: carriedCorrectionRev } satisfies SelfCopy,
       selfEvent.created_at,
     );
     return published;
@@ -514,12 +600,14 @@ export async function loadSelfCopy(
         media?: MediaDescriptor[];
         intro_text?: string;
         rev?: number;
+        correction_rev?: number;
       };
       const self: SelfCopy = {
         profile: parsed.profile,
         media: parsed.media ?? [],
         introText: parsed.intro_text,
         rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
+        correctionRev: typeof parsed.correction_rev === "number" ? parsed.correction_rev : undefined,
       };
       cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
       return self;

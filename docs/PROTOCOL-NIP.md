@@ -364,6 +364,7 @@ silently drop them.
     rev?: int ≥0                     // per-event self-copy only; the client's own
                                       // durable store of the last 21601 `rev` it sent
                                       // (survives a device change)
+    correction_rev?: int ≥0           // same, for the last 21608 correction `rev`
   }
   ```
   `AttendeeProfile = { about: string ≤5000 (default ""), skills: string[≤200] ≤50
