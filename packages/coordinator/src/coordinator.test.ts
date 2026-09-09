@@ -2481,6 +2481,68 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
   });
 
+  /**
+   * Audit B-10. A suspension (NIP §3.5 — the newest 31600 wasn't fetchable at
+   * startup revalidation, which a relay outage at boot is enough to cause) drops
+   * the event out of the live map but keeps its custody and its queued work. Every
+   * event-scoped job handler then hit its `events.get()` early return, and the
+   * runner read that as SUCCESS: the row went `done`. Its dedupe key is derived
+   * from stage inputs, so when the event came back the same work could not be
+   * re-enqueued — the attendee's pipeline was simply never going to run, and
+   * nothing anywhere said so.
+   */
+  it("work queued while an event is SUSPENDED parks and resumes, instead of completing as done", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // Suspend it exactly as startup revalidation does: config unfetchable.
+    h.transport.blockConfig = true;
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+    expect(h.store.getEvent(h.coordinate)).toBeDefined(); // suspended, not detached
+
+    // Work queued (or already queued) for a suspended event must not be consumed.
+    h.coordinator.jobs.enqueue("process_attendee", `proc:${h.coordinate}:${pk}:while-suspended`, {
+      coordinate: h.coordinate,
+      pubkey: pk,
+    });
+    await h.coordinator.jobs.drain();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(1);
+
+    // The event comes back → the parked work is released and actually runs.
+    h.transport.blockConfig = false;
+    h.clock.t += 60_000;
+    await h.coordinator.retrySuspendedEvents();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+    await h.coordinator.jobs.drain();
+    expect(h.store.jobStateCounts().done).toBeGreaterThan(0);
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  it("work queued for a DETACHED event completes rather than parking forever", async () => {
+    // The mirror case: custody is deleted and the tombstone bars re-install, so
+    // there is nothing left for the work to act on and a park would be litter no
+    // release condition could ever clear.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "detach", {});
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+
+    h.coordinator.jobs.enqueue("process_attendee", `proc:${h.coordinate}:${pk}:after-detach`, {
+      coordinate: h.coordinate,
+      pubkey: pk,
+    });
+    await h.coordinator.jobs.drain();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
   // Regression (prod incident): after the v2 deploy the coordinator crash-looped at
   // startup because a still-installed pre-v2 event's newest 31600 carried ["v","1"];
   // parseEventConfig threw "unsupported v tag 1" out of installEvent → start() → fatal.

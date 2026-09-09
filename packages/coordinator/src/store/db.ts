@@ -86,6 +86,13 @@ const DAEMON_USAGE_RETENTION_HOURS = 24 * 7;
  *  shared between the thrower and the sweeper so the two cannot drift apart. */
 export const DAEMON_PARK_REASON = "daemon budget exceeded";
 
+/** Park-reason prefix for work whose EVENT is not currently live — suspended by
+ *  startup revalidation (NIP §3.5), or not yet restored (audit B-10). Same
+ *  contract as {@link DAEMON_PARK_REASON}: the reason in the row is the only thing
+ *  that distinguishes these from billing/budget parks, so the release can be scoped
+ *  to them and cannot accidentally un-park work that is waiting on money. */
+export const EVENT_NOT_LIVE_PARK_REASON = "event not live";
+
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
  * `BEGIN IMMEDIATE` transaction and, on success, `user_version` is advanced to
@@ -2957,6 +2964,24 @@ export class Store {
          WHERE state = 'waiting' AND last_error LIKE '${DAEMON_PARK_REASON}%'`,
       )
       .run();
+    return Number(info.changes);
+  }
+
+  /**
+   * Re-enqueue jobs parked because their EVENT was not live (audit B-10), for one
+   * coordinate — called when that event comes back (a successful install/restore).
+   * Reason-scoped for the same reason as {@link resumeDaemonParkedJobs}: an event
+   * coming back says nothing about a billing block or a per-event budget, and those
+   * parks must survive it.
+   */
+  resumeEventNotLiveJobs(coordinate: string): number {
+    const info = this.db
+      .prepare(
+        `UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL
+         WHERE state = 'waiting' AND json_extract(payload, '$.coordinate') = ?
+           AND last_error LIKE '${EVENT_NOT_LIVE_PARK_REASON}%'`,
+      )
+      .run(coordinate);
     return Number(info.changes);
   }
 

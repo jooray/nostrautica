@@ -94,7 +94,7 @@ import {
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
-import { Store, DAEMON_PARK_REASON, type BillingStateRow } from "./store/db.js";
+import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
@@ -1211,6 +1211,11 @@ export class Coordinator {
     // nothing (the gate that actually enforces billing is `assertSpendAllowed`, at
     // job execution, not this call), and means a billing failure leaves an event
     // that can at least hear its attendees.
+    // The event is serving again: release work parked because it wasn't (audit
+    // B-10). Reason-scoped, so a billing block or a per-event budget park — which an
+    // install says nothing about — survives untouched.
+    const revived = this.deps.store.resumeEventNotLiveJobs(grant.coordinate);
+    if (revived > 0) log(`[install] resumed ${revived} job(s) parked while ${grant.coordinate} was not live`);
     const since = grant.backfill === "full" ? 0 : giftwrapSince(Math.floor(this.now() / 1000));
     this.subscribeEventInbox(state, since);
     // Explicitly BACKFILL the E_inbox history from before this subscription's epoch
@@ -1562,6 +1567,29 @@ export class Coordinator {
     jobSignal: AbortSignal,
     fn: (signal: AbortSignal) => Promise<void>,
   ): Promise<void> {
+    // The event has to BE here for event-scoped work to mean anything (audit B-10).
+    // Every handler already returned early when `events.get()` came back undefined —
+    // and the runner read that as success, so the job was marked `done`. For a
+    // SUSPENDED event (startup revalidation could not fetch its newest 31600, NIP
+    // §3.5 — a relay outage at boot is enough) that is a silent loss: the event
+    // comes back minutes later and the work never runs again, because its dedupe key
+    // now belongs to a terminal row. Park it instead, under a reason scoped enough
+    // to release when the event returns and narrow enough to leave billing/budget
+    // parks alone.
+    //
+    // A DETACHED or uninstalled event is the opposite case and still completes: its
+    // custody is gone, the tombstone bars re-install, and there is nothing left for
+    // the work to act on — parking it forever would just be litter.
+    if (!this.events.has(coordinate)) {
+      const installed = !!this.deps.store.getEvent(coordinate);
+      if (!installed || this.deps.store.isInstallTombstoned(coordinate)) {
+        log(`[job] ${coordinate} is no longer installed — nothing to do`);
+        return;
+      }
+      throw new ParkJobError(
+        `${EVENT_NOT_LIVE_PARK_REASON}: ${coordinate} is installed but not serving (suspended or not yet restored)`,
+      );
+    }
     const eventSig = this.eventSignal(coordinate);
     const combined = AbortSignal.any([jobSignal, eventSig]);
     const set = this.activeEventHandlers.get(coordinate) ?? new Set<Promise<void>>();
