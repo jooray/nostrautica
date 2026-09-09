@@ -2548,7 +2548,17 @@ export class Coordinator {
   private parseStoredProfile(
     attendee: import("./store/db.js").AttendeeRow | undefined,
   ): { profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string } {
-    const raw = attendee?.profile_json ? JSON.parse(attendee.profile_json) : {};
+    // Same blast-radius reasoning as loadAiProfile: an unparseable row must cost
+    // this attendee their submitted fields, not throw out of every caller
+    // (publishDirectory, the pipeline, the handover backfill).
+    let raw: any = {};
+    if (attendee?.profile_json) {
+      try {
+        raw = JSON.parse(attendee.profile_json);
+      } catch (e) {
+        log(`[pipeline] ${short(attendee.pubkey)}: stored profile is not parseable JSON — treated as empty (${e instanceof Error ? e.message : e})`);
+      }
+    }
     const media = (raw.__media ?? []) as MediaDescriptor[];
     const profile: AttendeeProfile = {
       about: raw.about ?? "",
@@ -2570,13 +2580,20 @@ export class Coordinator {
     const aiFresh =
       attendee?.ai_profile_json &&
       (!attendee.source_revision || attendee.ai_source_revision === attendee.source_revision);
-    const generatedAi: AiProfile | undefined = aiFresh ? JSON.parse(attendee!.ai_profile_json!) : undefined;
+    // Guarded like the rest of this method's column reads: publishing a directory
+    // entry is on the approval, submission, correction and handover-backfill paths,
+    // and a row that can't be parsed must cost this attendee the derived half of
+    // their entry, not throw those callers into a retry loop that can never win.
+    const generatedAi: AiProfile | undefined = aiFresh
+      ? (this.loadAiProfile(state.coordinate, pubkey) as AiProfile | undefined)
+      : undefined;
     // Apply the attendee's correction/hide (F3) on top of the freshly generated
     // ai_profile. The correction lives in correction_json (not the artifact cache),
     // so it is re-applied here on EVERY publish — it survives a reprocess/recompute.
-    const correction: ProfileCorrectionContent | undefined = attendee?.correction_json
-      ? JSON.parse(attendee.correction_json)
-      : undefined;
+    const correction: ProfileCorrectionContent | undefined = parseStoredJson<ProfileCorrectionContent>(
+      attendee?.correction_json,
+      `${short(pubkey)} correction_json`,
+    );
     const { aiProfile: correctedAi, edited } = applyCorrection(generatedAi, correction);
     // Output hygiene at the publish boundary (audit COORD-12): LLM-authored text
     // is length-capped and URLs neutralized so injected content can't smuggle
@@ -2586,9 +2603,8 @@ export class Coordinator {
     // transcripts whose media is still present — a re-record changes `x`, so an old
     // transcript is silently dropped (also enforced by the 31603 schema refine).
     const liveHashes = new Set(media.map((m) => m.x));
-    const storedTranscripts = attendee?.transcripts_json
-      ? (JSON.parse(attendee.transcripts_json) as MediaTranscript[])
-      : [];
+    const storedTranscripts =
+      parseStoredJson<MediaTranscript[]>(attendee?.transcripts_json, `${short(pubkey)} transcripts_json`) ?? [];
     const transcripts = storedTranscripts.filter((tr) => liveHashes.has(tr.x));
     // Defensive size guard (audit COORD-18): NIP-44 caps plaintext at 65,535
     // bytes — bound user-authored fields so one giant field can't fail the
@@ -3130,8 +3146,9 @@ export class Coordinator {
     if (!provider.embed) return;
     const modelKey = `${this.roles.embed.provider}:${this.roles.embed.model}`;
     const textFor = (pubkey: string): string => {
-      const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-      const ai = attendee?.ai_profile_json ? JSON.parse(attendee.ai_profile_json) : {};
+      // Same reasoning as loadAiProfile: an unparseable row costs THAT attendee a
+      // useful embedding, not the whole roster's prefilter.
+      const ai = this.loadAiProfile(coordinate, pubkey) ?? {};
       return `${ai.summary ?? ""} ${(ai.skills ?? []).join(" ")} ${(ai.interests ?? []).join(" ")}`;
     };
     // Resolve cached embeddings; embed only the misses in one batched call.
@@ -3314,9 +3331,28 @@ export class Coordinator {
     return { scored, missing: missing.length };
   }
 
+  /**
+   * One attendee's stored ai_profile, or `undefined` when there isn't one — INCLUDING
+   * when the stored JSON can't be parsed.
+   *
+   * A bare `JSON.parse` here (and in the embedding text builder below) meant one
+   * corrupt row took down the whole roster's matching rather than one attendee's:
+   * the throw unwinds out of `scoreBatchJob`/`attachEmbeddings`, failing and
+   * eventually poisoning every batch that attendee appears in, which is every batch.
+   * `hasStoredProfileContent` two methods down already guards its parse of the same
+   * column; these two were the outliers. Returning `undefined` lands on the
+   * `!targetProfile` / "no profile content" paths that already exist for an
+   * attendee with nothing to match on.
+   */
   private loadAiProfile(coordinate: string, pubkey: string) {
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-    return attendee?.ai_profile_json ? JSON.parse(attendee.ai_profile_json) : undefined;
+    if (!attendee?.ai_profile_json) return undefined;
+    try {
+      return JSON.parse(attendee.ai_profile_json);
+    } catch (e) {
+      log(`[match] ${short(pubkey)}: stored ai_profile is not parseable JSON — treated as absent (${e instanceof Error ? e.message : e})`);
+      return undefined;
+    }
   }
 
   /**
@@ -5354,6 +5390,27 @@ function applyCorrection(
  * Map a job's error message to a coarse, sanitized category for organizer-visible
  * status (audit Q12). Never returns attendee text or prompts — only a class.
  */
+/**
+ * Parse a JSON column the coordinator wrote itself, treating an unparseable value
+ * as absent rather than as an exception.
+ *
+ * These are not untrusted inputs — they were schema-validated on the way in — so
+ * the only way they go bad is a partial write, a manual edit, or a disk fault. But
+ * a bare `JSON.parse` turns that one row into a throw inside `publishDirectory`,
+ * which sits on the approval, submission, correction and handover-backfill paths;
+ * the caller then retries forever against data that will never parse. Losing the
+ * derived half of one attendee's entry is the right cost.
+ */
+function parseStoredJson<T>(json: string | null | undefined, what: string): T | undefined {
+  if (!json) return undefined;
+  try {
+    return JSON.parse(json) as T;
+  } catch (e) {
+    log(`[store] ${what} is not parseable JSON — treated as absent (${e instanceof Error ? e.message : e})`);
+    return undefined;
+  }
+}
+
 function errorCategory(msg: string): string {
   const m = msg.toLowerCase();
   if (

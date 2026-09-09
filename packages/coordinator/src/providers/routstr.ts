@@ -11,6 +11,7 @@
 import type { LlmProvider, ModelInfo, PaymentStrategy, TokenUsage } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
+  parseModelJson,
   PROVIDER_TIMEOUTS,
   providerHttpError,
   readJsonCapped,
@@ -136,9 +137,32 @@ export class RoutstrLlm implements LlmProvider {
     if (typeof content !== "string") {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "no string content");
     }
+    // Both of these landed on the Venice path (PIPE-1, PIPE-13) and not here, and
+    // Routstr routes to the SAME open-weight models over the same OpenAI-compatible
+    // shape, so both failures are equally reachable through it.
+    //
+    // A response cut off at the token ceiling is unparseable JSON, and without this
+    // it is indistinguishable in the logs from a model that emitted garbage — the
+    // two want opposite responses (raise the budget vs. fix the prompt). Checked
+    // BEFORE the parse so the diagnosis survives a truncation that happens to land
+    // on a syntactically complete prefix.
+    const finish = body.choices?.[0]?.finish_reason;
+    if (finish === "length") {
+      throw new ProviderContractError(
+        this.id,
+        req.schemaName,
+        req.model,
+        `response truncated at the ${req.maxTokens ?? 4096}-token ceiling (finish_reason=length)`,
+      );
+    }
     let parsed: unknown;
     try {
-      parsed = JSON.parse(content);
+      // Lenient only in the ways a model actually malforms JSON — a ```json fence,
+      // a leading sentence. A bare JSON.parse is what makes MODEL-BAKEOFF.md's
+      // quality-and-cost winner unadoptable: it fences its output despite
+      // `strict: true`, so it fails almost every production call while
+      // benchmarking at zero format failures.
+      parsed = parseModelJson(content);
     } catch {
       throw new ProviderContractError(this.id, req.schemaName, req.model, "output was not valid JSON");
     }

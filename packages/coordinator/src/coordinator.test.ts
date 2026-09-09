@@ -4552,6 +4552,65 @@ describe("P1 #14 — the periodic inbox rescan makes \"left unseen\" recoverable
   });
 });
 
+describe("PIPE-9 — one corrupt row costs one attendee, not the whole roster", () => {
+  // `publishDirectory` read four JSON columns the coordinator wrote itself with a
+  // bare `JSON.parse`. They are not untrusted input — they were schema-validated on
+  // the way in — so the only way they go bad is a partial write, a manual edit or a
+  // disk fault. But `publishDirectory` sits on the approval, submission, correction
+  // and handover-backfill paths, and a throw there is one the caller retries
+  // forever against data that will never parse: the wrap is left unseen, every
+  // rescan re-runs it, and the attendee's entry never publishes again. Treating the
+  // row as absent costs them the derived half of their entry instead.
+  it("still publishes a directory entry when the stored profile is unparseable", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    h.store.upsertAttendee({
+      coordinate: h.coordinate,
+      pubkey: pk,
+      profileJson: "{not json",
+      now: h.clock.t,
+    });
+    const before = h.transport.published.filter((e) => e.kind === 31603).length;
+
+    // A correction is the shortest path to publishDirectory that also reports
+    // whether the handler completed (the rumor is marked seen only on success).
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 1, hidden: true },
+      tags: [["a", h.coordinate]],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    expect(h.transport.published.filter((e) => e.kind === 31603).length).toBeGreaterThan(before);
+  });
+
+  it("keeps the pipeline running for the rest of the event", async () => {
+    const h = await setup();
+    const aSk = generateSecretKey();
+    const aPk = await join(h, aSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await join(h, generateSecretKey(), "code");
+    await h.coordinator.jobs.drain();
+
+    h.store.upsertAttendee({
+      coordinate: h.coordinate,
+      pubkey: aPk,
+      profileJson: "{not json",
+      now: h.clock.t,
+    });
+    await admin(h, "reprocess", { pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    // The reprocess RAN rather than failing into the retry schedule: nothing is
+    // pending or waiting for this attendee, and no job is queued to try again.
+    expect(h.store.pendingJobCount()).toBe(0);
+    expect(h.store.poisonJobs()).toHaveLength(0);
+  });
+});
+
 describe("audit C2 — a running attendee job cannot overwrite a newer submission", () => {
   it("pausing rev1 mid-STT while rev2 lands discards rev1's stale commit and matching", async () => {
     let release: () => void = () => {};
