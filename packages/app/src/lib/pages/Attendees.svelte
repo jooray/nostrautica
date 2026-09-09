@@ -17,8 +17,14 @@
    *
    * Pure so the three-way split is unit-testable without a browser.
    */
-  export type RosterEmptyReason = "loading" | "notApproved" | "unreachable" | "none";
+  export type RosterEmptyReason = "loading" | "notApproved" | "staleKey" | "unreachable" | "none";
   export function rosterEmptyReason(s: {
+    /**
+     * Directory entries arrived that this device could not decrypt (audit EV-9).
+     * Outranks everything except `loading`: it is positive evidence that people
+     * ARE here, which makes every other empty-state sentence false.
+     */
+    undecryptable?: number;
     loading: boolean;
     /** An ECK is present, i.e. streamDirectory handed back a live stream. */
     hasKey: boolean;
@@ -28,6 +34,12 @@
   }): RosterEmptyReason {
     if (s.loading) return "loading";
     if (!s.hasKey) return "notApproved";
+    // Entries came back and none of them opened. Holding an ECK (`hasKey`) says
+    // nothing about whether it is the CURRENT one — a revoked member, or one whose
+    // grant for a rotation has not landed, holds a stale key and decrypts nothing.
+    // They were shown "Nobody is on the list yet", which is a claim about the
+    // event, and the wrong one: the people are there, this device cannot read them.
+    if ((s.undecryptable ?? 0) > 0) return "staleKey";
     // "connected" is the only state that licenses the claim "the list really is
     // empty" — idle/connecting/failed all mean we never got an answer worth
     // believing, and offline settles it outright.
@@ -107,6 +119,8 @@
   // Whether the LAST completed pass had an event key (see rosterEmptyReason).
   // Starts true so a cache-painted roster never flashes "you're not approved".
   let hasKey = $state(true);
+  /** Entries that arrived and would not decrypt under this device's ECK (EV-9). */
+  let undecryptableCount = $state(0);
   // Relay health as of the last settled pass. Sampled rather than read live so
   // the empty state doesn't flicker between reasons on the connectivity poll.
   let relayAtSettle = $state<RelayHealth>("connecting");
@@ -229,6 +243,9 @@
       });
       hasKey = stream !== undefined;
       await Promise.allSettled([social, stream?.ready]);
+      // Read AFTER the stream settles: this is the count of entries that arrived
+      // and would not open under this device's ECK (EV-9).
+      undecryptableCount = stream?.undecryptable() ?? 0;
     } catch (e) {
       error = e;
     } finally {
@@ -329,6 +346,7 @@
     rosterEmptyReason({
       loading,
       hasKey,
+      undecryptable: undecryptableCount,
       online: online.isOnline,
       relay: relayAtSettle,
     }),
@@ -349,6 +367,8 @@
     <p class="muted">
       {#if emptyReason === "unreachable"}
         {t("attendees.empty.unreachable")}
+      {:else if emptyReason === "staleKey"}
+        {t("attendees.empty.staleKey")}
       {:else if emptyReason === "notApproved"}
         {t("attendees.empty.notApproved")}
       {:else}

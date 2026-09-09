@@ -14,6 +14,30 @@ import { rosterEmptyReason } from "./Attendees.svelte";
 describe("rosterEmptyReason", () => {
   const base = { loading: false, hasKey: true, online: true, relay: "connected" } as const;
 
+  // EV-9. Holding an ECK is what `hasKey` reports, and it says nothing about
+  // whether that ECK is the CURRENT one. A member the organizer revoked, or one
+  // whose grant for a rotation has not landed, holds a stale key: entries arrive,
+  // none of them open, and the page said "Nobody is on the list yet" — a claim
+  // about the event, and the wrong one. The people are there.
+  it("says the KEY is stale when entries arrived and none decrypted", () => {
+    expect(rosterEmptyReason({ ...base, undecryptable: 3 })).toBe("staleKey");
+  });
+
+  it("outranks unreachable and empty, but never loading", () => {
+    // Undecryptable entries are positive evidence people ARE here, which makes
+    // both of those sentences false. Mid-pass we still know nothing.
+    expect(rosterEmptyReason({ ...base, undecryptable: 1, relay: "failed" })).toBe("staleKey");
+    expect(rosterEmptyReason({ ...base, undecryptable: 1, online: false })).toBe("staleKey");
+    expect(rosterEmptyReason({ ...base, undecryptable: 1, loading: true })).toBe("loading");
+  });
+
+  it("does not fire for a genuinely empty roster, or for a non-member", () => {
+    expect(rosterEmptyReason({ ...base, undecryptable: 0 })).toBe("none");
+    expect(rosterEmptyReason({ ...base })).toBe("none");
+    // No ECK at all is still "you haven't joined", not "your key is stale".
+    expect(rosterEmptyReason({ ...base, hasKey: false, undecryptable: 2 })).toBe("notApproved");
+  });
+
   it("says loading while the pass is still in flight", () => {
     expect(rosterEmptyReason({ ...base, loading: true })).toBe("loading");
     // Loading outranks everything: mid-pass we know nothing yet, so neither

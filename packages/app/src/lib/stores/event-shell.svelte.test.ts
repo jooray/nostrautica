@@ -167,3 +167,38 @@ describe("approval landing mid-visit moves the nav without a navigation", () => 
     expect(mocks.cacheSet).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Role must not bleed from one event to the next (audit EV-15).
+ *
+ * The shell is a singleton and `sync` is the only place `role` is seeded on
+ * navigation. It seeded only `if (cachedRole)`, so opening an event with no
+ * persisted label kept whatever the PREVIOUS event resolved to: an organizer of X
+ * opening Y for the first time rendered Y with Admin, People and Matches until
+ * the custody read landed. The no-flash guarantee that guard exists for is about
+ * a previously-visited event, where a cached label is present.
+ */
+describe("eventShell.sync — the previous event's role does not carry over", () => {
+  const OTHER = coordinateToNaddr(`31923:${"c".repeat(64)}:another`, []);
+
+  it("falls back to visitor for an event with no persisted label", async () => {
+    eventShell.role = "organizer"; // resolved for the event we are navigating away from
+    mocks.cacheGet.mockReturnValue(undefined); // nothing cached for the new one
+    void eventShell.sync(OTHER);
+    // Synchronously, before any custody read or relay call settles.
+    expect(eventShell.role).toBe("visitor");
+  });
+
+  it("still paints a previously-visited event's cached role with no flash", () => {
+    eventShell.role = "visitor";
+    mocks.cacheGet.mockReturnValue({ data: "organizer" });
+    void eventShell.sync(OTHER);
+    expect(eventShell.role).toBe("organizer");
+  });
+
+  it("resets on an undecodable address instead of keeping the old role", () => {
+    eventShell.role = "organizer";
+    void eventShell.sync("naddr1thisisnotdecodable");
+    expect(eventShell.role).toBe("visitor");
+  });
+});

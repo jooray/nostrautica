@@ -627,6 +627,8 @@ export const messages = {
       "Nobody is on the list yet. People appear here as the organizer approves them; if you were just approved yourself, your own entry can take a minute to arrive.",
     "attendees.empty.unreachable":
       "Couldn't reach the relays that hold the attendee list, so we can't tell who's here. Venue Wi-Fi often blocks them. Try again, or switch networks.",
+    "attendees.empty.staleKey":
+      "There are people here, but this device can't read the list. Your access key is out of date, which happens after the organizer removes someone. Try again in a moment; if it persists, ask the organizer whether you're still on the list.",
     "attendees.backToEvent": "Back to the event",
     "attendees.count.one": "{n} attendee",
     "attendees.count.many": "{n} attendees",
@@ -2203,6 +2205,8 @@ export const messages = {
       "V zozname zatiaľ nikto nie je. Ľudia sa tu objavia, keď ich organizátor schváli; ak schválili práve vás, váš vlastný záznam môže prísť s minútovým oneskorením.",
     "attendees.empty.unreachable":
       "Nepodarilo sa spojiť s relaymi, ktoré držia zoznam účastníkov, takže nevieme povedať, kto je tu. Wi-Fi na mieste ich často blokuje. Skúste to znova alebo prepnite sieť.",
+    "attendees.empty.staleKey":
+      "Ľudia tu sú, ale toto zariadenie zoznam neprečíta. Váš prístupový kľúč je zastaraný, čo sa stáva po tom, ako organizátor niekoho odstráni. Skúste to o chvíľu znova; ak to pretrváva, overte si u organizátora, či ste stále na zozname.",
     "attendees.backToEvent": "Späť na podujatie",
     "attendees.count.one": "{n} účastník",
     "attendees.count.few": "{n} účastníci",
@@ -3771,6 +3775,8 @@ export const messages = {
       "V seznamu zatím nikdo není. Lidé se tu objeví, jakmile je organizátor schválí; pokud schválili právě vás, váš vlastní záznam může přijít s minutovým zpožděním.",
     "attendees.empty.unreachable":
       "Nepodařilo se spojit s relayi, které drží seznam účastníků, takže nevíme, kdo tu je. Wi-Fi na místě je často blokuje. Zkuste to znovu nebo přepněte síť.",
+    "attendees.empty.staleKey":
+      "Lidé tu jsou, ale toto zařízení seznam nepřečte. Váš přístupový klíč je zastaralý, což se stává poté, co organizátor někoho odebere. Zkuste to za chvíli znovu; pokud to přetrvává, ověřte si u organizátora, zda jste stále na seznamu.",
     "attendees.backToEvent": "Zpět na akci",
     "attendees.count.one": "{n} účastník",
     "attendees.count.few": "{n} účastníci",

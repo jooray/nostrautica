@@ -124,6 +124,10 @@ class EventShell {
     try {
       coordinate = naddrToCoordinate(naddr).coordinate;
     } catch {
+      // Reset before bailing: without this the previous event's role stays, so a
+      // malformed address navigated to FROM an event you organize renders as
+      // organizer.
+      this.role = "visitor";
       this.loading = false;
       return; // not a decodable event address; nothing to resolve
     }
@@ -132,7 +136,16 @@ class EventShell {
     // Seed from the persisted label before any await (§2.13) — never flash
     // "Visitor" at an organizer.
     const cachedRole = cacheGet<EventRole>(roleKey(coordinate))?.data;
-    if (cachedRole) this.role = cachedRole;
+    // `?? "visitor"`, not `if (cachedRole)`. The store is a singleton and this is
+    // the only place `role` is seeded on navigation, so leaving it alone when the
+    // NEW event has no cached label kept the PREVIOUS event's: an organizer of X
+    // opening Y for the first time rendered Y with Admin, People and Matches until
+    // the custody read below resolved. The no-flash guarantee this line exists for
+    // is about a previously-visited event, where `cachedRole` is present; where it
+    // is absent we genuinely know nothing yet, and "visitor" is the honest floor —
+    // the same one the store starts at and the same one the bad-address branch
+    // above uses.
+    this.role = cachedRole ?? "visitor";
 
     this.loading = true;
     try {

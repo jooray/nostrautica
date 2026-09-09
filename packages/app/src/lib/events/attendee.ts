@@ -600,6 +600,17 @@ export interface DirectoryStream {
   /** Settles at first-EOSE+grace or timeout with everything decrypted so far. */
   ready: Promise<DirectoryEntryContent[]>;
   stop: () => void;
+  /**
+   * Directory entries arrived that this device could NOT decrypt (audit EV-9).
+   *
+   * The distinction the roster view could not draw. Holding an ECK is what
+   * `hasKey` reports, and it says nothing about whether that ECK is the CURRENT
+   * one: a member who was revoked, or whose grant for a rotation hasn't landed
+   * yet, holds a stale key, decrypts nothing, and was shown "Nobody is on the
+   * list yet". That is a claim about the event, and the wrong one — the people
+   * are there, this device just can't read them.
+   */
+  undecryptable: () => number;
 }
 
 /**
@@ -632,6 +643,8 @@ export async function streamDirectory(
   if (cached) for (const e of cached) byPk.set(e.pubkey, { entry: e, at: 0, id: "" });
   const snapshot = () => [...byPk.values()].map((v) => v.entry);
   let newestAt = 0;
+  // By event id, so a relay re-delivering the same entry is not counted twice.
+  const undecryptable = new Set<string>();
 
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   const flush = () => {
@@ -659,7 +672,10 @@ export async function streamDirectory(
       if (at > newestAt) newestAt = at;
       scheduleFlush();
     } catch {
-      /* skip entries we can't decrypt (e.g. published under a newer ECK) */
+      // Skipped, but COUNTED: an entry published under an ECK we don't hold is
+      // the signal that this device's access is stale, and swallowing it is what
+      // turned a revoked member's view into "nobody is here" (EV-9).
+      undecryptable.add(e.id);
     }
   };
 
@@ -730,6 +746,7 @@ export async function streamDirectory(
       flushTimer = undefined;
       inner?.stop();
     },
+    undecryptable: () => undecryptable.size,
   };
 }
 
