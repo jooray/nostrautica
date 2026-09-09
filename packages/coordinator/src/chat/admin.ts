@@ -714,11 +714,26 @@ export class MarmotAdmin {
    * strictly stronger than the forward-only ECK rotation the revoke path already
    * does for directory/roster/match content.
    */
-  async handleRevoke(coordinate: string, accountPubkey: string): Promise<void> {
+  async handleRevoke(
+    coordinate: string,
+    accountPubkey: string,
+    /**
+     * Device keys captured by the CALLER before it ran (audit B-9). The
+     * `chat_revoke_member` job carries the account's chat pubkeys in its payload
+     * because a `delete_data` withdrawal purges `marmot_chat_keys` in the same
+     * lock that enqueues this job — so by the time it runs, the store can no
+     * longer say which leaves belong to the leaver, and the removal silently
+     * covered the account key only. Unioned with whatever is still stored, so a
+     * legacy payload (no field) and a non-purging revoke both behave as before.
+     */
+    opts?: { chatPubkeys?: string[] },
+  ): Promise<void> {
     const group = this.activeGroup(coordinate);
     if (!group) return;
     const chatKeys = this.store.chatKeysForAccount(coordinate, accountPubkey);
-    const pubkeys = [accountPubkey, ...chatKeys.map((k) => k.chat_pubkey)];
+    const pubkeys = [
+      ...new Set([accountPubkey, ...chatKeys.map((k) => k.chat_pubkey), ...(opts?.chatPubkeys ?? [])]),
+    ];
     await this.mls.removePubkeys(group.mls_group_id, pubkeys);
     for (const k of chatKeys) this.store.setChatKeyStatus(coordinate, k.chat_pubkey, "revoked", this.now());
     // Same reason as the 21607 revoke path: the removed member's devices stay in
@@ -727,7 +742,9 @@ export class MarmotAdmin {
     // A removed organizer must lose co-admin standing (desiredAdminPubkeys keys
     // off the approved-organizer set, so a removed organizer drops out of it).
     await this.maybeSyncAdmins(coordinate, accountPubkey);
-    this.log(`[chat] removed ${accountPubkey.slice(0, 8)} (+${chatKeys.length} chat key(s)) from ${coordinate}`);
+    this.log(
+      `[chat] removed ${accountPubkey.slice(0, 8)} (+${pubkeys.length - 1} chat key(s)) from ${coordinate}`,
+    );
   }
 
   // ── 445 ingest ─────────────────────────────────────────────────────────────

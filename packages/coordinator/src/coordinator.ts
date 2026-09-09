@@ -920,7 +920,14 @@ export class Coordinator {
     this.jobs.register("chat_revoke_member", async (p, { signal }) => {
       if (!this.marmot) return;
       await this.runEventJob(p.coordinate, signal, async () => {
-        await this.marmot!.handleRevoke(p.coordinate, p.pubkey);
+        // `chatPubkeys` is the device list captured at revoke time (audit B-9), for
+        // the case where the attendee's bindings have since been purged by a
+        // delete_data withdrawal. Absent on rows enqueued before this field
+        // existed, and on paths that don't purge — handleRevoke unions it with
+        // whatever is still stored, so both shapes behave.
+        await this.marmot!.handleRevoke(p.coordinate, p.pubkey, {
+          chatPubkeys: Array.isArray(p.chatPubkeys) ? (p.chatPubkeys as string[]) : undefined,
+        });
       });
     });
   }
@@ -3789,10 +3796,26 @@ export class Coordinator {
     //    poison/21606 path rather than leaving the member in the group forever.
     if (state.chat && this.marmot) {
       this.marmot.invalidateEligibility(state.coordinate);
+      // Carry the DEVICE keys in the payload, captured now (audit B-9). The job runs
+      // asynchronously and `handleRevoke` reads the account's `marmot_chat_keys`
+      // rows to build the MLS remove list — but a withdrawal with `delete_data`
+      // (the DEFAULT, and the common "leave this event" path) purges exactly those
+      // rows inside the same lock, moments later and long before the job is
+      // claimed. The job then found no bindings and removed only the ACCOUNT leaf,
+      // leaving the leaver's device in the group, able to read new chat traffic
+      // until some other member's add/remove churned the epoch. Removing a leaf is
+      // the one part of a revoke that is real post-compromise security, so it must
+      // not depend on state the same operation is about to delete.
       this.jobs.enqueue(
         "chat_revoke_member",
         `chat-revoke:${state.coordinate}:${removedPubkey}:${this.now()}`,
-        { coordinate: state.coordinate, pubkey: removedPubkey },
+        {
+          coordinate: state.coordinate,
+          pubkey: removedPubkey,
+          chatPubkeys: this.deps.store
+            .chatKeysForAccount(state.coordinate, removedPubkey)
+            .map((k) => k.chat_pubkey),
+        },
       );
     }
     // Attendee-count change (spec §9): a revocation can bring the event back under

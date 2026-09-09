@@ -4144,6 +4144,40 @@ describe("NIP §6.3 — attendee withdrawal (21610)", () => {
     expect(h2.store.getTranscript(x2)).not.toBeUndefined();
   });
 
+  /**
+   * Audit B-9. The default withdrawal purges the leaver's artifacts —
+   * `marmot_chat_keys` among them — inside the same per-member lock that enqueues
+   * the `chat_revoke_member` job. That job builds its MLS remove list by READING
+   * those rows, so by the time it ran there was nothing left to read: only the
+   * account key was removed and the leaver's DEVICE leaf stayed in the group,
+   * still able to decrypt everything said in it until an unrelated commit
+   * happened to churn the epoch. "Leave the event" is the common path and an MLS
+   * Remove is the only real post-compromise boundary the chat has.
+   */
+  it("a delete_data withdrawal still MLS-removes the leaver's DEVICE leaf, not just the account", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const leaverSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({
+      coordinate: h.coordinate,
+      accountPubkey: leaverPk,
+      chatPubkey: devicePk,
+      now: h.clock.t,
+    });
+    await h.coordinator.jobs.drain();
+
+    await withdraw(h, leaverSk, { deleteData: true });
+    // The purge has already happened by here — the bindings are gone…
+    expect(h.store.chatKeysForAccount(h.coordinate, leaverPk)).toEqual([]);
+    // …and the removal must STILL name the device, from the list captured at
+    // revoke time and carried in the job payload.
+    await h.coordinator.jobs.drain();
+    expect(mls.removed.length).toBe(1);
+    expect([...mls.removed[0]!].sort()).toEqual([leaverPk, devicePk].sort());
+  });
+
   it("a re-delivered stale withdrawal cannot re-withdraw after a rejoin (per-subject watermark)", async () => {
     const h = await setup();
     const sk = generateSecretKey();

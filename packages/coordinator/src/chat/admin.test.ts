@@ -902,6 +902,52 @@ describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
     expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
   });
 
+  /**
+   * Audit B-9. `delete_data: true` is the DEFAULT on an attendee withdrawal, and
+   * the withdrawal handler purges the attendee's artifacts — `marmot_chat_keys`
+   * included — in the same per-member lock that enqueues `chat_revoke_member`.
+   * The job then ran minutes later against a store that no longer knew which
+   * leaves belonged to the leaver, so it removed the ACCOUNT key only and the
+   * leaver's DEVICE kept its leaf: it could still decrypt everything the group
+   * said until some unrelated add/remove happened to churn the epoch. The MLS
+   * Remove is the one genuinely post-compromise part of a revoke, so it cannot
+   * depend on rows the same operation deletes.
+   */
+  it("removes a leaf whose binding was already purged, from the captured device list", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.members.get("mls-1")?.size).toBe(1);
+
+    // What a delete_data withdrawal does before the queued job ever runs.
+    store.purgeAttendeeArtifacts(COORD, ACCOUNT);
+    expect(store.chatKeysForAccount(COORD, ACCOUNT)).toEqual([]);
+
+    await admin.handleRevoke(COORD, ACCOUNT, { chatPubkeys: [CHATKEY] });
+    expect(mls.removed.at(-1)!.sort()).toEqual([ACCOUNT, CHATKEY].sort());
+    expect(mls.members.get("mls-1")?.size).toBe(0); // the device leaf is really gone
+  });
+
+  it("a legacy payload with no captured device list still removes the stored keys", async () => {
+    // Rows enqueued before the payload carried `chatPubkeys` must keep working: the
+    // union means "whatever is still stored" is the whole list in that case.
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+
+    await admin.handleRevoke(COORD, ACCOUNT, { chatPubkeys: undefined });
+    expect(mls.removed.at(-1)!.sort()).toEqual([ACCOUNT, CHATKEY].sort());
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+  });
+
   it("ingest forwards 445 events to the MLS layer for the event's group", async () => {
     const store = freshStore();
     const mls = new FakeMls();
