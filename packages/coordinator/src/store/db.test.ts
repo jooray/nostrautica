@@ -4,6 +4,10 @@
  * legacy plaintext rows, and idempotency of that migration.
  */
 import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1409,5 +1413,57 @@ describe("inspectPipelineReadOnly (doctor)", () => {
     expect(p.counts).toEqual({});
     expect(p.poisonJobs).toEqual([]);
     expect(p.lastCompletedStartedAt).toBeNull();
+  });
+});
+
+/**
+ * A schema migration takes its own rollback point (audit OPS-2).
+ *
+ * A pending migration makes the file unreadable to every older binary — the
+ * "written by a NEWER coordinator, refusing to open" refusal is exactly that seen
+ * from the other side — so the only way back is a copy of the file as it stands
+ * before it runs. CLAUDE.md documented taking one by hand before any push that
+ * bumps SCHEMA_VERSION, and nothing enforced it: a ritual performed under deploy
+ * pressure by whoever happens to be pushing, where the one time it is skipped is
+ * the one time it is needed.
+ */
+describe("pre-migration backup (audit OPS-2)", () => {
+  const tmp = () => join(mkdtempSync(join(tmpdir(), "nostrautica-migrate-")), "coordinator.sqlite");
+  const backupsIn = (dbPath: string) =>
+    readdirSync(dirname(dbPath)).filter((f) => f.endsWith(".bak"));
+
+  it("writes one, named for the version the file CONTAINS, when a migration is pending", () => {
+    const path = tmp();
+    // A v1 database: the baseline shape, nothing beyond it.
+    const seed = new DatabaseSync(path);
+    seed.exec("PRAGMA user_version = 1");
+    seed.close();
+
+    new Store(path).close();
+
+    const backups = backupsIn(path);
+    expect(backups).toHaveLength(1);
+    // `.v1-…`, not `.v5-…`: it holds v1, which is what a restore needs to know.
+    // The first hand-taken v4→v5 backup was labelled `pre-v5` while holding v4.
+    expect(backups[0]).toMatch(/\.v1-\d{8}T\d{6}\.bak$/);
+
+    // And it is a real, readable database still at the old version.
+    const restored = new DatabaseSync(join(dirname(path), backups[0]!), { readOnly: true });
+    const uv = (restored.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    restored.close();
+    expect(uv).toBe(1);
+  });
+
+  it("writes nothing when the database is already current", () => {
+    const path = tmp();
+    new Store(path).close(); // creates + migrates to SCHEMA_VERSION
+    const after = backupsIn(path).length;
+    new Store(path).close(); // reopen: nothing pending
+    expect(backupsIn(path).length).toBe(after);
+  });
+
+  it("never writes one for an in-memory database", () => {
+    // No file, nothing to roll back to, and no directory to litter.
+    expect(() => new Store(":memory:").close()).not.toThrow();
   });
 });

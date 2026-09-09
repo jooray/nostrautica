@@ -421,7 +421,7 @@ const MIGRATIONS: Migration[] = [
  * transaction, advancing `user_version` at each boundary. Read-only inspection
  * (doctor, audit O2) must NOT go through here — it uses {@link inspectDatabaseReadOnly}.
  */
-function migrate(db: DatabaseSync): void {
+function migrate(db: DatabaseSync, path?: string): void {
   const uv = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
   if (uv > SCHEMA_VERSION) {
     throw new Error(
@@ -429,6 +429,18 @@ function migrate(db: DatabaseSync): void {
     );
   }
   applyBaselineDDL(db);
+  // A pending migration is about to make this file unreadable to every older
+  // binary — the refusal above is exactly that, seen from the other side — so the
+  // ONLY way back is a copy of the file as it is right now (audit OPS-2).
+  //
+  // CLAUDE.md documents taking one by hand before any push that bumps
+  // SCHEMA_VERSION. Nothing enforced that, and it is a ritual performed under
+  // deploy pressure by whoever happens to be pushing: the one time it is skipped
+  // is the one time it is needed. Taking it here means it cannot be skipped, and
+  // it costs nothing on the overwhelmingly common path where there is nothing to
+  // migrate.
+  const pending = MIGRATIONS.some((m) => m.version > uv);
+  if (pending && path && path !== ":memory:") writePreMigrationBackup(db, path, uv);
   for (const m of MIGRATIONS) {
     if (m.version <= uv) continue;
     db.exec("BEGIN IMMEDIATE");
@@ -448,6 +460,34 @@ function migrate(db: DatabaseSync): void {
   // Stamp the current version even when there were no pending migrations (a fresh
   // database whose baseline already matches, or one already at SCHEMA_VERSION).
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+/**
+ * Copy the database as it stands, before a migration makes it unreadable to older
+ * binaries (audit OPS-2). Named for the version the file CONTAINS, not the one it
+ * is about to become — the first hand-taken v4→v5 backup was labelled `pre-v5`
+ * while holding v4, which is precisely the read-it-backwards trap you do not want
+ * at restore time.
+ *
+ * `.backup`, not a file copy: the daemon runs in WAL mode, and a plain copy of the
+ * main file can miss committed pages still sitting in the `-wal`.
+ *
+ * Best-effort by design. A backup that cannot be written (a full disk, a read-only
+ * mount) must not stop a coordinator from starting — but it is loud, because the
+ * operator has just lost their rollback point and the deploy is going ahead anyway.
+ */
+function writePreMigrationBackup(db: DatabaseSync, path: string, fromVersion: number): void {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+/, "");
+  const out = `${path}.v${fromVersion}-${stamp}.bak`;
+  try {
+    db.exec(`VACUUM INTO '${out.replace(/'/g, "''")}'`);
+    console.log(`[store] pre-migration backup of v${fromVersion} written to ${out}`);
+  } catch (e) {
+    console.error(
+      `[store] COULD NOT write the pre-migration backup to ${out} (${e instanceof Error ? e.message : e}) — ` +
+        `migrating to v${SCHEMA_VERSION} anyway, but this schema change is ONE-WAY and you now have no rollback point`,
+    );
+  }
 }
 
 /**
@@ -1260,7 +1300,7 @@ export class Store {
       // Refuse a newer database, apply the idempotent baseline shape, and run every
       // pending numbered migration transactionally (audit O3). Doctor's read-only
       // inspection (audit O2) deliberately does NOT come through here.
-      migrate(this.db);
+      migrate(this.db, path);
       // Migration (F1): encrypt any legacy plaintext event-key rows in place.
       if (this.identitySk) this.encryptPlaintextKeyRows();
     }

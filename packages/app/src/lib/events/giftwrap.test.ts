@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { generateSecretKey, getPublicKey, getEventHash, finalizeEvent } from "nostr-tools/pure";
 import {
   wrapRumor,
@@ -157,5 +157,99 @@ describe("signer-based gift wrap ↔ protocol raw-key gift wrap", () => {
     // Clamped to at most now + skew — the 3-day head start is gone.
     expect(unwrapped.created_at).toBeLessThanOrEqual(clampCeiling);
     expect(unwrapped.created_at).toBeLessThan(future);
+  });
+});
+
+/**
+ * The unwrap path must bound the ciphertext BEFORE handing it to the signer
+ * (audit PROTO-1).
+ *
+ * `signerUnwrap` delegates decryption to the user's signer: for NIP-07 that hands
+ * the raw string to a browser extension, and for NIP-46 it ships the whole thing
+ * to a remote bunker over a relay and waits for an answer. Nothing on that path
+ * had an upper bound — the protocol's ceiling guards only its own in-process
+ * decrypts — so a few thousand kind-1059 events `#p`-tagged at someone, each
+ * carrying an 800 KB `content`, are enough to stall the signer session through
+ * the ordinary DM and grant scans.
+ */
+describe("signerUnwrap refuses an oversized ciphertext before touching the signer", () => {
+  /** A signed kind-1059 whose content is far past any legal NIP-44 payload. */
+  function oversizedWrap(recipientPubkey: string) {
+    const throwaway = generateSecretKey();
+    return finalizeEvent(
+      {
+        kind: KIND_GIFT_WRAP,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [["p", recipientPubkey]],
+        content: "A".repeat(800_000),
+      },
+      throwaway,
+    );
+  }
+
+  it("throws without calling the signer at all", async () => {
+    const me = LocalSigner.generate();
+    let decryptCalls = 0;
+    const counting = {
+      ...me,
+      getPublicKey: () => me.getPublicKey(),
+      nip44Decrypt: async (pk: string, ct: string) => {
+        decryptCalls++;
+        return me.nip44Decrypt(pk, ct);
+      },
+    } as unknown as LocalSigner;
+
+    const wrap = oversizedWrap(await me.getPublicKey());
+    await expect(signerUnwrap(counting, wrap as never)).rejects.toThrow(/ceiling/i);
+    // The point is not that it fails — it would have failed eventually. It is that
+    // the signer was never asked, so a flood of these costs no signer round-trips.
+    expect(decryptCalls).toBe(0);
+  });
+
+  it("still round-trips a normal wrap", async () => {
+    const sender = LocalSigner.generate();
+    const me = LocalSigner.generate();
+    const wrap = await signerWrap(sender, await me.getPublicKey(), {
+      kind: KIND_JOIN_REQUEST,
+      content: payload,
+      tags: [],
+    });
+    const rumor = await signerUnwrap(me, wrap);
+    expect(joinRequestContentSchema.parse(JSON.parse(rumor.content)).name).toBe("Alice");
+  });
+});
+
+/**
+ * The wrap timestamp offset is a PRIVACY parameter (audit PROTO-2): it is what
+ * stops `created_at` from revealing when its author actually sent the wrap. It
+ * came from `Math.random`, whose V8 xorshift state is recoverable from a handful
+ * of outputs — so someone collecting an author's wraps could predict the rest of
+ * the sequence and subtract the offset back off.
+ */
+describe("wrap timestamps are randomized from a CSPRNG", () => {
+  it("draws the offset from crypto.getRandomValues, not Math.random", async () => {
+    const sender = LocalSigner.generate();
+    const me = await LocalSigner.generate().getPublicKey();
+    const mathRandom = vi.spyOn(Math, "random");
+    const csprng = vi.spyOn(globalThis.crypto, "getRandomValues");
+    try {
+      await signerWrap(sender, me, { kind: KIND_JOIN_REQUEST, content: payload, tags: [] });
+      expect(csprng).toHaveBeenCalled();
+      expect(mathRandom).not.toHaveBeenCalled();
+    } finally {
+      mathRandom.mockRestore();
+      csprng.mockRestore();
+    }
+  });
+
+  it("still lands within the NIP-59 two-day window, in the past", async () => {
+    const sender = LocalSigner.generate();
+    const me = await LocalSigner.generate().getPublicKey();
+    const now = Math.floor(Date.now() / 1000);
+    for (let i = 0; i < 30; i++) {
+      const wrap = await signerWrap(sender, me, { kind: KIND_JOIN_REQUEST, content: payload, tags: [] });
+      expect(wrap.created_at).toBeLessThanOrEqual(now + 1);
+      expect(wrap.created_at).toBeGreaterThan(now - 2 * 24 * 60 * 60 - 1);
+    }
   });
 });

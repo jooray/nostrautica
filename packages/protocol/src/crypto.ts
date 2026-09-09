@@ -78,7 +78,20 @@ const NIP44_MAX_CIPHERTEXT_B64 =
     (1 + 32 + (2 + nip44v2.utils.calcPaddedLen(NIP44_MAX_PLAINTEXT_BYTES)) + 32) / 3,
   ) * 4;
 
-function assertNip44CiphertextCeiling(ciphertext: string): void {
+/**
+ * Reject a NIP-44 payload that cannot be a valid encryption of a within-ceiling
+ * plaintext, BEFORE handing it to anything that has to work to find out.
+ *
+ * Exported because the app's gift-wrap unwrap delegates decryption to the user's
+ * signer rather than doing it here (PROTO-1): for NIP-07 that hands the raw
+ * string to a browser extension, and for NIP-46 it ships the whole thing to a
+ * remote bunker over a relay and waits. A few thousand kind-1059 events
+ * `#p`-tagged at someone, each carrying an 800 KB `content`, are enough to stall
+ * that signer session through the ordinary DM and grant scans — with no upper
+ * bound anywhere on the path, because the ceiling only guarded the in-process
+ * decrypt functions below.
+ */
+export function assertNip44CiphertextCeiling(ciphertext: string): void {
   if (ciphertext.length > NIP44_MAX_CIPHERTEXT_B64) {
     throw new Error(
       `NIP-44 ciphertext is ${ciphertext.length} base64 chars, over the ${NIP44_MAX_CIPHERTEXT_B64} ceiling`,
