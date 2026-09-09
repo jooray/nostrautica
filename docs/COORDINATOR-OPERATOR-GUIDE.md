@@ -363,7 +363,7 @@ sudo systemctl start nostrautica-coordinator
 migration has been designed and tested. Schema migrations are **numbered, ordered,
 and transactional** (see `docs/VERSIONING.md`): they run in place on the first
 read-write open and advance `PRAGMA user_version` at each boundary (the schema is at
-`v2`). A newer binary reads and upgrades an older database, but an older binary now
+`v5`). A newer binary reads and upgrades an older database, but an older binary now
 **refuses to open *or* restore a database written by a newer one** (`user_version`
 greater than the binary's `SCHEMA_VERSION`) with a clear "upgrade the coordinator"
 message, the downgrade guard applies at open time, not only at restore. This is

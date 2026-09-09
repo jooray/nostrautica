@@ -4,13 +4,11 @@
  * legacy plaintext rows, and idempotency of that migration.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
 import { bytesToHex } from "@nostrautica/protocol";
 import {
@@ -1465,5 +1463,34 @@ describe("pre-migration backup (audit OPS-2)", () => {
   it("never writes one for an in-memory database", () => {
     // No file, nothing to roll back to, and no directory to litter.
     expect(() => new Store(":memory:").close()).not.toThrow();
+  });
+});
+
+/**
+ * `docs/VERSIONING.md` is the page an operator reads before deciding a rollback is
+ * safe, and the migration it describes is ONE-WAY. It said "Currently `2`" while
+ * the code was at 5 and production was at 5, with three substantive migrations
+ * documented nowhere (audit DOC-1). A number in prose drifts silently; this is the
+ * same guard `packages/protocol/src/registry.test.ts` already gives the protocol
+ * registry.
+ */
+describe("docs/VERSIONING.md: schema version drift guard", () => {
+  const docPath = fileURLToPath(new URL("../../../../docs/VERSIONING.md", import.meta.url));
+  const doc = readFileSync(docPath, "utf8");
+
+  it("the documented `SCHEMA_VERSION` (Store schema row, 'Currently `N`.') matches the code", () => {
+    const row = doc.split("\n").find((l) => l.startsWith("| Store schema "));
+    expect(row, "Store schema row in the versions table").toBeDefined();
+    const m = row!.match(/Currently `(\d+)`\./);
+    expect(m, `a 'Currently \`N\`.' clause in: ${row}`).not.toBeNull();
+    expect(Number(m![1])).toBe(SCHEMA_VERSION);
+  });
+
+  it("every schema version from 2 through SCHEMA_VERSION has a row in the migration history table", () => {
+    for (let v = 2; v <= SCHEMA_VERSION; v++) {
+      expect(doc, `no '| \`${v}\` |' row documenting migration to version ${v}`).toMatch(
+        new RegExp("\\|\\s*`" + v + "`\\s*\\|"),
+      );
+    }
   });
 });
