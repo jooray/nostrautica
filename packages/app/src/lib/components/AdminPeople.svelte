@@ -59,6 +59,20 @@
                still gets a card + working controls, never silently omitted. -->
           <p class="muted" style="margin:0.25rem 0">{t("admin.people.intakeUnavailable")}</p>
         {/if}
+        {#if person.withdrawn && !person.revoked}
+          <!-- They sent a 21610 asking to leave and nothing acted on it. Only
+               reachable without a coordinator (with one, the daemon runs the whole
+               revoke chain and republishes a roster they are not in). Their client
+               has ALREADY deleted their media and their self-copy and told them the
+               request was sent, so the honest state is "they are gone, the roster
+               just doesn't say so yet" — and Revoke, right below, is what makes it
+               true. -->
+          <p class="withdrew" role="status">
+            {person.withdrawalRequestedPurge
+              ? t("admin.people.withdrew.purge")
+              : t("admin.people.withdrew")}
+          </p>
+        {/if}
         {#if person.revoked}
           <p class="muted">{t("admin.revoked")}</p>
         {:else if confirmingRevoke === person.pubkey}
@@ -87,6 +101,10 @@
 {/if}
 
 <style>
+  .withdrew {
+    color: var(--danger);
+    margin: 0.25rem 0;
+  }
   .section-head {
     margin-top: 1.5rem;
   }

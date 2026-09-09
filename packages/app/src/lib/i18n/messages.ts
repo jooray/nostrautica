@@ -1058,6 +1058,10 @@ export const messages = {
     "admin.requests.invite": "invite",
     "admin.requests.withdrew": "Asked to leave after sending this request. Approving now would re-admit them.",
     "admin.requests.withdrew.purge": "Asked to leave and to have their data deleted, after sending this request. Approving now would re-admit them.",
+    "admin.people.withdrew":
+      "Asked to leave. Their app has already removed their intro and media, so revoking here is what takes them off the roster.",
+    "admin.people.withdrew.purge":
+      "Asked to leave and to have their data deleted. Their app has already removed their intro and media, so revoking here is what takes them off the roster.",
     "admin.requests.video.one": "{n} video",
     "admin.requests.video.many": "{n} videos",
     "admin.requests.approve": "Approve",
@@ -2631,6 +2635,10 @@ export const messages = {
     "admin.requests.invite": "pozvánka",
     "admin.requests.withdrew": "Táto osoba po odoslaní žiadosti požiadala o odchod. Schválením ju teraz znova prijmete.",
     "admin.requests.withdrew.purge": "Táto osoba po odoslaní žiadosti požiadala o odchod a o vymazanie svojich údajov. Schválením ju teraz znova prijmete.",
+    "admin.people.withdrew":
+      "Táto osoba požiadala o odchod. Jej aplikácia už odstránila predstavenie aj médiá, takže zo zoznamu ju odstráni až zrušenie prístupu tu.",
+    "admin.people.withdrew.purge":
+      "Táto osoba požiadala o odchod a o vymazanie svojich údajov. Jej aplikácia už odstránila predstavenie aj médiá, takže zo zoznamu ju odstráni až zrušenie prístupu tu.",
     "admin.requests.video.one": "{n} video",
     "admin.requests.video.few": "{n} videá",
     "admin.requests.video.many": "{n} videí",
@@ -4194,6 +4202,10 @@ export const messages = {
     "admin.requests.invite": "pozvánka",
     "admin.requests.withdrew": "Tato osoba po odeslání žádosti požádala o odchod. Schválením ji nyní znovu přijmete.",
     "admin.requests.withdrew.purge": "Tato osoba po odeslání žádosti požádala o odchod a o smazání svých údajů. Schválením ji nyní znovu přijmete.",
+    "admin.people.withdrew":
+      "Tato osoba požádala o odchod. Její aplikace už odstranila představení i média, takže ze seznamu ji odstraní až zrušení přístupu tady.",
+    "admin.people.withdrew.purge":
+      "Tato osoba požádala o odchod a o smazání svých údajů. Její aplikace už odstranila představení i média, takže ze seznamu ji odstraní až zrušení přístupu tady.",
     "admin.requests.video.one": "{n} video",
     "admin.requests.video.few": "{n} videa",
     "admin.requests.video.many": "{n} videí",

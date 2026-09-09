@@ -317,8 +317,30 @@ export async function fetchPending(
   // matters: someone may withdraw and then re-join, and a stale withdrawal must
   // not shadow the newer request.
   for (const [pubkey, w] of withdrawals) {
-    const req = byAttendee.get(pubkey);
-    if (!req) continue;
+    let req = byAttendee.get(pubkey);
+    if (!req) {
+      // No join request for this person IN THIS WINDOW. That is the ordinary case,
+      // not an edge one: the inbox is read over the 3-day gift-wrap window, and
+      // somebody who joined when the invite went out and withdrew a week later has
+      // only the withdrawal inside it. Dropping it here meant their request reached
+      // nobody at all, while their client had already deleted their media and their
+      // 31602 self-copy and told them it was sent.
+      //
+      // Synthesized with no name/message on purpose: we genuinely do not have their
+      // intake, and `buildApprovedPeople` will fill in the name from the directory
+      // entry for anyone actually on the roster — which is who this is about.
+      req = {
+        attendeePubkey: pubkey,
+        name: "",
+        message: "",
+        rsvpPublic: false,
+        rumorCreatedAt: w.created_at,
+      };
+      byAttendee.set(pubkey, req);
+      req.withdrawn = true;
+      req.withdrawalRequestedPurge = w.deleteData;
+      continue;
+    }
     const joinId = joinRumorId.get(pubkey) ?? "";
     if (supersedes({ id: w.id, created_at: w.created_at }, { id: joinId, created_at: req.rumorCreatedAt })) {
       req.withdrawn = true;
