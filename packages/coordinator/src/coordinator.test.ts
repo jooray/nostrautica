@@ -1226,6 +1226,38 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
   });
 
+  it("a config edit whose matrix publish fails is RETRIED durably, not silently lost (CORE-N-2)", async () => {
+    // The applied-config watermark moved to this 31600 before its outward effects
+    // ran, and `subscribeEventConfig`'s callback swallowed the throw. So a relay
+    // hiccup during an organizer's visibility change left the coordinator believing
+    // the new config was live, with the matrix never published — and a redelivery of
+    // the same 31600 rejected by `supersedes`, so nothing could ever fix it.
+    const h = await setup(0, { matchVisibility: "pair" });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const newer = {
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100,
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"], ["match_visibility", "event"]],
+      content: "", id: "cfg-2", sig: "",
+    } as any;
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+    // The config itself IS applied (state + DB); only the effect failed.
+    expect(JSON.parse(h.store.getEvent(h.coordinate)!.config_json).matchVisibility).toBe("event");
+
+    // Redelivering the identical 31600 correctly changes nothing — it does not
+    // supersede. The durable job is what recovers it.
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(false);
+
+    h.transport.failPublishes = 0;
+    await h.coordinator.jobs.drain();
+    expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
+  });
+
   it("on a created_at tie, the LOWEST-id 31600 wins (NIP §3.1 flip; converges either arrival order)", async () => {
     const mkCfg = (h: Awaited<ReturnType<typeof setup>>, id: string, matching: "on" | "off") => ({
       kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 500,
@@ -3241,6 +3273,42 @@ describe("D5 §9 — persisted billing state machine (§13.4)", () => {
     expect(s?.billing?.checkout_url).toBe("https://pay/x");
   });
 
+  it("a RESTORE whose billing status publish fails is still LISTENING (CORE-N-4)", async () => {
+    // `reevaluateBilling` publishes a 21606 on a state transition, and a publish
+    // every relay refuses REJECTS. It used to run BEFORE `subscribeEventInbox`, so
+    // it unwound out of installEvent with the event row already written and no
+    // subscription open.
+    //
+    // On the GRANT path the in-memory wrap retry papers over it (attempt 1 persists
+    // the billing state, so attempt 2 sees no transition and doesn't republish). The
+    // startup RESTORE path has no retry: `start()` catches per event and logs
+    // "restore of X failed — skipping". A relay outage at boot — precisely when a
+    // restore runs — therefore dropped an installed event for the whole life of the
+    // process, silently. Billing enforcement does not depend on this publish
+    // landing (`assertSpendAllowed` gates spend at job execution), so listening
+    // first costs nothing.
+    const h = await setup(0, { evaluateBilling: overTier(), skipAutoInstall: true });
+    h.transport.failPublishes = 99;
+    await h.coordinator
+      .installEvent({
+        coordinate: h.coordinate,
+        inboxSkHex: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+        configRelays: ["wss://test"],
+        gen: 1,
+        source: "restore",
+      })
+      .catch(() => {}); // exactly what start() does
+    h.transport.failPublishes = 0;
+
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    const inboxPk = getPublicKey(h.einboxSk);
+    expect(h.transport.subs.some((sub) => !sub.closed && sub.filter?.["#p"]?.includes(inboxPk))).toBe(true);
+    // And it can actually take a join, which is the whole point of listening.
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined();
+  });
+
   it("revoke, detach and roster/status paths are NOT blocked by billing", async () => {
     const h = await setup(0, { evaluateBilling: overTier() });
     const aSk = generateSecretKey();
@@ -4367,28 +4435,42 @@ describe("audit C9 — relay handover is make-before-break", () => {
 });
 
 describe("audit R4 — the coordinator's own inbox is rate-gated before durable accounting", () => {
-  it("drops a single sender's flood past the per-sender window WITHOUT marking the excess seen", async () => {
-    const h = await setup();
+  /** 40 distinct admin-command wraps from one sender, inside one 60s rate window. */
+  function flood(h: Harness, senderSk: Uint8Array) {
     const coordPub = getPublicKey(h.coordSk);
     const baseSec = Math.floor(h.clock.t / 1000);
-    // 40 distinct admin commands from ONE sender (E_id) in a single rate window.
-    // MAX_RUMORS_PER_SENDER_WINDOW is 30, so 30 are accepted and 10 are rate-dropped.
-    const wraps = Array.from({ length: 40 }, (_, i) =>
-      wrapRumor(h.eidSk, coordPub, {
+    return Array.from({ length: 40 }, (_, i) =>
+      wrapRumor(senderSk, coordPub, {
         kind: KIND_ADMIN_COMMAND,
         content: { v: 2, a: h.coordinate, cmd: "recompute" },
-        created_at: baseSec + i, // distinct rumor ids, all within the same 60s window
+        created_at: baseSec + i, // distinct rumor ids, all within the same window
       }),
     );
+  }
+
+  it("drops a STRANGER's flood past the per-sender window WITHOUT marking the excess seen", async () => {
+    const h = await setup();
+    const wraps = flood(h, generateSecretKey());
     for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
 
     const seen = wraps.map((w) => h.store.isRumorSeen((w as any).id));
-    const acceptedCount = seen.filter(Boolean).length;
     // Exactly the per-sender window was accepted (and marked seen); the rest were
     // dropped and left UNSEEN — so a flood cannot grow the durable seen ledger (R4).
-    expect(acceptedCount).toBe(30);
+    expect(seen.filter(Boolean)).toHaveLength(30);
     expect(seen.slice(0, 30).every(Boolean)).toBe(true);
     expect(seen.slice(30).some(Boolean)).toBe(false);
+  });
+
+  it("does NOT drop an installed event's own organizer past that window (2026-09-09 audit)", async () => {
+    // "Approve all" on a room of forty sends one 21604 per attendee, serially, from
+    // the event's E_id. Under the flat per-sender cap the last ten were dropped —
+    // and left unseen, so nothing recovered them short of a restart — while the app
+    // reported every one of them confirmed, because the PUBLISH had succeeded. Ten
+    // people stayed in the pending queue with nobody aware of it.
+    const h = await setup();
+    const wraps = flood(h, h.eidSk); // the E_id of an event this daemon has installed
+    for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
+    expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
   });
 });
 
@@ -4600,6 +4682,91 @@ describe("audit C1 — commands resume to full completion after a partial failur
     expect(h.store.getTranscript(x)).toBeUndefined();
     expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
     expect(h.store.getCommandWatermark(h.coordinate, `member:${pk}`)!.state).toBe("complete");
+  });
+
+  it("correction: a directory-publish failure resumes on the SAME rumor instead of reading as stale", async () => {
+    // CORE-N-3. `handleCorrection` writes the attendee row and THEN publishes. When
+    // the publish failed, processRumorWithRetry re-ran the handler — and the strict
+    // §3.3 revision guard at the top rejected the very correction it had just
+    // stored as "stale", returning early. The wrapper then recorded success and
+    // marked the rumor seen forever: the correction was stored and never published,
+    // so the attendee's edit silently did not appear, with nothing in the log.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 1, hidden: true },
+      tags: [["a", h.coordinate]],
+    });
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false); // left for a retry
+    expect(h.store.getAttendee(h.coordinate, pk)!.correction_rev).toBe(1); // already stored
+
+    const publishedBefore = h.transport.published.length;
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    // The resume actually republished the directory entry — the point of the retry.
+    expect(h.transport.published.length).toBeGreaterThan(publishedBefore);
+  });
+
+  it("matching-off submission: a directory-publish failure resumes on the SAME rumor", async () => {
+    // Same shape. `ae89ccb` fixed the approved+matching-ON path by enqueuing the
+    // pipeline job before publishing; with matching OFF `enqueueProcess` returns
+    // immediately, so the directory publish is the only effect and the stale-guard
+    // trap was untouched.
+    const h = await setup(0, { matching: "off" });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_SUBMISSION,
+      content: {
+        v: 2,
+        rev: 7,
+        profile: { about: "an edit that must not vanish", skills: ["zk"], looking_for: "", links: [] },
+        media: [],
+      },
+      tags: [["a", h.coordinate]],
+    });
+
+    h.transport.failPublishes = 99;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)!.profile_rev).toBe(7);
+
+    const publishedBefore = h.transport.published.length;
+    h.transport.failPublishes = 0;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+    expect(h.transport.published.length).toBeGreaterThan(publishedBefore);
+  });
+
+  it("a genuinely older correction is still refused (the resume path is same-rumor only)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const nowSec = Math.floor(h.clock.t / 1000);
+    const newer = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 5, hidden: true },
+      tags: [["a", h.coordinate]],
+      created_at: nowSec,
+    });
+    const older = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_PROFILE_CORRECTION,
+      content: { v: 2, a: h.coordinate, rev: 2, hidden: false },
+      tags: [["a", h.coordinate]],
+      created_at: nowSec - 10,
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, newer as any);
+    await h.coordinator.handleInboxWrap(h.coordinate, older as any);
+    expect(h.store.getAttendee(h.coordinate, pk)!.correction_rev).toBe(5);
   });
 
   it("attach: an install that throws mid-chat-setup RESUMES on the same grant (gen-check allows it)", async () => {

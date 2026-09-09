@@ -878,6 +878,15 @@ export class Coordinator {
         await this.marmot!.syncMember(p.coordinate, p.pubkey);
       });
     });
+    // Durable retry for a config edit whose outward effects (31606 matrix publish,
+    // MLS group creation/relay routing) failed on the network. See
+    // {@link Coordinator.applyConfigEffects}.
+    this.jobs.register("config_effects", async (p, { signal }) => {
+      await this.runEventJob(p.coordinate, signal, async () => {
+        await this.applyConfigEffects(p.coordinate, { matrix: p.matrix, chat: p.chat });
+      });
+    });
+
     this.jobs.register("chat_revoke_member", async (p, { signal }) => {
       if (!this.marmot) return;
       await this.runEventJob(p.coordinate, signal, async () => {
@@ -1139,9 +1148,6 @@ export class Coordinator {
       retentionExpired: this.deps.store.isRetentionExpired(grant.coordinate) || undefined,
     };
     this.events.set(grant.coordinate, state);
-    // Persist the typed billing principal + evaluate the state machine at install
-    // (spec §9, D5). Emits a 21606 if the event installs already over its tier.
-    await this.reevaluateBilling(grant.coordinate);
     log(
       `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}, talks=${state.talks}`,
     );
@@ -1151,6 +1157,15 @@ export class Coordinator {
     // + submissions immediately. A FRESH install backfills the full history (since=0)
     // so requests/submissions older than the 3-day live window are still recovered
     // (audit H2); a restart of a known event keeps the 3-day overlap.
+    //
+    // BEFORE billing, deliberately. `reevaluateBilling` publishes a 21606 on a state
+    // transition, and a publish that every relay refuses REJECTS — which unwound out
+    // of installEvent with the event row already written and NO subscription open.
+    // The result of a relay hiccup in the wrong ten seconds was a half-installed
+    // event: durably recorded, believed installed, and deaf. Listening first costs
+    // nothing (the gate that actually enforces billing is `assertSpendAllowed`, at
+    // job execution, not this call), and means a billing failure leaves an event
+    // that can at least hear its attendees.
     const since = grant.backfill === "full" ? 0 : giftwrapSince(Math.floor(this.now() / 1000));
     this.subscribeEventInbox(state, since);
     // Explicitly BACKFILL the E_inbox history from before this subscription's epoch
@@ -1167,6 +1182,9 @@ export class Coordinator {
     await this.backfillEventInbox(state, since);
     // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
     this.subscribeEventConfig(state);
+    // Persist the typed billing principal + evaluate the state machine at install
+    // (spec §9, D5). Emits a 21606 if the event installs already over its tier.
+    await this.reevaluateBilling(grant.coordinate);
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
     // work here — a chat-off event stays completely inert (no group, no watcher).
     if (state.chat) await this.ensureChat(state);
@@ -1584,12 +1602,37 @@ export class Coordinator {
    * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
    * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
    */
-  private inboxRateAllows(coordinate: string, senderPubkey: string): boolean {
+  private inboxRateAllows(coordinate: string, senderPubkey: string, exemptSenderCap = false): boolean {
     const now = this.now();
     const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
     if (eventCount > this.eventRumorBudget(coordinate)) return false;
+    // Always bump the sender's counter, exempt or not: the accounting is what the
+    // per-window budget is computed from, and an exemption is a decision about
+    // whether to REFUSE, not a licence to stop counting.
     const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
-    return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+    return exemptSenderCap || senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+  }
+
+  /**
+   * Is `pubkey` the E_id of an event this daemon currently has installed?
+   *
+   * The per-sender cap exists to stop a stranger from flooding a public inbox. An
+   * organizer running "Approve all" on a room of forty people is not that: the app
+   * sends one 21604 per attendee, serially, so past thirty the tail was dropped —
+   * left unseen, with the app showing every one of them "confirmed" because the
+   * PUBLISH succeeded. Ten people stayed in the pending queue, at the door, and
+   * nothing but a restart's backfill would have recovered them.
+   *
+   * The exemption is bounded and authenticated rather than a raised number: it
+   * applies only to admin commands whose seal author (bound by `unwrapRumor`) is
+   * the E_id of an already-installed event — an identity that, by definition, this
+   * daemon is already doing work for. The per-inbox budget still applies, so the
+   * total is still capped; and installs (21603) and attestations (21607) are NOT
+   * exempt, so nothing here widens the surface a stranger can reach.
+   */
+  private isInstalledEventIdentity(pubkey: string): boolean {
+    for (const state of this.events.values()) if (state.eidPubkey === pubkey) return true;
+    return false;
   }
 
   /**
@@ -1630,7 +1673,9 @@ export class Coordinator {
     // an event inbox. A rate-rejected wrap is left UNSEEN (not written to the durable
     // seen ledger) so the ledger can't be grown by a flood — a legitimately-throttled
     // rumor is simply retried by a later backfill rescan once the burst subsides.
-    if (!this.inboxRateAllows(COORD_INBOX_RATE_KEY, rumor.pubkey)) {
+    const organizerCommand =
+      rumor.kind === KIND_ADMIN_COMMAND && this.isInstalledEventIdentity(rumor.pubkey);
+    if (!this.inboxRateAllows(COORD_INBOX_RATE_KEY, rumor.pubkey, organizerCommand)) {
       log(`[coord-inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)}`);
       this.inFlightRumors.delete(rumor.id);
       return;
@@ -2016,7 +2061,20 @@ export class Coordinator {
     // Revisioned ordering (NIP §3.3): reject a correction whose (rev, created_at, id)
     // key does not strictly supersede the applied one — an out-of-order older
     // correction can never overwrite a newer one.
-    if (order && attendee.correction_rev != null) {
+    //
+    // Except when it IS the stored one. `revisionSupersedes` is strict, so a
+    // redelivery of the correction we already stored fails it — and that is exactly
+    // the shape of a retry after the publish below threw: the attendee row was
+    // written, `publishDirectory` failed on a relay, processRumorWithRetry re-ran
+    // the handler, this guard returned early, and the wrapper then marked the rumor
+    // seen forever. The correction was stored and never published: the attendee's
+    // edit silently did not appear, with nothing in the log. Same shape as the
+    // 2026-07-31 submission incident that `ae89ccb` fixed on the other path.
+    //
+    // A re-delivery of the SAME rumor id is a resume, not a loser. Re-applying is
+    // idempotent (the same row, the same values) and re-publishes the directory,
+    // which is the whole point.
+    if (order && attendee.correction_rev != null && attendee.correction_rumor_id !== order.rumorId) {
       const current = { rev: attendee.correction_rev, created_at: attendee.correction_created_at ?? 0, id: attendee.correction_rumor_id ?? "" };
       const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };
       if (!revisionSupersedes(candidate, current)) {
@@ -2158,9 +2216,17 @@ export class Coordinator {
     // lexicographically lowest id. A loser (an out-of-order older edit, or a
     // same-key re-delivery) is discarded, never applied. This replaces v1's
     // created_at-only interim guard (P0-2), closing same-key nondeterminism.
+    //
+    // A re-delivery of the SAME rumor id is a RESUME, not a loser. The guard is
+    // strict, so the very rumor already stored fails it — which is what a retry
+    // after a failed publish looks like. `enqueueProcess` running before the
+    // publish covers the approved+matching-on path (`ae89ccb`), but two paths were
+    // left with the original shape: matching-OFF (where `enqueueProcess` returns
+    // immediately, so the directory publish is the only effect) and every path
+    // where the retry happens after the row is written. Re-applying is idempotent.
     if (order) {
       const cur = this.deps.store.getAttendee(state.coordinate, pubkey);
-      if (cur?.profile_rev != null) {
+      if (cur?.profile_rev != null && cur.profile_rumor_id !== order.rumorId) {
         const current = { rev: cur.profile_rev, created_at: cur.profile_created_at ?? 0, id: cur.profile_rumor_id ?? "" };
         const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };
         if (!revisionSupersedes(candidate, current)) {
@@ -4537,7 +4603,11 @@ export class Coordinator {
             this.handleMetaUpdate(state.coordinate, e);
             return;
           }
-          void this.handleConfigUpdate(state.coordinate, e).catch(() => {});
+          void this.handleConfigUpdate(state.coordinate, e).catch((err) =>
+            log(
+              `[config] handling 31600 ${e.id.slice(0, 8)} for ${state.coordinate} threw: ${err instanceof Error ? err.message : err}`,
+            ),
+          );
         },
         state.configRelays,
       ),
@@ -4747,25 +4817,77 @@ export class Coordinator {
         }
       }
     }
+    // The OUTWARD effects (relay publishes, MLS commits) are the ones that can
+    // fail on a network the config edit knows nothing about, and by the time they
+    // run the applied-config watermark has already moved to this event. A throw
+    // here therefore used to be terminal in the worst way: `handleConfigUpdate`'s
+    // caller swallowed it, the watermark said "applied", and a redelivery of the
+    // very same 31600 was rejected by `supersedes` — so an organizer flipping
+    // match visibility during a relay hiccup got a coordinator that believed the
+    // new config was live while the matrix was never published, with nothing
+    // retrying and nothing said to anyone.
+    //
+    // Each effect is now individually guarded and, on failure, handed to the
+    // durable job runner as an explicit INTENT rather than a diff — the diff
+    // (`prev` vs `state`) is gone by the time a retry runs, because the config was
+    // genuinely applied to memory and to the DB.
+    const effects: { matrix?: "publish" | "delete"; chat?: "ensure" | "relays" } = {};
     // Visibility changed to/from "event": publish or delete the 31606 matrix (H4).
     if (prev.matchVisibility !== state.matchVisibility) {
-      if (state.matching === "on" && state.matchVisibility === "event") await this.publishMatrix(state);
-      else if (prev.matchVisibility === "event") await this.deleteMatrix(state);
+      if (state.matching === "on" && state.matchVisibility === "event") effects.matrix = "publish";
+      else if (prev.matchVisibility === "event") effects.matrix = "delete";
     }
     // Marmot chat toggled (§4.1, §9 Q4): turned on ⇒ create group + backfill all
     // approved attendees + watch; turned off ⇒ freeze (stop adds; group lives on).
     if (this.marmot && prev.chat !== state.chat) {
-      if (state.chat) await this.ensureChat(state);
-      else this.marmot.freeze(coordinate);
+      if (state.chat) effects.chat = "ensure";
+      else this.marmot.freeze(coordinate); // purely local; cannot fail on a relay
     } else if (this.marmot && state.chat && relayChanged) {
       // A relay edit with chat already on used to reach everything EXCEPT the
       // group's routing state, because this branch only fired on the chat toggle.
       // Additive and idempotent, so re-running it is free; without it the group
       // keeps routing to relays the coordinator has stopped listening on.
-      await this.marmot.ensureRelays(coordinate, chatRelaysFor(state));
+      effects.chat = "relays";
+    }
+    if (effects.matrix || effects.chat) {
+      try {
+        await this.applyConfigEffects(coordinate, effects);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        log(
+          `[config] ${coordinate}: config applied but its effects (${JSON.stringify(effects)}) failed — queued for durable retry: ${msg.slice(0, 200)}`,
+        );
+        this.jobs.enqueue("config_effects", `cfg:${coordinate}:${event.id}`, { coordinate, ...effects });
+      }
     }
     // The caller runs the relay handover (outside the lock) for the recorded candidate.
     return relayChanged ? candidateRelays : undefined;
+  }
+
+  /**
+   * Carry out the outward effects of a config edit, as intents rather than a diff
+   * so the durable retry (`config_effects`) can re-run exactly what failed.
+   *
+   * Every branch re-reads current state and re-checks that the intent is still
+   * wanted: a retry may run minutes later, behind a newer config that already
+   * changed the answer, and publishing a matrix the event has since turned off
+   * would be worse than not retrying at all.
+   */
+  private async applyConfigEffects(
+    coordinate: string,
+    effects: { matrix?: "publish" | "delete"; chat?: "ensure" | "relays" },
+  ): Promise<void> {
+    const state = this.events.get(coordinate);
+    if (!state) return; // detached while the retry was queued
+    if (effects.matrix === "publish") {
+      if (state.matching === "on" && state.matchVisibility === "event") await this.publishMatrix(state);
+    } else if (effects.matrix === "delete") {
+      if (state.matchVisibility !== "event") await this.deleteMatrix(state);
+    }
+    if (effects.chat && this.marmot && state.chat) {
+      if (effects.chat === "ensure") await this.ensureChat(state);
+      else await this.marmot.ensureRelays(coordinate, chatRelaysFor(state));
+    }
   }
 
   // ── billing state machine (spec §9, D5, §13.4) ─────────────────────────────
