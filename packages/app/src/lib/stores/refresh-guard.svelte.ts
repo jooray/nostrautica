@@ -63,7 +63,22 @@ class RefreshGuard {
       const n = (this.refs.get(reason) ?? 1) - 1;
       if (n <= 0) this.refs.delete(reason);
       else this.refs.set(reason, n);
-      this.maybeRefresh();
+      // DEFERRED, not immediate (App-2 incident 2026-09-09 / audit A-4). Every
+      // hold() site lives in a component `$effect` shaped
+      // `$effect(() => { if (dirty) return refreshGuard.hold(reason); })`, and
+      // Svelte re-runs such an effect by calling the previous run's CLEANUP first
+      // and the new body immediately after. So a dirty→dirty transition — one more
+      // keystroke in the chat composer, one more character in a Record draft —
+      // momentarily takes the refcount to zero, and a synchronous check there saw
+      // "nothing dirty" and reloaded the tab. The guard whose entire job is
+      // protecting unsaved work destroyed it, mid-keystroke, and only while a
+      // service-worker update happened to be pending (which is why it survived
+      // testing).
+      //
+      // A microtask is enough and is exact: Svelte's cleanup and re-run happen in
+      // one synchronous flush, so a release+re-hold pair has always settled by the
+      // time this runs. A genuine last release still reloads on the same tick.
+      this.scheduleRefreshCheck();
     };
   }
 
@@ -76,6 +91,17 @@ class RefreshGuard {
     this.refresh = refresh;
     this.pending = true;
     this.maybeRefresh();
+  }
+
+  /** Coalesce the post-release check into one microtask (see `hold`). */
+  private checkScheduled = false;
+  private scheduleRefreshCheck(): void {
+    if (this.checkScheduled) return;
+    this.checkScheduled = true;
+    queueMicrotask(() => {
+      this.checkScheduled = false;
+      this.maybeRefresh();
+    });
   }
 
   private maybeRefresh(): void {
@@ -91,6 +117,7 @@ class RefreshGuard {
     this.refs.clear();
     this.refresh = null;
     this.pending = false;
+    this.checkScheduled = false;
   }
 }
 

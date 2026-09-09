@@ -17,7 +17,7 @@ describe("refreshGuard (App-2)", () => {
     expect(refreshGuard.updateWaiting).toBe(false);
   });
 
-  it("defers while dirty, then applies automatically when the last holder clears", () => {
+  it("defers while dirty, then applies automatically when the last holder clears", async () => {
     const release = refreshGuard.hold("recording");
     expect(refreshGuard.dirty).toBe(true);
 
@@ -27,18 +27,22 @@ describe("refreshGuard (App-2)", () => {
     expect(refreshGuard.updateWaiting).toBe(true);
 
     release();
+    // One microtask later, not synchronously — see the dirty→dirty case below.
+    await Promise.resolve();
     expect(reload).toHaveBeenCalledTimes(1); // applied on clear
     expect(refreshGuard.updateWaiting).toBe(false);
   });
 
-  it("waits for EVERY holder — multiple reasons must all clear", () => {
+  it("waits for EVERY holder — multiple reasons must all clear", async () => {
     const r1 = refreshGuard.hold("dm");
     const r2 = refreshGuard.hold("create");
     const reload = vi.fn();
     refreshGuard.requestRefresh(reload);
     r1();
+    await Promise.resolve();
     expect(reload).not.toHaveBeenCalled(); // create still dirty
     r2();
+    await Promise.resolve();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
@@ -85,12 +89,58 @@ describe("refreshGuard (App-2)", () => {
 
   // A defer that is set WHILE dirty must still apply automatically after the
   // storm settles — the churn above must not have lost the pending reload.
-  it("still applies a deferred reload after a hold/release storm", () => {
+  it("still applies a deferred reload after a hold/release storm", async () => {
     const release = refreshGuard.hold("compose");
     const reload = vi.fn();
     refreshGuard.requestRefresh(reload);
     expect(reload).not.toHaveBeenCalled();
     release();
+    await Promise.resolve();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * Audit A-4. Every hold() site is a component `$effect` shaped
+   * `$effect(() => { if (dirty) return refreshGuard.hold(reason); })`, and Svelte
+   * re-runs such an effect by calling the previous run's CLEANUP first and the new
+   * body immediately after. So one more keystroke in a still-dirty composer runs
+   * release() then hold() — the refcount touches zero in between, and the old
+   * synchronous check read that as "nothing unsaved" and reloaded the tab. The one
+   * thing the guard exists to protect, destroyed by the guard, mid-keystroke,
+   * whenever a service-worker update happened to be pending.
+   */
+  it("a dirty→dirty edit does NOT reload while a refresh is pending", async () => {
+    const release = refreshGuard.hold("compose");
+    const reload = vi.fn();
+    refreshGuard.requestRefresh(reload);
+
+    // Svelte's re-run: cleanup, then the new body, synchronously.
+    release();
+    const release2 = refreshGuard.hold("compose");
+
+    await Promise.resolve();
+    expect(refreshGuard.dirty).toBe(true);
+    expect(reload).not.toHaveBeenCalled(); // the draft survives
+    expect(refreshGuard.updateWaiting).toBe(true); // …and the update is still queued
+
+    // When the work is genuinely finished, it applies on its own.
+    release2();
+    await Promise.resolve();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("a thousand $effect re-runs never reload, and the last release does", async () => {
+    let release = refreshGuard.hold("compose");
+    const reload = vi.fn();
+    refreshGuard.requestRefresh(reload);
+    for (let i = 0; i < 1000; i++) {
+      release();
+      release = refreshGuard.hold("compose");
+      await Promise.resolve(); // give the deferred check every chance to fire
+      expect(reload).not.toHaveBeenCalled();
+    }
+    release();
+    await Promise.resolve();
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
