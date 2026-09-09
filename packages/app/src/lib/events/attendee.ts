@@ -404,11 +404,23 @@ export async function receiveGrants(
   }
   // The full-history scan completed without throwing (a fetch failure would have
   // rejected above), ran to the end of the wrap list rather than out of budget,
-  // AND was meaningful: either there was nothing addressed to us to unwrap, or
-  // the signer successfully unwrapped at least one wrap. A pass where every
-  // single unwrap failed is a signer/transport outage, not an empty inbox —
-  // leave the marker unset so the next scan re-runs the full history.
-  if (fullBackfill && !outcome.truncated && (unwrapped > 0 || unwrapFailed === 0)) {
+  // AND was meaningful: the read returned wraps, and either the signer unwrapped
+  // at least one or none of them were addressed to us. A pass where every single
+  // unwrap failed is a signer/transport outage, not an empty inbox — leave the
+  // marker unset so the next scan re-runs the full history.
+  //
+  // `wraps.length > 0` is part of that (audit A-3). `fetchEventsRelayOnly` does
+  // NOT reject on failure: it settles with whatever arrived inside its window, so
+  // a relay timeout, a dropped socket, or an EOSE that beat the wraps home all
+  // look identical to a genuinely empty inbox — and `unwrapFailed === 0` was
+  // trivially true for all of them. Latching on that narrowed every later scan on
+  // this device to `giftwrapSince()` (now − 3 days), which made an ECK grant for an
+  // event joined last month PERMANENTLY undiscoverable here: the user opens their
+  // own event and is told they're a visitor who should join. An identity whose
+  // inbox really is empty simply keeps doing the full-history read — which is a
+  // filter with `since: 0` that returns nothing, and stops as soon as their first
+  // wrap arrives and unwraps.
+  if (fullBackfill && wraps.length > 0 && !outcome.truncated && (unwrapped > 0 || unwrapFailed === 0)) {
     markGrantsBackfilled(pubkey);
   }
   if (memoDirty) {

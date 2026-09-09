@@ -553,6 +553,48 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(scanIncomplete(outcomes[0]!)).toBe(true);
   });
 
+  it("an EMPTY read does not latch the backfill marker (audit A-3)", async () => {
+    // `fetchEventsRelayOnly` does not reject on failure — it settles with whatever
+    // arrived inside its window — so a relay timeout, a dropped socket, and an EOSE
+    // that beat the wraps home are all indistinguishable from an empty inbox here.
+    // `unwrapFailed === 0` was trivially true for every one of them, so one bad
+    // read latched the marker and narrowed every LATER scan on this device to
+    // now − 3 days. An ECK grant for an event joined last month then became
+    // permanently undiscoverable: the user opens their own event and is told they
+    // are a visitor who should join it.
+    const store = new Map<string, string>();
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+      },
+    });
+    try {
+      // Scan 1 and 2 both come back empty (the relay never answered).
+      fetchEventsRelayOnly.mockResolvedValue([]);
+      fetchEvents.mockResolvedValue([signedConfig()]);
+      expect(await receiveGrants(attendee)).toEqual([]);
+      expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since: number }).since).toBe(0);
+      expect(await receiveGrants(attendee)).toEqual([]);
+      // Still a FULL-history read: nothing has been proven about this inbox yet.
+      expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since: number }).since).toBe(0);
+
+      // The relay comes back, carrying a grant published weeks ago. Because the
+      // window was never narrowed, this scan still sees it.
+      fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+      expect(await receiveGrants(attendee)).toEqual([coordinate]);
+      // Now the pass was genuinely meaningful, so the marker latches and later
+      // scans use the narrow live-overlap window.
+      await receiveGrants(attendee);
+      expect((fetchEventsRelayOnly.mock.calls[3]![0] as { since: number }).since).toBeGreaterThan(0);
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
   it("a truncated full-history pass does not latch the backfill marker", async () => {
     // A pass that ran out of budget saw only part of the history. Latching would
     // narrow every later scan to giftwrapSince() and permanently hide the wraps
