@@ -326,3 +326,66 @@ describe("an empty transcript over non-trivial audio is not cached", () => {
     expect(store.getTranscript(descriptor.x)).toBe("hello");
   });
 });
+
+/**
+ * Audit B-7 — a duration verdict belongs to the (blob, limit) pair, not the blob.
+ *
+ * The transcript cache is keyed by blob sha256 alone and shared across every event
+ * a coordinator serves, so caching an over-duration/unprobeable rejection as an
+ * empty transcript let a STRICT event's limit silence the same recording at a
+ * LENIENT one — the reuse flow the product advertises, failing in a way that looks
+ * exactly like a silent recording.
+ */
+describe("a limit-dependent media rejection is not cached across events", () => {
+  const bigSegment = { data: new Uint8Array(MIN_AUDIO_BYTES_TO_EXPECT_SPEECH), mime: "audio/ogg" };
+
+  it("an over-duration rejection at a STRICT event does not silence a LENIENT one", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(100);
+    const stt = new MockStt({ default: "the reused intro" });
+    const deps = {
+      store,
+      stt,
+      sttModel: "m",
+      fetchBlob: async () => ciphertext,
+      probeDuration: async () => 100,
+      extractAudio: async () => [bigSegment],
+    };
+
+    // Event A caps intros at 90s: this 100s blob is rejected, nothing transcribed.
+    await expect(transcribeMedia({ ...deps, maxDurationSec: 90 }, descriptor as any)).rejects.toBeInstanceOf(
+      MediaPolicyError,
+    );
+    expect(stt.calls).toBe(0);
+    expect(store.getTranscript(descriptor.x)).toBeUndefined(); // NOT cached as ""
+
+    // Event B allows 900s: the same blob must actually transcribe.
+    const r = await transcribeMedia({ ...deps, maxDurationSec: 900 }, descriptor as any);
+    expect(r.text).toBe("the reused intro");
+    expect(stt.calls).toBe(1);
+  });
+
+  it("unprobeable media is likewise not cached as a permanent rejection", async () => {
+    // Same reasoning: "unprobeable" is only a rejection BECAUSE a limit is
+    // enforced. An event with no duration limit waves the identical blob through,
+    // so the verdict cannot be cached against the blob alone.
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "spoken words" });
+    const deps = {
+      store,
+      stt,
+      sttModel: "m",
+      fetchBlob: async () => ciphertext,
+      probeDuration: async () => undefined, // ffprobe answered, with nothing usable
+      extractAudio: async () => [bigSegment],
+    };
+    await expect(transcribeMedia({ ...deps, maxDurationSec: 60 }, descriptor as any)).rejects.toBeInstanceOf(
+      MediaPolicyError,
+    );
+    expect(store.getTranscript(descriptor.x)).toBeUndefined();
+    // No limit configured for this event ⇒ the same media is transcribed.
+    expect((await transcribeMedia(deps, descriptor as any)).text).toBe("spoken words");
+  });
+
+});
