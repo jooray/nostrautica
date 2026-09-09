@@ -902,7 +902,14 @@
   }
   .compose {
     position: sticky;
-    bottom: 0;
+    /* ABOVE the fixed bottom nav, not under it (audit A-1). `bottom: 0` pins the
+       composer to the bottom of the SCROLLPORT, which is exactly where the fixed
+       nav is — so once the page was tall enough for the composer to be pinned at
+       all (any desktop-width window: the e2e project runs 1280x720), the nav
+       covered it and a click on Send landed on the nav's Updates tab instead.
+       --nav-band is the same allowance the shell reserves for that bar, so the
+       two can no longer drift apart. */
+    bottom: var(--nav-band);
     display: flex;
     gap: 0.5rem;
     align-items: flex-end;

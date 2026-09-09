@@ -1,4 +1,5 @@
 import { expect, type Page } from "@playwright/test";
+import { nip19 } from "nostr-tools";
 import { ownPubkeyHex } from "../helpers.js";
 
 /**
@@ -18,9 +19,24 @@ import { ownPubkeyHex } from "../helpers.js";
  *    coordinator Add → welcome consumed. The composer is disabled until then.
  */
 
-/** The short "aaaaaaaa…zzzz" badge AdminPeople renders for an attendee card. */
-export function shortPubkey(hex: string): string {
-  return hex.slice(0, 8) + "…" + hex.slice(-4);
+/**
+ * The identity chip `PersonId` renders on an organizer's attendee card — the
+ * short NPUB, not short hex.
+ *
+ * It printed raw hex (`2e5124a9…0024`) until 2026-07-30, when user feedback
+ * ("neither recognizable as an identity nor pasteable into any Nostr client")
+ * moved it to `npubEncode(pubkey).slice(0, 10) + "…" + npub.slice(-4)`. This
+ * helper — and the revocation scenario that locates a card by it — kept the old
+ * hex shape, so the card could never be found. Nothing caught it because the
+ * scenario is fourth in a serial suite whose first test was failing (audit A-1),
+ * so it had not run since.
+ *
+ * Mirrors PersonId's formula deliberately: if that display changes again, this is
+ * the one place to follow it.
+ */
+export function personChip(hex: string): string {
+  const npub = nip19.npubEncode(hex);
+  return npub.slice(0, 10) + "…" + npub.slice(-4);
 }
 
 /**
@@ -135,10 +151,52 @@ export async function sendChat(page: Page, text: string): Promise<void> {
   const ta = page.locator("form.compose textarea").first();
   await ta.fill(text);
   // Scope to the compose form: a bare button[aria-label] would match a nav button.
-  // `force`: the sticky composer can sit against the fixed bottom nav.
-  await page.locator("form.compose button.send").first().click({ force: true });
+  //
+  // A REAL click, deliberately not `force` (audit A-1). This helper used to force
+  // it "because the sticky composer can sit against the fixed bottom nav" — and
+  // that is precisely the bug: a forced click dispatches at the element's centre
+  // whatever is on top, so when the nav covered Send the click went to the nav's
+  // Updates tab, the page navigated to Posts, and the message sat in a composer
+  // that no longer existed. The workaround hid a broken primary action from the
+  // one test that would have caught it. Unforced, Playwright's own hit-test is
+  // the regression test: if the nav ever covers Send again, this fails with
+  // "element intercepts pointer events" instead of silently navigating away.
+  await page.locator("form.compose button.send").first().click();
   // The composer clears on a successful send.
   await expect(ta).toHaveValue("", { timeout: 15_000 });
+}
+
+/**
+ * Assert the Send button's own centre point actually belongs to Send — i.e. no
+ * fixed overlay (the bottom nav) is sitting on the primary chat action (audit
+ * A-1). Checked at the viewport `page` is currently using; the caller drives the
+ * widths it cares about.
+ *
+ * `elementFromPoint` rather than a click: it names WHAT is on top when this
+ * fails, which is what turned the original symptom ("the message never sent")
+ * into a diagnosis ("the nav's Updates tab is on top of Send").
+ */
+export async function expectSendClickable(page: Page): Promise<void> {
+  const send = page.locator("form.compose button.send").first();
+  await expect(send).toBeVisible();
+  const box = (await send.boundingBox())!;
+  const hit = await page.evaluate(
+    ([x, y]) => {
+      const el = document.elementFromPoint(x as number, y as number);
+      return {
+        onSend: !!el?.closest("form.compose button.send"),
+        // What IS there, for the failure message.
+        found: el ? `${el.tagName.toLowerCase()}${el.className ? "." + String(el.className).split(" ").join(".") : ""}` : "nothing",
+        inNav: !!el?.closest("nav"),
+      };
+    },
+    [box.x + box.width / 2, box.y + box.height / 2],
+  );
+  expect(
+    hit.onSend,
+    `the Send button's centre hits ${hit.found}${hit.inNav ? " (inside the bottom nav)" : ""} at ` +
+      `${page.viewportSize()?.width}x${page.viewportSize()?.height} — something is covering the primary chat action`,
+  ).toBe(true);
 }
 
 /** Assert a message with `text` is visible in the message pane. */

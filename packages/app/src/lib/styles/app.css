@@ -34,6 +34,21 @@
   --event-h2: 322;
   /* Bottom-nav geometry (A7) */
   --nav-target: 48px;
+  /* The band at the bottom of the viewport the FIXED bottom nav (EventNav /
+     BottomNav) occupies. Every layer that must stay clear of that nav reads this
+     one value: the shell's own bottom padding below, and any element that pins
+     itself to the bottom of the scrollport (the chat composer's `position:
+     sticky`). It exists because those two had drifted apart — the shell reserved
+     5rem while the composer stuck to `bottom: 0`, i.e. UNDER the bar, so on a
+     desktop-width window the Send button's centre landed on the nav's Updates
+     tab and the primary chat action navigated away instead of sending (found by
+     hit-test, 2026-09-09 audit A-1; mobile was unaffected because the pane
+     sizing left the composer above the bar naturally, which is why manual
+     testing never saw it).
+     The safe-area inset is part of the band, not extra: the nav's own bottom
+     padding already includes it, so on a notched phone the bar is that much
+     taller than the flat 5rem this used to reserve. */
+  --nav-band: calc(5rem + env(safe-area-inset-bottom));
 }
 
 :root,
@@ -190,7 +205,7 @@ a:hover {
 .app-shell {
   max-width: var(--maxw);
   margin: 0 auto;
-  padding: 0 1rem 5rem;
+  padding: 0 1rem var(--nav-band);
 }
 
 .topbar {
