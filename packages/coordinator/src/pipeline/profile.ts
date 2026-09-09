@@ -19,6 +19,7 @@ import {
 } from "@nostrautica/protocol";
 import type { LlmProvider, ModelRef } from "../providers/types.js";
 import { fenceUntrusted, fenceUntrustedList } from "./fencing.js";
+import { promptRevision } from "./prompt-revision.js";
 
 // ── Provider-output response schemas (audit finding Q9) ──────────────────────
 // The model's raw JSON is validated at the provider boundary before it can enter
@@ -207,6 +208,43 @@ const PROFILE_SYSTEM = [
 ].join(" ");
 
 /**
+ * The translation stage's system prompt, as a named builder rather than an inline
+ * template literal, so {@link promptRevision} can fingerprint it. Its only varying
+ * parts are the target language's name and code, which the artifact hash already
+ * carries separately.
+ */
+export function translationSystemPrompt(targetName: string, base: string): string {
+  return (
+    `Detect the language of the user-authored fields. If it is already ${targetName} (${base}), set` +
+    ` needs_translation=false and omit the translated fields. Otherwise set needs_translation=true and` +
+    ` translate each non-empty field into ${targetName} (${base}), preserving meaning and proper nouns.` +
+    " Return strict JSON."
+  );
+}
+
+/** The nostr-summary stage's system prompt; `langNote` is empty for English. */
+export function nostrSummarySystemPrompt(langNote: string): string {
+  return (
+    "Summarize what this person is interested in and works on, based on their public posts. 2-3 sentences." +
+    langNote
+  );
+}
+
+/**
+ * Prompt+schema fingerprints for the three artifacts this module produces
+ * (audit PIPE-3). Folded into each artifact's inputs hash below, so editing a
+ * prompt actually invalidates what that prompt produced.
+ *
+ * The language-varying prompts are fingerprinted with PLACEHOLDER language
+ * arguments on purpose: the real language is hashed separately by every caller,
+ * and baking it in here would give two English events different fingerprints for
+ * an identical prompt.
+ */
+const AI_PROFILE_REVISION = promptRevision(PROFILE_SYSTEM, AI_PROFILE_SCHEMA);
+// TRANSLATION_REVISION and NOSTR_SUMMARY_REVISION are declared beside their own
+// schemas further down, since a module-scope const cannot read one declared later.
+
+/**
  * Output-language instruction for the profile summary (attendee-facing, spec §9.3).
  * The self-described profile and transcripts may be in any language; the summary
  * is written in the event language regardless. Empty for English events.
@@ -244,7 +282,10 @@ export function profileInputsHash(inputs: ProfileInputs, modelKey = ""): string 
     n: inputs.nostrSummary ?? "",
     lang: (inputs.lang ?? "en").toLowerCase(),
     m: modelKey,
-    schema: "ai_profile.v1",
+    // The prompt that produces this artifact, fingerprinted from its source. This
+    // was the hand-written string "ai_profile.v1", which nobody ever bumped — so
+    // every prompt edit since kept serving profiles built by the previous one.
+    schema: AI_PROFILE_REVISION,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -257,7 +298,7 @@ export function translationInputsHash(fields: TranslationInput, targetLang: stri
     skills: fields.skills,
     lang: (targetLang || "en").toLowerCase(),
     m: modelKey,
-    schema: "profile_translation.v1",
+    schema: TRANSLATION_REVISION,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -327,6 +368,11 @@ export const PROFILE_TRANSLATION_SCHEMA = {
   },
 } as const;
 
+const TRANSLATION_REVISION = promptRevision(
+  translationSystemPrompt("«lang»", "«code»"),
+  PROFILE_TRANSLATION_SCHEMA,
+);
+
 interface RawTranslation {
   source_lang?: string;
   needs_translation?: boolean;
@@ -374,11 +420,7 @@ export async function translateProfileFields(
   ].join("\n");
 
   const { value } = await llm.completeStructured<RawTranslation>({
-    system:
-      `Detect the language of the user-authored fields. If it is already ${targetName} (${base}), set` +
-      ` needs_translation=false and omit the translated fields. Otherwise set needs_translation=true and` +
-      ` translate each non-empty field into ${targetName} (${base}), preserving meaning and proper nouns.` +
-      " Return strict JSON.",
+    system: translationSystemPrompt(targetName, base),
     user,
     schema: PROFILE_TRANSLATION_SCHEMA,
     schemaName: "profile_translation",
@@ -410,6 +452,11 @@ export const NOSTR_SUMMARY_SCHEMA = {
   },
 } as const;
 
+const NOSTR_SUMMARY_REVISION = promptRevision(
+  nostrSummarySystemPrompt("«langNote»"),
+  NOSTR_SUMMARY_SCHEMA,
+);
+
 export interface NostrPost {
   kind: number;
   content: string;
@@ -425,6 +472,8 @@ export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en",
     lang: (lang || "en").toLowerCase(),
     ids: posts.map((p) => `${p.kind}:${p.created_at}:${p.content}`),
     m: modelKey,
+    // This one had no prompt field at ALL, unlike its two siblings.
+    schema: NOSTR_SUMMARY_REVISION,
   });
   return sha256Hex(utf8ToBytes(canonical));
 }
@@ -472,9 +521,7 @@ export async function summarizeNostr(
       ? ""
       : ` The posts may be in any language; write the summary in ${languageName(base)} (${base}).`;
   const { value } = await llm.completeStructured<{ summary: string }>({
-    system:
-      "Summarize what this person is interested in and works on, based on their public posts. 2-3 sentences." +
-      langNote,
+    system: nostrSummarySystemPrompt(langNote),
     user,
     schema: NOSTR_SUMMARY_SCHEMA,
     schemaName: "nostr_summary",

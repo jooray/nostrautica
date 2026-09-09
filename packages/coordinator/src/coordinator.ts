@@ -3137,7 +3137,14 @@ export class Coordinator {
     if (roster.length > this.prefilter.threshold && this.roles.embed.llm.embed) {
       await this.attachEmbeddings(coordinate, roster, signal);
     }
-    return selectPairsToScore(this.deps.store, coordinate, target, roster, this.prefilter);
+    return selectPairsToScore(
+      this.deps.store,
+      coordinate,
+      target,
+      roster,
+      this.prefilter,
+      this.matchModelKey(),
+    );
   }
 
   /**
@@ -3387,7 +3394,13 @@ export class Coordinator {
     const ha = this.deps.store.getAttendee(coordinate, pair.a)?.profile_hash;
     const hb = this.deps.store.getAttendee(coordinate, pair.b)?.profile_hash;
     if (!ha || !hb) return false;
-    return pairInputsHash(ha, hb) === pair.inputsHash;
+    return pairInputsHash(ha, hb, this.matchModelKey()) === pair.inputsHash;
+  }
+
+  /** The `match` role's provider+model, folded into every pair's inputs hash so a
+   *  model switch re-scores instead of silently reusing the old model's answers. */
+  private matchModelKey(): string {
+    return `${this.roles.match.provider}:${this.roles.match.model}`;
   }
 
   /** Display name from the join request (B1), for name-aware match reasoning. */

@@ -108,6 +108,9 @@ export function selectPairsToScore(
   target: AttendeeForMatching,
   attendees: AttendeeForMatching[],
   cfg: PrefilterConfig,
+  /** "<provider>:<model>" for the `match` role, folded into the pair's inputs hash
+   *  so switching the scoring model actually re-scores (audit PIPE-3). */
+  matchModelKey = "",
   rng: () => number = Math.random,
   warn?: (msg: string) => void,
 ): CandidatePair[] {
@@ -117,7 +120,7 @@ export function selectPairsToScore(
   for (const other of candidatePubkeys) {
     const otherHash = hashByPubkey.get(other);
     if (!otherHash) continue;
-    const inputsHash = pairInputsHash(target.profileHash, otherHash);
+    const inputsHash = pairInputsHash(target.profileHash, otherHash, matchModelKey);
     // Directional idempotency: the target→other direction is pending unless a row
     // exists for the current inputs_hash AND that direction has been scored (its
     // reasoning is non-empty). A row seeded by the reverse (other→target) batch

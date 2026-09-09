@@ -10,6 +10,7 @@ import { sha256Hex, utf8ToBytes, languageName, hasAiProfileContent } from "@nost
 import type { AiProfile } from "@nostrautica/protocol";
 import type { LlmProvider } from "../providers/types.js";
 import { fenceUntrusted, fenceUntrustedList } from "../pipeline/fencing.js";
+import { promptRevision } from "../pipeline/prompt-revision.js";
 
 /**
  * Lenient envelope validation for batch-score output (audit finding Q9). This
@@ -138,10 +139,36 @@ export function profileHash(profile: AiProfile): string {
  */
 export const hasProfileContent = hasAiProfileContent;
 
-/** inputs_hash = sha256(sorted(profileA_hash, profileB_hash)) — order-independent. */
-export function pairInputsHash(hashA: string, hashB: string): string {
+/**
+ * Prompt+schema fingerprint for the two scoring prompts (audit PIPE-3). Declared
+ * lazily because both prompts are defined further down this file.
+ */
+let matchRevision: string | undefined;
+export function matchPromptRevision(): string {
+  matchRevision ??= promptRevision(
+    BATCH_SYSTEM_PROMPT,
+    REVERSE_BATCH_SYSTEM_PROMPT,
+    BATCH_SCORE_SCHEMA,
+  );
+  return matchRevision;
+}
+
+/**
+ * inputs_hash = sha256(sorted(profileA_hash, profileB_hash) + prompt + model) —
+ * order-independent in the pair, which is what makes a directed score reusable
+ * from either side.
+ *
+ * `modelKey` and the prompt fingerprint were BOTH missing (audit PIPE-3), which
+ * made this the worst of the four content-addressed stages: the two profile
+ * hashes change when the attendees change, and nothing at all changed when the
+ * thing doing the scoring changed. Editing the matching prompt, or pointing the
+ * `match` role at a different model, left every cached pair score in place and
+ * every lookup hitting it — so the edit deployed, cost nothing, and did nothing,
+ * with no way to tell from the outside.
+ */
+export function pairInputsHash(hashA: string, hashB: string, modelKey = ""): string {
   const [x, y] = hashA < hashB ? [hashA, hashB] : [hashB, hashA];
-  return sha256Hex(utf8ToBytes(`${x}|${y}`));
+  return sha256Hex(utf8ToBytes(`${x}|${y}|${matchPromptRevision()}|${modelKey}`));
 }
 
 function profileText(p: AiProfile, name?: string): string {
