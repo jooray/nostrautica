@@ -644,10 +644,15 @@ export class Coordinator {
         // Durable retry for the attestation path, using the same job the approval
         // path already uses. The timestamp in the key is deliberate: a retry after
         // a failure is new work, not a duplicate of the enqueue that succeeded.
-        enqueueSync: (coordinate, pubkey) =>
+        enqueueSync: (coordinate, pubkey, reenrolling) =>
           this.jobs.enqueue("chat_sync_member", `chat-sync:${coordinate}:${pubkey}:${this.now()}`, {
             coordinate,
             pubkey,
+            // The device that attested re-enrolment, when this retry came from the
+            // attestation path. It is the ONLY warrant for dropping a leaf we still
+            // hold, so a retry without it is a plain add that the eligibility gate
+            // refuses — see MarmotAdmin.tryAddKeyPackage.
+            ...(reenrolling ? { reenrolling } : {}),
           }),
         // A device-management action changes `chat_keys`, and the published 31604
         // roster is the only place a client reads the device list from — so without
@@ -891,7 +896,11 @@ export class Coordinator {
     this.jobs.register("chat_sync_member", async (p, { signal }) => {
       if (!this.marmot) return;
       await this.runEventJob(p.coordinate, signal, async () => {
-        await this.marmot!.syncMember(p.coordinate, p.pubkey);
+        // `reenrolling` is absent on the approval path and on rows enqueued before
+        // it was carried; both are plain adds, which is correct for them.
+        await this.marmot!.syncMember(p.coordinate, p.pubkey, {
+          ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
+        });
       });
     });
     // Durable retry for a config edit whose outward effects (31606 matrix publish,

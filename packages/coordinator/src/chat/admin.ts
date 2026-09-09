@@ -37,7 +37,7 @@ export interface MarmotAdminDeps {
    * constructible in tests without a queue; when absent, a failed attestation-path
    * sync is only logged, which is the behaviour this exists to replace.
    */
-  enqueueSync?(coordinate: string, accountPubkey: string): void;
+  enqueueSync?(coordinate: string, accountPubkey: string, reenrolling?: string): void;
   /**
    * The event's published roster (31604) is now stale — republish it.
    *
@@ -91,7 +91,7 @@ export class MarmotAdmin {
   private readonly now: () => number;
   private readonly coordinatorPubkey: string;
   private readonly fetchKeyPackages: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
-  private readonly enqueueSync?: (coordinate: string, accountPubkey: string) => void;
+  private readonly enqueueSync?: (coordinate: string, accountPubkey: string, reenrolling?: string) => void;
   private readonly onRosterChanged?: (coordinate: string) => void;
   private readonly notifyAttendee?: (
     coordinate: string,
@@ -634,7 +634,14 @@ export class MarmotAdmin {
             this.log(
               `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed (${msg.slice(0, 120)}) — queued for durable retry`,
             );
-            this.enqueueSync(coordinate, accountPubkey);
+            // Carry `reenrolling`. Without it the retry is a PLAIN add, and
+            // `tryAddKeyPackage`'s `member && opts?.reenrolling !== kp.pubkey`
+            // branch then keeps the stale leaf and refuses it ("likely rotated for
+            // another event") — which is the exact case this attestation exists to
+            // repair. The user pressed Rejoin, saw "requested", and was not back in;
+            // the inline attempt's transient failure had quietly turned the durable
+            // retry into a no-op.
+            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey);
           } else {
             this.log(
               `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed with no retry queue: ${msg.slice(0, 160)}`,

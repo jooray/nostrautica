@@ -121,7 +121,7 @@ function makeAdmin(
   kps: AnyEvent[] = [],
   log?: (m: string) => void,
   extra?: {
-    enqueueSync?: (coordinate: string, pubkey: string) => void;
+    enqueueSync?: (coordinate: string, pubkey: string, reenrolling?: string) => void;
     fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
     onRosterChanged?: (coordinate: string) => void;
     notifyAttendee?: (
@@ -1015,11 +1015,11 @@ describe("MarmotAdmin — second admin: organizer device promotion (§13.2 recov
 describe("a failed attestation sync is retried, not just logged", () => {
   it("queues durable work when the inline sync throws", async () => {
     const logs: string[] = [];
-    const queued: Array<{ coordinate: string; pubkey: string }> = [];
+    const queued: Array<{ coordinate: string; pubkey: string; reenrolling?: string }> = [];
     const store = freshStore();
     const mls = new FakeMls();
     const admin = makeAdmin(store, mls, [], (m) => logs.push(m), {
-      enqueueSync: (coordinate, pubkey) => queued.push({ coordinate, pubkey }),
+      enqueueSync: (coordinate, pubkey, reenrolling) => queued.push({ coordinate, pubkey, reenrolling }),
       fetchKeyPackages: async () => {
         throw new Error("simulated relay outage");
       },
@@ -1032,8 +1032,53 @@ describe("a failed attestation sync is retried, not just logged", () => {
     // The attestation itself is still accepted and the binding recorded — only the
     // group add is deferred.
     expect(ok).toBe(true);
-    expect(queued).toEqual([{ coordinate: COORD, pubkey: ACCOUNT }]);
+    // `reenrolling` must ride along. Without it the retry is a PLAIN add, and the
+    // eligibility gate refuses it because the stale leaf is still there ("already a
+    // member" / "likely rotated for another event") — which is exactly the state
+    // this attestation exists to repair. The user pressed Rejoin, saw "requested",
+    // and stayed out; the inline attempt's transient failure had quietly turned the
+    // durable retry into a no-op.
+    expect(queued).toEqual([{ coordinate: COORD, pubkey: ACCOUNT, reenrolling: CHATKEY }]);
     expect(logs.some((l) => l.includes("queued for durable retry"))).toBe(true);
+  });
+
+  it("the queued retry actually REPAIRS the member — a plain add would be refused", async () => {
+    // The behavioural half of the finding. `tryAddKeyPackage` refuses to drop a
+    // leaf it still holds unless `reenrolling` names that very device, so a retry
+    // that lost the flag is a no-op dressed as work: the user pressed Rejoin, the
+    // inline attempt failed transiently, the durable retry ran, and they were still
+    // out with nothing further queued.
+    const store = freshStore();
+    const mls = new FakeMls();
+    const queued: Array<{ pubkey: string; reenrolling?: string }> = [];
+    let failFetch = true;
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      enqueueSync: (_c, pubkey, reenrolling) => queued.push({ pubkey, reenrolling }),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // Rejoin: the device rotated its key package and attested — but the relay is
+    // down for the inline sync, so it is queued.
+    const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")], undefined, {
+      enqueueSync: (_c, pubkey, reenrolling) => queued.push({ pubkey, reenrolling }),
+      fetchKeyPackages: async () => {
+        if (failFetch) throw new Error("simulated relay outage");
+        return [kpEvent(CHATKEY, "kp2")];
+      },
+    });
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(queued).toHaveLength(1);
+    expect(mls.removed).toEqual([]); // nothing repaired yet
+
+    // The job runner comes back with what it was given.
+    failFetch = false;
+    await admin2.syncMember(COORD, ACCOUNT, { reenrolling: queued[0]!.reenrolling });
+    expect(mls.removed).toEqual([[CHATKEY]]);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
   });
 
   it("says so plainly when there is no queue to fall back on", async () => {
