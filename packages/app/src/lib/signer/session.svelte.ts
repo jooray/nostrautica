@@ -109,6 +109,17 @@ class Session {
    * flag is what lets the shell offer it.
    */
   restoreError = $state(false);
+  /**
+   * WHY the restore failed, so the shell can say the right sentence.
+   * "signer" = a persisted bunker that did not answer; "extension" = a NIP-07
+   * login whose extension is not injected (yet). The second used to produce no
+   * error at all: `restore()` fell straight through to `return false` and the
+   * user was SILENTLY logged out, on a machine where their key is right there in
+   * the extension. The visible consequence is worse than "logged out" — the app's
+   * sign-in flow then offers to make a NEW local identity, which is how someone
+   * ends up with two.
+   */
+  restoreErrorKind = $state<"signer" | "extension" | null>(null);
   /** Human-readable reason for the failed restore, for the retry surface. */
   restoreErrorMessage = $state<string | null>(null);
 
@@ -215,6 +226,7 @@ class Session {
     this.logoutError = false;
     this.restoreError = false;
     this.restoreErrorMessage = null;
+    this.restoreErrorKind = null;
     // Scope owner-backed stores only after custody has settled, matching the
     // reactive session publication above.
     setActiveOwner(pubkey);
@@ -242,6 +254,7 @@ class Session {
     this.restoring = true;
     this.restoreError = false;
     this.restoreErrorMessage = null;
+    this.restoreErrorKind = null;
     try {
       const method = await loadLoginMethod();
       if (method === "local") {
@@ -249,8 +262,19 @@ class Session {
         if (sk) return this.adopt(new LocalSigner(sk), tok);
       }
       // NIP-07 can be re-established silently if the extension is present.
-      if (method === "nip07" && hasNip07()) {
-        return this.adopt(new Nip07Signer(), tok);
+      if (method === "nip07") {
+        if (hasNip07()) return this.adopt(new Nip07Signer(), tok);
+        // Not injected. Extensions inject `window.nostr` at document_start, but a
+        // cold profile, a slow extension host or a disabled/removed extension all
+        // land here — and falling through silently tells a logged-in user they are
+        // logged out. Say so, and keep the persisted method on disk so Retry can
+        // pick it up once the extension appears.
+        if (tok === this.opToken) {
+          this.restoreError = true;
+          this.restoreErrorKind = "extension";
+          this.restoreErrorMessage = "no NIP-07 extension is available in this browser";
+        }
+        return false;
       }
       // NIP-46 (Amber): reconnect the persisted bunker session (spec §5.3).
       if (method === "nip46") {
@@ -282,6 +306,7 @@ class Session {
             console.warn("[session] NIP-46 restore failed; session kept for retry", e);
             if (tok === this.opToken) {
               this.restoreError = true;
+              this.restoreErrorKind = "signer";
               this.restoreErrorMessage = e instanceof Error ? e.message : String(e);
             }
             return false;
@@ -363,6 +388,7 @@ class Session {
     // left to bring back, so offering a retry would be nonsense.
     this.restoreError = false;
     this.restoreErrorMessage = null;
+    this.restoreErrorKind = null;
     // Self-encrypt event-key custody (E_id/E_inbox nsecs, ECKs) into an
     // on-device backup BEFORE tearing down the signer or clearing anything
     // (audit UX-6). These keys were deliberately left in plaintext forever so
@@ -472,6 +498,7 @@ class Session {
     this.custodyReady = false;
     this.restoreError = false;
     this.restoreErrorMessage = null;
+    this.restoreErrorKind = null;
     // R21: the originating tab already discarded this owner's queued items from
     // shared IndexedDB; drop this tab's reactive outbox view synchronously so it
     // doesn't keep showing them until its next poll.

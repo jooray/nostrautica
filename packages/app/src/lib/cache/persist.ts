@@ -425,6 +425,16 @@ export function hydrateAppCache(): Promise<void> {
         // the first boot after the upgrade doesn't evict a warm cache on the very
         // `at` semantics the split exists to stop using.
         if (typeof v.touchedAt !== "number") v.touchedAt = nowSec();
+        // LATEST WINS. Boot no longer awaits this bulk read (§7.4.5), so by the
+        // time it lands the app has been running for up to 1.5 s and has very
+        // likely written fresher entries — a just-fetched event context, a
+        // submission's write-through. Overwriting those with what was on disk when
+        // the read started paints stale data over fresh, and pages re-read on the
+        // hydration version bump, so they actively pick the stale copy up. `at` is
+        // the record's own recency (`touchedAt` is only the eviction clock), so
+        // compare on that.
+        const live = mirror.get(k);
+        if (live && typeof live.at === "number" && live.at >= v.at) continue;
         mirror.set(k, v);
       }
       recountMirrorBytes();

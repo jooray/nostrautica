@@ -232,6 +232,50 @@ describe("persist hydration generation fence (H-5)", () => {
   });
 });
 
+describe("late hydration never paints over a fresher entry (INFRA-N-4)", () => {
+  beforeEach(() => __resetPersistForTests());
+
+  it("keeps the newer in-memory record when the bulk read lands with an older one", async () => {
+    // Boot no longer awaits the bulk read (§7.4.5), so by the time it lands the app
+    // has been running for up to 1.5 s and has very likely written fresher entries
+    // — a just-fetched event context, a submission's write-through. Overwriting
+    // those with what was on disk when the read STARTED paints stale over fresh,
+    // and pages re-read on the hydration bump, so they actively pick the stale copy
+    // up until the next revalidation.
+    let release!: (v: Array<[string, CacheEntry]>) => void;
+    const gate = new Promise<Array<[string, CacheEntry]>>((r) => (release = r));
+    __setPersistBackend({ getAll: () => gate, put: async () => {}, delete: async () => {} });
+    const p = hydrateAppCache();
+
+    // The app fetches and writes while the bulk read is still in flight.
+    setActiveCacheOwner(A);
+    cacheSet("dir", ["fresh"], 100);
+
+    release([
+      [`${A}\x1fdir`, { at: 10, data: ["stale-from-disk"] }],
+      [`${A}\x1fother`, { at: 10, data: ["only-on-disk"] }],
+    ]);
+    await p;
+
+    expect(cacheGet<string[]>("dir")?.data).toEqual(["fresh"]);
+    // Entries the app has NOT touched still hydrate — this is a latest-wins rule,
+    // not a "skip everything once anything is in memory" rule.
+    expect(cacheGet<string[]>("other")?.data).toEqual(["only-on-disk"]);
+  });
+
+  it("still takes the disk copy when it is the newer one (another tab wrote it)", async () => {
+    let release!: (v: Array<[string, CacheEntry]>) => void;
+    const gate = new Promise<Array<[string, CacheEntry]>>((r) => (release = r));
+    __setPersistBackend({ getAll: () => gate, put: async () => {}, delete: async () => {} });
+    const p = hydrateAppCache();
+    setActiveCacheOwner(A);
+    cacheSet("dir", ["older"], 10);
+    release([[`${A}\x1fdir`, { at: 100, data: ["newer-from-disk"] }]]);
+    await p;
+    expect(cacheGet<string[]>("dir")?.data).toEqual(["newer-from-disk"]);
+  });
+});
+
 describe("persist hydrate + prune", () => {
   beforeEach(() => __resetPersistForTests());
 

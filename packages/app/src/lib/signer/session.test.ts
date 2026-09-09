@@ -452,3 +452,43 @@ describe("adopting a new signer closes the one it replaces", () => {
     expect(close).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * A NIP-07 user whose extension isn't injected must not be silently logged out
+ * (2026-09-09 audit, INFRA-N-3).
+ *
+ * `restore()` guarded the whole branch on `hasNip07()` and fell through to
+ * `return false` with no error set. The shell then rendered a logged-OUT app to
+ * someone whose key is sitting in the extension, and the sign-in flow's most
+ * prominent path creates a NEW local identity — which is how a person ends up
+ * with two accounts and no idea why.
+ */
+describe("a NIP-07 restore with no extension says so", () => {
+  beforeEach(async () => {
+    await session.logout().catch(() => {});
+    keystore.clearKeystore.mockClear(); // the logout above legitimately calls it
+    keystore.loadLoginMethod.mockResolvedValue("nip07");
+    vi.stubGlobal("window", {});
+  });
+  afterEach(() => {
+    keystore.loadLoginMethod.mockResolvedValue(null);
+    vi.unstubAllGlobals();
+  });
+
+  it("sets restoreError with the extension kind, and keeps the persisted method for a retry", async () => {
+    expect(await session.restore()).toBe(false);
+    expect(session.loggedIn).toBe(false);
+    expect(session.restoreError).toBe(true);
+    expect(session.restoreErrorKind).toBe("extension");
+    // The method stays on disk — Retry is meant to work once the extension wakes.
+    expect(keystore.clearKeystore).not.toHaveBeenCalled();
+  });
+
+  it("restores silently, with no error, once the extension IS present", async () => {
+    const pubkey = "a".repeat(64);
+    vi.stubGlobal("window", { nostr: { getPublicKey: async () => pubkey } });
+    expect(await session.restore()).toBe(true);
+    expect(session.restoreError).toBe(false);
+    expect(session.restoreErrorKind).toBeNull();
+  });
+});

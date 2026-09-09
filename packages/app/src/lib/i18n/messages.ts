@@ -1153,6 +1153,10 @@ export const messages = {
     "error.followListGuard":
       "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
     "error.signerTimeout": "Your signer didn't respond. Check it's online and try again.",
+    "error.extensionMissing":
+      "Your Nostr browser extension isn't available. Unlock or enable it, then try again — you're still signed in.",
+    "boot.badRecoveryLink":
+      "That recovery link didn't carry a usable key. Ask for a fresh one, or sign in another way.",
     // Same failure, but we know a signer relay refused the connection, so say which
     // one. A relay outage and a closed signer app produce the identical symptom
     // otherwise, and only one of the two is something the user can act on.
@@ -2703,6 +2707,10 @@ export const messages = {
     "error.followListGuard":
       "Nepodarilo sa načítať váš zoznam sledovaných z relayov, preto je sledovanie pozastavené, aby sa neprepísal. Skúste to o chvíľu znova.",
     "error.signerTimeout": "Váš podpisovač neodpovedal. Skontrolujte, či je online, a skúste znova.",
+    "error.extensionMissing":
+      "Vaše rozšírenie pre Nostr nie je dostupné. Odomknite ho alebo zapnite a skúste znova — stále ste prihlásený.",
+    "boot.badRecoveryLink":
+      "Tento obnovovací odkaz neniesol použiteľný kľúč. Vypýtajte si nový alebo sa prihláste inak.",
     "error.signerRelaysUnreachable":
       "Váš podpisovač neodpovedal: nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
     "error.badBunkerLink": "Toto nevyzerá ako platný bunker odkaz.",
@@ -4240,6 +4248,10 @@ export const messages = {
     "error.followListGuard":
       "Nepodařilo se načíst váš seznam sledovaných z relayů, proto je sledování pozastaveno, aby se nepřepsal. Zkuste to za chvíli znovu.",
     "error.signerTimeout": "Váš podpisovač neodpověděl. Zkontrolujte, že je online, a zkuste to znovu.",
+    "error.extensionMissing":
+      "Vaše rozšíření pro Nostr není dostupné. Odemkněte ho nebo zapněte a zkuste to znovu — stále jste přihlášen.",
+    "boot.badRecoveryLink":
+      "Tento obnovovací odkaz nenesl použitelný klíč. Vyžádejte si nový nebo se přihlaste jinak.",
     "error.signerRelaysUnreachable":
       "Váš podpisovač neodpověděl: nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
     "error.badBunkerLink": "Tohle nevypadá jako platný bunker odkaz.",
