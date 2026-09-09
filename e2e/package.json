@@ -3,9 +3,20 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "_scripts_note": [
+    "The Playwright suite is deliberately NOT called `test`. As `test` it was picked",
+    "up by `pnpm -r test`, where it starts `vite preview` on :4173 and — with no",
+    "app build present, i.e. on a fresh checkout — hangs until Playwright's 120 s",
+    "webServer timeout, at which point pnpm's RECURSIVE_RUN_FIRST_FAIL aborts the",
+    "whole run BEFORE the app and coordinator suites. Only the protocol package's",
+    "242 tests ever reported, so `pnpm -r test` silently under-reported by ~1,900",
+    "tests while looking like it had run everything.",
+    "Run these through the orchestrator (`pnpm e2e:smoke` and friends), which owns",
+    "the relay/Blossom/proxy lifecycle; `pnpm e2e` is the bare-preview form."
+  ],
   "scripts": {
-    "test": "playwright test",
-    "test:headed": "playwright test --headed"
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.1",
