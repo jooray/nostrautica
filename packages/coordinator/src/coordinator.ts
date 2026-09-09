@@ -57,6 +57,7 @@ import {
   directoryEntryContentSchema,
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
+  NIP44_MAX_PLAINTEXT_BYTES,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
   CHAT_INTEROP_RELAYS,
@@ -249,6 +250,12 @@ const INBOX_MAX_QUEUE = 2000;
  * comparison alone, is what that guard turns on.
  */
 const JOIN_STALE_AFTER_SEC = 5 * 60;
+/**
+ * Warn the organizer once the 31604 roster payload crosses this fraction of the
+ * NIP-44 ceiling (audit B-8). "The event is full" must never be the first anyone
+ * hears about a limit they can still plan around.
+ */
+const ROSTER_WARN_FRACTION = 0.9;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
 function effectiveMaxMediaSec(configured: number): number {
@@ -621,6 +628,9 @@ export class Coordinator {
   /** Coordinates whose retention expiry is currently running (audit R3): guards the
    *  boot + hourly sweeps against double-executing the same event's expiry. */
   private readonly retentionInProgress = new Set<string>();
+  /** Events already warned about the roster ceiling (audit B-8) — once per process,
+   *  so a burst of approvals near the limit produces one notice, not one per person. */
+  private readonly rosterWarned = new Set<string>();
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -2350,6 +2360,14 @@ export class Coordinator {
       }
     }
 
+    // The roster ceiling applies to an auto-approval exactly as it does to an
+    // organizer's (audit B-8): an invite code cannot conjure space that the 31604
+    // payload does not have. Refused entrants stay pending, which is the same place
+    // a manual-approval event would have put them.
+    if (decision.grant && !(await this.admitToRoster(state, attendeePubkey))) {
+      decision = { grant: false, reason: "event roster is full" };
+    }
+
     // Never REGRESS a status decided while the fetch above was in flight (audit
     // B-1). Entitlement can only ever promote to `approved`; when it says no, the
     // row keeps whatever it says now. The mutex makes the organizer's approve wait
@@ -2830,7 +2848,13 @@ export class Coordinator {
     return run;
   }
 
-  private async publishRoster(state: EventState): Promise<void> {
+  /**
+   * The 31604 roster content for this event's approved set, optionally including
+   * one attendee who is not approved YET — the capacity probe below asks "would
+   * this person still fit". Split out of {@link publishRoster} so the probe
+   * measures the real payload rather than an estimate of it.
+   */
+  private buildRosterContent(state: EventState, alsoInclude?: string): RosterContent {
     const approved = this.deps.store.approvedAttendees(state.coordinate);
     const { bytes } = this.currentEck(state);
     // Advertise this event's MLS routing id (audit APPK-3) so members bind to the
@@ -2868,6 +2892,116 @@ export class Coordinator {
         };
       }),
     };
+    if (alsoInclude && !approved.some((a) => a.pubkey === alsoInclude)) {
+      roster.attendees.push({
+        pubkey: alsoInclude,
+        d: blindedDFor(bytes, state.coordinate, alsoInclude),
+        role: "attendee",
+        ...(() => {
+          const keys = this.deps.store
+            .chatKeysForAccount(state.coordinate, alsoInclude)
+            .filter((k) => k.status === "active")
+            .slice(0, MAX_CHAT_KEYS_PER_ACCOUNT)
+            .map((k) => ({
+              pubkey: k.chat_pubkey,
+              ...(k.label ? { label: k.label } : {}),
+              added_at: Math.floor(k.updated_at / 1000),
+            }));
+          return keys.length > 0 ? { chat_keys: keys } : {};
+        })(),
+      });
+    }
+    return roster;
+  }
+
+  /**
+   * Would this event's roster still ENCRYPT with one more member in it?
+   *
+   * A 31604 is a single NIP-44 payload, and NIP-44 v2 caps plaintext at 65,535
+   * bytes — a hard protocol ceiling, unrelated to the 2,000-member intake cap the
+   * schema and the join gate advertise. A minimal entry is ~135 bytes and one with
+   * a chat device ~265, so a real event runs out somewhere between roughly 240 and
+   * 480 approved members, not 2,000.
+   *
+   * Past that, `buildRoster` threw from inside the approve path: the ECK grant had
+   * already been published (the attendee genuinely holds the key), the roster never
+   * went out, and the organizer saw a failed command with a crypto error in it —
+   * for the 400th person, at the door, with no way to know that the 399th was fine.
+   * So the ceiling is enforced HERE, before the grant, and reported to the organizer
+   * in terms they can act on (audit B-8).
+   *
+   * The honest fix for large events is roster pagination, which is a wire change
+   * against a frozen NIP and an owner decision, not a patch. Until then this is a
+   * real cap, and it says so out loud — see PROTOCOL-NIP.md §31604, which now
+   * documents the measured ceiling instead of only the ≤2000 array bound.
+   */
+  private rosterCapacity(state: EventState, adding?: string): { bytes: number; fits: boolean; count: number } {
+    const roster = this.buildRosterContent(state, adding);
+    const bytes = utf8ToBytes(JSON.stringify(roster)).length;
+    return { bytes, fits: bytes <= NIP44_MAX_PLAINTEXT_BYTES, count: roster.attendees.length };
+  }
+
+  /**
+   * Gate an approval on the roster ceiling (audit B-8). Returns false when this
+   * member cannot be admitted, having told the organizer why. Also warns ONCE per
+   * event as the roster crosses {@link ROSTER_WARN_FRACTION} of capacity, so
+   * "this event is full" is never the first anyone hears of it.
+   */
+  private async admitToRoster(state: EventState, pubkey: string): Promise<boolean> {
+    const { bytes, fits, count } = this.rosterCapacity(state, pubkey);
+    if (!fits) {
+      log(
+        `[roster] REFUSED approval of ${short(pubkey)} for ${state.coordinate}: the 31604 roster would be ${bytes} bytes, over the ${NIP44_MAX_PLAINTEXT_BYTES}-byte NIP-44 ceiling at ${count} members`,
+      );
+      await this.emitRosterFullStatus(state, count).catch(() => {});
+      return false;
+    }
+    if (bytes >= NIP44_MAX_PLAINTEXT_BYTES * ROSTER_WARN_FRACTION && !this.rosterWarned.has(state.coordinate)) {
+      this.rosterWarned.add(state.coordinate);
+      log(
+        `[roster] ${state.coordinate} is near the roster ceiling: ${bytes}/${NIP44_MAX_PLAINTEXT_BYTES} bytes at ${count} members`,
+      );
+      await this.emitRosterNearFullStatus(state, count).catch(() => {});
+    }
+    return true;
+  }
+
+  /** Tell the organizer the roster is full — the approval did NOT happen. */
+  private async emitRosterFullStatus(state: EventState, count: number): Promise<void> {
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: "roster",
+      state: "poison",
+      attempts: 0,
+      error_category: "roster_full",
+      // Not retryable: nothing clears by waiting. Revoking or removing a member
+      // frees space; nothing else does.
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, this.accountRelays(state));
+    log(`[roster] published 21606 roster_full for ${state.coordinate} (${count} members)`);
+  }
+
+  /** Warn the organizer once, while they can still do something about it. */
+  private async emitRosterNearFullStatus(state: EventState, count: number): Promise<void> {
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: "roster",
+      state: "poison",
+      attempts: 0,
+      error_category: "roster_nearly_full",
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, this.accountRelays(state));
+    log(`[roster] published 21606 roster_nearly_full for ${state.coordinate} (${count} members)`);
+  }
+
+  private async publishRoster(state: EventState): Promise<void> {
+    const roster = this.buildRosterContent(state);
     const event = buildRoster(this.publishKeys(state), state.coordinate, roster, this.nextCreatedAt);
     await this.publish(event, state.configRelays);
   }
@@ -3702,6 +3836,10 @@ export class Coordinator {
       if (order && !this.stillOwnsSubject(coordinate, subject, order.rumorId)) return;
       const attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
       if (attendee) {
+        // The roster has a real ceiling well below the 2,000-member intake cap
+        // (audit B-8) — refuse BEFORE the grant rather than throwing mid-publish
+        // with the ECK already in the attendee's hands.
+        if (attendee.status !== "approved" && !(await this.admitToRoster(state, pubkey))) return;
         if (attendee.status !== "approved") {
           this.deps.store.upsertAttendee({ coordinate, pubkey, status: "approved", now: this.now() });
           log(`[approve] organizer approved ${short(pubkey)}`);

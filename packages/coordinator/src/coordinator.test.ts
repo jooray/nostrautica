@@ -1547,6 +1547,99 @@ async function admin(
   await h.coordinator.handleCoordinatorWrap(wrap as any);
 }
 
+/**
+ * Audit B-8 — the roster's REAL ceiling, enforced where it can still be acted on.
+ *
+ * A 31604 is one NIP-44 payload, capped at 65,535 plaintext bytes. A minimal entry
+ * is ~135 bytes and one with a chat device ~265, so an event runs out somewhere
+ * between roughly 240 and 480 approved members — nowhere near the 2,000 the schema
+ * and the join gate advertise. Past that, `buildRoster` threw from INSIDE the
+ * approve path: the ECK grant was already published, the roster never went out, and
+ * the organizer got a crypto error for the 400th person at the door.
+ */
+describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () => {
+  /** Fill the event's approved set until the roster is at `fraction` of capacity. */
+  function fillRoster(h: Harness, count: number): void {
+    for (let i = 0; i < count; i++) {
+      h.store.upsertAttendee({
+        coordinate: h.coordinate,
+        pubkey: i.toString(16).padStart(64, "0"),
+        status: "approved",
+        now: h.clock.t,
+      });
+    }
+  }
+
+  it("refuses an approval that would not fit, tells the organizer, and grants nothing", async () => {
+    const h = await setup();
+    fillRoster(h, 600); // past the ceiling on its own
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+    const grantsBefore = grantsTo(h, sk).length;
+
+    await admin(h, "approve", { pubkey: pk });
+
+    // Still pending — and, crucially, holding no key.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(grantsTo(h, sk).length).toBe(grantsBefore);
+    // The organizer is told, in terms they can act on.
+    const status = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .find((s) => s.error_category === "roster_full");
+    expect(status).toBeDefined();
+    expect(status!.retryable).toBe(false);
+  });
+
+  it("an auto-approving invite cannot conjure space either", async () => {
+    const h = await setup();
+    fillRoster(h, 600);
+    const sk = generateSecretKey();
+    const { pubkey } = await joinOnly(h, sk, "with-a-valid-code");
+    // The invite proof is valid; the roster is not. They land in the manual queue.
+    expect(h.store.getAttendee(h.coordinate, pubkey)?.status).toBe("pending");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+  });
+
+  it("warns ONCE as the roster approaches the ceiling, while it can still be planned around", async () => {
+    const h = await setup();
+    fillRoster(h, 460); // ~90% of capacity for bare entries
+    const rosterStatuses = () =>
+      h.transport.published
+        .filter((e) => e.kind === 1059)
+        .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+        .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+        .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+        .filter((s) => s.error_category === "roster_nearly_full");
+
+    for (const name of ["a", "b", "c"]) {
+      const sk = generateSecretKey();
+      const pk = getPublicKey(sk);
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", displayName: name, now: h.clock.t });
+      await admin(h, "approve", { pubkey: pk });
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved"); // still admitted
+    }
+    expect(rosterStatuses()).toHaveLength(1); // one notice, not one per approval
+  });
+
+  it("an ordinary event approves normally and says nothing about capacity", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    const noisy = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .filter((s) => s.stage === "roster");
+    expect(noisy).toHaveLength(0);
+  });
+});
+
 describe("audit B-4 — reprocess repairs a poisoned TALK, not just the attendee profile", () => {
   it("re-enqueues the speaker's untranscribed talk so a fixed outage can actually transcribe it", async () => {
     // `clearAttendeeJobMemo` deliberately covers `process_talk`, because a poisoned

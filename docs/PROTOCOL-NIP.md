@@ -437,6 +437,17 @@ silently drop them.
   absent for chat-off events. `chat_keys` is absent for an attendee with no attested
   device.
 
+  **The `≤2000` array cap is not the operative limit.** The whole content is a
+  single NIP-44 v2 payload, so it is bounded by that layer's 65,535-byte plaintext
+  ceiling (§7.4). A minimal entry costs about 135 bytes and one carrying a chat
+  device about 265, which puts the real ceiling somewhere between roughly 240 and
+  480 approved members depending on how many have attested a device. A coordinator
+  **MUST NOT** approve past the point where the roster it would publish no longer
+  encrypts, and **SHOULD** tell the organizer (a `21606` with
+  `error_category: "roster_full"`, and `"roster_nearly_full"` on the way there)
+  rather than failing mid-publish with the ECK grant already delivered. Removing
+  this limit means paginating the roster, which is a wire change.
+
 #### `31605`: Match List
 
 - **Class:** parameterized-replaceable. **Signer:** the coordinator only.
