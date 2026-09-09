@@ -238,9 +238,17 @@
       <!--
         Tapping follows the nostrconnect:// deep link to whichever signer app on
         THIS device registered the scheme (Amber and Amethyst on Android, Clave on
-        iOS, Primal on both). The label used to say "Open in Amber", naming one
-        Android-only app when several signers exist across platforms — on any
-        device without Amber the button looked broken rather than unhandled.
+        iOS). The label used to say "Open in Amber", naming one Android-only app
+        when several signers exist across platforms — on any device without Amber
+        the button looked broken rather than unhandled.
+
+        WHICH app gets it is the OS's choice, not ours, and it is a coin toss when
+        several have claimed the scheme. On an iPhone with both Primal and Clave
+        installed it is usually Primal, whose built-in signer cannot sign this
+        app's event kinds at all — so the happy path routes the user into the one
+        signer that silently breaks. That is what the "Trouble signing in?"
+        disclosure below is for; we cannot pick the app, only explain the escape.
+
         The QR above stays on every platform regardless: displaying it here and
         scanning it from a SEPARATE phone running a signer is a supported flow,
         not a fallback.
@@ -271,6 +279,35 @@
         {t("signin.remote.connect")}
       </button>
     {/if}
+
+    <!--
+      Two failures that look identical from the outside, and neither is
+      self-evident from anything on this screen.
+
+      Primal's built-in signer connects, reports success, and then silently
+      refuses the addressable/custom kinds this whole app is built on. So the user
+      signs in, everything appears fine, and nothing they do is ever saved. It is
+      no longer named in the button above, but people already have it installed,
+      so saying nothing leaves them to discover it the slow way.
+
+      And on iOS the `nostrconnect://` link goes to whichever installed app claimed
+      the scheme. With Primal and Clave both present that is usually Primal, i.e.
+      the OS routes the user straight into the broken case. Both remedies already
+      exist on this screen (the Copy button above, and the bunker:// paste field
+      below); what was missing was any way to know they are the remedies.
+
+      A <details> rather than a modal: it needs no focus trap, it is one tap, it
+      collapses back, and it costs nothing to the majority for whom the button
+      simply works. Rendered in both states because the wrong app can be opened
+      from the QR state and the "it didn't work" realisation usually arrives after
+      the connect attempt, not before.
+    -->
+    <details class="trouble">
+      <summary>{t("signin.trouble")}</summary>
+      <p class="muted">{t("signin.trouble.primal")}</p>
+      <p class="muted">{t("signin.trouble.wrongApp")}</p>
+      <p class="muted">{t("signin.trouble.bunker")}</p>
+    </details>
   </div>
 
   <div style="order:{order('paste', 3)}">
@@ -329,3 +366,18 @@
     </p>
   </div>
 </div>
+
+<style>
+  .trouble {
+    margin-top: 0.75rem;
+  }
+  .trouble > summary {
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--accent);
+  }
+  .trouble > p {
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+  }
+</style>

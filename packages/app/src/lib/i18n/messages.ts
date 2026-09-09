@@ -138,7 +138,14 @@ export const messages = {
     // Android-only, so on an iPhone or a desktop the old label promised an app
     // the user could not have. Whether the link opens anything depends on a
     // signer being installed, which is equally true everywhere.
-    "signin.remote.openSigner": "Open in your signer app (Amber, Clave, Primal, Amethyst, …)",
+    //
+    // Primal is NOT in this list, and is called out in `signin.trouble.primal`
+    // instead: its built-in signer refuses the addressable/custom event kinds this
+    // whole app is built on (31600-31611, 21600-21610) and drops them SILENTLY, so
+    // it is not a signer that merely might be missing, it is one that connects and
+    // then breaks everything quietly. Recommending it by name was actively
+    // steering people into that.
+    "signin.remote.openSigner": "Open in your signer app (Amber, Clave, Amethyst, …)",
     "signin.remote.copy": "Copy",
     "signin.remote.copied": "Copied ✓",
     "signin.remote.waiting": "Waiting for the signer to approve…",
@@ -146,11 +153,18 @@ export const messages = {
       "Didn't get the approval? Keep this tab open while approving, or retry with a fresh code.",
     "signin.remote.retry": "Retry",
     "signin.remote.cancel": "Cancel",
-    "signin.remote.hint": "such as Amber, Amethyst, Clave or Primal",
+    "signin.remote.hint": "such as Amber, Amethyst or Clave",
     "signin.remote.connect": "Connect with Remote Signer",
     "signin.remote.authRequired":
       "Your signer asks you to approve this request on its website:",
     "signin.remote.openAuth": "Open approval page",
+    "signin.trouble": "Trouble signing in?",
+    "signin.trouble.primal":
+      "Primal's built-in signer does not work here. It silently refuses the kinds of event Nostrautica publishes, so signing in looks like it worked and then nothing you do is saved. Use Amber on Android, Clave on iOS, or another NIP-46 signer.",
+    "signin.trouble.wrongApp":
+      "Opened the wrong app? With more than one signer installed, the button opens whichever one claimed the link, which is often not the one you want. Copy the code above, open the signer you want yourself, and paste it in there.",
+    "signin.trouble.bunker":
+      "Or go the other way: in your signer, create a connection, copy the bunker:// link it gives you, and paste that into \"Paste a key\" below.",
     "signin.paste": "Paste a key",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Passphrase",
@@ -1155,13 +1169,13 @@ export const messages = {
       "Couldn't load your follow list from relays, so following is paused to avoid overwriting it. Try again in a moment.",
     "error.signerTimeout": "Your signer didn't respond. Check it's online and try again.",
     "error.extensionMissing":
-      "Your Nostr browser extension isn't available. Unlock or enable it, then try again — you're still signed in.",
+      "Your Nostr browser extension isn't available. You're still signed in; unlock or enable it, then try again.",
     "boot.badRecoveryLink":
       "That recovery link didn't carry a usable key. Ask for a fresh one, or sign in another way.",
     "join.loadFailed.body": "We couldn't load this event, so there's nothing to join yet.",
     "join.waiting.checking": "Checking every {sec} seconds…",
     "join.waiting.checked": "Last checked {time} · checking again every {sec} seconds.",
-    "join.waiting.canClose": "You can close this — we'll show you're in when you come back.",
+    "join.waiting.canClose": "You can close this. We'll show you're in when you come back.",
     "matches.none.why":
       "Matches appear once your intro has been processed and the organizer has run matching.",
     "matches.checkAgain": "Check again",
@@ -1250,7 +1264,7 @@ export const messages = {
     "chat.checking": "Checking your access…",
     "chat.sendFailed": "Couldn't send: this device is no longer in the chat. Ask to be added again.",
     "chat.sendFailedTransport":
-      "Couldn't send — we couldn't reach the relays. Your message is still here; try again.",
+      "Couldn't send: we couldn't reach the relays. Your message is still here, try again.",
     "chat.sendRetry": "Try again",
     "chat.evicted.title": "You're no longer in this chat",
     "chat.evicted.body":
@@ -1704,7 +1718,7 @@ export const messages = {
     "signin.remote.scan":
       "Naskenujte to svojou podpisovacou aplikáciou (na tomto zariadení alebo na inom telefóne) alebo to otvorte priamo tu:",
     "signin.remote.openSigner":
-      "Otvoriť v podpisovacej aplikácii (Amber, Clave, Primal, Amethyst, …)",
+      "Otvoriť v podpisovacej aplikácii (Amber, Clave, Amethyst, …)",
     "signin.remote.copy": "Kopírovať",
     "signin.remote.copied": "Skopírované ✓",
     "signin.remote.waiting": "Čaká sa na schválenie podpisovačom…",
@@ -1712,11 +1726,18 @@ export const messages = {
       "Neprišlo schválenie? Nechajte túto kartu otvorenú počas schvaľovania, alebo to skúste znova s novým kódom.",
     "signin.remote.retry": "Skúsiť znova",
     "signin.remote.cancel": "Zrušiť",
-    "signin.remote.hint": "napríklad Amber, Amethyst, Clave alebo Primal",
+    "signin.remote.hint": "napríklad Amber, Amethyst alebo Clave",
     "signin.remote.connect": "Pripojiť vzdialený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žiada o schválenie tejto požiadavky na svojej stránke:",
     "signin.remote.openAuth": "Otvoriť schvaľovaciu stránku",
+    "signin.trouble": "Problém s prihlásením?",
+    "signin.trouble.primal":
+      "Vstavaný podpisovač v Primale tu nefunguje. Ticho odmieta typy udalostí, ktoré Nostrautica zverejňuje, takže prihlásenie vyzerá úspešne a potom sa nič, čo urobíte, neuloží. Použite Amber na Androide, Clave na iOS alebo iný NIP-46 podpisovač.",
+    "signin.trouble.wrongApp":
+      "Otvorila sa nesprávna aplikácia? Ak máte nainštalovaných viac podpisovačov, tlačidlo otvorí ten, ktorý si odkaz zaregistroval, a to často nie je ten, ktorý chcete. Skopírujte kód vyššie, sami si otvorte podpisovač, ktorý chcete, a vložte ho tam.",
+    "signin.trouble.bunker":
+      "Alebo opačne: v podpisovači vytvorte pripojenie, skopírujte bunker:// odkaz, ktorý vám dá, a vložte ho nižšie do poľa „Vložiť kľúč“.",
     "signin.paste": "Vložiť kľúč",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Heslo",
@@ -1922,12 +1943,12 @@ export const messages = {
     "readiness.checking": "Overuje sa…",
     "readiness.cta.editProfile": "Upraviť profil",
     "readiness.hint.failed":
-      "Koordinátorovi sa nepodarilo zostaviť tvoj profil. Keď ho upravíš a uložíš, odošle sa znova.",
+      "Koordinátorovi sa nepodarilo zostaviť váš profil. Keď ho upravíte a uložíte, odošle sa znova.",
     "readiness.hint.failedMedia":
-      "Tvoju nahrávku sa nepodarilo spracovať. Zvyčajne pomôže nahrať novú.",
+      "Vašu nahrávku sa nepodarilo spracovať. Zvyčajne pomôže nahrať novú.",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuálny krok",
-    "readiness.state.failed": "Vyžaduje tvoju pozornosť",
+    "readiness.state.failed": "Vyžaduje vašu pozornosť",
     "readiness.state.upcoming": "Nasleduje",
 
     "event.organizerAdmin": "Administračné rozhranie udalosti",
@@ -1971,7 +1992,7 @@ export const messages = {
     "event.offline.partial": "Uložené, no niektoré časti sa nestiahli. Skúste znova.",
     "event.offline.noSw": "Dáta sú uložené, ale obrazovky aplikácie ešte nie sú uložené. Znova otvorte aplikáciu (alebo obnovte stránku) a stiahnite znova, aby sa otvorila aj bez signálu.",
     "event.offline.storageFull":
-      "Zariadenie nemá voľné miesto, takže sa nič neukladá na offline použitie. Uvoľni miesto a stiahni znova.",
+      "Zariadenie nemá voľné miesto, takže sa nič neukladá na offline použitie. Uvoľnite miesto a stiahnite to znova.",
     "event.offline.stored": "Pridané {size} do zariadenia",
     "event.offline.persisted": "ponechané v tomto zariadení",
     "event.offline.mediaNote": "zvuk/video sa nesťahuje vopred",
@@ -2724,15 +2745,15 @@ export const messages = {
       "Nepodarilo sa načítať váš zoznam sledovaných z relayov, preto je sledovanie pozastavené, aby sa neprepísal. Skúste to o chvíľu znova.",
     "error.signerTimeout": "Váš podpisovač neodpovedal. Skontrolujte, či je online, a skúste znova.",
     "error.extensionMissing":
-      "Vaše rozšírenie pre Nostr nie je dostupné. Odomknite ho alebo zapnite a skúste znova — stále ste prihlásený.",
+      "Vaše rozšírenie pre Nostr nie je dostupné. Stále ste prihlásený; odomknite ho alebo zapnite a skúste znova.",
     "boot.badRecoveryLink":
       "Tento obnovovací odkaz neniesol použiteľný kľúč. Vypýtajte si nový alebo sa prihláste inak.",
     "join.loadFailed.body": "Podujatie sa nepodarilo načítať, takže sa zatiaľ nie je k čomu pripojiť.",
     "join.waiting.checking": "Overujeme každých {sec} sekúnd…",
     "join.waiting.checked": "Naposledy overené o {time} · overujeme každých {sec} sekúnd.",
-    "join.waiting.canClose": "Pokojne to zavri — keď sa vrátiš, ukážeme, že si vnútri.",
+    "join.waiting.canClose": "Pokojne to zavrite. Keď sa vrátite, ukážeme, že ste vnútri.",
     "matches.none.why":
-      "Spojenia sa objavia, keď sa spracuje tvoje predstavenie a organizátor spustí párovanie.",
+      "Spojenia sa objavia, keď sa spracuje vaše predstavenie a organizátor spustí párovanie.",
     "matches.checkAgain": "Overiť znova",
     "error.signerRelaysUnreachable":
       "Váš podpisovač neodpovedal: nepodarilo sa spojiť s {relays}. Skontrolujte, či je podpisovač online, a skúste znova.",
@@ -2806,13 +2827,13 @@ export const messages = {
     "chat.compose.placeholder": "Správa",
     "chat.send": "Odoslať",
     "chat.checking": "Overujeme váš prístup…",
-    "chat.sendFailed": "Správu sa nepodarilo odoslať: toto zariadenie už nie je v chate. Požiadaj o opätovné pridanie.",
+    "chat.sendFailed": "Správu sa nepodarilo odoslať: toto zariadenie už nie je v chate. Požiadajte o opätovné pridanie.",
     "chat.sendFailedTransport":
-      "Správu sa nepodarilo odoslať — nepodarilo sa spojiť s relayami. Text tu zostal, skús to znova.",
+      "Správu sa nepodarilo odoslať: nepodarilo sa spojiť s relayami. Text tu zostal, skúste to znova.",
     "chat.sendRetry": "Skúsiť znova",
-    "chat.evicted.title": "Už nie si v tomto chate",
+    "chat.evicted.title": "Už nie ste v tomto chate",
     "chat.evicted.body":
-      "Nové správy sa na toto zariadenie nedostanú, kým ťa znova nepridajú. Všetko vyššie je to, čo ti prišlo, kým si bol vnútri.",
+      "Nové správy sa na toto zariadenie nedostanú, kým vás znova nepridajú. Všetko vyššie je to, čo vám prišlo, kým ste boli vnútri.",
     "chat.sending": "Odosiela sa…",
     "chat.rejoin": "Znovu sa pripojiť do chatu",
     "chat.rejoining": "Pripájame…",
@@ -3262,7 +3283,7 @@ export const messages = {
     "signin.remote.scan":
       "Naskenujte to svojí podepisovací aplikací (na tomto zařízení nebo na jiném telefonu) nebo to otevřete přímo tady:",
     "signin.remote.openSigner":
-      "Otevřít v podepisovací aplikaci (Amber, Clave, Primal, Amethyst, …)",
+      "Otevřít v podepisovací aplikaci (Amber, Clave, Amethyst, …)",
     "signin.remote.copy": "Kopírovat",
     "signin.remote.copied": "Zkopírováno ✓",
     "signin.remote.waiting": "Čeká se na schválení podpisovačem…",
@@ -3270,11 +3291,18 @@ export const messages = {
       "Nepřišlo schválení? Nechte tuto kartu otevřenou během schvalování, nebo to zkuste znovu s novým kódem.",
     "signin.remote.retry": "Zkusit znovu",
     "signin.remote.cancel": "Zrušit",
-    "signin.remote.hint": "například Amber, Amethyst, Clave nebo Primal",
+    "signin.remote.hint": "například Amber, Amethyst nebo Clave",
     "signin.remote.connect": "Připojit vzdálený podpisovač",
     "signin.remote.authRequired":
       "Váš podpisovač žádá o schválení tohoto požadavku na svém webu:",
     "signin.remote.openAuth": "Otevřít schvalovací stránku",
+    "signin.trouble": "Problém s přihlášením?",
+    "signin.trouble.primal":
+      "Vestavěný podpisovač v Primalu tu nefunguje. Tiše odmítá typy událostí, které Nostrautica zveřejňuje, takže přihlášení vypadá úspěšně a potom se nic, co uděláte, neuloží. Použijte Amber na Androidu, Clave na iOS nebo jiný NIP-46 podpisovač.",
+    "signin.trouble.wrongApp":
+      "Otevřela se špatná aplikace? Když máte nainstalovaných víc podpisovačů, tlačítko otevře ten, který si odkaz zaregistroval, a to často není ten, který chcete. Zkopírujte kód výše, sami si otevřete podpisovač, který chcete, a vložte ho tam.",
+    "signin.trouble.bunker":
+      "Nebo opačně: v podpisovači vytvořte připojení, zkopírujte bunker:// odkaz, který vám dá, a vložte ho níže do pole „Vložit klíč“.",
     "signin.paste": "Vložit klíč",
     "signin.paste.placeholder": "nsec1… / ncryptsec1… / bunker://…",
     "signin.paste.passphrase": "Heslo",
@@ -3480,12 +3508,12 @@ export const messages = {
     "readiness.checking": "Ověřuje se…",
     "readiness.cta.editProfile": "Upravit profil",
     "readiness.hint.failed":
-      "Koordinátorovi se nepodařilo sestavit tvůj profil. Když ho upravíš a uložíš, odešle se znovu.",
+      "Koordinátorovi se nepodařilo sestavit váš profil. Když ho upravíte a uložíte, odešle se znovu.",
     "readiness.hint.failedMedia":
-      "Tvou nahrávku se nepodařilo zpracovat. Obvykle pomůže nahrát novou.",
+      "Vaši nahrávku se nepodařilo zpracovat. Obvykle pomůže nahrát novou.",
     "readiness.state.done": "Hotovo",
     "readiness.state.current": "Aktuální krok",
-    "readiness.state.failed": "Vyžaduje tvou pozornost",
+    "readiness.state.failed": "Vyžaduje vaši pozornost",
     "readiness.state.upcoming": "Nadcházející",
 
     "event.organizerAdmin": "Administrační rozhraní akce",
@@ -3529,7 +3557,7 @@ export const messages = {
     "event.offline.partial": "Uloženo, ale některé části se nestáhly. Zkuste to znovu.",
     "event.offline.noSw": "Data jsou uložena, ale obrazovky aplikace se zatím neuložily. Znovu otevřete aplikaci (nebo obnovte stránku) a stáhněte znovu, aby se otevřela i bez signálu.",
     "event.offline.storageFull":
-      "Zařízení nemá volné místo, takže se nic neukládá pro offline použití. Uvolni místo a stáhni znovu.",
+      "Zařízení nemá volné místo, takže se nic neukládá pro offline použití. Uvolněte místo a stáhněte to znovu.",
     "event.offline.stored": "Přidáno {size} do zařízení",
     "event.offline.persisted": "ponecháno v tomto zařízení",
     "event.offline.mediaNote": "zvuk/video se nestahuje předem",
@@ -4280,15 +4308,15 @@ export const messages = {
       "Nepodařilo se načíst váš seznam sledovaných z relayů, proto je sledování pozastaveno, aby se nepřepsal. Zkuste to za chvíli znovu.",
     "error.signerTimeout": "Váš podpisovač neodpověděl. Zkontrolujte, že je online, a zkuste to znovu.",
     "error.extensionMissing":
-      "Vaše rozšíření pro Nostr není dostupné. Odemkněte ho nebo zapněte a zkuste to znovu — stále jste přihlášen.",
+      "Vaše rozšíření pro Nostr není dostupné. Stále jste přihlášen; odemkněte ho nebo zapněte a zkuste to znovu.",
     "boot.badRecoveryLink":
       "Tento obnovovací odkaz nenesl použitelný klíč. Vyžádejte si nový nebo se přihlaste jinak.",
     "join.loadFailed.body": "Událost se nepodařilo načíst, takže se zatím není k čemu připojit.",
     "join.waiting.checking": "Ověřujeme každých {sec} sekund…",
     "join.waiting.checked": "Naposledy ověřeno v {time} · ověřujeme každých {sec} sekund.",
-    "join.waiting.canClose": "Klidně to zavři — až se vrátíš, ukážeme, že jsi uvnitř.",
+    "join.waiting.canClose": "Klidně to zavřete. Až se vrátíte, ukážeme, že jste uvnitř.",
     "matches.none.why":
-      "Spojení se objeví, až se zpracuje tvé představení a organizátor spustí párování.",
+      "Spojení se objeví, až se zpracuje vaše představení a organizátor spustí párování.",
     "matches.checkAgain": "Ověřit znovu",
     "error.signerRelaysUnreachable":
       "Váš podpisovač neodpověděl: nepodařilo se spojit s {relays}. Zkontrolujte, že je podpisovač online, a zkuste to znovu.",
@@ -4370,13 +4398,13 @@ export const messages = {
     "chat.compose.placeholder": "Zpráva",
     "chat.send": "Odeslat",
     "chat.checking": "Kontrola vašeho přístupu…",
-    "chat.sendFailed": "Odeslání se nezdařilo: toto zařízení už není v chatu. Požádej o opětovné přidání.",
+    "chat.sendFailed": "Odeslání se nezdařilo: toto zařízení už není v chatu. Požádejte o opětovné přidání.",
     "chat.sendFailedTransport":
-      "Odeslání se nezdařilo — nepodařilo se spojit s relayi. Text tu zůstal, zkus to znovu.",
+      "Odeslání se nezdařilo: nepodařilo se spojit s relayi. Text tu zůstal, zkuste to znovu.",
     "chat.sendRetry": "Zkusit znovu",
-    "chat.evicted.title": "Už nejsi v tomto chatu",
+    "chat.evicted.title": "Už nejste v tomto chatu",
     "chat.evicted.body":
-      "Nové zprávy se na toto zařízení nedostanou, dokud tě znovu nepřidají. Všechno výše je to, co ti přišlo, dokud jsi byl uvnitř.",
+      "Nové zprávy se na toto zařízení nedostanou, dokud vás znovu nepřidají. Všechno výše je to, co vám přišlo, dokud jste byli uvnitř.",
     "chat.sending": "Odesílá se…",
     "chat.rejoin": "Znovu se připojit do chatu",
     "chat.rejoining": "Připojujeme…",

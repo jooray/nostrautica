@@ -138,3 +138,37 @@ describe("strings that were hardcoded English in the UI", () => {
     expect(messages.en).not.toHaveProperty("attendees.empty");
   });
 });
+
+/**
+ * Primal must not be recommended as a signer (2026-09-09, reported from an
+ * iPhone).
+ *
+ * Its built-in signer connects, reports success, and then silently refuses the
+ * addressable/custom event kinds this whole app is built on. So it is not a
+ * signer that might be missing, it is one that appears to work and then loses
+ * everything the user does. Naming it in the button was steering people into
+ * that, and on iOS the OS often routes the nostrconnect:// link there anyway
+ * when both it and a working signer are installed.
+ *
+ * Primal stays recommended as a READING client (`Me.svelte`'s "take your identity
+ * anywhere" list, the guides): pasting an nsec into it to see your feed is a
+ * different thing and works fine. This is only about signing.
+ */
+describe("signer recommendations", () => {
+  const SIGNER_KEYS = ["signin.remote.openSigner", "signin.remote.hint"] as const;
+
+  it("never names Primal in a sign-in signer suggestion, in any language", () => {
+    for (const [lang, table] of Object.entries(messages)) {
+      for (const key of SIGNER_KEYS) {
+        expect(`${lang}:${key}:${(table as Record<string, string>)[key]}`).not.toMatch(/Primal/);
+      }
+    }
+  });
+
+  it("explains the Primal trap somewhere the user can find it, in every language", () => {
+    for (const [lang, table] of Object.entries(messages)) {
+      const trouble = (table as Record<string, string>)["signin.trouble.primal"];
+      expect(`${lang}: ${trouble ?? ""}`).toMatch(/Primal/);
+    }
+  });
+});
