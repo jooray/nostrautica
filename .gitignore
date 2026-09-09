@@ -24,6 +24,11 @@ docs-site-build/
 CLAUDE.md
 AGENTS.md
 benchmarks/matching/cache/
+# Per-machine Claude Code state (settings.local.json, local skills). Nothing in
+# here belongs to the project, and leaving it untracked-but-unignored meant it sat
+# in every `git status` and one `git add -A` from being committed, which is the
+# same trap the audit-notes rule below exists to close.
+.claude/
 
 # scratch design assets — kept local, never committed
 landing-mockups/
