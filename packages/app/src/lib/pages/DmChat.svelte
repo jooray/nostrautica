@@ -10,7 +10,17 @@
   import { fetchDms, cachedDms, sendDm, mergeOptimisticDms, type DmMessage } from "$lib/events/dm.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
-  import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { fetchFollowSet, cachedFollowSet } from "$lib/events/social.js";
+  import { deriveBlindingKey } from "$lib/events/blinding.js";
+  import {
+    loadPerEventSettings,
+    toggleSetting,
+    cachedPerEventSettings,
+  } from "$lib/events/settings.js";
+  import type { PerEventSettings } from "@nostrautica/protocol";
+  import FollowButton from "$lib/components/FollowButton.svelte";
+  import Icon from "$lib/components/icons/Icon.svelte";
   import { listEventKeys } from "$lib/events/keystore.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -118,9 +128,73 @@
         }),
       );
       sharedEvents = found.filter((e): e is { title: string; naddr: string } => !!e);
+      // Want-to-meet / Open profile hang off the first shared event, so their
+      // state can only load once that list exists.
+      if (sharedEvents[0]) void loadEventActions(sharedEvents[0].naddr);
     } catch {
       sharedEvents = [];
     }
+  }
+
+  // --- Header peer actions (user request 2026-09-10) --------------------------
+  // Follow is account-global, so it is always offered. Want-to-meet and Open
+  // profile are per-EVENT — the setting is stored per event and an attendee
+  // profile only exists inside one — so they act on the first shared event and
+  // NAME it in their tooltips. Picking one of several silently is the thing to
+  // avoid: the user would have no way to tell which event they just marked.
+  let followSet = $state<Set<string>>(cachedFollowSet() ?? new Set());
+  let followsKnown = $state(cachedFollowSet() !== undefined);
+  let blindingKey: Uint8Array | null = null;
+  let actionCtx = $state<EventContext | null>(null);
+  let settings = $state<PerEventSettings | null>(null);
+  let meetBusy = $state(false);
+
+  const primaryEvent = $derived(sharedEvents[0]);
+  const following = $derived(!!peer && followSet.has(peer));
+  const wantsToMeet = $derived(!!peer && !!settings?.want_to_meet?.includes(peer));
+
+  /** FollowButton published a change — keep this page's set authoritative. */
+  function noteFollow(f: boolean) {
+    if (!peer) return;
+    const next = new Set(followSet);
+    if (f) next.add(peer);
+    else next.delete(peer);
+    followSet = next;
+  }
+
+  /** Per-event state behind the Want-to-meet toggle (cache-first, like People). */
+  async function loadEventActions(naddr: string): Promise<void> {
+    if (!session.signer) return;
+    const signer = session.signer;
+    try {
+      const ctx =
+        cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
+      actionCtx = ctx;
+      settings = cachedPerEventSettings(ctx.coordinate) ?? settings;
+      blindingKey ??= await deriveBlindingKey(signer);
+      settings = await loadPerEventSettings(signer, ctx, blindingKey);
+    } catch {
+      // No settings event yet is the normal first-time case, not an error — the
+      // toggle simply starts unpressed. Leaving `error` alone matters: this is
+      // background state for one button and must not blank the conversation.
+    }
+  }
+
+  async function toggleWantToMeet(): Promise<void> {
+    if (!session.signer || !peer || !actionCtx || !blindingKey) return;
+    meetBusy = true;
+    try {
+      settings = await toggleSetting(session.signer, actionCtx, blindingKey, "want_to_meet", peer);
+    } catch (e) {
+      error = e;
+    } finally {
+      meetBusy = false;
+    }
+  }
+
+  function openProfile(): void {
+    if (!primaryEvent || !peer) return;
+    router.go({ name: "attendee", naddr: primaryEvent.naddr, npub: npubEncode(peer) });
   }
 
   async function toggleMute() {
@@ -206,6 +280,14 @@
         .catch(() => {});
       void loadSharedEvents(peer);
     }
+    if (session.signer) {
+      void fetchFollowSet(session.signer)
+        .then((set) => {
+          followSet = set;
+          followsKnown = true;
+        })
+        .catch(() => {});
+    }
     await refresh();
     timer = setInterval(refresh, 5_000);
     document.addEventListener("visibilitychange", markVisibleRead);
@@ -272,12 +354,45 @@
 {:else if !peer}
   <div class="card warn">{t("dmchat.invalidLink")}</div>
 {:else}
-  <div class="row" style="gap:0.75rem;margin:1rem 0 0.5rem">
+  <div class="row hdr">
     <Avatar pubkey={peer} name={profile?.name} picture={profile?.picture} size={40} />
     <h1 style="margin:0;font-size:1.25rem;flex:1;min-width:0">{title}</h1>
-    <button class="btn inline" style="flex:none" onclick={toggleMute} disabled={muteBusy}>
-      {muted ? t("attendee.unmute") : t("attendee.mute")}
-    </button>
+    <!-- The same quick actions a People row offers, so the two screens agree
+         (user request 2026-09-10). Icon-only here: the header already carries an
+         avatar and a name, and four labelled buttons do not fit a phone. The
+         accessible name and the tooltip always spell the action out, and they
+         name the event for the two that are per-event. -->
+    <div class="acts">
+      {#if peer !== session.pubkey}
+        {#if primaryEvent}
+          <button
+            class="btn inline icon-btn"
+            aria-pressed={wantsToMeet}
+            class:primary={wantsToMeet}
+            disabled={meetBusy || !actionCtx}
+            title={t("dmchat.wantToMeetAt", { event: primaryEvent.title })}
+            aria-label={t("dmchat.wantToMeetAt", { event: primaryEvent.title })}
+            onclick={() => void toggleWantToMeet()}
+          >
+            <Icon name="star" size={16} />
+          </button>
+          <button
+            class="btn inline icon-btn"
+            title={t("dmchat.openProfileAt", { event: primaryEvent.title })}
+            aria-label={t("dmchat.openProfileAt", { event: primaryEvent.title })}
+            onclick={openProfile}
+          >
+            <Icon name="person" size={16} />
+          </button>
+        {/if}
+        {#if followsKnown}
+          <FollowButton pubkey={peer} name={title} {following} onChange={(f) => noteFollow(f)} />
+        {/if}
+      {/if}
+      <button class="btn inline" style="flex:none" onclick={toggleMute} disabled={muteBusy}>
+        {muted ? t("attendee.unmute") : t("attendee.mute")}
+      </button>
+    </div>
   </div>
   <p class="muted" style="margin:0 0 0.5rem">
     {t("dmchat.e2e")}
@@ -354,3 +469,25 @@
     <p class="muted" role="status" style="margin:0.4rem 0 0;font-size:0.85rem">{t("dmchat.signerSlow")}</p>
   {/if}
 {/if}
+
+<style>
+  /* The header wraps rather than squashing: avatar + name hold the first line
+     and the action group drops below them on a narrow phone. */
+  .hdr {
+    gap: 0.75rem;
+    margin: 1rem 0 0.5rem;
+    flex-wrap: wrap;
+  }
+  .acts {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex: none;
+    margin-left: auto;
+  }
+  .icon-btn {
+    padding: 0.4rem 0.5rem;
+    line-height: 0;
+    flex: none;
+  }
+</style>
