@@ -1,7 +1,7 @@
 {
   "suiteVersion": 2,
   "model": "qwen-3-8-flash",
-  "ranAt": "2026-09-10T08:16:37.559Z",
+  "ranAt": "2026-09-10T15:44:07.158Z",
   "spec": {
     "name": "Qwen 3.8 Flash",
     "contextTokens": 1000000,
@@ -160,6 +160,11 @@
       "emptyReason": 0
     },
     "strictJson": {
+      "ok": 82,
+      "known": 82,
+      "pct": 100
+    },
+    "veniceJson": {
       "ok": 82,
       "known": 82,
       "pct": 100

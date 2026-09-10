@@ -47,7 +47,14 @@ export async function latencyProbe(model = MODEL, n = N, refresh = REFRESH) {
     const batch = PERSONAS.filter((p) => p.id !== target.id).slice(0, 10);
     const r = await complete({
       model, system: BATCHED_PROMPTS.BP3, user: sampleScoringUser(target, batch),
-      schema, schemaName: "batch_scores", temperature: 0.3, maxTokens: 4000,
+      // maxTokens must match what production ASKS FOR, not a round number:
+      // batchMaxTokens(10) is 12,000 (BATCH_TOKENS_BASE 2000 + 1000/candidate),
+      // and the gap mattered. At 4,000 this arm reported z-ai-glm-5-3-flash at a
+      // p50 of 16.1s, while the same model on the real K=10 reverse batch runs
+      // 70.6s (sk) — the ceiling truncates the generation, so the arm was timing
+      // a shorter answer than the daemon ever receives and calling it "the same
+      // K=10 shape production uses".
+      schema, schemaName: "batch_scores", temperature: 0.3, maxTokens: 12000,
     });
     rows.push({
       latencyMs: r.latencyMs,

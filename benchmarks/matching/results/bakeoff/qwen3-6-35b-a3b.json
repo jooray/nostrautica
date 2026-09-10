@@ -1,7 +1,7 @@
 {
   "suiteVersion": 2,
   "model": "qwen3-6-35b-a3b",
-  "ranAt": "2026-09-10T08:17:13.880Z",
+  "ranAt": "2026-09-10T15:44:09.697Z",
   "spec": {
     "name": "Qwen 3.6 35B A3B",
     "contextTokens": 256000,
@@ -160,6 +160,11 @@
       "emptyReason": 0
     },
     "strictJson": {
+      "ok": 82,
+      "known": 82,
+      "pct": 100
+    },
+    "veniceJson": {
       "ok": 82,
       "known": 82,
       "pct": 100

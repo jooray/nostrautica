@@ -20,7 +20,7 @@ import {
 } from "./prompts.mjs";
 import {
   complete, parseJsonLoose, profileText, normalizeScore, cacheKey, readCache,
-  writeCache, mulberry32, shuffle, pool, costUsd,
+  writeCache, mulberry32, shuffle, pool, costUsd, veniceParses,
 } from "./lib.mjs";
 import { readFileSync } from "node:fs";
 
@@ -104,6 +104,8 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
   let calls = 0;
   let strictOkCalls = 0;
   let strictKnownCalls = 0;
+  let veniceOkCalls = 0;
+  let veniceKnownCalls = 0;
 
   const batches = [];
   for (let i = 0; i < ordered.length; i += K) batches.push(ordered.slice(i, i + K));
@@ -123,9 +125,9 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
         "",
         `Return a JSON object {"matches": [...]} with exactly ${batch.length} entries, one per candidate index 0..${batch.length - 1}.`,
       ].join("\n");
-      let content, usage, latencyMs, strictParseOk;
+      let content, usage, latencyMs, strictParseOk, veniceParseOk;
       try {
-        ({ content, usage, latencyMs, strictParseOk } = await complete({
+        ({ content, usage, latencyMs, strictParseOk, veniceParseOk } = await complete({
           model: MODEL, system, user, schema, schemaName: "batch_scores",
           temperature: 0.3, maxTokens: Math.min(8000, 500 + batch.length * 350),
           useSchema: !NO_SCHEMA.has(MODEL),
@@ -147,10 +149,21 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
           fail = true;
           parsed = [];
         }
-        // strictOk: did the RAW body survive JSON.parse — which is what
-        // providers/venice.ts does — or only parseJsonLoose? Undefined on runs
-        // recorded before 2026-08-26, hence `?? null` at the aggregate.
-        cached = { batch, usage, latencyMs, formatFail: fail, strictOk: strictParseOk, entries: parsed };
+        // strictOk: did the RAW body survive a bare JSON.parse? veniceOk: did it
+        // survive `parseModelJson`, which is what providers/venice.ts has ACTUALLY
+        // called since 2026-09-04 — that is the one that decides whether a model
+        // can be deployed.
+        //
+        // `content` is kept so the NEXT parser question is free. This one was not:
+        // the cache held only the parsed `entries`, so when venice.ts stopped doing
+        // a bare JSON.parse there was no way to re-answer "would this model work"
+        // from 654 cached calls, and every card had to be re-billed. That is the
+        // same lesson icebreaker-regrade.mjs already encodes for the grader —
+        // store the bytes the verdict was derived FROM, not just the verdict.
+        cached = {
+          batch, usage, latencyMs, formatFail: fail, content,
+          strictOk: strictParseOk, veniceOk: veniceParseOk, entries: parsed,
+        };
         writeCache(CACHE_DIR, ck, cached);
       }
     }
@@ -159,6 +172,22 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
     usageAcc.completionTokens += cached.usage.completionTokens;
     usageAcc.totalTokens += cached.usage.totalTokens;
     usageAcc.reasoningTokens += cached.usage.reasoningTokens ?? 0;
+    // Prefer the recorded answer; otherwise re-derive it, in that order of
+    // confidence. `parseModelJson` begins with a bare `JSON.parse` and returns
+    // on success, so strictOk === true PROVES veniceOk === true — which makes
+    // every card whose model already parsed strictly readable without re-billing
+    // it. strictOk === false proves nothing either way (the fence path may still
+    // recover it), so that stays unknown rather than being guessed at.
+    if (typeof cached.veniceOk === "boolean") {
+      veniceKnownCalls++;
+      if (cached.veniceOk) veniceOkCalls++;
+    } else if (typeof cached.content === "string") {
+      veniceKnownCalls++;
+      if (veniceParses(cached.content)) veniceOkCalls++;
+    } else if (cached.strictOk === true) {
+      veniceKnownCalls++;
+      veniceOkCalls++;
+    }
     if (typeof cached.strictOk === "boolean") {
       strictKnownCalls++;
       if (cached.strictOk) strictOkCalls++;
@@ -193,7 +222,7 @@ async function scoreTargetBatched(targetId, K, promptKey, seed, subset) {
       });
     }
   }
-  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates, calls, strictOkCalls, strictKnownCalls };
+  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates, calls, strictOkCalls, strictKnownCalls, veniceOkCalls, veniceKnownCalls };
 }
 
 // ── pairwise reference (K=1, P0 prompt) ───────────────────────────────────────
@@ -245,7 +274,7 @@ async function scoreTargetPairwise(targetId, subset) {
       reasoning: String(forTarget ?? "").trim(),
     });
   }
-  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates: 0, calls, strictOkCalls: 0, strictKnownCalls: 0 };
+  return { edges, usage: usageAcc, latencies, formatFails, missingCandidates: 0, calls, strictOkCalls: 0, strictKnownCalls: 0, veniceOkCalls: 0, veniceKnownCalls: 0 };
 }
 
 function hashId(id) {
@@ -285,6 +314,8 @@ async function main() {
   const missingCandidates = perTarget.reduce((a, r) => a + r.missingCandidates, 0);
   const calls = perTarget.reduce((a, r) => a + r.calls, 0);
   const strictOkCalls = perTarget.reduce((a, r) => a + (r.strictOkCalls ?? 0), 0);
+  const veniceOkCalls = perTarget.reduce((a, r) => a + (r.veniceOkCalls ?? 0), 0);
+  const veniceKnownCalls = perTarget.reduce((a, r) => a + (r.veniceKnownCalls ?? 0), 0);
   const strictKnownCalls = perTarget.reduce((a, r) => a + (r.strictKnownCalls ?? 0), 0);
 
   const out = {
@@ -296,6 +327,7 @@ async function main() {
       // Production parses with JSON.parse, not leniently. A model at 0/N here is
       // a model providers/venice.ts rejects on every call, whatever its recall is.
       strictOkCalls, strictKnownCalls,
+      veniceOkCalls, veniceKnownCalls,
       latencyP50: p(0.5), latencyP95: p(0.95),
       usage, costUsd: costUsd(MODEL, usage),
     },

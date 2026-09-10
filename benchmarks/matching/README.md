@@ -764,3 +764,70 @@ At the time of writing, 408 of 452 live pair rows predate that fix, and 17
 predate the 2026-07-25 role-binding fix entirely. **A prompt improvement does
 not repair the cards already published.** `recompute` (which clears pairs AND
 the job memo) is what does.
+
+## Ask production's own code whether a model is deployable (2026-09-10)
+
+`bakeoff-report.mjs` had two standing blockers describing `providers/venice.ts`:
+that it sends `disable_thinking` unconditionally, and that it parses with a bare
+`JSON.parse`. **Both had stopped being true, and the report went on printing
+them** — for two weeks and one week respectively:
+
+- `disable_thinking` became per-model on 2026-08-26 (`cbc564d`): venice.ts
+  probes once, remembers the refusal for the process, and honours
+  `models.<role>.disable_thinking`.
+- the bare parse became `parseModelJson` on 2026-09-04 (`5f5468c`), which strips
+  a whole-output fence and falls back to the outermost JSON span.
+
+So the suite's quality-and-cost winner was being blocked on defects the
+coordinator had already fixed. This is the same failure as 2026-08-26 in the
+other direction: **the harness is a reimplementation of `venice.ts`, and every
+adoption mistake this benchmark has made came from the two drifting.**
+
+`provider-probe.mjs` stops re-deriving the answer. It imports `VeniceLlm` and
+`scoreReverseBatch` from `packages/coordinator/dist` and runs the real thing at
+K=10 against the dense fixture. If a call fails there, it fails in production.
+`bakeoff-report.mjs` reads `results/PROBE_<model>.json` and treats it as the
+last word — a model with no probe is flagged as unproven rather than assumed
+fine.
+
+### What it found, and why it matters more than the table
+
+**`z-ai-glm-5-3-flash` fails 5 of 5 production calls**, for a third reason
+nothing in the suite was measuring: its mandatory reasoning exhausts
+`batchMaxTokens(10)` = 12,000 tokens and the response returns
+`finish_reason=length`, which `venice.ts` rejects outright. The harness never
+noticed because it does not check `finish_reason` — it simply parsed whatever
+prefix came back, so a truncated answer counted as a clean one. Raising the
+budget was tried and did not rescue it.
+
+The table, meanwhile, has GLM at the top of nearly every column (separation
+0.64, prose 4.70, 98.8% Slovak, 0.2% attribution, zero reasoning inversions).
+**Every one of those numbers is real and none of them are reachable.** That gap
+is the whole argument for this arm existing.
+
+### The probe refuses to answer when it cannot ask
+
+Its own first run scored the DEPLOYED model 0/3 — it had been started somewhere
+without DNS, and "DNS resolution failed" was being filed as a deployability
+failure. A probe that cannot reach Venice has learned nothing about the model,
+so `unreachable`/`unauthorized` are classified apart from every model verdict
+and the run throws instead of writing a file. A caveat inside a field nobody
+renders is not a safeguard, and this report is read as authority.
+
+### A live bug the probe found on the way
+
+The first probe attempt failed 3/3 with `provider timeout: Venice
+chat/completions exceeded 120000ms` — against the DEPLOYED model. That was not
+a benchmark artefact. `PROVIDER_TIMEOUTS.completion` was a flat 120s while the
+measured p95 for production's own reverse batch is 130.6s (sk), and the
+coordinator log showed `score_batch` and `score_reverse_batch` failing at
+120,03Xms and retrying — six times on 2026-09-10 alone. A timed-out call still
+generated its tokens and is still billed, so each one cost 120s of the serial
+job loop and paid twice. The deadline now scales with the output budget
+(`completionTimeoutMs`), which is what the flat number should always have been:
+one limit was doing duty for a 500-token summary and a 12,000-token batch.
+
+The latency arm was understating this too — it sent `maxTokens: 4000` while
+calling itself "the same K=10 shape production uses", so it timed a shorter
+answer than the daemon ever receives (GLM: 16.1s there, 70.6s on the real
+shape). It now sends `batchMaxTokens(10)`.

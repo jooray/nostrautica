@@ -1,7 +1,7 @@
 {
   "suiteVersion": 2,
   "model": "deepseek-v4-flash-0731",
-  "ranAt": "2026-09-10T08:16:36.867Z",
+  "ranAt": "2026-09-10T15:44:06.500Z",
   "spec": {
     "name": "DeepSeek V4 Flash 0731",
     "contextTokens": 1000000,
@@ -160,6 +160,11 @@
       "emptyReason": 0
     },
     "strictJson": {
+      "ok": 40,
+      "known": 40,
+      "pct": 100
+    },
+    "veniceJson": {
       "ok": 40,
       "known": 40,
       "pct": 100

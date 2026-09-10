@@ -8,7 +8,31 @@
  */
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// The coordinator's OWN response parser, so "would this model work in
+// production" is answered by production's code rather than by a copy of it.
+// Requires `pnpm --filter @nostrautica/coordinator build`, like the prompt
+// splices in icebreaker-run.mjs.
+const { parseModelJson } = await import(
+  join(dirname(fileURLToPath(import.meta.url)), "../../packages/coordinator/dist/providers/http.js")
+);
+
+/**
+ * Would providers/venice.ts accept this body? Exported so a SAVED call can be
+ * re-judged offline when that parser changes again — which it has once already,
+ * and which cost a full re-run of every card because the raw bodies had not
+ * been kept.
+ */
+export function veniceParses(content) {
+  try {
+    parseModelJson(content);
+    return true;
+  } catch {
+    return false;
+  }
+}
 import {
   modelProfile, recordProfile, isReasoningMandatory, snapshotPricing,
 } from "./model-profiles.mjs";
@@ -186,18 +210,32 @@ export async function complete({ model, system, user, schema, schemaName, temper
         reasoningTokens: j.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
         cachedTokens: j.usage?.prompt_tokens_details?.cached_tokens ?? 0,
       };
-      // Does the raw body survive `JSON.parse` — which is what
-      // providers/venice.ts does — or only parseJsonLoose? A model that wraps
-      // strict-schema output in a ```json fence parses fine here and throws
-      // ProviderContractError on every call in production. That difference is
-      // invisible to every other metric, so it is measured.
+      // Does the raw body survive the parser PRODUCTION actually uses? A model
+      // that wraps strict-schema output in a ```json fence parses fine under the
+      // harness's lenient parser and would once have thrown ProviderContractError
+      // on every call live, so this has always been measured.
+      //
+      // What it measures changed on 2026-09-04. `providers/venice.ts` no longer
+      // does a bare `JSON.parse`; it calls `parseModelJson` (providers/http.ts),
+      // which strips a whole-output fence and falls back to the outermost JSON
+      // span. So `strictParseOk` stopped being a deployability signal and became
+      // trivia about formatting — while the report went on printing "venice.ts
+      // does not parse leniently" and blocking a model on it. Both are recorded
+      // now: `veniceParseOk` is the one that decides adoptability, and it is
+      // imported from dist rather than reimplemented, so it cannot drift from
+      // the code it stands for (the same rule the prompt splices already follow).
       let strictParseOk = false;
       try {
         JSON.parse(content);
         strictParseOk = true;
       } catch {}
+      let veniceParseOk = false;
+      try {
+        parseModelJson(content);
+        veniceParseOk = true;
+      } catch {}
       return {
-        content, usage, latencyMs, raw: j, strictParseOk,
+        content, usage, latencyMs, raw: j, strictParseOk, veniceParseOk,
         finishReason: j.choices?.[0]?.finish_reason ?? null,
         disableThinkingSent: !!profile.disableThinking,
       };

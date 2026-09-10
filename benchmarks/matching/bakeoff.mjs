@@ -272,6 +272,18 @@ function strictJsonOf(runs) {
   return { ok, known, pct: known ? Math.round((ok / known) * 1000) / 10 : null };
 }
 
+/**
+ * The number that actually decides adoptability: does the raw body survive
+ * `parseModelJson`, which is what providers/venice.ts calls. `strictJsonOf`
+ * above answers a question production stopped asking on 2026-09-04. Null on
+ * cards recorded before this was measured — which must not read as 0%.
+ */
+function veniceJsonOf(runs) {
+  const ok = runs.reduce((a, r) => a + (r.stats.veniceOkCalls ?? 0), 0);
+  const known = runs.reduce((a, r) => a + (r.stats.veniceKnownCalls ?? 0), 0);
+  return { ok, known, pct: known ? Math.round((ok / known) * 1000) / 10 : null };
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 const subsetRuns = [];
 for (const seed of SUITE.seeds) subsetRuns.push(await scoringArm(seed, true));
@@ -327,6 +339,7 @@ const card = {
     pooledSubset: pooledScoring(subsetRuns),
     full190: evalRun(fullRun),
     strictJson: strictJsonOf(scoringRuns),
+    veniceJson: veniceJsonOf(scoringRuns),
     reasoningTokens: scoringRuns.reduce((a, r) => a + (r.stats.usage.reasoningTokens ?? 0), 0),
   },
 
@@ -457,7 +470,11 @@ console.log(`\n${"=".repeat(72)}\n${MODEL} — suite v${SUITE_VERSION}\n${"=".re
 console.log(`request profile   disable_thinking=${card.requestProfile.disableThinking}` +
   (card.requestProfile.reason ? `  (${card.requestProfile.reason})` : ""));
 console.log(`strict JSON       ${card.scoring.strictJson.ok}/${card.scoring.strictJson.known} calls` +
-  ` (${card.scoring.strictJson.pct}%) parse with JSON.parse — production's parser`);
+  ` (${card.scoring.strictJson.pct}%) parse with a bare JSON.parse`);
+if (card.scoring.veniceJson?.known) {
+  console.log(`venice parser     ${card.scoring.veniceJson.ok}/${card.scoring.veniceJson.known} calls` +
+    ` (${card.scoring.veniceJson.pct}%) parse with parseModelJson — production's parser`);
+}
 console.log(`scoring subset    r@1 ${s.recall1.toFixed(2)}  r@3 ${s.recall3.toFixed(2)}  sep ${s.sepStrongWeak.toFixed(2)}  posBias ${s.posBias.toFixed(2)}  fails ${s.formatFails}`);
 console.log(`scoring full-190  r@1 ${f.recall1.toFixed(2)}  r@3 ${f.recall3.toFixed(2)}  sep ${f.sepStrongWeak.toFixed(2)}  posBias ${f.posBias.toFixed(2)}  fails ${f.formatFails}  miss ${f.missingCandidates}`);
 if (card.icebreakers) {
