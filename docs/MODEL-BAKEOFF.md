@@ -289,7 +289,14 @@ next model that ships.
    icebreaker calls return a shape the schema forbids, and tolerating that in
    `venice.ts` costs more than the model is worth. Revisit if z.ai fixes it. It
    is one command.
-4. **No Qwen. No Minimax.**
+4. **No Qwen, three of them now, and no Minimax.** `qwen-3-8-flash`
+   (2026-09-10) is the closest any challenger has come mechanically and the
+   furthest any has been on output language: 28 of 48 Slovak batches fully
+   English against the deployed model's 0, on the identical live prompt.
+5. **Arm D measures R3, which stopped being the deployed prompt on
+   2026-08-26.** Repointing it costs a `SUITE_VERSION` bump and a re-run of
+   every card; until then read `sk-in-lang` and `attr-err` as R3 numbers.
+   See [Round 4](#round-4-qwen-38-flash-and-the-arm-that-was-measuring-last-months-prompt).
 
 The original round-1 reasoning follows.
 
@@ -512,6 +519,127 @@ scoring.ts`. English events get byte-identical output to before. The function
 throws rather than silently returning the un-reminded prompt if its anchor ever
 moves, because a reworded block quietly reverting a measured fix is precisely how
 the regression it repairs got in.
+
+---
+
+## Round 4: Qwen 3.8 Flash, and the arm that was measuring last month's prompt
+
+Venice shipped `qwen-3-8-flash` (Qwen 3.8 Flash, $0.14/$0.49 per Mtok, 1M
+context, `privacy: anonymized`), the model the "Adding the next model" section
+below was written in anticipation of. It went through the same five arms on
+2026-09-10, plus two arms that did not exist before, for a reason this round
+discovered rather than planned.
+
+**Verdict: no.** It is the first challenger with no mechanical blocker at all,
+and on a Slovak event it writes English in two thirds of its openers.
+
+### What it does well, which is not nothing
+
+| | `qwen-3-8-flash` | `deepseek-v4-flash-0731` (deployed) |
+|---|---|---|
+| r@1 / r@3, eval subset (2 seeds) | 0.75 / 0.90 | 0.75 / 0.90 |
+| r@1 / r@3, full-190 | **0.75 / 0.90** | 0.65 / 0.85 |
+| strong–weak separation | **0.58** | 0.55 |
+| position bias (full-190) | **0.04** | 0.11 |
+| strict `JSON.parse` | **100%** (82/82) | 100% |
+| declared response shape | **96/96 calls** | 96/96 |
+| `disable_thinking` | **accepted** (0 reasoning tokens) | accepted |
+| p50 latency / output tok/s | **12.3 s / 65.8** | 22.1 s / 41.6 |
+| $/100 attendees | $0.306 | **$0.281** |
+
+On the harder full-190 ranking it beats the deployed model by two gold pairs,
+with a third of the position bias, at twice the throughput. Everything
+`venice.ts` needs, it does: no 400 on `disable_thinking`, no code fence, no
+renamed wrapper, no undeclared shape. GLM 5.3 Flash's two hard blockers are
+simply absent here. If the only arms that existed were the ones this benchmark
+had in July, this would read as an upgrade.
+
+### The language failure, measured against the prompt production actually sends
+
+The first pass put it at **22.1% in-language** on Slovak: 811 of 1052 openers
+in English, and whole-call rather than mid-message, **31 of 48 calls came back
+entirely in English**, 7 mixed, 10 clean.
+
+That number came from arm D, which runs the **R3** variant, and R3 has been the
+*pre-fix* prompt since 2026-08-26 (see the section below). So it was re-run
+against **R6**, what `reverseSystemPrompt()` returns today, alongside a matched
+same-day control on the deployed model. All four cells, same fixture, same
+afternoon, runs overlapping in time:
+
+| model | prompt | Slovak in-language | calls fully English |
+|---|---|---|---|
+| `deepseek-v4-flash-0731` | **R6 (live)** | **97.7%** | **0 / 48** |
+| `deepseek-v4-flash-0731` | R3 (pre-fix) | 70.7% | 11 / 48 |
+| `qwen-3-8-flash` | **R6 (live)** | 34.5% | **28 / 48** |
+| `qwen-3-8-flash` | R3 (pre-fix) | 22.1% | 31 / 48 |
+
+**The shipped fix does nothing for this model**: 31/48 → 28/48, Fisher exact
+p = 0.68. Against the deployed model on the identical prompt it is 28/48 versus
+0/48, **p = 2.6 × 10⁻¹¹**. The same reminder that takes DeepSeek to zero leaves
+Qwen writing English on more than half of its batches. Whatever the sentence
+does, this model does not read it.
+
+Attribution is the second disqualifier and R6 does not help there either: 3.0%
+(32/1073) on the live prompt, 2.5% on R3, against the deployed model's 0.4%
+today. It is also the first model since `qwen3-6-35b-a3b` to produce third-party
+briefings at all.
+
+Blind judging (same judge, same rubric, same content-addressed pack as every
+earlier round) puts it **last of six on reasoning** at 3.40, with **14 of 20
+items flagged `generic`**. The prose is accurate and gives an attendee nothing to
+do with it: "Yusuf helps scale open-source privacy tools, which could amplify
+your workshop curriculum" is a true sentence and not an introduction.
+
+### The thing this round actually found: arm D has been benchmarking a superseded prompt
+
+`bakeoff.mjs` freezes `SUITE.icebreakerVariant = "R3"`. On 2026-08-26 the
+output-language reminder shipped, the deployed prompt became **R6**, and
+`reverse-variants.mjs` was updated to say so in as many words: *"R3 … is now the
+PRE-FIX control … The current deployed prompt is R6."* Nothing propagated that to
+the suite. Every model benchmarked since has had its language and attribution
+measured on a prompt production stopped sending three weeks ago.
+
+The card's fingerprint should have caught it and instead disguised it: it hashed
+`reverseSystemPrompt()` (R6, live) while the arm sent R3. So cards written after
+the fix carried an R6 hash over an R3 measurement, and when the drift check was
+repaired it promptly announced that six cards "were NOT measured under the same
+prompt", about six arms that had all sent byte-identical R3
+(`63e056b48b6c6e8c` on every one of them). A drift detector that invents drift is
+worth no more than one that misses it; this one managed both within an hour.
+
+Three fixes landed:
+
+- the icebreaker cache key now includes the SHA of the system prompt, not just
+  the variant label, because a label here names whatever `scoring.ts` said on
+  the day;
+- the fingerprint records **both** the measured variant (`icebreaker.system.R3.sk`)
+  and the live prompt (`icebreaker.system.LIVE.sk`), so a card shows on its face
+  whether it measured what ships;
+- `bakeoff.mjs` says loudly, at the end of every run, when the two differ.
+
+**Still open, and a deliberate decision rather than a bug fix:** pointing
+`SUITE.icebreakerVariant` at R6 means bumping `SUITE_VERSION` and re-running arm
+D for all six existing cards (~$0.55, about an hour), because the report refuses
+to mix suite versions. Until that happens the `sk-in-lang` and `attr-err` columns
+of the cross-model table describe R3.
+
+### And the R3 control is far noisier than one draw suggests
+
+Re-running the deployed model's R3 Slovak arm today, against bytes that have not
+changed since August, produced **11/48** fully-English calls where the
+2026-08-26 card recorded **3/48**. Pooling every R3-equivalent control draw ever
+taken (3/48, 8/48, 9/48, 11/48), the control sits nearer 80–85% in-language than
+the card's 93.3%, which was a lucky draw that has been quoted in three subsequent
+rounds.
+
+This does not weaken the round-3 verdict; it strengthens it. Every control draw
+sits far above every R6 draw (0/48 today, 1/48 and 1/96 in August), and today's
+matched pair re-establishes the fix independently: **11/48 → 0/48, p = 0.0005**.
+What it does mean is that a single 48-call draw of this metric cannot separate
+80% from 93%, and no future round should quote one as if it could.
+
+*Round 4 cost: $0.48 of Venice API: $0.22 for the five frozen arms, $0.26 for
+the three R3/R6 arms this round added.*
 
 ---
 

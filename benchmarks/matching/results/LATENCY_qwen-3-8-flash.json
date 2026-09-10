@@ -1,0 +1,73 @@
+{
+  "model": "qwen-3-8-flash",
+  "calls": 6,
+  "measuredAt": "2026-09-10T05:10:43.409Z",
+  "concurrency": 1,
+  "k": 10,
+  "latencyP50": 12307,
+  "latencyP95": 16991,
+  "latencyMin": 11915,
+  "latencyMax": 16991,
+  "meanCompletionTokens": 865,
+  "meanReasoningTokens": 0,
+  "outputTokensPerSec": 65.8,
+  "strictJsonOk": 6,
+  "truncated": 0,
+  "costUsd": 0.00437696,
+  "rows": [
+    {
+      "latencyMs": 16991,
+      "promptTokens": 2182,
+      "completionTokens": 941,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 11915,
+      "promptTokens": 2182,
+      "completionTokens": 838,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 13671,
+      "promptTokens": 2182,
+      "completionTokens": 872,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 12307,
+      "promptTokens": 2182,
+      "completionTokens": 779,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 12068,
+      "promptTokens": 2182,
+      "completionTokens": 864,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    },
+    {
+      "latencyMs": 11928,
+      "promptTokens": 2182,
+      "completionTokens": 898,
+      "reasoningTokens": 0,
+      "cachedTokens": 0,
+      "strictParseOk": true,
+      "finishReason": "stop"
+    }
+  ]
+}
