@@ -39,6 +39,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { complete, pool, parseJsonLoose, cacheKey, readCache, writeCache, costUsd } from "./lib.mjs";
+import { sha } from "./suite-prompts.mjs";
 import { EVENT } from "./personas.mjs";
 import {
   buildCases,
@@ -491,6 +492,16 @@ if (process.env.DRY) {
 async function runVariant(key, lang) {
   const v = VARIANTS[key];
   const system = v.system(lang);
+  // The BYTES of the prompt, not just its label. Several variants are built from
+  // REVERSE_BATCH_SYSTEM_PROMPT imported from the coordinator's dist, and R6 IS
+  // reverseSystemPrompt() from dist, so a label here names whatever scoring.ts
+  // said on the day it was run. Without the hash a replay is indistinguishable
+  // from a fresh measurement of the same bytes: re-running R3 today returned
+  // numbers identical to a three-week-old run, and nothing in the cache could
+  // say whether that was a correct hit (it was) or a stale answer to a prompt
+  // that had since moved. Now a prompt change invalidates exactly the calls it
+  // affects and leaves the rest replayable.
+  const systemSha = sha(system);
   // A variant may change the OUTPUT schema as well as the prompt (R4 adds the
   // per-entry role fields). Everything downstream reads `matches[].icebreakers`,
   // which no variant may remove, so grading is unaffected.
@@ -526,7 +537,7 @@ async function runVariant(key, lang) {
       // and only pays for what is missing. `rep` is in the key, so repeats stay
       // distinct draws rather than one answer served three times.
       const ck = cacheKey([
-        "icebreaker", MODEL, K, v.label, lang, kase.bucket, fixed.id, listed.map((x) => x.id), rep,
+        "icebreaker", MODEL, K, v.label, systemSha, lang, kase.bucket, fixed.id, listed.map((x) => x.id), rep,
       ]);
       let fresh = null;
       // Cache shape v2 wraps the parsed value alongside its telemetry, because
