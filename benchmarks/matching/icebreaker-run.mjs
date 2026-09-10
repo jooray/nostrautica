@@ -48,7 +48,13 @@ import {
   buildReverseCases,
   buildReverseDenseCases,
 } from "./icebreaker-fixture.mjs";
-import { gradeIcebreaker, mentionsEntity, summarize } from "./icebreaker-grade.mjs";
+import {
+  gradeIcebreaker,
+  gradeReasoning,
+  mentionsEntity,
+  summarize,
+  summarizeReasoning,
+} from "./icebreaker-grade.mjs";
 // The reverse variants live in their own module because reverse-score-run.mjs sends
 // the same two prompts to answer the other half of the question (did the scores
 // move). Two copies of a control are two different controls the day one is edited.
@@ -507,6 +513,12 @@ async function runVariant(key, lang) {
   // which no variant may remove, so grading is unaffected.
   const schema = v.schema ? v.schema(SCHEMA) : SCHEMA;
   const rows = [];
+  // `reasoning_for_target` graded separately (2026-09-10). Every run since
+  // 2026-07-24 has saved this field and graded none of it, which is how an
+  // inverted reasoning reached a production card while the icebreakers in the
+  // same entry were correct. Separate array, separate summary: the two fields
+  // have opposite addressee conventions and must never be pooled.
+  const reasonRows = [];
   const tele = [];
   let failed = 0;
   let shapeDeviations = 0;
@@ -600,10 +612,31 @@ async function runVariant(key, lang) {
       }
       for (const m of entries) {
         const entry = listed[Number(m.index) - 1];
-        if (!entry || !Array.isArray(m.icebreakers)) continue;
+        if (!entry) continue;
         // Grading is always (sender, recipient) — the shape decides which is which.
         const target = reverse ? entry : kase.target;
         const cand = reverse ? kase.shared : entry;
+        // The reasoning is graded whether or not the entry carried icebreakers:
+        // they are separate fields and a model can get one right and the other
+        // wrong — the production card did exactly that.
+        if (typeof m.reasoning_for_target === "string" && m.reasoning_for_target.trim()) {
+          const text = m.reasoning_for_target;
+          reasonRows.push({
+            variant: v.label,
+            lang,
+            bucket,
+            rep,
+            callId: `${v.label}|${lang}|${bucket}|${fixed.id}|${rep}`,
+            sharer: cand.sharesTargetArtifact === true,
+            target: target.id,
+            candidate: cand.id,
+            text,
+            mentionsTarget: mentionsEntity(text, target.signature.entity),
+            mentionsCandidate: mentionsEntity(text, cand.signature.entity),
+            violations: gradeReasoning(text, target, cand),
+          });
+        }
+        if (!Array.isArray(m.icebreakers)) continue;
         for (const text of m.icebreakers) {
           if (typeof text !== "string" || !text.trim()) continue;
           rows.push({
@@ -656,6 +689,7 @@ async function runVariant(key, lang) {
     shapeDeviations,
     shapeKinds,
     rows,
+    reasonRows,
     // Telemetry covers only the calls this process saw a response for — replayed
     // v1 cache entries have none. `telemetryCalls` vs the case count says how much.
     telemetry: {
@@ -668,6 +702,13 @@ async function runVariant(key, lang) {
       strictJsonKnown: tele.filter((t) => typeof t.strictParseOk === "boolean").length,
     },
     summary: summarize(rows),
+    reasonSummary: summarizeReasoning(reasonRows),
+    reasonByBucket: Object.fromEntries(
+      [...new Set(reasonRows.map((r) => r.bucket))].map((b) => [
+        b,
+        summarizeReasoning(reasonRows.filter((r) => r.bucket === b)),
+      ]),
+    ),
     byBucket: Object.fromEntries(
       [...new Set(rows.map((r) => r.bucket))].map((b) => [b, summarize(rows.filter((r) => r.bucket === b))]),
     ),
@@ -729,6 +770,20 @@ for (const r of runs) {
   console.log(fmt(r, r.sharerSummary, "sharers"));
 }
 
+// reasoning_for_target, reported on its own line — the field that carried the
+// 2026-09-10 production failure while the icebreakers above it were clean.
+const rfmt = (r, s, tag) =>
+  `${(r.label + "/" + r.lang).padEnd(18)} ${tag.padEnd(7)} n=${String(s.total).padStart(3)}  ` +
+  `reasoning-errors ${String(s.errors).padStart(3)} (${s.errorPct}%)  ` +
+  `[inverted ${s.inverted} (${s.invertedPct}%) / misattributed ${s.misattributed}]  ` +
+  `clean ${s.cleanPct}%  names-an-artifact ${s.grounded} (${s.groundedPct}%)`;
+
+console.log("\nreasoning_for_target:");
+for (const r of runs) {
+  console.log(rfmt(r, r.reasonSummary, "all"));
+  for (const [bucket, s] of Object.entries(r.reasonByBucket ?? {})) console.log(rfmt(r, s, bucket));
+}
+
 console.log(`\nwrote ${out}`);
 
 // Sample of what actually went wrong, so a regression is diagnosable not just
@@ -740,5 +795,13 @@ for (const r of runs) {
   console.log(`\n--- ${r.label}/${r.lang}: ${bad.length} flagged, first 6 ---`);
   for (const b of bad.slice(0, 6)) {
     console.log(`  [${b.violations.join(",")}${b.sharer ? ",SHARER" : ""}] ${b.text.slice(0, 190)}`);
+  }
+}
+for (const r of runs) {
+  const bad = (r.reasonRows ?? []).filter((x) => x.violations.length);
+  if (!bad.length) continue;
+  console.log(`\n--- ${r.label}/${r.lang} REASONING: ${bad.length} flagged, first 6 ---`);
+  for (const b of bad.slice(0, 6)) {
+    console.log(`  [${b.violations.join(",")}] ${b.text.slice(0, 190)}`);
   }
 }

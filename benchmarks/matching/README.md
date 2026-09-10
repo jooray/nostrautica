@@ -655,3 +655,85 @@ than inferred. Rows without one make `bakeoff.mjs` say so.
 **And one reporting habit:** `bakeoff-report.mjs` prints per-language attribution
 rows unconditionally. Pooling hid this run's only significant result — the two
 models fail in opposite languages and cancelled to nothing.
+
+## The field nobody graded: `reasoning_for_target` (2026-09-10)
+
+A production card showed the failure this whole directory exists to catch, in
+the one field no arm had ever looked at. Reader is Juraj; the card read:
+
+> **Milane**, Juraj je autor nástroja Nostrautica a románu Krotitelia entropie…
+> Ty hľadáš informácie o bitcoine a pláne B – Juraj ti môže ponúknuť…
+
+The reader is written about in the third person and the OTHER person is
+addressed — while the icebreakers in the SAME entry were correctly written for
+the reader to send ("Ahoj Milane, som Juraj a…"). One entry, two fields,
+opposite addressees.
+
+Everything above grades `icebreakers`. `reasoning_for_target` was saved verbatim
+by every run since 2026-07-24 and checked by none — the same shape of blind spot
+as the 2026-07-25 English-only grader, which reported a clean 0% while a live
+Slovak event inverted every opener. Every prompt fix in this file's history
+(fc7bd25, d0b7164, 5e0d793) edited the ICEBREAKER block; none of them touched
+who the reasoning is addressed to, and nothing would have noticed if they had.
+
+`gradeReasoning` mirrors the existing checks rather than reusing them, because
+the two fields have deliberately OPPOSITE conventions:
+
+| | target | candidate |
+|---|---|---|
+| `icebreakers` | "I" | "you" |
+| `reasoning_for_target` | "you" | third person |
+
+- **INVERTED** — the TARGET named with a third-person verb. They are the reader
+  and are always "you" here, so being described means the sentence is addressed
+  to somebody else. Unlike the icebreaker checks this needs no artifact mention,
+  so it is not gated by `names-an-artifact`.
+- **MISATTRIBUTED** — the CANDIDATE's artifact called "your". In this field
+  "your" can only mean the target's.
+
+The split matters: `isBriefing` treats "ask him about X" as a defect, which is
+right for an icebreaker (it cannot be sent) and exactly WRONG here, where it is
+the house style the prompt asks for. `namedInThirdPerson` is that function's
+other half, extracted so this grader can use it alone; reusing `isBriefing`
+would have flagged the intended output as the failure.
+
+### Result — reverse-dense, K=10, ×6, both languages (all replayed from cache)
+
+| model | lang | n | inverted | rate |
+|---|---|---|---|---|
+| `deepseek-v4-flash-0731` (production) | sk | 480 | 0 | **0%** |
+| `deepseek-v4-flash-0731` | en | 480 | 0 | **0%** |
+| `qwen-3-8-flash` | sk | 480 | 30 | **6.3%** |
+| `qwen-3-8-flash` | en | 480 | 17 | **3.5%** |
+
+The forward shape (IB1/IB2, trap buckets, sk) is also 0/72 per arm.
+
+Every Qwen row was read by hand and they are genuine — and they are one failure
+mode, not a scatter: it abandons the second person for an analytical briefing
+about both people, which is what the prompt forbids in as many words.
+
+> Theo je full-stack web developer, ktorý sa chce len učiť, zatiaľ čo Kenji
+> potrebuje špecialistu na embedded systémy… Ich zručnosti sa vôbec nedopĺňajú.
+
+> Lars is semi-retired and seeking conversation, while Casimir is actively
+> seeking partners… There is little professional overlap.
+
+So this metric separates models where the icebreaker metric does not: Qwen 3.8
+Flash is near-clean on icebreaker attribution and ships this in 1 reasoning in
+16 (sk). It is a reason not to switch to it beyond the wrong-language finding
+already recorded above.
+
+### Why the production card is nonetheless NOT evidence against the live prompt
+
+The production model scores 0/960 here, so the card almost certainly predates
+the prompt that is running now. Until **2026-09-09** (`eabd83b`) `pairInputsHash`
+carried neither the prompt nor the model, so every prompt fix listed above
+invalidated nothing it had produced: the edit deployed and every lookup kept
+hitting the artifact the OLD prompt wrote. Even now invalidation is lazy by
+design — a stage re-runs only on a new submission or an explicit organizer
+recompute, so a quiet event keeps serving its fossils.
+
+At the time of writing, 408 of 452 live pair rows predate that fix, and 17
+predate the 2026-07-25 role-binding fix entirely. **A prompt improvement does
+not repair the cards already published.** `recompute` (which clears pairs AND
+the job memo) is what does.
