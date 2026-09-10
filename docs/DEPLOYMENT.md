@@ -76,22 +76,41 @@ A limit set too *short* is the worse failure: the script does not kill anything,
 so the daemon starts normally while the deploy prints "coordinator is NOT
 running" and sends whoever pushed into an incident that is not happening.
 
-The soft threshold is the part worth watching. Startup resolves each provider
-route over the network and then backfills every event's `E_inbox` plus the
-coordinator's own inbox, and that last one grows with every wrap the daemon has
-ever been sent, 98 wraps on one boot, 153 two months later. It does not come
-back down on its own. The limit was 45 s until a 2026-09-04 deploy came in at
-44 s, which is not a margin.
+The soft threshold is the part worth watching. The limit was 45 s until a
+2026-09-04 deploy came in at 44 s, which is not a margin.
 
-If the warning starts firing, look at the boot log's `[boot] … backfill`
-lines before raising anything:
+**What actually drives it is per-event startup work, not inbox backfill.** That
+correction is worth stating plainly, because this section previously blamed the
+coordinator's own inbox backfill growing with the daemon's wrap history (98
+wraps on one boot, 153 two months later) and told you to go read the `[boot] …
+backfill` counts. A 2026-09-10 restart measured 52 s with the wrap count *down*
+to 45 — startup rose while the thing it was blamed on fell, so that story cannot
+be the explanation. Timing the phases from one boot's log:
+
+| phase | cost |
+|---|---|
+| per installed event: install → invite-list refresh → `30443`/`445` roster scan → `E_inbox` backfill | ~9–12 s **each**, serialized |
+| coordinator-inbox backfill (45 wraps) | ~5 s |
+| kind 31611 announce publish | up to ~4.4 s |
+
+Three installed events is most of the budget, and a fourth adds roughly another
+ten seconds. The announce is the cheap fix if one is ever needed: `main.ts`
+`await`s it between `coordinator.start()` and the readiness line, and
+`NostrClient.publish` resolves on the first relay ack — but when *no* relay acks
+(all five timed out on that boot) it pays nostr-tools' full publish timeout
+before the daemon reports ready. Nothing waits on that announcement.
+
+So when the warning fires, time the phases rather than counting wraps:
 
 ```sh
-ssh <coordinator-host> 'grep -a "\[boot\]" ~/log/nostrautica-coordinator.log | tail -20'
+ssh <coordinator-host> 'grep -av "not an authorized chat identity" \
+  ~/log/nostrautica-coordinator.log | tail -60'
 ```
 
-Growing wrap counts there mean the fix is bounding the backfill window, not
-buying more seconds.
+Read the timestamps between consecutive `[install]` lines. If they are ~10 s
+apart and there are simply more events than there used to be, the fix is making
+per-event startup concurrent or deferring the roster scan past the readiness
+line, not buying more seconds.
 
 ### Runtime
 

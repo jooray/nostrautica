@@ -51,11 +51,14 @@ STOP_TIMEOUT=45   # > the 30s drain, so a normally-draining daemon is given time
 # whoever pushed into an incident that is not happening. The asymmetry is the
 # whole argument for a large number.
 #
-# The old 45s was measured against a much emptier relay. Startup resolves each
-# provider route over the network, then backfills every event's E_inbox and the
-# coordinator's own inbox — and that last one grows with every wrap the daemon has
-# ever been sent (98 wraps on one boot, 153 on a later one). The 2026-09-04 deploy
+# The old 45s was measured when fewer events were installed. The 2026-09-04 deploy
 # came in at 44s against a 45s limit. That is not a margin, it is a coin flip.
+#
+# What costs the time is per-event startup — install, invite-list refresh, chat
+# roster scan, E_inbox backfill — roughly 9-12s per installed event, serialized.
+# (This comment used to blame the coordinator-inbox backfill growing with wrap
+# history; a 2026-09-10 restart measured 52s with the wrap count DOWN to 45, so
+# that was wrong. See docs/DEPLOYMENT.md "Startup time" for the phase breakdown.)
 #
 # So: a hard fail far above anything normal, plus a SOFT threshold that warns
 # without failing. The warning is the part that matters — a bigger limit alone
@@ -75,9 +78,10 @@ fail() { echo "!!! $* — coordinator is NOT running $(date -Is)"; exit 1; }
 warn_if_slow() {
   [ "$1" -ge "$READY_WARN" ] || return 0
   echo "!!! WARNING: startup took ${1}s (soft threshold ${READY_WARN}s, hard limit ${READY_TIMEOUT}s)."
-  echo "!!! Boot time here is dominated by relay backfill, which grows with the daemon's"
-  echo "!!! history — it does not come back down on its own. Look into it before it"
-  echo "!!! reaches the hard limit; see the rollback/verification notes in docs/DEPLOYMENT.md."
+  echo "!!! Boot cost is dominated by per-event startup (install + invite refresh +"
+  echo "!!! chat roster scan + E_inbox backfill), roughly 9-12s per installed event,"
+  echo "!!! serialized — it does not come back down on its own. Look into it before it"
+  echo "!!! reaches the hard limit; see \"Startup time\" in docs/DEPLOYMENT.md."
 }
 
 # --- Preferred path: systemd owns the lifecycle ---------------------------------
