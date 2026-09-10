@@ -146,6 +146,13 @@ send and exits, which is how to check a control reconstruction before it is bill
 - `stats.mjs` / `stats.test.mjs` — the exact statistics behind it, with no normal
   approximations (a Wald interval on 0 errors returns [0, 0], which reads as proof
   of perfection) and no dependencies. 10 tests.
+- `language-adherence.mjs` / `language-adherence.test.mjs` — did the model write in
+  the event's language? Exclusive markers only (Czech and Slovak share diacritics),
+  and anything with no marker either way is `undecided` rather than folded into the
+  pass rate. It also owns `IN_LANGUAGE_FLOOR_PCT`, the ONE threshold both
+  `bakeoff.mjs` and `bakeoff-report.mjs` gate on — there were two, 98 and 95, and
+  they first disagreed about the DEPLOYED model. The test pins the floor against
+  the real measurements that placed it. 5 tests.
 - `icebreaker-fixture.test.mjs` — the properties the dense bucket must have for its
   number to mean what it says: 100% trap density, the shared person keeps its own
   artifact so FALSE_CLAIM stays measurable, and every clone resolves through

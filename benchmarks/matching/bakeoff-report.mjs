@@ -25,6 +25,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ciExact, permutationTestRate } from "./stats.mjs";
+import { languageFloorCheck } from "./language-adherence.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CARDS = join(here, "results", "bakeoff");
@@ -114,13 +115,12 @@ function blockers(c) {
     out.push(`${c.icebreakers.failedCalls} icebreaker call(s) returned no parseable JSON at all`);
   }
   // A model that answers a Slovak event in Czech is not a quality gradation, it
-  // is a wrong answer that every attendee sees. 5% is the threshold at which the
-  // deployed model's own regression would have been caught.
+  // is a wrong answer that every attendee sees. The floor and its calibration
+  // live in language-adherence.mjs, so this gate and the run summary cannot
+  // drift apart the way they had.
   for (const [lang, l] of Object.entries(c.icebreakers?.language ?? {})) {
-    if (l.inLanguagePct < 95) {
-      out.push(`only ${l.inLanguagePct}% of ${lang} openers were actually in ${lang} ` +
-        `(${l.english} English, ${l.czech} Czech, n=${l.n})`);
-    }
+    const v = languageFloorCheck(lang, l);
+    if (!v.ok) out.push(v.detail);
   }
   return out;
 }
