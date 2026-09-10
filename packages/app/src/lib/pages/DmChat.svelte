@@ -100,7 +100,10 @@
   // People there), but always falls through to a real fetch on a cache miss
   // or a "not found" — the whole point is not to under-report from a merely
   // cold cache, which is why this was deferred rather than shipped earlier.
-  let sharedEvents = $state<{ title: string; naddr: string }[]>([]);
+  // start/end are present-but-possibly-undefined rather than optional: 31923
+  // makes dates optional, and the loader always sets both keys.
+  type SharedEvent = { title: string; naddr: string; start: number | undefined; end: number | undefined };
+  let sharedEvents = $state<SharedEvent[]>([]);
 
   async function loadSharedEvents(peerPubkey: string): Promise<void> {
     try {
@@ -112,25 +115,25 @@
             const naddr = coordinateToNaddr(k.coordinate);
             const cachedR = cachedRoster(k.coordinate);
             if (cachedR?.attendees.some((a) => a.pubkey === peerPubkey)) {
-              const title =
-                cachedEventContext(naddr)?.title ??
-                (await loadEventContext(naddr, { adoptLang: false })).title;
-              return { title, naddr };
+              const c =
+                cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
+              return { title: c.title, naddr, start: c.start, end: c.end };
             }
             const ctx = cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
             const roster = await fetchRoster(ctx);
             return roster?.attendees.some((a) => a.pubkey === peerPubkey)
-              ? { title: ctx.title, naddr }
+              ? { title: ctx.title, naddr, start: ctx.start, end: ctx.end }
               : undefined;
           } catch {
             return undefined; // one bad event must not blank the whole list
           }
         }),
       );
-      sharedEvents = found.filter((e): e is { title: string; naddr: string } => !!e);
-      // Want-to-meet / Open profile hang off the first shared event, so their
+      sharedEvents = found.filter((e): e is SharedEvent => !!e);
+      // Want-to-meet / Open profile hang off the chosen shared event, so their
       // state can only load once that list exists.
-      if (sharedEvents[0]) void loadEventActions(sharedEvents[0].naddr);
+      const primary = primaryEvent;
+      if (primary) void loadEventActions(primary.naddr);
     } catch {
       sharedEvents = [];
     }
@@ -149,7 +152,29 @@
   let settings = $state<PerEventSettings | null>(null);
   let meetBusy = $state(false);
 
-  const primaryEvent = $derived(sharedEvents[0]);
+  /**
+   * Which shared event the per-event actions act on.
+   *
+   * NOT simply the first (user feedback 2026-09-10): two people can share an
+   * event that finished months ago, and "want to meet at" a conference that is
+   * over is meaningless — it writes a private note nobody will ever act on, on
+   * the event least likely to be the one you are talking about.
+   *
+   * So: the soonest event that has not ended yet, an event with no dates counted
+   * as live (a date is optional in 31923, and excluding undated events would
+   * hide the action entirely for them). Only when every shared event is over
+   * does it fall back to the most RECENT past one — still the likeliest subject
+   * of the conversation, and better than the oldest.
+   */
+  const primaryEvent = $derived.by(() => {
+    const now = Math.floor(Date.now() / 1000);
+    const ended = (e: SharedEvent) => (e.end ?? e.start) !== undefined && (e.end ?? e.start)! < now;
+    const live = sharedEvents.filter((e) => !ended(e));
+    if (live.length) {
+      return [...live].sort((a, b) => (a.start ?? 0) - (b.start ?? 0))[0];
+    }
+    return [...sharedEvents].sort((a, b) => (b.end ?? b.start ?? 0) - (a.end ?? a.start ?? 0))[0];
+  });
   const following = $derived(!!peer && followSet.has(peer));
   const wantsToMeet = $derived(!!peer && !!settings?.want_to_meet?.includes(peer));
 
