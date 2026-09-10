@@ -274,6 +274,25 @@ const ice = SKIP_IB ? null : await icebreakerArm();
 console.log(`\n── latency: 6 serial K=10 calls ──`);
 const lat = await latencyProbe(MODEL, 6);
 
+// The suite is frozen on SUITE.icebreakerVariant, and the LIVE prompt is free to
+// move away from it — it did on 2026-08-26, when the output-language reminder
+// shipped and the deployed prompt became R6 while this suite kept running R3.
+// That is a legitimate choice (changing the arm breaks comparability with every
+// existing card, which is what SUITE_VERSION is for), but it must never be a
+// silent one: an attribution or language number measured on a superseded prompt
+// does not describe what an attendee would receive.
+{
+  const fp = await promptFingerprint(LANGS, SUITE.icebreakerVariant);
+  const stale = LANGS.filter((l) => fp[`icebreaker.system.${SUITE.icebreakerVariant}.${l}`] !== fp[`icebreaker.system.LIVE.${l}`]);
+  if (stale.length) {
+    console.log(`\n  ⚠ arm D runs ${SUITE.icebreakerVariant}, which is NOT the prompt production sends` +
+      ` (differs in: ${stale.join(", ")}).\n` +
+      `    Its language and attribution numbers describe a superseded prompt.\n` +
+      `    To measure the shipped one, point SUITE.icebreakerVariant at the live variant\n` +
+      `    and bump SUITE_VERSION — every existing card must then be re-run.\n`);
+  }
+}
+
 const scoringRuns = [...subsetRuns, fullRun];
 const totalScoringCost = scoringRuns.reduce((a, r) => a + r.stats.costUsd, 0);
 const iceCost = (ice?.runs ?? []).reduce((a, r) => a + (r.telemetry?.costUsd ?? 0), 0);
@@ -293,7 +312,7 @@ const card = {
   // Hashes of the exact bytes sent. Two cards with different fingerprints were
   // measured under different prompts — most often a stale coordinator dist, which
   // silently benchmarks the previous release. Full text: record-prompts.mjs.
-  promptFingerprint: await promptFingerprint(LANGS),
+  promptFingerprint: await promptFingerprint(LANGS, SUITE.icebreakerVariant),
 
   scoring: {
     perSeedSubset: subsetRuns.map((r) => evalRun(r)),

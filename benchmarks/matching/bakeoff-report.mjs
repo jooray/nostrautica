@@ -45,13 +45,31 @@ if (versions.length > 1) {
 // Prompt drift. Cards measured under different prompt bytes are not rows of one
 // table; the usual cause is a coordinator rebuild between two models' runs.
 const fps = cards.filter((c) => c.promptFingerprint);
+// Fingerprint KEYS have been renamed once already (`icebreaker.system.R3.sk` →
+// `icebreaker.system.sk`, when the fingerprint started calling the coordinator's
+// own builder instead of reconstructing the prompt). Comparing raw key names put
+// the old and new hashes in different buckets, so the two never met and the
+// check passed silently on cards that genuinely differed — the drift detector
+// blind to the drift it exists for, a second time. Normalise the name, and say
+// so loudly when two cards do not even describe the same prompts.
+const canonicalFpName = (n) => n.replace(/\.(R\d+|IB\d+|L\d+|BP\d+|P\d+)(?=\.|$)/g, "");
 if (fps.length > 1) {
-  const names = [...new Set(fps.flatMap((c) => Object.keys(c.promptFingerprint)))];
+  const names = [...new Set(fps.flatMap((c) => Object.keys(c.promptFingerprint).map(canonicalFpName)))];
   for (const n of names) {
-    const seen = [...new Set(fps.map((c) => c.promptFingerprint[n]).filter(Boolean))];
-    if (seen.length > 1) {
-      console.log(`⚠ prompt \`${n}\` differs between cards (${seen.join(" vs ")}) — ` +
-        `re-run the older model against the current prompt before trusting this table.\n`);
+    const seen = new Map();
+    for (const c of fps) {
+      for (const [k, v] of Object.entries(c.promptFingerprint)) {
+        if (canonicalFpName(k) !== n) continue;
+        if (!seen.has(v)) seen.set(v, []);
+        seen.get(v).push(c.model);
+      }
+    }
+    if (seen.size > 1) {
+      console.log(`⚠ prompt \`${n}\` differs between cards — this table's rows were NOT ` +
+        `measured under the same prompt:`);
+      for (const [hash, models] of seen) console.log(`    ${hash}  ${models.join(", ")}`);
+      console.log(`  Re-run the older models' affected arm against the current prompt ` +
+        `before comparing those columns.\n`);
     }
   }
 }
