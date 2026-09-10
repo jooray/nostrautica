@@ -16,6 +16,7 @@ import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
   PROVIDER_BODY_LIMITS,
   PROVIDER_TIMEOUTS,
+  completionTimeoutMs,
   ProviderHttpError,
   parseModelJson,
   providerHttpError,
@@ -198,7 +199,8 @@ export class VeniceLlm implements LlmProvider {
     const headers = await this.headers(req.maxTokens);
     const body = await withProviderTimeout(
       "Venice chat/completions",
-      PROVIDER_TIMEOUTS.completion,
+      // Scaled by the output budget, not flat — see completionTimeoutMs.
+      completionTimeoutMs(req.maxTokens ?? 4096),
       (signal) =>
         guardedProviderFetch(
           `${this.base}/chat/completions`,

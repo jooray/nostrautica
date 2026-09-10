@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { withProviderTimeout, ProviderTimeoutError, PROVIDER_TIMEOUTS, parseRetryAfter } from "./http.js";
+import {
+  withProviderTimeout,
+  ProviderTimeoutError,
+  PROVIDER_TIMEOUTS,
+  completionTimeoutMs,
+  parseRetryAfter,
+} from "./http.js";
 import { VeniceLlm } from "./venice.js";
 
 describe("withProviderTimeout (audit H-4)", () => {
@@ -171,5 +177,29 @@ describe("Retry-After (2026-09-09 audit, PIPE-N-3)", () => {
 
   it("clamps an absurd wait — a provider asking for a week is telling us something, but not a delay", () => {
     expect(parseRetryAfter(res({ "retry-after": "604800" }))).toBe(3600);
+  });
+});
+
+describe("completionTimeoutMs", () => {
+  it("never drops below the flat floor", () => {
+    expect(completionTimeoutMs(0)).toBe(PROVIDER_TIMEOUTS.completion);
+    expect(completionTimeoutMs(undefined)).toBe(PROVIDER_TIMEOUTS.completion);
+    expect(completionTimeoutMs(100)).toBe(PROVIDER_TIMEOUTS.completion);
+  });
+
+  it("gives the match scorer's batch more than the old flat ceiling", () => {
+    // batchMaxTokens(10) — production's default batch_size — is 12,000. Under the
+    // flat 120s this call failed at 120,03Xms in production (both forward and
+    // reverse batches) while the model was still legitimately working: the
+    // deployed model's measured p95 on that shape is 130.6s.
+    const batchOfTen = 2000 + 1000 * 10;
+    expect(completionTimeoutMs(batchOfTen)).toBeGreaterThan(130_600);
+    expect(batchOfTen * 25).toBe(300_000);
+  });
+
+  it("still bounds a small call tightly", () => {
+    // The guard has to keep meaning something: a 500-token summary does not get
+    // five minutes just because a batch scorer needed them.
+    expect(completionTimeoutMs(500)).toBe(PROVIDER_TIMEOUTS.completion);
   });
 });
