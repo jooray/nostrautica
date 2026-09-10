@@ -41,7 +41,8 @@ import { costUsd, priceOf } from "./lib.mjs";
 import { modelProfile, snapshotSpec } from "./model-profiles.mjs";
 import { promptFingerprint } from "./suite-prompts.mjs";
 import { latencyProbe } from "./latency-probe.mjs";
-import { detectLanguage } from "./language-adherence.mjs";
+import { detectLanguage, languageFloorCheck, IN_LANGUAGE_FLOOR_PCT } from "./language-adherence.mjs";
+import { summarizeReasoning } from "./icebreaker-grade.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -49,12 +50,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Changing anything here makes new cards incomparable with old ones. If it must
 // change, bump SUITE_VERSION and re-run every model — the report refuses to mix
 // versions rather than printing a table that quietly compares two experiments.
-export const SUITE_VERSION = 1;
+// v2 (2026-09-10): arm D moved from R3 to R6. R3 stopped being the deployed
+// prompt on 2026-08-26, when the output-language reminder shipped, so every card
+// between then and now measured attribution and output language on a prompt
+// production no longer sends. R6 IS `reverseSystemPrompt()`, so the arm now
+// follows production rather than a snapshot of it — and when that function next
+// changes, the per-card prompt hash is what makes two R6 cards comparable or
+// not. Every v1 card was re-run; the originals are kept in results/bakeoff/v1-R3.
+export const SUITE_VERSION = 2;
 export const SUITE = {
   prompt: "BP3",
   k: 10,
   seeds: [1, 2],
-  icebreakerVariant: "R3",
+  icebreakerVariant: "R6",
   icebreakerBucket: "reverse-dense",
   icebreakerLangs: ["sk", "en"],
   icebreakerReps: 6,
@@ -371,6 +379,33 @@ const card = {
             return [r.lang, { n, ...c, wrong, inLanguagePct: n ? Math.round(((n - wrong - c.undecided) / n) * 1000) / 10 : 0 }];
           }),
         ),
+        // reasoning_for_target, pooled and per language (2026-09-10). Carried on
+        // the card because a model can be clean on icebreaker attribution and
+        // still invert the reasoning — qwen-3-8-flash is 2% on the first and
+        // 6.3% (sk) on the second. Older cards have no `reasonRows` and get null
+        // rather than a zero, which would read as a clean score it never earned.
+        reasoning: (() => {
+          const has = ice.runs.some((r) => Array.isArray(r.reasonRows));
+          if (!has) return null;
+          const rows = ice.runs.flatMap((r) => r.reasonRows ?? []);
+          const c = (code) => rows.filter((r) => r.violations.includes(code)).length;
+          const pct = (n) => (rows.length ? Math.round((n / rows.length) * 1000) / 10 : 0);
+          const inverted = c("INVERTED"), misattributed = c("MISATTRIBUTED");
+          return {
+            pooled: {
+              total: rows.length,
+              inverted, invertedPct: pct(inverted),
+              misattributed, misattributedPct: pct(misattributed),
+              errors: inverted + misattributed, errorPct: pct(inverted + misattributed),
+              clean: rows.filter((r) => r.violations.length === 0).length,
+              cleanPct: pct(rows.filter((r) => r.violations.length === 0).length),
+            },
+            perLang: Object.fromEntries(
+              ice.runs.map((r) => [r.lang, summarizeReasoning(r.reasonRows ?? [])]),
+            ),
+            clusters: ice.runs.flatMap((r) => clustersOf(r.reasonRows ?? [])),
+          };
+        })(),
         // Per CALL, not per opener — the unit the permutation test shuffles.
         // Keyed on the `callId` the run stamps on every row: deriving it from
         // (target, candidate, rep) is wrong for the reverse shape, where one
@@ -428,8 +463,14 @@ console.log(`scoring full-190  r@1 ${f.recall1.toFixed(2)}  r@3 ${f.recall3.toFi
 if (card.icebreakers) {
   const p = card.icebreakers.pooled;
   console.log(`icebreakers       n=${p.total}  attribution-errors ${p.attributionErrors} (${p.attributionErrorPct}%)  briefing ${p.briefingPct}%  clean ${p.cleanPct}%`);
+  if (card.icebreakers.reasoning) {
+    const rp = card.icebreakers.reasoning.pooled;
+    console.log(`reasoning         n=${rp.total}  inverted ${rp.inverted} (${rp.invertedPct}%)  misattributed ${rp.misattributed}  clean ${rp.cleanPct}%`);
+  }
   for (const [lang, l] of Object.entries(card.icebreakers.language ?? {})) {
-    const bad = l.inLanguagePct < 98 ? "  ⚠ WROTE THE WRONG LANGUAGE" : "";
+    // Same floor the report gates on. This line used to have its own, stricter
+    // number and shouted at results the table then cleared.
+    const bad = languageFloorCheck(lang, l).ok ? "" : `  ⚠ BELOW THE ${IN_LANGUAGE_FLOOR_PCT}% FLOOR`;
     console.log(`  lang ${lang}          ${l.inLanguagePct}% in-language (n=${l.n})` +
       (lang === "sk" ? `  english ${l.english}  czech ${l.czech}` : "") + bad);
   }

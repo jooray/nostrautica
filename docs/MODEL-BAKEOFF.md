@@ -285,18 +285,23 @@ next model that ships.
    the prompt could not be fixed. It could. 0423 remains the better model on
    speed and cost and is still live if that ever matters, but there is no longer
    a defect forcing the choice.
-3. **GLM 5.3 Flash wins on quality and is still not adoptable**: 68% of its
-   icebreaker calls return a shape the schema forbids, and tolerating that in
-   `venice.ts` costs more than the model is worth. Revisit if z.ai fixes it. It
-   is one command.
+3. **GLM 5.3 Flash wins on quality and is still not adoptable, for fewer
+   reasons than before.** On the live prompt the undeclared-shape blocker is
+   gone (65/96 → 0/96), leaving only the two provider changes this document
+   already judged defensible. But Venice repriced it 60% on 2026-09-10, so it is
+   now dearer than what we run ($0.398 vs $0.281 per 100 attendees) rather than
+   cheaper. Quality-wise it is the best model in the table.
 4. **No Qwen, three of them now, and no Minimax.** `qwen-3-8-flash`
    (2026-09-10) is the closest any challenger has come mechanically and the
    furthest any has been on output language: 28 of 48 Slovak batches fully
    English against the deployed model's 0, on the identical live prompt.
-5. **Arm D measures R3, which stopped being the deployed prompt on
-   2026-08-26.** Repointing it costs a `SUITE_VERSION` bump and a re-run of
-   every card; until then read `sk-in-lang` and `attr-err` as R3 numbers.
-   See [Round 4](#round-4-qwen-38-flash-and-the-arm-that-was-measuring-last-months-prompt).
+5. **Arm D now measures R6, the prompt production sends** (suite v2,
+   2026-09-10, all six cards re-run). The R3 numbers quoted in rounds 1-3 stand
+   as a record of that prompt; the current table is not comparable with them.
+   One consequence worth carrying: the Qwen language verdicts were partly
+   measuring the old prompt, and `qwen3-6-35b-a3b`'s Czech rate fell from 58.9%
+   to 8.4% on the new one. It fails on attribution instead.
+   See [Suite v2](#suite-v2-every-card-re-measured-on-the-prompt-production-sends).
 
 The original round-1 reasoning follows.
 
@@ -617,11 +622,11 @@ Three fixes landed:
   whether it measured what ships;
 - `bakeoff.mjs` says loudly, at the end of every run, when the two differ.
 
-**Still open, and a deliberate decision rather than a bug fix:** pointing
-`SUITE.icebreakerVariant` at R6 means bumping `SUITE_VERSION` and re-running arm
-D for all six existing cards (~$0.55, about an hour), because the report refuses
-to mix suite versions. Until that happens the `sk-in-lang` and `attr-err` columns
-of the cross-model table describe R3.
+**Since resolved.** Pointing `SUITE.icebreakerVariant` at R6 meant bumping
+`SUITE_VERSION` and re-running arm D for all six cards, because the report
+refuses to mix suite versions. That was done the same day; see
+[Suite v2](#suite-v2-every-card-re-measured-on-the-prompt-production-sends).
+Three verdicts moved.
 
 ### And the R3 control is far noisier than one draw suggests
 
@@ -640,6 +645,104 @@ What it does mean is that a single 48-call draw of this metric cannot separate
 
 *Round 4 cost: $0.48 of Venice API: $0.22 for the five frozen arms, $0.26 for
 the three R3/R6 arms this round added.*
+
+---
+
+## Suite v2: every card re-measured on the prompt production sends
+
+Round 4 left arm D pointed at R3 and flagged the fix as a decision rather than a
+bug. The decision was taken on 2026-09-10: `SUITE.icebreakerVariant` is now
+**R6**, which is `reverseSystemPrompt()` itself rather than a snapshot of it,
+`SUITE_VERSION` is 2, and all six cards were re-run. The v1 cards are kept in
+`results/bakeoff/v1-R3/` because their numbers are quoted throughout rounds 1-3
+and remain the correct record of what R3 measured.
+
+`node bakeoff-report.mjs --md`, suite v2, all six models measured against the
+same live prompt.
+
+| model | $/Mtok | r@1 190 | r@3 190 | sep | strictJSON | sk-in-lang | attr-err | reason-inv | judge R | judge IB | p50 s | $/100 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| z-ai-glm-5-3-flash | $0.15/$0.5 | **0.80** | **0.90** | **0.64** | 3.7% | 98.8% | **0.2%** | **0%** | **4.70** | **4.70** | 16.1 | $0.398 |
+| qwen-3-8-flash | $0.14/$0.49 | 0.75 | 0.90 | 0.58 | **100%** | **34.5%** | 2.0% | 4.9% | 3.40 | 3.15 | 12.3 | $0.306 |
+| deepseek-v4-flash | $0.138/$0.275 | 0.75 | 0.90 | 0.56 | **100%** | **99.4%** | 0.5% | 1.3% | 4.45 | 3.55 | **10.5** | **$0.224** |
+| qwen3-6-35b-a3b | $0.1/$1 | 0.60 | 0.85 | 0.57 | **100%** | 83.5% | 3.4% | 2.2% | 3.85 | 3.55 | **4.4** | $0.475 |
+| **deepseek-v4-flash-0731** | $0.175/$0.35 | 0.65 | 0.85 | 0.55 | **100%** | **97.7%** | **0.3%** | **0%** | 4.25 | **4.20** | 22.1 | $0.281 |
+| qwen-3-8-27b | $0.45/$3.2 | 0.65 | 0.85 | 0.52 | **100%** | 79.4% | 1.8% | 5.5% | 3.90 | 3.55 | 11.3 | $1.734 |
+
+`reason-inv` is new and populated for the first time here: `reasoning_for_target`
+inversions, from the grader added the same day. Every earlier card reads "–",
+which is not zero.
+
+### The prompt was carrying more of the Qwen verdicts than anyone knew
+
+Moving from R3 to R6 is one sentence of prompt, and it moves the Slovak column
+for almost every model:
+
+| model | R3 | R6 | what changed |
+|---|---|---|---|
+| `qwen3-6-35b-a3b` | 31.2% | **83.5%** | Czech openers 841 → 117 |
+| `qwen-3-8-27b` | 62.5% | **79.4%** | English 303 → 179, Czech 76 → 2 |
+| `deepseek-v4-flash-0731` | 93.3% | **97.7%** | English 90 → 29 |
+| `z-ai-glm-5-3-flash` | 96.7% | **98.8%** | Czech 23 → 0 |
+| `deepseek-v4-flash` | 99.6% | 99.4% | already at ceiling |
+| **`qwen-3-8-flash`** | 22.1% | **34.5%** | English 811 → 697 |
+
+Round 2's headline, *"`qwen3-6-35b-a3b` answers a Slovak event in Czech 59% of
+the time"*, was true of the prompt then deployed and is not true of the prompt
+deployed now: 8.4%. The model is still not adoptable, and the reason is now
+attribution (3.4%) rather than language. Read that sentence in Round 2 as a
+statement about R3.
+
+`qwen-3-8-flash` is the one model the sentence does not reach. It gains 12
+points where the others gain 17, 21 and 52, and it stays four times below the
+floor. That is what makes its failure a property of the model rather than of the
+prompt it was measured under.
+
+### Three verdicts from earlier rounds that this changes
+
+**GLM 5.3 Flash lost a hard blocker.** Under R3 it answered the reverse batch
+with undeclared top-level shapes on 65 of 96 calls, which
+[Deployability §2b](#2b-the-strict-schema-is-not-honoured-at-all-on-the-harder-shape)
+called the point where tolerating it "costs more than the model is worth". Under
+R6: **0 of 96**. What remains is the two provider changes that section already
+judged defensible, per-model `disable_thinking` and lenient parsing, and *not*
+the third one it refused to make. Its prose also improved from 4.10 to **4.70**,
+15 of 20 sampled openers scored 5, and its Czech leakage went to zero. It is now
+the best model in this table on every quality axis it is measured on.
+
+**And it got 60% more expensive.** Venice repriced it between the snapshots:
+$0.09375/$0.3125 on 2026-08-26, $0.15/$0.50 on 2026-09-10. That is $0.398 per
+100 attendees against the deployed model's $0.281, so the "cheaper and faster"
+half of the round-1 verdict no longer holds. It is faster; it is not cheaper.
+The price is not in the pinned `PRICING` table, so nothing warned about the
+drift, which is an argument for pinning any model a verdict depends on.
+
+**Round 3's case for rolling back to 0423 is weaker on the live prompt.** Its
+Slovak attribution is now significantly worse than the deployed model's (1.3% vs
+0.4%, p = 0.0275, where under R3 the same comparison was null), its icebreaker
+prose grades below it (3.55 vs 4.20), and it inverts `reasoning_for_target` on
+1.3% of entries where 0731 inverts none. It keeps its advantages in speed, cost
+and raw ranking. The rollback was already not on the table; it is now less
+attractive than the round-3 numbers made it look.
+
+**`qwen-3-8-27b`'s attribution was flattered by R3.** It recorded 0.1% there, the
+best of any model tested. On the live prompt it is 1.8%, significantly worse than
+the deployed model (p = 0.006), with 5.5% reasoning inversions on top.
+
+### What the deployed model looks like on its own prompt
+
+97.7% Slovak in-language, 0.3% attribution errors pooled and 0.4% in Slovak,
+**zero** reasoning inversions in 960 entries, 100% strict JSON, and icebreaker
+prose at 4.20 against 3.45 under R3. Every one of those is better than the card
+that has been quoted since August, because that card measured the prompt it no
+longer runs.
+
+**No model change.** `deepseek-v4-flash-0731` stays. The one model that beats it
+on quality is blocked on the same two provider changes as before and now costs
+42% more per attendee.
+
+*Suite v2 cost: $2.07 of Venice API across six models' arm D. The scoring arms
+were cached, so re-running them cost nothing.*
 
 ---
 

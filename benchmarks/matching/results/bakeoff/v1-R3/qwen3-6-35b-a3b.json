@@ -1,0 +1,1074 @@
+{
+  "suiteVersion": 1,
+  "model": "qwen3-6-35b-a3b",
+  "ranAt": "2026-08-26T19:47:28.450Z",
+  "spec": {
+    "name": "Qwen 3.6 35B A3B",
+    "contextTokens": 256000,
+    "maxCompletionTokens": 65536,
+    "privacy": "private",
+    "supportsResponseSchema": true,
+    "supportsReasoning": true,
+    "defaultReasoningEffort": null,
+    "snapshotAt": "2026-08-26T18:27:08.121Z"
+  },
+  "price": {
+    "in": 0.1,
+    "out": 1
+  },
+  "priceSource": "pinned-or-snapshot",
+  "requestProfile": {
+    "disableThinking": true
+  },
+  "suite": {
+    "prompt": "BP3",
+    "k": 10,
+    "seeds": [
+      1,
+      2
+    ],
+    "icebreakerVariant": "R3",
+    "icebreakerBucket": "reverse-dense",
+    "icebreakerLangs": [
+      "sk",
+      "en"
+    ],
+    "icebreakerReps": 6
+  },
+  "promptFingerprint": {
+    "scoring.system.BP3": "dcba8e29111395ac",
+    "scoring.user.sample": "8d086a8902af2f6b",
+    "icebreaker.system.R3.sk": "63e056b48b6c6e8c",
+    "icebreaker.system.R3.en": "b141415e3e195e32",
+    "icebreaker.user.sample": "1327678f2837383e"
+  },
+  "scoring": {
+    "perSeedSubset": [
+      {
+        "label": "BP3|K10|qwen3-6-35b-a3b|seed1|subset",
+        "model": "qwen3-6-35b-a3b",
+        "prompt": "BP3",
+        "k": 10,
+        "seed": 1,
+        "subset": true,
+        "recall1": 0.8,
+        "recall3": 0.95,
+        "recallDenom": 20,
+        "meanStrong": 0.8700000000000001,
+        "meanMedium": 0.49615384615384617,
+        "meanWeak": 0.22229729729729725,
+        "sepStrongWeak": 0.6477027027027029,
+        "orderSW": 0.972972972972973,
+        "orderSM": 0.9192307692307692,
+        "disc": 0.32390172334967426,
+        "posBias": 0.19200396326321995,
+        "formatFails": 0,
+        "missingCandidates": 0,
+        "calls": 21,
+        "latencyP50": 4425,
+        "latencyP95": 5860,
+        "costUsd": 0.0154237,
+        "edges": 120,
+        "avgReasonLen": 212,
+        "emptyReason": 0
+      },
+      {
+        "label": "BP3|K10|qwen3-6-35b-a3b|seed2|subset",
+        "model": "qwen3-6-35b-a3b",
+        "prompt": "BP3",
+        "k": 10,
+        "seed": 2,
+        "subset": true,
+        "recall1": 0.75,
+        "recall3": 0.9,
+        "recallDenom": 20,
+        "meanStrong": 0.8524999999999998,
+        "meanMedium": 0.5,
+        "meanWeak": 0.21283783783783783,
+        "sepStrongWeak": 0.639662162162162,
+        "orderSW": 0.9716216216216216,
+        "orderSM": 0.8538461538461538,
+        "disc": 0.3187824057601395,
+        "posBias": 0.031192109666091847,
+        "formatFails": 0,
+        "missingCandidates": 0,
+        "calls": 21,
+        "latencyP50": 4609,
+        "latencyP95": 5882,
+        "costUsd": 0.015428700000000002,
+        "edges": 120,
+        "avgReasonLen": 213,
+        "emptyReason": 0
+      }
+    ],
+    "pooledSubset": {
+      "label": "BP3|K10|qwen3-6-35b-a3b|seeds1+2|subset",
+      "model": "qwen3-6-35b-a3b",
+      "prompt": "BP3",
+      "k": 10,
+      "seed": "pooled",
+      "subset": true,
+      "recall1": 0.75,
+      "recall3": 0.95,
+      "recallDenom": 20,
+      "meanStrong": 0.8612500000000001,
+      "meanMedium": 0.49807692307692303,
+      "meanWeak": 0.21756756756756754,
+      "sepStrongWeak": 0.6436824324324325,
+      "orderSW": 0.9797297297297297,
+      "orderSM": 0.8730769230769231,
+      "disc": 0.311726751672572,
+      "posBias": 0.16752609823124293,
+      "formatFails": 0,
+      "missingCandidates": 0,
+      "calls": 42,
+      "latencyP50": 3411,
+      "latencyP95": 4406,
+      "costUsd": 0.030852400000000002,
+      "edges": 120,
+      "avgReasonLen": 212,
+      "emptyReason": 0
+    },
+    "full190": {
+      "label": "BP3|K10|qwen3-6-35b-a3b|seed1|full",
+      "model": "qwen3-6-35b-a3b",
+      "prompt": "BP3",
+      "k": 10,
+      "seed": 1,
+      "subset": false,
+      "recall1": 0.6,
+      "recall3": 0.85,
+      "recallDenom": 20,
+      "meanStrong": 0.8549999999999999,
+      "meanMedium": 0.5884615384615385,
+      "meanWeak": 0.2854191616766469,
+      "sepStrongWeak": 0.5695808383233529,
+      "orderSW": 0.9455089820359281,
+      "orderSM": 0.8538461538461538,
+      "disc": 0.2860521364930592,
+      "posBias": 0.08031164491996402,
+      "formatFails": 0,
+      "missingCandidates": 0,
+      "calls": 40,
+      "latencyP50": 6642,
+      "latencyP95": 7648,
+      "costUsd": 0.0450861,
+      "edges": 380,
+      "avgReasonLen": 201,
+      "emptyReason": 0
+    },
+    "strictJson": {
+      "ok": 82,
+      "known": 82,
+      "pct": 100
+    },
+    "reasoningTokens": 0
+  },
+  "icebreakers": {
+    "variant": "R3",
+    "bucket": "reverse-dense",
+    "shapeDeviations": 0,
+    "shapeKinds": {},
+    "failedCalls": 0,
+    "perLang": [
+      {
+        "lang": "sk",
+        "label": "R3-order",
+        "failedCalls": 0,
+        "shapeDeviations": 0,
+        "total": 1428,
+        "grounded": 666,
+        "groundedPct": 46.6,
+        "attributionErrors": 94,
+        "attributionErrorPct": 6.6,
+        "theft": 74,
+        "falseClaim": 20,
+        "briefing": 12,
+        "briefingPct": 0.8,
+        "clean": 1331,
+        "cleanPct": 93.2,
+        "telemetry": {
+          "telemetryCalls": 48,
+          "latencyP50": 13102,
+          "latencyP95": 17187,
+          "usage": {
+            "promptTokens": 217230,
+            "completionTokens": 126714,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.14843699999999999,
+          "strictJsonOk": 48,
+          "strictJsonKnown": 48
+        }
+      },
+      {
+        "lang": "en",
+        "label": "R3-order",
+        "failedCalls": 0,
+        "shapeDeviations": 0,
+        "total": 1289,
+        "grounded": 869,
+        "groundedPct": 67.4,
+        "attributionErrors": 52,
+        "attributionErrorPct": 4,
+        "theft": 52,
+        "falseClaim": 0,
+        "briefing": 1,
+        "briefingPct": 0.1,
+        "clean": 1236,
+        "cleanPct": 95.9,
+        "telemetry": {
+          "telemetryCalls": 48,
+          "latencyP50": 12871,
+          "latencyP95": 16161,
+          "usage": {
+            "promptTokens": 209598,
+            "completionTokens": 116233,
+            "reasoningTokens": 0
+          },
+          "costUsd": 0.1371928,
+          "strictJsonOk": 48,
+          "strictJsonKnown": 48
+        }
+      }
+    ],
+    "pooled": {
+      "total": 2717,
+      "grounded": 1535,
+      "attributionErrors": 146,
+      "attributionErrorPct": 5.4,
+      "theft": 126,
+      "falseClaim": 20,
+      "briefing": 13,
+      "briefingPct": 0.5,
+      "clean": 2567,
+      "cleanPct": 94.5
+    },
+    "language": {
+      "sk": {
+        "n": 1428,
+        "target": 446,
+        "english": 134,
+        "czech": 841,
+        "slovak": 0,
+        "undecided": 7,
+        "wrong": 975,
+        "inLanguagePct": 31.2
+      },
+      "en": {
+        "n": 1289,
+        "target": 1250,
+        "english": 0,
+        "czech": 0,
+        "slovak": 39,
+        "undecided": 0,
+        "wrong": 39,
+        "inLanguagePct": 97
+      }
+    },
+    "clusters": [
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 8,
+        "n": 30
+      },
+      {
+        "err": 2,
+        "n": 30
+      },
+      {
+        "err": 3,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 24
+      },
+      {
+        "err": 3,
+        "n": 30
+      },
+      {
+        "err": 2,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 8,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 9,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 4,
+        "n": 30
+      },
+      {
+        "err": 2,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 5,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 24
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 11,
+        "n": 30
+      },
+      {
+        "err": 2,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 8,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 4,
+        "n": 30
+      },
+      {
+        "err": 8,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 7,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 24
+      },
+      {
+        "err": 2,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 10
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 10
+      },
+      {
+        "err": 0,
+        "n": 10
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 10
+      },
+      {
+        "err": 16,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 10
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 3,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 9,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 5,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 5
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 1,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 3,
+        "n": 30
+      },
+      {
+        "err": 2,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 30
+      },
+      {
+        "err": 0,
+        "n": 10
+      },
+      {
+        "err": 1,
+        "n": 30
+      }
+    ],
+    "clustersByLang": {
+      "sk": [
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 8,
+          "n": 30
+        },
+        {
+          "err": 2,
+          "n": 30
+        },
+        {
+          "err": 3,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 24
+        },
+        {
+          "err": 3,
+          "n": 30
+        },
+        {
+          "err": 2,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 8,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 9,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 4,
+          "n": 30
+        },
+        {
+          "err": 2,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 5,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 24
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 11,
+          "n": 30
+        },
+        {
+          "err": 2,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 8,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 4,
+          "n": 30
+        },
+        {
+          "err": 8,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        }
+      ],
+      "en": [
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 7,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 24
+        },
+        {
+          "err": 2,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 10
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 10
+        },
+        {
+          "err": 0,
+          "n": 10
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 10
+        },
+        {
+          "err": 16,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 10
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 3,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 9,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 5,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 5
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 1,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 3,
+          "n": 30
+        },
+        {
+          "err": 2,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 30
+        },
+        {
+          "err": 0,
+          "n": 10
+        },
+        {
+          "err": 1,
+          "n": 30
+        }
+      ]
+    }
+  },
+  "cost": {
+    "benchmarkUsd": 0.3682,
+    "scoringUsd": 0.0759,
+    "icebreakerUsd": 0.2856,
+    "per100AttendeesUsd": 0.47459052631578946
+  },
+  "speed": {
+    "serialLatencyP50Ms": 4364,
+    "serialLatencyP95Ms": 4711,
+    "serialCalls": 6,
+    "outputTokensPerSec": 205,
+    "meanCompletionTokens": 888,
+    "meanReasoningTokens": 0,
+    "underConcurrency16": {
+      "p50Ms": 6642,
+      "p95Ms": 7648
+    },
+    "icebreakerLatencyP50Ms": 13102,
+    "projectedMinutesPer100AtConc8": 3.6366666666666667
+  },
+  "artifacts": {
+    "scoringResults": [
+      "BP3|K10|qwen3-6-35b-a3b|seed1|subset",
+      "BP3|K10|qwen3-6-35b-a3b|seed2|subset",
+      "BP3|K10|qwen3-6-35b-a3b|seed1|full"
+    ],
+    "icebreakerResult": "results/ICEBREAKER_qwen3-6-35b-a3b_K10_sk-en_R3_reverse-dense_x6.json"
+  }
+}
