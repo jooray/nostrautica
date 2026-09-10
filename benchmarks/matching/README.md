@@ -705,6 +705,8 @@ would have flagged the intended output as the failure.
 | `deepseek-v4-flash-0731` | en | 480 | 0 | **0%** |
 | `qwen-3-8-flash` | sk | 480 | 30 | **6.3%** |
 | `qwen-3-8-flash` | en | 480 | 17 | **3.5%** |
+| `z-ai-glm-5-3-flash` | sk | 470 | 0 | **0%** |
+| `z-ai-glm-5-3-flash` | en | 480 | 0 | **0%** |
 
 The forward shape (IB1/IB2, trap buckets, sk) is also 0/72 per arm.
 
@@ -719,9 +721,34 @@ about both people, which is what the prompt forbids in as many words.
 > seeking partners… There is little professional overlap.
 
 So this metric separates models where the icebreaker metric does not: Qwen 3.8
-Flash is near-clean on icebreaker attribution and ships this in 1 reasoning in
-16 (sk). It is a reason not to switch to it beyond the wrong-language finding
-already recorded above.
+Flash ships this in 1 reasoning in 16 (sk) while sitting at 3% on icebreaker
+attribution. It is a reason not to switch to it beyond the wrong-language
+finding already recorded above. GLM 5.3 Flash and the production model are both
+clean on it.
+
+### Grader correction, round eight — and the first from this new arm
+
+GLM's single Slovak flag was a false positive, found the way the seven before it
+were: by reading the flagged row.
+
+> Sunny je … embedded inžinierka, **ktorá** píše C a **navrhla si** vlastnú
+> hardvérovú peňaženku Copperwake.
+
+`MADE_SLAVIC\s+(?:si|jsi)` cannot separate the second-person auxiliary
+("navrhol si X" — YOU designed X) from the reflexive dative ("navrhla si vlastnú
+X" — she designed her OWN X); they are the same two tokens. The clause settles
+it: a NOMINATIVE relative pronoun makes the relativized noun the subject, so the
+verb is third person and `si` can only be reflexive.
+
+Only the unambiguously nominative forms (`ktorý`/`ktorá`, `který`/`která`) are
+listed. Object cases leave the subject free and there `si` really is second
+person — *"kniha, ktorú si napísal"* is "the book YOU wrote" and must stay
+flagged. Both directions are pinned; adding `ktorú` would have traded a false
+positive for a miss on the exact failure this file exists to catch.
+
+Re-graded offline with `icebreaker-regrade.mjs` (now reasoning-aware, so a
+grader fix still costs nothing): the correction moved that one row and no other
+number in any run.
 
 ### Why the production card is nonetheless NOT evidence against the live prompt
 

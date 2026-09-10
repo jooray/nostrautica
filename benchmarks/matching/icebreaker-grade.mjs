@@ -381,12 +381,50 @@ function governs(gap) {
  * comparison, which is the whole point: an earlier possessive that DOES govern
  * must still be able to win.
  */
-function lastGoverning(before, res) {
+/**
+ * Round eight, and the first one found by the reasoning grader (2026-09-10).
+ *
+ * `navrhla si vlastnú hardvérovú peňaženku Copperwake` was graded as a
+ * second-person claim, because `MADE_SLAVIC\s+(?:si|jsi)` cannot tell the
+ * second-person auxiliary ("navrhol si X" — YOU designed X) from the reflexive
+ * dative ("navrhla si vlastnú X" — she designed her OWN X). Both are the same
+ * two surface tokens.
+ *
+ * What settles it in the flagged row is the clause: "…embedded inžinierka,
+ * KTORÁ píše C a navrhla si vlastnú…". A NOMINATIVE relative pronoun makes the
+ * relativized noun the subject of its clause, so the verb is third person and
+ * `si` can only be reflexive.
+ *
+ * Only the unambiguously nominative forms are listed. The object cases leave the
+ * subject free, and there `si` really is second person — "kniha, ktorú si
+ * napísal" is "the book YOU wrote", a real claim that must stay flagged. Listing
+ * `ktorú`/`ktorého` here would have traded one false positive for a false
+ * negative on the exact failure this file exists to catch.
+ */
+const NOM_REL_RE = /(?<!\p{L})(?:ktor|kter)[ya](?!\p{L})/iu;
+const SI_RE = /(?<!\p{L})(?:si|jsi)(?!\p{L})/iu;
+
+function reflexiveNotSecondPerson(before, idx, matched) {
+  if (!SI_RE.test(matched)) return false;
+  const clause = deaccent(before.slice(0, idx));
+  const lastComma = clause.lastIndexOf(",");
+  return NOM_REL_RE.test(lastComma === -1 ? clause : clause.slice(lastComma));
+}
+
+/**
+ * Index of the LAST claim in `before` that actually reaches the artifact, or -1.
+ * `veto` drops a match that survives `governs()` but is grammatically not the
+ * person it looks like — see reflexiveNotSecondPerson.
+ */
+function lastGoverning(before, res, veto) {
   let best = -1;
   for (const re of res) {
     re.lastIndex = 0;
     for (const m of before.matchAll(re)) {
-      if (m.index > best && governs(before.slice(m.index + m[0].length))) best = m.index;
+      if (m.index <= best) continue;
+      if (!governs(before.slice(m.index + m[0].length))) continue;
+      if (veto && veto(before, m.index, m[0])) continue;
+      best = m.index;
     }
   }
   return best;
@@ -413,7 +451,11 @@ export function attributionOf(text, entity) {
   // be a verb claim, and those are read separately below.
   const nextWord = deaccent(after).trim().split(/[\s,.;:!?—–-]+/)[0] ?? "";
   const serviceHead = SERVICE_NOUN.test(nextWord);
-  const second = lastGoverning(before, serviceHead ? SECOND_MADE_RES : [SECOND_POSS_RE, ...SECOND_MADE_RES]);
+  const second = lastGoverning(
+    before,
+    serviceHead ? SECOND_MADE_RES : [SECOND_POSS_RE, ...SECOND_MADE_RES],
+    reflexiveNotSecondPerson,
+  );
   const first = lastGoverning(before, serviceHead ? FIRST_MADE_RES : [FIRST_POSS_RE, ...FIRST_MADE_RES]);
   if (second === -1 && first === -1) return "none";
   return second > first ? "second" : "first";

@@ -477,3 +477,25 @@ test("namedInThirdPerson does not inherit isBriefing's third-party half", () => 
   // A vocative is an address, not a description — in either field.
   assert.equal(namedInThirdPerson("Ahoj Gideon, pracujem na tom.", "Gideon"), false);
 });
+
+test("round eight: a NOMINATIVE relative clause makes \"si\" reflexive, not second person", () => {
+  // Real GLM 5.3 Flash output, flagged by the new reasoning grader. "ktorá …
+  // navrhla si vlastnú peňaženku Copperwake" is "who … designed her OWN wallet",
+  // and Copperwake is indeed the candidate's. Correct text, wrong grade.
+  const reader = { firstName: "Kenji", signature: { entity: "Sundial Custody" } };
+  const other = { firstName: "Sunny", signature: { entity: "Copperwake" } };
+  const ok =
+    "Sunny je presne to, čo hľadáš: embedded inžinierka, ktorá píše C a navrhla si vlastnú " +
+    "hardvérovú peňaženku Copperwake. Tvoje tamper-evident zariadenia a jej firmware sú tím.";
+  assert.deepEqual(gradeReasoning(ok, reader, other), []);
+  assert.equal(attributionOf(ok, "Copperwake"), "none");
+});
+
+test("round eight does not blind the grader to a real second-person claim", () => {
+  // The object case leaves the subject free, so here "si" IS second person and
+  // the claim must survive. Trading the false positive above for a miss on this
+  // would defeat the point of the whole file.
+  assert.equal(attributionOf("kniha, ktorú si napísal, Tamers of Entropy, ma dostala.", "Tamers of Entropy"), "second");
+  assert.equal(attributionOf("Tvoja kniha Tamers of Entropy ma dostala.", "Tamers of Entropy"), "second");
+  assert.equal(attributionOf("Vytvoril si Nostrauticu a to je presne ono.", "Nostrautica"), "second");
+});
