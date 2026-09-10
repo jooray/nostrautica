@@ -1426,7 +1426,17 @@ describe("inspectPipelineReadOnly (doctor)", () => {
  * the one time it is needed.
  */
 describe("pre-migration backup (audit OPS-2)", () => {
-  const tmp = () => join(mkdtempSync(join(tmpdir(), "nostrautica-migrate-")), "coordinator.sqlite");
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const tmp = () => {
+    // Tracked for cleanup: these are real dirs in the SHARED system tmpdir, and
+    // audio.test.ts's sweep test looks at every `nostrautica-*` in there.
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-migrate-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  };
   const backupsIn = (dbPath: string) =>
     readdirSync(dirname(dbPath)).filter((f) => f.endsWith(".bak"));
 

@@ -31,7 +31,12 @@ describe("sweepStaleTempDirs (audit COORD-23)", () => {
 
     const now = Date.now();
     const removed = await sweepStaleTempDirs(DAY, now);
-    expect(removed).toBe(1);
+    // NOT toBe(1): the sweep is over the SHARED system tmpdir, so the count also
+    // includes any aged `nostrautica-*` dir another test or an earlier run left
+    // behind. Asserting the exact total made this pass on a clean machine and
+    // fail a day later on a working one. What this test actually owns is the
+    // three dirs below.
+    expect(removed).toBeGreaterThanOrEqual(1);
     expect(existsSync(stale)).toBe(false);
     expect(existsSync(fresh)).toBe(true);
     expect(existsSync(foreign)).toBe(true);
