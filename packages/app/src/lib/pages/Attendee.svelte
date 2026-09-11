@@ -21,6 +21,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import FollowButton from "$lib/components/FollowButton.svelte";
   import MatchDetails from "$lib/components/MatchDetails.svelte";
+  import { STRONG_FLOOR, bandAtCut, strongCutFor } from "$lib/events/confidence.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
@@ -51,6 +52,14 @@
   // (UX feedback 2026-07-29): Matches → profile was a one-way door, so the
   // reasoning and icebreakers you came for vanished on arrival.
   let myMatch = $state<Match | null>(null);
+  /**
+   * The viewer's own "strong" cut, carried alongside the single match: the band
+   * depends on the WHOLE match list (confidence.ts), which this page otherwise
+   * throws away after picking one entry out of it. Defaulting to the bare floor
+   * means a match shown before any list has loaded is banded conservatively
+   * rather than optimistically.
+   */
+  let strongCut = $state(STRONG_FLOOR);
   let copied = $state<"npub" | "nprofile" | null>(null);
   const muted = $derived(!!pubkey && mutes.isMuted(pubkey));
 
@@ -72,7 +81,9 @@
         // Cached per-event settings (want-to-meet/met/note) paint instantly (§2.8).
         settings = cachedPerEventSettings(cached.coordinate) ?? null;
         if (settings) noteDraft = settings.notes[pubkey] ?? "";
-        myMatch = cachedMatches(cached.coordinate)?.matches.find((m) => m.pubkey === pubkey) ?? null;
+        const cachedList = cachedMatches(cached.coordinate)?.matches;
+        if (cachedList) strongCut = strongCutFor(cachedList);
+        myMatch = cachedList?.find((m) => m.pubkey === pubkey) ?? null;
       }
       if (kind0 || entry) {
         loading = false;
@@ -127,7 +138,10 @@
         // a match computed since the last visit must not stay invisible here.
         // Non-members / no coordinator resolve to undefined; the section hides.
         void fetchMatches(session.signer, eventCtx)
-          .then((list) => (myMatch = list?.matches.find((m) => m.pubkey === pubkey) ?? myMatch))
+          .then((list) => {
+            if (list) strongCut = strongCutFor(list.matches);
+            myMatch = list?.matches.find((m) => m.pubkey === pubkey) ?? myMatch;
+          })
           .catch(() => {});
         const me = await session.signer.getPublicKey();
         // Bound the follow-list fetch (audit UX-10): an unbounded fetch on a bad
@@ -487,7 +501,7 @@
 {#if myMatch}
   <div class="card match">
     <div class="field-label" style="margin-top:0">{t("attendee.yourMatch")}</div>
-    <MatchDetails match={myMatch}>
+    <MatchDetails match={myMatch} band={bandAtCut(myMatch.score, strongCut)}>
       {#snippet actions()}
         <div class="mact">
           <button class="btn inline primary" onclick={introduce}>

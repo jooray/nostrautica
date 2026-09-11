@@ -17,6 +17,7 @@
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import MatchDetails from "$lib/components/MatchDetails.svelte";
+  import { bandAtCut, byMatchRank, strongCutFor } from "$lib/events/confidence.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -131,8 +132,17 @@
 
   onMount(loadMatches);
 
-  // Muted attendees never appear in your matches (U10).
-  const visibleMatches = $derived(matches.filter((m) => !mutes.isMuted(m.pubkey)));
+  // Muted attendees never appear in your matches (U10), and the list is ordered
+  // here rather than trusted as received — an event scored before the coordinator
+  // learned to break score ties on complementarity still has arbitrary order at
+  // the top (confidence.ts).
+  const rankedMatches = $derived([...matches].sort(byMatchRank));
+  const visibleMatches = $derived(rankedMatches.filter((m) => !mutes.isMuted(m.pubkey)));
+
+  // The "strong" cut is per attendee, so it is derived ONCE for the list. It reads
+  // the full ranked list, not the muted-out one: muting three people must not
+  // promote the next three into "Strong match".
+  const strongCut = $derived(strongCutFor(rankedMatches));
 
   // Empty-state cause: does the viewer still owe an intro?
   const needsIntro = $derived(
@@ -241,7 +251,7 @@
           </div>
         </div>
 
-        <MatchDetails match={m}>
+        <MatchDetails match={m} band={bandAtCut(m.score, strongCut)}>
           {#snippet actions()}
             <div class="actions">
               {#if session.loggedIn}

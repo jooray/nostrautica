@@ -17,10 +17,18 @@
   import type { Snippet } from "svelte";
   import type { Match } from "@nostrautica/protocol";
   import ConfidenceBadge from "./ConfidenceBadge.svelte";
+  import type { ConfidenceBand } from "$lib/events/confidence.js";
   import Icon from "./icons/Icon.svelte";
   import { t, i18n } from "$lib/i18n/i18n.svelte.js";
 
-  let { match, actions }: { match: Match; actions?: Snippet } = $props();
+  // `band` comes from the caller because it is a property of the whole match
+  // list, not of this row (confidence.ts): "strong" means top-few FOR THIS
+  // ATTENDEE, so a component holding one Match cannot work it out.
+  let {
+    match,
+    band,
+    actions,
+  }: { match: Match; band: ConfidenceBand; actions?: Snippet } = $props();
 
   /**
    * Scores are 0–1 on the wire and stay that way everywhere else — this is a
@@ -39,7 +47,7 @@
   }
 </script>
 
-<ConfidenceBadge score={match.score} />
+<ConfidenceBadge {band} />
 
 <!-- Reasoning is the product — full body size, no longer under a %. -->
 <p class="reason">{match.reasoning}</p>

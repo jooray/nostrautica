@@ -6,12 +6,14 @@
   // the whole hierarchy alone. The band is still encoded in BOTH the label and the
   // glyph SHAPE (rising curve / gentle arc / dashed line), never colour
   // alone (A6).
-  import { confidenceBand } from "$lib/events/confidence.js";
+  import type { ConfidenceBand } from "$lib/events/confidence.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
-  let { score, size = "md" }: { score: number; size?: "sm" | "md" } = $props();
+  // The BAND, not the score: "strong" is a per-attendee cut that only the whole
+  // match list can decide (see confidence.ts), so the caller derives it once for
+  // the list and hands it down rather than each badge re-reading a bare number.
+  let { band, size = "md" }: { band: ConfidenceBand; size?: "sm" | "md" } = $props();
 
-  const band = $derived(confidenceBand(score));
   const labelKey = $derived(
     band === "strong"
       ? ("matches.band.strong" as const)
