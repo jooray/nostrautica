@@ -199,6 +199,35 @@ export function recordPairScore(
   });
 }
 
+/**
+ * Rank one attendee's candidates: score, then complementarity, then similarity
+ * (2026-09-12).
+ *
+ * Sorting on `score` alone left the top of a real list decided by whatever order
+ * SQLite returned. The scorer quantizes hard — 1482 directed scores from the Plan
+ * B event took only 19 distinct values, and 165 pairs sat on 0.85 alone — so 19
+ * of 39 attendees had a TIED top match, and which of them was crowned could
+ * change on any recompute with nothing in the data having moved.
+ *
+ * The two dimensions stored beside the score are free signal against that:
+ * adding them cuts tied #1s from 19 to 10 and lifts the distinct keys inside a
+ * top five from 2.46 to 3.79. Complementarity goes first because the scoring
+ * prompt names it "the most important signal" (scoring.ts), and
+ * docs/MATCHING-BENCHMARK.md picked the model on separation and recall — on
+ * ORDER — so a tie-break that sharpens order is using it as intended.
+ *
+ * This affects WHICH pairs survive the top-K cut. Display order is re-derived
+ * client-side from the same rule (`byMatchRank` in the app's confidence.ts), so
+ * an event scored before this change still renders in the right order without a
+ * recompute.
+ */
+function byRank(
+  a: { score: number; similarity: number; complementarity: number },
+  b: { score: number; similarity: number; complementarity: number },
+): number {
+  return b.score - a.score || b.complementarity - a.complementarity || b.similarity - a.similarity;
+}
+
 /** Build an attendee's top-K match list (kind 31605 content) from cached pairs. */
 export function buildMatchList(
   store: Store,
@@ -209,7 +238,7 @@ export function buildMatchList(
 ): MatchListContent {
   const rows = store.pairsFor(coordinate, pubkey);
   const matches: Match[] = rows
-    .sort((a, b) => b.score - a.score)
+    .sort(byRank)
     .slice(0, topK)
     .map((r) => ({
       pubkey: r.other,
