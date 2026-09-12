@@ -25,6 +25,7 @@
   import { evaluateChatGate } from "$lib/chat/gate.js";
   import { chatSession, ChatUnroutableError } from "$lib/chat/session.svelte.js";
   import { fillHeight } from "$lib/components/fill-height.js";
+  import { autoGrow } from "$lib/components/auto-grow.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
@@ -796,6 +797,7 @@
       <textarea
         bind:value={draft}
         rows="1"
+        use:autoGrow={draft}
         placeholder={t("chat.compose.placeholder")}
         disabled={phase === "setup" || phase === "evicted"}
         onkeydown={(e) => {
@@ -1207,6 +1209,9 @@
     padding: 0.5rem 0;
     background: var(--bg);
   }
+  /* One row at rest, growing with the draft (use:autoGrow) to max-height, then
+     scrolling — a message longer than a line used to scroll out of sight inside
+     a one-line box. */
   .compose textarea {
     flex: 1;
     resize: none;

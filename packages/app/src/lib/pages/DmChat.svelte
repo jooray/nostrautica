@@ -28,6 +28,7 @@
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import { fillHeight } from "$lib/components/fill-height.js";
+  import { autoGrow } from "$lib/components/auto-grow.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
@@ -484,6 +485,7 @@
     <div class="row" style="align-items:flex-end">
       <textarea
         rows="2"
+        use:autoGrow={draft}
         placeholder={t("dmchat.placeholder")}
         bind:value={draft}
         onkeydown={(e) => {
@@ -533,5 +535,11 @@
     bottom: var(--nav-band);
     padding: 0.5rem 0;
     background: var(--bg);
+  }
+  /* Grows with the draft (use:autoGrow) until it would eat the transcript;
+     past that it scrolls. Manual resizing would fight the action. */
+  .compose textarea {
+    resize: none;
+    max-height: 8rem;
   }
 </style>
