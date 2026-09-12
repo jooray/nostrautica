@@ -469,30 +469,40 @@
     {/each}
   </div>
 
-  <div class="row" bind:this={composerEl} style="align-items:flex-end">
-    <textarea
-      rows="2"
-      placeholder={t("dmchat.placeholder")}
-      bind:value={draft}
-      onkeydown={(e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          void send();
-        }
-      }}
-    ></textarea>
-    <button
-      class="btn primary inline"
-      style="flex:none"
-      onclick={send}
-      disabled={sending || !draft.trim()}
-    >
-      {sending ? "…" : t("dmchat.send")}
-    </button>
+  <!-- Sticky ABOVE the fixed bottom nav, the same way event chat's composer is
+       (audit A-1): `fillHeight` normally leaves exactly enough room below the
+       transcript, but it is a measurement, and a measurement can be wrong for a
+       frame — or for good, if something above the pane grows after it ran. When
+       that happened here the composer sat UNDER the nav bar and half of what you
+       typed was invisible (2026-09-12). Sticky makes that unrepresentable: the
+       composer cannot leave the band above the nav, whatever the pane measures.
+       The slow-signer note lives inside the sticky block for the same reason. -->
+  <div class="compose" bind:this={composerEl}>
+    {#if sendSlow}
+      <p class="muted" role="status" style="margin:0 0 0.4rem;font-size:0.85rem">{t("dmchat.signerSlow")}</p>
+    {/if}
+    <div class="row" style="align-items:flex-end">
+      <textarea
+        rows="2"
+        placeholder={t("dmchat.placeholder")}
+        bind:value={draft}
+        onkeydown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            void send();
+          }
+        }}
+      ></textarea>
+      <button
+        class="btn primary inline"
+        style="flex:none"
+        onclick={send}
+        disabled={sending || !draft.trim()}
+      >
+        {sending ? "…" : t("dmchat.send")}
+      </button>
+    </div>
   </div>
-  {#if sendSlow}
-    <p class="muted" role="status" style="margin:0.4rem 0 0;font-size:0.85rem">{t("dmchat.signerSlow")}</p>
-  {/if}
 {/if}
 
 <style>
@@ -514,5 +524,14 @@
     padding: 0.4rem 0.5rem;
     line-height: 0;
     flex: none;
+  }
+  /* --nav-band is the same allowance the shell reserves for the fixed bottom
+     nav, so the two cannot drift apart (it includes the notch inset, which a
+     hard-coded 5rem would miss). */
+  .compose {
+    position: sticky;
+    bottom: var(--nav-band);
+    padding: 0.5rem 0;
+    background: var(--bg);
   }
 </style>
