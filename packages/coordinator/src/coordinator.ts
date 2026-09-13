@@ -412,6 +412,12 @@ export interface CoordinatorDeps {
   /** @deprecated pass `roles`. */
   translateModel?: ModelRef;
   defaultRelays: string[];
+  /**
+   * How many LLM scoring jobs may run at once ({@link SCORE_LANE}); default 1.
+   * `main.ts` raises it for the daemon and is where the one configuration that
+   * must not be raised is spelled out.
+   */
+  scoreConcurrency?: number;
   prefilter?: PrefilterConfig;
   topK?: number;
   /** Candidates per batched match-scoring call (spec §16.2). Default 10. */
@@ -718,6 +724,7 @@ export class Coordinator {
     }
     this.jobs = new JobRunner(deps.store, {
       now: this.now,
+      scoreConcurrency: deps.scoreConcurrency,
       // A poisoned job is surfaced to the organizer (audit Q12): persist a status
       // row and gift-wrap a 21606 status to E_id so it's visible without server logs.
       onPoison: (info) => void this.surfacePoison(info).catch(() => {}),

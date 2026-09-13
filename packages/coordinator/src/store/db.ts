@@ -2866,7 +2866,29 @@ export class Store {
    * claim the same row. Attempts are NOT incremented here — lease expiry or a
    * crash must not consume a retry; only a classified failure (`failJob`) does.
    */
-  claimNextJob(now: number, workerToken: string, leaseMs = 5 * 60_000): JobRow | undefined {
+  claimNextJob(
+    now: number,
+    workerToken: string,
+    leaseMs = 5 * 60_000,
+    /**
+     * Restrict which types this claim may take — how the runner keeps a job type
+     * inside its concurrency lane without the lane itself having to be a column.
+     * `onlyTypes: []` means "nothing is claimable", which is a real state (every
+     * lane busy) and answers without touching the database.
+     */
+    types?: { onlyTypes?: string[]; excludeTypes?: string[] },
+  ): JobRow | undefined {
+    if (types?.onlyTypes?.length === 0) return undefined;
+    const filters: string[] = [];
+    const params: string[] = [];
+    if (types?.onlyTypes?.length) {
+      filters.push(`AND type IN (${types.onlyTypes.map(() => "?").join(", ")})`);
+      params.push(...types.onlyTypes);
+    }
+    if (types?.excludeTypes?.length) {
+      filters.push(`AND type NOT IN (${types.excludeTypes.map(() => "?").join(", ")})`);
+      params.push(...types.excludeTypes);
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db
@@ -2875,11 +2897,12 @@ export class Store {
           // reclaimed under its own class: it is work that was already started, and
           // demoting or promoting it on recovery would be a second, invisible rule.
           `SELECT * FROM jobs
-             WHERE (state = 'pending' AND next_run_at <= ?)
-                OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
+             WHERE ((state = 'pending' AND next_run_at <= ?)
+                OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?))
+                ${filters.join(" ")}
              ORDER BY priority, id LIMIT 1`,
         )
-        .get(now, now) as JobRow | undefined;
+        .get(now, now, ...params) as JobRow | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return undefined;
