@@ -103,6 +103,31 @@ export type ChatAttestationRefusal =
   | "chat_proof_invalid"
   | "chat_key_package_ineligible";
 
+/**
+ * How long an as-yet-unauthorized kind-30443 is held while its kind-21607
+ * attestation catches up (see {@link MarmotAdmin.handleKeyPackageEvent}).
+ *
+ * Two minutes, against a healthy gap of well under a second. It is sized for the
+ * failure it exists to cover — a relay that delivers the two rumors out of order
+ * or holds one back — not for a device that has stopped enrolling. Past it the
+ * key package is forgotten and the device is back to where it is today: it must
+ * publish again, or the durable `chat_sync_member` retry must find it on a relay.
+ */
+export const HELD_KEY_PACKAGE_TTL_MS = 120_000;
+
+/**
+ * Hard cap on held key packages across all events.
+ *
+ * This material is UNAUTHENTICATED by construction — the whole point is that we
+ * do not yet know the author is anybody's device — so it is a memory-growth
+ * surface open to anyone who can publish a kind-30443 to a relay the coordinator
+ * watches. Oldest-first eviction bounds it at a few hundred KB; an attacker who
+ * fills it evicts a legitimate entry, which lands that device back on exactly
+ * today's behaviour (dropped, recovered by the next sync) rather than anywhere
+ * worse. One entry per author, so a single device republishing cannot fill it.
+ */
+export const MAX_HELD_KEY_PACKAGES = 256;
+
 export class MarmotAdmin {
   private readonly store: Store;
   private readonly mls: ChatMls;
@@ -289,6 +314,90 @@ export class MarmotAdmin {
     this.eligibleCache.delete(coordinate);
   }
 
+  // ── out-of-order enrolment: key package before attestation ────────────────
+  /**
+   * Kind-30443s seen from an author who was not (yet) an authorized chat
+   * identity, keyed `coordinateauthor`, with the wall-clock deadline past
+   * which they are forgotten.
+   *
+   * A client enrolling in chat publishes two things — its key package (30443) and
+   * its device attestation (21607) — and nothing orders them. When the key package
+   * wins the race the coordinator had no binding for its author yet, logged
+   * "ignored 30443 …: not an authorized chat identity", and DISCARDED it. The
+   * attestation arriving a beat later then had to find that key package on a relay
+   * all over again, and when it could not — the relay had not settled, or served
+   * the read from a node that had not got it yet — the member sat on "Setting up
+   * your secure chat…" until something unrelated re-drove the flow.
+   *
+   * Holding it changes nothing about WHO may be added: the authorization decision
+   * still runs when the attestation lands, with the same proof-of-possession check
+   * (§10.2) that closed v1's mis-binding and griefing gap. All that changes is that
+   * the artifact is still in hand when the decision is finally made.
+   */
+  private readonly heldKeyPackages = new Map<string, { kp: AnyEvent; expiresAt: number }>();
+
+  private heldKey(coordinate: string, author: string): string {
+    return `${coordinate}${author}`;
+  }
+
+  /** Remember one unauthorized key package, bounded by TTL and by count. */
+  private holdKeyPackage(coordinate: string, kp: AnyEvent): void {
+    const now = this.now();
+    for (const [k, v] of this.heldKeyPackages) if (v.expiresAt <= now) this.heldKeyPackages.delete(k);
+    const key = this.heldKey(coordinate, kp.pubkey);
+    // Re-holding an author's newest key package replaces the older one rather than
+    // adding a second: 30443 is addressable, so there is exactly one live per
+    // (author, `d`), and keeping the stale copy is actively harmful — inviting with
+    // it commits an Add whose Welcome the device can no longer decrypt.
+    this.heldKeyPackages.delete(key);
+    while (this.heldKeyPackages.size >= MAX_HELD_KEY_PACKAGES) {
+      const oldest = this.heldKeyPackages.keys().next();
+      if (oldest.done) break;
+      this.heldKeyPackages.delete(oldest.value);
+    }
+    this.heldKeyPackages.set(key, { kp, expiresAt: now + HELD_KEY_PACKAGE_TTL_MS });
+  }
+
+  /** The key package held for `author`, if one is still within its TTL. */
+  private heldKeyPackage(coordinate: string, author: string): AnyEvent | undefined {
+    const key = this.heldKey(coordinate, author);
+    const entry = this.heldKeyPackages.get(key);
+    if (!entry) return undefined;
+    if (entry.expiresAt <= this.now()) {
+      this.heldKeyPackages.delete(key);
+      return undefined;
+    }
+    return entry.kp;
+  }
+
+  private dropHeldKeyPackage(coordinate: string, author: string): void {
+    this.heldKeyPackages.delete(this.heldKey(coordinate, author));
+  }
+
+  /** How many key packages are currently held (test/diagnostic). */
+  heldKeyPackageCount(): number {
+    const now = this.now();
+    for (const [k, v] of this.heldKeyPackages) if (v.expiresAt <= now) this.heldKeyPackages.delete(k);
+    return this.heldKeyPackages.size;
+  }
+
+  /**
+   * True when at least one of this account's authorized chat identities holds a
+   * leaf in the event's group — i.e. the person can actually read the room.
+   *
+   * Distinct from "their sync job completed": a sync that found no key package at
+   * all completes perfectly happily having added nobody, which is exactly the
+   * state the enrolment re-check exists to notice.
+   */
+  async isEnrolled(coordinate: string, accountPubkey: string): Promise<boolean> {
+    const group = this.activeGroup(coordinate);
+    if (!group) return false;
+    for (const id of this.authorizedIdentities(coordinate, accountPubkey)) {
+      if (await this.mls.isMember(group.mls_group_id, id)) return true;
+    }
+    return false;
+  }
+
   /**
    * One choke point for "this event's `chat_keys` changed": drop the eligibility
    * cache AND republish the roster.
@@ -367,18 +476,53 @@ export class MarmotAdmin {
   async syncMember(
     coordinate: string,
     accountPubkey: string,
-    opts?: { reenrolling?: string },
+    opts?: {
+      reenrolling?: string;
+      /**
+       * Key packages already fetched for a KNOWN set of authors ({@link prefetched}),
+       * so a walk over many members costs one relay read instead of one per member.
+       * Used only when this member's authorized identities are a subset of the set
+       * the batch was fetched for — otherwise (a device attested after the batch was
+       * taken) this member falls back to its own fetch, so batching can never make
+       * the coordinator act on a roster older than the one it was handed.
+       */
+      prefetched?: { forAuthors: Set<string>; keyPackages: AnyEvent[] };
+    },
   ): Promise<boolean> {
     const group = this.activeGroup(coordinate);
     if (!group) return true;
     const attendee = this.store.getAttendee(coordinate, accountPubkey);
     if (!attendee || attendee.status !== "approved") return true;
     const authors = this.authorizedIdentities(coordinate, accountPubkey);
-    const kps = await this.fetchKeyPackages(coordinate, authors);
+    const batch = opts?.prefetched;
+    const covered = !!batch && authors.every((a) => batch.forAuthors.has(a));
+    const kps = covered ? batch.keyPackages : await this.fetchKeyPackages(coordinate, authors);
     const authorized = new Set(authors);
+    const candidates = [...kps.filter((kp) => authorized.has(kp.pubkey))];
+    // Fold in any key package we are HOLDING for one of this member's now-authorized
+    // identities that the read above did not return. This is the payoff of
+    // {@link heldKeyPackages}: the device published its 30443 before the 21607 that
+    // authorizes it, so the watcher could not act on it then — and the relay read
+    // that happens now is exactly the read that can still miss it. The
+    // authorization is unchanged; `authors` comes from `authorizedIdentities`, i.e.
+    // an ACTIVE binding proven by a §10.2 possession proof.
+    const fromHold = new Set<string>();
+    const seen = new Set(candidates.map((kp) => kp.pubkey));
+    for (const author of authors) {
+      if (seen.has(author)) {
+        this.dropHeldKeyPackage(coordinate, author);
+        continue;
+      }
+      const held = this.heldKeyPackage(coordinate, author);
+      if (!held) continue;
+      this.log(
+        `[chat] using the 30443 ${held.id.slice(0, 8)} held for ${author.slice(0, 8)} in ${coordinate}: it arrived before the attestation that authorized it`,
+      );
+      fromHold.add(author);
+      candidates.push(held);
+    }
     let synced = true;
-    for (const kp of kps) {
-      if (!authorized.has(kp.pubkey)) continue; // relay returned an unrelated author
+    for (const kp of candidates) {
       // `reconcile`: this path is a DELIBERATE "bring this member up to date" —
       // approval, a fresh attestation, or the startup backfill — so it also repairs
       // an attested device that holds no leaf despite its key package having been
@@ -389,6 +533,10 @@ export class MarmotAdmin {
         reconcile: true,
         reenrolling: opts?.reenrolling,
       });
+      // Release the hold only on "nothing further to do for this member" — a
+      // transient Add/Welcome failure keeps the copy so the durable retry a moment
+      // later still has it, which is the whole reason it was kept.
+      if (ok && fromHold.has(kp.pubkey)) this.dropHeldKeyPackage(coordinate, kp.pubkey);
       if (!ok) synced = false;
     }
     // An approved organizer's device landing in the group must also be an admin.
@@ -404,9 +552,21 @@ export class MarmotAdmin {
    */
   async handleKeyPackageEvent(coordinate: string, event: AnyEvent): Promise<void> {
     if (!this.eligibleAuthorSet(coordinate).has(event.pubkey)) {
-      this.log(`[chat] ignored 30443 from ${event.pubkey.slice(0, 8)}: not an authorized chat identity`);
+      // HELD, not dropped (see {@link heldKeyPackages}). An enrolling client
+      // publishes its 30443 and its 21607 with no ordering between them; when the
+      // key package wins, throwing it away meant the attestation seconds later had
+      // to re-find it on a relay, and a member whose relay had not settled sat on
+      // "Setting up your secure chat…" indefinitely. This is a bounded wait for the
+      // authorization decision, NOT a relaxation of it: nothing is added until an
+      // authenticated 21607 with a valid §10.2 possession proof binds this author.
+      this.holdKeyPackage(coordinate, event);
+      this.log(
+        `[chat] holding 30443 from ${event.pubkey.slice(0, 8)}: not an authorized chat identity yet — will re-check when its 21607 arrives`,
+      );
       return;
     }
+    // An eligible author's key package supersedes anything we were holding for it.
+    this.dropHeldKeyPackage(coordinate, event.pubkey);
     const group = this.activeGroup(coordinate);
     if (!group) return;
     await this.tryAddKeyPackage(coordinate, group.mls_group_id, event);
@@ -587,10 +747,31 @@ export class MarmotAdmin {
    *  revoke or an attestation arriving mid-walk cannot interleave with this
    *  member's add — see {@link MarmotAdminDeps.withMemberLock}. */
   async backfillApproved(coordinate: string): Promise<void> {
-    for (const a of this.store.approvedAttendees(coordinate)) {
+    const approved = this.store.approvedAttendees(coordinate);
+    // ONE key-package read for the whole roster, not one per member.
+    //
+    // This walk runs on every restart of every chat-enabled event, and each
+    // `syncMember` used to open its own relay fetch for a single author. Measured
+    // on a four-event daemon with twelve members each, that was 48 serialized
+    // round trips and 84% of the entire boot — the per-event cost DEPLOYMENT.md
+    // records as "9–12 s each", growing with both the number of events and the
+    // size of their rosters, against a deploy that fails at 240 s. A relay filter
+    // takes an author LIST, so the whole roster is one REQ; `syncMember` still
+    // filters the result to its own member's authorized identities, so each member
+    // sees exactly the key packages it saw before.
+    //
+    // Not parallelised per member on purpose: what is left after the fetch is a
+    // local membership read and, for a member who needs repair, an MLS Add — and
+    // Adds against one group are serialized anyway (`MarmotClientMls.serialize`,
+    // the concurrent-commit hazard), so concurrency here would buy queueing, not
+    // speed.
+    const forAuthors = new Set(this.eligibleChatAuthors(coordinate));
+    const keyPackages = forAuthors.size ? await this.fetchKeyPackages(coordinate, [...forAuthors]) : [];
+    const prefetched = { forAuthors, keyPackages };
+    for (const a of approved) {
       let synced = true;
       const sync = async () => {
-        synced = await this.syncMember(coordinate, a.pubkey);
+        synced = await this.syncMember(coordinate, a.pubkey, { prefetched });
       };
       if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
       else await sync();

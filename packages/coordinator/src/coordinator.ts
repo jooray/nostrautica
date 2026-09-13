@@ -410,6 +410,110 @@ function relayKey(relays: string[]): string {
 }
 
 /**
+ * How many stored events restore at once at boot (see {@link Coordinator.start}).
+ *
+ * Four, not "all of them". Each restoring event has at most a handful of relay
+ * reads in flight at a time (its config, its E_inbox history, its chat roster's
+ * key packages), and those all multiplex over the SAME websockets — a daemon with
+ * forty installed events restoring unbounded would put ~120 concurrent REQs on
+ * each relay socket, which is where relays start dropping subscriptions and where
+ * a burst of NIP-44 decrypts starts starving the event loop that has to service
+ * them. Four is enough to hide a slow or dead relay behind three other events'
+ * work, which is the whole point, while keeping the fan-out per relay in the range
+ * a single ordinary client produces.
+ *
+ * It bounds CONCURRENCY, not correctness: everything genuinely shared underneath
+ * is already serialized (node:sqlite is synchronous, so a store write cannot
+ * interleave; `MarmotClientMls.serialize` chains MLS commits per group; the chat
+ * roster walk takes `withMemberLock` per member). Two events never share a group
+ * or an inbox, so there is nothing left for them to race over.
+ */
+const RESTORE_CONCURRENCY = 4;
+
+/**
+ * Delays, in order, of the bounded chat-enrolment re-check that follows an
+ * approval (see the `chat_sync_member` handler).
+ *
+ * `chat_sync_member` is enqueued the moment an attendee is approved, and on a
+ * chat event it then completes in 0–1 ms having done nothing at all: the account
+ * has no attested device yet, because the client publishes its key package and
+ * its 21607 later, when it prewarms chat. The job's success was therefore
+ * meaningless — nothing was waiting to notice when the device DID show up except
+ * the passive 30443 watcher, and the person watched a spinner in the meantime.
+ *
+ * Four re-checks at +5 s, +25 s, +85 s, +265 s (each scheduled from the previous
+ * run, so ~4.5 minutes end to end), and the chain stops the moment the member
+ * holds a leaf. Bounded on purpose: past that window the live watcher and the
+ * attestation path are the right mechanisms, and a chain that never ends is a
+ * per-approval timer on every event this daemon serves.
+ */
+const CHAT_ENROLMENT_RECHECK_DELAYS_MS = [5_000, 20_000, 60_000, 180_000];
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, preserving nothing about
+ * order (callers here only care that every item ran). A rejection from `fn`
+ * propagates — every call site in this file catches per item.
+ */
+async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  if (items.length === 0) return;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/**
+ * Wall-clock accounting for the boot path, so "startup is slow" can be answered
+ * with a measurement instead of a hypothesis.
+ *
+ * This exists because docs/DEPLOYMENT.md's startup-time section has twice blamed
+ * the wrong phase — first the coordinator's own inbox backfill (which FELL while
+ * startup ROSE), then a per-event cost stated as one undifferentiated 9–12 s lump.
+ * Neither could be checked without an SSH session and a stopwatch, so both
+ * survived as folklore. The daemon now prints its own breakdown on every boot,
+ * which means the next person to ask "where does the time go" reads it off the
+ * deploy output.
+ *
+ * Deliberately `performance.now()`, not the injectable `this.now()`: tests drive a
+ * fake clock and would otherwise report every phase as 0 ms.
+ */
+class BootPhases {
+  private readonly totals = new Map<string, { ms: number; n: number }>();
+  private readonly t0 = performance.now();
+
+  /** Time `fn` under `phase`. Nested phases are fine — each is reported on its own
+   *  line, so an enclosing phase's total legitimately exceeds the sum of its parts. */
+  async time<T>(phase: string, fn: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    try {
+      return await fn();
+    } finally {
+      const prev = this.totals.get(phase) ?? { ms: 0, n: 0 };
+      prev.ms += performance.now() - started;
+      prev.n += 1;
+      this.totals.set(phase, prev);
+    }
+  }
+
+  /** Wall-clock ms since this accounting began. */
+  elapsedMs(): number {
+    return performance.now() - this.t0;
+  }
+
+  /** One line per phase, slowest first: `phase 12.3s ×4`. */
+  report(): string[] {
+    return [...this.totals]
+      .sort((a, b) => b[1].ms - a[1].ms)
+      .map(([phase, { ms, n }]) => `${phase} ${(ms / 1000).toFixed(1)}s${n > 1 ? ` ×${n}` : ""}`);
+  }
+}
+
+/**
  * Stable dedupe fragment for a batch job: a hash of the sorted candidate
  * `b:inputsHash` pairs. Two enqueues covering the same target+candidate set (same
  * inputs) collapse to one job, so a restart mid-recompute never double-bills.
@@ -690,6 +794,9 @@ export class Coordinator {
   /** Events already warned about the roster ceiling (audit B-8) — once per process,
    *  so a burst of approvals near the limit produces one notice, not one per person. */
   private readonly rosterWarned = new Set<string>();
+  /** Per-phase boot accounting, live only for the duration of {@link start} — the
+   *  same code paths run for a live install, where the numbers would be noise. */
+  private boot?: BootPhases;
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -994,6 +1101,7 @@ export class Coordinator {
         if (!synced) {
           throw new Error(`chat sync for ${short(p.pubkey)} did not complete (a device was left out of the group)`);
         }
+        await this.scheduleEnrolmentRecheck(p.coordinate, p.pubkey, p.recheck, p.chain);
       });
     });
     // Durable retry for a config edit whose outward effects (31606 matrix publish,
@@ -1018,6 +1126,56 @@ export class Coordinator {
         });
       });
     });
+  }
+
+  /**
+   * Keep looking for an approved member's chat device for a bounded window after
+   * their grant (see {@link CHAT_ENROLMENT_RECHECK_DELAYS_MS}).
+   *
+   * Chosen over the other option on the table — publishing an explicit "chat
+   * enrolment pending/complete" signal the client reads — because that is a WIRE
+   * change: a new field or `error_category` on the 21606/31604 that the app has to
+   * learn to render, which means a protocol revision and a coordinated app release
+   * to deliver any benefit at all. This is coordinator-only, ships on its own, and
+   * addresses the concrete cost (the first-open wait): the re-check is what
+   * actually notices the key package the moment it lands instead of leaving it to
+   * the passive watcher.
+   *
+   * `chain` scopes a chain's dedupe keys to ONE approval, so a later re-approval
+   * of the same member starts a fresh chain instead of colliding with the previous
+   * chain's terminal `done` rows (which would be discarded with a warning and
+   * silently never run).
+   */
+  private async scheduleEnrolmentRecheck(
+    coordinate: string,
+    pubkey: string,
+    recheck: unknown,
+    chain: unknown,
+  ): Promise<void> {
+    // Absent on every enqueue that is not an approval-seeded chain (the attestation
+    // path's durable retry, rows written before this existed): those are one-shot.
+    if (typeof recheck !== "number" || recheck >= CHAT_ENROLMENT_RECHECK_DELAYS_MS.length) return;
+    if (!this.marmot) return;
+    // A member who left, was revoked, or whose event turned chat off has nothing to
+    // wait for — don't keep a chain alive for them.
+    if (!this.events.get(coordinate)?.chat) return;
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") return;
+    if (await this.marmot.isEnrolled(coordinate, pubkey)) return;
+    const delay = CHAT_ENROLMENT_RECHECK_DELAYS_MS[recheck]!;
+    this.jobs.enqueue(
+      "chat_sync_member",
+      `chat-recheck:${coordinate}:${pubkey}:${String(chain)}:${recheck}`,
+      { coordinate, pubkey, recheck: recheck + 1, chain },
+      this.now() + delay,
+    );
+  }
+
+  /** Account `fn` against a boot phase while {@link start} is running; a plain
+   *  pass-through at every other time (a live install must not be charged to a
+   *  boot report, and paying for a `performance.now()` pair per relay fetch for
+   *  the life of the process buys nothing). */
+  private phase<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    return this.boot ? this.boot.time(name, fn) : fn();
   }
 
   // ── install (21603) ────────────────────────────────────────────────────────
@@ -1057,11 +1215,13 @@ export class Coordinator {
     const relays = grantRelays.length ? grantRelays : this.deps.defaultRelays;
 
     // Load public config + event details for scoring context.
-    const cfgEvents = await this.deps.transport.fetch(
-      // 31612 is the community twin of 31923 (PROTOCOL-NIP.md §1.1): ask for
-      // both and let the coordinate decide which one came back.
-      { kinds: [31600, 31923, 31612], authors: [eidPubkey], "#d": [identifier] },
-      relays,
+    const cfgEvents = await this.phase("install:config-fetch", () =>
+      this.deps.transport.fetch(
+        // 31612 is the community twin of 31923 (PROTOCOL-NIP.md §1.1): ask for
+        // both and let the coordinate decide which one came back.
+        { kinds: [31600, 31923, 31612], authors: [eidPubkey], "#d": [identifier] },
+        relays,
+      ),
     );
     // Newest config wins (audit COORD-14): relays return replaceable events in
     // arbitrary order. Pick with the shared §3.1 comparator — higher created_at,
@@ -1311,15 +1471,15 @@ export class Coordinator {
     // an enrollment row exists before any same-identity submission is evaluated)
     // closes both; the seen_rumors ledger dedupes it against the live stream, and
     // transport.fetch is capped (C3) so the backfill stays bounded.
-    await this.backfillEventInbox(state, since);
+    await this.phase("install:inbox-backfill", () => this.backfillEventInbox(state, since));
     // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
     this.subscribeEventConfig(state);
     // Persist the typed billing principal + evaluate the state machine at install
     // (spec §9, D5). Emits a 21606 if the event installs already over its tier.
-    await this.reevaluateBilling(grant.coordinate);
+    await this.phase("install:billing", () => this.reevaluateBilling(grant.coordinate));
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
     // work here — a chat-off event stays completely inert (no group, no watcher).
-    if (state.chat) await this.ensureChat(state);
+    if (state.chat) await this.phase("install:chat", () => this.ensureChat(state));
     // Handover bootstrap (NIP §3.7): a FRESH grant install may be a replacement
     // coordinator taking over an event that already has a published record set under
     // the previous coordinator's key. Reconstruct the approved set from the prior
@@ -2671,10 +2831,15 @@ export class Coordinator {
     // path rather than leaving the member out of the group forever.
     if (state.chat && this.marmot) {
       this.marmot.invalidateEligibility(state.coordinate);
+      const chain = this.now();
       this.jobs.enqueue(
         "chat_sync_member",
-        `chat-sync:${state.coordinate}:${attendeePubkey}:${this.now()}`,
-        { coordinate: state.coordinate, pubkey: attendeePubkey },
+        `chat-sync:${state.coordinate}:${attendeePubkey}:${chain}`,
+        // Seed the bounded enrolment re-check (see {@link scheduleEnrolmentRecheck}).
+        // This job runs at approval time, when the client has not yet published the
+        // key package or the attestation — so on its own it completes in a
+        // millisecond having added nobody, and nothing looks again.
+        { coordinate: state.coordinate, pubkey: attendeePubkey, recheck: 0, chain },
       );
     }
   }
@@ -4698,12 +4863,14 @@ export class Coordinator {
    */
   private async ensureChat(state: EventState): Promise<void> {
     if (!this.marmot) return;
-    await this.marmot.ensureGroup({
-      coordinate: state.coordinate,
-      name: state.scoringCtx.title,
-      description: state.scoringCtx.summary,
-      relays: state.configRelays,
-    });
+    await this.phase("chat:ensure-group", () =>
+      this.marmot!.ensureGroup({
+        coordinate: state.coordinate,
+        name: state.scoringCtx.title,
+        description: state.scoringCtx.summary,
+        relays: state.configRelays,
+      }),
+    );
     // Self-heal: additively fold the Whitenoise relays into the group's own
     // routing state, even for a group that already existed before this was
     // added — a no-op once they're present, so safe to run on every install.
@@ -4716,8 +4883,8 @@ export class Coordinator {
     // published where it could not see them, and once the removed relay went away
     // the room split silently. `ensureRelays` is additive and idempotent — it was
     // simply being handed the wrong list.
-    await this.marmot.ensureRelays(state.coordinate, chatRelaysFor(state));
-    await this.marmot.backfillApproved(state.coordinate);
+    await this.phase("chat:ensure-relays", () => this.marmot!.ensureRelays(state.coordinate, chatRelaysFor(state)));
+    await this.phase("chat:roster-scan", () => this.marmot!.backfillApproved(state.coordinate));
     this.subscribeChat(state);
   }
 
@@ -4760,6 +4927,19 @@ export class Coordinator {
   // ── event loop ──────────────────────────────────────────────────────────────
   /** Subscribe to the coordinator inbox and all installed events; run jobs. */
   async start(): Promise<void> {
+    this.boot = new BootPhases();
+    try {
+      await this.startInner();
+    } finally {
+      // Always, even when a boot step threw: `this.phase` is a no-op once this is
+      // cleared, and leaving a dead BootPhases behind would charge every later live
+      // install to a report nobody will ever print.
+      this.boot = undefined;
+    }
+  }
+
+  private async startInner(): Promise<void> {
+    const boot = this.boot!;
     // Recover any job stranded `running` by a previous crash (audit H1): its lease
     // is expired, so reset it to claimable before the loop begins.
     const reclaimed = this.jobs.recoverStrandedJobs();
@@ -4770,58 +4950,81 @@ export class Coordinator {
     // coordinator+gen detaches it; an unfetchable config leaves it SUSPENDED (retried
     // by retrySuspendedEvents) rather than resumed leniently. Already-known events use
     // the 3-day live-overlap window (backfill "recent").
-    for (const row of this.deps.store.allEvents()) {
-      // Defense in depth: one event's restore must never abort start() or block the
-      // OTHER stored events from restoring. installEvent already routes a bad/pre-v2
-      // config to the SUSPENDED path rather than throwing, but any unexpected
-      // per-event failure is caught here so the daemon still boots and serves the
-      // rest (prod incident: a single pre-v2 config threw out of start() → crash-loop).
-      try {
-        await this.installEvent({
-          coordinate: row.coordinate,
-          inboxSkHex: row.inbox_nsec,
-          eck: this.eckFromStore(row.coordinate),
-          configRelays: JSON.parse(row.config_relays),
-          gen: row.gen,
-          backfill: "recent",
-          source: "restore",
-        });
-      } catch (e) {
-        log(`[boot] restore of ${row.coordinate} failed: ${e instanceof Error ? e.message : e} — skipping, other events continue`);
-      }
-    }
+    //
+    // CONCURRENTLY, bounded — see {@link RESTORE_CONCURRENCY}. Restoring events one
+    // at a time made boot O(events) in relay round trips: measured at ~9–12 s per
+    // installed event, three events were most of a 47–66 s budget against a hard
+    // 240 s deploy limit, and nothing brought it back down. The work is almost
+    // entirely independent relay I/O against DIFFERENT inboxes and DIFFERENT MLS
+    // groups, and everything genuinely shared is already serialized a layer down
+    // (node:sqlite is synchronous; `MarmotClientMls` serializes per group;
+    // `withSubjectLock` serializes per member).
+    const rows = this.deps.store.allEvents();
+    await boot.time("boot:restore-events", () =>
+      mapWithConcurrency(rows, RESTORE_CONCURRENCY, async (row) => {
+        // Defense in depth: one event's restore must never abort start() or block the
+        // OTHER stored events from restoring. installEvent already routes a bad/pre-v2
+        // config to the SUSPENDED path rather than throwing, but any unexpected
+        // per-event failure is caught here so the daemon still boots and serves the
+        // rest (prod incident: a single pre-v2 config threw out of start() → crash-loop).
+        try {
+          await this.installEvent({
+            coordinate: row.coordinate,
+            inboxSkHex: row.inbox_nsec,
+            eck: this.eckFromStore(row.coordinate),
+            configRelays: JSON.parse(row.config_relays),
+            gen: row.gen,
+            backfill: "recent",
+            source: "restore",
+          });
+        } catch (e) {
+          log(`[boot] restore of ${row.coordinate} failed: ${e instanceof Error ? e.message : e} — skipping, other events continue`);
+        }
+      }),
+    );
 
     // One-shot FULL-history fetch of the coordinator's own inbox (audit COORD-11):
     // the live subscription below only covers the 3-day gift-wrap window, so
     // install grants/admin commands sent during a longer outage would be missed.
     // Already-handled rumors dedupe via the seen ledger.
-    try {
-      // Paginated so a >5000-wrap flood on the public coordinator inbox can't crowd a
-      // legitimate older install grant / admin command out of recovery (audit R4).
-      const wraps = await this.fetchFullHistory(
-        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: 0 },
-        this.deps.defaultRelays,
-      );
-      if (wraps.length) log(`[boot] coordinator-inbox backfill: ${wraps.length} historical wrap(s)`);
-      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
-    } catch (e) {
-      log(`[boot] coordinator-inbox backfill failed: ${e instanceof Error ? e.message : e}`);
-    }
+    await boot.time("boot:coordinator-inbox", async () => {
+      try {
+        // Paginated so a >5000-wrap flood on the public coordinator inbox can't crowd a
+        // legitimate older install grant / admin command out of recovery (audit R4).
+        const wraps = await this.fetchFullHistory(
+          { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: 0 },
+          this.deps.defaultRelays,
+        );
+        if (wraps.length) log(`[boot] coordinator-inbox backfill: ${wraps.length} historical wrap(s)`);
+        for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
+      } catch (e) {
+        log(`[boot] coordinator-inbox backfill failed: ${e instanceof Error ? e.message : e}`);
+      }
+    });
 
     const coordCloser = this.subscribeCoordInbox();
     this.closers.push(coordCloser);
     // Periodically revalidate suspended events (NIP §3.5, P0-5): one whose config was
     // unfetchable at startup resumes once it's fetchable, or detaches if it now names
-    // another coordinator/gen. Only scheduled when there's something to retry.
-    if (this.suspended.size > 0) {
-      const timer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
-      if (typeof (timer as any).unref === "function") (timer as any).unref();
-      this.closers.push(() => clearInterval(timer));
-    }
+    // another coordinator/gen.
+    //
+    // UNCONDITIONAL. This used to be `if (this.suspended.size > 0)`, i.e. scheduled
+    // only when something was already suspended at boot — but `suspendEvent` is
+    // reachable for the whole life of the process: a running daemon whose config
+    // watcher re-installs an event, or whose relay set goes away, suspends it, and
+    // on a daemon that booted clean there was then NOTHING to ever retry it. The
+    // event went quiet until the next deploy, with the log saying only "SUSPENDED …
+    // retry in 5000ms" — a retry that had no timer behind it. The saving was one
+    // unref'd 60 s interval that iterates an empty Map.
+    const suspendTimer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
+    if (typeof (suspendTimer as any).unref === "function") (suspendTimer as any).unref();
+    this.closers.push(() => clearInterval(suspendTimer));
     // Retention sweep (NIP §6.2): run once at boot (catches events whose window
     // elapsed while the daemon was down) and then hourly. Cheap — it only touches
     // events that carry a retention policy and are past their deadline.
-    await this.retentionSweep().catch((e) => log(`[retention] boot sweep failed: ${e instanceof Error ? e.message : e}`));
+    await boot.time("boot:retention-sweep", () =>
+      this.retentionSweep().catch((e) => log(`[retention] boot sweep failed: ${e instanceof Error ? e.message : e}`)),
+    );
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.push(() => clearInterval(retentionTimer));
@@ -4872,7 +5075,9 @@ export class Coordinator {
     // Resume any relay handover left pending by a transient outage or a restart
     // (audit C9): probe the stored candidate and promote it once reachable. Run once
     // at boot, then periodically.
-    await this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`));
+    await boot.time("boot:relay-handovers", () =>
+      this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`)),
+    );
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
     this.closers.push(() => clearInterval(relayTimer));
@@ -4894,6 +5099,13 @@ export class Coordinator {
     this.closers.push(() => clearInterval(rescanTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
+
+    // Print where the boot actually went, BEFORE start() returns — main.ts prints
+    // the readiness line the deploy script measures right after this resolves, so
+    // this report is inside the measured window and cannot flatter it. DEPLOYMENT.md
+    // points at these lines; keep the phase names stable if you edit them.
+    log(`[boot] ready in ${(boot.elapsedMs() / 1000).toFixed(1)}s — ${rows.length} event(s); phases:`);
+    for (const line of boot.report()) log(`[boot]   ${line}`);
   }
 
   // Live subscriptions keyed by (inbox pubkey + sorted relay set) — audit COORD-8:

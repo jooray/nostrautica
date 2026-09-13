@@ -98,20 +98,32 @@ class FakeTransport implements Transport {
    *  so a test can mutate `seed` to model a 31600 that only names the coordinator
    *  after propagation (i.e. the value differs between the 1st and a later fetch). */
   beforeFetch?: (filter: any) => void;
+  /** When > 0, every fetch takes this long — so a boot that fans out across events
+   *  genuinely overlaps and {@link peakInFlightFetches} measures something real. */
+  fetchDelayMs = 0;
+  inFlightFetches = 0;
+  peakInFlightFetches = 0;
   async fetch(filter: any, relays?: string[]): Promise<NostrEvent[]> {
     this.fetches.push(filter);
     this.fetchCalls.push({ filter, relays });
     this.beforeFetch?.(filter);
-    if (this.blockConfig && filter.kinds?.includes(31600)) return [];
-    return [...this.seed, ...this.published].filter((e) => {
-      if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
-      if (filter.authors && !filter.authors.includes(e.pubkey)) return false;
-      if (filter["#d"]) {
-        const d = e.tags.find((t) => t[0] === "d")?.[1];
-        if (!d || !filter["#d"].includes(d)) return false;
-      }
-      return true;
-    });
+    this.inFlightFetches++;
+    this.peakInFlightFetches = Math.max(this.peakInFlightFetches, this.inFlightFetches);
+    try {
+      if (this.fetchDelayMs > 0) await new Promise((r) => setTimeout(r, this.fetchDelayMs));
+      if (this.blockConfig && filter.kinds?.includes(31600)) return [];
+      return [...this.seed, ...this.published].filter((e) => {
+        if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
+        if (filter.authors && !filter.authors.includes(e.pubkey)) return false;
+        if (filter["#d"]) {
+          const d = e.tags.find((t) => t[0] === "d")?.[1];
+          if (!d || !filter["#d"].includes(d)) return false;
+        }
+        return true;
+      });
+    } finally {
+      this.inFlightFetches--;
+    }
   }
   subscribe(filter: any, onEvent: (e: NostrEvent) => void, relays?: string[]): () => void {
     const sub = { filter, relays, onEvent, closed: false };
@@ -3118,20 +3130,26 @@ class StubMls implements ChatMls {
   invited: string[] = [];
   removed: string[][] = [];
   failIsMember = false;
+  /** Membership-aware, like the real library: a leaf exists once the Add lands.
+   *  Without this the stub models a group nobody is ever in, which hides every
+   *  decision that turns on "is this person already enrolled". */
+  members = new Set<string>();
   async createGroup() {
     return { mlsGroupIdHex: "mls-1", nostrGroupIdHex: "ng-1" };
   }
   async isEligible() {
     return true;
   }
-  async isMember() {
+  async isMember(_g: string, pubkey: string) {
     if (this.failIsMember) throw new Error("simulated MLS outage");
-    return false;
+    return this.members.has(pubkey);
   }
   async invite(_g: string, kp: any) {
     this.invited.push(kp.pubkey);
+    this.members.add(kp.pubkey);
   }
   async removePubkeys(_g: string, pks: string[]) {
+    for (const p of pks) this.members.delete(p);
     this.removed.push(pks);
   }
   async ingest() {}
@@ -6013,5 +6031,178 @@ describe("profile refresh — a kind-0 edited OUTSIDE Nostrautica re-enriches an
     const pipelineK0 = h.transport.fetchCalls.filter((c) => c.filter?.kinds?.includes(KIND_PROFILE));
     expect(pipelineK0.length).toBeGreaterThan(0);
     for (const c of pipelineK0) expect(c.relays).toContain("wss://the-users-own-relay");
+  });
+});
+
+/**
+ * Boot cost. `restart-coordinator.sh` measures the gap between the process
+ * starting and the daemon's own "watching for installs, submissions, admin
+ * commands" line, warns at 60 s and FAILS THE DEPLOY at 240 s
+ * (docs/DEPLOYMENT.md). That number was 47–66 s and rising, because every stored
+ * event was restored strictly one after another while almost all of the work is
+ * independent relay I/O against a different inbox and a different MLS group.
+ */
+describe("boot restores stored events concurrently", () => {
+  /** A store holding `n` already-installed, chat-off events, plus their configs. */
+  function seedEvents(
+    store: Store,
+    transport: FakeTransport,
+    coordPubkey: string,
+    n: number,
+  ): string[] {
+    const coordinates: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const eidSk = generateSecretKey();
+      const eidPubkey = getPublicKey(eidSk);
+      const d = `event-${i}`;
+      const coordinate = makeCoordinate(eidPubkey, d);
+      const inboxSk = generateSecretKey();
+      transport.seed.push({
+        kind: 31600,
+        pubkey: eidPubkey,
+        created_at: 1,
+        id: `cfg-${i}`,
+        sig: "",
+        content: "",
+        tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(inboxSk)], ["coordinator", coordPubkey, "1"]],
+      } as any);
+      store.upsertEvent({
+        coordinate,
+        configJson: "{}",
+        inboxNsec: bytesToHex(inboxSk),
+        eckJson: JSON.stringify([{ id: 1, key: bytesToBase64(generateEck()) }]),
+        configRelays: JSON.stringify(["wss://test"]),
+        gen: 1,
+        now: Date.now(),
+      });
+      store.recordInstalledGen(coordinate, 1);
+      coordinates.push(coordinate);
+    }
+    return coordinates;
+  }
+
+  function bootCoordinator(store: Store, transport: FakeTransport, coordSk: Uint8Array): Coordinator {
+    return new Coordinator({
+      store,
+      transport,
+      coordSk,
+      stt: new MockStt({ default: "x" }),
+      llm: new MockLlm(() => ({})),
+      summaryModel: { provider: "mock", model: "m" },
+      matchModel: { provider: "mock", model: "m" },
+      embedModel: { provider: "mock", model: "m" },
+      translateModel: { provider: "mock", model: "m" },
+      sttModel: "mock",
+      defaultRelays: ["wss://test"],
+      maxEvents: 50,
+      sleep: async () => {},
+    });
+  }
+
+  it("has several events' relay reads in flight at once, and still restores every one", async () => {
+    const coordSk = generateSecretKey();
+    const store = new Store(":memory:", coordSk);
+    const transport = new FakeTransport();
+    const coordinates = seedEvents(store, transport, getPublicKey(coordSk), 4);
+    transport.fetchDelayMs = 20; // long enough for the fan-out to actually overlap
+
+    const coordinator = bootCoordinator(store, transport, coordSk);
+    await coordinator.start();
+    coordinator.stop();
+
+    expect(transport.peakInFlightFetches).toBeGreaterThan(1);
+    // Every event still ends up live — concurrency must not lose one.
+    for (const c of coordinates) expect(coordinator.eckOf(c)).toHaveLength(1);
+  });
+
+  it("never runs more than the bound at once, however many events are stored", async () => {
+    const coordSk = generateSecretKey();
+    const store = new Store(":memory:", coordSk);
+    const transport = new FakeTransport();
+    seedEvents(store, transport, getPublicKey(coordSk), 20);
+    transport.fetchDelayMs = 5;
+
+    const coordinator = bootCoordinator(store, transport, coordSk);
+    await coordinator.start();
+    coordinator.stop();
+
+    // A boot that fans out over twenty events unbounded puts sixty-odd concurrent
+    // REQs on each relay socket; the bound is what stops that.
+    expect(transport.peakInFlightFetches).toBeLessThanOrEqual(4);
+  });
+});
+
+/**
+ * `suspendEvent` is reachable for the whole life of the process — a config that
+ * stops being fetchable, a re-install that can't revalidate. The retry timer was
+ * created only `if (this.suspended.size > 0)` AT BOOT, so on a daemon that started
+ * clean an event suspended later had nothing to ever retry it: the log said
+ * "SUSPENDED … retry in 5000ms" and no retry existed. It stayed deaf until the
+ * next deploy.
+ */
+describe("the suspended-event retry timer exists even when nothing was suspended at boot", () => {
+  it("retries suspensions that happen after start()", async () => {
+    const h = await setup();
+    vi.useFakeTimers();
+    try {
+      const spy = vi.spyOn(h.coordinator, "retrySuspendedEvents").mockResolvedValue(undefined);
+      await h.coordinator.start(); // nothing suspended: the config is fetchable
+      expect(spy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      h.coordinator.stop();
+    }
+  });
+});
+
+/**
+ * `chat_sync_member` is enqueued the instant an attendee is approved, and on a
+ * chat event it then completes in 0–1 ms having done nothing: the account has no
+ * attested device yet, because the client publishes its key package and its 21607
+ * later, when it prewarms chat. Nothing looked again, so the member's first open
+ * waited on the passive 30443 watcher.
+ */
+describe("chat enrolment is re-checked for a bounded window after the grant", () => {
+  it("picks the device up on a re-check when it appears after the approval", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto"); // auto-approved
+    await h.coordinator.jobs.drain(); // the approval-time sync: nothing to add yet
+    expect(mls.invited).toEqual([]);
+
+    // Prewarm: the client now binds a device and publishes its key package.
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-late", tags: [], content: "", sig: "" } as any);
+
+    // Nothing else happens — no attestation rumor, no watcher delivery. The bounded
+    // re-check is the only thing that can notice.
+    h.clock.t += 10_000;
+    await h.coordinator.jobs.drain();
+
+    expect(mls.invited).toEqual([devicePk]);
+  });
+
+  it("stops the chain once the member is enrolled, instead of re-checking forever", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    await h.coordinator.jobs.drain();
+    expect(mls.invited).toEqual([devicePk]);
+
+    // The member holds a leaf now, so the chain has its answer and must stop —
+    // every further re-check would be one relay read per member per event.
+    const kpReadsAfterEnrolment = h.transport.fetches.filter((f: any) => f.kinds?.includes(30443)).length;
+    for (let i = 0; i < 6; i++) {
+      h.clock.t += 300_000;
+      await h.coordinator.jobs.drain();
+    }
+    expect(h.transport.fetches.filter((f: any) => f.kinds?.includes(30443)).length).toBe(kpReadsAfterEnrolment);
+    expect(h.store.pendingJobCount()).toBe(0);
   });
 });

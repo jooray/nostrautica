@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { Store } from "../store/db.js";
-import { MarmotAdmin } from "./admin.js";
+import { MarmotAdmin, HELD_KEY_PACKAGE_TTL_MS, MAX_HELD_KEY_PACKAGES } from "./admin.js";
 import type { ChatMls } from "./mls.js";
 import {
   makeChatDeviceProof,
@@ -130,9 +130,12 @@ function makeAdmin(
       accountPubkey: string,
       content: CoordinatorStatusContent,
     ) => void;
+    /** Mutable clock, for the held-key-package TTL. Defaults to the fixed CREATED_AT
+     *  the proof challenges are signed against. */
+    now?: () => number;
   },
 ) {
-  const now = () => 1000;
+  const now = extra?.now ?? (() => 1000);
   return new MarmotAdmin({
     store,
     mls,
@@ -1462,5 +1465,169 @@ describe("MarmotAdmin — telling the attendee WHY their device was refused", ()
     expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
 
     expect(notices).toEqual([]);
+  });
+});
+
+/**
+ * A kind-30443 and its kind-21607 attestation are published by the same client at
+ * the same moment and nothing orders them on the wire. When the key package won
+ * the race, the coordinator had no binding for its author yet and DISCARDED it —
+ * "ignored 30443 …: not an authorized chat identity" — leaving the attestation a
+ * second later to re-find it on a relay. When the relay had not settled, the
+ * member sat on "Setting up your secure chat…" with both sides silent.
+ */
+describe("a key package that arrives before its attestation is held, not dropped", () => {
+  it("adds the device when the attestation lands, even though the relay read finds nothing", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    // The relay read returns NOTHING — the exact case that made this unrecoverable:
+    // the only copy of the key package we will ever see is the one the watcher
+    // already had in its hand.
+    const admin = makeAdmin(store, mls, [], undefined, { fetchKeyPackages: async () => [] });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    // 30443 first, from an author nothing has authorized yet.
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp-early"));
+    expect(mls.invited).toEqual([]);
+    expect(admin.heldKeyPackageCount()).toBe(1);
+
+    // …then its 21607, with a real §10.2 possession proof.
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(admin.heldKeyPackageCount()).toBe(0); // consumed, not leaked
+  });
+
+  it("still refuses a held key package whose attestation carries no valid proof", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], undefined, { fetchKeyPackages: async () => [] });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp-early"));
+    // A 21607 for CHATKEY signed by a DIFFERENT device key: the proof of possession
+    // fails, which is the v1 mis-binding/griefing gap. Holding the key package must
+    // not become a way past it.
+    const forged = attest("add", CHATKEY, { deviceSk: DEVICE_SK2 });
+    expect(await admin.handleAttestation(COORD, ACCOUNT, forged, CREATED_AT)).toBe(false);
+
+    expect(mls.invited).toEqual([]);
+  });
+
+  it("forgets a held key package once its TTL passes — an attestation that never comes leaks nothing", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const clock = { t: CREATED_AT };
+    const admin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async () => [],
+      now: () => clock.t,
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+
+    await admin.handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp-early"));
+    expect(admin.heldKeyPackageCount()).toBe(1);
+
+    clock.t += HELD_KEY_PACKAGE_TTL_MS + 1;
+    expect(admin.heldKeyPackageCount()).toBe(0);
+    // …and the stale copy is genuinely gone, not merely uncounted.
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(mls.invited).toEqual([]);
+  });
+
+  it("bounds the hold: a flood of unauthorized key packages cannot grow without limit", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], undefined, { fetchKeyPackages: async () => [] });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+
+    for (let i = 0; i < MAX_HELD_KEY_PACKAGES + 50; i++) {
+      const author = getPublicKey(generateSecretKey());
+      await admin.handleKeyPackageEvent(COORD, kpEvent(author, `flood-${i}`));
+    }
+    expect(admin.heldKeyPackageCount()).toBe(MAX_HELD_KEY_PACKAGES);
+
+    // One author republishing replaces its own entry rather than adding a second —
+    // and the newest copy is the one kept (inviting with a superseded key package
+    // sends a Welcome the device can no longer decrypt).
+    const before = admin.heldKeyPackageCount();
+    const author = getPublicKey(generateSecretKey());
+    await admin.handleKeyPackageEvent(COORD, kpEvent(author, "rot-1"));
+    await admin.handleKeyPackageEvent(COORD, kpEvent(author, "rot-2"));
+    expect(admin.heldKeyPackageCount()).toBe(before);
+  });
+});
+
+/**
+ * The startup/chat-toggle roster walk used to open ONE relay read per member.
+ * Measured on a four-event daemon with twelve members each, that was 48 serialized
+ * round trips and 84% of the whole boot — the per-event startup cost
+ * docs/DEPLOYMENT.md records, growing with both the event count and the roster
+ * size, against a deploy that fails at 240 s.
+ */
+describe("the chat roster backfill reads key packages once for the whole roster", () => {
+  it("issues one fetch covering every member, and still adds each member's own device", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const accounts = Array.from({ length: 12 }, () => getPublicKey(generateSecretKey()));
+    const devices = accounts.map(() => getPublicKey(generateSecretKey()));
+    const kps = devices.map((d, i) => kpEvent(d, `kp-${i}`));
+    const calls: string[][] = [];
+    const admin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async (_c, authors) => {
+        calls.push([...authors]);
+        return kps.filter((e) => authors.includes(e.pubkey));
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    accounts.forEach((a, i) => {
+      store.upsertAttendee({ coordinate: COORD, pubkey: a, status: "approved", now: 1 });
+      store.upsertChatKey({ coordinate: COORD, accountPubkey: a, chatPubkey: devices[i]!, now: 1 });
+    });
+
+    await admin.backfillApproved(COORD);
+
+    expect(calls).toHaveLength(1);
+    expect([...calls[0]!].sort()).toEqual([...devices].sort());
+    expect([...mls.invited].sort()).toEqual([...devices].sort());
+  });
+
+  it("falls back to a per-member read for a device attested after the batch was taken", async () => {
+    // The batch is a snapshot; a 21607 landing mid-walk must not leave that member
+    // acting on a roster older than the one they were handed.
+    const store = freshStore();
+    const mls = new FakeMls();
+    const early = getPublicKey(generateSecretKey());
+    const second = getPublicKey(generateSecretKey());
+    const late = getPublicKey(generateSecretKey());
+    const kps = [kpEvent(early, "kp-early"), kpEvent(late, "kp-late")];
+    const calls: string[][] = [];
+    const admin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async (_c, authors) => {
+        calls.push([...authors]);
+        return kps.filter((e) => authors.includes(e.pubkey));
+      },
+      withMemberLock: async (coordinate, pubkey, fn) => {
+        // The second member's device is bound only once the walk is under way, so
+        // it cannot be in the batch the walk started from.
+        if (pubkey === second) {
+          store.upsertChatKey({ coordinate, accountPubkey: pubkey, chatPubkey: late, now: 1 });
+        }
+        await fn();
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: early, now: 1 });
+    store.upsertAttendee({ coordinate: COORD, pubkey: second, status: "approved", now: 1 });
+
+    await admin.backfillApproved(COORD);
+
+    // The batch read for the roster as it stood, plus one read for the member whose
+    // device the batch could not have covered.
+    expect(calls).toEqual([[early], [late]]);
+    expect([...mls.invited].sort()).toEqual([early, late].sort());
   });
 });
