@@ -24,6 +24,7 @@
   import type { Match } from "@nostrautica/protocol";
   import Avatar from "./Avatar.svelte";
   import Icon from "./icons/Icon.svelte";
+  import { shouldOpenFromBody } from "./open-from-body.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -51,9 +52,33 @@
 
   // Duplicates happen in real coordinator output; the old card deduped too.
   const icebreakers = $derived([...new Set(match.icebreakers ?? [])]);
+
+  /**
+   * Open from anywhere in the entry, not just the identity line.
+   *
+   * The identity line alone is 41px at the top of an entry that is 260px tall,
+   * almost all of which is the reasoning — so the item somebody most wants to
+   * open had a far smaller target than a plain roster row, whose whole row is
+   * the button. Reported as "the strong match doesn't open, the one below it
+   * does" (2026-09-13), which is exactly what that looks like from the outside.
+   *
+   * The reasoning still has to be selectable text — it is the thing people quote
+   * into a message — so this is a click handler with two guards rather than a
+   * button wrapped around the paragraph:
+   *  - a click that lands on a control (the actions, the disclosure, a link) is
+   *    that control's, not ours;
+   *  - a click that ends a text selection was a drag, not a tap.
+   * The `.who` button stays for keyboard and assistive tech: this adds a pointer
+   * affordance, it does not replace the accessible one.
+   */
+  function openFromBody(e: MouseEvent) {
+    const collapsed = window.getSelection()?.isCollapsed ?? true;
+    if (shouldOpenFromBody(e.target as Element | null, collapsed)) onOpen();
+  }
 </script>
 
-<article class="entry" class:selected>
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+<article class="entry" class:selected onclick={openFromBody}>
   <!-- The identity line is the tap target, exactly as in PersonCard: a button
        wrapping the reasoning paragraph would make the one piece of text people
        actually want to read unselectable. -->
@@ -89,6 +114,7 @@
 
 <style>
   .entry {
+    cursor: pointer;
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -169,6 +195,9 @@
      the person's own name in 86% of real coordinator output — it reads as a
      note about the two of you, and it should look like one. */
   .why {
+    /* Selectable, and the cursor says so: the body opens the person, but this
+       paragraph is also the text people copy into a first message. */
+    cursor: text;
     margin: 0;
     font-family: var(--font-display);
     font-size: 1rem;
