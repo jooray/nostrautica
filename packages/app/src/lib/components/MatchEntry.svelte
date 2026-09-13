@@ -15,6 +15,36 @@
   // which is 3 × ~104 chars — three times the reasoning, and wanted only after
   // you have decided to talk to someone.
   //
+  // Asked again for the desktop two-pane layout (2026-09-14), where the list is
+  // a ~420px column with a detail pane beside it showing the selected person in
+  // full: should the list column clamp the reasoning, since the reading surface
+  // has moved? Answer: no, and the measurement is why the question dissolves.
+  //
+  // Rendered and measured at all three widths, `.why` at 1rem display serif,
+  // 24.8px line box, with the 68ch cap (605px) binding only past ~640px:
+  //
+  //   width            median 168ch   max 276ch   entry px   6 entries
+  //   phone 390px      4 lines        6 lines     260px      1562px
+  //   list pane 420px  3 lines        6 lines     236px      1414px
+  //   desktop 760px    3 lines        4 lines     236px      1414px
+  //
+  // The list pane is WIDER than the phone, so the same reasoning sets SHORTER
+  // there: the median match entry is three lines and 236px in the two-pane
+  // column against four lines and 260px on the phone the design already
+  // accepts. The estimate that prompted the question ("about seven lines at
+  // that width") was off by more than half, and it is the one number that would
+  // have made clamping look necessary. Clamping to three lines would recover
+  // nothing at all at the median, and about 12% of the block on a list of
+  // maximum-length reasonings, on the layout that has the most room to spare.
+  // It would also make a 1280px desktop show less about each person than a
+  // 390px phone.
+  //
+  // The sticky detail pane does not rescue a clamp either: it shows the person
+  // you have ALREADY clicked. The reasoning you need in the list is for the
+  // five people you have not, and making those cost a click each is precisely
+  // what the merge existed to stop. Nobody should have to click to find out why
+  // somebody is on their list, on any width.
+  //
   // The band is NOT rendered here. In the merged list the band is the section
   // heading above a run of entries, said once instead of once per person; a
   // single match shown out of list context (the profile page) keeps the pill via

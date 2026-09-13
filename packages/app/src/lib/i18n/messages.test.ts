@@ -82,6 +82,24 @@ describe("counted strings use plural families", () => {
     expect(shape("en", 3)).toBe(shape("en", 9));
   });
 
+  it("no user-facing string contains an em or en dash", () => {
+    // The single most reliable tell that a string was drafted by a model rather
+    // than written. All 3500 strings here were dash-free until 2026-09-13, when
+    // nine arrived in one day across three languages and had to be hunted back
+    // out by hand. Slovak and Czech typography has no em dash at all, so there
+    // it is not even a style preference.
+    //
+    // The en dash stays banned in prose too; ranges in UI copy are written with
+    // "to"/"až" or a hyphen. If a genuine numeric range ever needs one, narrow
+    // this test to that key rather than deleting it.
+    for (const loc of LOCALES) {
+      const offenders = Object.entries(messages[loc])
+        .filter(([, v]) => typeof v === "string" && /[—–]/.test(v))
+        .map(([k]) => k);
+      expect(offenders, `${loc} contains a dash that should be punctuation`).toEqual([]);
+    }
+  });
+
   it("no string papers over grammatical gender with a bracketed suffix", () => {
     // The Slovak and Czech version of the "(s)" crutch: "prihlásený(á)",
     // "připojen(a)", "uložil(a)". It is not a translation, it is two words in a
