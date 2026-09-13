@@ -86,6 +86,8 @@ function correctionRevKey(coordinate: string): string {
 }
 const MEDIALIB_KEY = "medialib";
 const TEXTLIB_KEY = "textlib";
+/** Per-clip "added at" sidecar for the reuse gallery (see ReuseLibrary.at). */
+const MEDIALIB_AT_KEY = "medialib-at";
 
 /**
  * The next submission `rev` for this event — strictly greater than both the
@@ -129,7 +131,24 @@ function nextRevFloor(coordinate: string, rev: number): void {
 
 /** The cross-event reuse library: recorded intros (`media`) + authored text intros
  *  (`texts`). Both live in the SINGLE per-user `a:null` 31602 entry (§6.2). */
-export type ReuseLibrary = { media: MediaDescriptor[]; texts: string[] };
+/**
+ * `at` maps a clip's ciphertext hash to when it was added, in unix seconds.
+ *
+ * It is a sidecar rather than a field on MediaDescriptor for two reasons: the
+ * descriptor is a WIRE object that gets republished into events, and its schema
+ * strips unknown keys, so a timestamp added there would silently vanish on the
+ * next validation round-trip. This library record is self-encrypted and private
+ * — nobody else parses it — so an extra top-level key costs nothing and older
+ * clients ignore it.
+ *
+ * Entries written before this existed have no stamp. That is why the gallery
+ * also falls back to array order, which has always been chronological.
+ */
+export type ReuseLibrary = {
+  media: MediaDescriptor[];
+  texts: string[];
+  at: Record<string, number>;
+};
 
 /**
  * The authored profile of someone who has genuinely never written one. A
@@ -246,6 +265,11 @@ export async function claimCorrectionRev(
 }
 
 /** Cached reuse-library media (no network), or undefined. */
+/** Cached per-clip "added at" map; `{}` when this device has never seen one. */
+export function cachedLibraryAt(): Record<string, number> {
+  return cacheGet<Record<string, number>>(MEDIALIB_AT_KEY)?.data ?? {};
+}
+
 export function cachedLibrary(): MediaDescriptor[] | undefined {
   return cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.data;
 }
@@ -502,6 +526,12 @@ export async function addToLibrary(
   const byHash = new Map<string, MediaDescriptor>();
   for (const d of [...existing.media, ...media]) byHash.set(d.x, d);
   const mergedMedia = [...byHash.values()];
+  // Stamp only what is genuinely new. Re-adding a clip that is already in the
+  // library must not move it to the top of the gallery: the question the date
+  // answers is when it was MADE, not when it was last touched.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const mergedAt: Record<string, number> = { ...existing.at };
+  for (const d of mergedMedia) if (mergedAt[d.x] === undefined) mergedAt[d.x] = nowSec;
 
   const mergedTexts = [...existing.texts];
   for (const txt of texts) {
@@ -515,6 +545,7 @@ export async function addToLibrary(
     v: 2,
     a: null,
     media: mergedMedia,
+    media_at: mergedAt,
     ...(cappedTexts.length ? { intro_texts: cappedTexts } : {}),
   };
   const cipher = await signer.nip44Encrypt(pubkey, JSON.stringify(content));
@@ -527,6 +558,7 @@ export async function addToLibrary(
   const published = await publishOrQueue(event);
   cacheSet(MEDIALIB_KEY, mergedMedia, event.created_at);
   cacheSet(TEXTLIB_KEY, cappedTexts, event.created_at);
+  cacheSet(MEDIALIB_AT_KEY, mergedAt, event.created_at);
   return toOutcome(published);
 }
 
@@ -675,19 +707,25 @@ export async function loadLibraryFull(
     "#d": [libD],
   });
   const latest = pickLatest(events);
-  if (!latest) return { media: [], texts: [] };
+  if (!latest) return { media: [], texts: [], at: {} };
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
-    const parsed = JSON.parse(json) as { media?: MediaDescriptor[]; intro_texts?: string[] };
+    const parsed = JSON.parse(json) as {
+      media?: MediaDescriptor[];
+      intro_texts?: string[];
+      media_at?: Record<string, number>;
+    };
     const media = parsed.media ?? [];
+    const at = parsed.media_at ?? {};
     // Older library entries (written before text reuse) carry no intro_texts —
     // treated as an empty text library, so they still load cleanly.
     const texts = (parsed.intro_texts ?? []).filter((s) => typeof s === "string");
     cacheSet(MEDIALIB_KEY, media, latest.created_at ?? 0);
     cacheSet(TEXTLIB_KEY, texts, latest.created_at ?? 0);
-    return { media, texts };
+    cacheSet(MEDIALIB_AT_KEY, at, latest.created_at ?? 0);
+    return { media, texts, at };
   } catch {
-    return { media: [], texts: [] };
+    return { media: [], texts: [], at: {} };
   }
 }
 
