@@ -16,13 +16,14 @@
   import {
     loadEventContext,
     cachedEventContext,
+    ensureEventContext,
     type EventContext,
   } from "$lib/events/event-context.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { receiveGrants, fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { buildDeviceAccountMap, chatMembers } from "$lib/chat/members.js";
   import type { RosterContent } from "@nostrautica/protocol";
-  import { evaluateChatGate } from "$lib/chat/gate.js";
+  import { evaluateChatGate, canEnterChatFromLocalState } from "$lib/chat/gate.js";
   import { chatSession, ChatUnroutableError } from "$lib/chat/session.svelte.js";
   import { fillHeight } from "$lib/components/fill-height.js";
   import { autoGrow } from "$lib/components/auto-grow.js";
@@ -38,6 +39,7 @@
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
   import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
+  import { perfMark } from "$lib/perf.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -131,6 +133,46 @@
       const saved = loadDraft(`chat:${naddr}`);
       if (saved) draft = saved;
     }
+    // The event context is public (31600 + 31923 + kind-0) and cached across
+    // reloads, so read it before anything async: the room needs it for the
+    // coordinator identity and the relay set, and awaiting a relay for a copy we
+    // already hold was the first of four round-trips this mount used to serialise.
+    const cached = cachedEventContext(naddr);
+    if (cached) ctx = cached;
+
+    // ── Fast path: this device already knows it is a member ───────────────────
+    // "Checking your access…" (`chat.checking`) used to cover a full network re-derivation of
+    // something already settled: connect → 31600/31923 fetch → a paged gift-wrap
+    // grant scan (two signer round-trips per unprocessed wrap, i.e. an Amber
+    // prompt storm on a remote signer) → a shell re-sync. Every one of those ran
+    // on EVERY open, and on a repeat open none of them could change the answer:
+    // membership in an event's chat is an ECK in THIS device's keystore, which
+    // `eventShell` has already resolved for this event (it resolves the role from
+    // local custody, deliberately without waiting for a relay).
+    //
+    // This is not an optimistic paint (see gate.ts): the predicate is the gate's
+    // own, and nothing below widens it. A non-member, a fresh device, or a deep
+    // link that beat the shell still falls through to the honest pass.
+    if (
+      cached &&
+      canEnterChatFromLocalState({
+        membershipKnown: true,
+        shellNaddr: eventShell.naddr,
+        naddr,
+        loading: eventShell.loading,
+        showChat: eventShell.showChat,
+        hasSigner: !!session.signer,
+        hasCtx: true,
+      })
+    ) {
+      // Release the gate BEFORE any await — this is the whole point.
+      membershipKnown = true;
+      roster = cachedRoster(cached.coordinate);
+      void refreshInBackground(cached);
+      return;
+    }
+
+    // ── Slow path: membership is genuinely unknown on this device ─────────────
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
@@ -157,6 +199,40 @@
       membershipKnown = true;
     }
   });
+
+  /**
+   * Fast-path follow-up: refresh what the room shows, without ever reopening the
+   * gate that is now (correctly) settled.
+   *
+   * Two things are deliberately NOT done here. `eventShell.sync()` is not called:
+   * it sets `eventShell.loading`, which `evaluateChatGate` reads as "membership
+   * unknown", so a background sync would drop a rendered room back to "Checking
+   * your access…" seconds after opening it. `refreshRole()` does the part that
+   * matters — re-resolve the role from local custody — and is network-free, so a
+   * membership that has genuinely gone away still closes the room reactively.
+   *
+   * `receiveGrants` is not called either: an ECK grant scan cannot make an
+   * already-approved member any more approved for THIS event, and on a remote
+   * signer it is two NIP-46 round-trips per unprocessed wrap. Ingesting new
+   * grants stays where it belongs — the identity-level warmers and EventHome's
+   * approval poll, which run whether or not chat is ever opened.
+   */
+  async function refreshInBackground(context: EventContext): Promise<void> {
+    try {
+      await connectNdk();
+      // Public context, SWR: cached copy already applied above; this only lands a
+      // newer one (e.g. the organizer swapped the coordinator or a relay).
+      void ensureEventContext(naddr, (fresh) => {
+        ctx = fresh;
+      }).catch(() => {});
+      const fresh = await fetchRoster(context).catch(() => undefined);
+      if (fresh) roster = fresh;
+      await eventShell.refreshRole().catch(() => {});
+    } catch {
+      /* the room is already usable from local state — a failed refresh is not an
+         error the user needs to see, and `chatSession` reports real chat faults */
+    }
+  }
 
   // No dispose here: the session outlives this page (it belongs to the event),
   // and the layout tears it down when the user leaves the event or logs out.
@@ -201,6 +277,23 @@
     // never render for it.
     if (chatSession.phase === "evicted") return "evicted";
     return chatSession.phase === "ready" ? "ready" : "setup";
+  });
+
+  // Perf instrumentation (perf.ts), measured from the route change that brought
+  // the user here — the owner's complaint is literally "tap Chat, wait". The two
+  // phases mean something specific for this page:
+  //   cache-paint     — the room itself is on screen (history, members, the
+  //                     composer), i.e. "Checking your access…" is gone.
+  //   network-settled — the composer is LIVE: the MLS group is joined and a
+  //                     message can actually be sent. On a prewarmed session this
+  //                     lands with the paint; on a first ever open it waits for
+  //                     the coordinator's Add + welcome, which is the honest
+  //                     enrolment cost and worth seeing separately.
+  $effect(() => {
+    if (phase === "setup" || phase === "evicted" || phase === "ready") {
+      perfMark("EventChat", "cache-paint");
+    }
+    if (phase === "ready") perfMark("EventChat", "network-settled");
   });
 
   // Show the "taking longer than usual" hint if we're still in setup after a

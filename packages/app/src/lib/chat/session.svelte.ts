@@ -32,6 +32,7 @@ import {
   type TabRole,
   type TabCoordinatorOptions,
 } from "./tab-leader.js";
+import { warmChatTab } from "./warm.js";
 
 /** Test-only override; production always constructs the real coordinator. */
 let coordinatorFactory: ((opts: TabCoordinatorOptions) => ChatTabCoordinator) | undefined;
@@ -154,6 +155,12 @@ class ChatSessionStore {
     const ctx = this.ctx;
     const signer = this.signer;
     if (!ctx || !signer) return;
+    // Warm the Chat screen's DISPLAY data (sender/member kind-0s) now, from the
+    // event page the prewarm fires on — not when the page mounts. Without it the
+    // room's first paint is a wall of truncated pubkeys that become names one
+    // relay round-trip later. Detached and self-deduping: it must never delay or
+    // fail the handshake below (see warm.ts).
+    warmChatTab(ctx);
     this.phase = "setup";
     this.error = null;
     const run = (async () => {

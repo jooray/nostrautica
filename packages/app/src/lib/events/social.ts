@@ -27,6 +27,72 @@ function profileKey(pubkey: string): string {
 // Re-fetch a cached profile only when it's older than this (§2.2): kind-0s change
 // rarely, so most People/Matches paints skip relays entirely.
 const PROFILE_TTL_SEC = 10 * 60;
+/**
+ * A pubkey the relays had NO kind-0 for is re-asked much sooner: there is nothing
+ * cached to paint, and the commonest reason for a miss is someone whose profile
+ * is still propagating (they created their identity a minute ago and their name
+ * is the thing everyone is looking at).
+ */
+const PROFILE_MISS_TTL_SEC = 60;
+
+/**
+ * WHEN this device last ASKED the relays about a pubkey — a completely different
+ * clock from the cache entry's `at`, which carries the kind-0's own `created_at`.
+ *
+ * Conflating the two silently disabled the profile cache for its whole purpose.
+ * The freshness test used to read `now - hit.at > PROFILE_TTL_SEC`, and `hit.at`
+ * is the timestamp of the kind-0 EVENT: anyone who last edited their profile more
+ * than ten minutes ago — which is very nearly everyone, forever — was classified
+ * stale on every call, so every People paint, every Matches paint and every Chat
+ * open re-streamed every profile on screen from the relays and re-wrote the same
+ * bytes back into the cache. Same family as the `at`/`touchedAt` split
+ * persist.ts documents (2026-09-04); this is the read side of it.
+ *
+ * `touchedAt` cannot serve here either: `cacheGet` bumps it on every READ, so a
+ * profile that is displayed constantly would look perpetually fresh and never
+ * revalidate. A fetch clock has to be stamped by the fetch, which is what this
+ * is. Persisted (one anon-scoped record, not one per pubkey) so a reload doesn't
+ * re-stream hundreds of kind-0s the app already has.
+ */
+const PROFILE_FETCH_KEY = "profilefetched";
+/** Keep the stamp record bounded; oldest stamps are dropped first. */
+const MAX_FETCH_STAMPS = 2000;
+
+function fetchStamps(): Record<string, number> {
+  return cacheGet<Record<string, number>>(PROFILE_FETCH_KEY, ANON)?.data ?? {};
+}
+
+/** Record that these pubkeys were just asked about (hit or miss). */
+function markFetched(pubkeys: string[], nowSec: number): void {
+  const stamps = { ...fetchStamps() };
+  for (const p of pubkeys) stamps[p] = nowSec;
+  const keys = Object.keys(stamps);
+  if (keys.length > MAX_FETCH_STAMPS) {
+    keys.sort((a, b) => (stamps[a] ?? 0) - (stamps[b] ?? 0));
+    for (const k of keys.slice(0, keys.length - MAX_FETCH_STAMPS)) delete stamps[k];
+  }
+  cacheSet(PROFILE_FETCH_KEY, stamps, nowSec, ANON);
+}
+
+/**
+ * Does this pubkey need a relay read? Pure so the freshness rule — the thing that
+ * was wrong — is unit-testable without a cache or a relay.
+ */
+export function profileNeedsFetch(
+  opts: {
+    /** A cached kind-0 exists for this pubkey. */
+    cached: boolean;
+    /** Seconds since epoch when this device last asked, or undefined if never. */
+    fetchedAt: number | undefined;
+    nowSec: number;
+    force?: boolean;
+  },
+): boolean {
+  if (opts.force) return true;
+  if (opts.fetchedAt === undefined) return true; // never asked (or a pre-fix cache)
+  const ttl = opts.cached ? PROFILE_TTL_SEC : PROFILE_MISS_TTL_SEC;
+  return opts.nowSec - opts.fetchedAt > ttl;
+}
 
 /**
  * Avatar props (name + picture) for a pubkey, resolved from a profile map, for
@@ -68,11 +134,15 @@ export async function fetchProfiles(
   if (pubkeys.length === 0) return out;
 
   const nowSec = Math.floor(Date.now() / 1000);
+  const stamps = fetchStamps();
   const stale: string[] = [];
   for (const p of pubkeys) {
     const hit = cacheGet<ProfileMeta>(profileKey(p), ANON);
     if (hit) out.set(p, hit.data);
-    if (opts.force || !hit || nowSec - hit.at > PROFILE_TTL_SEC) stale.push(p);
+    // Freshness is decided by WHEN WE LAST ASKED, not by how old the profile
+    // itself is — see PROFILE_FETCH_KEY.
+    if (profileNeedsFetch({ cached: !!hit, fetchedAt: stamps[p], nowSec, force: opts.force }))
+      stale.push(p);
   }
   if (stale.length === 0) return out;
 
@@ -101,6 +171,10 @@ export async function fetchProfiles(
       /* skip malformed profile */
     }
   }
+  // Stamp every pubkey we ASKED about, including the ones the relays had nothing
+  // for: without that, a pubkey with no kind-0 anywhere is re-streamed by every
+  // caller forever (it can never produce a cache entry to age).
+  markFetched(stale, nowSec);
   return out;
 }
 
