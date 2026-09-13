@@ -12,6 +12,7 @@
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
+  import EventSwitcher from "$lib/components/EventSwitcher.svelte";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -43,19 +44,13 @@
 {/snippet}
 
 <nav class="event-nav" aria-label={t("nav.eventPrimary")}>
-  <!-- Which event you are in, said once and permanently. On the phone this
-       lives in the strip above the content and the bar has no room for it; in
-       the rail it is the one thing that should never scroll away, so the strip
-       stands down (see .compact-event-strip in app.css). -->
+  <!-- Which event you are in, said once and permanently, and the way out to
+       another one. On the phone this lives in the strip above the content and
+       the bar has no room for it; in the rail it is the one thing that should
+       never scroll away, so the strip stands down (see .compact-event-strip in
+       app.css). -->
   {#if eventShell.ctx}
-    <button
-      class="rail-id"
-      onclick={() => router.go({ name: "event", naddr })}
-      title={eventShell.ctx.title}
-    >
-      <Avatar pubkey={eventShell.ctx.coordinate} name={eventShell.ctx.title} size={26} />
-      <span class="rail-id-name">{eventShell.ctx.title}</span>
-    </button>
+    <EventSwitcher ctx={eventShell.ctx} {naddr} />
   {/if}
   <button
     aria-current={active("event", "join") ? "page" : undefined}
@@ -224,9 +219,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .rail-id {
-    display: none;
-  }
 
   /* ── Desktop: the bar becomes a left rail ──────────────────────────────
      A bottom bar is where a thumb already is, which is why it is right on a
@@ -248,35 +240,14 @@
       border-top: none;
       border-right: 1px solid var(--border);
       box-shadow: none;
+      /* Solid, not translucent. Blur behind a bar floating over scrolling
+         content is a real effect; behind a full-height rail beside the content
+         it is decoration — and it would create a containing block that traps
+         the switcher's fixed menu inside the rail's own scroll. */
+      background: var(--bg-elev);
+      backdrop-filter: none;
       overflow-y: auto;
       overscroll-behavior: contain;
-    }
-    .rail-id {
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-      min-width: 0;
-      margin: 0 0 1rem;
-      padding: 0.35rem 0.45rem;
-      background: none;
-      border: none;
-      color: var(--text);
-      font: inherit;
-      text-align: left;
-      cursor: pointer;
-      border-radius: var(--radius-sm);
-    }
-    .rail-id:hover {
-      background: var(--bg-elev2);
-    }
-    .rail-id-name {
-      font-family: var(--font-display);
-      font-size: 1rem;
-      font-weight: 600;
-      line-height: 1.2;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
     }
     .event-nav button {
       flex: 0 0 auto;

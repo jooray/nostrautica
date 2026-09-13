@@ -163,6 +163,9 @@
       border-top: none;
       border-right: 1px solid var(--border);
       box-shadow: none;
+      /* Solid, like the event rail: see the note there. */
+      background: var(--bg-elev);
+      backdrop-filter: none;
       overflow-y: auto;
       overscroll-behavior: contain;
     }

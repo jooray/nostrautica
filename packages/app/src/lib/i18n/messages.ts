@@ -1234,6 +1234,7 @@ export const messages = {
     "nav.primary": "Primary",
 
     // Event-scoped nav + More menu (redesign §6)
+    "nav.switchEvent": "Switch event",
     "nav.eventPrimary": "Event navigation",
     "nav.overview": "Overview",
     "nav.people": "People",
@@ -2820,6 +2821,7 @@ export const messages = {
     "nav.primary": "Hlavná navigácia",
 
     // Event-scoped nav + More menu (redesign §6)
+    "nav.switchEvent": "Prepnúť podujatie",
     "nav.eventPrimary": "Navigácia podujatia",
     "nav.overview": "Prehľad",
     "nav.people": "Ľudia",
@@ -4398,6 +4400,7 @@ export const messages = {
     "nav.primary": "Hlavní navigace",
 
     // Navigace v rámci akce + menu Více (redesign §6)
+    "nav.switchEvent": "Přepnout akci",
     "nav.eventPrimary": "Navigace akce",
     "nav.overview": "Přehled",
     "nav.people": "Lidé",
