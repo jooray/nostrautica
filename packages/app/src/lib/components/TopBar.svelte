@@ -13,7 +13,7 @@
   const showBack = $derived(router.route.name !== "home");
   // Contextual label naming where the button goes (e.g. "All events" on the
   // event home). The top-bar button is a hierarchical "up", not browser back.
-  const backLabel = $derived(t(upLabelKey(router.route, router.eventOrigin)));
+  const backLabel = $derived(t(upLabelKey(router.route, router.eventOrigin, router.dmReturn)));
   // On event routes the event header carries context, so drop the brand link.
   const onEvent = $derived(eventNaddr(router.route) !== undefined);
 </script>

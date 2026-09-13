@@ -38,12 +38,21 @@ const ATTENDEE: Route = { name: "attendee", naddr: "naddr1xyz", npub: "npub1abc"
 const POST: Route = { name: "post", naddr: "naddr1xyz", d: "d1" };
 const DM: Route = { name: "dm" };
 const DM_PEER: Route = { name: "dmPeer", npub: "npub1abc" };
+const DM_PEER2: Route = { name: "dmPeer", npub: "npub1def" };
 const SETTINGS: Route = { name: "settings" };
 
 let fw: ReturnType<typeof fakeWindow>;
 let router: Router;
 
 beforeEach(() => {
+  // The router persists `eventOrigin` and `dmReturn` in sessionStorage so both
+  // survive a reload, which is deliberate. It also means one test's state is the
+  // next test's starting condition unless it is cleared here.
+  try {
+    sessionStorage.clear();
+  } catch {
+    /* not every environment has one; the router tolerates that too */
+  }
   fw = fakeWindow();
   vi.stubGlobal("window", fw.win);
   router = new Router();
@@ -274,5 +283,79 @@ describe("a back that goes nowhere must not latch goingBack", () => {
   it("back() with an empty stack on Home does not eat the next navigation", () => {
     homeThenMatches(() => router.back());
     expect(router.route).toEqual(HOME);
+  });
+});
+
+/**
+ * Up from a DM used to be the conversations list unconditionally, which is the
+ * right answer only for someone who picked the thread out of that list. The
+ * common path is browsing People, writing to somebody, and wanting to carry on
+ * down the roster — and that user was being dropped into a list of
+ * conversations they never asked for.
+ */
+describe("a DM thread remembers where it was opened from", () => {
+  /**
+   * These assert on the hash `up()` actually WROTE, rather than following it
+   * with `fw.navigate(buildHash(expected))` the way the suite above does. That
+   * idiom sets the hash to the expected value itself, so the assertion after it
+   * holds whatever the router decided — three of these tests passed against the
+   * unfixed router before this was changed.
+   */
+  const upTarget = (): string => {
+    router.up();
+    return fw.win.location.hash;
+  };
+
+  it("up() from a thread opened in People returns to People", () => {
+    go(EVENT);
+    go(ATTENDEES);
+    go(DM_PEER);
+    expect(upTarget()).toBe(buildHash(ATTENDEES));
+  });
+
+  it("names the destination People, so the button says where it goes", () => {
+    go(ATTENDEES);
+    go(DM_PEER);
+    expect(upLabelKey(router.route, router.eventOrigin, router.dmReturn)).toBe("nav.people");
+  });
+
+  it("a thread opened FROM the conversations list still rises to that list", () => {
+    go(DM);
+    go(DM_PEER);
+    expect(upTarget()).toBe(buildHash(DM));
+  });
+
+  it("writing to a second person in a row still returns to the roster", () => {
+    // Thread-to-thread keeps the ORIGINAL origin: the roster is still where the
+    // user was working, and re-pointing "up" at the previous thread would strand
+    // them one conversation deeper with every reply.
+    go(ATTENDEES);
+    go(DM_PEER);
+    go(DM_PEER2);
+    expect(upTarget()).toBe(buildHash(ATTENDEES));
+  });
+
+  it("forgets the origin once you leave chat, so a later thread isn't misrouted", () => {
+    go(ATTENDEES);
+    go(DM_PEER);
+    go(EVENT);
+    expect(router.dmReturn).toBeUndefined();
+    go(DM_PEER);
+    expect(upTarget()).toBe(buildHash(EVENT));
+  });
+
+  it("a cold deep link into a thread still has somewhere to go", () => {
+    // A real cold open: the hash is already the thread when the router boots,
+    // so there is no departed screen to remember. Built by hand rather than
+    // reusing the shared `router`, which has already booted on "#/".
+    const cold = fakeWindow();
+    cold.win.location.hash = buildHash(DM_PEER);
+    vi.stubGlobal("window", cold.win);
+    const r = new Router();
+    r.init();
+    expect(r.route).toEqual(DM_PEER);
+    expect(r.dmReturn).toBeUndefined();
+    r.up();
+    expect(cold.win.location.hash).toBe(buildHash(DM));
   });
 });
