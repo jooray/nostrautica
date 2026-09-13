@@ -400,7 +400,7 @@
             aria-label={t("dmchat.wantToMeetAt", { event: primaryEvent.title })}
             onclick={() => void toggleWantToMeet()}
           >
-            <Icon name="star" size={16} />
+            <Icon name="bookmark" size={16} />
           </button>
           <button
             class="btn inline icon-btn"
