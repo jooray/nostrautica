@@ -299,6 +299,11 @@ export const PRICING = {
   // 0423 is deprecated (removed 2026-08-14, autoRemap:false); 0731 is Venice's
   // named replacement — same 284B/13B-active MoE, ~27% dearer per token.
   "deepseek-v4-flash-0731": { in: 0.175, out: 0.35 },
+  // Read from GET /models on 2026-09-13. Note the asymmetry: input is 2.14x the
+  // 0731 it would replace, but OUTPUT is 4.29x, and pair scoring is an
+  // output-heavy workload (a reasoning paragraph per candidate). A blended "2.7x"
+  // taken from a price-list headline understates what this costs us.
+  "deepseek-v4-1-flash": { in: 0.375, out: 1.5 },
   "deepseek-v4-pro": { in: 1.65, out: 3.301 },
   "mistral-small-3-2-24b-instruct": { in: 0.09375, out: 0.25 },
   "qwen3-235b-a22b-instruct-2507": { in: 0.15, out: 0.75 },

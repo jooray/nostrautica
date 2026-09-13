@@ -794,3 +794,60 @@ Samples are stratified (reasoning by hidden gold label, icebreakers by language)
 text that separates models is what they write about two people with little to say
 to each other.
 
+
+---
+
+## 2026-09-13: DeepSeek V4.1 Flash
+
+**Question.** Venice shipped `deepseek-v4-1-flash`. Is it worth replacing
+`deepseek-v4-flash-0731`, given it is dearer?
+
+**Short answer.** It is not a quality upgrade. It is a *latency* upgrade, and
+it costs 3.2x, not the 2.7x the price list suggests.
+
+| | 0731 (production) | v4.1 Flash |
+|---|---|---|
+| recall@1, full 190 | 0.65 | **0.75** |
+| recall@3, full 190 | 0.85 | **0.90** |
+| recall@1 / @3, subset | 0.75 / 0.90 | 0.75 / **0.95** |
+| separation | **0.55** | 0.53 |
+| ordering > weak | **0.98** | 0.96 |
+| position bias | 0.11 | **0.08** |
+| strict JSON | 100% | 100% |
+| Slovak stayed Slovak | **97.7%** | 96.5% |
+| attribution errors | 0.3% (9/2836) | 0.1% (2/2812) |
+| inverted reasoning | **0% (0/960)** | 0.2% (2/960) |
+| p50 latency, K=10 | 22.1 s | **4.2 s** |
+| output tok/s | 41.6 | **179.6** |
+| **$ per 100 attendees** | **$0.281** | $0.911 |
+
+**On the price.** Input is 2.14x ($0.175 → $0.375) but output is **4.29x**
+($0.35 → $1.50), and pair scoring is output-heavy: a reasoning paragraph per
+candidate. On this workload that lands at **3.24x**, so a blended headline
+figure taken from a price list understates it.
+
+**On the quality.** The one real gain is recall@1 on the harder full-190
+ranking, 0.65 → 0.75. Everything else is a wash or slightly worse: separation,
+ordering and inverted-reasoning all move the wrong way, and Slovak openers
+stayed Slovak slightly less often. The attribution-error improvement looks good
+at 0.1% against 0.3% but **does not survive the permutation test (p=0.124)** —
+that is the sample size talking, not the model.
+
+**Not comparable yet:** no subjective grades. Every other row in the table above
+carries human-judged reasoning and icebreaker scores; this one does not. Run
+`node judge-pack.mjs`, grade `judging/pack.md`, and re-run the report before
+treating the prose quality as measured.
+
+**Deployability: clean.** `node provider-probe.mjs deepseek-v4-1-flash` drove it
+through `providers/venice.ts` unchanged, 5/5 calls, 100% of requested entries
+scored. No provider work needed, unlike GLM 5.3 Flash above.
+
+**Recommendation.** Do not switch for quality; the evidence is not there for
+3.2x. Switch only if the 5x latency drop is the thing being bought — and note
+that the coordinator scores in batches on its own schedule, so scoring latency
+is mostly invisible to attendees, unlike the newcomer-first path.
+
+**The more interesting row is still `z-ai-glm-5-3-flash`**: better than both on
+recall (0.80/0.80), separation (0.64) and judged prose (4.70/4.70), at $0.398
+per 100 attendees — cheaper than V4.1 Flash and only 1.4x the incumbent. Its
+blockers are in `providers/venice.ts`, not in the model.
