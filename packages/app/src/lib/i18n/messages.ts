@@ -656,6 +656,12 @@ export const messages = {
     "attendees.count.many": "{n} attendees",
     "attendees.count.community.one": "{n} member",
     "attendees.count.community.many": "{n} members",
+    "home.card.new.one": "{n} new",
+    "home.card.new.many": "{n} new",
+    "attendees.empty.none.community":
+      "Nobody has introduced themselves here yet. Record yours and you will be told about everyone who arrives after you.",
+    "matches.none.community":
+      "No matches yet. {n} of the people here have introduced themselves, and matches appear as more do.",
     "follow.following": "following",
     "follow.notFollowing": "not following",
     "follow.follow": "Follow!",
@@ -1691,10 +1697,10 @@ export const messages = {
     "home.backup.body":
       "Zaberie to 30 sekúnd. Bez zálohy strata tohto zariadenia znamená stratu účtu.",
     "home.backup.now": "Zálohovať teraz",
-    "home.backup.saved": "Už som si to uložil(a)",
+    "home.backup.saved": "Už to mám uložené",
     "home.yourEvents": "Vaše podujatia",
     "home.role.organizer": "organizujete",
-    "home.role.attendee": "pripojený(á)",
+    "home.role.attendee": "ste vnútri",
     "home.role.visitor": "prezreté",
     "home.createAnother": "Vytvoriť ďalšie podujatie",
     "home.getStarted": "Začať",
@@ -1735,7 +1741,7 @@ export const messages = {
     "login.created.body":
       "Práve sme pre vás vytvorili identitu na Nostri. Zálohujte si ju teraz, aby ste o prístup nikdy neprišli.",
     "login.continue": "Pokračovať",
-    "login.alreadyLoggedIn": "Už ste prihlásený(á).",
+    "login.alreadyLoggedIn": "Už ste prihlásení.",
     "login.welcome": "Vitajte",
     "login.failed": "Prihlásenie sa nepodarilo.",
     "login.createIdentity": "Vytvoriť identitu",
@@ -2256,6 +2262,13 @@ export const messages = {
     "attendees.count.community.one": "{n} člen",
     "attendees.count.community.few": "{n} členovia",
     "attendees.count.community.many": "{n} členov",
+    "home.card.new.one": "{n} nový",
+    "home.card.new.few": "{n} noví",
+    "home.card.new.many": "{n} nových",
+    "attendees.empty.none.community":
+      "Zatiaľ sa tu nikto nepredstavil. Nahrajte svoje predstavenie a dozviete sa o každom, kto príde po vás.",
+    "matches.none.community":
+      "Zatiaľ žiadne zhody. Predstavilo sa {n} ľudí a zhody pribúdajú, ako sa predstavujú ďalší.",
     "follow.following": "sledované",
     "follow.notFollowing": "nesledované",
     "follow.follow": "Sledovať!",
@@ -2372,7 +2385,7 @@ export const messages = {
       "Zatiaľ žiadne spojenia. Objavia sa, keď koordinátor spracuje pár účastníkov. Vráťte sa čoskoro.",
 
     // Me
-    "me.notLoggedIn": "Nie ste prihlásený(á).",
+    "me.notLoggedIn": "Nie ste prihlásení.",
     "me.login": "Prihlásiť sa",
     "me.ready": "Váš Nostr profil je pripravený",
     "me.title.new": "Teraz ste používateľ Nostru",
@@ -2384,7 +2397,7 @@ export const messages = {
       "Zdieľajte ju voľne: takto vás ľudia nájdu a začnú sledovať. (Je bezpečné ju zverejniť.)",
     "me.copied": "Skopírované ✓",
     "me.copyNpub": "Kopírovať npub",
-    "me.signedInVia": "Prihlásený(á) cez {method}.",
+    "me.signedInVia": "Prihlásení cez {method}.",
     "me.keyInSigner": "Váš kľúč žije vo vašom podpisovači. Zálohujte si ho tam.",
     "me.takeAnywhere": "Vezmite si to kamkoľvek",
     "me.takeAnywhere.body":
@@ -3283,10 +3296,10 @@ export const messages = {
     "home.backup.body":
       "Zabere to 30 sekund. Bez zálohy ztráta tohoto zařízení znamená ztrátu účtu.",
     "home.backup.now": "Zálohovat teď",
-    "home.backup.saved": "Už jsem si to uložil(a)",
+    "home.backup.saved": "Už to mám uložené",
     "home.yourEvents": "Vaše akce",
     "home.role.organizer": "organizujete",
-    "home.role.attendee": "připojen(a)",
+    "home.role.attendee": "jste uvnitř",
     "home.role.visitor": "zobrazeno",
     "home.createAnother": "Vytvořit další akci",
     "home.getStarted": "Začít",
@@ -3327,7 +3340,7 @@ export const messages = {
     "login.created.body":
       "Právě jsme pro vás vytvořili identitu na Nostru. Zazálohujte si ji teď, abyste o přístup nikdy nepřišli.",
     "login.continue": "Pokračovat",
-    "login.alreadyLoggedIn": "Už jste přihlášen(a).",
+    "login.alreadyLoggedIn": "Už jste přihlášeni.",
     "login.welcome": "Vítejte",
     "login.failed": "Přihlášení se nezdařilo.",
     "login.createIdentity": "Vytvořit identitu",
@@ -3847,6 +3860,13 @@ export const messages = {
     "attendees.count.community.one": "{n} člen",
     "attendees.count.community.few": "{n} členové",
     "attendees.count.community.many": "{n} členů",
+    "home.card.new.one": "{n} nový",
+    "home.card.new.few": "{n} noví",
+    "home.card.new.many": "{n} nových",
+    "attendees.empty.none.community":
+      "Zatím se tu nikdo nepředstavil. Nahrajte své představení a dozvíte se o každém, kdo přijde po vás.",
+    "matches.none.community":
+      "Zatím žádné shody. Představilo se {n} lidí a shody přibývají, jak se představují další.",
     "follow.following": "sleduji",
     "follow.notFollowing": "nesleduji",
     "follow.follow": "Sledovat!",
@@ -3963,7 +3983,7 @@ export const messages = {
     "matches.dim.overall": "Celkově",
 
     // Já
-    "me.notLoggedIn": "Nejste přihlášen(a).",
+    "me.notLoggedIn": "Nejste přihlášeni.",
     "me.login": "Přihlásit se",
     "me.ready": "Váš profil na Nostru je připraven",
     "me.title.new": "Teď jste uživatelem Nostru",
@@ -3974,7 +3994,7 @@ export const messages = {
     "me.handle.body": "Sdílejte ji volně: takto vás lidé najdou a začnou sledovat. (Je bezpečné ji zveřejnit.)",
     "me.copied": "Zkopírováno ✓",
     "me.copyNpub": "Kopírovat npub",
-    "me.signedInVia": "Přihlášen(a) přes {method}.",
+    "me.signedInVia": "Přihlášeni přes {method}.",
     "me.keyInSigner": "Váš klíč žije ve vašem podpisovači. Zazálohujte si ho tam.",
     "me.takeAnywhere": "Vezměte si to kamkoli",
     "me.takeAnywhere.body":

@@ -82,6 +82,20 @@ describe("counted strings use plural families", () => {
     expect(shape("en", 3)).toBe(shape("en", 9));
   });
 
+  it("no string papers over grammatical gender with a bracketed suffix", () => {
+    // The Slovak and Czech version of the "(s)" crutch: "prihlásený(á)",
+    // "připojen(a)", "uložil(a)". It is not a translation, it is two words in a
+    // trench coat, and with formal `vy` it is not even needed — plural agreement
+    // ("ste prihlásení") is already gender-neutral and is what people write.
+    const bracketed = /\((?:a|á|ka|y|i)\)/;
+    for (const loc of LOCALES) {
+      const offenders = Object.entries(messages[loc])
+        .filter(([, v]) => typeof v === "string" && bracketed.test(v))
+        .map(([k]) => k);
+      expect(offenders, `${loc} uses a bracketed gender suffix`).toEqual([]);
+    }
+  });
+
   it("no counted string still uses the English '(s)' device", () => {
     // "action(s)" reads as a placeholder even in English and is untranslatable
     // into either Slavic locale — there is no sk/cs construction that means it.

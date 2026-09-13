@@ -2,7 +2,9 @@
   import { onMount } from "svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
-  import { coordinateToNaddr, parseCoordinate } from "@nostrautica/protocol";
+  import { coordinateToNaddr, parseCoordinate, isCommunityCoordinate } from "@nostrautica/protocol";
+  import { cachedDirectory } from "$lib/events/attendee.js";
+  import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
   import type { AppSigner } from "$lib/signer/types.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -24,9 +26,29 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
   import { perfMark } from "$lib/perf.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp, tcp } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
+
+  /**
+   * What each card says about itself, from data already on this device.
+   *
+   * An event card used to carry only a role badge, so an event and a community
+   * were indistinguishable in the list. Rather than stamping a "COMMUNITY" label
+   * on one of them, each says the thing that is true of it: how many people are
+   * in, and what has arrived since the last visit. For a community that second
+   * number is the whole reason to come back — it has no date to bring anyone
+   * back on its own.
+   *
+   * Both read caches, never the network: `cachedDirectory` is whatever this
+   * device last decrypted and `matchBadge` is a pure read of the watermark. A
+   * card with no cached roster simply says nothing about size, which is honest.
+   */
+  function cardFacts(coordinate: string): { community: boolean; people?: number; fresh: number } {
+    const community = isCommunityCoordinate(coordinate);
+    const people = cachedDirectory(coordinate)?.length;
+    return { community, people, fresh: whatsNew.matchBadge(coordinate) };
+  }
 
   // "No events yet" is only the truth once the relay scans have SETTLED. On a
   // fresh browser the keystore is empty and the events arrive from the async
@@ -338,6 +360,7 @@
   <h2>{t("home.yourEvents")}</h2>
   <div class="stack">
     {#each events as e (e.naddr)}
+      {@const facts = cardFacts(e.coordinate)}
       <button
         class="card row"
         style="text-align:left;cursor:pointer;gap:0.75rem;align-items:center"
@@ -356,7 +379,15 @@
           <strong style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
             {e.title}
           </strong>
-          <span class="badge">{t(roleLabel[e.role])}</span>
+          <span class="cardmeta">
+            <span class="badge">{t(roleLabel[e.role])}</span>
+            {#if facts.people !== undefined}
+              <span class="muted">{tcp("attendees.count", facts.community, facts.people)}</span>
+            {/if}
+            {#if facts.fresh > 0}
+              <span class="fresh">{tp("home.card.new", facts.fresh)}</span>
+            {/if}
+          </span>
         </div>
         <span class="muted">›</span>
       </button>
@@ -460,3 +491,23 @@
     <li>{t("home.how.portable")}</li>
   </ul>
 </div>
+
+<style>
+  /* What the card knows about itself. Quiet, because the title is what gets
+     scanned; these are the two facts that decide whether it is worth opening. */
+  .cardmeta {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-top: 0.15rem;
+    font-size: 0.8rem;
+  }
+  /* The return signal. A word, not a coloured dot: it has to survive forced
+     colours and greyscale, and for a community it is the only reason anyone
+     comes back — there is no date to do it for them. */
+  .fresh {
+    font-weight: 700;
+    color: var(--accent);
+  }
+</style>

@@ -431,6 +431,16 @@
   const needsIntro = $derived(
     readinessStore.readiness?.steps.find((s) => s.id === "intro")?.state === "action-required",
   );
+  /**
+   * How many people here have actually introduced themselves.
+   *
+   * An `ai_profile` is what the coordinator produces from an intro, so its
+   * presence is the honest proxy for "this person has given matching something
+   * to work with". Read from the roster already on screen; no extra fetch.
+   */
+  const introduced = $derived(
+    entries.filter((e) => !!e.ai_profile).length,
+  );
   const awaitingMatches = $derived(
     matchingOn && hasKey && !loading && entries.length > 0 && visibleMatches.length === 0,
   );
@@ -560,7 +570,7 @@
       {:else if emptyReason === "notApproved"}
         {t("attendees.empty.notApproved")}
       {:else}
-        {t("attendees.empty.none")}
+        {tc("attendees.empty.none", eventShell.isCommunity)}
       {/if}
     </p>
     <div class="row" style="flex-wrap:wrap">
@@ -629,8 +639,16 @@
             {t("readiness.cta.record")}
           </button>
         {:else}
-          <p class="muted">{t("matches.none")}</p>
-          <p class="muted">{t("matches.none.why")}</p>
+          {#if eventShell.isCommunity}
+            <!-- A community has no date to wait for, so "come back later" is not
+                 an answer. The honest one is how many people have introduced
+                 themselves so far: it says whether it is worth returning, and it
+                 is a number we already have rather than a promise. -->
+            <p class="muted">{t("matches.none.community", { n: introduced })}</p>
+          {:else}
+            <p class="muted">{t("matches.none")}</p>
+            <p class="muted">{t("matches.none.why")}</p>
+          {/if}
           <button class="btn" onclick={() => void load()} disabled={loading}>
             {loading ? t("error.state.retrying") : t("matches.checkAgain")}
           </button>
