@@ -18,7 +18,6 @@ export type Route =
   | { name: "record"; naddr: string; talk: boolean }
   | { name: "attendees"; naddr: string }
   | { name: "attendee"; naddr: string; npub: string }
-  | { name: "matches"; naddr: string }
   | { name: "report"; naddr: string }
   | { name: "chat"; naddr: string }
   | { name: "talks"; naddr: string }
@@ -43,7 +42,7 @@ function split(body: string): { segments: string[]; query: URLSearchParams } {
 }
 
 /**
- * Parse a `location.hash` (e.g. "#/e/naddr1.../matches?foo=bar") into a Route.
+ * Parse a `location.hash` (e.g. "#/e/naddr1.../attendees?foo=bar") into a Route.
  * A leading "#" and/or "/" are tolerated. Unknown paths → notFound.
  */
 export function parseHash(hash: string): Route {
@@ -76,8 +75,13 @@ export function parseHash(hash: string): Route {
           return { name: "join", naddr, code: query.get("code") ?? undefined };
         case "record":
           return { name: "record", naddr, talk: query.get("talk") === "1" };
+        // Ľudia and Spojenia merged into one People surface (2026-09-13), so
+        // every link ever shared into the Matches tab — the readiness journey,
+        // the nav badge, a pasted URL, a screenshot in the participant guide —
+        // lands on the merged list rather than 404ing. There is no `matches`
+        // Route any more: nothing builds this path, only this line reads it.
         case "matches":
-          return { name: "matches", naddr };
+          return { name: "attendees", naddr };
         case "report":
           return { name: "report", naddr };
         case "chat":
@@ -140,8 +144,6 @@ export function buildHash(route: Route): string {
       return `#/e/${route.naddr}/attendees`;
     case "attendee":
       return `#/e/${route.naddr}/attendees/${route.npub}`;
-    case "matches":
-      return `#/e/${route.naddr}/matches`;
     case "report":
       return `#/e/${route.naddr}/report`;
     case "chat":
@@ -194,7 +196,6 @@ export function eventNaddr(route: Route): string | undefined {
     case "record":
     case "attendees":
     case "attendee":
-    case "matches":
     case "report":
     case "chat":
     case "talks":

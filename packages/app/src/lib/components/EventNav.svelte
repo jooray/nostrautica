@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Event-scoped bottom nav (redesign §6.2): Overview · People · Matches ·
-  // Updates · More. People/Matches are gated by role + config so a tab never
-  // dead-ends at "join first". Replicates BottomNav's shipped a11y pattern
+  // Event-scoped bottom nav (redesign §6.2): Overview · People · Updates · More.
+  // People is gated by role + config so a tab never dead-ends at "join first".
+  // Matches merged INTO People (2026-09-13) — one list, matched people first —
+  // so the new-matches badge now rides the People tab. Replicates BottomNav's shipped a11y pattern
   // verbatim: aria-current="page", aria-hidden icons, a non-colour ::before
   // marker (forced-colors safe), 48px targets, safe-area padding.
   import { router } from "$lib/router/router.svelte.js";
@@ -24,10 +25,11 @@
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
-  // The bar holds Overview · People · Matches · Chat · Updates · More. When both
-  // Matches AND Chat are visible the bar is full, so Updates collapses into the
-  // More menu (MARMOT-GROUP-CHAT §7) to keep tap targets comfortable.
-  const collapseUpdates = $derived(eventShell.showMatches && eventShell.showChat);
+  // The bar holds Overview · People · Chat · Updates · More — five at most, one
+  // fewer than before the People/Matches merge. That is what let Updates come
+  // back out of the More menu: it used to collapse there whenever Matches AND
+  // Chat were both visible (MARMOT-GROUP-CHAT §7) because six tabs squeezed the
+  // labels to the point of truncating ("Overvi…"). Five fit.
 </script>
 
 {#snippet talksTab()}
@@ -58,30 +60,20 @@
       class:active={active("attendees", "attendee")}
       onclick={() => router.go({ name: "attendees", naddr })}
     >
-      <span class="ico"><Icon name="people" size={24} /></span><span class="lbl">{t("nav.people")}</span>
-    </button>
-  {/if}
-
-  {#if eventShell.showTalks && !eventShell.talksFirst}{@render talksTab()}{/if}
-
-  {#if eventShell.showMatches}
-    <button
-      aria-current={active("matches") ? "page" : undefined}
-      class:active={active("matches")}
-      onclick={() => router.go({ name: "matches", naddr })}
-    >
       <span class="ico">
-        <Icon name="constellation" size={24} />
-        {#if newMatches > 0 && !active("matches")}
+        <Icon name="people" size={24} />
+        {#if newMatches > 0 && !active("attendees", "attendee")}
           <span class="badge-count" aria-hidden="true">{newMatches > 9 ? "9+" : newMatches}</span>
         {/if}
       </span><span class="lbl"
-        >{t("nav.matches")}{#if newMatches > 0 && !active("matches")}<span class="visually-hidden"
+        >{t("nav.people")}{#if newMatches > 0 && !active("attendees", "attendee")}<span class="visually-hidden"
             >{tp("nav.matches.new", newMatches)}</span
           >{/if}</span
       >
     </button>
   {/if}
+
+  {#if eventShell.showTalks && !eventShell.talksFirst}{@render talksTab()}{/if}
 
   {#if eventShell.showChat}
     <!-- Active on the event group chat AND the global chat list / DM threads
@@ -103,15 +95,13 @@
     </button>
   {/if}
 
-  {#if !collapseUpdates}
-    <button
-      aria-current={active("posts", "post") ? "page" : undefined}
-      class:active={active("posts", "post")}
-      onclick={() => router.go({ name: "posts", naddr })}
-    >
-      <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
-    </button>
-  {/if}
+  <button
+    aria-current={active("posts", "post") ? "page" : undefined}
+    class:active={active("posts", "post")}
+    onclick={() => router.go({ name: "posts", naddr })}
+  >
+    <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
+  </button>
 
   <button
     aria-current={active("eventMore") ? "page" : undefined}

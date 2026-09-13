@@ -12,14 +12,28 @@
   // The BAND, not the score: "strong" is a per-attendee cut that only the whole
   // match list can decide (see confidence.ts), so the caller derives it once for
   // the list and hands it down rather than each badge re-reading a bare number.
-  let { band, size = "md" }: { band: ConfidenceBand; size?: "sm" | "md" } = $props();
+  // `context` picks the wording, not the look. As a row badge it names ONE
+  // match ("Strong match"); as the heading over a run of them in the People
+  // list it has to be the collective ("Strong matches"), which no amount of
+  // count-suffixing makes the singular string mean.
+  let {
+    band,
+    size = "md",
+    context = "row",
+  }: { band: ConfidenceBand; size?: "sm" | "md"; context?: "row" | "section" } = $props();
 
   const labelKey = $derived(
-    band === "strong"
-      ? ("matches.band.strong" as const)
-      : band === "good"
-        ? ("matches.band.good" as const)
-        : ("matches.band.hello" as const),
+    context === "section"
+      ? band === "strong"
+        ? ("matches.band.strong.section" as const)
+        : band === "good"
+          ? ("matches.band.good.section" as const)
+          : ("matches.band.hello.section" as const)
+      : band === "strong"
+        ? ("matches.band.strong" as const)
+        : band === "good"
+          ? ("matches.band.good" as const)
+          : ("matches.band.hello" as const),
   );
   const w = $derived(size === "sm" ? 28 : 32);
   const h = $derived(size === "sm" ? 14 : 16);

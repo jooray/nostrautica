@@ -32,7 +32,7 @@ function fakeWindow() {
 const HOME: Route = { name: "home" };
 const EVENT: Route = { name: "event", naddr: "naddr1xyz" };
 const POSTS: Route = { name: "posts", naddr: "naddr1xyz" };
-const MATCHES: Route = { name: "matches", naddr: "naddr1xyz" };
+const REPORT: Route = { name: "report", naddr: "naddr1xyz" };
 const ATTENDEES: Route = { name: "attendees", naddr: "naddr1xyz" };
 const ATTENDEE: Route = { name: "attendee", naddr: "naddr1xyz", npub: "npub1abc" };
 const POST: Route = { name: "post", naddr: "naddr1xyz", d: "d1" };
@@ -131,10 +131,10 @@ describe("router back-stack (UX-8)", () => {
 
 describe("router hierarchical up()", () => {
   it("rises to the contextual parent, not the chronological previous screen", () => {
-    // Arrive at matches via a non-hierarchical path: home → posts → matches.
+    // Arrive at the report via a non-hierarchical path: home → posts → the report.
     go(POSTS);
-    go(MATCHES);
-    router.up(); // hierarchy says matches' parent is the event home, NOT posts
+    go(REPORT);
+    router.up(); // hierarchy says the report' parent is the event home, NOT posts
     fw.navigate(buildHash(EVENT));
     expect(router.route).toEqual(EVENT);
   });
@@ -147,18 +147,18 @@ describe("router hierarchical up()", () => {
   });
 
   it("works on a cold deep-link with an empty stack", () => {
-    fw.navigate(buildHash(MATCHES)); // cold open, no in-app history
+    fw.navigate(buildHash(REPORT)); // cold open, no in-app history
     router.up();
     const target = router.route;
-    // parentOf(matches) is the event home; up() must reach it regardless of stack.
-    expect(target.name === "matches" || target.name === "event").toBe(true);
+    // parentOf(the report) is the event home; up() must reach it regardless of stack.
+    expect(target.name === "report" || target.name === "event").toBe(true);
   });
 
-  it("collapses a matching stack top so hardware Back stays coherent", () => {
-    // Linear drill: home → event → matches. up() from matches returns to event
+  it("collapses a duplicate stack top so hardware Back stays coherent", () => {
+    // Linear drill: home → event → the report. up() from the report returns to event
     // AND pops the duplicate event off the stack, so the next up() reaches home.
     go(EVENT);
-    go(MATCHES);
+    go(REPORT);
     router.up();
     fw.navigate(buildHash(EVENT));
     expect(router.route).toEqual(EVENT);
@@ -218,7 +218,7 @@ describe("upLabelKey names the destination", () => {
     expect(upLabelKey(EVENT)).toBe("more.allEvents");
   });
   it("labels event subtabs by their parent (event home = Overview)", () => {
-    expect(upLabelKey(MATCHES)).toBe("nav.overview");
+    expect(upLabelKey(REPORT)).toBe("nav.overview");
     expect(upLabelKey(ATTENDEES)).toBe("nav.overview");
   });
   it("labels a person detail 'People'", () => {
@@ -252,7 +252,7 @@ describe("a back that goes nowhere must not latch goingBack", () => {
    * Land on Home with an empty stack, then take the no-op back. Afterwards a
    * forward walk to Matches must still have Home on the stack, so back() from
    * Matches goes to HOME. With the flag latched the walk is not pushed, the
-   * stack is empty, and back() falls through to matches' contextual PARENT (the
+   * stack is empty, and back() falls through to the report' contextual PARENT (the
    * event home) instead — a different screen, which is the user-visible damage.
    */
   function homeThenMatches(noOpBack: () => void) {
@@ -260,7 +260,7 @@ describe("a back that goes nowhere must not latch goingBack", () => {
     fw.navigate(buildHash(HOME)); // system back onto the stack top → pops it
     expect(router.canGoBack).toBe(false); // stack is empty, we are on Home
     noOpBack();
-    go(MATCHES);
+    go(REPORT);
     router.back();
     // Whatever back() pointed the hash at, let the browser deliver it.
     fw.navigate(fw.win.location.hash);

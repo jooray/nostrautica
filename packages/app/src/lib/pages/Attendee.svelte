@@ -329,10 +329,6 @@
   }
 </script>
 
-<button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
-  {t("attendee.back")}
-</button>
-
 {#if error}<ErrorState {error} />{/if}
 
 {#if invalidNpub}
@@ -458,23 +454,7 @@
     >
       {t("attendee.message")}
     </button>
-    {#if muted}
-      <button class="btn inline" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
-    {:else}
-      <button class="btn inline danger" onclick={() => (confirmMute = !confirmMute)} disabled={busy}>{t("attendee.mute")}</button>
-    {/if}
   </div>
-
-  <!-- Directly under the button that opened it, not below the identity chips. -->
-  {#if confirmMute && !muted}
-    <div class="card warn" style="margin-top:0.5rem">
-      <p class="muted">{t("mute.confirm")}</p>
-      <div class="row">
-        <button class="btn danger" onclick={toggleMute} disabled={busy}>{t("attendee.mute")}</button>
-        <button class="btn" onclick={() => (confirmMute = false)}>{t("attendee.mute.cancel")}</button>
-      </div>
-    </div>
-  {/if}
 
   <!-- Public identity: copy it or open the person in any other Nostr client. The
        values themselves stay off-screen — nobody reads an npub, they paste it. -->
@@ -490,7 +470,28 @@
     <a class="chip" href={njumpUrl} target="_blank" rel="noopener noreferrer">
       {t("attendee.id.njump")}<Icon name="arrowUpRight" size={13} />
     </a>
+    <!-- Mute lives with the utilities, not with Follow and Message: it is rare,
+         it is about you rather than about them, and as a `danger` button third
+         in the primary row it was the loudest control on the page. -->
+    {#if muted}
+      <button class="chip" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
+    {:else}
+      <button class="chip mute" onclick={() => (confirmMute = !confirmMute)} disabled={busy} aria-expanded={confirmMute}>
+        {t("attendee.mute")}
+      </button>
+    {/if}
   </div>
+
+  <!-- Directly under the control that opened it. -->
+  {#if confirmMute && !muted}
+    <div class="card warn" style="margin-top:0.5rem">
+      <p class="muted">{t("mute.confirm")}</p>
+      <div class="row">
+        <button class="btn danger" onclick={toggleMute} disabled={busy}>{t("attendee.mute")}</button>
+        <button class="btn" onclick={() => (confirmMute = false)}>{t("attendee.mute.cancel")}</button>
+      </div>
+    </div>
+  {/if}
   <span class="visually-hidden" role="status">{copied ? t("attendee.id.copied") : ""}</span>
 </div>
 
@@ -590,6 +591,10 @@
   .chip:hover {
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  }
+  .chip.mute:hover {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
   .match {
     display: flex;

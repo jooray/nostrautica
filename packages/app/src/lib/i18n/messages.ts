@@ -648,7 +648,6 @@ export const messages = {
     "attendees.name": "Attendee",
 
     // Attendee
-    "attendee.back": "‹ Attendees",
     "attendee.youFollow": "You follow",
     "attendee.followsYou": "Follows you",
     "attendee.lookingFor": "Looking for: {value}",
@@ -736,6 +735,14 @@ export const messages = {
     "matches.band.strong": "Strong match",
     "matches.band.good": "Good match",
     "matches.band.hello": "Worth a hello",
+    "matches.band.strong.section": "Strong matches",
+    "matches.band.good.section": "Good matches",
+    "matches.band.hello.section": "Worth a hello",
+    "matches.new": "new",
+    "matches.noStrong":
+      "Nobody stands out sharply yet — these are the closest. More people are still joining, and matches are recalculated as they do.",
+    "attendees.section.everyone": "Everyone else",
+    "attendees.section.allFeatured": "Everyone here is already above.",
     "matches.message": "Message",
     "matches.introduce": "Introduce us",
     "matches.icebreakers": "Conversation starters",
@@ -1350,7 +1357,6 @@ export const messages = {
     "title.record": "Record your intro",
     "title.attendees": "Who's here",
     "title.attendee": "Attendee",
-    "title.matches": "Your matches",
     "title.chat": "Group chat",
     "title.talks": "Talks",
     "title.talk": "Talk",
@@ -2234,7 +2240,6 @@ export const messages = {
     "attendees.name": "Účastník",
 
     // Attendee
-    "attendee.back": "‹ Účastníci",
     "attendee.youFollow": "Sledujete",
     "attendee.followsYou": "Sleduje vás",
     "attendee.lookingFor": "Hľadá: {value}",
@@ -2315,6 +2320,14 @@ export const messages = {
     "matches.band.strong": "Silná zhoda",
     "matches.band.good": "Dobrá zhoda",
     "matches.band.hello": "Stojí za pozdrav",
+    "matches.band.strong.section": "Silné zhody",
+    "matches.band.good.section": "Dobré zhody",
+    "matches.band.hello.section": "Stoja za pozdrav",
+    "matches.new": "nové",
+    "matches.noStrong":
+      "Zatiaľ nikto výrazný — títo sú najbližšie. Ľudia stále pribúdajú a zhody sa prepočítavajú.",
+    "attendees.section.everyone": "Ostatní účastníci",
+    "attendees.section.allFeatured": "Všetci, čo sú tu, sú už vyššie.",
     "matches.message": "Napísať",
     "matches.introduce": "Predstaviť nás",
     "matches.icebreakers": "Námety na rozhovor",
@@ -2929,7 +2942,6 @@ export const messages = {
     "title.record": "Nahrajte svoje predstavenie",
     "title.attendees": "Kto je tu",
     "title.attendee": "Účastník",
-    "title.matches": "Vaše spojenia",
     "title.chat": "Skupinový chat",
     "title.talks": "Prednášky",
     "title.talk": "Prednáška",
@@ -3811,7 +3823,6 @@ export const messages = {
     "attendees.name": "Účastník",
 
     // Účastník
-    "attendee.back": "‹ Účastníci",
     "attendee.youFollow": "Sledujete",
     "attendee.followsYou": "Sleduje vás",
     "attendee.lookingFor": "Hledá: {value}",
@@ -3899,6 +3910,14 @@ export const messages = {
     "matches.band.strong": "Silná shoda",
     "matches.band.good": "Dobrá shoda",
     "matches.band.hello": "Stojí za pozdrav",
+    "matches.band.strong.section": "Silné shody",
+    "matches.band.good.section": "Dobré shody",
+    "matches.band.hello.section": "Stojí za pozdrav",
+    "matches.new": "nové",
+    "matches.noStrong":
+      "Zatím nikdo výrazný — tihle jsou nejblíž. Lidé stále přibývají a shody se přepočítávají.",
+    "attendees.section.everyone": "Ostatní účastníci",
+    "attendees.section.allFeatured": "Všichni, kdo tu jsou, jsou už výše.",
     "matches.message": "Napsat",
     "matches.introduce": "Představit nás",
     "matches.icebreakers": "Náměty na rozhovor",
@@ -4513,7 +4532,6 @@ export const messages = {
     "title.record": "Nahrajte své představení",
     "title.attendees": "Kdo je tu",
     "title.attendee": "Účastník",
-    "title.matches": "Vaše spojení",
     "title.chat": "Skupinový chat",
     "title.talks": "Přednášky",
     "title.talk": "Přednáška",

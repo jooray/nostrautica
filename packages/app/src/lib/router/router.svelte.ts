@@ -24,12 +24,11 @@ import { markRouteChange } from "$lib/perf.js";
  */
 function parentOf(route: Route, origin?: string): Route | null {
   switch (route.name) {
-    // Every event subpage rises to the event home — a group chat, the matches
-    // tab, the post-event report all go "up" to Overview, never off to Home.
+    // Every event subpage rises to the event home — a group chat, the People
+    // list, the post-event report all go "up" to Overview, never off to Home.
     case "join":
     case "record":
     case "attendees":
-    case "matches":
     case "report":
     case "chat":
     case "talks":

@@ -9,14 +9,14 @@
   import LazyRoute from "$lib/router/LazyRoute.svelte";
   import RouteBoundary from "$lib/router/RouteBoundary.svelte";
 
-  // Eager: the critical participant path (event entry, join, roster, matches).
+  // Eager: the critical participant path (event entry, join, the merged People
+  // list, a person). Matches merged into People (2026-09-13) and has no page.
   import Home from "$lib/pages/Home.svelte";
   import Login from "$lib/pages/Login.svelte";
   import EventHome from "$lib/pages/EventHome.svelte";
   import Join from "$lib/pages/Join.svelte";
   import Attendees from "$lib/pages/Attendees.svelte";
   import Attendee from "$lib/pages/Attendee.svelte";
-  import Matches from "$lib/pages/Matches.svelte";
   import Me from "$lib/pages/Me.svelte";
   import EventMore from "$lib/pages/EventMore.svelte";
   import NotFound from "$lib/pages/NotFound.svelte";
@@ -63,8 +63,6 @@
     {#key route.naddr}<Attendees naddr={route.naddr} />{/key}
   {:else if route.name === "attendee"}
     {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
-  {:else if route.name === "matches"}
-    {#key route.naddr}<Matches naddr={route.naddr} />{/key}
   {:else if route.name === "report"}
     {#key route.naddr}<LazyRoute loader={loadReport} props={{ naddr: route.naddr }} />{/key}
   {:else if route.name === "chat"}
