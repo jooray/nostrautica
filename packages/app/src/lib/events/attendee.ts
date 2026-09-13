@@ -756,8 +756,55 @@ export function cachedRoster(coordinate: string): RosterContent | undefined {
   return cacheGet<RosterContent>(rosterKey(coordinate))?.data;
 }
 
+/**
+ * Concurrent reads of the SAME roster/directory for the SAME coordinate share
+ * one relay round-trip and one decrypt+verify pass.
+ *
+ * Not a cache and deliberately not time-based: an entry lives only while the
+ * read is in flight, so every fresh call still hits relays and the roster can
+ * never go stale behind a TTL. What it removes is pure duplicate work that the
+ * app was doing on every single "open an event" (measured on a 120-person
+ * roster, simulated 300 ms relay RTT):
+ *
+ *  - `prefetchAttendeesTab` and `prefetchEventContent` both call
+ *    `fetchDirectory`, back to back, for the same coordinate — two full entry
+ *    reads, 240 Schnorr verifies and 240 ECK decrypts instead of 120 of each.
+ *    Signature verification is ~1.2 ms per event on a laptop (measured; ECK
+ *    decryption is ~0.03 ms, 40x cheaper), so the duplicate pass alone was
+ *    ~140 ms of blocking main-thread crypto on a laptop and several times that
+ *    on a phone — spent while the event page was still painting.
+ *  - `fetchDirectory` fetches the roster itself, so the warm-up's own
+ *    `fetchRoster` call was a third round-trip for the same event.
+ *  - Worst of all, tapping People while the warm-up was still running started
+ *    ANOTHER roster read from scratch, even though an identical one had been in
+ *    flight for half a second. That read gates the whole screen: until it
+ *    lands, `streamDirectory` doesn't know which blinded d's to ask for.
+ */
+const inflightRoster = new Map<string, Promise<RosterContent | undefined>>();
+const inflightDirectory = new Map<string, Promise<DirectoryEntryContent[]>>();
+
+function share<T>(map: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> {
+  const running = map.get(key);
+  if (running) return running;
+  const job = run().finally(() => {
+    if (map.get(key) === job) map.delete(key);
+  });
+  map.set(key, job);
+  return job;
+}
+
+/** Test-only: drop shared in-flight reads between cases. */
+export function __resetAttendeeInflightForTests(): void {
+  inflightRoster.clear();
+  inflightDirectory.clear();
+}
+
 /** Fetch + decrypt the roster. Returns undefined if the user isn't approved. */
-export async function fetchRoster(ctx: EventContext): Promise<RosterContent | undefined> {
+export function fetchRoster(ctx: EventContext): Promise<RosterContent | undefined> {
+  return share(inflightRoster, ctx.coordinate, () => fetchRosterOnce(ctx));
+}
+
+async function fetchRosterOnce(ctx: EventContext): Promise<RosterContent | undefined> {
   const eck = await eckBytesFor(ctx.coordinate);
   if (!eck) return undefined;
   const authors = acceptedRecordAuthors(ctx);
@@ -856,19 +903,29 @@ function streamDirectoryEvents(
 }
 
 /** Fetch + decrypt every directory entry listed in the roster. */
-export async function fetchDirectory(
+export function fetchDirectory(ctx: EventContext): Promise<DirectoryEntryContent[]> {
+  return share(inflightDirectory, ctx.coordinate, () => fetchDirectoryOnce(ctx));
+}
+
+async function fetchDirectoryOnce(
   ctx: EventContext,
 ): Promise<DirectoryEntryContent[]> {
   const eck = await eckBytesFor(ctx.coordinate);
+  console.log("[DIAG fetchDirectoryOnce] eck present?", !!eck);
   if (!eck) return [];
   const roster = await fetchRoster(ctx);
+  console.log("[DIAG fetchDirectoryOnce] roster", roster && { n: roster.attendees.length, ds: roster.attendees.map(a=>a.d) });
   if (!roster || roster.attendees.length === 0) return [];
 
   const authors = acceptedRecordAuthors(ctx);
+  console.log("[DIAG fetchDirectoryOnce] authors", authors, "coordinator", ctx.config.coordinator, "eidPubkey", ctx.config.eidPubkey);
   const ds = roster.attendees.map((a) => a.d);
   // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
   // relay filter-size limits and silently return fewer people.
-  const events = onlyByAuthors(await streamDirectoryEvents(authors, ds, ctx.config.relays).ready, authors);
+  const rawEvents = await streamDirectoryEvents(authors, ds, ctx.config.relays).ready;
+  console.log("[DIAG fetchDirectoryOnce] rawEvents", rawEvents.map((e:any)=>({id: e.id?.slice(0,8), pubkey: e.pubkey?.slice(0,8), tags: e.tags, created_at: e.created_at})));
+  const events = onlyByAuthors(rawEvents, authors);
+  console.log("[DIAG fetchDirectoryOnce] afterOnlyByAuthors count", events.length);
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
@@ -884,10 +941,12 @@ export async function fetchDirectory(
     try {
       entries.push(directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
       if ((e.created_at ?? 0) > newestAt) newestAt = e.created_at ?? 0;
-    } catch {
+    } catch (err) {
       /* skip entries we can't decrypt (e.g. published under a newer ECK) */
+      console.log("[DIAG fetchDirectoryOnce] decrypt/parse FAILED for", e.id?.slice(0,8), err);
     }
   }
+  console.log("[DIAG fetchDirectoryOnce] final entries", entries.map(e=>({pubkey: e.pubkey?.slice(0,8), hasAi: !!e.ai_profile})));
   cacheDirectory(ctx.coordinate, entries, newestAt);
   return entries;
 }
@@ -977,6 +1036,33 @@ export async function streamDirectory(
 
   // Paint whatever we already have, instantly.
   if (byPk.size) onEntries(snapshot());
+
+  // A People-tab warm-up may already be fetching and decrypting this exact
+  // directory (prefetch.ts starts one the moment the event page knows this
+  // device holds an ECK). Adopt its result the instant it lands instead of
+  // painting nothing until THIS stream's own round-trip returns: tapping People
+  // 800 ms into a warm-up used to wait out a fresh roster read plus a fresh
+  // entry read, ~1.2 s, for entries that were already decrypted 400 ms later in
+  // the other pass. Adopted entries are seeded like the cached ones (at 0) so a
+  // real event from this stream always supersedes them; they replace a cache
+  // seed (also at 0) because the warm's snapshot is strictly the fresher of the
+  // two. Never awaited — a slow or dead warm must not hold up this stream.
+  const pendingWarm = inflightDirectory.get(coord);
+  if (pendingWarm) {
+    void pendingWarm
+      .then((warmed) => {
+        if (!warmed.length) return;
+        let adopted = false;
+        for (const entry of warmed) {
+          const prev = byPk.get(entry.pubkey);
+          if (prev && prev.at !== 0) continue; // a real event already won
+          byPk.set(entry.pubkey, { entry, at: 0, id: "" });
+          adopted = true;
+        }
+        if (adopted) scheduleFlush();
+      })
+      .catch(() => {});
+  }
 
   // (Re)start the entry stream over a blinded-d list; restarts when the fresh
   // roster changes the set. Entries accumulate into the same byPk map.

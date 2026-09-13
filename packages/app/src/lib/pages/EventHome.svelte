@@ -426,6 +426,18 @@
       // if not (fresh device), the public-content pass below can't decrypt
       // members-only additions and is re-run once the grant scan lands them.
       const hadEck = identityPending ? false : await primeFromLocalCustody(ctx, session.signer);
+      // Warm People HERE, not in `syncIdentity`. Holding an ECK is the whole
+      // precondition for decrypting the directory, and `primeFromLocalCustody`
+      // has just proved it from the local keystore — whereas `syncIdentity`
+      // first awaits the grant scan, a full gift-wrap sweep over the inbox
+      // relays with its own paging. Gating the warm on that meant the most
+      // common flow in the app ("open an event, look at the people") only
+      // started fetching the roster seconds after the event page was already on
+      // screen and tappable, so a user who tapped Ľudia straight away beat the
+      // warm-up to it every time and paid for the roster read themselves.
+      // Deliberately after the `cache-paint` mark above: the header is already
+      // painted, so this competes with the body's fetches, not with first paint.
+      if (hadEck) prefetchAttendeesTab(ctx, session.signer);
       // Public content (custom layout 31608 + official feed) needs no keys and
       // no grant scan — start immediately so the page fills while grants resolve.
       const publicLoad = (async () => {

@@ -297,6 +297,13 @@
       stream = await streamDirectory(ctx, (list) => {
         entries = list;
         loading = false;
+        // "First meaningful data, cache OR network, whichever wins" is what this
+        // mark is defined as (perf.ts) — but nothing marked the network win, so
+        // the one case anybody wanted to measure, a cold People tab, produced no
+        // `cache-paint` mark at all and looked in the perf log like a page that
+        // never painted. `perfMark` dedupes per route, so the cache-painted path
+        // above still owns the mark when it got there first.
+        if (list.length) perfMark("Attendees", "cache-paint");
         const fresh = list.map((e) => e.pubkey).filter((p) => !profiledPubkeys.has(p));
         if (fresh.length) {
           for (const p of fresh) profiledPubkeys.add(p);
