@@ -105,9 +105,9 @@ export const messages = {
       "These events are what this device last saw. Log in to check for new ones.",
     "home.cantCheck.title": "We couldn't check for your events",
     "home.cantCheck.body":
-      "This device can't reach any relay right now, so this isn't an answer — nothing is lost, your events are on your relays.",
+      "This device can't reach any relay right now, so this isn't an answer. Nothing is lost: your events are on your relays.",
     "home.keysWaiting":
-      "An event has sent you its key, but this device can't reach that event's relays to open it. It will keep trying — opening the event's invite link here fixes it straight away.",
+      "An event has sent you its key, but this device can't reach that event's relays to open it. It will keep trying. Opening the event's invite link here fixes it straight away.",
     "home.deepScan.hint":
       "Routine checks only look at the last few days. If an event you joined on another device is missing, search your whole history.",
     "home.deepScan.action": "Search my whole history",
@@ -748,9 +748,9 @@ export const messages = {
     "matches.band.hello.section": "Worth a hello",
     "matches.new": "new",
     "matches.noStrong":
-      "Nobody stands out sharply yet — these are the closest. More people are still joining, and matches are recalculated as they do.",
+      "Nobody stands out sharply yet, so these are the closest. More people are still joining, and matches recalculate as they do.",
     "attendees.section.everyone": "Everyone else",
-    "attendees.section.allFeatured": "Everyone here is already above.",
+    "attendees.section.allFeatured": "Everyone here is already listed above.",
     "matches.message": "Message",
     "matches.introduce": "Introduce us",
     "matches.icebreakers": "Conversation starters",
@@ -1701,9 +1701,9 @@ export const messages = {
       "Toto sú podujatia, ktoré toto zariadenie videlo naposledy. Prihláste sa a pozrieme sa, či pribudli nové.",
     "home.cantCheck.title": "Nepodarilo sa overiť vaše podujatia",
     "home.cantCheck.body":
-      "Toto zariadenie sa teraz nevie spojiť so žiadnym relayom, takže toto nie je odpoveď — nič sa nestratilo, vaše podujatia sú na vašich relayoch.",
+      "Toto zariadenie sa teraz nevie spojiť so žiadnym relayom, takže toto nie je odpoveď. Nič sa nestratilo, podujatia máte na svojich relayoch.",
     "home.keysWaiting":
-      "Jedno podujatie vám poslalo svoj kľúč, ale toto zariadenie sa nevie spojiť s jeho relaymi, aby ho otvorilo. Budeme to skúšať ďalej — ak tu otvoríte pozvánku na to podujatie, vyrieši sa to hneď.",
+      "Jedno podujatie vám poslalo svoj kľúč, ale toto zariadenie sa nevie spojiť s jeho relaymi, aby ho otvorilo. Budeme to skúšať ďalej. Ak tu otvoríte pozvánku na to podujatie, vyrieši sa to hneď.",
     "home.deepScan.hint":
       "Bežná kontrola sa pozerá len na posledných pár dní. Ak vám chýba podujatie, ku ktorému ste sa pripojili na inom zariadení, prehľadajte celú históriu.",
     "home.deepScan.action": "Prehľadať celú históriu",
@@ -2332,9 +2332,9 @@ export const messages = {
     "matches.band.hello.section": "Stoja za pozdrav",
     "matches.new": "nové",
     "matches.noStrong":
-      "Zatiaľ nikto výrazný — títo sú najbližšie. Ľudia stále pribúdajú a zhody sa prepočítavajú.",
+      "Zatiaľ nikto výrazný, tu sú tí najbližší. Ľudia stále pribúdajú a zhody sa prepočítavajú.",
     "attendees.section.everyone": "Ostatní účastníci",
-    "attendees.section.allFeatured": "Všetci, čo sú tu, sú už vyššie.",
+    "attendees.section.allFeatured": "Všetci sú už v zozname vyššie.",
     "matches.message": "Napísať",
     "matches.introduce": "Predstaviť nás",
     "matches.icebreakers": "Námety na rozhovor",
@@ -3279,9 +3279,9 @@ export const messages = {
       "Tohle jsou akce, které toto zařízení vidělo naposledy. Přihlaste se a podíváme se, jestli přibyly nové.",
     "home.cantCheck.title": "Nepodařilo se ověřit vaše akce",
     "home.cantCheck.body":
-      "Toto zařízení se teď nedokáže spojit s žádným relayem, takže tohle není odpověď — nic se neztratilo, vaše akce jsou na vašich relayích.",
+      "Toto zařízení se teď nedokáže spojit s žádným relayem, takže tohle není odpověď. Nic se neztratilo, akce máte na svých relayích.",
     "home.keysWaiting":
-      "Jedna akce vám poslala svůj klíč, ale toto zařízení se nedokáže spojit s jejími relayi, aby ho otevřelo. Budeme to zkoušet dál — když tu otevřete pozvánku na tu akci, vyřeší se to hned.",
+      "Jedna akce vám poslala svůj klíč, ale toto zařízení se nedokáže spojit s jejími relayi, aby ho otevřelo. Budeme to zkoušet dál. Když tu otevřete pozvánku na tu akci, vyřeší se to hned.",
     "home.deepScan.hint":
       "Běžná kontrola se dívá jen na posledních pár dní. Pokud vám chybí akce, ke které jste se připojili na jiném zařízení, prohledejte celou historii.",
     "home.deepScan.action": "Prohledat celou historii",
@@ -3911,9 +3911,9 @@ export const messages = {
     "matches.band.hello.section": "Stojí za pozdrav",
     "matches.new": "nové",
     "matches.noStrong":
-      "Zatím nikdo výrazný — tihle jsou nejblíž. Lidé stále přibývají a shody se přepočítávají.",
+      "Zatím nikdo výrazný, tady jsou ti nejbližší. Lidé stále přibývají a shody se přepočítávají.",
     "attendees.section.everyone": "Ostatní účastníci",
-    "attendees.section.allFeatured": "Všichni, kdo tu jsou, jsou už výše.",
+    "attendees.section.allFeatured": "Všichni jsou už v seznamu výše.",
     "matches.message": "Napsat",
     "matches.introduce": "Představit nás",
     "matches.icebreakers": "Náměty na rozhovor",

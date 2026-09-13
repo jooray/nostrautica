@@ -21,13 +21,12 @@ identity when prompted).
 > **A note on how the app is laid out.** Once you're inside an event, the bottom
 > bar is *event-scoped*: **Overview**, **People**, **Updates**, and **More** all
 > act on the event you're in, with a compact header showing the event's name and
-> your status. **Updates** always gets its own tab now; it no longer has to share
-> a spot inside **More**. Matches, for attendees who have any, show up at the top
-> of **People** rather than in a tab of their own. Two further tabs appear only
-> once you've turned those features on (§6.5), for you and for attendees: **Talks**
-> sits between Overview and People if talks are set to be watched before the event
-> ("prerecord-first"), or right after People otherwise; **Chat** sits right after
-> People too, following Talks there if both are on. Your global stuff (all your
+> your status. Matches, for attendees who have any, show up at the top of
+> **People**. Two further tabs appear only once you've turned those features on
+> (§6.5), for you and for attendees: **Talks** sits between Overview and People
+> if talks are set to be watched before the event ("prerecord-first"), and right
+> after People otherwise; **Chat** comes after People too, following Talks when
+> both are on. Your global stuff (all your
 > events, messages, settings, your identity) lives under **More**. As the organizer
 > you also get **Manage event** in that menu, which opens the admin console
 > described in §3.

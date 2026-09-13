@@ -17,16 +17,13 @@ announcements, the latest show up here too.
 
 Once you're in an event, the bar along the bottom is all about *this* event:
 **Overview** (where you are now), **People**, **Updates**, and **More** (your
-account, settings, other events) are always there. **Updates** always gets its
-own tab now, it no longer has to share a spot inside **More**. Two more tabs
-show up only if the organizer turned the feature on, and land in different
-spots depending on why: a **Talks** tab (§4.5) sits right between Overview and
-People if the organizer set talks up to be watched *before* the event
-("prerecord-first"), or right after People, ahead of Chat, for a regular talks
-setup. **Chat** (§5.5) sits right after People (or after Talks, if that's also
-on). If you don't see Talks or Chat at all, this event simply doesn't use that
-feature. A small header at the top always tells you which event you're in and
-whether you're a visitor, waiting, or in.
+account, settings, other events) are always in the bar. Two more appear when
+the organizer turns them on: **Talks** (§4.5) and **Chat** (§5.5). Talks sits
+between Overview and People when the organizer set talks up to be watched
+*before* the event ("prerecord-first"), and just after People otherwise. Chat
+comes after People, or after Talks when both are on. If you don't see either,
+this event simply doesn't use them. A small header at the top always tells you
+which event you're in and whether you're a visitor, waiting, or in.
 
 ![Event overview](images/participant/02-event-overview-light.png)
 
@@ -198,23 +195,18 @@ purely automated.
 ## 4. People
 
 Tap **People** in the bottom bar to browse who's here. It's one list, and your
-matches, if you have any, sit at the top of it rather than off in a tab of
-their own.
+matches, if you have any, sit at the top of it.
 
 A **search field** at the top finds people by name, bio, or skill.
 
 If the coordinator has matched you with anyone, they come first, grouped under
-**Strong matches** and **Good matches** headings — the confidence band is a
-heading over a group of people now, not a badge repeated on every card. Each
-match shows the person's name, one line of their own bio, and the full
-reasoning for why you two should meet, always visible, nothing to tap to read
-the rest of it. Underneath that, a collapsed **Conversation starters** section
-holds the coordinator's suggested opening lines, for whenever you want them.
+**Strong matches** and **Good matches** headings. Each match shows the person's
+name, one line of their own bio, and the whole reasoning for why you two should
+meet, right there on the row. Underneath it, a collapsed **Conversation
+starters** section holds the coordinator's suggested opening lines.
 
-If nobody stands out sharply yet, a line above the list says so plainly:
-these are your closest people so far, and matches recalculate as more people
-join. There's no empty "Strong matches" heading left sitting there with
-nothing under it.
+If nobody stands out sharply yet, a line above the list says so: these are your
+closest people so far, and matches recalculate as more people join.
 
 Below the matches, an **Everyone else** heading gives the attendee count, then
 the **Want to meet** / **Met** / **Following** filter buttons, then the full
@@ -224,9 +216,9 @@ appear as they decrypt (names and photos fill in a moment later), so a big
 roster on a slow connection never blocks on the slowest relay. Search, or tap
 a filter, and the sections collapse into one flat list of matching results.
 
-Every person, matched or not, gets the same three quick actions right on
-their row: **follow**, **want to meet**, and **message**, with no need to open
-their page first.
+Every person, matched or not, carries the same three quick actions on their
+row: **follow**, **want to meet**, and **message**. You can use all three
+without opening their page.
 
 The roster is **encrypted to approved attendees**, so until you're approved (or
 in the moment right after, before it syncs) the People screen stays empty and
@@ -236,17 +228,16 @@ tells you why. That's the privacy model working, not a bug:
 
 Tap a person's name or row to open their page: their intro video, what they
 do, what they're looking for, an AI-written summary once the matchmaking has
-run, their recent public posts, and, if you matched with them, the same
-reasoning again alongside **Score details**: similarity, complementarity, and
-overall, as percentages. A match's page also carries an explicit
-**Introduce us** button.
+run, and their recent public posts. If you matched with them, the page repeats
+the reasoning and adds **Score details** (similarity, complementarity, and
+overall, as percentages) and an **Introduce us** button.
 
 On a person's page you can **Follow** them, tap **Message** to start a private
-chat (see §5) — for a match, this opens the composer already filled in with
-the coordinator's suggested opening line, which you can edit or delete before
-sending — and, privately (nobody else ever sees these), mark
+chat (see §5), and, privately (nobody else ever sees these), mark
 **Want to meet** or **Met ✓**, and keep a private note ("the drummer with the
-mesh-network startup"). Reload and it all persists. If someone's bothering you,
+mesh-network startup"). Reload and it all persists. For a match, **Message**
+opens the composer already filled in with the coordinator's suggested opening
+line, which you can edit or delete before sending. If someone's bothering you,
 **Mute** hides them from your People list and messages (it's a standard
 Nostr mute, so it carries to other Nostr apps too):
 
