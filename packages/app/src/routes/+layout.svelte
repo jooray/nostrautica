@@ -498,9 +498,12 @@
   {/if}
   {#if showCompactHeader}
     {#if eventShell.ctx}
-      <EventHeader ctx={eventShell.ctx} compact link status={compactStatus} />
+      <div class="compact-event-strip">
+        <EventHeader ctx={eventShell.ctx} compact link status={compactStatus} />
+      </div>
     {:else}
       <div
+        class="compact-event-strip"
         aria-hidden="true"
         style="height:3rem;margin:0.5rem 0 1rem;border-radius:var(--radius);background:var(--bg-elev2);opacity:0.5"
       ></div>

@@ -43,6 +43,20 @@
 {/snippet}
 
 <nav class="event-nav" aria-label={t("nav.eventPrimary")}>
+  <!-- Which event you are in, said once and permanently. On the phone this
+       lives in the strip above the content and the bar has no room for it; in
+       the rail it is the one thing that should never scroll away, so the strip
+       stands down (see .compact-event-strip in app.css). -->
+  {#if eventShell.ctx}
+    <button
+      class="rail-id"
+      onclick={() => router.go({ name: "event", naddr })}
+      title={eventShell.ctx.title}
+    >
+      <Avatar pubkey={eventShell.ctx.coordinate} name={eventShell.ctx.title} size={26} />
+      <span class="rail-id-name">{eventShell.ctx.title}</span>
+    </button>
+  {/if}
   <button
     aria-current={active("event", "join") ? "page" : undefined}
     class:active={active("event", "join")}
@@ -210,6 +224,97 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .rail-id {
+    display: none;
+  }
+
+  /* ── Desktop: the bar becomes a left rail ──────────────────────────────
+     A bottom bar is where a thumb already is, which is why it is right on a
+     phone and wrong on a monitor: it puts the navigation as far from the
+     cursor as the window allows, and stretches five items across a width twice
+     that of the content they lead to. Same markup, same order, same badges —
+     the axis changes and the labels stop competing for room, which is also what
+     retires the 6-tab ellipsis rule above. */
+  @media (min-width: 1000px) {
+    .event-nav {
+      top: 0;
+      right: auto;
+      width: var(--rail);
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: stretch;
+      gap: 0.1rem;
+      padding: 1rem 0.7rem 1.2rem;
+      border-top: none;
+      border-right: 1px solid var(--border);
+      box-shadow: none;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .rail-id {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      min-width: 0;
+      margin: 0 0 1rem;
+      padding: 0.35rem 0.45rem;
+      background: none;
+      border: none;
+      color: var(--text);
+      font: inherit;
+      text-align: left;
+      cursor: pointer;
+      border-radius: var(--radius-sm);
+    }
+    .rail-id:hover {
+      background: var(--bg-elev2);
+    }
+    .rail-id-name {
+      font-family: var(--font-display);
+      font-size: 1rem;
+      font-weight: 600;
+      line-height: 1.2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .event-nav button {
+      flex: 0 0 auto;
+      max-width: none;
+      min-height: 40px;
+      flex-direction: row;
+      justify-content: flex-start;
+      gap: 0.7rem;
+      padding: 0.5rem 0.65rem 0.5rem 0.85rem;
+      border-radius: var(--radius-sm);
+    }
+    .event-nav button:hover {
+      background: var(--bg-elev2);
+      color: var(--text);
+    }
+    .event-nav button.active {
+      background: var(--accent-soft);
+    }
+    /* The selected marker turns with the axis: a bar down the leading edge
+       rather than across the top. Still currentColor and still not carried by
+       colour alone, so forced-colors keeps it (A6). */
+    /* Inside the button, not outside it: the rail scrolls, and a scroll
+       container clips both axes, so a marker hung in the rail's padding was
+       sliced off at the window edge. */
+    .event-nav button.active::before {
+      top: 50%;
+      left: 0;
+      width: 3px;
+      height: 1.25rem;
+      transform: translateY(-50%);
+      border-radius: 0 2px 2px 0;
+    }
+    .lbl {
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+  }
+
   /* Very narrow / high-zoom: shrink labels a touch so a long translated label
      ("Nastavenia", "Aktualizace") never forces horizontal overflow. */
   @media (max-width: 360px) {

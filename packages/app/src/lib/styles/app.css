@@ -15,6 +15,18 @@
   --radius: 14px; /* cards, large surfaces */
   --radius-sm: 10px; /* buttons, inputs, badges */
   --maxw: 640px;
+  /* Desktop shell (2026-09-13). The phone layout put a 640px column in the
+     middle of a 1280px window with a navigation bar stretched across the full
+     width behind it: the menu was twice as wide as everything it navigated,
+     which is what read as "a phone app running on a monitor" before anyone even
+     noticed the empty sides. The bar becomes a left rail and the column gets
+     room to stop clipping (the admin overview's last stat tile was being cut
+     off by the 640 cap with 336px of empty screen beside it).
+     The content cap only rises to 760: the match reasoning is prose and prose
+     wants 65-75 characters a line, so the width we gained belongs to structure,
+     never to longer lines. */
+  --rail: 232px;
+  --maxw-desk: 760px;
 
   --accent-contrast: #ffffff;
   /* Match-strength badge fills (ConfidenceBadge). A green-only three-step
@@ -482,5 +494,26 @@ h2 {
   * {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+  }
+}
+
+/* ── Desktop shell ────────────────────────────────────────────────────────
+   1000px is where the rail plus a 760px column plus breathing room fits. Below
+   it the phone layout is genuinely the right one: a bottom bar is where a thumb
+   already is. Above it a bottom bar is where no cursor ever is. */
+@media (min-width: 1000px) {
+  body {
+    padding-left: var(--rail);
+  }
+  .app-shell {
+    max-width: var(--maxw-desk);
+    /* No bottom bar up here, so nothing to clear. */
+    padding-bottom: 2.5rem;
+  }
+  /* The compact event strip repeated on every subpage is the phone's way of
+     saying which event you are in. The rail says it permanently, so on desktop
+     the strip is a second answer to a question already answered. */
+  .compact-event-strip {
+    display: none;
   }
 }
