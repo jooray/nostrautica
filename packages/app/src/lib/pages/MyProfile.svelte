@@ -11,8 +11,8 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
-  import { fetchDirectoryEntry } from "$lib/events/attendee.js";
+  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { fetchDirectoryEntry, cachedDirectoryEntry } from "$lib/events/attendee.js";
   import { fetchProfiles } from "$lib/events/social.js";
   import { submitProfileCorrection, type CorrectionInput } from "$lib/events/correction.js";
   import {
@@ -217,9 +217,33 @@
       if (!session.signer) return router.go({ name: "login" });
       const pubkey = await session.signer.getPublicKey();
       await connectNdk();
+      // Cache-first paint, mirroring Attendee.svelte's fetchDirectoryEntry usage:
+      // paint whatever this device already decrypted for THIS attendee (e.g. from
+      // the People-tab warm-up prefetch, or an earlier visit) before the network
+      // round-trip lands.
+      const cachedCtx = cachedEventContext(naddr);
+      if (cachedCtx) {
+        const cached = cachedDirectoryEntry(cachedCtx.coordinate, pubkey);
+        if (cached) {
+          entry = cached;
+          loadFromEntry(entry);
+        }
+      }
       ctx = await loadEventContext(naddr);
-      entry = (await fetchDirectoryEntry(ctx, pubkey)) ?? null;
-      loadFromEntry(entry);
+      const fetched = await fetchDirectoryEntry(ctx, pubkey);
+      // Only overwrite on a POSITIVE answer (same rule Attendee.svelte's SWR
+      // refresh follows). Unconditionally assigning `fetched ?? null` here used to
+      // regress a perfectly good, already-decrypted entry to null the instant the
+      // fresh fetch came back empty (e.g. a transient directory/roster republish
+      // gap) — this device HAD the ai_profile a moment earlier, and the page threw
+      // it away, showing "no AI profile yet" until a lucky reload happened to
+      // catch a fetch that DID find it. A one-shot page like this one never gets
+      // the live-subscription resilience streamDirectory gives Attendees.svelte,
+      // so it must not be less forgiving than a plain cache read.
+      if (fetched) {
+        entry = fetched;
+        loadFromEntry(entry);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {

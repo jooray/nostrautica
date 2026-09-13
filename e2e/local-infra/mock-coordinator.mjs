@@ -16,6 +16,7 @@ const { NostrClient } = await import(new URL("nostr/client.js", DIST));
 const { Coordinator } = await import(new URL("coordinator.js", DIST));
 const { MockStt, MockLlm } = await import(new URL("providers/mock.js", DIST));
 const { setRelayConnectPolicy } = await import(new URL("net/relay-guard.js", DIST));
+const { buildCoordinatorAnnounce } = await import(new URL("nostr/publisher.js", DIST));
 
 // C4 (audit): the coordinator now refuses ws:// and loopback/private relay hosts
 // unless the operator opts in — the connect-time SSRF guard (relay-guard) refuses
@@ -156,6 +157,32 @@ const coordinator = new Coordinator({
 });
 
 await coordinator.start();
+
+// Publish the kind-31611 discovery announcement (docs/COORDINATOR-DISCOVERY-PLAN.md).
+// The real CLI does this in main.ts when `config.coordinator.announce` is set; this
+// double has no config object at all, so it went unpublished entirely. Without it,
+// CoordinatorPicker.svelte's discovery subscription (fetchCoordinators, kind 31611)
+// finds nothing, every wait for `.coord-card` times out, and every
+// coordinator-dependent screenshot/test fails — 100% reproducible, not the
+// intermittent "mock sometimes goes inert" flakiness screenshot-refresh.mjs's header
+// documents. Built with the coordinator's own buildCoordinatorAnnounce (same as
+// main.ts) and signed with the identity already generated above, so the npub printed
+// there is the one the picker will show.
+try {
+  const announce = buildCoordinatorAnnounce(coordSk, {
+    v: 2,
+    name: "Mock Coordinator",
+    about: "Local e2e/screenshot double — MockStt/MockLlm, no real API calls.",
+    relays: [RELAY],
+    features: { matching: true, talks: false, chat: [] },
+    pricing: { model: "free" },
+  });
+  await client.publish(announce, [RELAY]);
+  console.log("[mock-coordinator] published kind-31611 discovery announcement");
+} catch (e) {
+  console.warn("[mock-coordinator] announce publish failed:", e instanceof Error ? e.message : e);
+}
+
 console.log("[mock-coordinator] running — attach the npub above in Admin");
 
 let stopped = false;
