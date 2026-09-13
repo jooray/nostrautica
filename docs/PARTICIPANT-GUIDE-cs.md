@@ -18,8 +18,11 @@ oznámení, i ta se objeví hned tady.
 Jakmile jste uvnitř akce, spodní lišta se celá týká *této* akce: **Přehled**
 (kde jste teď), **Lidé**, **Novinky** a **Více** (váš účet, nastavení, ostatní
 akce). Další dvě karty se objeví jen tehdy, když organizátor tyto funkce
-zapne: **Přednášky** (§4.5) a **Chat** (§5.5). Pokud je nevidíte, tato akce je
-prostě nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a
+zapne: **Přednášky** (§4.5) a **Chat** (§5.5). Přednášky jsou hned za
+Přehledem tehdy, když je organizátor nastavil na sledování *před* akcí
+(„prerecord-first“), jinak jsou hned za Lidmi. Chat je za Lidmi, a pokud jsou
+zapnuté i Přednášky, tak až za nimi. Pokud je nevidíte, tato akce je prostě
+nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a
 jestli jste návštěvník, čekáte, nebo jste uvnitř.
 
 ![Přehled akce](images/participant-cs/02-event-overview-light.png)
@@ -90,8 +93,8 @@ neukázala: seznam vám to řekne.
 Níž na téže stránce Přehled, jakmile jste schváleni, najdete kartu
 **Stáhnout pro offline použití**. Klepnutím na ni si aplikace předem stáhne
 lidi, spojení a přednášky *a zároveň načte i samotné obrazovky*, které je
-zobrazují (Lidé — teď včetně spojení, Přednášky, stránka přednášky, Nahrávání,
-Můj profil, Novinky), takže se všechno dá procházet i bez signálu, hodí se to
+zobrazují (Lidé, Přednášky, stránka přednášky, Nahrávání, Můj profil,
+Novinky), takže se všechno dá procházet i bez signálu, hodí se to
 v přeplněné místnosti, kde si všechny telefony soupeří o stejné slabé
 připojení. Starší verze sice stáhly data, ale některou obrazovku (třeba
 Přednášky) se offline stejně nemuselo podařit *otevřít*; teď se obrazovky
@@ -199,11 +202,8 @@ okamžitě a jejich pohled na vás dostane malou značku **„Upraveno
 ## 4. Lidé
 
 Klepněte na **Lidé** ve spodní liště. Je to jeden seznam pro celou akci: nahoře
-lidé, se kterými vás párování spojilo, s vysvětlením proč byste se měli
-potkat, a pod nimi zbytek účastníků. (Dřív to byly dvě záložky — jedna uměla
-sledovat a označit „chci potkat“, ale nikdy neřekla proč na někom záleží,
-druhá to vysvětlovala, ale nenabízela žádnou z těch akcí. Teď má na seznamu
-každý člověk, ať je shoda nebo ne, stejné tři ovládací prvky.)
+lidé, se kterými vás párování spojilo, s vysvětlením, proč byste se měli
+potkat, a pod nimi zbytek účastníků.
 
 Seznam účastníků je **zašifrovaný pro schválené účastníky**, takže dokud vás
 neschválí (nebo těsně poté, než se to ještě jen synchronizuje), obrazovka Lidé
@@ -218,12 +218,12 @@ Jakmile jste uvnitř, obrazovka shora dolů:
 - Pokud máte shody, sekce **Silné shody** a **Dobré shody**: úroveň shody je
   nadpis nad skupinou lidí, ne štítek opakovaný u každého člověka zvlášť. U
   každé shody vidíte jméno, jeden řádek z jejich vlastního popisu a celé
-  odůvodnění, proč byste se měli potkat — vždy celé, viditelné rovnou a není
-  na co klikat. Pod odůvodněním je sbalená sekce **Náměty na rozhovor**, kterou
-  si rozkliknete. Třetí úroveň se jmenuje **Stojí za pozdrav**; jako vlastní
-  sekci ji uvidíte, jen když nemáte žádnou silnou ani dobrou shodu, jinak jsou
-  tihle lidé dole v seznamu ostatních účastníků, jen označení štítkem
-  **Shoda**. Nemáte-li žádnou silnou shodu, nad seznamem uvidíte větu, že
+  odůvodnění, proč byste se měli potkat: vidíte ho vždy celé a hned, bez
+  nutnosti na cokoli klikat. Pod odůvodněním je sbalená sekce **Náměty na
+  rozhovor**, kterou si rozkliknete. Třetí úroveň se jmenuje **Stojí za
+  pozdrav**; jako vlastní sekci ji uvidíte, jen když nemáte žádnou silnou ani
+  dobrou shodu, jinak jsou tihle lidé dole v seznamu ostatních účastníků, jen
+  označení štítkem **Shoda**. Nemáte-li žádnou silnou shodu, nad seznamem uvidíte větu, že
   zatím nikdo výrazný není, že tohle jsou nejbližší, a že se shody přepočítávají,
   jak přibývají další lidé.
 - Nadpis **Ostatní účastníci** s počtem, filtry (**Chci potkat** / **Potkáno**
@@ -236,11 +236,11 @@ Na záložce **Lidé** se navíc objeví malý odznak s číslem, kdykoli přibu
 spojení od vaší poslední návštěvy, takže nemusíte pořád kontrolovat seznam,
 který se nezměnil.
 
-> Zatím žádné shody? Objeví se, až koordinátor zpracuje představení pár lidí,
-> takže to jednoduše znamená, že se místnost teprve zaplňuje — nejdřív nahrajte
-> vlastní představení (§3), právě to vás dostane do spojení ostatních. Aplikace
-> vám řekne, který z těch dvou důvodů to zrovna je, a nabídne buď nahrávání,
-> nebo tlačítko na nové ověření.
+> **Zatím žádné shody?** Objeví se, až koordinátor zpracuje představení pár
+> lidí, takže to jednoduše znamená, že se místnost teprve zaplňuje. Nejdřív
+> nahrajte vlastní představení (§3); právě to vás dostane do spojení
+> ostatních. Aplikace vám řekne, který z těch dvou důvodů to zrovna je, a
+> nabídne buď nahrávání, nebo tlačítko na nové ověření.
 
 Seznam se plní průběžně, jak odpovídají relaye: lidé se objevují, jak se
 dešifrují (jména a fotky se doplní o chvíli později), takže velký seznam na
@@ -252,8 +252,8 @@ nedávné veřejné příspěvky a u shody totéž odůvodnění i s rozbalovac�
 „Podrobnosti skóre“ (podobnost / doplňkovost / celkově v procentech).
 
 Každý člověk na seznamu, ať je shoda nebo ne, má tři rychlé ovládací prvky
-přímo na řádku, bez otevírání jeho stránky: **sledovat**, **chci potkat** a
-**napsat**. Napíšete-li shodě, editor zprávy se otevře už předvyplněný
+přímo na řádku, bez otevírání jeho stránky: **Sledovat**, **Chci potkat** a
+**Napsat**. Napíšete-li shodě, editor zprávy se otevře už předvyplněný
 navrženou úvodní větou od koordinátora; před odesláním ji můžete upravit nebo
 smazat. (Samostatné tlačítko **Představit nás** se stejným účinkem zůstává na
 stránce dané osoby.)
@@ -273,7 +273,7 @@ Na akci ten seznam využijte: najděte si své top shody, zmiňte, že vám to �
 aplikace. Lepší icebreaker neexistuje.
 
 > **Starý odkaz na záložku Spojení?** Adresa končící na `/matches` pořád
-> funguje — otevře se rovnou tenhle seznam Lidé.
+> funguje: otevře se rovnou tenhle seznam Lidé.
 
 ## 4.5 Přednášky (pokud je organizátor zapnul)
 

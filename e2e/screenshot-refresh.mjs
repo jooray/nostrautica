@@ -1152,7 +1152,7 @@ async function main() {
   if (!INCLUDE_FLAKY) {
     skip("21-transcript", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
     skip("23-my-profile-edited", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
-    skip("11-matches", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
+    skip("11-people-matches", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
   } else {
     // ---- participant/21-transcript (Olga's own profile, if the audio intro landed) ----
     if (transcriptOk) {
@@ -1241,14 +1241,25 @@ async function main() {
       skip("23-my-profile-edited", String(e).slice(0, 150));
     }
 
-    // ---- participant/11-matches ----
+    // ---- participant/11-people-matches: the merged People list once matches
+    // have landed (2026-09-13 merge — see Attendees.svelte's "People — the
+    // merged roster + matches surface" header comment). The old dedicated
+    // Matches tab/route is gone; #/e/<naddr>/matches now resolves to the
+    // "attendees" route (routes.ts case "matches"), so navigate straight to
+    // /attendees rather than lean on that redirect. Distinct from
+    // participant/08-attendees above, which is captured earlier in the run —
+    // before any intro has been processed — and so never has a match section
+    // to show; this stem exists specifically to show the "Strong matches" /
+    // "Good matches" h2.band-head section headings with at least one
+    // MatchEntry ("article.entry", MatchEntry.svelte) and its full reasoning
+    // above the plain roster.
     // clearStem BEFORE the attempt, matching 21-transcript / 15-dm-chat above:
     // this stem is coordinator-dependent and the mock coordinator's documented
     // stall means gotMatches below can legitimately come back false, in which
     // case there must be no file at all here rather than a stale one from an
     // earlier, unrelated successful run standing in for it unnoticed.
     try {
-      clearStem(partDir, "11-matches");
+      clearStem(partDir, "11-people-matches");
       await olga.goto(`/#/e/${naddr}/admin`);
       await olga.waitForTimeout(800);
       // id, not translated text (admin.coordinator.recompute is "↻ Recompute
@@ -1257,31 +1268,39 @@ async function main() {
       // Admin.svelte gave this button a stable id for exactly this reason.
       const recomputeBtn = olga.locator("#recompute-matches");
       if (await recomputeBtn.count()) await recomputeBtn.first().click();
-      await nina.goto(`/#/e/${naddr}/matches`);
+      await nina.goto(`/#/e/${naddr}/attendees`);
       await nina.waitForTimeout(1500);
       // Bigger budget (the mock coordinator's stall makes 40s too tight) — and,
-      // critically, GATE the shot on gotMatches. The old code logged a skip() on
-      // timeout but then shot anyway, which is exactly how a past run ended up
-      // shipping "Fetching your matches…" as the 11-matches screenshot: a real
-      // .card.match never renders while loading is true (Matches.svelte:187-188),
-      // so requiring it before ever pressing the shutter is sufficient to rule
-      // out the loading state — no separate text-based wait needed.
+      // critically, GATE the shot on a real match section actually rendering.
+      // A real MatchEntry never renders while the page's own `loading` is
+      // true, so requiring both the section heading AND an entry before ever
+      // pressing the shutter rules out a loading/empty roster ending up as
+      // this stem's file (the exact failure mode the old 11-matches code had
+      // to be specifically fixed for).
       const gotMatches = await pollReload(
         nina,
-        async () => (await nina.locator(".card.match").count()) > 0,
+        async () =>
+          (await nina.locator("h2.band-head").count()) > 0 && (await nina.locator("article.entry").count()) > 0,
         { maxMs: 90000, stepMs: 5000 },
       );
       if (gotMatches) {
+        await nina.locator("h2.band-head").first().scrollIntoViewIfNeeded();
         await nina.waitForTimeout(400);
-        await shoot(nina, partDir, "11-matches", "light");
-        await setTheme(nina, "dark");
-        await shoot(nina, partDir, "11-matches", "dark");
-        await setTheme(nina, "light");
+        await shoot(nina, partDir, "11-people-matches", "light");
+        // setThemeNoReload: a real reload re-fetches the roster/match list
+        // from relays, same rationale as 08-attendees above — nothing here
+        // needs a refetch just to re-theme the same on-screen state.
+        await setThemeNoReload(nina, "dark");
+        await shoot(nina, partDir, "11-people-matches", "dark");
+        await setThemeNoReload(nina, "light");
       } else {
-        skip("11-matches", "no match rows appeared within the poll budget — skipping rather than shoot a loading/empty state");
+        skip(
+          "11-people-matches",
+          "no match section appeared within the poll budget — skipping rather than shoot a loading/empty state",
+        );
       }
     } catch (e) {
-      skip("11-matches", String(e).slice(0, 150));
+      skip("11-people-matches", String(e).slice(0, 150));
     }
   }
 
@@ -1362,7 +1381,15 @@ async function main() {
         // silently navigating to /#/dm — which is exactly why
         // 18-mute-confirm shipped byte-identical to 14-messages: both ended
         // up screenshotting the same messages-list route.
-        const muteBtn = nina.locator("main .row button.inline").first();
+        // DmChat's header now carries icon-only quick actions ahead of Mute in
+        // the same .row.hdr — "the same quick actions a People row offers"
+        // (DmChat.svelte, 2026-09-10): a want-to-meet bookmark and an
+        // open-profile button, both button.inline.icon-btn. `.first()` over
+        // plain button.inline now hits the bookmark button instead of Mute.
+        // Mute is the only button.inline inside .acts that ISN'T also
+        // .icon-btn, which is stable regardless of whether those icon actions
+        // render at all (they're conditional on primaryEvent/peer).
+        const muteBtn = nina.locator(".acts button.inline:not(.icon-btn)").first();
         if (await muteBtn.count()) {
           await muteBtn.click();
           // toggleMute disables the button (muteBusy) for the duration of the

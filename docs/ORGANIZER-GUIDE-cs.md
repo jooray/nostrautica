@@ -23,8 +23,8 @@ aplikace vyzve, zazálohujte si identitu).
 > *vázaná na danou akci*: **Přehled**, **Lidé**, **Novinky** a **Více** se
 > týkají akce, ve které právě jste, a kompaktní hlavička nad nimi ukazuje její
 > název a váš status. Záložka **Lidé** je jeden seznam: nahoře lidé, které
-> párování označilo za shodu, i s odůvodněním proč, pod nimi zbytek
-> účastníků. Další dvě karty, **Přednášky** a **Chat**, se objeví jen tehdy,
+> párování označilo za shodu a vysvětlilo proč, pod nimi zbytek účastníků.
+> Další dvě karty, **Přednášky** a **Chat**, se objeví jen tehdy,
 > když tyto funkce zapnete (§6.5), a to pro vás i pro účastníky. Vaše globální
 > věci (všechny vaše akce, zprávy, nastavení, vaše identita) jsou v nabídce
 > **Více**.

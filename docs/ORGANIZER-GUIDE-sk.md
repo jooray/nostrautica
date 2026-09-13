@@ -24,11 +24,13 @@ vás na to aplikácia vyzve, zálohujte si identitu).
 > **Poznámka k usporiadaniu aplikácie.** Keď ste vnútri podujatia, spodná lišta
 > je *viazaná na dané podujatie*: **Prehľad**, **Ľudia**, **Novinky** a
 > **Viac** sa vzťahujú na podujatie, v ktorom práve ste, a kompaktná hlavička
-> nad nimi ukazuje jeho názov a váš status. Karta **Ľudia** teraz v sebe nesie
-> aj zhody: kto sa s kým má stretnúť, je hornou časťou toho istého zoznamu,
-> nie samostatná karta. Ďalšie dve karty, **Prednášky** (hneď za Prehľadom) a
-> **Chat** (hneď za Ľuďmi), sa objavia len vtedy, keď tieto funkcie zapnete
-> (§6.5), a to pre vás aj pre účastníkov. Vaše globálne veci (všetky vaše
+> nad nimi ukazuje jeho názov a váš status. Karta **Ľudia** v sebe nesie aj
+> zhody: kto sa s kým má stretnúť, je hornou časťou toho istého zoznamu.
+> Ďalšie dve karty, **Prednášky** a **Chat**, sa objavia len vtedy, keď tieto
+> funkcie zapnete (§6.5), a to pre vás aj pre účastníkov. Prednášky sú hneď za
+> Prehľadom, ak ste ich nastavili na pozeranie pred podujatím
+> („prerecord-first“), inak sú hneď za Ľuďmi; Chat je za Ľuďmi, a ak sú zapnuté
+> aj Prednášky, tak až za nimi. Vaše globálne veci (všetky vaše
 > podujatia, správy, nastavenia, vaša identita) sú v ponuke **Viac**. Ako
 > organizátor tam navyše nájdete **Správa podujatia**, ktorá otvorí
 > administráciu popísanú v §3.

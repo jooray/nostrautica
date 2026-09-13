@@ -220,4 +220,14 @@
       padding: 0.25rem 0.1rem;
     }
   }
+  /* Six tabs is the fullest the bar gets (Overview · Talks · People · Chat ·
+     Updates · More). At that count the widest label runs past the ellipsis at
+     390px, which is the common phone width AND the one the docs screenshots are
+     taken at, so "Overview" shipped as "Overvi…". The rule above never caught it
+     because it triggers on a width below 360px, and the cause is not width: five
+     tabs fit at 390px perfectly well. Count the tabs instead of guessing at the
+     viewport. */
+  .event-nav:has(> button:nth-child(6)) .lbl {
+    font-size: 0.68rem;
+  }
 </style>

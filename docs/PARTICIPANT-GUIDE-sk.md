@@ -18,10 +18,12 @@ oznámenia, aj tie sa objavia hneď tu.
 Keď ste vnútri podujatia, spodná lišta sa celá týka *tohto* podujatia:
 **Prehľad** (kde ste teraz), **Ľudia**, **Novinky** a **Viac** (váš účet,
 nastavenia, ostatné podujatia). Ďalšie dve karty sa objavia len vtedy, keď
-organizátor tie funkcie zapne, každá na svojom mieste v lište: **Prednášky**
-(§4.5) hneď za Prehľadom a **Chat** (§5.5) hneď za Ľuďmi. Ak ich nevidíte,
-toto podujatie ich jednoducho nepoužíva. Malá hlavička navrchu vám vždy
-hovorí, v ktorom podujatí ste a či ste návštevník, čakáte, alebo ste vnútri.
+organizátor tie funkcie zapne: **Prednášky** (§4.5) a **Chat** (§5.5).
+Prednášky sú hneď za Prehľadom vtedy, keď ich organizátor nastavil na pozeranie
+*pred* podujatím („prerecord-first“), inak sú hneď za Ľuďmi. Chat je za Ľuďmi,
+a ak sú zapnuté aj Prednášky, tak až za nimi. Ak ich nevidíte, toto podujatie
+ich jednoducho nepoužíva. Malá hlavička navrchu vám vždy hovorí, v ktorom podujatí ste a či
+ste návštevník, čakáte, alebo ste vnútri.
 
 ![Prehľad podujatia](images/participant-sk/02-event-overview-light.png)
 
@@ -211,14 +213,13 @@ podujatí, so zhodami navrchu. Hneď hore je **vyhľadávacie pole**, ktoré hľ
 podľa mena, popisu aj zručností.
 
 Ak vám párovanie už niekoho vytipovalo, nad zvyškom zoznamu uvidíte sekcie
-**„Silné zhody“** a **„Dobré zhody“**: úroveň zhody je teraz nadpis nad celou
-skupinou ľudí, nie štítok opakovaný pri každom mene. Tretia, najslabšia úroveň
-sa volá **„Stoja za pozdrav“**. Pri každej zhode vidíte meno, jeden riadok z
-jej vlastného popisu a hneď pod tým **celé odôvodnenie, prečo by ste sa mali
-stretnúť** — vždy viditeľné a neskrátené, netreba naň klikať. Pod odôvodnením
-je zabalená sekcia **„Námety na rozhovor“**, ktorú si rozkliknete, ak sa vám
-zíde icebreaker. Mechaniku skóre (nakoľko ste si podobní vs. nakoľko sa
-dopĺňate) tu už nehľadajte: presunula sa na profil danej osoby, pod jej zhodu.
+**„Silné zhody“** a **„Dobré zhody“**. Tretia, najslabšia úroveň sa volá
+**„Stoja za pozdrav“**. Pri každej zhode vidíte meno, jeden riadok z jej
+vlastného popisu a hneď pod tým **celé odôvodnenie, prečo by ste sa mali
+stretnúť**, vždy viditeľné a neskrátené. Pod odôvodnením je zabalená sekcia
+**„Námety na rozhovor“**, ktorú si rozkliknete, ak sa vám zíde icebreaker.
+Mechaniku skóre (nakoľko ste si podobní vs. nakoľko sa dopĺňate) nájdete na
+profile danej osoby, pod jej zhodou.
 
 Pod zhodami nasleduje nadpis **„Ostatní účastníci“** s počtom, filtrami
 (**Chcem stretnúť** / **Stretnuté** / **Sledované**) a celým zvyškom
@@ -228,8 +229,7 @@ do jedného plochého zoznamu výsledkov.
 
 Ak nemáte zatiaľ žiadnu silnú zhodu, nad zoznamom nájdete namiesto toho vetu,
 že zatiaľ nikto výrazne nevyčnieva, že toto sú aktuálne najbližšie zhody a že
-sa prepočítajú, ako pribudnú ďalší ľudia. Prázdna sekcia „Silné zhody“ sa
-jednoducho nezobrazí.
+sa prepočítajú, ako pribudnú ďalší ľudia.
 
 Na karte **Ľudia** sa objaví aj malý odznak vždy, keď pribudnú nové zhody od
 vašej poslednej návštevy, takže nemusíte stále kontrolovať zoznam, ktorý sa
@@ -245,21 +245,20 @@ presne tak, ako má, nie chyba:
 ![Ľudia: zašifrované, kým vás neschvália](images/participant-sk/08-attendees-light.png)
 
 **Akcie sú pri každom rovnaké**, či ide o zhodu alebo nie: **Sledovať**,
-**Chcem stretnúť** a **Napísať**, priamo pri riadku, bez otvárania stránky
-danej osoby. Predtým zhody sledovanie ani „chcem stretnúť“ vôbec nemali; to bol
-hlavný dôvod, prečo sa zoznamy spojili do jednej obrazovky. Klepnutím na meno
-alebo na riadok otvoríte celú stránku danej osoby: predstavovacie video, čo
-robí, čo hľadá, AI-generované zhrnutie, ak už párovanie prebehlo, a jej
-nedávne verejné príspevky.
+**Chcem stretnúť** a **Napísať**, priamo pri riadku. Všetky tri použijete bez
+otvárania stránky danej osoby. Klepnutím na meno alebo na riadok otvoríte
+celú stránku danej osoby: predstavovacie video, čo robí, čo hľadá,
+AI-generované zhrnutie, ak už párovanie prebehlo, a jej nedávne verejné
+príspevky.
 
 Na stránke niekoho iného môžete rovnako **Sledovať**, klepnutím na **Napísať
 správu** začať súkromný chat (pozri §5) a súkromne (tieto nikto iný nikdy
 neuvidí) označiť **Chcem stretnúť** alebo **Stretnuté ✓** a nechať si súkromnú
-poznámku („bubeník s mesh-network startupom“). Píšete niekomu, s kým vás
-párovanie spárovalo? Editor správy sa otvorí už predvyplnený navrhnutou
-úvodnou vetou od koordinátora — pred odoslaním si ju môžete upraviť alebo
-celkom zmazať. Samostatné tlačidlo **Predstaviť nás** na to isté zostáva aj na
-profile danej zhody. Po znovunačítaní všetko zostane. Ak vás niekto obťažuje,
+poznámku („bubeník s mesh-network startupom“). Ak píšete niekomu, s kým vás
+párovanie spárovalo, editor správy sa otvorí už predvyplnený navrhnutou
+úvodnou vetou od koordinátora; pred odoslaním si ju môžete upraviť alebo
+celkom zmazať. Na profile danej zhody nájdete aj samostatné tlačidlo
+**Predstaviť nás**. Po znovunačítaní všetko zostane. Ak vás niekto obťažuje,
 **Stlmenie** ho skryje z vášho zoznamu Ľudia aj zo správ (je to štandardné
 Nostr stlmenie, takže sa prenesie aj do iných Nostr aplikácií):
 
