@@ -95,6 +95,50 @@ export function profileNeedsFetch(
 }
 
 /**
+ * The name to show for a kind-0, in the order the rest of Nostr resolves it.
+ *
+ * The app used to read `name || display_name`, so anyone who updated ONLY their
+ * `display_name` kept rendering their older `name` everywhere in this app while
+ * every other client showed the new one. That is common rather than exotic:
+ * most clients label `display_name` as "Display name" or simply "Name" in their
+ * profile editor, so it is the field a person edits when they change what they
+ * are called.
+ *
+ * The precedence is deliberately the one the ecosystem already uses — Damus,
+ * Amethyst, Primal, Snort, Coracle and nostr-tools/NDK all prefer
+ * `display_name` and fall back to `name` — rather than the reverse. Under
+ * NIP-01 `name` is the short handle (the NIP-05 local part, lowercase, no
+ * spaces) and `display_name` is the human-readable one, so preferring
+ * `display_name` also matches what the two fields MEAN. Rendering a different
+ * name from every other client is not a neutral choice: a person shown by their
+ * old handle in the roster is a person other attendees fail to recognize.
+ *
+ * `displayName` is the same field under the spelling older clients wrote before
+ * `display_name` settled, and is read only when `display_name` is absent.
+ *
+ * The fallback chain is on EMPTINESS, not presence, which is the property that
+ * makes this safe to flip: plenty of profiles carry `display_name: ""` (some
+ * editors write the key whether or not it was filled in), and treating that as
+ * a name would blank out a perfectly good `name`. Whitespace counts as empty
+ * for the same reason. A profile with only one of the two fields set renders
+ * that one, whichever it is.
+ *
+ * This app itself only ever WRITES `name` (`publishProfile`, and the event's own
+ * kind-0 in create.ts), so nothing here is a name this app set being overridden
+ * by one it didn't — it is the user's later edit in another client winning,
+ * which is the whole point.
+ */
+export function profileDisplayName(profile: unknown): string | undefined {
+  if (!profile || typeof profile !== "object") return undefined;
+  const p = profile as Record<string, unknown>;
+  for (const field of ["display_name", "displayName", "name"]) {
+    const value = p[field];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+/**
  * Avatar props (name + picture) for a pubkey, resolved from a profile map, for
  * any card/header that shows a person's avatar (People rows, talk cards, the talk
  * detail header). The `picture` is always carried through when the map has it —
@@ -164,7 +208,7 @@ export async function fetchProfiles(
   for (const [pubkey, e] of latest) {
     try {
       const p = JSON.parse(e.content);
-      const meta = { name: p.name || p.display_name, picture: p.picture, about: p.about };
+      const meta = { name: profileDisplayName(p), picture: p.picture, about: p.about };
       out.set(pubkey, meta);
       cacheSet(profileKey(pubkey), meta, e.created_at ?? nowSec, ANON);
     } catch {

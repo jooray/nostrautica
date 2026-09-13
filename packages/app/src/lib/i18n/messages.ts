@@ -85,6 +85,12 @@ export const messages = {
     "home.role.organizer": "you organize",
     "home.role.attendee": "joined",
     "home.role.visitor": "viewed",
+    // A space the network says you joined, whose key has not reached this
+    // device (audit E9). A state, not a role: the card takes the place of the
+    // role badge, because "viewed" would be a lie about how you got there.
+    "home.role.awaitingKey": "waiting for its key",
+    "home.awaitingKey.note":
+      "You asked to join these, but the key that opens them hasn't reached this device yet. Open one to keep trying, or search your whole history below.",
     "home.createAnother": "Create another event or community",
     "home.getStarted": "Get started",
     "home.getStarted.body": "Open an event invite link, or create your own.",
@@ -677,6 +683,13 @@ export const messages = {
     "attendees.wantToMeetName": "Want to meet {name}",
     "attendees.messageName": "Message {name}",
     "attendees.name": "Attendee",
+    // A cache paint has no age bound: the list paints instantly from this
+    // device's saved copy and revalidates in the background. Offline, or on
+    // venue Wi-Fi that blocks WSS, the revalidation never lands and a week-old
+    // roster looks exactly like a current one. The "unreachable" empty state
+    // above only covers an EMPTY roster; this covers a full but unconfirmed one.
+    "attendees.asOf": "Showing a saved list, as of {time}. No relay has answered since.",
+    "attendees.asOf.unknown": "Showing a saved list. This device cannot tell how old it is.",
 
     // Attendee
     "attendee.youFollow": "You follow",
@@ -1705,6 +1718,9 @@ export const messages = {
     "home.role.organizer": "organizujete",
     "home.role.attendee": "ste vnútri",
     "home.role.visitor": "prezreté",
+    "home.role.awaitingKey": "čaká na kľúč",
+    "home.awaitingKey.note":
+      "Požiadali ste o vstup, ale kľúč, ktorý ich otvorí, sa na toto zariadenie zatiaľ nedostal. Otvorte niektoré z nich a skúsime to znova, alebo nižšie prehľadajte celú históriu.",
     "home.createAnother": "Vytvoriť ďalšie podujatie alebo komunitu",
     "home.getStarted": "Začať",
     "home.getStarted.body": "Otvorte pozvánku na podujatie, alebo si vytvorte vlastné.",
@@ -2288,6 +2304,8 @@ export const messages = {
     "attendees.wantToMeetName": "Chcem stretnúť {name}",
     "attendees.messageName": "Napísať {name}",
     "attendees.name": "Účastník",
+    "attendees.asOf": "Zobrazuje sa uložený zoznam, stav k {time}. Odvtedy neodpovedal žiadny relay.",
+    "attendees.asOf.unknown": "Zobrazuje sa uložený zoznam. Toto zariadenie nevie, aký je starý.",
 
     // Attendee
     "attendee.youFollow": "Sledujete",
@@ -3308,6 +3326,9 @@ export const messages = {
     "home.role.organizer": "organizujete",
     "home.role.attendee": "jste uvnitř",
     "home.role.visitor": "zobrazeno",
+    "home.role.awaitingKey": "čeká na klíč",
+    "home.awaitingKey.note":
+      "Požádali jste o vstup, ale klíč, který je otevře, se na toto zařízení zatím nedostal. Otevřete některé z nich a zkusíme to znovu, nebo níže prohledejte celou historii.",
     "home.createAnother": "Vytvořit další akci nebo komunitu",
     "home.getStarted": "Začít",
     "home.getStarted.body": "Otevřete pozvánku na akci, nebo si vytvořte vlastní.",
@@ -3890,6 +3911,8 @@ export const messages = {
     "attendees.wantToMeetName": "Chci potkat {name}",
     "attendees.messageName": "Napsat {name}",
     "attendees.name": "Účastník",
+    "attendees.asOf": "Zobrazuje se uložený seznam, stav k {time}. Od té doby neodpověděl žádný relay.",
+    "attendees.asOf.unknown": "Zobrazuje se uložený seznam. Toto zařízení neví, jak je starý.",
 
     // Účastník
     "attendee.youFollow": "Sledujete",

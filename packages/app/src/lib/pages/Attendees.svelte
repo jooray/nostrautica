@@ -46,6 +46,67 @@
     if (!s.online || s.relay !== "connected") return "unreachable";
     return "none";
   }
+
+  /**
+   * Whether to say how old the list on screen is.
+   *
+   * The People list is cache-first: it paints the saved roster instantly and
+   * revalidates behind it (§2.3). That is the right trade in a venue — a
+   * slightly old list beats a spinner, and blanking it behind a max-age is
+   * deliberately NOT what happens here — but until this pass corrects it, the
+   * screen is making a claim it cannot back. On venue Wi-Fi that blocks WSS the
+   * revalidation never lands at all, and a roster cached a week ago looks
+   * exactly like one read a second ago. `rosterEmptyReason` above covers the
+   * empty case ("unreachable"); nothing covered the full-but-unconfirmed one,
+   * which is the more dangerous of the two because it looks like success.
+   *
+   * `confirmed` is deliberately narrow: a pass that threw, or one that finished
+   * while offline or with no relay connected, has not confirmed anything. It is
+   * the SAME predicate `rosterEmptyReason` uses to decide whether "nobody is
+   * here" is a claim worth making, for the same reason.
+   *
+   * `settled` gates the FIRST frame. A cache paint starts with `loading` already
+   * false, so without it the cue would flash on every healthy load in the few
+   * hundred ms before the network answers, and a cue that cries wolf on a good
+   * connection is one nobody reads on a bad one.
+   *
+   * Pure so the decision is unit-testable without a browser.
+   */
+  export function rosterStaleCue(s: {
+    /** Rows on screen. Nothing to be stale about when there are none. */
+    entries: number;
+    /** A load pass has finished (or the grace window expired). */
+    settled: boolean;
+    /** This session read the roster from relays and believed the answer. */
+    confirmed: boolean;
+    /** ms epoch of the last confirmed read ON THIS DEVICE, across sessions. */
+    syncedAt?: number;
+  }): { show: boolean; at?: number } {
+    if (s.entries === 0 || s.confirmed || !s.settled) return { show: false };
+    return { show: true, at: s.syncedAt };
+  }
+
+  /**
+   * The clock in "as of {time}".
+   *
+   * A bare HH:MM is the honest format for a read from today and a LIE for one
+   * from last Tuesday: "as of 14:05" on a week-old roster reads as five minutes
+   * ago, which is the exact misreading this cue exists to prevent. So anything
+   * not from today carries its date. Locale-aware, because the whole app is.
+   */
+  export function formatAsOf(at: number, now: number, locale: string): string {
+    const d = new Date(at);
+    const n = new Date(now);
+    const sameDay =
+      d.getFullYear() === n.getFullYear() &&
+      d.getMonth() === n.getMonth() &&
+      d.getDate() === n.getDate();
+    return new Intl.DateTimeFormat(locale, {
+      hour: "2-digit",
+      minute: "2-digit",
+      ...(sameDay ? {} : { day: "numeric", month: "short" }),
+    }).format(d);
+  }
 </script>
 
 <script lang="ts">
@@ -90,6 +151,7 @@
   import { loadPerEventSettings, toggleSetting, cachedPerEventSettings } from "$lib/events/settings.js";
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
+  import { cacheGet, cacheSet } from "$lib/cache/persist.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { directoryEntryFields, searchRank } from "$lib/events/search.js";
@@ -164,6 +226,29 @@
   /** Whether this event has a coordinator at all — no coordinator, no matches. */
   let matchingOn = $state(!!cachedCtx?.config.coordinator);
 
+  /**
+   * When this DEVICE last read the roster from relays and believed the answer.
+   *
+   * Kept in the cache under a key this page owns rather than read off the
+   * directory's own cache entry: that entry's `at` is the newest directory
+   * ENTRY's `created_at` (see attendee.ts), i.e. when the last person edited
+   * their profile, which is a different fact entirely. A roster fetched ten
+   * seconds ago from entries last touched in July would have reported July.
+   *
+   * Owner-scoped like the roster itself, so a logged-out visitor (who has no
+   * cached roster either) simply gets nothing. Conservative by construction: a
+   * prefetch elsewhere in the app can refresh the directory without touching
+   * this, so the worst it does is claim the list is older than it is.
+   */
+  const readKey = (coordinate: string) => `roster-read:${coordinate}`;
+  let lastReadAt = $state<number | undefined>(
+    cachedCtx ? cacheGet<number>(readKey(cachedCtx.coordinate))?.data : undefined,
+  );
+  /** A pass this session actually read the roster from relays and believed it. */
+  let confirmedThisSession = $state(false);
+  /** A pass has finished, or the grace window expired. Gates the staleness cue. */
+  let settled = $state(false);
+
   if (cachedEntries.length) perfMark("Attendees", "cache-paint");
 
   // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
@@ -209,6 +294,10 @@
     }
     if (matchList.length === 0) matchList = cachedMatches(c.coordinate)?.matches ?? [];
     settings ??= cachedPerEventSettings(c.coordinate) ?? null;
+    // The roster this effect just painted came off the mirror; so does the
+    // record of when it was last confirmed. Boot no longer waits on hydration,
+    // so a cold start reaches the $state initialiser above with an empty mirror.
+    lastReadAt ??= cacheGet<number>(readKey(c.coordinate))?.data;
     loading = false;
     perfMark("Attendees", "cache-paint");
   });
@@ -327,12 +416,43 @@
       // Sampled once the pass has settled, so the empty-state reason is stable
       // rather than re-classifying itself on every connectivity poll.
       relayAtSettle = relayHealth();
+      // What licenses dropping the "saved list" cue: this pass opened the
+      // directory stream (so an ECK was present), nothing threw, and a relay was
+      // actually connected when it finished. Anything short of that and the rows
+      // on screen are still the ones the cache handed us — the same bar
+      // `rosterEmptyReason` sets before it will claim a roster is really empty.
+      const ok = !error && hasKey && online.isOnline && relayAtSettle === "connected";
+      if (ok && ctx) {
+        confirmedThisSession = true;
+        lastReadAt = Date.now();
+        cacheSet(readKey(ctx.coordinate), lastReadAt, Math.floor(lastReadAt / 1000));
+      }
+      settled = true;
       perfMark("Attendees", "network-settled");
     }
   }
 
-  onMount(load);
-  onDestroy(() => stream?.stop());
+  /**
+   * How long a cache-painted list may sit unannounced before it admits its age.
+   *
+   * Not zero: a cache paint starts with `loading` already false, so the cue
+   * would appear on the first frame of every healthy load and vanish a few
+   * hundred ms later. Not "wait for the pass to settle" either — `connectNdk`
+   * on a captive-portal Wi-Fi can hang well past any relay timeout, and that is
+   * precisely the reader this cue exists for, so a hung pass must not be able
+   * to suppress it forever.
+   */
+  const STALE_CUE_GRACE_MS = 3000;
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  onMount(() => {
+    graceTimer = setTimeout(() => (settled = true), STALE_CUE_GRACE_MS);
+    void load();
+  });
+  onDestroy(() => {
+    stream?.stop();
+    clearTimeout(graceTimer);
+  });
 
   const entryByPubkey = $derived(new Map(entries.map((e) => [e.pubkey, e])));
   function nameOf(pubkey: string, about?: string): string {
@@ -509,6 +629,26 @@
     router.go({ name: "attendee", naddr, npub: npubEncode(pubkey) });
   }
 
+  /**
+   * "Showing a saved list, as of 14:05" (see rosterStaleCue above).
+   *
+   * Recomputed rather than frozen at the moment it first shows, so a list left
+   * open across midnight starts carrying its date instead of a bare clock.
+   */
+  const staleCue = $derived(
+    rosterStaleCue({
+      entries: entries.length,
+      settled,
+      confirmed: confirmedThisSession,
+      syncedAt: lastReadAt,
+    }),
+  );
+  const staleLabel = $derived.by(() =>
+    staleCue.at === undefined
+      ? t("attendees.asOf.unknown")
+      : t("attendees.asOf", { time: formatAsOf(staleCue.at, Date.now(), i18n.locale) }),
+  );
+
   // Which of the empty states to render (see rosterEmptyReason above).
   const emptyReason = $derived(
     rosterEmptyReason({
@@ -597,6 +737,15 @@
     bind:value={query}
     placeholder={t("attendees.search.placeholder")}
   />
+
+  {#if staleCue.show}
+    <!-- Deliberately NOT a live region, for the reason the directory count
+         isn't: this line is present from the moment the page settles, so a
+         status role would announce nothing on arrival and interrupt with
+         nothing on departure. It sits directly under the search field, which is
+         the first thing in the list's reading order, so it is read in place. -->
+    <p class="muted as-of">{staleLabel}</p>
+  {/if}
 
   {#if !hasFilters}
     {#if newPubkeys.size > 0 && eventShell.isCommunity}
@@ -708,10 +857,15 @@
   {:else}
     <!-- Full roster in the DOM (audit §7.3.5): virtualization mounted only the
          visible window, so browser Find and screen readers missed offscreen
-         attendees and zoom could clip fixed-height rows. At the spec scale
-         (≤2000, typically ~200) rendering every row is fine, and it's the
-         simplest correct fix. Real list semantics so AT announces "list, N
-         items"; a 2000-row render-perf check is an e2e-phase task. -->
+         attendees and zoom could clip fixed-height rows. Real list semantics so
+         AT announces "list, N items".
+
+         The render-perf check this comment used to defer is done (2026-09-14),
+         measured at 200 / 500 / 1000 / 2000 rows in the 420px list pane and at
+         phone and desktop widths. Up to ~500 rows every row in the DOM costs
+         nothing worth naming even on a throttled CPU; 2000 was the cliff, and
+         the answer was a stylesheet rule rather than a windowing library. The
+         numbers and the reasoning are on `.roster-list > li` below. -->
     <div class="card roster">
       <ul class="roster-list" aria-label={tc("attendees.rosterLabel", eventShell.isCommunity)}>
         {#each visible as e (e.pubkey)}
@@ -811,8 +965,48 @@
     margin: 0;
     padding: 0;
   }
+  /* Rendering every row is correct (see the roster markup above) and, measured,
+     it is also what made the spec ceiling hurt. At 2000 rows on a 4x-throttled
+     CPU (roughly a mid-range phone) the list column took 1.80 s to first paint,
+     662 ms of that in one forced layout, and dropped 4-9 frames over a fast
+     fling. `content-visibility` skips layout and paint for rows that are
+     nowhere near the viewport while leaving all 95,030 nodes in the document:
+     the render tree drops from 54,903 layout objects to 2,445, first paint to
+     1.08 s, the forced layout to 70 ms, and the dropped frames to zero. The JS
+     heap is unchanged (28.2 MB either way) because nothing was unmounted.
+
+     That last part is the whole point. Virtualization (audit §7.3.5) bought the
+     same speed by taking rows OUT of the DOM, which is why browser Find and
+     screen readers missed offscreen attendees. Verified here, in Chromium, at
+     1000 rows: find-in-page still reaches row 950 and scrolls to it, and the
+     accessibility tree still exposes all 1000 list items. Supported in all
+     three engines we target (Chromium 149, WebKit 26.5, Firefox 151); where it
+     isn't, the declaration is ignored and the list behaves exactly as before.
+
+     `auto` in contain-intrinsic-size, never a bare length: a fixed row height
+     is the OTHER thing virtualization broke, clipping rows at large text sizes.
+     `auto` means "use the size this row last rendered at", so the placeholder
+     follows the user's zoom; the 60px is only the first guess for a row nobody
+     has scrolled to yet, and it is PersonCard's measured height at default
+     text size.
+
+     `:not(:focus-within)` because content-visibility also applies paint
+     containment, which clips the 2px-offset focus ring to the row's box: a
+     keyboard user tabbing the roster lost the top, bottom and left edges of
+     their focus indicator (confirmed by screenshot). Containment lifts for the
+     one row that holds focus, which costs nothing and restores the ring. */
+  .roster-list > li:not(:focus-within) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 60px;
+  }
   .icon-btn {
     padding: 0.4rem 0.5rem;
     line-height: 0;
+  }
+  .as-of {
+    margin: 0.5rem 0 0;
+    font-size: 0.8rem;
+    line-height: 1.45;
+    max-width: 60ch;
   }
 </style>

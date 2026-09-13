@@ -13,6 +13,11 @@
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { receiveGrants } from "$lib/events/attendee.js";
   import {
+    discoverJoinedSpaces,
+    awaitingKey,
+    type DiscoveredMembership,
+  } from "$lib/events/membership.js";
+  import {
     startScanBudget,
     scanFailure,
     unreachableEventCount,
@@ -29,6 +34,8 @@
   import { t, tp, tcp } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
+  /** Cards showing "waiting for its key" — they need one sentence of context. */
+  const anyPendingKey = $derived(events.some((e) => e.pendingKey));
 
   /**
    * What each card says about itself, from data already on this device.
@@ -112,13 +119,20 @@
   function backfillFromKeystore(
     keys: { coordinate: string; role: "organizer" | "attendee" }[],
     authoritative = false,
+    pending: DiscoveredMembership[] = [],
   ) {
     const byCoordinate = new Map(keys.map((k) => [k.coordinate, k]));
+    const pendingCoords = new Set(pending.map((p) => p.coordinate));
     if (authoritative) {
       for (const prior of recentEvents.list) {
         recentEvents.reconcile({
           ...prior,
           role: byCoordinate.get(prior.coordinate)?.role ?? "visitor",
+          // Written on EVERY authoritative pass, `false` included: this is the
+          // read that clears the flag once a grant finally lands, and a card
+          // still saying "waiting for its key" over an event the user can now
+          // open would be the same lie in the other direction.
+          pendingKey: pendingCoords.has(prior.coordinate),
         });
       }
     }
@@ -132,6 +146,35 @@
           icon: prior?.icon,
           role: k.role,
           at: prior?.at ?? 1, // reconciliation must preserve recent navigation order
+        });
+      } catch {
+        /* one malformed coordinate must not abort the whole backfill */
+      }
+    }
+    // Spaces the NETWORK says this identity joined and this device cannot open
+    // (audit E9). Nothing above would ever add them — that is the whole point:
+    // without this loop the user sees an empty list, which is indistinguishable
+    // from never having joined. `coordinateToNaddr` carries the coordinate's own
+    // kind, so a community lands here exactly like an event; enrichEvents() fills
+    // in the real title behind the placeholder.
+    //
+    // LAST, and with no key-store check of its own: `awaitingKey` has already
+    // decided what belongs here, and it counts a record with an empty ECK list as
+    // unopenable. So an event the key store knows a role for but holds no key
+    // for lands in this loop and is corrected down to "waiting for its key",
+    // which is the truth about it. The moment a real ECK arrives, `awaitingKey`
+    // stops returning it and the role loop above puts its badge back.
+    for (const p of pending) {
+      try {
+        const prior = recentEvents.list.find((e) => e.coordinate === p.coordinate);
+        recentEvents.reconcile({
+          coordinate: p.coordinate,
+          naddr: prior?.naddr ?? coordinateToNaddr(p.coordinate),
+          title: prior?.title ?? placeholderTitle(p.coordinate),
+          icon: prior?.icon,
+          role: "visitor",
+          pendingKey: true,
+          at: prior?.at ?? 1,
         });
       } catch {
         /* one malformed coordinate must not abort the whole backfill */
@@ -166,11 +209,23 @@
       // backfill marker months earlier re-asked exactly the question that had
       // already failed — and answered "No events yet" again, with more confidence.
       receiveGrants(signer, { budget, onOutcome, ...(force ? { force: true } : {}) }),
+      // The third question, and the only one that can be answered when the other
+      // two come back empty: "which spaces did you ever ASK to join?" (audit E9,
+      // events/membership.ts). It recovers no key — it reads the attendee's own
+      // 31602 self-copies — so it runs at LOW priority in the shared budget and
+      // can never take a signer prompt away from the two scans above.
+      //
+      // No `force`: it has no latch to bypass. It re-reads the full history on
+      // every pass by construction (a `{kinds, authors}` filter with no `since`),
+      // which is exactly why it can see a join the 3-day grant window cannot.
+      discoverJoinedSpaces(signer, { budget, onOutcome }),
     ]);
     scanError = scanFailure(results, outcomes);
     keysWaiting = unreachableEventCount(outcomes);
+    const discovered = results[2].status === "fulfilled" ? results[2].value : [];
     try {
-      backfillFromKeystore(await listEventKeys(), true);
+      const held = await listEventKeys();
+      backfillFromKeystore(held, true, awaitingKey(discovered, held));
       void enrichEvents();
     } catch {
       // A failed custody read is not evidence that every event is a visitor.
@@ -380,7 +435,14 @@
             {e.title}
           </strong>
           <span class="cardmeta">
-            <span class="badge">{t(roleLabel[e.role])}</span>
+            {#if e.pendingKey}
+              <!-- Not "viewed". The one thing this device knows about this space
+                   is that the person asked to join it and the key never arrived,
+                   and saying so is the entire reason the card exists at all. -->
+              <span class="badge warn">{t("home.role.awaitingKey")}</span>
+            {:else}
+              <span class="badge">{t(roleLabel[e.role])}</span>
+            {/if}
             {#if facts.people !== undefined}
               <span class="muted">{tcp("attendees.count", facts.community, facts.people)}</span>
             {/if}
@@ -393,6 +455,15 @@
       </button>
     {/each}
   </div>
+  {#if anyPendingKey}
+    <!-- One sentence for the badge above. Without it "waiting for its key" is a
+         label with no explanation and no next step; with it the user knows the
+         event is real, why it won't open, and that the wider search is right
+         below. -->
+    <p class="muted" role="status" aria-live="polite" style="margin-top:0.5rem">
+      {t("home.awaitingKey.note")}
+    </p>
+  {/if}
   {#if scanError || retrying}
     <!-- We have SOME events but the scan couldn't finish, so this list may be
          short of the one the user is looking for. Quiet here (they can see a

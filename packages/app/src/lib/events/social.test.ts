@@ -15,7 +15,13 @@ const { streamEvents } = vi.hoisted(() => ({ streamEvents: vi.fn() }));
 vi.mock("$lib/nostr/stream.js", () => ({ streamEvents }));
 vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents: vi.fn(), fetchEventsRelayOnly: vi.fn() }));
 
-import { avatarInfo, fetchProfiles, profileNeedsFetch, type ProfileMeta } from "./social.js";
+import {
+  avatarInfo,
+  fetchProfiles,
+  profileDisplayName,
+  profileNeedsFetch,
+  type ProfileMeta,
+} from "./social.js";
 import {
   __setPersistBackend,
   __resetPersistForTests,
@@ -62,6 +68,61 @@ describe("avatarInfo (Bug 3: talk avatars)", () => {
 
   it("returns undefined fields for an unresolved profile (initials fallback)", () => {
     expect(avatarInfo(AUTHOR, new Map())).toEqual({ name: undefined, picture: undefined });
+  });
+});
+
+/**
+ * Which of a kind-0's two name fields wins.
+ *
+ * The app resolved `name || display_name`, so someone who updated ONLY their
+ * `display_name` — the field most clients label "Display name" or just "Name" in
+ * their profile editor — kept rendering their older `name` here while every
+ * other client showed the new one. The rest of Nostr (Damus, Amethyst, Primal,
+ * Snort, Coracle, NDK) prefers `display_name` and falls back to `name`, and
+ * NIP-01 means them that way round: `name` is the short handle, `display_name`
+ * the human-readable one.
+ */
+describe("profileDisplayName", () => {
+  it("prefers display_name over an older name (the reported bug)", () => {
+    expect(profileDisplayName({ name: "ada1815", display_name: "Ada Lovelace" })).toBe(
+      "Ada Lovelace",
+    );
+  });
+
+  it("renders whichever single field is set, and never blanks a name", () => {
+    expect(profileDisplayName({ name: "ada1815" })).toBe("ada1815");
+    expect(profileDisplayName({ display_name: "Ada Lovelace" })).toBe("Ada Lovelace");
+  });
+
+  it("treats an empty or whitespace display_name as absent", () => {
+    // Several editors write the key whether or not it was filled in. Letting
+    // that win would make a perfectly good `name` disappear — which is the one
+    // thing a change to this rule must not do.
+    expect(profileDisplayName({ name: "ada1815", display_name: "" })).toBe("ada1815");
+    expect(profileDisplayName({ name: "ada1815", display_name: "   " })).toBe("ada1815");
+  });
+
+  it("reads the legacy displayName spelling only when display_name is absent", () => {
+    expect(profileDisplayName({ name: "ada1815", displayName: "Ada Lovelace" })).toBe(
+      "Ada Lovelace",
+    );
+    expect(
+      profileDisplayName({ displayName: "Stale", display_name: "Current" }),
+    ).toBe("Current");
+  });
+
+  it("is undefined for a profile with no usable name at all", () => {
+    expect(profileDisplayName({})).toBeUndefined();
+    expect(profileDisplayName({ name: "  " })).toBeUndefined();
+    // Malformed kind-0s are ordinary on relays; a non-string must not throw or
+    // be rendered as "[object Object]".
+    expect(profileDisplayName({ name: 42, display_name: null })).toBeUndefined();
+    expect(profileDisplayName(null)).toBeUndefined();
+    expect(profileDisplayName("not an object")).toBeUndefined();
+  });
+
+  it("trims the name it returns", () => {
+    expect(profileDisplayName({ display_name: "  Ada Lovelace  " })).toBe("Ada Lovelace");
   });
 });
 
@@ -135,6 +196,21 @@ describe("fetchProfiles cache behaviour", () => {
     const second = await fetchProfiles([PK]);
     expect(second.get(PK)?.name).toBe("Ada");
     expect(streamEvents).toHaveBeenCalledTimes(1); // no second relay read
+  });
+
+  it("resolves a fetched profile's name by display_name first", async () => {
+    // The wiring, not just the rule: this is the value that lands in the cache
+    // and is rendered everywhere a person's name appears.
+    streamEvents.mockReturnValue({
+      ready: Promise.resolve([
+        {
+          pubkey: PK,
+          created_at: Math.floor(Date.now() / 1000),
+          content: JSON.stringify({ name: "ada1815", display_name: "Ada Lovelace" }),
+        },
+      ]),
+    });
+    expect((await fetchProfiles([PK])).get(PK)?.name).toBe("Ada Lovelace");
   });
 
   it("does not re-stream a pubkey the relays had no profile for, twice in a row", async () => {

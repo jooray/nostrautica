@@ -12,6 +12,7 @@ import {
   ScanIncompleteError,
   SCAN_BUDGET_MS,
   MAX_SIGNER_CALLS,
+  LOW_PRIORITY_RESERVE,
 } from "./scan-budget.js";
 
 describe("startScanBudget", () => {
@@ -45,6 +46,52 @@ describe("startScanBudget", () => {
   it("defaults sit below Home's 12s spinner backstop", () => {
     expect(SCAN_BUDGET_MS).toBeLessThan(12_000);
     expect(MAX_SIGNER_CALLS).toBeGreaterThan(0);
+  });
+
+  it("holds a reserve back from work that cannot recover a key", () => {
+    // The membership sweep (31602 self-copies) proves you joined something; it
+    // can never hand this device an ECK. Left to race for the same pool, an
+    // account with many joins would spend the whole allowance on it and the
+    // grant scan would run out before reaching the wrap that actually holds the
+    // key the user is missing.
+    const budget = startScanBudget({ maxCalls: 5, reserve: 3, now: () => 0 });
+    expect([budget.take("low"), budget.take("low"), budget.take("low")]).toEqual([
+      true,
+      true,
+      false, // only 5 − 3 claims are ever available to low-priority work
+    ]);
+    // …and the three it was refused are still there for the scans that count.
+    expect([budget.take(), budget.take(), budget.take(), budget.take()]).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it("lets normal work spend the whole pool, reserve included", () => {
+    const budget = startScanBudget({ maxCalls: 2, reserve: 2, now: () => 0 });
+    expect(budget.take("low")).toBe(false); // nothing at all is spare
+    expect([budget.take(), budget.take(), budget.take()]).toEqual([true, true, false]);
+  });
+
+  it("defaults leave real room for both (the reserve is a floor, not the cap)", () => {
+    expect(LOW_PRIORITY_RESERVE).toBeGreaterThan(0);
+    expect(LOW_PRIORITY_RESERVE).toBeLessThan(MAX_SIGNER_CALLS);
+  });
+
+  it("a reserve wider than the cap disables low-priority work rather than wrapping", () => {
+    const budget = startScanBudget({ maxCalls: 2, reserve: 99, now: () => 0 });
+    expect(budget.take("low")).toBe(false);
+    expect(budget.take()).toBe(true);
+  });
+
+  it("still stops low-priority work when the wall clock is spent", () => {
+    let clock = 0;
+    const budget = startScanBudget({ budgetMs: 100, maxCalls: 50, reserve: 0, now: () => clock });
+    expect(budget.take("low")).toBe(true);
+    clock += 100;
+    expect(budget.take("low")).toBe(false);
   });
 });
 

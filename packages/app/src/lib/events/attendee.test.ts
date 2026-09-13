@@ -19,6 +19,7 @@ import {
   type Rumor,
   type KeyGrantContent,
   type OrganizerGrantContent,
+  KIND_COMMUNITY,
 } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
@@ -176,6 +177,30 @@ describe("C2 — authenticateKeyGrant (21602)", () => {
 
   it("accepts a grant sealed by E_id", () => {
     expect(authenticateKeyGrant(fakeRumor(eid, KIND_KEY_GRANT, grant), grant, config)).toBe(true);
+  });
+
+  it("accepts a grant for a COMMUNITY, not only a dated event", () => {
+    // Regression. Both grant authenticators compared the coordinate's kind
+    // against KIND_CALENDAR_EVENT alone, so the moment communities got their own
+    // kind (31612) every key grant for one was refused. A key grant is how an
+    // approved member receives the ECK, so a community would have worked for
+    // exactly one person: its creator, who self-approves locally and would never
+    // have seen it fail. Both kinds now go through the protocol's own allowlist.
+    const communityCoord = makeCoordinate(eid, "cypherpunks-sk", KIND_COMMUNITY);
+    const g: KeyGrantContent = { ...grant, a: communityCoord };
+    expect(authenticateKeyGrant(fakeRumor(eid, KIND_KEY_GRANT, g), g, config)).toBe(true);
+  });
+
+  it("still refuses a coordinate that is neither space kind", () => {
+    // The guard is an allowlist, not "any kind that parses" (audit R18): an
+    // alias like `1:<E_id>:<d>` must not open a divergent namespace against the
+    // same author and identifier.
+    for (const kind of [1, 30023, 31600, 31924]) {
+      const g: KeyGrantContent = { ...grant, a: `${kind}:${eid}:cypherpunk-2026` };
+      expect(authenticateKeyGrant(fakeRumor(eid, KIND_KEY_GRANT, g), g, config), `kind ${kind}`).toBe(
+        false,
+      );
+    }
   });
 
   it("accepts a grant sealed by the configured coordinator", () => {

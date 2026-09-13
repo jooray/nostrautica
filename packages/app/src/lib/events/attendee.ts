@@ -10,7 +10,7 @@ import {
   KIND_COORDINATOR_STATUS,
   KIND_DM_RELAY_LIST,
   KIND_EVENT_CONFIG,
-  KIND_CALENDAR_EVENT,
+  isEventCoordinate,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
   KIND_MATCH_LIST,
@@ -92,7 +92,12 @@ export function authenticateOrganizerGrant(
   } catch {
     return false;
   }
-  if (coord.kind !== KIND_CALENDAR_EVENT) return false;
+  // Both space kinds, via the protocol's own allowlist (audit R18). Comparing
+  // against KIND_CALENDAR_EVENT alone silently refused every grant for a
+  // community the moment 31612 existed: a key grant is how an approved member
+  // receives the ECK, so a community would have worked for exactly one person,
+  // its creator, who self-approves locally and would never have seen it fail.
+  if (!isEventCoordinate(grant.a)) return false;
   const eid = coord.pubkey;
   // Must be sealed by E_id itself, and name E_id as the granting authority.
   if (rumor.pubkey !== eid) return false;
@@ -129,7 +134,12 @@ export function authenticateKeyGrant(
   } catch {
     return false;
   }
-  if (coord.kind !== KIND_CALENDAR_EVENT) return false;
+  // Both space kinds, via the protocol's own allowlist (audit R18). Comparing
+  // against KIND_CALENDAR_EVENT alone silently refused every grant for a
+  // community the moment 31612 existed: a key grant is how an approved member
+  // receives the ECK, so a community would have worked for exactly one person,
+  // its creator, who self-approves locally and would never have seen it fail.
+  if (!isEventCoordinate(grant.a)) return false;
   if (!config) return false;
   const eid = coord.pubkey;
   const author = rumor.pubkey;
