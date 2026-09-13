@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { onMount, onDestroy } from "svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
@@ -1533,7 +1534,14 @@
     <select bind:value={talksMode}>
       <option value="off">{t("create.talks.off")}</option>
       <option value="on">{t("create.talks.on")}</option>
-      <option value="prerecord-first">{t("create.talks.prerecordFirst")}</option>
+      <!-- Prerecord-first is defined by an event's timeline: "watch ahead, meet
+           at the venue". A community has neither an ahead nor a venue, so the
+           option is not offered there. It is only hidden, never rewritten: a
+           community whose config somehow already carries it keeps working and
+           keeps showing it as its current value. -->
+      {#if !eventShell.isCommunity || talksMode === "prerecord-first"}
+        <option value="prerecord-first">{t("create.talks.prerecordFirst")}</option>
+      {/if}
     </select>
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={saveTalks} disabled={savingTalks || talksMode === ctx?.config.talks}>
