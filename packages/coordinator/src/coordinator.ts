@@ -95,11 +95,11 @@ import {
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
-import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow } from "./store/db.js";
+import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow, type EnqueueOutcome } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
-import type { NostrPost } from "./pipeline/profile.js";
+import { extractProfileBio, type NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
   hasProfileContent,
@@ -217,6 +217,41 @@ const INBOX_RATE_WINDOW_MS = 60_000;
  * conference wifi, a socket the relay closed quietly) is unresolved.
  */
 const INBOX_RESCAN_INTERVAL_MS = 120_000;
+/**
+ * How often {@link Coordinator.profileRefreshSweep} re-reads attendees' public
+ * kind-0 profiles to notice a bio edited OUTSIDE Nostrautica.
+ *
+ * Deliberately an hour, not the two minutes above. That interval exists because a
+ * missed join request is somebody standing at a registration desk; nobody is
+ * standing anywhere while their bio propagates, and the cost profile is the
+ * opposite — this sweep issues one relay query per event per tick against
+ * PUBLIC relays the daemon does not own, so a short interval would spend other
+ * people's relay budget to shave minutes off something nobody is waiting on.
+ */
+const PROFILE_REFRESH_INTERVAL_MS = 3_600_000;
+/**
+ * How long after an event ends the sweep keeps watching its attendees' profiles.
+ *
+ * Matches are consumed during the event and the days around it. A bio edited two
+ * months later should not quietly re-rank an event nobody is attending any more —
+ * it would spend the organizer's provider budget to rewrite match lists that no
+ * client will open. Events with no known end (`eventEndSec = 0`, no 31923 `end`
+ * or `start` tag) are swept indefinitely: those are the undated/rolling community
+ * events, where "two months after" has no meaning to bound against.
+ */
+const PROFILE_REFRESH_MAX_AGE_SEC = 14 * 86_400;
+/**
+ * Attendees whose profile may be re-enqueued per event per tick.
+ *
+ * The backstop against a whole event drifting at once and approaching the cost of
+ * a full organizer `recompute`. Each re-enqueued attendee re-scores every
+ * prefiltered pair they belong to in BOTH directions and republishes their
+ * directory entry, so an unbounded sweep over a 200-person event could dispatch a
+ * recompute-sized burst from a timer nobody pressed. Whatever exceeds the cap is
+ * simply picked up by the next tick an hour later — the work is not lost, it is
+ * spread.
+ */
+const PROFILE_REFRESH_MAX_PER_EVENT = 25;
 /** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
 /**
@@ -649,6 +684,9 @@ export class Coordinator {
   /** Coordinates whose retention expiry is currently running (audit R3): guards the
    *  boot + hourly sweeps against double-executing the same event's expiry. */
   private readonly retentionInProgress = new Set<string>();
+  /** Guards the hourly profile-refresh sweep against stacking on a slow tick (it
+   *  awaits one relay fetch per installed event). Same shape as `rescanRunning`. */
+  private profileRefreshRunning = false;
   /** Events already warned about the roster ceiling (audit B-8) — once per process,
    *  so a burst of approvals near the limit produces one notice, not one per person. */
   private readonly rosterWarned = new Set<string>();
@@ -2514,10 +2552,16 @@ export class Coordinator {
    * (audit H4): no transcript/summary/profile/embedding/scoring work — and thus
    * no provider billing — for an event that disabled AI matching.
    */
-  private enqueueProcess(coordinate: string, pubkey: string): void {
+  private enqueueProcess(coordinate: string, pubkey: string, kind0Bio?: string): EnqueueOutcome | "skipped" {
     const state = this.events.get(coordinate);
-    if (state?.matching === "off") return;
+    if (state?.matching === "off") return "skipped";
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
+    // UNCHANGED on purpose: the `version` component stays exactly
+    // `sha256(profile_json)`, because `supersedePendingJobs` below matches on the
+    // `proc:<coordinate>:<pubkey>:` prefix and every enqueue path has to produce
+    // keys from the same family. A sweep that hashed the profile differently would
+    // stop superseding the submission path's pending jobs, and the coordinator
+    // would pay twice to derive the same attendee.
     const version = sha256Hex(utf8ToBytes(attendee?.profile_json ?? "")).slice(0, 16);
     // The key names every input the run derives from, not just the profile (audit
     // B-11). The event's language and nostr-context depth are inputs too — the
@@ -2528,7 +2572,25 @@ export class Coordinator {
     // Slovak got a log line saying the enqueue was dropped and not one re-summarized
     // profile. Every attendee costs one reprocess per flip now, which is exactly
     // what the flip means.
-    const key = `proc:${coordinate}:${pubkey}:${version}:l=${state?.lang ?? "?"}:n=${state?.nostrContextN ?? 0}`;
+    // `k0` is the attendee's CURRENT public kind-0 bio, hashed — the input that
+    // used to be invisible to this key. The bug it fixes was reported by a real
+    // user: they had used Nostr for years, joined with that identity, then updated
+    // their profile OUTSIDE Nostrautica. Their ai_profile and everyone's matches
+    // stayed computed from the bio they had at join, forever, because every input
+    // named in this key was unchanged — the bio is fetched INSIDE the run
+    // (`fetchNostrContext`), so the key could not see that it had moved.
+    //
+    // Empty for every caller that does not have the bio in hand (submission,
+    // approval, config edit, handover, admin reprocess). Those paths re-read kind 0
+    // inside the run anyway, so they are already current; only the sweep needs to
+    // express "the bio moved since the last run" as a distinct key. The cost of
+    // that asymmetry is one extra run per attendee per submission revision, the
+    // first time the sweep sees them — and that run is LLM-free (every pipeline
+    // stage hits its content-addressed artifact cache) and re-ranks nothing (an
+    // unchanged ai_profile leaves `profile_hash` alone, so no pair inputs_hash
+    // moves). Paying that once beats carrying a watermark table for it.
+    const k0 = kind0Bio === undefined ? "" : sha256Hex(utf8ToBytes(kind0Bio)).slice(0, 16);
+    const key = `proc:${coordinate}:${pubkey}:${version}:l=${state?.lang ?? "?"}:n=${state?.nostrContextN ?? 0}:k0=${k0}`;
     // Coalesce superseded revisions (audit H-2): a new submission cancels this
     // attendee's still-pending/parked process_attendee jobs for OLDER revisions, so
     // the coordinator never pays to download+STT+profile a recording the attendee
@@ -2540,7 +2602,13 @@ export class Coordinator {
     // conditional commit is gated on the revision it actually READS at execution
     // (the authoritative "what this run derived from"); this payload copy records
     // the revision that was current at enqueue for traceability/debugging.
-    this.jobs.enqueue("process_attendee", key, {
+    // The outcome is RETURNED (it used to be discarded) so the profile-refresh
+    // sweep can tell "no-op because nothing changed" from "no-op because this key
+    // is already `poison`". Reading the second as the first is how two attendees
+    // sat without profiles for two weeks (see the `reprocess` handler): a poisoned
+    // row makes its key permanently un-runnable, and a sweep that logs nothing
+    // would hide that state indefinitely instead of surfacing it.
+    return this.jobs.enqueue("process_attendee", key, {
       coordinate,
       pubkey,
       sourceRevision: attendee?.source_revision ?? null,
@@ -2549,6 +2617,27 @@ export class Coordinator {
 
   /** Account-addressed gift wraps must reach both event-local and reader-default relays. */
   private accountRelays(state: EventState): string[] {
+    return [...new Set([...state.configRelays, ...this.deps.defaultRelays])];
+  }
+
+  /**
+   * Relays to read an attendee's OWN public events (kind 0 / notes) from.
+   *
+   * The event's `configRelays` alone are the wrong set, and this was a real defect:
+   * a person who has used Nostr for years publishes their kind 0 to THEIR relays,
+   * and nothing obliges an event's relay list to carry it. Reading only
+   * `configRelays` meant the daemon fetched nothing, concluded the bio was
+   * unchanged, and left them matched on whatever their profile said the day they
+   * joined — while every deploy marker printed OK, because nothing had failed.
+   *
+   * `defaultRelays` is the same reader-default set `accountRelays` unions in for
+   * the same reason (a gift wrap has to REACH a person who is not on the event's
+   * relays; this has to FIND them there). Kept as its own method rather than
+   * reusing `accountRelays` because the two are only incidentally equal today:
+   * one is a write/delivery set, this is a read/discovery set, and a future
+   * NIP-65 outbox lookup belongs here and not there.
+   */
+  private publicReadRelays(state: EventState): string[] {
     return [...new Set([...state.configRelays, ...this.deps.defaultRelays])];
   }
 
@@ -4265,6 +4354,157 @@ export class Coordinator {
   }
 
   /**
+   * Periodic profile-refresh sweep: notice when an attendee has edited their
+   * public kind-0 profile OUTSIDE Nostrautica, and re-derive what depends on it.
+   *
+   * THE BUG THIS EXISTS FOR. A user who had been on Nostr for years joined an
+   * event with that identity, then noticed their profile was out of date and
+   * updated it in their usual client — new display name, new bio. Nostrautica went
+   * on describing them, and matching them to other people, using the bio they had
+   * on the day they joined. Nothing was broken in a way anything could report: the
+   * bio IS an input to `ai_profile` (`fetchNostrContext` fetches kind 0 and
+   * `summarizeNostr` labels it "Profile bio:"), but it is fetched INSIDE a
+   * pipeline run, and the only things that started a run were coordinator-side
+   * events — a new submission, an approval, a config edit, an organizer command.
+   * A kind 0 changing out on the network was not one of them, so the run that
+   * would have picked it up never happened.
+   *
+   * HOW IT DETECTS A CHANGE, without storing a watermark. It hashes the current
+   * bio into the `process_attendee` dedupe key (see {@link enqueueProcess}). That
+   * key is UNIQUE in the jobs table, so an unchanged bio produces a byte-identical
+   * key and the enqueue is a no-op that costs nothing — no provider call, no row,
+   * no spend. A changed bio produces a new key, the job runs, and every derived
+   * artifact downstream re-derives itself off its own content hash: new posts+bio
+   * ⇒ new nostr summary ⇒ new ai_profile ⇒ new `profile_hash` ⇒ every pair
+   * `inputs_hash` involving them moves ⇒ `match_recompute` rescores them against
+   * the roster, forward and reverse. None of that chain needed changing; it was
+   * always correct, and was simply never started.
+   *
+   * WHAT IT DELIBERATELY DOES NOT WATCH: new notes. `fetchNostrContext` also feeds
+   * the last N posts to the model, and polling those would re-enrich somebody
+   * every time they posted — a cost that scales with how chatty an attendee is
+   * rather than with whether anything about them changed. A bio edit is a
+   * deliberate "this is who I am now"; a note is not. The run a bio edit triggers
+   * re-reads the posts anyway, so posts still reach matching — just on the
+   * person's own edit, not on their every toot.
+   */
+  async profileRefreshSweep(): Promise<void> {
+    const nowSec = Math.floor(this.now() / 1000);
+    for (const state of [...this.events.values()]) {
+      // Same live/terminal guards the rest of the daemon uses. A detached,
+      // tombstoned or retention-expired event must not have work started for it,
+      // and `retentionExpired` in particular is a TERMINAL park — re-enqueuing
+      // there would resurrect paid processing for an event whose member records
+      // have already been deleted.
+      if (!this.eventStillLive(state.coordinate)) continue;
+      if (this.deps.store.isRetentionExpired(state.coordinate)) continue;
+      // Matching off ⇒ no AI stages run for this event at all (audit H4), so there
+      // is nothing for a refreshed bio to change. Checked here as well as inside
+      // `enqueueProcess` so the relay fetch below is skipped too, not just the
+      // enqueue it would have fed.
+      if (state.matching === "off") continue;
+      // nostr_context = 0 ⇒ the pipeline never reads kind 0 (`fetchNostrContext`
+      // returns [] on n <= 0), so the bio is not a model input and re-running would
+      // rebuild a byte-identical ai_profile off the artifact cache. Skipping is not
+      // an optimization here, it is the difference between a no-op and a lie.
+      if (state.nostrContextN <= 0) continue;
+      // Past the window where matches are still being read (see
+      // PROFILE_REFRESH_MAX_AGE_SEC). `eventEndSec = 0` means "no known end", which
+      // is swept indefinitely rather than treated as epoch and skipped forever.
+      if (state.eventEndSec > 0 && nowSec > state.eventEndSec + PROFILE_REFRESH_MAX_AGE_SEC) continue;
+      try {
+        await this.refreshEventProfiles(state);
+      } catch (e) {
+        log(
+          `[profile-refresh] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e} — will retry next sweep`,
+        );
+      }
+    }
+  }
+
+  /**
+   * One event's half of {@link profileRefreshSweep}: fetch every approved
+   * attendee's kind 0 in ONE query and re-enqueue the ones whose bio moved.
+   */
+  private async refreshEventProfiles(state: EventState): Promise<void> {
+    // Organizers are excluded for the same reason `applyConfigUpdate`'s re-enqueue
+    // excludes them: they are not matched, so nothing downstream reads their
+    // ai_profile and a run for them would be pure spend.
+    const attendees = this.deps.store
+      .approvedAttendees(state.coordinate)
+      .filter((a) => a.role !== "organizer" && this.deps.store.getAttendee(state.coordinate, a.pubkey)?.profile_json);
+    if (attendees.length === 0) return;
+
+    // ONE batched query for the whole event, not one per attendee. Kind 0 is
+    // replaceable and the filter is author-scoped, so a single `authors: [...]`
+    // fetch returns at most one current event per person — asking per attendee
+    // would multiply a single round trip by the size of the roster for nothing.
+    const events = await this.deps.transport.fetch(
+      { kinds: [KIND_PROFILE], authors: attendees.map((a) => a.pubkey) },
+      this.publicReadRelays(state),
+    );
+    // Relays may each return their own copy; keep the newest per author using the
+    // §3.1 replaceable rule, exactly as `fetchNostrContext` does, so the sweep and
+    // the run it triggers agree on WHICH kind 0 is current. Disagreeing here would
+    // make the sweep enqueue off one revision and the run derive from another.
+    const latest = new Map<string, NostrEvent>();
+    for (const e of events) {
+      if (e.kind !== KIND_PROFILE) continue;
+      const prev = latest.get(e.pubkey);
+      if (!prev || compareLatest(e, prev) < 0) latest.set(e.pubkey, e);
+    }
+
+    let refreshed = 0;
+    let unchanged = 0;
+    let stuck = 0;
+    for (const a of attendees) {
+      if (refreshed >= PROFILE_REFRESH_MAX_PER_EVENT) {
+        log(
+          `[profile-refresh] ${state.coordinate}: hit the ${PROFILE_REFRESH_MAX_PER_EVENT}-attendee per-tick cap — the rest resume next sweep`,
+        );
+        break;
+      }
+      const kind0 = latest.get(a.pubkey);
+      // No kind 0 found is NOT "their bio is empty". It is "no relay we asked had
+      // one", which a dead relay produces just as readily as a profileless user.
+      // Treating it as an empty bio would hash to a value that differs from
+      // whatever was used before and enqueue a pointless run for everybody on the
+      // event every time a relay had a bad minute.
+      if (!kind0) continue;
+      const bio = extractProfileBio(kind0.content) ?? "";
+      const outcome = this.enqueueProcess(state.coordinate, a.pubkey, bio);
+      if (outcome === "enqueued") {
+        refreshed++;
+        log(`[profile-refresh] ${short(a.pubkey)}: kind-0 bio changed since the last run — re-enriching + re-matching`);
+      } else if (outcome === "poison") {
+        // NOT the same as "already done", and the distinction is the whole reason
+        // the outcome is inspected. A poisoned row makes its dedupe key
+        // permanently un-runnable, so this attendee is frozen at this bio until
+        // somebody intervenes — exactly the state two attendees sat in for two
+        // weeks after a translation bug that had already been fixed. The sweep
+        // cannot safely clear it on its own (that would re-run a job that has
+        // already failed its retries, on a timer, forever), so it says so loudly
+        // and leaves the repair to an organizer `reprocess`.
+        stuck++;
+        log(
+          `[profile-refresh] ${short(a.pubkey)}: kind-0 bio changed but their process job is POISON — NOT re-enriched; an organizer 'reprocess' is needed to clear it`,
+        );
+      } else {
+        unchanged++;
+      }
+    }
+    // Only speak when something happened. An hourly sweep over a quiet event would
+    // otherwise write a line per event per hour saying nothing changed, which is
+    // how a log stops being read.
+    if (refreshed > 0 || stuck > 0) {
+      log(
+        `[profile-refresh] ${state.coordinate}: ${refreshed} profile(s) refreshed, ${unchanged} unchanged` +
+          (stuck > 0 ? `, ${stuck} BLOCKED by a poisoned job` : ""),
+      );
+    }
+  }
+
+  /**
    * Expire one event's retention (NIP §6.2): NIP-09-delete every member record,
    * park paid processing terminally, and notify organizers via 21606. The public
    * effect is best-effort (relays may not honor NIP-09) — the wording never
@@ -4402,11 +4642,19 @@ export class Coordinator {
    */
   async fetchNostrContext(state: EventState, pubkey: string, n: number): Promise<NostrPost[]> {
     if (n <= 0) return [];
+    // Read the attendee's own relays too, not just the event's (see
+    // {@link publicReadRelays}). This has to match the relay set the
+    // profile-refresh sweep detects changes on, or the two disagree in the worst
+    // possible way: the sweep sees a new bio on a default relay, enqueues a
+    // re-enrichment, and the run then re-reads only `configRelays`, finds the OLD
+    // kind 0, and rebuilds a byte-identical ai_profile. The job would be spent,
+    // the log would say it ran, and the person's matches would never move.
+    const readRelays = this.publicReadRelays(state);
     const [profileEvents, postEvents] = await Promise.all([
-      this.deps.transport.fetch({ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }, state.configRelays),
+      this.deps.transport.fetch({ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }, readRelays),
       this.deps.transport.fetch(
         { kinds: [KIND_NOTE, KIND_REPOST, KIND_LONGFORM], authors: [pubkey], limit: n },
-        state.configRelays,
+        readRelays,
       ),
     ]);
     // Kind 0 is replaceable — pick it with the §3.1 rule, not an ad-hoc sort, so a
@@ -4575,6 +4823,30 @@ export class Coordinator {
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.push(() => clearInterval(retentionTimer));
+    // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
+    // {@link profileRefreshSweep} for the user report this fixes).
+    //
+    // No boot run, unlike the retention sweep above. Retention runs at boot because
+    // a window that elapsed while the daemon was down is a deletion that is already
+    // overdue; a bio that changed during a restart is not overdue by any standard,
+    // and the first tick catches it an hour later. Startup is the wrong moment to
+    // add a relay round trip per installed event: the daemon is not "ready" until
+    // it reaches its watch loop, that readiness is measured and alarmed on, and it
+    // already drifts upward with the number of installed events.
+    //
+    // Overlap-guarded like the inbox rescan: the sweep awaits a relay fetch per
+    // event, so on a many-event daemon a slow tick must not stack on the next one.
+    const profileTimer = setInterval(() => {
+      if (this.profileRefreshRunning) return;
+      this.profileRefreshRunning = true;
+      void this.profileRefreshSweep()
+        .catch((e) => log(`[profile-refresh] sweep failed: ${e instanceof Error ? e.message : e}`))
+        .finally(() => {
+          this.profileRefreshRunning = false;
+        });
+    }, PROFILE_REFRESH_INTERVAL_MS);
+    if (typeof (profileTimer as any).unref === "function") (profileTimer as any).unref();
+    this.closers.push(() => clearInterval(profileTimer));
     // Daemon-wide ceiling release (audit SEC-7): work parked because the whole
     // daemon was over its rolling budget has no other way back — the per-event
     // resume paths are driven by billing and by organizer action, and neither

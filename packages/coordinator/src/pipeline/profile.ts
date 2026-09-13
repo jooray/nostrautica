@@ -478,8 +478,17 @@ export function nostrInputsHash(pubkey: string, posts: NostrPost[], lang = "en",
   return sha256Hex(utf8ToBytes(canonical));
 }
 
-/** Extract the "about" bio from a kind-0 metadata event's JSON content, if any. */
-function extractProfileBio(content: string): string | undefined {
+/**
+ * Extract the "about" bio from a kind-0 metadata event's JSON content, if any.
+ *
+ * Exported because it is also the CHANGE-DETECTION input for the periodic
+ * profile-refresh sweep (`Coordinator.profileRefreshSweep`). The sweep must hash
+ * exactly the kind-0 field this pipeline reads and nothing else: `about` is the
+ * only part of a kind 0 that reaches the model (see `summarizeNostr` below), so
+ * hashing the whole event would re-enrich — and re-rank — every time somebody
+ * fixed their lud16 or swapped their avatar, which changes no model input at all.
+ */
+export function extractProfileBio(content: string): string | undefined {
   try {
     const parsed = JSON.parse(content);
     const about = typeof parsed?.about === "string" ? parsed.about.trim() : "";

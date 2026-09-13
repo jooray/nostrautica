@@ -16,6 +16,7 @@ import {
   wrapRumor,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
+  KIND_PROFILE,
   KIND_KEY_GRANT,
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
@@ -37,6 +38,8 @@ import {
   keyGrantContentSchema,
   coordinatorStatusContentSchema,
   unwrapRumor,
+  sha256Hex,
+  utf8ToBytes,
   RUMOR_MAX_CLOCK_SKEW_SEC,
   type EckVersion,
 } from "@nostrautica/protocol";
@@ -56,6 +59,11 @@ class FakeTransport implements Transport {
   subs: { filter: any; relays?: string[]; onEvent: (e: NostrEvent) => void; closed: boolean }[] = [];
   /** Recorded fetch filters (COORD-29 tests). */
   fetches: any[] = [];
+  /** Recorded fetches WITH the relay set each one targeted. `fetches` above drops
+   *  the relays, which made the profile-refresh relay union untestable — and that
+   *  union is precisely the thing whose failure mode is silent (read the event's
+   *  relays only, find no kind 0, conclude "unchanged", do nothing, print OK). */
+  fetchCalls: { filter: any; relays?: string[] }[] = [];
   /** Throw on the next N publishes (COORD-2 failure injection). */
   failPublishes = 0;
   /** When true, a fetch touching kind 31600 returns [] — simulates an unfetchable
@@ -90,8 +98,9 @@ class FakeTransport implements Transport {
    *  so a test can mutate `seed` to model a 31600 that only names the coordinator
    *  after propagation (i.e. the value differs between the 1st and a later fetch). */
   beforeFetch?: (filter: any) => void;
-  async fetch(filter: any): Promise<NostrEvent[]> {
+  async fetch(filter: any, relays?: string[]): Promise<NostrEvent[]> {
     this.fetches.push(filter);
+    this.fetchCalls.push({ filter, relays });
     this.beforeFetch?.(filter);
     if (this.blockConfig && filter.kinds?.includes(31600)) return [];
     return [...this.seed, ...this.published].filter((e) => {
@@ -5876,5 +5885,133 @@ describe("prod 2026-07-24 — an organizer recompute must actually re-run the sc
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("profile refresh — a kind-0 edited OUTSIDE Nostrautica re-enriches and re-matches", () => {
+  // The reported bug: somebody who had used Nostr for years joined with that
+  // identity, then updated their profile in their usual client. Nostrautica kept
+  // describing and matching them on the bio they had on the day they joined,
+  // because nothing coordinator-side had changed and only coordinator-side events
+  // ever started a pipeline run.
+  function processJobKeys(h: Harness, pubkey: string): string[] {
+    return (
+      (h.store as any).db
+        .prepare("SELECT dedupe_key FROM jobs WHERE type = 'process_attendee' AND dedupe_key LIKE ?")
+        .all(`proc:${h.coordinate}:${pubkey}:%`) as { dedupe_key: string }[]
+    ).map((r) => r.dedupe_key);
+  }
+
+  /** Publish (or supersede) an attendee's public kind 0. Replaceable: a later
+   *  `created_at` wins, exactly as the §3.1 rule resolves it in production. */
+  function setKind0(h: Harness, pubkey: string, about: string, createdAt: number): void {
+    h.transport.seed.push({
+      kind: KIND_PROFILE,
+      pubkey,
+      created_at: createdAt,
+      tags: [],
+      content: JSON.stringify({ name: "Long-time Nostr user", about }),
+      id: `k0-${pubkey.slice(0, 8)}-${createdAt}`,
+      sig: "",
+    } as any);
+  }
+
+  const k0Hash = (bio: string) => sha256Hex(utf8ToBytes(bio)).slice(0, 16);
+
+  it("an UNCHANGED kind 0 enqueues nothing — the sweep must be free to run hourly", async () => {
+    const h = await setup(3);
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "Cypherpunk, cryptographer, coffee.", 100);
+    await h.coordinator.jobs.drain();
+
+    // First sighting: the sweep has never expressed this bio as a key, so it
+    // enqueues once. That run is the documented cost of carrying no watermark.
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.jobs.drain();
+    const baseline = processJobKeys(h, pk);
+    expect(baseline.some((k) => k.endsWith(`:k0=${k0Hash("Cypherpunk, cryptographer, coffee.")}`))).toBe(true);
+
+    // Every subsequent sweep over the same bio must be a pure no-op. If this ever
+    // fails, the hourly timer is re-billing the whole roster every hour.
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.profileRefreshSweep();
+    expect(processJobKeys(h, pk)).toEqual(baseline);
+  });
+
+  it("a CHANGED kind 0 enqueues exactly one job, keyed by the new bio", async () => {
+    const h = await setup(3);
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "Old bio from years ago.", 100);
+    await h.coordinator.jobs.drain();
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.jobs.drain();
+    const before = processJobKeys(h, pk);
+
+    // The user updates their profile in their own client.
+    const NEW_BIO = "Now doing hardware wallets and post-quantum signatures.";
+    setKind0(h, pk, NEW_BIO, 200);
+    await h.coordinator.profileRefreshSweep();
+
+    const after = processJobKeys(h, pk);
+    const added = after.filter((k) => !before.includes(k));
+    expect(added).toHaveLength(1);
+    // Keyed by the NEW bio, and otherwise the same key family the submission path
+    // builds — same `proc:<coordinate>:<pubkey>:` prefix, so `supersedePendingJobs`
+    // still coalesces across both paths instead of paying for the attendee twice.
+    expect(added[0]).toBe(`${before[0]!.split(":k0=")[0]}:k0=${k0Hash(NEW_BIO)}`);
+    expect(added[0]!.startsWith(`proc:${h.coordinate}:${pk}:`)).toBe(true);
+  });
+
+  it("skips the event entirely when nostr_context = 0 — the bio is not a model input there", async () => {
+    const h = await setup(0);
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "A bio nothing will read.", 100);
+    await h.coordinator.jobs.drain();
+    const before = processJobKeys(h, pk);
+
+    await h.coordinator.profileRefreshSweep();
+    setKind0(h, pk, "A completely different bio.", 200);
+    await h.coordinator.profileRefreshSweep();
+
+    // No enqueue, and no kind-0 fetch either — with n = 0 the pipeline never reads
+    // kind 0, so re-running would rebuild a byte-identical ai_profile.
+    expect(processJobKeys(h, pk)).toEqual(before);
+    expect(h.transport.fetchCalls.some((c) => c.filter?.kinds?.includes(KIND_PROFILE))).toBe(false);
+  });
+
+  it("reads kind 0 from the attendee's OWN relays, not just the event's", async () => {
+    // The test that would have caught the silent no-op. A person who has been on
+    // Nostr for years publishes their kind 0 to THEIR relays; nothing obliges the
+    // event's relay list to carry it. Reading only `configRelays` finds nothing,
+    // concludes "unchanged", does nothing — and every deploy marker still prints
+    // OK, because nothing failed.
+    const h = await setup(3, { eventRelays: ["wss://event-only"], defaultRelays: ["wss://the-users-own-relay"] });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "Bio that lives on my own relay.", 100);
+    await h.coordinator.jobs.drain();
+
+    h.transport.fetchCalls.length = 0;
+    await h.coordinator.profileRefreshSweep();
+
+    const k0Fetch = h.transport.fetchCalls.find((c) => c.filter?.kinds?.includes(KIND_PROFILE));
+    expect(k0Fetch).toBeDefined();
+    expect(k0Fetch!.relays).toContain("wss://the-users-own-relay");
+    expect(k0Fetch!.relays).toContain("wss://event-only");
+    // ONE batched query for the whole event, not one per attendee.
+    expect(k0Fetch!.filter.authors).toContain(pk);
+
+    // The pipeline's own read has to use the SAME union, or the sweep detects a
+    // change on a relay the run cannot see and rebuilds an identical ai_profile.
+    h.transport.fetchCalls.length = 0;
+    setKind0(h, pk, "Updated on my own relay again.", 200);
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.jobs.drain();
+    const pipelineK0 = h.transport.fetchCalls.filter((c) => c.filter?.kinds?.includes(KIND_PROFILE));
+    expect(pipelineK0.length).toBeGreaterThan(0);
+    for (const c of pipelineK0) expect(c.relays).toContain("wss://the-users-own-relay");
   });
 });
