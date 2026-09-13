@@ -866,7 +866,7 @@
       {t("create.rotationNote")}
     </p>
     <button class="btn primary" onclick={submit} disabled={busy}>
-      {busy ? t("create.creating") : t("create.submit")}
+      {busy ? t("create.creating") : isCommunity ? t("create.submit.community") : t("create.submit")}
     </button>
   </div>
 {/if}
