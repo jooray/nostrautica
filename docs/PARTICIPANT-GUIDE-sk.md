@@ -16,12 +16,12 @@ to je, kedy a kde) a tlačidlo na pripojenie. Ak organizátor zverejnil nejaké
 oznámenia, aj tie sa objavia hneď tu.
 
 Keď ste vnútri podujatia, spodná lišta sa celá týka *tohto* podujatia:
-**Prehľad** (kde ste teraz), **Ľudia**, **Spojenia**, **Novinky** a **Viac**
-(váš účet, nastavenia, ostatné podujatia). Ďalšie dve karty sa objavia len
-vtedy, keď organizátor tie funkcie zapne: **Prednášky** (§4.5) a **Chat**
-(§6.5). Ak ich nevidíte, toto podujatie ich jednoducho nepoužíva. Malá hlavička
-navrchu vám vždy hovorí, v ktorom podujatí ste a či ste návštevník, čakáte,
-alebo ste vnútri.
+**Prehľad** (kde ste teraz), **Ľudia**, **Novinky** a **Viac** (váš účet,
+nastavenia, ostatné podujatia). Ďalšie dve karty sa objavia len vtedy, keď
+organizátor tie funkcie zapne, každá na svojom mieste v lište: **Prednášky**
+(§4.5) hneď za Prehľadom a **Chat** (§5.5) hneď za Ľuďmi. Ak ich nevidíte,
+toto podujatie ich jednoducho nepoužíva. Malá hlavička navrchu vám vždy
+hovorí, v ktorom podujatí ste a či ste návštevník, čakáte, alebo ste vnútri.
 
 ![Prehľad podujatia](images/participant-sk/02-event-overview-light.png)
 
@@ -92,9 +92,8 @@ neukázali: zoznam vám to povie.
 
 Nižšie na tej istej stránke Prehľad, keď ste už schválení, nájdete kartu
 **Stiahnuť na offline použitie**. Klepnutím na ňu si aplikácia vopred stiahne
-ľudí, spojenia a prednášky *a zároveň načíta aj samotné obrazovky*, ktoré ich
-zobrazujú (Ľudia, Spojenia, Prednášky, stránka prednášky, Nahrávanie, Môj
-profil,
+ľudí, zhody a prednášky *a zároveň načíta aj samotné obrazovky*, ktoré ich
+zobrazujú (Ľudia, Prednášky, stránka prednášky, Nahrávanie, Môj profil,
 Novinky), takže sa všetko dá prezerať aj bez signálu, hodí sa to v preplnenej
 miestnosti, kde si všetky telefóny súperia o rovnaké slabé pripojenie. Staršie
 verzie
@@ -207,15 +206,36 @@ aby vedeli, že to nie je čisto automatické.
 
 ## 4. Ľudia
 
-Klepnite na **Ľudia** v spodnej lište a prezerajte si, kto tu je. Každý riadok
-zobrazuje avatar (fotku, alebo iniciály na farebnej dlaždici), meno a zručnosti.
-**Hľadajte** podľa mena alebo zručnosti a filtrujte len na ľudí, ktorých ste si
-označili ako **chcem stretnúť**, **stretnuté**, alebo ktorých na Nostri
-**sledujete**. Každý riadok má aj rýchle akcie: označiť **chcem stretnúť** alebo
-začať **správu** bez otvárania jeho stránky.
-Zoznam sa napĺňa priebežne, ako odpovedajú relaye: ľudia sa objavujú, ako sa
-dešifrujú (mená a fotky sa doplnia o chvíľu), takže veľký zoznam na pomalom
-pripojení nikdy nečaká na najpomalší relay.
+Klepnite na **Ľudia** v spodnej lište: jeden zoznam všetkých, kto je na
+podujatí, so zhodami navrchu. Hneď hore je **vyhľadávacie pole**, ktoré hľadá
+podľa mena, popisu aj zručností.
+
+Ak vám párovanie už niekoho vytipovalo, nad zvyškom zoznamu uvidíte sekcie
+**„Silné zhody“** a **„Dobré zhody“**: úroveň zhody je teraz nadpis nad celou
+skupinou ľudí, nie štítok opakovaný pri každom mene. Tretia, najslabšia úroveň
+sa volá **„Stoja za pozdrav“**. Pri každej zhode vidíte meno, jeden riadok z
+jej vlastného popisu a hneď pod tým **celé odôvodnenie, prečo by ste sa mali
+stretnúť** — vždy viditeľné a neskrátené, netreba naň klikať. Pod odôvodnením
+je zabalená sekcia **„Námety na rozhovor“**, ktorú si rozkliknete, ak sa vám
+zíde icebreaker. Mechaniku skóre (nakoľko ste si podobní vs. nakoľko sa
+dopĺňate) tu už nehľadajte: presunula sa na profil danej osoby, pod jej zhodu.
+
+Pod zhodami nasleduje nadpis **„Ostatní účastníci“** s počtom, filtrami
+(**Chcem stretnúť** / **Stretnuté** / **Sledované**) a celým zvyškom
+účastníkov, po jednom riadku. Poradie určujú sekcie: najprv zhody podľa
+úrovne, potom ostatní podľa abecedy. Hľadanie alebo filter tieto sekcie zlúči
+do jedného plochého zoznamu výsledkov.
+
+Ak nemáte zatiaľ žiadnu silnú zhodu, nad zoznamom nájdete namiesto toho vetu,
+že zatiaľ nikto výrazne nevyčnieva, že toto sú aktuálne najbližšie zhody a že
+sa prepočítajú, ako pribudnú ďalší ľudia. Prázdna sekcia „Silné zhody“ sa
+jednoducho nezobrazí.
+
+Na karte **Ľudia** sa objaví aj malý odznak vždy, keď pribudnú nové zhody od
+vašej poslednej návštevy, takže nemusíte stále kontrolovať zoznam, ktorý sa
+nezmenil. Samotný zoznam sa napĺňa priebežne, ako odpovedajú relaye: ľudia sa
+objavujú, ako sa dešifrujú (mená a fotky sa doplnia o chvíľu), takže veľký
+zoznam na pomalom pripojení nikdy nečaká na najpomalší relay.
 
 Zoznam účastníkov je **zašifrovaný pre schválených účastníkov**, takže kým vás
 neschvália (alebo tesne po tom, než sa to ešte len synchronizuje), obrazovka
@@ -224,19 +244,33 @@ presne tak, ako má, nie chyba:
 
 ![Ľudia: zašifrované, kým vás neschvália](images/participant-sk/08-attendees-light.png)
 
-Keď ste vnútri, klepnutím na kohokoľvek otvoríte jeho stránku: predstavovacie
-video, čo robí, čo hľadá, AI-generované zhrnutie, ak už párovanie prebehlo, a
-jeho nedávne verejné príspevky.
+**Akcie sú pri každom rovnaké**, či ide o zhodu alebo nie: **Sledovať**,
+**Chcem stretnúť** a **Napísať**, priamo pri riadku, bez otvárania stránky
+danej osoby. Predtým zhody sledovanie ani „chcem stretnúť“ vôbec nemali; to bol
+hlavný dôvod, prečo sa zoznamy spojili do jednej obrazovky. Klepnutím na meno
+alebo na riadok otvoríte celú stránku danej osoby: predstavovacie video, čo
+robí, čo hľadá, AI-generované zhrnutie, ak už párovanie prebehlo, a jej
+nedávne verejné príspevky.
 
-Na stránke niekoho iného ho môžete **Sledovať**, klepnutím na **Napísať správu**
-začať súkromný chat (pozri §6), a, súkromne (tieto nikto iný nikdy neuvidí),
-označiť **Chcem stretnúť** alebo **Stretnuté ✓** a nechať si súkromnú poznámku
-(„bubeník s mesh-network startupom“). Po znovunačítaní všetko zostane. Ak vás
-niekto obťažuje, **Stlmenie** ho skryje z vášho zoznamu Ľudia, zo Spojení aj zo
-správ (je to štandardné Nostr stlmenie, takže sa prenesie aj do iných Nostr
-aplikácií):
+Na stránke niekoho iného môžete rovnako **Sledovať**, klepnutím na **Napísať
+správu** začať súkromný chat (pozri §5) a súkromne (tieto nikto iný nikdy
+neuvidí) označiť **Chcem stretnúť** alebo **Stretnuté ✓** a nechať si súkromnú
+poznámku („bubeník s mesh-network startupom“). Píšete niekomu, s kým vás
+párovanie spárovalo? Editor správy sa otvorí už predvyplnený navrhnutou
+úvodnou vetou od koordinátora — pred odoslaním si ju môžete upraviť alebo
+celkom zmazať. Samostatné tlačidlo **Predstaviť nás** na to isté zostáva aj na
+profile danej zhody. Po znovunačítaní všetko zostane. Ak vás niekto obťažuje,
+**Stlmenie** ho skryje z vášho zoznamu Ľudia aj zo správ (je to štandardné
+Nostr stlmenie, takže sa prenesie aj do iných Nostr aplikácií):
 
 ![Stránka osoby s potvrdením stlmenia](images/participant-sk/18-mute-confirm-light.png)
+
+> Zhody sa objavia až vtedy, keď organizátorov koordinátor spracuje
+> predstavenia pár ľudí. Najprv nahrajte vlastné predstavenie (§3); práve to
+> vás dostane do zoznamu zhôd ostatných.
+
+Na podujatí ten zoznam využite: nájdite si svoje top zhody, spomeňte, že vám
+to povedala aplikácia. Lepší icebreaker neexistuje.
 
 ## 4.5 Prednášky (ak ich organizátor zapol)
 
@@ -272,33 +306,7 @@ aplikáciu a pokračovať neskôr, a prehrávač má **ovládanie rýchlosti**
 (1×/1,5×/2×) na rýchlejšie zvládnutie dlhej prednášky. Prepis je dostupný, keď
 rečník prednášku zapol na spracovanie.
 
-## 5. Vaše spojenia
-
-Krátko po nahratí predstavenia klepnite na **Spojenia**: rebríček ľudí, ktorých
-sa oplatí stretnúť. Každé vedie s tým, aká silná je zhoda: **Silná zhoda** alebo
-**Dobrá zhoda**, farebne odstupňované na jedinej zelenej škále tak, že silnejšia
-zhoda je viditeľne jasnejšia a odlíšite ich skôr, než si prečítate čo i len
-slovo. A čo je najdôležitejšie, hneď navrchu je vysvetlenie v bežnom jazyku,
-*prečo by ste sa mali porozprávať*. Ak chcete mechaniku (nakoľko ste si podobní
-vs. nakoľko sa dopĺňate), je na jedno klepnutie pod „podrobnosti skóre“, ale
-dôvod je na prvom mieste. Zoznam sa aktualizuje, ako sa pridávajú ďalší ľudia.
-Klepnutím na spojenie otvoríte jeho celú stránku.
-
-![Spojenia](images/participant-sk/11-matches-light.png)
-
-Na záložke **Spojenia** sa objaví malý odznak vždy, keď pribudnú nové
-spojenia od vašej poslednej návštevy, takže nemusíte stále kontrolovať
-zoznam, ktorý sa nezmenil.
-
-Na podujatí ten zoznam využite: nájdite si svoje top spojenia, spomeňte, že vám
-to povedala aplikácia. Lepší icebreaker neexistuje.
-
-> Spojenia sa objavia až vtedy, keď organizátorov koordinátor spracuje
-> predstavenia pár ľudí, takže ak zoznam hovorí „zatiaľ žiadne spojenia“,
-> jednoducho to znamená, že sa miestnosť ešte len zapĺňa. Najprv nahrajte
-> vlastné predstavenie (§3); práve to vás dostane do spojení ostatných.
-
-## 6. Napíšte niekomu
+## 5. Napíšte niekomu
 
 Na stránke kohokoľvek je tlačidlo **Napísať správu**. Klepnutím naň otvoríte
 súkromnú, **koncovo šifrovanú** konverzáciu:
@@ -315,7 +323,7 @@ aplikáciami na správy**: druhá osoba môže odpovedať z ktorejkoľvek Nostr
 aplikácie, ktorú používa, a vaša konverzácia sa objaví aj tam. Nie je uzamknutá
 len na toto podujatie.
 
-## 6.5 Skupinový chat (experimentálne)
+## 5.5 Skupinový chat (experimentálne)
 
 Ak organizátor zapol **Skupinový chat**, hneď po schválení sa vám objaví záložka
 **Chat**: jedna zašifrovaná miestnosť pre celé podujatie, oddelená od súkromných
@@ -342,7 +350,7 @@ nespoliehajte) a pripojenie do skupiny môže chvíľu trvať, alebo občas potr
 nový pokus, kým sa začnú objavovať správy. Ak záložka zostane zaseknutá na
 „nastavuje sa“, dajte tomu pár minút a otvorte ju znova.
 
-## 7. Váš report z podujatia
+## 6. Váš report z podujatia
 
 Kedykoľvek pred podujatím, počas neho aj po ňom otvorte **Report podujatia** z
 menu podujatia a pozrite si prehľadné zhrnutie svojho podujatia, postavené
@@ -374,7 +382,7 @@ odkaz na zálohovanie kľúča a jeho vyskúšanie v iných Nostr aplikáciách:
 rovnaký moment „prechodu na Nostr“, opísaný nižšie, práve vo chvíli, keď je
 najrelevantnejší.
 
-## 8. Potom: váš profil si necháte
+## 7. Potom: váš profil si necháte
 
 Prekvapenie: účet, ktorý ste práve použili, je **identita na Nostri**:
 prihlásenie, ktoré vlastníte vy, nie táto aplikácia ani žiadna firma. Záložka

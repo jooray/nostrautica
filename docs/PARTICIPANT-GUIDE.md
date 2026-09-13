@@ -16,11 +16,17 @@ when, where) and a button to join. If the organizer has posted any
 announcements, the latest show up here too.
 
 Once you're in an event, the bar along the bottom is all about *this* event:
-**Overview** (where you are now), **People**, **Matches**, **Updates**, and
-**More** (your account, settings, other events). Two more tabs appear only when the
-organizer has switched those features on: **Talks** (§4.5) and **Chat** (§6.5). If
-you don't see them, this event simply doesn't use them. A small header at the top
-always tells you which event you're in and whether you're a visitor, waiting, or in.
+**Overview** (where you are now), **People**, **Updates**, and **More** (your
+account, settings, other events) are always there. **Updates** always gets its
+own tab now, it no longer has to share a spot inside **More**. Two more tabs
+show up only if the organizer turned the feature on, and land in different
+spots depending on why: a **Talks** tab (§4.5) sits right between Overview and
+People if the organizer set talks up to be watched *before* the event
+("prerecord-first"), or right after People, ahead of Chat, for a regular talks
+setup. **Chat** (§5.5) sits right after People (or after Talks, if that's also
+on). If you don't see Talks or Chat at all, this event simply doesn't use that
+feature. A small header at the top always tells you which event you're in and
+whether you're a visitor, waiting, or in.
 
 ![Event overview](images/participant/02-event-overview-light.png)
 
@@ -87,7 +93,7 @@ guessing why matches haven't appeared yet: the list tells you.
 
 Further down the same Overview page, once you're approved, there's a
 **Download for offline** card. Tap it and the app pre-fetches people, matches,
-and talks *and* loads the screens that show them (People, Matches, Talks, a talk's
+and talks *and* loads the screens that show them (People, Talks, a talk's
 page, Record, My profile, Updates) so they're all browsable even with no signal,
 handy in a packed room where everyone's phone is fighting over the same weak
 connection. Earlier versions fetched the data but could still fail to *open* a
@@ -191,15 +197,36 @@ purely automated.
 
 ## 4. People
 
-Tap **People** in the bottom bar to browse who's here. Each row shows an avatar
-(their photo, or their initials on a coloured tile), their name, and their
-skills. **Search** by name or skill, and filter to just the people you've marked
-**want to meet**, **met**, or people you **follow** on Nostr. Each row also
-has quick actions: mark **want to meet** or start a **message** without
-opening their page.
-The list streams in as relays answer: people appear as they decrypt (names and
-photos fill in a moment later), so a big roster on a slow connection never
-blocks on the slowest relay.
+Tap **People** in the bottom bar to browse who's here. It's one list, and your
+matches, if you have any, sit at the top of it rather than off in a tab of
+their own.
+
+A **search field** at the top finds people by name, bio, or skill.
+
+If the coordinator has matched you with anyone, they come first, grouped under
+**Strong matches** and **Good matches** headings — the confidence band is a
+heading over a group of people now, not a badge repeated on every card. Each
+match shows the person's name, one line of their own bio, and the full
+reasoning for why you two should meet, always visible, nothing to tap to read
+the rest of it. Underneath that, a collapsed **Conversation starters** section
+holds the coordinator's suggested opening lines, for whenever you want them.
+
+If nobody stands out sharply yet, a line above the list says so plainly:
+these are your closest people so far, and matches recalculate as more people
+join. There's no empty "Strong matches" heading left sitting there with
+nothing under it.
+
+Below the matches, an **Everyone else** heading gives the attendee count, then
+the **Want to meet** / **Met** / **Following** filter buttons, then the full
+roster as one-line rows: an avatar (their photo, or their initials on a
+coloured tile), name, and skills. The list streams in as relays answer: people
+appear as they decrypt (names and photos fill in a moment later), so a big
+roster on a slow connection never blocks on the slowest relay. Search, or tap
+a filter, and the sections collapse into one flat list of matching results.
+
+Every person, matched or not, gets the same three quick actions right on
+their row: **follow**, **want to meet**, and **message**, with no need to open
+their page first.
 
 The roster is **encrypted to approved attendees**, so until you're approved (or
 in the moment right after, before it syncs) the People screen stays empty and
@@ -207,18 +234,31 @@ tells you why. That's the privacy model working, not a bug:
 
 ![People: encrypted until you're approved](images/participant/08-attendees-light.png)
 
-Once you're in, tap anyone to open their page: their intro video, what they do,
-what they're looking for, an AI-written summary once the matchmaking has run, and
-their recent public posts.
+Tap a person's name or row to open their page: their intro video, what they
+do, what they're looking for, an AI-written summary once the matchmaking has
+run, their recent public posts, and, if you matched with them, the same
+reasoning again alongside **Score details**: similarity, complementarity, and
+overall, as percentages. A match's page also carries an explicit
+**Introduce us** button.
 
 On a person's page you can **Follow** them, tap **Message** to start a private
-chat (see §6), and, privately (nobody else ever sees these), mark
+chat (see §5) — for a match, this opens the composer already filled in with
+the coordinator's suggested opening line, which you can edit or delete before
+sending — and, privately (nobody else ever sees these), mark
 **Want to meet** or **Met ✓**, and keep a private note ("the drummer with the
 mesh-network startup"). Reload and it all persists. If someone's bothering you,
-**Mute** hides them from your People list, Matches, and messages (it's a standard
+**Mute** hides them from your People list and messages (it's a standard
 Nostr mute, so it carries to other Nostr apps too):
 
 ![A person's page, with the mute confirmation](images/participant/18-mute-confirm-light.png)
+
+At the event, work the list: find your top matches, mention the app told you
+to. Best icebreaker there is.
+
+> Matches only appear once the organizer's coordinator has processed a few
+> people's intros, so if nobody stands out yet, it just means the room is
+> still warming up. Record your own intro first (§3); that's what puts you in
+> everyone else's matches.
 
 ## 4.5 Talks (if the organizer turned them on)
 
@@ -253,33 +293,7 @@ it up later, and the player has a **speed control** (1×/1.5×/2×) for getting
 through a long talk faster. A transcript is available when the speaker opted
 their talk into processing.
 
-## 5. Your matches
-
-Shortly after you record your intro, tap **Matches**: a ranked list of people to
-meet. Each one leads with how strong the match is: **Strong match** or **Good
-match**, colour-graded on a single green ramp so the stronger badge is
-visibly brighter and you can tell them apart before reading a word. Then,
-most importantly, a plain-language explanation of *why you two should talk*,
-right up front. If you want the mechanics (how similar vs. how complementary
-you are), they're one tap away under "score details", but the reason comes
-first. The list updates as more people join. Tap a match to open their full
-page.
-
-![Matches](images/participant/11-matches-light.png)
-
-A small badge appears on the **Matches** tab whenever there are new matches
-since you last looked, so you don't have to keep re-checking a list that
-hasn't changed.
-
-At the event, work the list: find your top matches, mention the app told you to.
-Best icebreaker there is.
-
-> Matches only appear once the organizer's coordinator has processed a few
-> people's intros, so if the list says "no matches yet", it just means the room
-> is still warming up. Record your own intro first (§3); that's what puts you in
-> everyone else's matches.
-
-## 6. Message people
+## 5. Message people
 
 Anyone's page has a **Message** button. Tap it to open a private,
 **end-to-end encrypted** conversation:
@@ -295,7 +309,7 @@ Because these are standard Nostr private messages, **they also work with other
 Nostr messengers**: the person can reply from whatever Nostr app they use, and
 your conversation shows up there too. It isn't locked to this event.
 
-## 6.5 Group chat (experimental)
+## 5.5 Group chat (experimental)
 
 If the organizer has turned on **Group chat**, a **Chat** tab appears once
 you're approved: a single encrypted room for the whole event, separate from
@@ -321,7 +335,7 @@ and joining the group can take a little while, or occasionally need a retry,
 before messages start flowing. If the tab is stuck on "setting up," give it a
 few minutes and reopen it.
 
-## 7. Your event report
+## 6. Your event report
 
 Any time before, during, or after the event, open **Event report** from
 the event menu to see a tidy summary of your event, built entirely from your
@@ -349,7 +363,7 @@ identity anywhere**: one more nudge, and a direct link, to back up your key
 and see it working in Primal, Damus, Amethyst, or Yakihonne: the same
 "switch to Nostr" moment described below, right when it's most relevant.
 
-## 8. Afterwards: your profile is yours to keep
+## 7. Afterwards: your profile is yours to keep
 
 Surprise: the account you just used is a **Nostr identity**: a login you own,
 not tied to this app or any company. The **More** tab leads with an identity

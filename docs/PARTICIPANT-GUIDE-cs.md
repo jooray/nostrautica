@@ -16,11 +16,11 @@ je, kdy a kde) a tlačítko pro připojení. Pokud organizátor zveřejnil něja
 oznámení, i ta se objeví hned tady.
 
 Jakmile jste uvnitř akce, spodní lišta se celá týká *této* akce: **Přehled**
-(kde jste teď), **Lidé**, **Spojení**, **Novinky** a **Více** (váš účet,
-nastavení, ostatní akce). Další dvě karty se objeví jen tehdy, když organizátor
-tyto funkce zapne: **Přednášky** (§4.5) a **Chat** (§6.5). Pokud je nevidíte,
-tato akce je prostě nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které
-akci jste a jestli jste návštěvník, čekáte, nebo jste uvnitř.
+(kde jste teď), **Lidé**, **Novinky** a **Více** (váš účet, nastavení, ostatní
+akce). Další dvě karty se objeví jen tehdy, když organizátor tyto funkce
+zapne: **Přednášky** (§4.5) a **Chat** (§5.5). Pokud je nevidíte, tato akce je
+prostě nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a
+jestli jste návštěvník, čekáte, nebo jste uvnitř.
 
 ![Přehled akce](images/participant-cs/02-event-overview-light.png)
 
@@ -90,15 +90,13 @@ neukázala: seznam vám to řekne.
 Níž na téže stránce Přehled, jakmile jste schváleni, najdete kartu
 **Stáhnout pro offline použití**. Klepnutím na ni si aplikace předem stáhne
 lidi, spojení a přednášky *a zároveň načte i samotné obrazovky*, které je
-zobrazují (Lidé, Spojení, Přednášky, stránka přednášky, Nahrávání, Můj profil,
-Novinky), takže se všechno dá procházet i bez signálu, hodí se to v přeplněné
-místnosti, kde si všechny telefony soupeří o stejné slabé připojení. Starší
-verze
-sice stáhly data, ale některou obrazovku (třeba Přednášky) se offline stejně
-nemuselo
-podařit *otevřít*; teď se obrazovky stahují spolu s nimi. Samotné video a zvuk
-se
-předem stále nestahují (jen všechno ostatní, co potřebujete), a kdykoli můžete
+zobrazují (Lidé — teď včetně spojení, Přednášky, stránka přednášky, Nahrávání,
+Můj profil, Novinky), takže se všechno dá procházet i bez signálu, hodí se to
+v přeplněné místnosti, kde si všechny telefony soupeří o stejné slabé
+připojení. Starší verze sice stáhly data, ale některou obrazovku (třeba
+Přednášky) se offline stejně nemuselo podařit *otevřít*; teď se obrazovky
+stahují spolu s nimi. Samotné video a zvuk se předem stále nestahují (jen
+všechno ostatní, co potřebujete), a kdykoli můžete
 klepnout na **Aktualizovat offline kopii**, abyste si ji obnovili. Pokud se něco
 nepodařilo stáhnout, karta to řekne, místo aby předstírala, že je kompletní.
 
@@ -200,15 +198,12 @@ okamžitě a jejich pohled na vás dostane malou značku **„Upraveno
 
 ## 4. Lidé
 
-Klepněte na **Lidé** ve spodní liště a procházejte, kdo tu je. Každý řádek
-zobrazuje avatar (fotku, nebo iniciály na barevné dlaždici), jméno a dovednosti.
-**Hledejte** podle jména nebo dovednosti a filtrujte jen na lidi, které jste si
-označili jako **chci potkat**, **potkáno**, nebo které na Nostru **sledujete**.
-Každý řádek má i rychlé akce: označit **chci potkat** nebo začít **zprávu** bez
-otevírání jeho stránky.
-Seznam se plní průběžně, jak odpovídají relaye: lidé se objevují, jak se
-dešifrují (jména a fotky se doplní o chvíli později), takže velký seznam na
-pomalém připojení nikdy nečeká na nejpomalejší relay.
+Klepněte na **Lidé** ve spodní liště. Je to jeden seznam pro celou akci: nahoře
+lidé, se kterými vás párování spojilo, s vysvětlením proč byste se měli
+potkat, a pod nimi zbytek účastníků. (Dřív to byly dvě záložky — jedna uměla
+sledovat a označit „chci potkat“, ale nikdy neřekla proč na někom záleží,
+druhá to vysvětlovala, ale nenabízela žádnou z těch akcí. Teď má na seznamu
+každý člověk, ať je shoda nebo ne, stejné tři ovládací prvky.)
 
 Seznam účastníků je **zašifrovaný pro schválené účastníky**, takže dokud vás
 neschválí (nebo těsně poté, než se to ještě jen synchronizuje), obrazovka Lidé
@@ -217,19 +212,68 @@ tak, jak má, ne chyba:
 
 ![Lidé: zašifrováno, dokud vás neschválí](images/participant-cs/08-attendees-light.png)
 
-Jakmile jste uvnitř, klepnutím na kohokoli otevřete jeho stránku: představovací
-video, co dělá, co hledá, AI shrnutí, jakmile už párování proběhlo, a jeho
-nedávné veřejné příspěvky.
+Jakmile jste uvnitř, obrazovka shora dolů:
 
-Na stránce někoho jiného ho můžete **Sledovat**, klepnutím na **Napsat zprávu**
-zahájit soukromý chat (viz §6) a, soukromě (tohle nikdo jiný nikdy neuvidí),
-označit **Chci potkat** nebo **Potkáno ✓** a nechat si soukromou poznámku
-(„bubeník s mesh-network startupem“). Po znovunačtení všechno zůstane. Pokud vás
-někdo obtěžuje, **Ztlumení** ho skryje z vašeho seznamu Lidé, ze Spojení i ze
-zpráv (je to standardní Nostr ztlumení, takže se přenese i do jiných Nostr
+- **Vyhledávací pole**: hledejte podle jména, popisu nebo dovedností.
+- Pokud máte shody, sekce **Silné shody** a **Dobré shody**: úroveň shody je
+  nadpis nad skupinou lidí, ne štítek opakovaný u každého člověka zvlášť. U
+  každé shody vidíte jméno, jeden řádek z jejich vlastního popisu a celé
+  odůvodnění, proč byste se měli potkat — vždy celé, viditelné rovnou a není
+  na co klikat. Pod odůvodněním je sbalená sekce **Náměty na rozhovor**, kterou
+  si rozkliknete. Třetí úroveň se jmenuje **Stojí za pozdrav**; jako vlastní
+  sekci ji uvidíte, jen když nemáte žádnou silnou ani dobrou shodu, jinak jsou
+  tihle lidé dole v seznamu ostatních účastníků, jen označení štítkem
+  **Shoda**. Nemáte-li žádnou silnou shodu, nad seznamem uvidíte větu, že
+  zatím nikdo výrazný není, že tohle jsou nejbližší, a že se shody přepočítávají,
+  jak přibývají další lidé.
+- Nadpis **Ostatní účastníci** s počtem, filtry (**Chci potkat** / **Potkáno**
+  / **Sledovaní**) a celý zbytek seznamu, po jednom řádku. Pořadí určují
+  sekce: nejdřív shody podle úrovně, pak ostatní podle abecedy. Jakmile něco
+  hledáte nebo zapnete filtr, sekce zmizí a dostanete jeden plochý seznam
+  výsledků.
+
+Na záložce **Lidé** se navíc objeví malý odznak s číslem, kdykoli přibudou nová
+spojení od vaší poslední návštěvy, takže nemusíte pořád kontrolovat seznam,
+který se nezměnil.
+
+> Zatím žádné shody? Objeví se, až koordinátor zpracuje představení pár lidí,
+> takže to jednoduše znamená, že se místnost teprve zaplňuje — nejdřív nahrajte
+> vlastní představení (§3), právě to vás dostane do spojení ostatních. Aplikace
+> vám řekne, který z těch dvou důvodů to zrovna je, a nabídne buď nahrávání,
+> nebo tlačítko na nové ověření.
+
+Seznam se plní průběžně, jak odpovídají relaye: lidé se objevují, jak se
+dešifrují (jména a fotky se doplní o chvíli později), takže velký seznam na
+pomalém připojení nikdy nečeká na nejpomalejší relay.
+
+Klepnutím na jméno nebo na řádek kohokoli otevřete jeho stránku: představovací
+video, co dělá, co hledá, AI shrnutí, jakmile už párování proběhlo, jeho
+nedávné veřejné příspěvky a u shody totéž odůvodnění i s rozbalovacím
+„Podrobnosti skóre“ (podobnost / doplňkovost / celkově v procentech).
+
+Každý člověk na seznamu, ať je shoda nebo ne, má tři rychlé ovládací prvky
+přímo na řádku, bez otevírání jeho stránky: **sledovat**, **chci potkat** a
+**napsat**. Napíšete-li shodě, editor zprávy se otevře už předvyplněný
+navrženou úvodní větou od koordinátora; před odesláním ji můžete upravit nebo
+smazat. (Samostatné tlačítko **Představit nás** se stejným účinkem zůstává na
+stránce dané osoby.)
+
+Na stránce někoho jiného ho můžete taky **Sledovat**, klepnutím na **Napsat
+zprávu** zahájit soukromý chat (viz §5) a, soukromě (tohle nikdo jiný nikdy
+neuvidí), označit **Chci potkat** nebo **Potkáno ✓** a nechat si soukromou
+poznámku („bubeník s mesh-network startupem“). Po znovunačtení všechno
+zůstane. Pokud vás někdo obtěžuje, tlačítko **Ztlumit** (dole, vedle
+kopírování npub/nprofile a odkazu na njump) ho skryje z vašeho seznamu Lidé i
+ze zpráv (je to standardní Nostr ztlumení, takže se přenese i do jiných Nostr
 aplikací):
 
 ![Stránka osoby s potvrzením ztlumení](images/participant-cs/18-mute-confirm-light.png)
+
+Na akci ten seznam využijte: najděte si své top shody, zmiňte, že vám to řekla
+aplikace. Lepší icebreaker neexistuje.
+
+> **Starý odkaz na záložku Spojení?** Adresa končící na `/matches` pořád
+> funguje — otevře se rovnou tenhle seznam Lidé.
 
 ## 4.5 Přednášky (pokud je organizátor zapnul)
 
@@ -264,33 +308,7 @@ a pokračovat později, a přehrávač má **ovládání rychlosti** (1×/1,5×/
 rychlejší zvládnutí dlouhé přednášky. Přepis je dostupný, když řečník přednášku
 zapnul ke zpracování.
 
-## 5. Vaše spojení
-
-Krátce po nahrání představení klepněte na **Spojení**: žebříček lidí, které se
-vyplatí potkat. Každé vede tím, jak silná je shoda: **Silná shoda** nebo **Dobrá
-shoda**, barevně odstupňované na jediné zelené škále, takže silnější odznak je
-viditelně jasnější a rozeznáte je od sebe ještě dřív, než přečtete jediné slovo.
-A co je nejdůležitější, hned nahoře je vysvětlení běžným jazykem, *proč byste se
-měli bavit*. Pokud chcete mechaniku (nakolik jste si podobní vs. nakolik se
-doplňujete), je na jedno klepnutí pod „podrobnosti skóre“, ale důvod je na
-prvním místě. Seznam se aktualizuje, jak se přidávají další lidé. Klepnutím na
-spojení otevřete jeho celou stránku.
-
-![Spojení](images/participant-cs/11-matches-light.png)
-
-Na záložce **Spojení** se objeví malý odznak, kdykoli přibudou nová spojení
-od vaší poslední návštěvy, takže nemusíte pořád kontrolovat seznam, který se
-nezměnil.
-
-Na akci ten seznam využijte: najděte si svá top spojení, zmiňte, že vám to řekla
-aplikace. Lepší icebreaker neexistuje.
-
-> Spojení se objeví, až jakmile organizátorův koordinátor zpracuje představení
-> pár lidí, takže pokud seznam říká „zatím žádná spojení“, jednoduše to znamená,
-> že se místnost teprve zaplňuje. Nejdřív nahrajte vlastní představení (§3);
-> právě to vás dostane do spojení ostatních.
-
-## 6. Napište někomu
+## 5. Napište někomu
 
 Na stránce kohokoli je tlačítko **Napsat zprávu**. Klepnutím na něj otevřete
 soukromou, **koncově šifrovanou** konverzaci:
@@ -307,7 +325,7 @@ aplikacemi na zprávy**: druhá osoba může odpovědět z kterékoli Nostr apli
 kterou používá, a vaše konverzace se objeví i tam. Není uzamčená jen na tuhle
 akci.
 
-## 6.5 Skupinový chat (experimentální)
+## 5.5 Skupinový chat (experimentální)
 
 Pokud organizátor zapnul **Skupinový chat**, hned po schválení se vám objeví
 záložka **Chat**: jedna zašifrovaná místnost pro celou akci, oddělená od
@@ -333,7 +351,7 @@ nespoléhejte) a připojení do skupiny může chvíli trvat, nebo občas potře
 nový pokus, než se začnou objevovat zprávy. Pokud záložka zůstane zaseknutá na
 „nastavuje se“, dejte tomu pár minut a otevřete ji znovu.
 
-## 7. Váš report z akce
+## 6. Váš report z akce
 
 Kdykoli před akcí, během ní i po ní otevřete **Report akce** z menu akce a
 podívejte se na přehledné shrnutí své akce, postavené výhradně na vašich
@@ -364,7 +382,7 @@ odkaz na zálohování klíče a jeho vyzkoušení v jiných Nostr aplikacích:
 stejný moment „přechodu na Nostr“, popsaný níže, právě ve chvíli, kdy je
 nejrelevantnější.
 
-## 8. Pak: váš profil si necháváte
+## 7. Pak: váš profil si necháváte
 
 Překvapení: účet, který jste právě použili, je **identita na Nostru**:
 přihlášení, které vlastníte vy, ne tahle aplikace ani žádná firma. Záložka
