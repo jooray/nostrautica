@@ -24,6 +24,7 @@
     trailing,
     actions,
     last = false,
+    selected = false,
   }: {
     pubkey: string;
     name: string;
@@ -36,11 +37,13 @@
      *  roster the DOM's last child isn't necessarily the list's last item, so
      *  `:last-child` can no longer decide this — the caller knows). */
     last?: boolean;
+    /** Open in the detail pane beside this list (desktop master/detail). */
+    selected?: boolean;
   } = $props();
 </script>
 
-<div class="person" class:last>
-  <button class="open" onclick={onOpen}>
+<div class="person" class:last class:selected>
+  <button class="open" onclick={onOpen} aria-current={selected ? "true" : undefined}>
     <Avatar {pubkey} {name} {picture} size={40} />
     <span class="meta">
       <span class="name">{name}</span>
@@ -81,6 +84,24 @@
   }
   .open:hover .name {
     color: var(--accent);
+  }
+  /* Which row the detail pane is showing. `aria-current` carries it for anyone
+     not looking at the tint, and the leading bar keeps it legible in forced
+     colours, where the background is discarded. */
+  .person.selected {
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+  }
+  .person.selected .name {
+    color: var(--accent);
+  }
+  .person.selected::before {
+    content: "";
+    align-self: stretch;
+    width: 3px;
+    flex: none;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
   }
   .meta {
     flex: 1;

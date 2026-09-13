@@ -78,7 +78,7 @@
    * lead line says plainly that nothing here is sharp yet.
    */
   import { onMount, onDestroy } from "svelte";
-  import { npubEncode } from "nostr-tools/nip19";
+  import { npubEncode, decode as decodeNip19 } from "nostr-tools/nip19";
   import type { DirectoryEntryContent, PerEventSettings, Match } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -475,6 +475,25 @@
     activeFilters = new Set();
   }
 
+  /**
+   * Who the detail pane beside this list is currently showing.
+   *
+   * Read from the route rather than held as local selection state: on desktop
+   * the person IS the route, so a second copy of "who is open" could disagree
+   * with the URL after a Back or a pasted link. Undefined on a phone, where the
+   * list and the person are never on screen together.
+   */
+  const selectedPubkey = $derived.by(() => {
+    const r = router.route;
+    if (r.name !== "attendee") return undefined;
+    try {
+      const d = decodeNip19(r.npub);
+      return d.type === "npub" ? (d.data as string) : undefined;
+    } catch {
+      return undefined; // malformed npub in the hash — nothing is selected
+    }
+  });
+
   function open(pubkey: string) {
     router.go({ name: "attendee", naddr, npub: npubEncode(pubkey) });
   }
@@ -588,6 +607,7 @@
               sub={bioOf(m.pubkey)}
               picture={profiles.get(m.pubkey)?.picture}
               isNew={newPubkeys.has(m.pubkey)}
+              selected={selectedPubkey === m.pubkey}
               onOpen={() => open(m.pubkey)}
             >
               {#snippet actions()}{@render personActions(m.pubkey, name)}{/snippet}
@@ -676,6 +696,7 @@
               picture={profiles.get(e.pubkey)?.picture}
               onOpen={() => open(e.pubkey)}
               last={e.pubkey === visible[visible.length - 1]?.pubkey}
+              selected={selectedPubkey === e.pubkey}
             >
               {#snippet trailing()}
                 {#if matchByPubkey.has(e.pubkey)}<span class="badge accent">{t("attendees.matchTag")}</span>{/if}

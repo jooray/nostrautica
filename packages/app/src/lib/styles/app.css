@@ -27,6 +27,9 @@
      never to longer lines. */
   --rail: 232px;
   --maxw-desk: 760px;
+  /* Wide enough for the 420px list plus a detail column that still holds prose
+     at a readable measure. Only master/detail pages claim it. */
+  --maxw-wide: 1180px;
 
   --accent-contrast: #ffffff;
   /* Match-strength badge fills (ConfidenceBadge). A green-only three-step
@@ -509,6 +512,12 @@ h2 {
     max-width: var(--maxw-desk);
     /* No bottom bar up here, so nothing to clear. */
     padding-bottom: 2.5rem;
+  }
+  /* A master/detail page needs two columns' worth of room; every other page
+     keeps the reading width. Asking the shell what it contains beats threading
+     a "wide" flag down from the router to the layout. */
+  .app-shell:has(.two-pane) {
+    max-width: var(--maxw-wide);
   }
   /* The compact event strip repeated on every subpage is the phone's way of
      saying which event you are in. The rail says it permanently, so on desktop

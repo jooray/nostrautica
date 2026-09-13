@@ -14,6 +14,7 @@
   import { onNip46AuthUrl } from "$lib/signer/nip46.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
+  import { viewport } from "$lib/stores/viewport.svelte.js";
   import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
@@ -73,6 +74,8 @@
     setTimeout(() => splash.remove(), 320);
   }
 
+  // Structural breakpoint for the desktop shell (see stores/viewport).
+  onMount(() => viewport.init());
   onMount(async () => {
     dismissSplash();
     // Release provenance (§13.9): log the embedded manifest once so a deployed

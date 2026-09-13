@@ -8,6 +8,8 @@
   import { router } from "$lib/router/router.svelte.js";
   import LazyRoute from "$lib/router/LazyRoute.svelte";
   import RouteBoundary from "$lib/router/RouteBoundary.svelte";
+  import { viewport } from "$lib/stores/viewport.svelte.js";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   // Eager: the critical participant path (event entry, join, the merged People
   // list, a person). Matches merged into People (2026-09-13) and has no page.
@@ -59,10 +61,37 @@
     {#key route.naddr}<Join naddr={route.naddr} code={route.code} />{/key}
   {:else if route.name === "record"}
     {#key route.naddr}<LazyRoute loader={loadRecord} props={{ naddr: route.naddr, talk: route.talk }} />{/key}
-  {:else if route.name === "attendees"}
-    {#key route.naddr}<Attendees naddr={route.naddr} />{/key}
-  {:else if route.name === "attendee"}
-    {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
+  {:else if route.name === "attendees" || route.name === "attendee"}
+    <!--
+      People is master/detail on a wide window: the list on the left, whoever you
+      clicked on the right. One branch for both routes so the LIST COMPONENT
+      SURVIVES the selection change — a separate branch per route would destroy
+      and rebuild it on every click, losing the scroll position and reopening the
+      directory stream each time.
+
+      The URL still changes, so a person is still a link you can share and Back
+      still closes them. The narrow branch below renders one or the other,
+      never both: `display:none` would still mount the list, open its stream and
+      pay for a roster read on a phone that will never show it.
+    -->
+    {#if viewport.wide}
+      {#key route.naddr}
+        <div class="two-pane">
+          <div class="pane-list"><Attendees naddr={route.naddr} /></div>
+          <aside class="pane-detail" aria-live="polite">
+            {#if route.name === "attendee"}
+              {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
+            {:else}
+              <p class="muted pane-hint">{t("attendees.pane.hint")}</p>
+            {/if}
+          </aside>
+        </div>
+      {/key}
+    {:else if route.name === "attendees"}
+      {#key route.naddr}<Attendees naddr={route.naddr} />{/key}
+    {:else}
+      {#key route.npub}<Attendee naddr={route.naddr} npub={route.npub} />{/key}
+    {/if}
   {:else if route.name === "report"}
     {#key route.naddr}<LazyRoute loader={loadReport} props={{ naddr: route.naddr }} />{/key}
   {:else if route.name === "chat"}
@@ -91,3 +120,32 @@
     <NotFound />
   {/if}
 </RouteBoundary>
+
+<style>
+  /* Two columns, and the list column does not resize when a person opens: a
+     list that reflows under the cursor every time you click somebody is worse
+     than one that leaves half the window quiet until you do. */
+  .two-pane {
+    display: grid;
+    grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+    gap: 1.75rem;
+    align-items: start;
+  }
+  /* The reader scrolls the list to browse and reads the detail. Sticky with its
+     own overflow keeps the person you are reading on screen while you keep
+     going down the roster, without turning the page into two nested scroll
+     containers fighting the sticky top bar. */
+  .pane-detail {
+    position: sticky;
+    top: 4.25rem;
+    max-height: calc(100dvh - 6rem);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .pane-hint {
+    margin: 4rem 0 0;
+    max-width: 34ch;
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+</style>

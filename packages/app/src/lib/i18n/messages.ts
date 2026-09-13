@@ -750,6 +750,8 @@ export const messages = {
     "matches.noStrong":
       "Nobody stands out sharply yet, so these are the closest. More people are still joining, and matches recalculate as they do.",
     "attendees.section.everyone": "Everyone else",
+    "attendees.pane.hint":
+      "Pick somebody from the list to see their intro, what they do, and why the two of you should meet.",
     "attendees.section.allFeatured": "Everyone here is already listed above.",
     "matches.message": "Message",
     "matches.introduce": "Introduce us",
@@ -2334,6 +2336,8 @@ export const messages = {
     "matches.noStrong":
       "Zatiaľ nikto výrazný, tu sú tí najbližší. Ľudia stále pribúdajú a zhody sa prepočítavajú.",
     "attendees.section.everyone": "Ostatní účastníci",
+    "attendees.pane.hint":
+      "Vyberte niekoho zo zoznamu a uvidíte jeho predstavenie, čomu sa venuje a prečo by ste sa mali stretnúť.",
     "attendees.section.allFeatured": "Všetci sú už v zozname vyššie.",
     "matches.message": "Napísať",
     "matches.introduce": "Predstaviť nás",
@@ -3913,6 +3917,8 @@ export const messages = {
     "matches.noStrong":
       "Zatím nikdo výrazný, tady jsou ti nejbližší. Lidé stále přibývají a shody se přepočítávají.",
     "attendees.section.everyone": "Ostatní účastníci",
+    "attendees.pane.hint":
+      "Vyberte někoho ze seznamu a uvidíte jeho představení, čemu se věnuje a proč byste se měli potkat.",
     "attendees.section.allFeatured": "Všichni jsou už v seznamu výše.",
     "matches.message": "Napsat",
     "matches.introduce": "Představit nás",

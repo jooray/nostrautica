@@ -21,6 +21,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import FollowButton from "$lib/components/FollowButton.svelte";
   import MatchDetails from "$lib/components/MatchDetails.svelte";
+  import { viewport } from "$lib/stores/viewport.svelte.js";
   import { STRONG_FLOOR, bandAtCut, strongCutFor } from "$lib/events/confidence.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
@@ -529,7 +530,7 @@
 {#if myMatch}
   <div class="card match">
     <div class="field-label" style="margin-top:0">{t("attendee.yourMatch")}</div>
-    <MatchDetails match={myMatch} band={bandAtCut(myMatch.score, strongCut)}>
+    <MatchDetails match={myMatch} band={bandAtCut(myMatch.score, strongCut)} showReasoning={!viewport.wide}>
       {#snippet actions()}
         <div class="mact">
           <button class="btn inline primary" onclick={introduce}>

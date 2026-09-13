@@ -32,6 +32,7 @@
     sub,
     picture,
     isNew = false,
+    selected = false,
     onOpen,
     actions,
   }: {
@@ -42,6 +43,8 @@
     picture?: string;
     /** Arrived since this list was last opened (spec §13 watermark). */
     isNew?: boolean;
+    /** Open in the detail pane beside this list (desktop master/detail). */
+    selected?: boolean;
     onOpen: () => void;
     actions?: Snippet;
   } = $props();
@@ -50,11 +53,11 @@
   const icebreakers = $derived([...new Set(match.icebreakers ?? [])]);
 </script>
 
-<article class="entry">
+<article class="entry" class:selected>
   <!-- The identity line is the tap target, exactly as in PersonCard: a button
        wrapping the reasoning paragraph would make the one piece of text people
        actually want to read unselectable. -->
-  <button class="who" onclick={onOpen}>
+  <button class="who" onclick={onOpen} aria-current={selected ? "true" : undefined}>
     <Avatar pubkey={match.pubkey} {name} {picture} size={38} />
     <span class="meta">
       <span class="nameline">
@@ -109,6 +112,17 @@
     cursor: pointer;
   }
   .who:hover .name {
+    color: var(--accent);
+  }
+  /* Marked the same way a roster row is, so one list reads as one list. */
+  .entry.selected {
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+    box-shadow: inset 3px 0 0 var(--accent);
+    padding-left: 0.75rem;
+    padding-right: 0.6rem;
+  }
+  .entry.selected .name {
     color: var(--accent);
   }
   .meta {

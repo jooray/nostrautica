@@ -24,11 +24,16 @@
   // `band` comes from the caller because it is a property of the whole match
   // list, not of this row (confidence.ts): "strong" means top-few FOR THIS
   // ATTENDEE, so a component holding one Match cannot work it out.
+  // `showReasoning` exists for the desktop two-pane People layout, where the
+  // list entry beside this pane is already showing the same paragraph: the same
+  // prose twice on one screen reads as a bug, and the list is the copy that has
+  // to stay (it is the one that is there for every person, not just this one).
   let {
     match,
     band,
     actions,
-  }: { match: Match; band: ConfidenceBand; actions?: Snippet } = $props();
+    showReasoning = true,
+  }: { match: Match; band: ConfidenceBand; actions?: Snippet; showReasoning?: boolean } = $props();
 
   /**
    * Scores are 0–1 on the wire and stay that way everywhere else — this is a
@@ -50,7 +55,9 @@
 <ConfidenceBadge {band} />
 
 <!-- Reasoning is the product — full body size, no longer under a %. -->
-<p class="reason">{match.reasoning}</p>
+{#if showReasoning}
+  <p class="reason">{match.reasoning}</p>
+{/if}
 
 <!-- Icebreakers (§7.3 kind 31605): concrete conversation starters, if any. -->
 {#if match.icebreakers && match.icebreakers.length > 0}
