@@ -352,7 +352,7 @@ screenshot; names refer to the checklist in §5.
 1. Wait for the coordinator to process intros (watch its logs; minutes).
 2. Each attendee opens “people you should meet”. Expect ranked match cards
    with a percentage, similar/complementary breakdown, and **plain-language
-   reasoning**. 📸 `participant/11-matches` (phone)
+   reasoning**. 📸 `participant/11-people-matches` (phone)
 3. Tap through a match card to the attendee detail.
 4. Olga triggers “recompute all matches” in admin; expect no errors and
    eventually refreshed lists.
@@ -420,7 +420,7 @@ the UI changed.
 | `participant/08-attendees` | attendee roster | Nina · phone | Participant guide |
 | `participant/09-record` | recording UI mid-capture | Ivan · phone | Participant guide |
 | `participant/10-attendee-detail` | attendee detail w/ video + private actions | Nina · phone | Participant guide |
-| `participant/11-matches` | match list w/ reasoning (Tier 2) | Nina · phone | Participant guide |
+| `participant/11-people-matches` | People, matches leading the list w/ reasoning (Tier 2) | Nina · phone | Participant guide |
 | `participant/12-outsider` | what a non-attendee sees | Otto · desktop | Participant guide |
 | `participant/13-me` | Nostr hand-off / Me page | Nina · phone | Participant guide |
 | `app/settings` | settings (theme + language) | any | Both guides |

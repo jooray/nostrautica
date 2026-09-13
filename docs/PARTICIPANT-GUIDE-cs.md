@@ -232,6 +232,8 @@ Jakmile jste uvnitř, obrazovka shora dolů:
   hledáte nebo zapnete filtr, sekce zmizí a dostanete jeden plochý seznam
   výsledků.
 
+![Lidé: shody vedou seznam, i s celým odůvodněním](images/participant-cs/11-people-matches-light.png)
+
 Na záložce **Lidé** se navíc objeví malý odznak s číslem, kdykoli přibudou nová
 spojení od vaší poslední návštěvy, takže nemusíte pořád kontrolovat seznam,
 který se nezměnil.

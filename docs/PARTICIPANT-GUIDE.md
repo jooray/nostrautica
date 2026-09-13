@@ -205,6 +205,8 @@ name, one line of their own bio, and the whole reasoning for why you two should
 meet, right there on the row. Underneath it, a collapsed **Conversation
 starters** section holds the coordinator's suggested opening lines.
 
+![People: your matches lead the list, with the reasoning in full](images/participant/11-people-matches-light.png)
+
 If nobody stands out sharply yet, a line above the list says so: these are your
 closest people so far, and matches recalculate as more people join.
 

@@ -218,6 +218,8 @@ Ak vám párovanie už niekoho vytipovalo, nad zvyškom zoznamu uvidíte sekcie
 vlastného popisu a hneď pod tým **celé odôvodnenie, prečo by ste sa mali
 stretnúť**, vždy viditeľné a neskrátené. Pod odôvodnením je zabalená sekcia
 **„Námety na rozhovor“**, ktorú si rozkliknete, ak sa vám zíde icebreaker.
+
+![Ľudia: zhody vedú zoznam, aj s celým odôvodnením](images/participant-sk/11-people-matches-light.png)
 Mechaniku skóre (nakoľko ste si podobní vs. nakoľko sa dopĺňate) nájdete na
 profile danej osoby, pod jej zhodou.
 
