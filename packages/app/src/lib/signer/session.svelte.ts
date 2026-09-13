@@ -29,6 +29,7 @@ import {
 } from "$lib/events/keystore.js";
 import { lockChatIdentityForLogout, unlockChatIdentityForLogin } from "$lib/chat/identity.js";
 import { clearBlindingCache } from "$lib/events/blinding.js";
+import { clearInboxRelayCache } from "$lib/events/attendee.js";
 import { setActiveCacheOwner, clearOwnerCache } from "$lib/cache/persist.js";
 import { discardQueuedForOwner } from "$lib/nostr/publish-queue.js";
 import { outbox } from "$lib/stores/outbox.svelte.js";
@@ -479,6 +480,11 @@ class Session {
     setActiveOwner(null);
     setActiveCacheOwner(null);
     clearBlindingCache();
+    // Per-session, pubkey-keyed memo of the account's own NIP-17 inbox relays
+    // (used to widen the grant scan's read set). Public data, so this is hygiene
+    // rather than isolation — but a session-lifetime cache should not outlive
+    // the session that created it.
+    clearInboxRelayCache();
     // Not owner-scoped stores (audit UX-6): the previous identity's event
     // titles/roles and "Pending" join markers must not linger for the next
     // person on a shared device.
@@ -527,6 +533,7 @@ class Session {
     setActiveOwner(null);
     setActiveCacheOwner(null);
     clearBlindingCache();
+    clearInboxRelayCache();
     recentEvents.setOwner(null);
     clearAllJoinSent();
     ownStatusStore.setOwner(null);

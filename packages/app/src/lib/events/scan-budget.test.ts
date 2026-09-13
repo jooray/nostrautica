@@ -50,21 +50,21 @@ describe("startScanBudget", () => {
 
 describe("scanIncomplete", () => {
   it("is false for a pass that read everything it attempted", () => {
-    expect(scanIncomplete({ attempted: 4, succeeded: 4, truncated: false })).toBe(false);
+    expect(scanIncomplete({ attempted: 4, succeeded: 4, truncated: false, unreachableEvents: 0 })).toBe(false);
   });
 
   it("is false when SOME unwraps failed but the signer demonstrably answered", () => {
     // The steady state of any gift-wrap inbox: foreign/corrupt wraps addressed
     // to us that will never decrypt. Not an outage — must not raise an alarm.
-    expect(scanIncomplete({ attempted: 10, succeeded: 1, truncated: false })).toBe(false);
+    expect(scanIncomplete({ attempted: 10, succeeded: 1, truncated: false, unreachableEvents: 0 })).toBe(false);
   });
 
   it("is true when every signer round trip failed (an outage, not an empty account)", () => {
-    expect(scanIncomplete({ attempted: 6, succeeded: 0, truncated: false })).toBe(true);
+    expect(scanIncomplete({ attempted: 6, succeeded: 0, truncated: false, unreachableEvents: 0 })).toBe(true);
   });
 
   it("is true when the pass ran out of budget", () => {
-    expect(scanIncomplete({ attempted: 50, succeeded: 50, truncated: true })).toBe(true);
+    expect(scanIncomplete({ attempted: 50, succeeded: 50, truncated: true, unreachableEvents: 0 })).toBe(true);
   });
 
   it("is false for a pass with nothing to do", () => {
@@ -85,7 +85,7 @@ describe("scanFailure", () => {
   it("returns null when both scans came back complete", () => {
     expect(
       scanFailure([ok(), ok()], [
-        { attempted: 2, succeeded: 2, truncated: false },
+        { attempted: 2, succeeded: 2, truncated: false, unreachableEvents: 0 },
         emptyOutcome(),
       ]),
     ).toBeNull();
@@ -93,7 +93,7 @@ describe("scanFailure", () => {
 
   it("prefers a real rejection over a synthetic incomplete", () => {
     const boom = new Error("relay pool is offline");
-    expect(scanFailure([bad(boom), ok()], [{ attempted: 3, succeeded: 0, truncated: false }])).toBe(
+    expect(scanFailure([bad(boom), ok()], [{ attempted: 3, succeeded: 0, truncated: false, unreachableEvents: 0 }])).toBe(
       boom,
     );
   });
@@ -103,7 +103,7 @@ describe("scanFailure", () => {
     // and Home concluded the account was empty.
     const failure = scanFailure([ok(), ok()], [
       emptyOutcome(),
-      { attempted: 12, succeeded: 0, truncated: false },
+      { attempted: 12, succeeded: 0, truncated: false, unreachableEvents: 0 },
     ]);
     expect(failure).toBeInstanceOf(ScanIncompleteError);
   });

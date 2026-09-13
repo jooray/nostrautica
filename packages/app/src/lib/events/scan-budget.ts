@@ -79,12 +79,26 @@ export interface ScanOutcome {
   attempted: number;
   /** …of which returned plaintext — proof the signer is actually answering. */
   succeeded: number;
-  /** The pass stopped early because the shared budget ran out. */
+  /** The pass stopped early because the shared budget ran out, or the relay read
+   *  could not be walked to the end of the history. */
   truncated: boolean;
+  /**
+   * Key grants we hold, unwrapped, and could NOT act on because the event's
+   * signed 31600 was unreachable from every relay this device knows.
+   *
+   * A count rather than a boolean because it is a fact about the user's account
+   * ("2 events are waiting"), and because zero is the only value the UI should
+   * stay quiet about. This branch used to `continue` in silence: the device had
+   * the key grant in its hands on every single scan, could not open it, and Home
+   * rendered "No events yet" with no hint that anything was being retried. It is
+   * the difference between "you have no events" and "I can't reach that event's
+   * relays", which are the two states this whole module exists to separate.
+   */
+  unreachableEvents: number;
 }
 
 export function emptyOutcome(): ScanOutcome {
-  return { attempted: 0, succeeded: 0, truncated: false };
+  return { attempted: 0, succeeded: 0, truncated: false, unreachableEvents: 0 };
 }
 
 /**
@@ -124,6 +138,17 @@ export class ScanIncompleteError extends Error {
  * more specific, more actionable message, and `categorizeError` can classify a
  * real error where it can only guess at a synthetic one.
  */
+/**
+ * How many events across a scan round are held-but-unopenable (see
+ * {@link ScanOutcome.unreachableEvents}). Separate from {@link scanFailure}
+ * because it is not a failure: the scan worked, the signer answered, and the
+ * answer was "you have a key waiting for an event I can't reach". That deserves
+ * its own sentence, not the generic retry error.
+ */
+export function unreachableEventCount(outcomes: ScanOutcome[]): number {
+  return outcomes.reduce((n, o) => n + o.unreachableEvents, 0);
+}
+
 export function scanFailure(
   results: PromiseSettledResult<unknown>[],
   outcomes: ScanOutcome[],

@@ -13,9 +13,11 @@
   import {
     startScanBudget,
     scanFailure,
+    unreachableEventCount,
     ScanIncompleteError,
     type ScanOutcome,
   } from "$lib/events/scan-budget.js";
+  import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { defaultEventIcon } from "$lib/media/image.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
   import { prefetchEventContext } from "$lib/nostr/prefetch.js";
@@ -43,6 +45,17 @@
   // exactly how 2026-07-28 got reported as "my events vanished".
   let scanError = $state<unknown>(null);
   let retrying = $state(false);
+
+  /**
+   * How many events handed this device a key grant it cannot open, because the
+   * event's signed 31600 is unreachable from every relay we know (see
+   * ScanOutcome.unreachableEvents). Non-zero is the one state where "No events
+   * yet" is not merely unproven but demonstrably false: we are holding the key.
+   */
+  let keysWaiting = $state(0);
+
+  /** The full-history sweep finished, so "nothing more to find" is now earned. */
+  let deepScanDone = $state(false);
 
   /** Backstop for a scan round that never comes back at all. */
   const SCAN_GUARD_MS = 12_000;
@@ -124,9 +137,16 @@
     const onOutcome = (o: ScanOutcome) => outcomes.push(o);
     const results = await Promise.allSettled([
       recoverEventKeys(signer, { budget, onOutcome, ...(force ? { force: true } : {}) }),
-      receiveGrants(signer, { budget, onOutcome }),
+      // `force` reaches the GRANT scan too. It did not, and that was the whole
+      // gap: the one control the user had for "you're wrong, look again" bypassed
+      // recover.ts's session latch but left `receiveGrants` reading its narrow
+      // now−3-days window, so pressing Retry on a phone that had latched its
+      // backfill marker months earlier re-asked exactly the question that had
+      // already failed — and answered "No events yet" again, with more confidence.
+      receiveGrants(signer, { budget, onOutcome, ...(force ? { force: true } : {}) }),
     ]);
     scanError = scanFailure(results, outcomes);
+    keysWaiting = unreachableEventCount(outcomes);
     try {
       backfillFromKeystore(await listEventKeys(), true);
       void enrichEvents();
@@ -137,21 +157,42 @@
     perfMark("Home", "network-settled");
   }
 
-  async function retryScan() {
+  /**
+   * The user telling us the previous answer was wrong.
+   *
+   * `force` bypasses BOTH latches — recover.ts's once-per-session guard and the
+   * grant scan's full-history backfill marker — so neither a cached "already
+   * swept" nor a marker written weeks ago can turn this into a no-op. It is the
+   * same work behind the error-state "Retry" and the "Search my whole history"
+   * button; `announce` is the only difference, because a retry that follows a
+   * visible error needs no receipt while an unprompted search does.
+   */
+  async function deepScan(announce = false) {
     const signer = session.signer;
     if (!signer || retrying) return;
     retrying = true;
     settled = false;
     scanError = null;
-    // `force` bypasses recover.ts's once-per-session latch: the user is telling
-    // us the previous answer was wrong, so a cached "already swept" must not
-    // turn the retry into a no-op.
+    deepScanDone = false;
     try {
       await runScans(signer, true);
+      if (announce) deepScanDone = true;
     } finally {
       retrying = false;
     }
   }
+
+  const retryScan = () => deepScan(false);
+
+  /**
+   * True when the device cannot currently reach a relay AT ALL. In that state an
+   * empty list is not a finding — nothing was asked and nothing answered — and
+   * rendering "No events yet" over it asserts the one thing we have no basis for.
+   * "connecting" is deliberately excluded: it means no attempt has FAILED yet.
+   */
+  const cannotReachRelays = $derived(
+    connectivity.overall === "offline" || connectivity.overall === "relay-blocked",
+  );
 
   onMount(async () => {
     // 1. Instant: local custody answers "My events" with no network.
@@ -265,6 +306,34 @@
   </div>
 {/if}
 
+<!-- SESSION STATE FIRST. This block used to sit in the `{:else}` chain BELOW the
+     list, which meant `{#if events.length}` swallowed it: a device whose session
+     had quietly not restored rendered its cached event cards and NOTHING else —
+     no login prompt, no explanation — while running no scan at all (the onMount
+     scan is gated on a signer). That is one of the shapes "it still shows me the
+     OLD events and the interface tells me nothing" takes. -->
+{#if !session.loggedIn && session.restoring}
+  <!-- A persisted NIP-46 session is reconnecting in the background (UX-19: the
+       shell must not block on it). Until it settles we do NOT know whether this
+       person is logged out — telling them to log in while their own session is
+       coming back is what made a returning organizer log in a second time on
+       2026-07-28. -->
+  <p class="muted" role="status" aria-live="polite">{t("home.restoringSession")}</p>
+{:else if !session.loggedIn}
+  <div class="card {events.length ? 'warn' : ''}">
+    <h2>{events.length ? t("home.signedOut.title") : t("home.getStarted")}</h2>
+    <p class="muted">
+      {events.length ? t("home.signedOut.stale") : t("home.getStarted.body")}
+    </p>
+    <button class="btn primary" onclick={() => router.go({ name: "login" })}>
+      {t("home.loginOrCreate")}
+    </button>
+    <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
+      {t("home.createEvent")}
+    </button>
+  </div>
+{/if}
+
 {#if events.length}
   <h2>{t("home.yourEvents")}</h2>
   <div class="stack">
@@ -306,54 +375,81 @@
       {retrying ? t("error.state.retrying") : t("error.state.retry")}
     </button>
   {/if}
-  <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
-    <Icon name="plus" size={17} />{t("home.createAnother")}
-  </button>
-{:else if !session.loggedIn && session.restoring}
-  <!-- A persisted NIP-46 session is reconnecting in the background (UX-19: the
-       shell must not block on it). Until it settles we do NOT know whether this
-       person is logged out — telling them to log in while their own session is
-       coming back is what made a returning organizer log in a second time on
-       2026-07-28. Show the pending state instead; the branches above take over
-       the moment the restore lands (or fails). -->
-  <p class="muted" role="status" aria-live="polite">{t("home.restoringSession")}</p>
-{:else if !session.loggedIn}
-  <div class="card">
-    <h2>{t("home.getStarted")}</h2>
-    <p class="muted">{t("home.getStarted.body")}</p>
-    <button class="btn primary" onclick={() => router.go({ name: "login" })}>
-      {t("home.loginOrCreate")}
-    </button>
+  {@render diagnostics()}
+  {#if session.loggedIn}
     <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "create" })}>
-      {t("home.createEvent")}
+      <Icon name="plus" size={17} />{t("home.createAnother")}
     </button>
-  </div>
-{:else if loadingEvents}
-  <p class="muted">{t("home.loadingEvents")}</p>
-{:else if scanError}
-  <!-- Empty list AND a scan we can't trust: the two states this screen used to
-       render identically. "No events yet" here is an assertion we have no basis
-       for — say what actually happened and let the user retry. -->
-  <ErrorState
-    error={scanError}
-    body="home.scanFailed.body"
-    onRetry={retryScan}
-    {retrying}
-  />
-  <div class="card">
-    <button class="btn" onclick={() => router.go({ name: "create" })}>
-      {t("home.createEvent")}
-    </button>
-  </div>
-{:else}
-  <div class="card">
-    <h2>{t("home.noEvents")}</h2>
-    <p class="muted">{t("home.noEvents.body")}</p>
-    <button class="btn primary" onclick={() => router.go({ name: "create" })}>
-      {t("home.createEvent")}
-    </button>
-  </div>
+  {/if}
+{:else if session.loggedIn}
+  {#if loadingEvents}
+    <p class="muted">{t("home.loadingEvents")}</p>
+  {:else if scanError}
+    <!-- Empty list AND a scan we can't trust: the two states this screen used to
+         render identically. "No events yet" here is an assertion we have no basis
+         for — say what actually happened and let the user retry. -->
+    <ErrorState
+      error={scanError}
+      body="home.scanFailed.body"
+      onRetry={retryScan}
+      {retrying}
+    />
+    <div class="card">
+      <button class="btn" onclick={() => router.go({ name: "create" })}>
+        {t("home.createEvent")}
+      </button>
+    </div>
+  {:else if cannotReachRelays}
+    <!-- The third state, and the one that used to be indistinguishable from the
+         other two: we did not fail to FIND events, we failed to ASK. Rendering
+         "No events yet" here is how a conference-WiFi captive portal gets
+         reported as data loss. -->
+    <div class="card warn" role="status" aria-live="polite">
+      <h2>{t("home.cantCheck.title")}</h2>
+      <p class="muted">{t("home.cantCheck.body")}</p>
+      <button class="btn" onclick={retryScan} disabled={retrying}>
+        {retrying ? t("error.state.retrying") : t("error.state.retry")}
+      </button>
+    </div>
+  {:else}
+    <div class="card">
+      <h2>{t("home.noEvents")}</h2>
+      <p class="muted">{t("home.noEvents.body")}</p>
+      <button class="btn primary" onclick={() => router.go({ name: "create" })}>
+        {t("home.createEvent")}
+      </button>
+    </div>
+    {@render diagnostics()}
+  {/if}
 {/if}
+
+<!--
+  The honest floor under every "you have no events"-shaped claim on this screen.
+  Three facts the user previously had no way to get at:
+   - a key grant IS held for an event whose relays this device can't reach (not
+     "no events" — we are holding the key and cannot open it);
+   - the routine check only covers the last few days, which is exactly why an
+     event joined on another device last month can be missing;
+   - the wider search exists, and can be run on demand.
+-->
+{#snippet diagnostics()}
+  {#if session.loggedIn}
+    {#if keysWaiting > 0}
+      <p class="muted" role="status" aria-live="polite" style="margin-top:0.5rem">
+        {t("home.keysWaiting")}
+      </p>
+    {/if}
+    <p class="muted" style="margin-top:0.5rem">{t("home.deepScan.hint")}</p>
+    <button class="btn inline" onclick={() => deepScan(true)} disabled={retrying}>
+      {retrying ? t("home.deepScan.busy") : t("home.deepScan.action")}
+    </button>
+    {#if deepScanDone && !retrying}
+      <p class="muted" role="status" aria-live="polite" style="margin-top:0.5rem">
+        {t("home.deepScan.done")}
+      </p>
+    {/if}
+  {/if}
+{/snippet}
 
 <div class="card">
   <h2>{t("home.how.title")}</h2>

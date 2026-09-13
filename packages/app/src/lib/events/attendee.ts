@@ -8,6 +8,7 @@ import {
   KIND_KEY_GRANT,
   KIND_ORGANIZER_GRANT,
   KIND_COORDINATOR_STATUS,
+  KIND_DM_RELAY_LIST,
   KIND_EVENT_CONFIG,
   KIND_CALENDAR_EVENT,
   KIND_DIRECTORY_ENTRY,
@@ -43,7 +44,14 @@ import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerUnwrap } from "./giftwrap.js";
-import { addEckVersions, applyOrganizerGrant, loadEventKeys, currentEck } from "./keystore.js";
+import {
+  addEckVersions,
+  applyOrganizerGrant,
+  loadEventKeys,
+  listEventKeys,
+  currentEck,
+  type EventKeys,
+} from "./keystore.js";
 import { acceptedRecordAuthors } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
@@ -167,20 +175,66 @@ async function fetchEventConfig(
   }
 }
 
-/** Per-identity marker: has a full-history grant backfill run on this device? */
+/** Per-identity marker: WHEN the last full-history grant backfill completed. */
 function grantsBackfilledKey(pubkey: string): string {
   return `nostrautica-grants-backfilled:${pubkey}`;
 }
-function hasBackfilledGrants(pubkey: string): boolean {
+
+/**
+ * How long a completed full-history sweep is trusted before this device redoes
+ * one.
+ *
+ * This marker used to be the string `"1"` and it was written ONCE, forever. That
+ * is the bug behind the 2026-09-13 report, and it is worth stating concretely
+ * because the failure is completely silent: the owner joined an event on their
+ * desktop, opened the app on a phone that had been logged in for months, and the
+ * event simply was not there — not stale, not spinning, absent, with the phone
+ * cheerfully rendering "No events yet" underneath it. The phone had latched the
+ * marker back in July, so every scan since then asked the relays only for wraps
+ * newer than `giftwrapSince()` (now − 3 days). The 21602 key grant was still
+ * sitting on the relays the whole time; the phone had simply stopped asking a
+ * question wide enough to include it, and nothing — not a relaunch, not the
+ * Retry button, not a reinstall short of clearing site data — ever widened it
+ * again.
+ *
+ * An attendee's ECK exists on the network in exactly ONE place (the one-shot
+ * 21602 gift wrap; unlike an organizer, there is no 30078 self-backup to fall
+ * back on), so a device that stops asking for old wraps has permanently lost the
+ * only copy it could ever have fetched. A week is short enough that a missed
+ * grant costs days rather than months, and long enough that the cost — one
+ * paginated relay read, no signer round trips for anything already memoized — is
+ * paid rarely.
+ */
+export const GRANT_BACKFILL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Any stored value below this is not a timestamp this code wrote. In practice it
+ * is the legacy `"1"`, which is the state EVERY affected device is in right now:
+ * treat it as expired (not as "backfilled at 1ms past the epoch", and emphatically
+ * not as fresh) so the first scan after this ships re-runs the full sweep and
+ * recovers the grants those devices have been unable to see.
+ */
+const MIN_PLAUSIBLE_BACKFILL_MS = 1_000_000_000_000; // 2001-09-09
+
+/** When the last trusted full sweep finished, or undefined if there isn't one. */
+function backfilledAt(pubkey: string): number | undefined {
   try {
-    return localStorage.getItem(grantsBackfilledKey(pubkey)) === "1";
+    const raw = localStorage.getItem(grantsBackfilledKey(pubkey));
+    if (!raw) return undefined;
+    const at = Number(raw);
+    if (!Number.isFinite(at) || at < MIN_PLAUSIBLE_BACKFILL_MS) return undefined;
+    return at;
   } catch {
-    return false;
+    // Storage unavailable (private mode, disabled cookies): we cannot prove a
+    // sweep ever ran, so the honest answer is "none" — a wider read, never a
+    // narrower one.
+    return undefined;
   }
 }
-function markGrantsBackfilled(pubkey: string): void {
+
+function markGrantsBackfilled(pubkey: string, at: number = Date.now()): void {
   try {
-    localStorage.setItem(grantsBackfilledKey(pubkey), "1");
+    localStorage.setItem(grantsBackfilledKey(pubkey), String(at));
   } catch {
     /* storage unavailable — a full backfill just re-runs next load */
   }
@@ -205,9 +259,176 @@ function markGrantsBackfilled(pubkey: string): void {
 /** Cap on the persisted grant-wrap memo (audit App-7), mirroring the DM memo. */
 export const MAX_GRANT_WRAPS = 5000;
 
+/**
+ * Page size for the wrap read, and the cap on how many pages one sweep walks.
+ *
+ * The read used to carry NO `limit` at all, which does not mean "everything": it
+ * means the RELAY picks, and relays answer an unbounded filter with their own
+ * default cap, newest-first. So a full-history sweep on an account with a busy
+ * NIP-17 inbox silently returned only the newest N wraps — and then latched the
+ * backfill marker as if it had seen the whole history, which is the same
+ * permanent blindness the marker's TTL above exists to prevent, arrived at from
+ * the other side. Asking for an explicit page and walking backwards with `until`
+ * is the only way to know whether we reached the end or the relay's ceiling.
+ */
+export const GRANT_PAGE_SIZE = 500;
+export const GRANT_MAX_PAGES = 20;
+
+/**
+ * Accept only relay URLs we would dial. Deliberately a local check rather than
+ * ndk's `isAcceptedRelayUrl`: the values here come from an untrusted kind-10050
+ * published by anyone, and this module is on the login path where the ndk
+ * surface is routinely stubbed — a seven-line guard is cheaper than the coupling.
+ */
+function isDialableRelay(url: string): boolean {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "wss:") return true;
+    if (u.protocol !== "ws:") return false;
+    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Bound an untrusted 10050 so a hostile list can't crowd out the defaults. */
+const MAX_INBOX_RELAYS = 20;
+
+/**
+ * The account's own NIP-17 inbox relays, resolved at most once per session.
+ *
+ * `receiveGrants` runs on nearly every event-page mount, so resolving this on
+ * each call would put an extra subscription (and its EOSE wait) in front of work
+ * that is already on the critical path for "which events are mine". A user's own
+ * 10050 changes about as often as their relay preferences do; a session is a
+ * perfectly good staleness bound, and the value only ever WIDENS the read set —
+ * a stale one costs nothing but a relay we needn't have dialled.
+ */
+const inboxRelayCache = new Map<string, Promise<string[]>>();
+
+/** Drop the per-session inbox-relay memo (logout, or tests). */
+export function clearInboxRelayCache(): void {
+  inboxRelayCache.clear();
+}
+
+function ownInboxRelays(pubkey: string): Promise<string[]> {
+  let pending = inboxRelayCache.get(pubkey);
+  if (!pending) {
+    pending = (async () => {
+      const lists = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey] });
+      const latest = pickLatest(onlyVerified(lists));
+      return (latest?.tags ?? [])
+        .filter((t) => t[0] === "relay" && !!t[1] && isDialableRelay(t[1]))
+        .map((t) => t[1]!)
+        .slice(0, MAX_INBOX_RELAYS);
+    })();
+    inboxRelayCache.set(pubkey, pending);
+    // A failed lookup must not be cached as "this account has no inboxes".
+    pending.catch(() => inboxRelayCache.delete(pubkey));
+  }
+  return pending;
+}
+
+/**
+ * Where to LOOK for wraps addressed to this account.
+ *
+ * `DEFAULT_RELAYS` alone was the read side of an asymmetry with the write side:
+ * `publishAccountGiftWrap` (nostr/giftwrap-routing.ts) deliberately sends a grant
+ * to the recipient's declared kind-10050 inboxes as well as the event + app
+ * relays, precisely so it reaches the account's other clients — and then this
+ * scan never looked at those inboxes. A grant delivered to an inbox the user
+ * publishes but we don't read is a grant that exists and is invisible.
+ *
+ * Event relay hints are unioned in for the same reason (audit APPK-5 already
+ * applies them to the 31600 lookup): an event living on custom relays may have
+ * had its grant land there too.
+ *
+ * Best-effort and never narrowing: any failure leaves the defaults standing.
+ */
+async function grantScanRelays(pubkey: string, held: EventKeys[]): Promise<string[]> {
+  let inboxes: string[] = [];
+  try {
+    inboxes = await ownInboxRelays(pubkey);
+  } catch {
+    /* no 10050, or the read failed — the defaults below still stand */
+  }
+  const hints: string[] = [];
+  for (const k of held) {
+    try {
+      hints.push(...eventRelayHints(k.coordinate).filter(isDialableRelay));
+    } catch {
+      /* one unreadable hint must not cost us the whole relay set */
+    }
+  }
+  return unionRelays(DEFAULT_RELAYS, inboxes, hints);
+}
+
+/**
+ * One paginated read of the gift wraps addressed to `pubkey`.
+ *
+ * `complete` is false when we stopped for any reason other than reaching the end
+ * of the history — the page cap, or a page that made no progress. Only a
+ * `complete` full-history sweep may latch the backfill marker; anything else has
+ * demonstrably not seen everything, and latching on it is how a device teaches
+ * itself to stop looking.
+ */
+async function readGrantWraps(
+  pubkey: string,
+  relays: string[],
+  since: number,
+): Promise<{ wraps: GiftWrap[]; complete: boolean }> {
+  const seen = new Set<string>();
+  const wraps: GiftWrap[] = [];
+  let until: number | undefined;
+  for (let page = 0; page < GRANT_MAX_PAGES; page++) {
+    const filter: Record<string, unknown> = {
+      kinds: [KIND_GIFT_WRAP],
+      "#p": [pubkey],
+      since,
+      limit: GRANT_PAGE_SIZE,
+    };
+    if (until !== undefined) filter.until = until;
+    // Relay-only read (no dexie cache in the loop): grants must not be missed —
+    // fetchEvents can EOSE-resolve before the cache adapter surfaces a wrap that
+    // already arrived from the relay (found via e2e, TEST-REPORT-2026-07-13).
+    // Explicit relay set: without one, NDK's outbox calculation can stall the
+    // fetch indefinitely when relay lists are unresolvable (BUG-1b).
+    const batch = (await fetchEventsRelayOnly(filter, relays)) as unknown as GiftWrap[];
+    let added = 0;
+    let oldest: number | undefined;
+    for (const w of batch) {
+      if (!seen.has(w.id)) {
+        seen.add(w.id);
+        wraps.push(w);
+        added++;
+      }
+      if (oldest === undefined || w.created_at < oldest) oldest = w.created_at;
+    }
+    // A short page is the end of the history — the only way to actually finish.
+    if (batch.length < GRANT_PAGE_SIZE) return { wraps, complete: true };
+    // A full page that taught us nothing new (every id already seen, or no
+    // timestamp to step back from) would loop forever on the same `until`.
+    if (added === 0 || oldest === undefined) return { wraps, complete: false };
+    // `until` is inclusive, so the boundary second is re-requested and the id
+    // dedupe above absorbs it — stepping past it would drop wraps that share it.
+    until = oldest;
+  }
+  return { wraps, complete: false };
+}
+
 export async function receiveGrants(
   signer: AppSigner,
-  opts: { budget?: ScanBudget; onOutcome?: (outcome: ScanOutcome) => void } = {},
+  opts: {
+    budget?: ScanBudget;
+    onOutcome?: (outcome: ScanOutcome) => void;
+    /**
+     * Ignore the backfill marker and sweep the full history regardless. This is
+     * the user pressing "Search my whole history": they are telling us the last
+     * answer was wrong, and a marker written weeks ago must not turn that into a
+     * no-op the way it did for the reporter's phone.
+     */
+    force?: boolean;
+  } = {},
 ): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
   // Bounded (see `scan-budget.ts`): every un-memoized wrap costs TWO signer
@@ -218,20 +439,28 @@ export async function receiveGrants(
   // than swallowed, so the caller can distinguish it from an empty inbox.
   const budget = opts.budget ?? startScanBudget();
   const outcome = emptyOutcome();
-  const fullBackfill = !hasBackfilledGrants(pubkey);
-  // Relay-only read (no dexie cache in the loop): grants must not be missed —
-  // fetchEvents can EOSE-resolve before the cache adapter surfaces a wrap that
-  // already arrived from the relay (found via e2e, TEST-REPORT-2026-07-13).
-  // Explicit relay set: without one, NDK's outbox calculation can stall the
-  // fetch indefinitely when relay lists are unresolvable (BUG-1b).
-  const wraps = (await fetchEventsRelayOnly(
-    {
-      kinds: [KIND_GIFT_WRAP],
-      "#p": [pubkey],
-      since: fullBackfill ? 0 : giftwrapSince(),
-    },
-    DEFAULT_RELAYS,
-  )) as unknown as GiftWrap[];
+  // What this device already holds for this identity. Two jobs: it widens the
+  // relay set (an event's own relays may have taken the grant), and an EMPTY
+  // keystore is itself a reason to sweep the whole history regardless of the
+  // marker — "I have no events at all" and "I already checked" cannot both be
+  // true, and believing the marker in that state is what leaves a restored
+  // identity staring at "No events yet" with a full inbox on the relays.
+  const held = await listEventKeys(pubkey).catch(() => [] as EventKeys[]);
+  const lastBackfill = backfilledAt(pubkey);
+  const backfillExpired =
+    lastBackfill === undefined || Date.now() - lastBackfill >= GRANT_BACKFILL_TTL_MS;
+  const fullBackfill = opts.force === true || backfillExpired || held.length === 0;
+  const relays = await grantScanRelays(pubkey, held);
+  const { wraps, complete: readComplete } = await readGrantWraps(
+    pubkey,
+    relays,
+    fullBackfill ? 0 : giftwrapSince(),
+  );
+  // A read we could not finish must not be presented as the whole truth — it is
+  // the same class of half-answer as a truncated signer budget, and the caller
+  // (Home) needs it to say "this list may be incomplete" rather than "you have
+  // no events".
+  if (!readComplete) outcome.truncated = true;
 
   const coordinates = new Set<string>();
   // Did this scan prove the SIGNER can actually read our wraps? A full-history
@@ -300,16 +529,31 @@ export async function receiveGrants(
     if (rumor.kind === KIND_ORGANIZER_GRANT) {
       // Co-organizer custody: store the full event keys so this device can admin.
       let grant;
+      let raw: unknown;
       try {
-        const raw = JSON.parse(rumor.content);
-        // A grant sealed by the E_id/coordinator authority (rumor.pubkey is bound
-        // by signerUnwrap) that carries a newer protocol version means this client
-        // is stale (NIP §2 / D2) — prompt an update. Still definitive: memoize.
-        if (isNewerProtocolVersion(raw)) updatePrompt.flag();
+        raw = JSON.parse(rumor.content);
+      } catch {
+        memo[wrap.id] = true; // not even JSON — definitive, never re-try
+        memoDirty = true;
+        continue;
+      }
+      // A grant sealed by the E_id/coordinator authority (rumor.pubkey is bound
+      // by signerUnwrap) that carries a newer protocol version means this client
+      // is stale (NIP §2 / D2) — prompt an update.
+      const newerProtocol = isNewerProtocolVersion(raw);
+      if (newerProtocol) updatePrompt.flag();
+      try {
         grant = organizerGrantContentSchema.parse(raw);
       } catch {
-        memo[wrap.id] = true; // malformed — definitive, never re-try
-        memoDirty = true;
+        // NOT definitive when the payload is simply newer than this build (D2):
+        // memoizing it meant the app auto-updated minutes later and then never
+        // looked at that wrap again, so a grant we were one release away from
+        // understanding stayed permanently unread. Leave it for the updated
+        // build. A parse failure at the CURRENT version is genuinely malformed.
+        if (!newerProtocol) {
+          memo[wrap.id] = true;
+          memoDirty = true;
+        }
         continue;
       }
       const config = await configFor(grant.a, grant.config_relays);
@@ -340,15 +584,29 @@ export async function receiveGrants(
     }
     if (rumor.kind === KIND_KEY_GRANT) {
       let grant;
+      let raw: unknown;
       try {
-        const raw = JSON.parse(rumor.content);
-        // Newer-protocol grant from the authenticated E_id/coordinator authority:
-        // prompt an update (NIP §2 / D2) before dropping it.
-        if (isNewerProtocolVersion(raw)) updatePrompt.flag();
+        raw = JSON.parse(rumor.content);
+      } catch {
+        memo[wrap.id] = true; // not even JSON — definitive
+        memoDirty = true;
+        continue;
+      }
+      // Newer-protocol grant from the authenticated E_id/coordinator authority:
+      // prompt an update (NIP §2 / D2) before dropping it.
+      const newerProtocol = isNewerProtocolVersion(raw);
+      if (newerProtocol) updatePrompt.flag();
+      try {
         grant = keyGrantContentSchema.parse(raw);
       } catch {
-        memo[wrap.id] = true; // malformed — definitive
-        memoDirty = true;
+        // See the 21605 branch: a payload from a NEWER protocol version is not a
+        // malformed one, and memoizing it burned the grant permanently — the PWA
+        // auto-updates within a minute, and the build that could finally read it
+        // had already been told never to look again.
+        if (!newerProtocol) {
+          memo[wrap.id] = true;
+          memoDirty = true;
+        }
         continue;
       }
       const config = await configFor(grant.a, eventRelayHints(grant.a));
@@ -358,6 +616,20 @@ export async function receiveGrants(
         // authenticateKeyGrant can't establish the granting authority without
         // it. This is NOT a definitive negative — leave the wrap un-memoized so
         // the next scan retries (audit APPK-5).
+        //
+        // But it was also completely SILENT, which is worse than the retry is
+        // good: a device that can reach the wrap but not the event's relays sits
+        // in this branch on every scan forever, holding an unopened key grant,
+        // while Home renders "No events yet" with total confidence. Count it and
+        // say it, so the UI can offer the one true sentence — "a key grant is
+        // waiting, but this device can't reach that event's relays".
+        outcome.unreachableEvents++;
+        console.warn(
+          "[receiveGrants] a 21602 key grant is waiting for",
+          grant.a,
+          "but its signed 31600 config could not be fetched from any known relay" +
+            " — cannot authenticate the grant, will retry on the next scan",
+        );
         continue;
       }
       if (!authenticateKeyGrant(rumor, grant, config)) {
@@ -420,7 +692,19 @@ export async function receiveGrants(
   // inbox really is empty simply keeps doing the full-history read — which is a
   // filter with `since: 0` that returns nothing, and stops as soon as their first
   // wrap arrives and unwraps.
-  if (fullBackfill && wraps.length > 0 && !outcome.truncated && (unwrapped > 0 || unwrapFailed === 0)) {
+  //
+  // `readComplete` joins that list (and `outcome.truncated` now carries it too,
+  // so the check below is belt-and-braces): a sweep the RELAY cut short at its
+  // page ceiling saw only the newest slice of the history and knows nothing about
+  // what lies behind it. Latching on that is indistinguishable, a week later,
+  // from having genuinely read everything.
+  if (
+    fullBackfill &&
+    readComplete &&
+    wraps.length > 0 &&
+    !outcome.truncated &&
+    (unwrapped > 0 || unwrapFailed === 0)
+  ) {
     markGrantsBackfilled(pubkey);
   }
   if (memoDirty) {

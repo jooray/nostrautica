@@ -26,7 +26,8 @@ import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
-import { loadEventKeys, saveEventKeys } from "./keystore.js";
+import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { loadEventKeys, listEventKeys, saveEventKeys } from "./keystore.js";
 import {
   startScanBudget,
   emptyOutcome,
@@ -39,6 +40,45 @@ const EVENTKEYS_PREFIX = "nostrautica:eventkeys:";
 // One recovery pass per identity per session is enough (the keystore is a
 // durable local cache once restored). A failed pass isn't marked, so it retries.
 const recovered = new Set<string>();
+
+/** Cap on the persisted backup memo, mirroring attendee.ts's MAX_GRANT_WRAPS. */
+export const MAX_RECOVERED_BACKUPS = 2000;
+
+/**
+ * Per-30078 memo (owner-scoped, persisted), mirroring the grant-wrap memo in
+ * attendee.ts.
+ *
+ * The `d`-prefix test above already costs nothing for a FOREIGN 30078, so this
+ * is not about other apps' app-data. It is about our own: an organizer with a
+ * dozen events has one backup per event plus one per ECK rotation and attach,
+ * and paid a `nip44Decrypt` for every one of them on every session — each of
+ * which then restored a record the keystore already held. On a remote signer
+ * that is a round trip (possibly an Amber dialog) each, drawn from the SAME
+ * 50-call allowance `receiveGrants` needs to walk gift wraps, and the two scans
+ * run concurrently from one budget: the re-decrypts could exhaust it before the
+ * grant scan reached the wrap carrying a newly-joined event. Which is to say
+ * this memo is here to stop recovery from starving discovery.
+ *
+ * A 30078 is addressable, so a rewritten backup is a NEW event id: memoizing by
+ * id can never pin a stale backup. And the memo is bypassed entirely whenever it
+ * could cost us custody rather than save a prompt — see `trustMemo`.
+ */
+function backupMemoKey(): string {
+  return "eventkeysbackups";
+}
+
+function loadBackupMemo(): Record<string, true> {
+  return { ...(cacheGet<Record<string, true>>(backupMemoKey())?.data ?? {}) };
+}
+
+function saveBackupMemo(memo: Record<string, true>): void {
+  const keys = Object.keys(memo);
+  if (keys.length > MAX_RECOVERED_BACKUPS) {
+    const keep = new Set(keys.slice(-MAX_RECOVERED_BACKUPS));
+    for (const k of keys) if (!keep.has(k)) delete memo[k];
+  }
+  cacheSet(backupMemoKey(), memo, Math.floor(Date.now() / 1000));
+}
 
 /**
  * Resolve the event coordinate a backup belongs to. New backups carry `a`
@@ -118,6 +158,16 @@ export async function recoverEventKeys(
 
   const budget = opts.budget ?? startScanBudget();
   const outcome = emptyOutcome();
+  // The memo is a PROMPT saver, never a correctness input, so it is trusted only
+  // when skipping a backup cannot cost anything. An empty keystore means this
+  // device holds no custody at all — a wipe, a fresh install, a restored
+  // identity — and that is exactly the moment recovery must re-read every backup
+  // it can find, memo or no memo. `force` is the user saying the same thing out
+  // loud.
+  const held = await listEventKeys(pubkey).catch(() => []);
+  const trustMemo = !opts.force && held.length > 0;
+  const memo = loadBackupMemo();
+  let memoDirty = false;
   try {
     const events = await fetchEvents(
       { kinds: [KIND_APP_DATA], authors: [pubkey] },
@@ -141,6 +191,15 @@ export async function recoverEventKeys(
       const d = e.tags.find((t) => t[0] === "d")?.[1];
       if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
       candidates++;
+      // Already decrypted and restored in an earlier pass, and the keystore still
+      // holds custody — re-reading it would re-derive a record we have.
+      if (trustMemo && memo[e.id]) {
+        // Counts as read for the `meaningful` test below: skipping it is only
+        // legitimate BECAUSE we once read it successfully, so a sweep made
+        // entirely of memo hits is a complete sweep, not a signer outage.
+        decrypted++;
+        continue;
+      }
       // Out of time or out of prompts: stop rather than start another decrypt.
       // The sweep is resumable — nothing here is memoized as a negative — so a
       // truncated pass costs a retry, while continuing costs the user an
@@ -162,8 +221,14 @@ export async function recoverEventKeys(
       const coordinate = await resolveCoordinate(backup);
       if (!coordinate) continue;
       await restore(coordinate, backup);
+      // Definitive: decrypted, resolved, and written to the keystore. Only now —
+      // a backup whose coordinate could not be resolved stays un-memoized, since
+      // that depends on a 31600 read that may simply have failed this time.
+      memo[e.id] = true;
+      memoDirty = true;
       if (!restoredCoords.includes(coordinate)) restoredCoords.push(coordinate);
     }
+    if (memoDirty) saveBackupMemo(memo);
 
     // Latch the once-per-session guard ONLY after a genuine sweep — otherwise a
     // remote signer (NIP-46/Amber) that wasn't reachable yet, or a relay race that

@@ -98,6 +98,21 @@ export const messages = {
       "We couldn't finish looking for your events: your signer didn't answer. Nothing is lost; they're still on your relays.",
     "home.scanIncomplete":
       "This list may be incomplete: the check for your events didn't finish.",
+    // Multi-device honesty (2026-09-13). "No events yet" was doing the work of
+    // three different facts; these separate them.
+    "home.signedOut.title": "You're signed out",
+    "home.signedOut.stale":
+      "These events are what this device last saw. Log in to check for new ones.",
+    "home.cantCheck.title": "We couldn't check for your events",
+    "home.cantCheck.body":
+      "This device can't reach any relay right now, so this isn't an answer — nothing is lost, your events are on your relays.",
+    "home.keysWaiting":
+      "An event has sent you its key, but this device can't reach that event's relays to open it. It will keep trying — opening the event's invite link here fixes it straight away.",
+    "home.deepScan.hint":
+      "Routine checks only look at the last few days. If an event you joined on another device is missing, search your whole history.",
+    "home.deepScan.action": "Search my whole history",
+    "home.deepScan.busy": "Searching…",
+    "home.deepScan.done": "Searched your whole history.",
     "home.how.title": "How it works",
     "home.how.record": "Record a short intro video (and optionally a talk).",
     "home.how.matched": "Get matched with people whose skills complement yours.",
@@ -1703,6 +1718,19 @@ export const messages = {
       "Nepodarilo sa dokončiť hľadanie vašich podujatí: váš podpisovač neodpovedal. Nič sa nestratilo, stále sú na vašich relayoch.",
     "home.scanIncomplete":
       "Tento zoznam nemusí byť úplný: hľadanie vašich podujatí sa nedokončilo.",
+    "home.signedOut.title": "Ste odhlásený",
+    "home.signedOut.stale":
+      "Toto sú podujatia, ktoré toto zariadenie videlo naposledy. Prihláste sa a pozrieme sa, či pribudli nové.",
+    "home.cantCheck.title": "Nepodarilo sa overiť vaše podujatia",
+    "home.cantCheck.body":
+      "Toto zariadenie sa teraz nevie spojiť so žiadnym relayom, takže toto nie je odpoveď — nič sa nestratilo, vaše podujatia sú na vašich relayoch.",
+    "home.keysWaiting":
+      "Jedno podujatie vám poslalo svoj kľúč, ale toto zariadenie sa nevie spojiť s jeho relaymi, aby ho otvorilo. Budeme to skúšať ďalej — ak tu otvoríte pozvánku na to podujatie, vyrieši sa to hneď.",
+    "home.deepScan.hint":
+      "Bežná kontrola sa pozerá len na posledných pár dní. Ak vám chýba podujatie, ku ktorému ste sa pripojili na inom zariadení, prehľadajte celú históriu.",
+    "home.deepScan.action": "Prehľadať celú históriu",
+    "home.deepScan.busy": "Hľadáme…",
+    "home.deepScan.done": "Celá história prehľadaná.",
     "home.how.title": "Ako to funguje",
     "home.how.record": "Nahrajte krátke predstavovacie video (a voliteľne aj prednášku).",
     "home.how.matched": "Spojíme vás s ľuďmi, ktorých zručnosti dopĺňajú tie vaše.",
@@ -3290,6 +3318,19 @@ export const messages = {
       "Nepodařilo se dokončit hledání vašich akcí: váš podepisovač neodpověděl. Nic se neztratilo, stále jsou na vašich relayích.",
     "home.scanIncomplete":
       "Tento seznam nemusí být úplný: hledání vašich akcí se nedokončilo.",
+    "home.signedOut.title": "Jste odhlášeni",
+    "home.signedOut.stale":
+      "Tohle jsou akce, které toto zařízení vidělo naposledy. Přihlaste se a podíváme se, jestli přibyly nové.",
+    "home.cantCheck.title": "Nepodařilo se ověřit vaše akce",
+    "home.cantCheck.body":
+      "Toto zařízení se teď nedokáže spojit s žádným relayem, takže tohle není odpověď — nic se neztratilo, vaše akce jsou na vašich relayích.",
+    "home.keysWaiting":
+      "Jedna akce vám poslala svůj klíč, ale toto zařízení se nedokáže spojit s jejími relayi, aby ho otevřelo. Budeme to zkoušet dál — když tu otevřete pozvánku na tu akci, vyřeší se to hned.",
+    "home.deepScan.hint":
+      "Běžná kontrola se dívá jen na posledních pár dní. Pokud vám chybí akce, ke které jste se připojili na jiném zařízení, prohledejte celou historii.",
+    "home.deepScan.action": "Prohledat celou historii",
+    "home.deepScan.busy": "Hledáme…",
+    "home.deepScan.done": "Celá historie prohledána.",
     "home.how.title": "Jak to funguje",
     "home.how.record": "Nahrajte krátké představovací video (a volitelně i přednášku).",
     "home.how.matched": "Propojíme vás s lidmi, jejichž dovednosti doplňují ty vaše.",

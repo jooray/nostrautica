@@ -31,6 +31,13 @@ import {
 } from "./keystore.js";
 import { recoverEventKeys, resetRecoveryGuard } from "./recover.js";
 import { startScanBudget, scanIncomplete, type ScanOutcome } from "./scan-budget.js";
+import {
+  __setPersistBackend,
+  __resetPersistForTests,
+  setActiveCacheOwner,
+  type CacheEntry,
+  type PersistBackend,
+} from "$lib/cache/persist.js";
 
 type Stored = EventKeys & { owner: string };
 function memBackend() {
@@ -307,5 +314,112 @@ describe("recoverEventKeys is bounded and reports its outcome", () => {
     expect(await recoverEventKeys(deaf, { onOutcome: (o) => outcomes.push(o) })).toEqual([]);
     expect(outcomes[0]).toMatchObject({ attempted: 1, succeeded: 0, truncated: false });
     expect(scanIncomplete(outcomes[0]!)).toBe(true);
+  });
+});
+
+/**
+ * The backup memo exists to stop recovery from starving discovery: both scans
+ * draw signer round trips from ONE budget, and an organizer re-decrypting a
+ * dozen backups they already hold could exhaust it before the grant scan reached
+ * the wrap carrying a newly-joined event.
+ *
+ * It is a prompt saver and must never become a correctness input — a memo that
+ * skips a backup on a device holding no custody is silent custody loss, which is
+ * the one outcome this module exists to prevent.
+ */
+describe("recoverEventKeys backup memo", () => {
+  function memPersist(): PersistBackend {
+    const store = new Map<string, CacheEntry>();
+    return {
+      async getAll() {
+        return [...store.entries()];
+      },
+      async put(k, v) {
+        store.set(k, v);
+      },
+      async delete(keys) {
+        for (const k of keys) store.delete(k);
+      },
+    };
+  }
+
+  beforeEach(() => {
+    fetchEvents.mockReset();
+    resetRecoveryGuard();
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+  });
+
+  it("skips a re-decrypt of a backup already restored, while custody is held", async () => {
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const { event, coordinate } = await makeBackupEvent(organizer, { includeA: true });
+    fetchEvents.mockResolvedValue([event]);
+
+    let decrypts = 0;
+    const counted = {
+      method: "nip46" as const,
+      getPublicKey: async () => owner,
+      signEvent: organizer.signEvent.bind(organizer),
+      nip44Encrypt: organizer.nip44Encrypt.bind(organizer),
+      nip44Decrypt: async (pk: string, ct: string) => {
+        decrypts++;
+        return organizer.nip44Decrypt(pk, ct);
+      },
+    };
+
+    __setKeystoreBackend(memBackend().backend);
+    setActiveOwner(owner);
+    setActiveCacheOwner(owner);
+
+    expect(await recoverEventKeys(counted)).toEqual([coordinate]);
+    expect(decrypts).toBe(1);
+
+    // Second pass (a new session — the once-per-session guard is reset): the
+    // keystore still holds this event, so re-reading the backup would re-derive
+    // a record we have. On Amber that is a dialog the user did not need.
+    resetRecoveryGuard();
+    expect(await recoverEventKeys(counted)).toEqual([]);
+    expect(decrypts).toBe(1);
+    // …and the skip still counts as a READ pass, not a signer outage: a sweep
+    // made entirely of memo hits is complete, so the session guard may latch.
+    expect(await loadEventKeys(coordinate)).toBeDefined();
+  });
+
+  it("ignores the memo when the keystore holds nothing for this identity", async () => {
+    // A wipe, a fresh install, a restored identity. "I already read that backup"
+    // is worthless when the thing it produced is gone — and trusting it here
+    // would leave an organizer permanently on Visitor with their own custody
+    // sitting readable on the relays.
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const { event, coordinate } = await makeBackupEvent(organizer, { includeA: true });
+    fetchEvents.mockResolvedValue([event]);
+
+    __setKeystoreBackend(memBackend().backend);
+    setActiveOwner(owner);
+    setActiveCacheOwner(owner);
+    expect(await recoverEventKeys(organizer)).toEqual([coordinate]);
+
+    // Custody wiped, memo intact (a different IndexedDB database).
+    __setKeystoreBackend(memBackend().backend);
+    resetRecoveryGuard();
+    expect(await loadEventKeys(coordinate)).toBeUndefined();
+    expect(await recoverEventKeys(organizer)).toEqual([coordinate]);
+    expect(await loadEventKeys(coordinate)).toBeDefined();
+  });
+
+  it("ignores the memo under `force` (the user's explicit re-search)", async () => {
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const { event, coordinate } = await makeBackupEvent(organizer, { includeA: true });
+    fetchEvents.mockResolvedValue([event]);
+
+    __setKeystoreBackend(memBackend().backend);
+    setActiveOwner(owner);
+    setActiveCacheOwner(owner);
+    expect(await recoverEventKeys(organizer)).toEqual([coordinate]);
+    // Custody is still held, so the memo WOULD apply — `force` overrides it.
+    expect(await recoverEventKeys(organizer, { force: true })).toEqual([coordinate]);
   });
 });
