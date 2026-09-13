@@ -235,6 +235,23 @@ function applyBaselineDDL(db: DatabaseSync): void {
     )`,
   );
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
+  // Migration (2026-09-13): scheduling class on a job row. Deliberately a plain
+  // defaulted column rather than a numbered migration — an older binary neither
+  // reads nor writes it, and its INSERTs take the DEFAULT, so the file stays
+  // readable both ways and this needs no one-way SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0");
+    // Classify the rows that predate the column, so the deploy that introduces it
+    // also reorders the queue it inherits. Without this the change would only
+    // apply to jobs enqueued afterwards, and a backlog of reverse batches would
+    // still be the first thing the next arrival waits behind. Inside the same
+    // try/catch on purpose: it runs exactly once, on the transition.
+    const setPriority = db.prepare("UPDATE jobs SET priority = ? WHERE type = ?");
+    for (const [type, priority] of Object.entries(JOB_PRIORITY)) setPriority.run(priority, type);
+  } catch {
+    /* column already exists */
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim_priority ON jobs (state, next_run_at, priority, id)");
 }
 
 /**
@@ -767,6 +784,44 @@ export const MATCH_JOB_TYPES = [
 ] as const;
 
 /**
+ * Jobs the queue runs LAST (higher number = later), keyed by type. Everything
+ * unlisted is 0 and runs in id order as before.
+ *
+ * `score_reverse_batch` is the one piece of matching work whose result the person
+ * who triggered it never sees: it scores the EXISTING attendees against the
+ * newcomer, i.e. it updates other people's match lists. Their lists matter, but
+ * nobody is staring at the screen waiting for them, and a newcomer very much is.
+ *
+ * Measured on the Plan B event (2026-09-11): a newcomer's own three forward
+ * batches finished ~2 minutes after their submission, and then their
+ * `publish_matches` — a 30ms job — sat behind three reverse batches (88s, 134s,
+ * 52s) because `claimNextJob` took rows in id order and the publish row was
+ * created LAST, after the forward batch that produced it. Six minutes to show a
+ * list that had been ready for four.
+ *
+ * `publish_matches` goes the other way, to −1. Each forward batch enqueues one for
+ * the ≤10 candidates it just scored, and the job is a single replaceable publish
+ * measured in tens of milliseconds — so running it the moment it exists means a
+ * list that fills in while the remaining batches score, instead of an empty screen
+ * until the last one lands. Out-of-order publishes are already safe: every
+ * replaceable address goes out under a monotonic `created_at` watermark.
+ *
+ * The trade-off is deliberate: a long enough queue of arrivals can keep reverse
+ * work waiting indefinitely. At an event that is the desired shape — everyone
+ * walking in sees their own matches quickly, and the cross-updates land once the
+ * registration burst stops. It is not a general-purpose fair scheduler.
+ */
+export const JOB_PRIORITY: Readonly<Record<string, number>> = {
+  publish_matches: -1,
+  score_reverse_batch: 1,
+};
+
+/** The scheduling class for a job type (see {@link JOB_PRIORITY}); 0 = foreground. */
+export function jobPriority(type: string): number {
+  return JOB_PRIORITY[type] ?? 0;
+}
+
+/**
  * Per-attendee pipeline job types whose dedupe-key memory an organizer `reprocess`
  * must clear (see {@link Store.clearAttendeeJobMemo}). Both carry `$.coordinate` +
  * `$.pubkey` in their payload, which is what makes a single per-attendee delete
@@ -805,6 +860,8 @@ export interface JobRow {
   claimed_at: number | null;
   lease_until: number | null;
   worker_token: string | null;
+  /** Scheduling class, written from the type at enqueue ({@link jobPriority}). */
+  priority: number;
 }
 
 /** A stored attendee row (audit Q11: typed instead of `any` at the pipeline boundary). */
@@ -2708,9 +2765,9 @@ export class Store {
   enqueueJob(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
     const info = this.db
       .prepare(
-        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', ?)",
+        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at, priority) VALUES (?, ?, ?, 'pending', ?, ?)",
       )
-      .run(type, dedupeKey, JSON.stringify(payload), notBefore);
+      .run(type, dedupeKey, JSON.stringify(payload), notBefore, jobPriority(type));
     if (Number(info.changes) > 0) return "enqueued";
     const row = this.db.prepare("SELECT state FROM jobs WHERE dedupe_key = ?").get(dedupeKey) as
       | { state: JobState }
@@ -2814,10 +2871,13 @@ export class Store {
     try {
       const row = this.db
         .prepare(
+          // Scheduling class first, then id (see JOB_PRIORITY). A stranded lease is
+          // reclaimed under its own class: it is work that was already started, and
+          // demoting or promoting it on recovery would be a second, invisible rule.
           `SELECT * FROM jobs
              WHERE (state = 'pending' AND next_run_at <= ?)
                 OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
-             ORDER BY id LIMIT 1`,
+             ORDER BY priority, id LIMIT 1`,
         )
         .get(now, now) as JobRow | undefined;
       if (!row) {

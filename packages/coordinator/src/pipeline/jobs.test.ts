@@ -26,6 +26,55 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.pendingJobCount()).toBe(0);
   });
 
+  it("runs a newcomer's own matching ahead of reverse work already queued", async () => {
+    // The Plan B shape (2026-09-11): someone's forward batch finishes and enqueues
+    // the publish that shows THEM their list — but that row is created after the
+    // reverse batches, so in pure id order the 30ms publish waited out three LLM
+    // calls. And a second arrival's whole pipeline waited behind the first
+    // person's reverse work, which nobody is looking at.
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now });
+    const order: string[] = [];
+    for (const type of ["score_batch", "score_reverse_batch", "publish_matches", "process_attendee"]) {
+      runner.register(type, async (p: { who: string }) => {
+        order.push(`${type}:${p.who}`);
+      });
+    }
+    // Newcomer A's recompute: forward first, then reverse (what match_recompute does).
+    runner.enqueue("score_batch", "a-fwd", { who: "A" });
+    runner.enqueue("score_reverse_batch", "a-rev-1", { who: "A" });
+    runner.enqueue("score_reverse_batch", "a-rev-2", { who: "A" });
+    // A's forward batch would enqueue this only once it finished — it is queued
+    // last, and before this change it ran last.
+    runner.enqueue("publish_matches", "a-pub", { who: "A" });
+    // B walks in while A's reverse work is still queued.
+    runner.enqueue("process_attendee", "b-proc", { who: "B" });
+    await runner.drain();
+
+    expect(order).toEqual([
+      // A's list is published the moment there is something to publish …
+      "publish_matches:A",
+      "score_batch:A",
+      // … B's pipeline starts while A's cross-updates are still queued …
+      "process_attendee:B",
+      // … and the work nobody is watching for runs last.
+      "score_reverse_batch:A",
+      "score_reverse_batch:A",
+    ]);
+  });
+
+  it("keeps id order inside a scheduling class", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now });
+    const order: number[] = [];
+    runner.register("score_reverse_batch", async (p: { n: number }) => {
+      order.push(p.n);
+    });
+    for (const n of [1, 2, 3]) runner.enqueue("score_reverse_batch", `r${n}`, { n });
+    await runner.drain();
+    expect(order).toEqual([1, 2, 3]);
+  });
+
   it("stopClaiming halts new claims but the drain returns cleanly (graceful shutdown)", async () => {
     const store = new Store();
     const runner = new JobRunner(store, { now: fixedClock().now });
