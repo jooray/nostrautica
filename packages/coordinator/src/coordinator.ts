@@ -196,12 +196,27 @@ const MAX_ATTENDEES_PER_EVENT = 2000;
 /** Durable inbox rate accounting (audit C3): fixed 60s window. */
 const INBOX_RATE_WINDOW_MS = 60_000;
 /**
- * How often every live inbox is re-read from the relays (P1 #14). Ten minutes is
- * chosen against what is actually waiting on it: a join request that the live
- * subscription missed is somebody standing at a door, and the pre-existing
- * recovery for that was "wait for the next deploy".
+ * How often every live inbox is re-read from the relays (P1 #14). Chosen against
+ * what is actually waiting on it: a join request that the live subscription
+ * missed is somebody standing at a door, and the pre-existing recovery for that
+ * was "wait for the next deploy".
+ *
+ * Ten minutes until 2026-09-13, and the Plan B logs show exactly what that cost.
+ * Of 18 auto-approvals on the event's first day, most landed in clusters on the
+ * sweep tick — four people at 09:17:43, more at :27:42, :37:42, :47:42 — while
+ * the ones the live subscription did deliver arrived at ordinary times like
+ * 09:05:58. Each cluster is people who had already submitted, waiting out the
+ * rest of the interval at a registration desk. A sweep reads a 3-day window of
+ * wraps (~50 for the coordinator inbox, ~100 per event) and skips the seen ones,
+ * and took about 2 seconds in production, so running it five times as often is
+ * cheap next to what it saves. The overlap guard at the call site means a slow
+ * sweep still cannot stack.
+ *
+ * This is a mitigation, not the fix: a live subscription that reliably delivered
+ * would make the sweep a backstop again. Why it drops events (relay handover,
+ * conference wifi, a socket the relay closed quietly) is unresolved.
  */
-const INBOX_RESCAN_INTERVAL_MS = 600_000;
+const INBOX_RESCAN_INTERVAL_MS = 120_000;
 /** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
 /**
