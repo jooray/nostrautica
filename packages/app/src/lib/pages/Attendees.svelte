@@ -168,6 +168,29 @@
   // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
   // mirror, so re-read the roster/directory snapshots when hydration lands while
   // the list is still empty.
+  /**
+   * Mark the matches seen, once, however they arrived.
+   *
+   * This has to read the watermark BEFORE clearing it — which is why it is one
+   * effect rather than a call at each of the three sites that can produce a
+   * list (the cache-painted initial state, background hydration, the network).
+   * The first of those has no hook to call from at all: it is a `$state`
+   * initialiser, and writing another component's rune from there is exactly the
+   * state_unsafe_mutation the Matches tab's badge was rewritten to avoid. The
+   * hole that left was small but real — open the list offline, paint from cache,
+   * and the nav badge never cleared because only the network path marked it.
+   */
+  let markedSeen = false;
+  $effect(() => {
+    const coordinate = ctx?.coordinate;
+    if (markedSeen || !coordinate || matchList.length === 0) return;
+    markedSeen = true;
+    newPubkeys = new Set(
+      newMatchPubkeys({ matches: matchList }, loadWatermark(coordinate).seenMatches),
+    );
+    whatsNew.markMatchesSeen(coordinate);
+  });
+
   $effect(() => {
     void cacheHydration.version;
     if (entries.length > 0) return;
@@ -183,10 +206,7 @@
       followSet = cf;
       followsKnown = true;
     }
-    if (matchList.length === 0) {
-      const cm = cachedMatches(c.coordinate);
-      if (cm?.matches.length) noteMatches(c.coordinate, cm.matches);
-    }
+    if (matchList.length === 0) matchList = cachedMatches(c.coordinate)?.matches ?? [];
     settings ??= cachedPerEventSettings(c.coordinate) ?? null;
     loading = false;
     perfMark("Attendees", "cache-paint");
@@ -195,21 +215,6 @@
   let stream: DirectoryStream | undefined;
   let blindingKey: Uint8Array | null = null;
   const profiledPubkeys = new Set<string>();
-
-  /**
-   * Take a match list: remember which entries are new (before clearing the
-   * watermark), then clear it. Viewing this page is what "seeing" your matches
-   * now means — the Matches tab it replaced did the same on open (spec §13).
-   */
-  function noteMatches(coordinate: string, list: Match[]) {
-    if (newPubkeys.size === 0) {
-      newPubkeys = new Set(
-        newMatchPubkeys({ matches: list }, loadWatermark(coordinate).seenMatches),
-      );
-    }
-    matchList = list;
-    whatsNew.markMatchesSeen(coordinate);
-  }
 
   // Row-level quick actions (user feedback 2026-07-16): message someone or mark
   // "want to meet" straight from the list, no detour through their profile.
@@ -266,7 +271,7 @@
       jobs.push(
         fetchMatches(signer, c)
           .then((list) => {
-            noteMatches(c.coordinate, list?.matches ?? []);
+            matchList = list?.matches ?? [];
             // Powers the cause-aware note ("record your intro" when that's why
             // there is nothing to show).
             if (matchList.length === 0) void readinessStore.load(c, signer);
