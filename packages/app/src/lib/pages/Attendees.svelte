@@ -105,7 +105,7 @@
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import FollowButton from "$lib/components/FollowButton.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
-  import { i18n, t, tc, tcp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tp, tc, tcp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -599,6 +599,13 @@
   />
 
   {#if !hasFilters}
+    {#if newPubkeys.size > 0 && eventShell.isCommunity}
+      <!-- In an event this is a badge on a tab: you already came for the date.
+           A community has no date, so what arrived since you last looked IS the
+           reason you are here, and it says so at the top of the list rather than
+           as a number on an icon. -->
+      <p class="returned">{tp("attendees.sinceLastVisit", newPubkeys.size)}</p>
+    {/if}
     {#if noStrong}
       <p class="lead">{t("matches.noStrong")}</p>
     {/if}
@@ -760,6 +767,15 @@
     list-style: none;
     margin: 0;
     padding: 0;
+  }
+  /* The return signal, given the weight it earns in a community: the first
+     thing on the page, in the reading serif, not a muted aside. */
+  .returned {
+    margin: 0.9rem 0 0;
+    font-family: var(--font-display);
+    font-size: 1.05rem;
+    line-height: 1.45;
+    max-width: 60ch;
   }
   .lead {
     color: var(--text-dim);
