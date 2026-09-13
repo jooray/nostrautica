@@ -11,6 +11,7 @@ import {
 import {
   KIND_PROFILE,
   KIND_CALENDAR_EVENT,
+  KIND_COMMUNITY,
   KIND_APP_DATA,
   generateEck,
   bytesToBase64,
@@ -21,7 +22,6 @@ import {
   blindedD,
   type Approval,
   type EventConfig,
-  type EventMode,
   type MatchVisibility,
   type TalksMode,
   type ChatBackend,
@@ -40,17 +40,11 @@ export interface CreateEventInput {
   title: string;
   summary: string;
   /**
-   * Unix seconds. Optional for a community, which has no start.
+   * Unix seconds. Required for an event, absent for a community.
    *
-   * Kind 31923 is a NIP-52 TIME-BASED calendar event and `start` is mandatory
-   * in it, so a community — which is not a calendar event at all — still has to
-   * put something there. It uses its creation moment, and emits no `end` and no
-   * day-index tags. A foreign NIP-52 client will therefore render a community as
-   * a zero-length event at the instant it was made, which is wrong but harmless;
-   * the honest alternative is a different kind, and that is a wire change to a
-   * frozen protocol. Nostrautica itself never reads this value for a community:
-   * `mode` on the 31600 is what decides, and the coordinator already treats
-   * `eventEndSec = 0` as "no known end".
+   * A community is published as kind 31612, which has no time semantics at all,
+   * so there is nothing to put here and nothing is invented. See §1.1 of
+   * PROTOCOL-NIP.md for why it is not a 31923 with a placeholder start.
    */
   start?: number; // unix seconds
   end?: number;
@@ -64,8 +58,8 @@ export interface CreateEventInput {
   matching: "on" | "off";
   matchVisibility: MatchVisibility;
   approval: Approval;
-  /** Event by default; a community is the same record without an end. */
-  mode?: EventMode;
+  /** Event by default; a community publishes kind 31612 instead of 31923. */
+  mode?: "event" | "community";
   nostrContext: number;
   lang?: string; // ISO 639-1 event language; default "en"
   talks?: TalksMode; // prerecorded-talks journey (spec F2); default "off"
@@ -144,7 +138,10 @@ export async function createEvent(
   const inboxPubkey = getPublicKey(einboxSk);
   const eck = generateEck();
   const d = slug(input.title);
-  const coordinate = makeCoordinate(eidPubkey, d);
+  // The kind IS the mode: a community is 31612, an event the NIP-52 31923. Every
+  // record downstream is addressed by this coordinate and does not care which.
+  const spaceKind = input.mode === "community" ? KIND_COMMUNITY : KIND_CALENDAR_EVENT;
+  const coordinate = makeCoordinate(eidPubkey, d, spaceKind);
   const relays = input.relays?.length ? input.relays : DEFAULT_RELAYS;
   // Marmot chat groups route messages only to the relays baked into the group at
   // creation (§ MLS routing component, not re-derived from config later), so a
@@ -173,21 +170,20 @@ export async function createEvent(
     eidSk,
   );
 
-  // 2. kind 31923 — the NIP-52 event itself (interoperates with any NIP-52 client).
-  const nowSec = Math.floor(Date.now() / 1000);
-  const startSec = input.start ?? nowSec;
+  // 2. The public space record: kind 31923 for an event (interoperates with any
+  //    NIP-52 client), kind 31612 for a community (deliberately invisible to
+  //    them — see PROTOCOL-NIP.md §1.1).
   const eventTags: string[][] = [
     ["d", d],
     ["title", input.title],
-    ["start", String(startSec)],
   ];
-  if (input.end) eventTags.push(["end", String(input.end)]);
-  // NIP-52 `D` day-index tags — one per UTC day the event covers (audit P8).
-  // A community covers no days: emitting a day index for the afternoon it was
-  // created would put it in calendar clients' date filters, which is the one
-  // consequence of the `start` compromise above worth actively avoiding.
+  // Time and place belong to an event and do not exist on a community, so a
+  // community emits none of them — not a placeholder, not a zero.
   if (input.start !== undefined) {
-    for (const t of dayIndexTags(startSec, input.end)) eventTags.push(t);
+    eventTags.push(["start", String(input.start)]);
+    if (input.end) eventTags.push(["end", String(input.end)]);
+    // NIP-52 `D` day-index tags — one per UTC day the event covers (audit P8).
+    for (const t of dayIndexTags(input.start, input.end)) eventTags.push(t);
   }
   if (input.summary) eventTags.push(["summary", input.summary]);
   if (input.banner) eventTags.push(["image", input.banner]);
@@ -195,7 +191,7 @@ export async function createEvent(
   for (const t of input.hashtags ?? []) eventTags.push(["t", t]);
   const event31923 = finalizeEvent(
     {
-      kind: KIND_CALENDAR_EVENT,
+      kind: spaceKind,
       created_at: Math.floor(Date.now() / 1000),
       tags: eventTags,
       content: input.summary,
@@ -216,7 +212,6 @@ export async function createEvent(
     matching: input.matching,
     matchVisibility: input.matchVisibility,
     approval: input.approval,
-    mode: input.mode ?? "event",
     eck: 1,
     nostrContext: input.nostrContext,
     lang: input.lang ?? "en",

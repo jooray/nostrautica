@@ -30,6 +30,7 @@ import {
   KIND_EVENT_THEME,
   KIND_TALK,
   KIND_COORDINATOR_ANNOUNCE,
+  KIND_COMMUNITY,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
   KIND_KEY_GRANT,
@@ -213,6 +214,18 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     notes:
       "Discovery name, capabilities, resolved-route privacy disclosure, relays, optional pricing. Latest announcement per coordinator wins.",
   },
+  {
+    constant: "KIND_COMMUNITY",
+    kind: KIND_COMMUNITY,
+    name: "Community",
+    klass: "addressable",
+    schemaExport: null,
+    sealing: "public",
+    author: "`E_id`",
+    protection: "Public; `d` = the space's `d`",
+    notes:
+      "The standing-group twin of the NIP-52 31923 a dated event publishes: `d`, `title`, optional `summary`/`image`/`t`, and deliberately no `start`, `end`, `location` or day-index tags. A community is not a calendar event, and publishing one as 31923 would put it into other clients' calendars as a zero-length event at its creation moment.",
+  },
   // ── gift-wrapped rumors (21600–21610) ──────────────────────────────────────
   {
     constant: "KIND_JOIN_REQUEST",
@@ -329,7 +342,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
 ] as const;
 
 /** The exact addressable and rumor kind ranges (inclusive). */
-export const CUSTOM_ADDRESSABLE_RANGE = { min: 31600, max: 31611 } as const;
+export const CUSTOM_ADDRESSABLE_RANGE = { min: 31600, max: 31612 } as const;
 export const CUSTOM_RUMOR_RANGE = { min: 21600, max: 21610 } as const;
 
 /**

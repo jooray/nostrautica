@@ -1,11 +1,11 @@
 /**
- * Load an event's public surface (kind 31600 config + kind 31923 details) from
+ * Load a space's public surface (kind 31600 config + the 31923 or 31612 the
+ * coordinate names) from
  * its naddr, and add the event's home relays to the pool. This is what every
  * event page needs before it can do anything else.
  */
 import {
   KIND_EVENT_CONFIG,
-  KIND_CALENDAR_EVENT,
   KIND_PROFILE,
   parseEventConfig,
   naddrToCoordinate,
@@ -104,14 +104,16 @@ export async function loadEventContext(
   }
   const { coordinate, relays } = decoded;
   if (relays.length) addRelays(relays);
-  const { pubkey, identifier } = parseCoordinate(coordinate);
+  // The kind comes from the coordinate, not a constant: the same code path
+  // loads a 31923 event and a 31612 community (PROTOCOL-NIP.md §1.1).
+  const { kind, pubkey, identifier } = parseCoordinate(coordinate);
 
   // Authority boundary (audit APPK-1): these fetches feed latest-by-created_at
   // picks the whole app trusts, so every candidate is signature-re-verified
   // here even though NDK already validates relay traffic.
   const [configEvents, eventEvents, profileEvents] = await Promise.all([
     fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
-    fetchEvents({ kinds: [KIND_CALENDAR_EVENT], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
+    fetchEvents({ kinds: [kind], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
     fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }).then(onlyVerified),
   ]);
 

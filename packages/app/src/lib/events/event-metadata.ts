@@ -56,10 +56,11 @@ export async function updateEventMetadata(
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
-  const { pubkey, identifier } = parseCoordinate(ctx.coordinate);
+  // See event-context: the coordinate names the kind.
+  const { kind, pubkey, identifier } = parseCoordinate(ctx.coordinate);
   const [calendarEvents, profileEvents] = await Promise.all([
     fetchEvents(
-      { kinds: [KIND_CALENDAR_EVENT], authors: [pubkey], "#d": [identifier] },
+      { kinds: [kind], authors: [pubkey], "#d": [identifier] },
       ctx.config.relays,
     ).then(onlyVerified),
     fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }, ctx.config.relays).then(onlyVerified),

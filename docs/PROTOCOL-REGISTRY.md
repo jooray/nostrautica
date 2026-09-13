@@ -16,7 +16,7 @@ and streaming subscriptions alike. Sender-mutable rumors (profile submissions,
 corrections, talk submissions) additionally carry an explicit `rev`/`revision` field that
 is the primary ordering key; the sender-chosen timestamp is only a tie-break (§3.3).
 
-The custom kind ranges are `31600`–`31611` (addressable) and `21600`–`21610`
+The custom kind ranges are `31600`–`31612` (addressable) and `21600`–`21610`
 (gift-wrapped rumors). All custom payloads carry `v: 2`; readers reject any payload or
 public event whose `v` is not exactly `2` (§2).
 
@@ -36,6 +36,7 @@ public event whose `v` is not exactly `2` (§2).
 | 31609 | Event Theme | `E_id` | Public raw CSS; `d` = event `d` | Organizer-controlled presentation. Not a secret-safe rendering boundary: clients must not render it on routes carrying secrets. |
 | 31610 | Talk | Coordinator, or `E_id` without one | ECK-encrypted; talk/ECK-blinded `d` | Moderated prerecorded talk, transcript, language, revision, status. Republished under a new address on ECK rotation; old address NIP-09-deleted. |
 | 31611 | Coordinator Announcement | Coordinator | Public; `d = nostrautica:coordinator` | Discovery name, capabilities, resolved-route privacy disclosure, relays, optional pricing. Latest announcement per coordinator wins. |
+| 31612 | Community | `E_id` | Public; `d` = the space's `d` | The standing-group twin of the NIP-52 31923 a dated event publishes: `d`, `title`, optional `summary`/`image`/`t`, and deliberately no `start`, `end`, `location` or day-index tags. A community is not a calendar event, and publishing one as 31923 would put it into other clients' calendars as a zero-length event at its creation moment. |
 
 ## Gift-Wrapped Rumors
 
@@ -77,6 +78,6 @@ user-private (§4.1):
 theme, language, correction revisions, watch progress. Those are not relay records and are
 not listed here.)
 
-The currently used custom set is exactly `31600` through `31611` and `21600` through
+The currently used custom set is exactly `31600` through `31612` and `21600` through
 `21610`. Before a public release, re-check every custom kind against the Nostr NIPs
 registry.

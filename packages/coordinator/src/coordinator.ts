@@ -1058,7 +1058,9 @@ export class Coordinator {
 
     // Load public config + event details for scoring context.
     const cfgEvents = await this.deps.transport.fetch(
-      { kinds: [31600, 31923], authors: [eidPubkey], "#d": [identifier] },
+      // 31612 is the community twin of 31923 (PROTOCOL-NIP.md §1.1): ask for
+      // both and let the coordinate decide which one came back.
+      { kinds: [31600, 31923, 31612], authors: [eidPubkey], "#d": [identifier] },
       relays,
     );
     // Newest config wins (audit COORD-14): relays return replaceable events in

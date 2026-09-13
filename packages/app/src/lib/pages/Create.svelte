@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Approval, EventMode } from "@nostrautica/protocol";
+  import type { Approval } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import {
@@ -44,7 +44,7 @@
    * changes the defaults rather than the machinery: nothing below branches on
    * it except what a community genuinely has no answer for.
    */
-  let mode = $state<EventMode>("event");
+  let mode = $state<"event" | "community">("event");
   const isCommunity = $derived(mode === "community");
   let title = $state("");
   let summary = $state("");

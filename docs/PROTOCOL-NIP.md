@@ -11,8 +11,17 @@ content, and MLS (Marmot) group chat with multi-device support.
 
 ## 1. Terms and actors
 
-- **Event**: a NIP-52 kind `31923` calendar event. Its canonical identifier everywhere is
-  the coordinate `31923:<E_id-pubkey>:<d>` (the *coordinate*).
+- **Space**: the thing attendees join. It is published in one of exactly two kinds, and
+  its canonical identifier everywhere is the coordinate `<kind>:<E_id-pubkey>:<d>` (the
+  *coordinate*):
+  - **Event** — a NIP-52 kind `31923` calendar event. It happens on a date, in a place,
+    and ends. Interoperates with any NIP-52 client.
+  - **Community** (added 2026-09-13) — a kind `31612` standing group. No date, no venue,
+    no end. See §2.1.
+
+  Everything downstream of the coordinate — the `31600` config, the ECK, the roster, the
+  directory, matching, chat — is addressed by the coordinate and is identical for both.
+  Where this document says "event" without qualification, it means either.
 - **`E_id`**: the *event identity* keypair. Signs everything "official" the event
   publishes. Never used for encryption. Held by the organizer and co-organizers only.
 - **`E_inbox`**: the *event inbox* keypair. Signs nothing, ever. Its pubkey is the NIP-44
@@ -28,6 +37,55 @@ content, and MLS (Marmot) group chat with multi-device support.
   (§10). One account may have several concurrently.
 
 All hex values are lowercase. *hex32* means `/^[0-9a-f]{64}$/`.
+
+### 1.1 Community (kind `31612`)
+
+A community is a standing group: people who already share a chat somewhere and could
+network if they knew who to talk to. It has no start, no end and no venue.
+
+**Why not `31923` with a placeholder start.** Kind `31923` is a NIP-52 *time-based
+calendar event* whose `start` is mandatory. A community publishing one would have to
+invent a value — its creation moment is the only defensible choice — and every NIP-52
+calendar client on the network would then show it as a zero-length event on the afternoon
+it was made, and index it in date filters. That is publishing noise into other people's
+software to satisfy a field that carries no meaning here. A community is simply not a
+calendar event, so it gets its own kind and calendar clients never see it.
+
+**Tags.** `31923`'s minus time and place:
+
+| tag | |
+|---|---|
+| `d` | the space identifier, identical to the `31600` config's `d` |
+| `title` | required |
+| `summary` | optional |
+| `image` | optional |
+| `t` | optional hashtags |
+
+No `start`, no `end`, no `location`, and no NIP-52 `D` day-index tags. A community that
+carried a day index would reappear in exactly the date filters this kind exists to stay
+out of.
+
+**Everything else is unchanged.** The `31600` config, the ECK, the roster, the directory,
+the match lists and group chat are addressed by coordinate and behave identically. There
+is no `mode` tag on the config: the kind in the coordinate is the single source of truth,
+and a second one would only be somewhere for the two to disagree.
+
+**Coordinate handling.** Anywhere an event identity is required — a key grant, a
+coordinator grant, a membership coordinate — the kind must be one of `31923` or `31612`
+and nothing else. That guard is an allowlist (audit R18) and widening it to two values
+does not weaken it: every downstream record is keyed by the whole coordinate string, so
+`31612:<E_id>:<d>` authorises nothing for `31923:<E_id>:<d>` and the two namespaces stay
+separate even for the same author and identifier.
+
+**Forward and backward compatibility.** No existing kind changed and no existing tag
+changed, so every record published before this section stays valid and byte-identical. A
+client that does not know `31612` does not see communities at all, which is the correct
+degradation: it cannot misread one as an event, because it never resolves the coordinate.
+No `v` bump; the `31600` config inside a community still carries `v=2`.
+
+**Approval.** A community defaults to `approval: "open"` (§6.3): anyone holding the invite
+link is a member. An older client or coordinator meeting `"open"` falls back to `"manual"`
+per the tolerant-parse rule, which is stricter than intended rather than looser.
 
 ## 2. Wire version
 
@@ -245,6 +303,7 @@ randomized up to 2 days into the past).
 | 31609 | Event Theme | `E_id` | public | event `d` |
 | 31610 | Talk | coordinator (or `E_id`) | ECK | blinded |
 | 31611 | Coordinator Announcement | coordinator | public | `nostrautica:coordinator` |
+| 31612 | Community | `E_id` | public | space `d` |
 
 | Rumor | Name | Seal author → recipient |
 |---:|---|---|
@@ -263,7 +322,7 @@ randomized up to 2 days into the past).
 Standard kinds used: 0, 1, 3, 5, 6, 13, 14, 1059, 10000, 10002, 10050, 10063, 24242,
 30023, 30078, 31923/31924/31925, and Marmot's 30443/443/444/445.
 
-`31610` extends past the originally-reserved `31600`–`31609` addressable block, and
+`31610` and `31612` extend past the originally-reserved `31600`–`31609` addressable block, and
 `21610` past the originally-reserved `21600`–`21609` rumor block; both remain inside their
 respective standard Nostr ranges (parameterized-replaceable 30000–39999, ephemeral
 20000–29999).

@@ -4,10 +4,13 @@ import {
   parseCoordinate,
   parseEventCoordinate,
   isEventCoordinate,
+  isCommunityCoordinate,
+  SPACE_KINDS,
   coordinateToNaddr,
   naddrToCoordinate,
 } from "./coordinate.js";
 import { buildEventConfig, parseEventConfig, isMarmotChatEnabled, UNLIMITED_SEC } from "./config.js";
+import { KIND_CALENDAR_EVENT, KIND_COMMUNITY } from "./kinds.js";
 
 const pubkey = "a".repeat(64);
 
@@ -83,7 +86,6 @@ describe("event config (kind 31600)", () => {
       maxVideoSec: 90,
       maxTalkSec: 900,
       matching: "on" as const,
-      mode: "event" as const,
       matchVisibility: "pair" as const,
       approval: "manual+invite" as const,
       eck: 1,
@@ -125,58 +127,19 @@ describe("event config (kind 31600)", () => {
     expect(parseEventConfig(pubkey, built.tags).lang).toBe("en");
   });
 
-  it("omits the mode tag for an event but round-trips a community", () => {
-    const base = {
-      d: "ev",
-      eidPubkey: pubkey,
-      inbox: "b".repeat(64),
-      relays: [],
-      blossom: [],
-      maxVideoSec: 90,
-      maxTalkSec: 900,
-      matching: "on" as const,
-      matchVisibility: "pair" as const,
-      approval: "manual" as const,
-      eck: 1,
-      nostrContext: 0,
-      lang: "en",
-      talks: "off" as const,
-      chat: [] as "marmot"[],
-    };
-    // An event emits no tag at all, so every config published before communities
-    // existed stays byte-identical to what it publishes today.
-    const ev = buildEventConfig({ ...base, mode: "event" });
-    expect(ev.tags.find((t) => t[0] === "mode")).toBeUndefined();
-    expect(parseEventConfig(pubkey, ev.tags).mode).toBe("event");
-
-    const community = buildEventConfig({ ...base, mode: "community" });
-    expect(community.tags).toContainEqual(["mode", "community"]);
-    expect(parseEventConfig(pubkey, community.tags).mode).toBe("community");
-
-    // A config with no mode tag at all is an event, which is what every record
-    // written before today looks like.
-    expect(
-      parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)]]).mode,
-    ).toBe("event");
-  });
-
-  it("falls back to the SAFER value on a mode or approval it does not know", () => {
+  it("falls back to the SAFER value on an approval it does not know", () => {
     // Forward compatibility in the only direction that is acceptable for these
-    // two fields. A client older than a value it meets must not guess upward:
+    // this field. A client older than a value it meets must not guess upward:
     // an unknown approval becomes "manual" (ask a human) rather than "open"
-    // (let anyone in), and an unknown mode becomes an event. This is what makes
-    // adding a value to either enum a safe, additive change rather than a wire
-    // break — see the note on Approval in config.ts.
+    // (let anyone in). That is what makes adding a value a safe, additive
+    // change rather than a wire break — see the note on Approval in config.ts.
     const tags = [
       ["d", "ev"],
       ["v", "2"],
       ["inbox", "b".repeat(64)],
       ["approval", "some-future-mode"],
-      ["mode", "some-future-thing"],
     ];
-    const parsed = parseEventConfig(pubkey, tags);
-    expect(parsed.approval).toBe("manual");
-    expect(parsed.mode).toBe("event");
+    expect(parseEventConfig(pubkey, tags).approval).toBe("manual");
   });
 
   it("round-trips the open approval a community uses", () => {
@@ -191,7 +154,6 @@ describe("event config (kind 31600)", () => {
       matching: "on" as const,
       matchVisibility: "pair" as const,
       approval: "open" as const,
-      mode: "community" as const,
       eck: 1,
       nostrContext: 0,
       lang: "en",
@@ -645,5 +607,46 @@ describe("event config (kind 31600)", () => {
     ]);
     expect(parsed.relays).toEqual(["wss://relay.a"]);
     expect(parsed.blossom).toEqual(["https://blossom.a"]);
+  });
+});
+
+describe("community coordinates (kind 31612)", () => {
+  const pk = "a".repeat(64);
+
+  it("builds a community coordinate under its own kind, not the calendar one", () => {
+    expect(makeCoordinate(pk, "grp")).toBe(`${KIND_CALENDAR_EVENT}:${pk}:grp`);
+    expect(makeCoordinate(pk, "grp", KIND_COMMUNITY)).toBe(`${KIND_COMMUNITY}:${pk}:grp`);
+    expect(isCommunityCoordinate(makeCoordinate(pk, "grp", KIND_COMMUNITY))).toBe(true);
+    expect(isCommunityCoordinate(makeCoordinate(pk, "grp"))).toBe(false);
+  });
+
+  it("accepts both kinds where an event identity is required", () => {
+    for (const kind of SPACE_KINDS) {
+      const c = `${kind}:${pk}:grp`;
+      expect(isEventCoordinate(c), `kind ${kind}`).toBe(true);
+      expect(parseEventCoordinate(c).kind).toBe(kind);
+    }
+  });
+
+  it("still refuses any other kind (audit R18)", () => {
+    // The guard is an ALLOWLIST, not a single value. Widening it to two kinds
+    // must not turn it into "any replaceable kind": an alias like `1:<E_id>:d`
+    // would open a divergent namespace against the same author and identifier.
+    for (const bad of ["1", "30023", "31600", "31924"]) {
+      const c = `${bad}:${pk}:grp`;
+      expect(isEventCoordinate(c), `kind ${bad}`).toBe(false);
+      expect(() => parseEventCoordinate(c)).toThrow();
+    }
+  });
+
+  it("keeps the two namespaces separate for the same author and identifier", () => {
+    // Nothing downstream is keyed by (pubkey, d) alone — it is keyed by the
+    // whole coordinate — so a grant for the community authorises nothing for an
+    // event of the same name, and the reverse.
+    const ev = makeCoordinate(pk, "same");
+    const com = makeCoordinate(pk, "same", KIND_COMMUNITY);
+    expect(ev).not.toBe(com);
+    expect(coordinateToNaddr(ev)).not.toBe(coordinateToNaddr(com));
+    expect(naddrToCoordinate(coordinateToNaddr(com)).coordinate).toBe(com);
   });
 });

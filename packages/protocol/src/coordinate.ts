@@ -1,9 +1,10 @@
 /**
- * Event coordinate helpers. The event's canonical identifier everywhere is the
- * NIP-52 coordinate `31923:<E_id-pubkey>:<d>` (spec §6.1).
+ * Event coordinate helpers. The canonical identifier everywhere is the
+ * coordinate `<kind>:<E_id-pubkey>:<d>` (spec §6.1), where the kind is 31923 for
+ * a dated event and 31612 for a standing community.
  */
 import { naddrEncode, decode } from "nostr-tools/nip19";
-import { KIND_CALENDAR_EVENT } from "./kinds.js";
+import { KIND_CALENDAR_EVENT, KIND_COMMUNITY } from "./kinds.js";
 
 export interface EventCoordinate {
   kind: number;
@@ -11,9 +12,32 @@ export interface EventCoordinate {
   identifier: string; // the `d` tag
 }
 
-/** Build the `31923:<pubkey>:<d>` coordinate string. */
-export function makeCoordinate(pubkey: string, d: string): string {
-  return `${KIND_CALENDAR_EVENT}:${pubkey}:${d}`;
+/**
+ * The two kinds a Nostrautica space can be published under. Everything that
+ * requires an event identity checks membership of THIS list and nothing wider
+ * (audit R18): the point of the guard is a bounded allowlist, not a single
+ * value, so adding a second kind keeps it intact. The two namespaces stay
+ * separate because every downstream record is keyed by the whole coordinate
+ * string — `31612:X:d` authorises nothing for `31923:X:d`.
+ */
+export const SPACE_KINDS: readonly number[] = [KIND_CALENDAR_EVENT, KIND_COMMUNITY];
+
+/** Build a `<kind>:<pubkey>:<d>` coordinate. Defaults to a dated event. */
+export function makeCoordinate(
+  pubkey: string,
+  d: string,
+  kind: number = KIND_CALENDAR_EVENT,
+): string {
+  return `${kind}:${pubkey}:${d}`;
+}
+
+/** True iff this coordinate names a standing community rather than a dated event. */
+export function isCommunityCoordinate(coordinate: string): boolean {
+  try {
+    return parseCoordinate(coordinate).kind === KIND_COMMUNITY;
+  } catch {
+    return false;
+  }
 }
 
 /** Parse a `kind:pubkey:d` coordinate. The identifier may itself contain colons. */
@@ -50,7 +74,7 @@ export function parseCoordinate(coordinate: string): EventCoordinate {
  */
 export function isEventCoordinate(coordinate: string): boolean {
   try {
-    return parseCoordinate(coordinate).kind === KIND_CALENDAR_EVENT;
+    return SPACE_KINDS.includes(parseCoordinate(coordinate).kind);
   } catch {
     return false;
   }
@@ -64,9 +88,9 @@ export function isEventCoordinate(coordinate: string): boolean {
  */
 export function parseEventCoordinate(coordinate: string): EventCoordinate {
   const parsed = parseCoordinate(coordinate);
-  if (parsed.kind !== KIND_CALENDAR_EVENT) {
+  if (!SPACE_KINDS.includes(parsed.kind)) {
     throw new Error(
-      `not a Nostrautica event coordinate (kind ${parsed.kind}, expected ${KIND_CALENDAR_EVENT}): ${coordinate}`,
+      `not a Nostrautica event coordinate (kind ${parsed.kind}, expected one of ${SPACE_KINDS.join(", ")}): ${coordinate}`,
     );
   }
   return parsed;
