@@ -83,6 +83,7 @@ describe("event config (kind 31600)", () => {
       maxVideoSec: 90,
       maxTalkSec: 900,
       matching: "on" as const,
+      mode: "event" as const,
       matchVisibility: "pair" as const,
       approval: "manual+invite" as const,
       eck: 1,
@@ -122,6 +123,83 @@ describe("event config (kind 31600)", () => {
     const built = buildEventConfig(cfg);
     expect(built.tags.find((t) => t[0] === "lang")).toBeUndefined();
     expect(parseEventConfig(pubkey, built.tags).lang).toBe("en");
+  });
+
+  it("omits the mode tag for an event but round-trips a community", () => {
+    const base = {
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: [],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "on" as const,
+      matchVisibility: "pair" as const,
+      approval: "manual" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+      talks: "off" as const,
+      chat: [] as "marmot"[],
+    };
+    // An event emits no tag at all, so every config published before communities
+    // existed stays byte-identical to what it publishes today.
+    const ev = buildEventConfig({ ...base, mode: "event" });
+    expect(ev.tags.find((t) => t[0] === "mode")).toBeUndefined();
+    expect(parseEventConfig(pubkey, ev.tags).mode).toBe("event");
+
+    const community = buildEventConfig({ ...base, mode: "community" });
+    expect(community.tags).toContainEqual(["mode", "community"]);
+    expect(parseEventConfig(pubkey, community.tags).mode).toBe("community");
+
+    // A config with no mode tag at all is an event, which is what every record
+    // written before today looks like.
+    expect(
+      parseEventConfig(pubkey, [["d", "ev"], ["v", "2"], ["inbox", "b".repeat(64)]]).mode,
+    ).toBe("event");
+  });
+
+  it("falls back to the SAFER value on a mode or approval it does not know", () => {
+    // Forward compatibility in the only direction that is acceptable for these
+    // two fields. A client older than a value it meets must not guess upward:
+    // an unknown approval becomes "manual" (ask a human) rather than "open"
+    // (let anyone in), and an unknown mode becomes an event. This is what makes
+    // adding a value to either enum a safe, additive change rather than a wire
+    // break — see the note on Approval in config.ts.
+    const tags = [
+      ["d", "ev"],
+      ["v", "2"],
+      ["inbox", "b".repeat(64)],
+      ["approval", "some-future-mode"],
+      ["mode", "some-future-thing"],
+    ];
+    const parsed = parseEventConfig(pubkey, tags);
+    expect(parsed.approval).toBe("manual");
+    expect(parsed.mode).toBe("event");
+  });
+
+  it("round-trips the open approval a community uses", () => {
+    const built = buildEventConfig({
+      d: "ev",
+      eidPubkey: pubkey,
+      inbox: "b".repeat(64),
+      relays: [],
+      blossom: [],
+      maxVideoSec: 90,
+      maxTalkSec: 900,
+      matching: "on" as const,
+      matchVisibility: "pair" as const,
+      approval: "open" as const,
+      mode: "community" as const,
+      eck: 1,
+      nostrContext: 0,
+      lang: "en",
+      talks: "off" as const,
+      chat: [] as "marmot"[],
+    });
+    expect(built.tags).toContainEqual(["approval", "open"]);
+    expect(parseEventConfig(pubkey, built.tags).approval).toBe("open");
   });
 
   it("omits the talks tag when off (default) but round-trips on/prerecord-first", () => {

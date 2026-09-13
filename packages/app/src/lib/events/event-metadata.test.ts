@@ -44,6 +44,7 @@ const config = {
   maxVideoSec: 90,
   maxTalkSec: 900,
   matching: "on",
+  mode: "event" as const,
   matchVisibility: "pair",
   approval: "manual",
   eck: 1,

@@ -22,7 +22,35 @@ import {
  */
 export const UNLIMITED_SEC = 0;
 
-export type Approval = "manual" | "invite" | "manual+invite";
+/**
+ * How somebody gets in.
+ *
+ * `"open"` (2026-09-13) is for communities: the trust already exists wherever
+ * the invite link was posted — a group chat whose members know each other — and
+ * asking an admin to click eighty times to re-confirm it is work they will not
+ * do. Anyone holding the link is in.
+ *
+ * Adding a value here is safe in both directions because `parseConfigTags`
+ * falls back to `"manual"` on anything it does not recognise rather than
+ * throwing. An older client or coordinator meeting an `"open"` config therefore
+ * degrades to requiring approval — STRICTER than intended, never looser, which
+ * is the only acceptable direction for a field that decides who can read an
+ * event's encrypted content.
+ */
+export type Approval = "manual" | "invite" | "manual+invite" | "open";
+/**
+ * Whether this is an event or a standing community (2026-09-13).
+ *
+ * A community is an event without an end: no date, no venue, nobody arriving on
+ * a Saturday. Everything else about it is the same — the same roster, the same
+ * encryption tiers, the same matching — so this is a mode on the existing
+ * record rather than a second kind of thing, and the protocol stays untouched.
+ *
+ * It has to be explicit rather than inferred from a missing date, because an
+ * event whose organiser simply has not set a date yet is not a community, and
+ * the two need to say completely different things to the person reading them.
+ */
+export type EventMode = "event" | "community";
 export type MatchVisibility = "pair" | "event";
 /**
  * Prerecorded-talks journey mode (spec F2, audit U11):
@@ -122,6 +150,7 @@ export interface EventConfig {
   matching: "on" | "off";
   matchVisibility: MatchVisibility;
   approval: Approval;
+  mode: EventMode;
   eck: number; // current ECK version
   nostrContext: number; // N public events per attendee to summarize; 0 = off
   lang: string; // ISO 639-1 event language (attendee UI + AI output); default "en"
@@ -173,6 +202,9 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
   tags.push(["matching", cfg.matching]);
   tags.push(["match_visibility", cfg.matchVisibility]);
   tags.push(["approval", cfg.approval]);
+  // "event" is the implicit default, so only a community emits the tag and every
+  // existing event's config stays byte-identical to what it publishes today.
+  if (cfg.mode === "community") tags.push(["mode", cfg.mode]);
   tags.push(["eck", String(cfg.eck)]);
   tags.push(["nostr_context", String(cfg.nostrContext)]);
   // Language is a single lowercased ISO 639-1 code; "en" is the implicit default,
@@ -233,7 +265,8 @@ function urlValues(tags: string[][], name: string, protocol: string): string[] {
   });
 }
 
-const APPROVALS: Approval[] = ["manual", "invite", "manual+invite"];
+const APPROVALS: Approval[] = ["manual", "invite", "manual+invite", "open"];
+const MODES: EventMode[] = ["event", "community"];
 const VISIBILITIES: MatchVisibility[] = ["pair", "event"];
 const TALKS_MODES: TalksMode[] = ["off", "on", "prerecord-first"];
 
@@ -291,6 +324,8 @@ export function parseEventConfig(
   const approval: Approval = APPROVALS.includes(approvalRaw as Approval)
     ? (approvalRaw as Approval)
     : "manual";
+  const modeRaw = first(tags, "mode");
+  const mode: EventMode = MODES.includes(modeRaw as EventMode) ? (modeRaw as EventMode) : "event";
   const visRaw = first(tags, "match_visibility");
   const matchVisibility: MatchVisibility = VISIBILITIES.includes(visRaw as MatchVisibility)
     ? (visRaw as MatchVisibility)
@@ -361,6 +396,7 @@ export function parseEventConfig(
     matching: first(tags, "matching") === "on" ? "on" : "off",
     matchVisibility,
     approval,
+    mode,
     eck: Math.max(1, intTag(tags, "eck", 1)),
     nostrContext: intTag(tags, "nostr_context", 0),
     lang: normalizeLang(first(tags, "lang")),

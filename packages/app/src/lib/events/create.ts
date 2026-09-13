@@ -21,6 +21,7 @@ import {
   blindedD,
   type Approval,
   type EventConfig,
+  type EventMode,
   type MatchVisibility,
   type TalksMode,
   type ChatBackend,
@@ -50,6 +51,8 @@ export interface CreateEventInput {
   matching: "on" | "off";
   matchVisibility: MatchVisibility;
   approval: Approval;
+  /** Event by default; a community is the same record without an end. */
+  mode?: EventMode;
   nostrContext: number;
   lang?: string; // ISO 639-1 event language; default "en"
   talks?: TalksMode; // prerecorded-talks journey (spec F2); default "off"
@@ -193,6 +196,7 @@ export async function createEvent(
     matching: input.matching,
     matchVisibility: input.matchVisibility,
     approval: input.approval,
+    mode: input.mode ?? "event",
     eck: 1,
     nostrContext: input.nostrContext,
     lang: input.lang ?? "en",

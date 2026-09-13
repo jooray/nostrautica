@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Approval } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import {
@@ -64,7 +65,7 @@
   // in the exact state as create-then-attach-from-Admin (see submit()).
   let coordinatorPubkey = $state<string | null>(null);
   let matchVisibility = $state<"pair" | "event">("pair");
-  let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
+  let approval = $state<Approval>("manual+invite");
   let lang = $state<string>("en"); // ISO 639-1 event language (default English)
 
   let busy = $state(false);
