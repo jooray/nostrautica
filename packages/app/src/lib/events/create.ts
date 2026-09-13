@@ -39,7 +39,20 @@ import { fetchProfiles } from "./social.js";
 export interface CreateEventInput {
   title: string;
   summary: string;
-  start: number; // unix seconds
+  /**
+   * Unix seconds. Optional for a community, which has no start.
+   *
+   * Kind 31923 is a NIP-52 TIME-BASED calendar event and `start` is mandatory
+   * in it, so a community — which is not a calendar event at all — still has to
+   * put something there. It uses its creation moment, and emits no `end` and no
+   * day-index tags. A foreign NIP-52 client will therefore render a community as
+   * a zero-length event at the instant it was made, which is wrong but harmless;
+   * the honest alternative is a different kind, and that is a wire change to a
+   * frozen protocol. Nostrautica itself never reads this value for a community:
+   * `mode` on the 31600 is what decides, and the coordinator already treats
+   * `eventEndSec = 0` as "no known end".
+   */
+  start?: number; // unix seconds
   end?: number;
   location?: string;
   icon?: string; // small event logo/avatar (kind-0 picture) — optional
@@ -161,14 +174,21 @@ export async function createEvent(
   );
 
   // 2. kind 31923 — the NIP-52 event itself (interoperates with any NIP-52 client).
+  const nowSec = Math.floor(Date.now() / 1000);
+  const startSec = input.start ?? nowSec;
   const eventTags: string[][] = [
     ["d", d],
     ["title", input.title],
-    ["start", String(input.start)],
+    ["start", String(startSec)],
   ];
   if (input.end) eventTags.push(["end", String(input.end)]);
   // NIP-52 `D` day-index tags — one per UTC day the event covers (audit P8).
-  for (const t of dayIndexTags(input.start, input.end)) eventTags.push(t);
+  // A community covers no days: emitting a day index for the afternoon it was
+  // created would put it in calendar clients' date filters, which is the one
+  // consequence of the `start` compromise above worth actively avoiding.
+  if (input.start !== undefined) {
+    for (const t of dayIndexTags(startSec, input.end)) eventTags.push(t);
+  }
   if (input.summary) eventTags.push(["summary", input.summary]);
   if (input.banner) eventTags.push(["image", input.banner]);
   if (input.location) eventTags.push(["location", input.location]);

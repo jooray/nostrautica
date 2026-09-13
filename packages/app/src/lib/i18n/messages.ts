@@ -231,6 +231,13 @@ export const messages = {
     "create.organizerName.body":
       "Your organizer identity is created with the event, no signup needed.",
     "create.field.title": "Title",
+    "create.field.kind": "What are you making?",
+    "create.kind.event": "An event",
+    "create.kind.event.body":
+      "It happens on a date, in a place, and ends. People record an intro beforehand and arrive knowing who to look for.",
+    "create.kind.community": "A community",
+    "create.kind.community.body":
+      "A standing group with no date and no end, like people who already share a chat somewhere. Anyone with the link is in, and matches keep arriving as more people introduce themselves.",
     "create.field.title.placeholder": "Cypherpunk Assembly 2026",
     "create.field.summary": "Summary",
     "create.field.start": "Start",
@@ -1823,6 +1830,13 @@ export const messages = {
     "create.organizerName.body":
       "Vaša organizátorská identita sa vytvorí spolu s podujatím, bez registrácie.",
     "create.field.title": "Názov",
+    "create.field.kind": "Čo zakladáte?",
+    "create.kind.event": "Podujatie",
+    "create.kind.event.body":
+      "Má dátum, miesto a koniec. Ľudia sa vopred predstavia a prídu s tým, že vedia, koho hľadať.",
+    "create.kind.community": "Komunitu",
+    "create.kind.community.body":
+      "Stála skupina bez dátumu a bez konca, napríklad ľudia, ktorí si už niekde spolu píšu. Kto má odkaz, je dnu, a zhody pribúdajú, ako sa ľudia predstavujú.",
     "create.field.title.placeholder": "Cypherpunk Assembly 2026",
     "create.field.summary": "Zhrnutie",
     "create.field.start": "Začiatok",
@@ -3408,6 +3422,13 @@ export const messages = {
     "create.organizerName.body":
       "Vaše organizátorská identita se vytvoří spolu s akcí, bez registrace.",
     "create.field.title": "Název",
+    "create.field.kind": "Co zakládáte?",
+    "create.kind.event": "Akci",
+    "create.kind.event.body":
+      "Má datum, místo a konec. Lidé se předem představí a přijdou s tím, že vědí, koho hledat.",
+    "create.kind.community": "Komunitu",
+    "create.kind.community.body":
+      "Stálá skupina bez data a bez konce, třeba lidé, kteří si už někde spolu píšou. Kdo má odkaz, je uvnitř, a shody přibývají, jak se lidé představují.",
     "create.field.title.placeholder": "Cypherpunk Assembly 2026",
     "create.field.summary": "Shrnutí",
     "create.field.start": "Začátek",
