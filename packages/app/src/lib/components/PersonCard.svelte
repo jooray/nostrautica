@@ -4,6 +4,12 @@
   // row markup — the translation-aware bio is computed at the call site and
   // passed in as `line`, so this component stays presentational.
   //
+  // `trailing` sits on the SECOND line, beside the bio, not beside the name
+  // (2026-09-13). On the name's line a 55px badge plus three controls left a
+  // 390px row about 76px of name — "Peter Bezpečnostný" rendered as "Peter…".
+  // The badge is an annotation on the person, not part of their name, and the
+  // bio's line has room the name's line does not.
+  //
   // `actions` renders OUTSIDE the open-button (quick actions like Message /
   // Want to meet, UX feedback 2026-07-16) — nested buttons are invalid HTML.
   import type { Snippet } from "svelte";
@@ -38,9 +44,13 @@
     <Avatar {pubkey} {name} {picture} size={40} />
     <span class="meta">
       <span class="name">{name}</span>
-      {#if line}<span class="line">{line}</span>{/if}
+      {#if line || trailing}
+        <span class="sub">
+          {#if trailing}<span class="trailing">{@render trailing()}</span>{/if}
+          {#if line}<span class="line">{line}</span>{/if}
+        </span>
+      {/if}
     </span>
-    {#if trailing}<span class="trailing">{@render trailing()}</span>{/if}
   </button>
   {#if actions}<span class="actions">{@render actions()}</span>{/if}
 </div>
@@ -86,6 +96,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .sub {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
   }
   .line {
     color: var(--text-dim);

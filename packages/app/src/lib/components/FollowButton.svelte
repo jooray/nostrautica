@@ -15,12 +15,21 @@
    * always name the action, and `aria-pressed` carries the state, so a touch or
    * screen-reader user gets the same information without ever hovering.
    *
-   * Two skins, one behaviour. `pill` is the roster row's compact badge-sized
-   * control. `cta` is the profile page's full-size action button, which differs
-   * in one more way than size: a lone primary button should read as the thing it
-   * does, so when you are NOT following it says "Follow" at rest rather than
-   * "not following" — the state/action swap only happens in the direction where
-   * the state is the interesting half.
+   * Three skins, one behaviour. `pill` is the compact badge-sized control.
+   * `cta` is the profile page's full-size action button, which differs in one
+   * more way than size: a lone primary button should read as the thing it does,
+   * so when you are NOT following it says "Follow" at rest rather than "not
+   * following" — the state/action swap only happens in the direction where the
+   * state is the interesting half.
+   *
+   * `icon` is the People list's skin (2026-09-13). The text variants are sized
+   * to the wider of their two labels, and in Slovak that is "nesledované" — on a
+   * 390px roster row, beside the want-to-meet and message buttons, it left the
+   * person's own name about 100px and ellipsed most of the list to "P…". The
+   * icon carries the state in `aria-pressed` and the pressed fill, exactly as
+   * the want-to-meet control beside it does, and the action stays named in the
+   * tooltip and the accessible name — which is where it always did the work for
+   * touch and screen-reader users anyway.
    */
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -28,6 +37,7 @@
   import { noteFollowChange } from "$lib/events/social.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
+  import Icon from "./icons/Icon.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -42,8 +52,8 @@
     following: boolean;
     /** Report the new state so the owner of the follow set stays authoritative. */
     onChange: (following: boolean) => void;
-    /** `pill` = roster row badge; `cta` = the profile page's primary action. */
-    variant?: "pill" | "cta";
+    /** `pill` = badge-sized text; `cta` = primary action; `icon` = dense row. */
+    variant?: "pill" | "cta" | "icon";
   } = $props();
 
   let busy = $state(false);
@@ -111,11 +121,15 @@
   aria-label={hint}
   onclick={toggle}
 >
-  <span class="labels">
-    <span class="state">{rest}</span>
-    <span class="action">{action}</span>
-    <span class="busy" aria-hidden="true">…</span>
-  </span>
+  {#if variant === "icon"}
+    <Icon name={following ? "personCheck" : "personPlus"} size={16} />
+  {:else}
+    <span class="labels">
+      <span class="state">{rest}</span>
+      <span class="action">{action}</span>
+      <span class="busy" aria-hidden="true">…</span>
+    </span>
+  {/if}
 </button>
 
 <style>
@@ -138,6 +152,26 @@
     background: var(--bg-elev2);
     color: var(--text-dim);
     font-size: 0.72rem;
+  }
+  /* Dense rows: the same footprint as the icon buttons it sits beside, so the
+     three controls read as one strip rather than as a pill plus two icons. */
+  .follow.icon {
+    min-height: 30px;
+    min-width: 30px;
+    padding: 0.25rem 0.4rem;
+    border-radius: var(--radius-sm);
+    background: var(--bg-elev2);
+    color: var(--text-dim);
+    line-height: 0;
+  }
+  .follow.icon.on {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    color: var(--accent);
+  }
+  .follow.icon:hover {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
   }
   /* Profile page: sized and weighted like the Message / Mute buttons beside it. */
   .follow.cta {
