@@ -273,6 +273,26 @@
   const aboutText = $derived(
     (useTranslated && translation?.about) || entry?.profile.about || kind0?.about || "",
   );
+  /**
+   * Their CURRENT Nostr bio, shown alongside the event bio when the two differ.
+   *
+   * `entry.profile.about` is one field with two meanings and no flag to tell
+   * them apart: for anyone who joined before 2026-09-13 it is a verbatim copy of
+   * their kind-0 bio frozen at join, and for anyone who edited it in MyProfile
+   * it is a bio deliberately written for this event. Preferring kind 0 would
+   * silently clobber the second; preferring the entry is the reported bug, where
+   * a user updates their Nostr profile and Nostrautica shows the old one
+   * forever.
+   *
+   * So neither wins and nothing is guessed — when the two texts differ, both are
+   * on the page and the reader can see which is which. Empty when the entry has
+   * no authored bio, because then the line above IS the kind-0 bio already.
+   */
+  const nostrAbout = $derived.by(() => {
+    const live = kind0?.about?.trim();
+    if (!live) return "";
+    return live === aboutText.trim() ? "" : live;
+  });
   const lookingForText = $derived(
     (useTranslated && translation?.looking_for) || entry?.profile.looking_for || "",
   );
@@ -381,6 +401,13 @@
 
   {#if aboutText}
     <p style="margin-top:0.75rem">{aboutText}</p>
+  {/if}
+
+  {#if nostrAbout}
+    <div class="nostr-about">
+      <div class="field-label">{t("attendee.nostrAbout")}</div>
+      <p class="muted">{nostrAbout}</p>
+    </div>
   {/if}
 
   {#if entry?.intro_text}
@@ -550,6 +577,12 @@
 <style>
   .small {
     font-size: 0.8rem;
+  }
+  .nostr-about {
+    margin-top: 0.75rem;
+  }
+  .nostr-about p {
+    margin: 0.15rem 0 0;
   }
   /* Primary actions on one row (they wrap before they squash). */
   .acts {

@@ -13,6 +13,7 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, type EventContext } from "$lib/events/event-context.js";
   import { fetchDirectoryEntry } from "$lib/events/attendee.js";
+  import { fetchProfiles } from "$lib/events/social.js";
   import { submitProfileCorrection, type CorrectionInput } from "$lib/events/correction.js";
   import {
     fieldsFromProfile,
@@ -61,6 +62,21 @@
   const authoredDraftId = $derived(ctx ? `authprofile:${ctx.coordinate}` : "");
   let authoredDraftRestored = $state(false);
 
+  /**
+   * Their own current kind-0 bio, so the editor can offer it.
+   *
+   * Joining used to copy the kind-0 bio into this field and freeze it; the copy
+   * has stopped being made (Join.svelte), but everyone who joined before
+   * 2026-09-13 still has one sitting here, indistinguishable from a bio they
+   * wrote for the event on purpose. Nothing may overwrite it silently — but the
+   * person it belongs to can be shown their real bio and given one tap to take
+   * it, which is how the old copies actually get cleaned up.
+   */
+  let nostrAbout = $state("");
+  const nostrAboutDiffers = $derived(
+    editingAuthored && !!nostrAbout.trim() && nostrAbout.trim() !== authored.about.trim(),
+  );
+
   async function openAuthoredEditor() {
     if (!session.signer || !ctx) return;
     authoredError = null;
@@ -93,6 +109,11 @@
       authoredDraftRestored = true;
     }
     editingAuthored = true;
+    if (session.pubkey) {
+      fetchProfiles([session.pubkey])
+        .then((m) => (nostrAbout = m.get(session.pubkey!)?.about ?? ""))
+        .catch(() => {});
+    }
   }
 
   // Hold an auto-refresh while an authored edit is in progress (App-2).
@@ -305,6 +326,16 @@
       <div class="editfield">
         <label for="au-about">{t("profile.authored.about")}</label>
         <textarea id="au-about" rows="3" maxlength={MAX_ABOUT} bind:value={authored.about}></textarea>
+        {#if nostrAboutDiffers}
+          <!-- Offered, never applied automatically: this field may hold a bio
+               written deliberately for this event, and the app cannot tell that
+               apart from a copy frozen at join. Saving is still an explicit act. -->
+          <p class="muted small nostr-hint">{t("profile.authored.nostrDiffers")}</p>
+          <p class="muted small nostr-quote">{nostrAbout}</p>
+          <button class="btn inline" onclick={() => (authored.about = nostrAbout)}>
+            {t("profile.authored.useNostr")}
+          </button>
+        {/if}
       </div>
       <div class="editfield">
         <label for="au-skills">{t("profile.authored.skills")}</label>
@@ -398,6 +429,17 @@
 {/if}
 
 <style>
+  .nostr-hint {
+    margin: 0.4rem 0 0.15rem;
+  }
+  /* Quoted, not editable: it is what their Nostr profile says right now, shown
+     so the choice is informed rather than blind. */
+  .nostr-quote {
+    margin: 0 0 0.4rem;
+    padding-left: 0.6rem;
+    border-left: 1px solid var(--border);
+    font-style: italic;
+  }
   .small {
     font-size: 0.82rem;
   }

@@ -337,7 +337,22 @@
     const x = e.ai_profile?.translations;
     return x && x.lang === i18n.locale ? x : undefined;
   };
-  const cardAbout = (e: DirectoryEntryContent) => tr(e)?.about || e.profile.about;
+  /**
+   * One line of who somebody is: what they wrote FOR THIS EVENT, and failing
+   * that their live Nostr bio.
+   *
+   * The second half is the fix for a real report (2026-09-13): a long-time Nostr
+   * user joined, updated their kind-0 bio on their own client, and Nostrautica
+   * kept showing the old one forever. It was never reading kind 0 here — the
+   * join flow copied the bio into the directory entry once and the copy was
+   * frozen from that moment. Nothing is mirrored now; `ProfileMeta.about` is the
+   * live kind 0, already fetched for the whole roster and cached, so this line
+   * cannot go stale in the first place.
+   */
+  function bioOf(pubkey: string): string | undefined {
+    const e = entryByPubkey.get(pubkey);
+    return (e && (tr(e)?.about || e.profile.about)) || profiles.get(pubkey)?.about || undefined;
+  }
 
   function toggleFilter(f: FilterKey) {
     const next = new Set(activeFilters);
@@ -558,7 +573,7 @@
             <MatchEntry
               match={m}
               {name}
-              sub={cardAbout(entryByPubkey.get(m.pubkey) ?? ({ profile: {} } as DirectoryEntryContent))}
+              sub={bioOf(m.pubkey)}
               picture={profiles.get(m.pubkey)?.picture}
               isNew={newPubkeys.has(m.pubkey)}
               onOpen={() => open(m.pubkey)}
@@ -645,7 +660,7 @@
             <PersonCard
               pubkey={e.pubkey}
               {name}
-              line={cardAbout(e) || e.ai_profile?.summary}
+              line={bioOf(e.pubkey) || e.ai_profile?.summary}
               picture={profiles.get(e.pubkey)?.picture}
               onOpen={() => open(e.pubkey)}
               last={e.pubkey === visible[visible.length - 1]?.pubkey}
