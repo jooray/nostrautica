@@ -63,6 +63,18 @@ class EventShell {
   get showPeople(): boolean {
     return this.isMember;
   }
+  /**
+   * A standing community rather than a dated event (config `mode`).
+   *
+   * Drives wording through `tc()` and, later, which parts of the event journey
+   * are offered at all. Reads false while the context is still loading, which
+   * is the right way round: an event is what every record written before
+   * communities existed is, so the fallback is the common case rather than a
+   * flash of the rarer one.
+   */
+  get isCommunity(): boolean {
+    return this.ctx?.config.mode === "community";
+  }
   get showMatches(): boolean {
     return (
       this.isMember &&

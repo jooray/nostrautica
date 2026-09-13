@@ -170,6 +170,25 @@ class I18n {
     return messages[this.locale][key] ?? messages.en[key] ?? key;
   }
 
+  /**
+   * Does a string for this key exist at all?
+   *
+   * Checked against English, not the active locale: the community variants are
+   * added in all three languages together, and falling back to the EVENT
+   * wording of the active locale is far better than showing an English
+   * community string to a Slovak reader because one translation lagged.
+   */
+  has(key: MessageKey): boolean {
+    return messages.en[key] !== undefined;
+  }
+
+  /** The plural-family equivalent of `has`: is any form of `base` defined? */
+  hasPlural(base: string): boolean {
+    return (["one", "few", "many"] as const).some(
+      (c) => messages.en[`${base}.${c}` as MessageKey] !== undefined,
+    );
+  }
+
   t(key: MessageKey, params?: Record<string, string | number>): string {
     return interpolate(this.raw(key), params);
   }
@@ -193,5 +212,44 @@ export function t(key: MessageKey, params?: Record<string, string | number>): st
 
 /** Plural-aware translator: `tp("attendees.count", n)`. */
 export function tp(base: string, n: number, params?: Record<string, string | number>): string {
+  return i18n.tp(base, n, params);
+}
+
+/**
+ * Community-aware translator: `tc("attendees.count", isCommunity)`.
+ *
+ * A community is an event without an end, but it is not an event in any
+ * sentence a person reads: they are members of a community, not attendees of
+ * it, and nothing "takes place". Most of the app never notices — talks,
+ * approvals, the venue, the report are all switched off — so only the strings
+ * that actually say "event" or "attendee" out loud need a second version, and
+ * this falls back to the event wording for every string that does not have one.
+ *
+ * Deliberately NOT a placeholder ("{thing} has ended"). Slovak and Czech decline
+ * the noun and change the preposition with it: `na podujatí` against
+ * `v komunite`. A slot that holds a nominative noun produces broken grammar in
+ * two of the three shipped languages, and the one language it works in is the
+ * one we are least likely to notice it in.
+ */
+export function tc(
+  key: MessageKey,
+  community: boolean,
+  params?: Record<string, string | number>,
+): string {
+  if (!community) return i18n.t(key, params);
+  const variant = `${key}.community` as MessageKey;
+  return i18n.has(variant) ? i18n.t(variant, params) : i18n.t(key, params);
+}
+
+/** Plural-aware community variant: `tcp("attendees.count", isCommunity, n)`. */
+export function tcp(
+  base: string,
+  community: boolean,
+  n: number,
+  params?: Record<string, string | number>,
+): string {
+  if (community && i18n.hasPlural(`${base}.community`)) {
+    return i18n.tp(`${base}.community`, n, params);
+  }
   return i18n.tp(base, n, params);
 }

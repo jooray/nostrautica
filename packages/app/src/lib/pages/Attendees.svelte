@@ -94,6 +94,7 @@
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { directoryEntryFields, searchRank } from "$lib/events/search.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
+  import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import { loadWatermark, newMatchPubkeys } from "$lib/events/whats-new.js";
@@ -104,7 +105,7 @@
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import FollowButton from "$lib/components/FollowButton.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
-  import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tc, tcp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -648,7 +649,9 @@
          people…" between every letter, drowning out the typing itself. The
          number is right there next to the field for anyone who wants it. -->
     <p class="muted count">
-      {hasFilters ? tp("attendees.showing", visible.length) : tp("attendees.count", entries.length)}
+      {hasFilters
+        ? tcp("attendees.showing", eventShell.isCommunity, visible.length)
+        : tcp("attendees.count", eventShell.isCommunity, entries.length)}
     </p>
   </div>
 
@@ -685,7 +688,7 @@
          simplest correct fix. Real list semantics so AT announces "list, N
          items"; a 2000-row render-perf check is an e2e-phase task. -->
     <div class="card roster">
-      <ul class="roster-list" aria-label={t("attendees.rosterLabel")}>
+      <ul class="roster-list" aria-label={tc("attendees.rosterLabel", eventShell.isCommunity)}>
         {#each visible as e (e.pubkey)}
           {@const name = nameOf(e.pubkey, e.profile.about)}
           <li>

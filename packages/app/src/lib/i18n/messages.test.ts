@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { i18n } from "./i18n.svelte.js";
 import { messages, LOCALES, type Locale } from "./messages.js";
+import { tc, tcp } from "./i18n.svelte.js";
 
 /**
  * Catalog checks for the counted strings that used to interpolate `{n}` into a
@@ -170,5 +171,56 @@ describe("signer recommendations", () => {
       const trouble = (table as Record<string, string>)["signin.trouble.primal"];
       expect(`${lang}: ${trouble ?? ""}`).toMatch(/Primal/);
     }
+  });
+});
+
+describe("community wording (tc / tcp)", () => {
+  it("falls back to the event string when a key has no community variant", () => {
+    // The point of the helper: only the strings that say "event" or "attendee"
+    // out loud need a second version, and every other string in the app keeps
+    // working untouched. If this ever throws or returns the key, adding a
+    // community variant becomes an all-or-nothing migration of 159 strings.
+    i18n.locale = "sk";
+    expect(tc("attendees.title", true)).toBe(tc("attendees.title", false));
+    expect(tc("attendees.title", true)).toBe(messages.sk["attendees.title"]);
+  });
+
+  it("uses the community wording where one exists, in every locale", () => {
+    for (const loc of LOCALES) {
+      i18n.locale = loc;
+      const event = tc("attendees.rosterLabel", false);
+      const community = tc("attendees.rosterLabel", true);
+      expect(community).toBeTruthy();
+      expect(community, `${loc} roster label`).not.toBe(event);
+    }
+  });
+
+  it("keeps the plural family intact for the community count", () => {
+    // Slovak and Czech need one/few/many for members exactly as they do for
+    // attendees; a community variant that defined only `.many` would silently
+    // render "5 členov" for a single member.
+    for (const loc of LOCALES) {
+      i18n.locale = loc;
+      for (const n of [1, 3, 9]) {
+        const s = tcp("attendees.count", true, n);
+        expect(s, `${loc} n=${n}`).toContain(String(n));
+        expect(s, `${loc} n=${n} should not be the attendee wording`).not.toBe(
+          tcp("attendees.count", false, n),
+        );
+      }
+      // sk/cs distinguish 1 / 2-4 / 5+; en only 1 / other.
+      const shape = (n: number) => tcp("attendees.count", true, n).replace(String(n), "#");
+      expect(shape(1), `${loc} singular`).not.toBe(shape(9));
+      if (loc !== "en") expect(shape(3), `${loc} few`).not.toBe(shape(9));
+    }
+  });
+
+  it("never silently shows English to a Slovak reader when a variant is missing", () => {
+    // `has` checks English on purpose: a variant is added in all three languages
+    // together, so a missing one means the KEY does not exist, not that a
+    // translation lagged. Falling back to the Slovak event wording beats
+    // falling through to an English community string.
+    i18n.locale = "sk";
+    expect(tc("attendees.decrypting", true)).toBe(messages.sk["attendees.decrypting"]);
   });
 });
