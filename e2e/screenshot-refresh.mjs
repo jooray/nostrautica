@@ -155,7 +155,31 @@ async function clearOutboxErrors(page) {
   }
 }
 
+/**
+ * Optional stem allow-list (`ONLY=01-create-form,14-more,…`).
+ *
+ * The journey is linear — a late stem is only reachable by walking the whole
+ * run — so this skips no navigation and no state-building. It decides only
+ * which stems are WRITTEN, which is what a targeted refresh needs: a run that
+ * re-shoots all ~50 stems rewrites ~300 files whose only real difference is a
+ * fresh set of random keys, burying the handful that genuinely changed.
+ *
+ * Gates `clearStem` as well as `shoot`, deliberately: clearStem deletes a
+ * stem's files BEFORE the attempt, so filtering only the write would delete
+ * good captures for every stem not in the list. Unset = capture everything, so
+ * the default behaviour of this script is unchanged.
+ */
+const ONLY = (process.env.ONLY ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const wanted = (stem) => ONLY.length === 0 || ONLY.includes(stem);
+
 async function shoot(page, dir, stem, theme) {
+  if (!wanted(stem)) {
+    console.log(`  (ONLY) not capturing ${dir}/${stem}-${theme}.png`);
+    return;
+  }
   mkdirSync(`${DOCS}/${dir}`, { recursive: true });
   const path = stemPath(dir, stem, theme);
   await clearOutboxErrors(page);
@@ -186,6 +210,7 @@ function skip(label, reason) {
  * must not delete a good capture from a previous INCLUDE_FLAKY=1 run.
  */
 function clearStem(dir, stem, themes = ["light", "dark"]) {
+  if (!wanted(stem)) return;
   for (const theme of themes) {
     const p = stemPath(dir, stem, theme);
     try {
@@ -428,8 +453,17 @@ async function pollReload(page, check, { maxMs = 40000, stepMs = 4000 } = {}) {
  * exactly the silent-substitution failure mode this file needs to never
  * reproduce (see clearStem's comment). If the source wasn't captured this
  * run (or ever), this silently no-ops — it mirrors, it never substitutes.
+ *
+ * ENGLISH RUNS ONLY, and that guard is the whole point of this note. The source
+ * `dir` is locale-scoped (`participant`, `participant-sk`, `participant-cs`)
+ * while `WEB` is not, so without it a three-locale refresh mirrored all three in
+ * sequence and whichever ran LAST won. `cs` is last, so the single English
+ * landing page (`web/index.html`, which has no locale variants) shipped Czech
+ * screenshots — ten of its twelve, live in production, and the guard above was
+ * carefully worded about stem substitution while this walked straight past it.
  */
 function mirrorToWeb(dir, stem, theme) {
+  if (LOCALE !== "en") return;
   const name = `${stem}-${theme}.png`;
   const src = `${DOCS}/${dir}/${name}`;
   const dest = `${WEB}/${name}`;
@@ -1287,11 +1321,19 @@ async function main() {
         await nina.locator("h2.band-head").first().scrollIntoViewIfNeeded();
         await nina.waitForTimeout(400);
         await shoot(nina, partDir, "11-people-matches", "light");
+        // The landing page's HERO image, so it must be mirrored. It was the one
+        // stem web/index.html embeds that nothing kept in sync: the People/Matches
+        // merge renamed this stem from `11-matches`, the old mirror calls went with
+        // the old name, and index.html was left pointing at a file that no longer
+        // existed — a 404 on the most prominent image on the site, with
+        // fetchpriority="high", until 2026-09-14.
+        mirrorToWeb(partDir, "11-people-matches", "light");
         // setThemeNoReload: a real reload re-fetches the roster/match list
         // from relays, same rationale as 08-attendees above — nothing here
         // needs a refetch just to re-theme the same on-screen state.
         await setThemeNoReload(nina, "dark");
         await shoot(nina, partDir, "11-people-matches", "dark");
+        mirrorToWeb(partDir, "11-people-matches", "dark");
         await setThemeNoReload(nina, "light");
       } else {
         skip(
