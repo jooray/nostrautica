@@ -18,7 +18,10 @@ is the primary ordering key; the sender-chosen timestamp is only a tie-break (§
 
 The custom kind ranges are `31600`–`31612` (addressable) and `21600`–`21610`
 (gift-wrapped rumors). All custom payloads carry `v: 2`; readers reject any payload or
-public event whose `v` is not exactly `2` (§2).
+public event whose `v` is not exactly `2` (§2). The single exception is a PAGINATED
+`31604` roster payload, which declares `v: 3` so that a client predating pagination
+fails loudly rather than rendering page 0 as the whole membership (§6.2.1); a roster that
+fits in one payload still carries `v: 2`.
 
 ## Addressable Events
 
@@ -28,7 +31,7 @@ public event whose `v` is not exactly `2` (§2).
 | 31601 | Invite List | `E_id` | Public, hash-hidden; `d` = event `d` | JSON invite hash list, ≤10,000 entries. Only `E_id` may publish. Voiding = republishing without the hash. |
 | 31602 | Self-encrypted profile / reuse library | Attendee account | NIP-44 self-encrypted; blinded `d` | Per-event self-copy (`a` = coordinate) and cross-event reuse library (`a: null`), same content schema. |
 | 31603 | Directory Entry | Coordinator, or `E_id` without one | ECK-encrypted; ECK-blinded `d` | One approved attendee's profile/media/transcripts/derived profile. Replaced when profile or derived output changes; NIP-09-deleted on revocation or withdrawal. Readers accept only the coordinator currently named in the newest `31600`, or `E_id`. |
-| 31604 | Roster | Coordinator, or `E_id` without one | ECK-encrypted; `d` = event `d` | Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. |
+| 31604 | Roster | Coordinator, or `E_id` without one | ECK-encrypted; `d` = event `d` (page N at `<event-d>:N`) | Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. A roster too large for one NIP-44 payload is paginated across `<event-d>:1`… with a `pages` count on page 0 and `v:3` (§6.2.1); one that fits keeps `v:2` and its single address. |
 | 31605 | Match List | Coordinator | NIP-44 coordinator→recipient; ECK-blinded `d` | Directional match reasoning (+ optional icebreakers) for one recipient. Replaced after scoring or ECK rotation. |
 | 31606 | Match Matrix | Coordinator | ECK-encrypted; `d` = event `d` | Event-wide score-only matrix; published only when `match_visibility: event`. Deleted when visibility changes away from it. |
 | 31607 | Members-only Event Post | `E_id` | ECK-encrypted; random stable `d` | Official members-only post. Same `d` on edit; old ciphertext stays readable to whoever held the ECK version it was published under. |

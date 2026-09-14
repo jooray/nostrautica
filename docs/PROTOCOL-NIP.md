@@ -96,6 +96,11 @@ per the tolerant-parse rule, which is stricter than intended rather than looser.
   "any positive integer"). Clients **SHOULD** surface an "update required" message when
   they observe a higher version from an authority key they trust (the event's `E_id` or
   configured coordinator).
+- **One exception, and only one:** a `31604` roster payload may declare `v: 3` when it is
+  paginated (§6.2.1). That kind alone has a wire problem — it is a single NIP-44 payload
+  with a hard 65,535-byte ceiling — and scoping the bump to it avoids a flag day across
+  every other kind to fix one of them. A roster that fits keeps `v: 2`. No other payload,
+  and no event `v` tag, may be anything but `2`.
 - Readers of public custom kinds **MUST** ignore events whose `v` tag is absent or not
   `"2"`.
 - Rationale: an explicit-rejection parse means a future breaking payload can never be
@@ -378,8 +383,8 @@ silently drop them.
   - `["chat", "marmot"]` × N, group-chat backends; omitted when chat is disabled.
     Operative only when a `coordinator` tag is also present.
   - `["retention", <days>]`: optional positive integer. When present, the coordinator
-    **MUST** delete the event's member records (31603, 31604, 31605, 31606, published
-    31610 talks) via NIP-09 and cease processing `<days>` days after the event's end
+    **MUST** delete the event's member records (31603, every 31604 page, 31605, 31606,
+    published 31610 talks) via NIP-09 and cease processing `<days>` days after the event's end
     time, and clients **MUST** surface the declared retention at join time. Absent =
     indefinite retention. Deletion remains best-effort (relays may not honor NIP-09); the
     privacy model never depends on it succeeding, and client wording must not overpromise.
@@ -472,14 +477,18 @@ silently drop them.
 #### `31604`: Roster
 
 - **Class:** parameterized-replaceable. **Signer:** the coordinator, or `E_id` without
-  one. **Sealing:** ECK. **`d`:** event `d` (one roster per event, not blinded).
-- **Tags:** `["d", <event-d>]`, `["a", <coordinate>]`, `["eck", <version>]`, `["v","2"]`.
+  one. **Sealing:** ECK. **`d`:** event `d` for page 0 (not blinded); `<event-d>:N` for
+  page N of a paginated roster (see below).
+- **Tags:** `["d", <page-d>]`, `["a", <coordinate>]`, `["eck", <version>]`, `["v","2"]`.
+  The `v` TAG is `"2"` on every page, including a paginated one — the event envelope is
+  unchanged; it is the payload that declares a version.
 - **Content:**
   ```
   {
-    v: 2,
+    v: 2 | 3,                         // 3 only on a paginated roster, see §6.2.1
     eck_current: int >0,
     nostr_group_id?: hex32,           // this event's active Marmot MLS group (§10.4)
+    pages?: int 2..40,                // page 0 of a paginated roster ONLY
     attendees: [
       {
         pubkey: hex32,
@@ -489,23 +498,78 @@ silently drop them.
           { pubkey: hex32, label?: string ≤60, added_at: int }  // added_at: unix SECONDS
         ] ≤5                         // per-device chat keys attested for this account
       }
-    ] ≤2000
+    ] ≤700                           // per PAGE; ≤2000 across the whole roster
   }
   ```
   `nostr_group_id` is the authoritative event→group routing binding (§10.4); it is
   absent for chat-off events. `chat_keys` is absent for an attendee with no attested
-  device.
+  device. A payload carrying `pages` beside `v: 2` is invalid and **MUST** be rejected.
 
-  **The `≤2000` array cap is not the operative limit.** The whole content is a
-  single NIP-44 v2 payload, so it is bounded by that layer's 65,535-byte plaintext
-  ceiling (§7.4). A minimal entry costs about 135 bytes and one carrying a chat
-  device about 265, which puts the real ceiling somewhere between roughly 240 and
-  480 approved members depending on how many have attested a device. A coordinator
-  **MUST NOT** approve past the point where the roster it would publish no longer
-  encrypts, and **SHOULD** tell the organizer (a `21606` with
-  `error_category: "roster_full"`, and `"roster_nearly_full"` on the way there)
-  rather than failing mid-publish with the ECK grant already delivered. Removing
-  this limit means paginating the roster, which is a wire change.
+  **Neither array cap is the operative limit.** One 31604 is one NIP-44 v2 payload, so a
+  page is bounded by that layer's 65,535-byte plaintext ceiling (§7.4). A minimal entry
+  costs about 135 bytes and one carrying a chat device about 265, so a page holds
+  somewhere between roughly 240 and 480 members depending on how many have attested a
+  device — well under the `≤700` parse bound, which exists only so a hostile payload
+  cannot allocate an unbounded array before the byte check runs.
+
+  A coordinator **MUST NOT** approve past `MAX_ROSTER` (2000) members or 40 pages, and
+  **SHOULD** tell the organizer (a `21606` with `error_category: "roster_full"`, and
+  `"roster_nearly_full"` on the way there) rather than failing mid-publish with the ECK
+  grant already delivered.
+
+##### 6.2.1 Roster pagination
+
+A roster that fits in one NIP-44 payload is published exactly as it always was: one
+31604 at the event's `d`, `v: 2`, no `pages` key, byte-identical to what shipped before
+this section existed. **Nothing below applies to it**, and that covers every event and
+community under a few hundred members.
+
+A roster that does not fit is split across several 31604s under the same author:
+
+| page | `d` | carries |
+|---|---|---|
+| 0 | `<event-d>` | `pages`, `eck_current`, `nostr_group_id`, the first entries |
+| N | `<event-d>:N` | `eck_current`, the next entries |
+
+`eck_current` and `nostr_group_id` are read from page 0 and are authoritative for the
+whole roster; a continuation page repeats `eck_current` only because the payload schema
+requires it. Entries are packed front to back, so appending a member changes the last
+page and nothing before it: a writer **SHOULD** republish only the pages whose contents
+actually changed, or one approval costs one relay publish per page for the length of the
+event. A reader fetches page 0, learns `pages`, and fetches 1..N-1 in a single REQ
+(`#d: ["<d>:1", "<d>:2", …]`) — two round trips, whatever the size.
+
+Because `<event-d>:N` could also be some *other* space's own `d` under the same
+coordinator, a reader **MUST** check a continuation page's `["a", <coordinate>]` tag as
+well as its author. The content is ECK-sealed per event, so a collision can only
+withhold a page, never forge one — but withholding it must not pass unnoticed. A reader
+that cannot read every page **MUST NOT** present the pages it did read as the roster; a
+partial membership list is indistinguishable from an event that shrank.
+
+**Why pages under distinct `d`s, and not the alternatives.** A manifest kind naming the
+pages reads more cleanly, but the round-trip count is identical — page 0 already is the
+manifest — and it costs a kind allocation for nothing. Dropping `chat_keys` back out of
+the roster roughly doubles what one payload holds, but it takes the device list away
+from the only surface that renders it and buys a single doubling; that is a deferral,
+not a fix. And no compression or entry shrinking was available: `pubkey` is 64 hex
+chars, `d` is a 32-char blinded value, both already minimal.
+
+**What an old client does.** This is the part that decided the design. Zod objects strip
+unknown keys, so simply adding `pages` would be *silently ignored* by every build
+already installed: it would read page 0, see 480 of 600 members, and render that as the
+complete event. So page 0 of a paginated roster declares `v: 3`, and an old client's
+strict `z.literal(2)` parse rejects it through the path §2 already defines — the roster
+is authored by a trusted authority, so the client surfaces "update required" instead of
+dropping it silently. It fails loudly, and only on the rosters it genuinely cannot
+represent.
+
+**This is the one payload field allowed to exceed `PROTOCOL_VERSION`,** and the
+exception is deliberate. Bumping `PROTOCOL_VERSION` to 3 would achieve the same refusal
+and would also invalidate every `31600` config, join request, directory entry, match
+list and `21xxx` rumor on the network — a full wire-v3 flag day across every kind, to
+solve a problem in exactly one of them. The bump is therefore scoped to the payload that
+has the problem. `31604` is the only kind whose `v` may be `2` **or** `3`; every other
+payload keeps the strict literal-2 parse of §2.
 
 #### `31605`: Match List
 
@@ -1115,6 +1179,13 @@ The coordinator issues NIP-09 kind-5 with both `["a", "<kind>:<pubkey>:<d>"]` an
 downgrade, and obsolete `31610` addresses after rotation or rejection. Deletion is
 best-effort; the privacy model never depends on relays honoring it.
 
+A retention sweep that deletes a `31604` **MUST** cover every page address the roster
+could have used (`<event-d>` and `<event-d>:1`…`<event-d>:39`), not only the pages it
+currently has. A roster that grew and later shrank leaves higher pages on relays that no
+reader asks for — `pages` on page 0 says they are not there — but they still hold member
+pubkeys, and nothing records how many pages an event ever had. Deleting an address that
+was never published is a no-op at the relay; missing one leaves member data behind.
+
 ## 13. Security considerations
 
 - **Forward-only revocation**: anyone who held a key reads everything published while it
@@ -1154,7 +1225,9 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
 - `MAX_NAME` 200, `MAX_MESSAGE` 2000, `MAX_ABOUT` 5000, `MAX_LOOKING_FOR` 2000,
   `MAX_SKILLS` 50, `MAX_SKILL` 200, `MAX_LINKS` 20, `MAX_URL` 2048,
   `MAX_INVITE_LABEL` 100, `MAX_INVITES` 10000, `MAX_REASONING` 2000, `MAX_MATCHES` 100,
-  `MAX_ROSTER` 2000, `MAX_RELAYS` 30, `MAX_MEDIA` 20 (31602), `MAX_SUBMISSION_MEDIA` 4
+  `MAX_ROSTER` 2000 (total across roster pages), `MAX_ROSTER_PAGE` 700 (entries in one
+  31604 page), `MAX_ROSTER_PAGES` 40, `MAX_RELAYS` 30, `MAX_MEDIA` 20 (31602),
+  `MAX_SUBMISSION_MEDIA` 4
   (21601), `MAX_D` 200, `MAX_MATCH_PAIRS` 200000, `MAX_TITLE` 300, `MAX_POST_BODY`
   100000, `MAX_NOTES` 2000, `MAX_NOTE` 5000, `MAX_LANG` 35, `MAX_TRANSCRIPT_TEXT`
   100000, `MAX_INTRO_TEXT` 2000, `MAX_LIBRARY_TEXTS` 20, `MAX_TALK_TITLE` 200,
@@ -1163,6 +1236,9 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
 - Icebreakers (31605, §6.2): ≤ 3 per match entry, ≤ 280 chars each.
 - Members-only post markdown editor cap: 60,000 UTF-8 bytes
   (`MAX_MEMBERS_POST_MARKDOWN_BYTES`). Theme CSS: 32,768 bytes (`MAX_THEME_CSS_BYTES`).
+- Roster page packing budget once a roster paginates: 60,000 UTF-8 bytes
+  (`ROSTER_PAGE_TARGET_BYTES`, §6.2.1). Whether to paginate at all is decided at the real
+  65,535-byte ceiling, so a roster that fits today is never split.
 - Media descriptor: `size ≥ 1` byte; `duration` required for `audio/*` and `video/*`
   mime types; decryption key decodes to exactly 32 bytes, nonce to exactly 12 bytes.
 

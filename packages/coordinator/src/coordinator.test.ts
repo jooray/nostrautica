@@ -37,6 +37,11 @@ import {
   matchListContentSchema,
   matchMatrixContentSchema,
   rosterContentSchema,
+  mergeRosterPages,
+  rosterPageD,
+  MAX_ROSTER,
+  MAX_ROSTER_PAGES,
+  NIP44_MAX_PLAINTEXT_BYTES,
   keyGrantContentSchema,
   coordinatorStatusContentSchema,
   unwrapRumor,
@@ -1583,12 +1588,17 @@ async function admin(
 /**
  * Audit B-8 — the roster's REAL ceiling, enforced where it can still be acted on.
  *
- * A 31604 is one NIP-44 payload, capped at 65,535 plaintext bytes. A minimal entry
- * is ~135 bytes and one with a chat device ~265, so an event runs out somewhere
+ * A 31604 PAGE is one NIP-44 payload, capped at 65,535 plaintext bytes. That used
+ * to be the ceiling on the whole roster, which put an event's real limit somewhere
  * between roughly 240 and 480 approved members — nowhere near the 2,000 the schema
- * and the join gate advertise. Past that, `buildRoster` threw from INSIDE the
- * approve path: the ECK grant was already published, the roster never went out, and
- * the organizer got a crypto error for the 400th person at the door.
+ * and the join gate advertise — and past it `buildRoster` threw from INSIDE the
+ * approve path, with the ECK grant already published and the organizer holding a
+ * crypto error for the 400th person at the door.
+ *
+ * Pagination (PROTOCOL-NIP.md §6.2) moved the ceiling out to the advertised
+ * number. What did NOT change, and is what these tests are really about, is the
+ * ordering: the gate runs BEFORE anything is granted, and a refusal reaches the
+ * organizer as something they can act on rather than as a failed publish.
  */
 describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () => {
   /** Fill the event's approved set until the roster is at `fraction` of capacity. */
@@ -1605,7 +1615,7 @@ describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () =>
 
   it("refuses an approval that would not fit, tells the organizer, and grants nothing", async () => {
     const h = await setup();
-    fillRoster(h, 600); // past the ceiling on its own
+    fillRoster(h, MAX_ROSTER); // the advertised total, in full
     const sk = generateSecretKey();
     const pk = getPublicKey(sk);
     h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
@@ -1629,9 +1639,17 @@ describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () =>
 
   it("an auto-approving invite cannot conjure space either", async () => {
     const h = await setup();
-    fillRoster(h, 600);
     const sk = generateSecretKey();
-    const { pubkey } = await joinOnly(h, sk, "with-a-valid-code");
+    const pubkey = getPublicKey(sk);
+    // They were already known to the event when there was still room — the intake
+    // cap (MAX_ATTENDEES_PER_EVENT, which counts PENDING rows that cost nothing on
+    // the wire) is a different gate and not what this test is about. What is: the
+    // roster gate runs on the auto-approval path too, not only on manual approval.
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey, status: "pending", now: h.clock.t });
+    fillRoster(h, MAX_ROSTER);
+
+    await joinOnly(h, sk, "with-a-valid-code");
+
     // The invite proof is valid; the roster is not. They land in the manual queue.
     expect(h.store.getAttendee(h.coordinate, pubkey)?.status).toBe("pending");
     expect(grantsTo(h, sk)).toHaveLength(0);
@@ -1639,7 +1657,7 @@ describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () =>
 
   it("warns ONCE as the roster approaches the ceiling, while it can still be planned around", async () => {
     const h = await setup();
-    fillRoster(h, 460); // ~90% of capacity for bare entries
+    fillRoster(h, Math.ceil(MAX_ROSTER * 0.9)); // the warning threshold
     const rosterStatuses = () =>
       h.transport.published
         .filter((e) => e.kind === 1059)
@@ -1670,6 +1688,130 @@ describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () =>
       .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
       .filter((s) => s.stage === "roster");
     expect(noisy).toHaveLength(0);
+  });
+});
+
+/**
+ * Roster pagination (PROTOCOL-NIP.md §6.2). The event the ceiling used to refuse
+ * — several hundred people, each with an attested chat device — now publishes,
+ * as pages, and an approval still costs one relay publish.
+ */
+describe("31604 roster pagination", () => {
+  function fillRoster(h: Harness, count: number): void {
+    for (let i = 0; i < count; i++) {
+      h.store.upsertAttendee({
+        coordinate: h.coordinate,
+        pubkey: i.toString(16).padStart(64, "0"),
+        status: "approved",
+        now: h.clock.t,
+      });
+    }
+  }
+
+  /** Every 31604 the coordinator published, newest per page `d`, in page order. */
+  function rosterPages(h: Harness): NostrEvent[] {
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const byD = new Map<string, NostrEvent>();
+    for (const e of h.transport.published.filter((e) => e.kind === KIND_ROSTER)) {
+      const d = e.tags.find((t) => t[0] === "d")?.[1];
+      if (d !== undefined) byD.set(d, e);
+    }
+    const out: NostrEvent[] = [];
+    for (let i = 0; byD.has(rosterPageD(identifier, i)); i++) out.push(byD.get(rosterPageD(identifier, i))!);
+    return out;
+  }
+
+  it("an event past the single-payload ceiling publishes as pages that each encrypt", async () => {
+    const h = await setup();
+    fillRoster(h, 600);
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+
+    await admin(h, "approve", { pubkey: pk });
+
+    // Admitted — this is exactly the approval the ceiling used to refuse.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, sk).length).toBeGreaterThan(0);
+
+    const pages = rosterPages(h);
+    expect(pages.length).toBeGreaterThan(1);
+    const parsed = pages.map((e) => {
+      const plaintext = eckDecrypt(h.eck, e.content);
+      // Measured on the real plaintext NIP-44 encrypted, not an entry-size estimate.
+      expect(utf8ToBytes(plaintext).length).toBeLessThanOrEqual(NIP44_MAX_PLAINTEXT_BYTES);
+      return rosterContentSchema.parse(JSON.parse(plaintext));
+    });
+    // Page 0 declares the count; the others are addressed <d>:1, <d>:2, …
+    expect(parsed[0]!.v).toBe(3);
+    expect(parsed[0]!.pages).toBe(pages.length);
+    expect(parsed[0]!.eck_current).toBeGreaterThan(0);
+    // Every member, exactly once, including the one just approved.
+    const merged = mergeRosterPages(parsed);
+    expect(merged.attendees).toHaveLength(601);
+    expect(new Set(merged.attendees.map((a) => a.pubkey)).size).toBe(601);
+    expect(merged.attendees.some((a) => a.pubkey === pk)).toBe(true);
+  });
+
+  it("an approval republishes ONLY the page it changed, not all of them", async () => {
+    const h = await setup();
+    fillRoster(h, 600);
+    const approve = async () => {
+      const pk = getPublicKey(generateSecretKey());
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+      await admin(h, "approve", { pubkey: pk });
+      return pk;
+    };
+    // First approval primes the per-page record by publishing every page once.
+    await approve();
+    const pageCount = rosterPages(h).length;
+    expect(pageCount).toBeGreaterThan(1);
+    const before = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length;
+
+    await approve();
+
+    const published = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length - before;
+    // One publish, not `pageCount` of them. This is the difference between an
+    // approval costing one relay round trip and costing N for the whole event.
+    expect(published).toBe(1);
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const last = h.transport.published.filter((e) => e.kind === KIND_ROSTER).at(-1)!;
+    expect(last.tags.find((t) => t[0] === "d")?.[1]).toBe(rosterPageD(identifier, pageCount - 1));
+  });
+
+  it("a roster that still fits publishes exactly one 31604, at the event d, with v:2", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const pages = rosterPages(h);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(identifier);
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, pages[0]!.content)));
+    expect(roster.v).toBe(2);
+    expect(roster.pages).toBeUndefined();
+  });
+
+  it("retention deletes every address pagination could have used, not just page 0", async () => {
+    // A roster that grew and then SHRANK leaves stale higher pages on relays, and
+    // nothing durably records how many pages an event ever had. Deleting an
+    // address that was never published is a no-op; missing one leaves member
+    // pubkeys behind after the retention window closed.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+
+    await h.coordinator.retentionSweep();
+
+    const deletion = h.transport.published.filter((e) => e.kind === KIND_DELETION).at(-1)!;
+    const addrs = new Set(deletion.tags.filter((t) => t[0] === "a").map((t) => t[1]));
+    const coordPk = getPublicKey(h.coordSk);
+    for (let i = 0; i < MAX_ROSTER_PAGES; i++) {
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(identifier, i)}`), `page ${i}`).toBe(true);
+    }
   });
 });
 

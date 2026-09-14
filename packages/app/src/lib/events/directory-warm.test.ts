@@ -24,6 +24,9 @@ import {
   eckEncrypt,
   KIND_ROSTER,
   KIND_DIRECTORY_ENTRY,
+  splitRoster,
+  rosterPageD,
+  type RosterContent,
   type EventConfig,
 } from "@nostrautica/protocol";
 import type { EventContext } from "./event-context.js";
@@ -225,6 +228,111 @@ beforeEach(async () => {
     coordinate,
     role: "attendee",
     eck: [{ id: 1, key: bytesToBase64(eck) }],
+  });
+});
+
+/**
+ * A roster too big for one NIP-44 payload arrives as several 31604s
+ * (PROTOCOL-NIP.md §6.2). The People screen reads page 0, learns the count, and
+ * asks for the rest in one more REQ.
+ */
+describe("reading a paginated roster", () => {
+  const pool: string[] = [];
+  const member = (i: number) => (pool[i] ??= getPublicKey(generateSecretKey()));
+
+  function paginated(n: number): RosterContent[] {
+    return splitRoster({
+      v: 2,
+      eck_current: 1,
+      attendees: Array.from({ length: n }, (_, i) => ({
+        pubkey: member(i),
+        d: (i + 0x1000).toString(16).padStart(32, "a"),
+        role: "attendee" as const,
+      })),
+    });
+  }
+
+  function pageEvent(page: RosterContent, index: number, createdAt = 100) {
+    return finalizeEvent(
+      {
+        kind: KIND_ROSTER,
+        created_at: createdAt,
+        tags: [["d", rosterPageD("warm-event", index)], ["a", coordinate]],
+        content: eckEncrypt(eck, JSON.stringify(page)),
+      },
+      coordSk,
+    );
+  }
+
+  it("reassembles every page into one member list", async () => {
+    const pages = paginated(600);
+    expect(pages.length).toBeGreaterThan(1);
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+
+    // First REQ: page 0 alone, at the event's own d.
+    expect(ofKind(KIND_ROSTER)).toHaveLength(1);
+    expect(ofKind(KIND_ROSTER)[0].ds).toEqual(["warm-event"]);
+    ofKind(KIND_ROSTER)[0].settle([pageEvent(pages[0]!, 0)]);
+    await settleMicrotasks();
+
+    // Second REQ: pages 1..N-1 together, not one round trip each.
+    expect(ofKind(KIND_ROSTER)).toHaveLength(2);
+    expect(ofKind(KIND_ROSTER)[1].ds).toEqual(
+      pages.slice(1).map((_, i) => rosterPageD("warm-event", i + 1)),
+    );
+    ofKind(KIND_ROSTER)[1].settle(pages.slice(1).map((p, i) => pageEvent(p, i + 1)));
+
+    const roster = await promise;
+    expect(roster?.attendees).toHaveLength(600);
+    expect(new Set(roster!.attendees.map((a) => a.pubkey)).size).toBe(600);
+    expect(roster!.attendees[599]!.pubkey).toBe(member(599));
+    // What consumers hold is an ordinary roster — pagination does not leak out.
+    expect(roster!.pages).toBeUndefined();
+  });
+
+  it("answers 'no roster' rather than a truncated one when a page is missing", async () => {
+    const pages = paginated(600);
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[0].settle([pageEvent(pages[0]!, 0)]);
+    await settleMicrotasks();
+    // Everything but the last page comes back.
+    ofKind(KIND_ROSTER)[1].settle(pages.slice(1, -1).map((p, i) => pageEvent(p, i + 1)));
+
+    // Not "the members on page 0" — that is a member list missing hundreds of
+    // people presented as complete, which is the failure pagination must not have.
+    expect(await promise).toBeUndefined();
+  });
+
+  it("ignores a page addressed to a different event, even from the same author", async () => {
+    const pages = paginated(600);
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[0].settle([pageEvent(pages[0]!, 0)]);
+    await settleMicrotasks();
+    // `<d>:1` could be another space's own `d` under this coordinator. The page's
+    // `a` tag is what tells the two apart.
+    const impostor = finalizeEvent(
+      {
+        kind: KIND_ROSTER,
+        created_at: 100,
+        tags: [["d", rosterPageD("warm-event", 1)], ["a", makeCoordinate(eid, "warm-event:1")]],
+        content: eckEncrypt(eck, JSON.stringify(pages[1])),
+      },
+      coordSk,
+    );
+    ofKind(KIND_ROSTER)[1].settle([impostor, ...pages.slice(2).map((p, i) => pageEvent(p, i + 2))]);
+
+    expect(await promise).toBeUndefined();
+  });
+
+  it("a roster that fits still costs exactly one relay read", async () => {
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[0].settle([rosterEvent(100)]);
+    expect((await promise)?.attendees).toHaveLength(2);
+    expect(ofKind(KIND_ROSTER)).toHaveLength(1);
   });
 });
 

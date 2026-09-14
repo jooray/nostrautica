@@ -25,6 +25,9 @@ import {
   rosterContentSchema,
   matchListContentSchema,
   parseCoordinate,
+  mergeRosterPages,
+  rosterContinuationDs,
+  rosterPageD,
   parseEventConfig,
   parsePayloadSafe,
   isNewerProtocolVersion,
@@ -844,8 +847,67 @@ async function fetchRosterOnce(ctx: EventContext): Promise<RosterContent | undef
     if (parsed.reason === "newer-version") updatePrompt.flag();
     return undefined;
   }
-  cacheSet(rosterKey(ctx.coordinate), parsed.value, latest.created_at ?? 0);
-  return parsed.value;
+  // A roster too big for one NIP-44 payload is split across pages
+  // (PROTOCOL-NIP.md §6.2): page 0 says how many there are, and the rest come
+  // back in one more REQ. A page we cannot read means we do not know the
+  // membership, so this answers "no roster" rather than handing the People
+  // screen a list that is missing everyone past page 0.
+  const pages = parsed.value.pages ?? 1;
+  let roster = parsed.value;
+  if (pages > 1) {
+    const rest = await fetchRosterContinuation(ctx, eck, latest.pubkey!, pages);
+    if (!rest) {
+      console.warn(`[roster] ${ctx.coordinate}: page 0 says ${pages} pages, not all of them read`);
+      return undefined;
+    }
+    roster = mergeRosterPages([parsed.value, ...rest]);
+  }
+  cacheSet(rosterKey(ctx.coordinate), roster, latest.created_at ?? 0);
+  return roster;
+}
+
+/**
+ * Pages 1..N-1 of a paginated roster, in ONE REQ, from the same author whose
+ * page 0 we just accepted. `undefined` if any page is missing, authored by
+ * someone else, addressed to another coordinate, or will not decrypt.
+ *
+ * The `a`-tag check matters because page N is addressed `<event-d>:N`, which a
+ * DIFFERENT space under the same coordinator could hold as its own `d`. The
+ * content is ECK-encrypted per event, so the worst such a collision could do is
+ * withhold a page — but withholding it silently is exactly what must not happen.
+ */
+async function fetchRosterContinuation(
+  ctx: EventContext,
+  eck: Uint8Array,
+  author: string,
+  pages: number,
+): Promise<RosterContent[] | undefined> {
+  const { identifier } = parseCoordinate(ctx.coordinate);
+  const ds = rosterContinuationDs(identifier, pages);
+  const events = await streamEvents(
+    { kinds: [KIND_ROSTER], authors: [author], "#d": ds },
+    { relays: ctx.config.relays },
+  ).ready;
+  const usable = onlyByAuthors(onlyVerified(events), [author]).filter((e) =>
+    e.tags?.some((t) => t[0] === "a" && t[1] === ctx.coordinate),
+  );
+  const out: RosterContent[] = [];
+  for (let page = 1; page < pages; page++) {
+    const d = rosterPageD(identifier, page);
+    const latest = pickLatest(usable.filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)));
+    if (!latest) return undefined;
+    try {
+      const parsed = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eck, latest.content)));
+      if (!parsed.ok) {
+        if (parsed.reason === "newer-version") updatePrompt.flag();
+        return undefined;
+      }
+      out.push(parsed.value);
+    } catch {
+      return undefined;
+    }
+  }
+  return out;
 }
 
 // The decrypted directory entries survive reloads too (owner-scoped) so the

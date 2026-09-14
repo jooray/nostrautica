@@ -1948,9 +1948,19 @@ export class Store {
     ai_profile_json: string | null;
     profile_hash: string | null;
   }[] {
+    // ORDER BY rowid — insertion order, i.e. the order people were admitted.
+    //
+    // Not cosmetic. The 31604 roster packs its pages front to back
+    // (PROTOCOL-NIP.md §6.2), so an approval only costs ONE relay publish as long
+    // as it appends to the end of this list. Without the clause SQLite is free to
+    // answer in (coordinate, pubkey) primary-key order, where a new member lands
+    // in the middle of the list by pubkey and shifts every page after it — one
+    // approval, N republishes, for the length of the event. Updating a row (a
+    // revoke-then-reapprove, a role change) keeps its rowid, so the order is
+    // stable across everything except a genuine new admission.
     return this.db
       .prepare(
-        "SELECT pubkey, role, ai_profile_json, profile_hash FROM attendees WHERE coordinate = ? AND status = 'approved'",
+        "SELECT pubkey, role, ai_profile_json, profile_hash FROM attendees WHERE coordinate = ? AND status = 'approved' ORDER BY rowid",
       )
       .all(coordinate) as any;
   }

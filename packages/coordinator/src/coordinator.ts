@@ -56,7 +56,14 @@ import {
   directoryEntryContentSchema,
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
-  NIP44_MAX_PLAINTEXT_BYTES,
+  MAX_ROSTER,
+  MAX_ROSTER_PAGES,
+  splitRoster,
+  mergeRosterPages,
+  rosterPageCount,
+  rosterPageD,
+  rosterPageDs,
+  rosterContinuationDs,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
   CHAT_INTEROP_RELAYS,
@@ -300,9 +307,11 @@ const INBOX_MAX_QUEUE = 2000;
  */
 const JOIN_STALE_AFTER_SEC = 5 * 60;
 /**
- * Warn the organizer once the 31604 roster payload crosses this fraction of the
- * NIP-44 ceiling (audit B-8). "The event is full" must never be the first anyone
- * hears about a limit they can still plan around.
+ * Warn the organizer once the 31604 roster crosses this fraction of MAX_ROSTER
+ * (audit B-8). "The event is full" must never be the first anyone hears about a
+ * limit they can still plan around. The fraction used to be measured against the
+ * NIP-44 byte ceiling, which pagination (PROTOCOL-NIP.md §6.2) is no longer the
+ * binding constraint — the member cap is.
  */
 const ROSTER_WARN_FRACTION = 0.9;
 
@@ -2893,6 +2902,57 @@ export class Coordinator {
    * a fetch failure leaves the E_inbox backfill (invite auto-approvals) as the
    * floor, and a later organizer recompute converges the rest.
    */
+  /**
+   * Fetch roster pages 1..`pages`-1 for a paginated 31604 (PROTOCOL-NIP.md
+   * §6.2), in ONE REQ, from the same author whose page 0 we accepted.
+   *
+   * Returns them in page order, or `undefined` if ANY page is missing, authored
+   * by someone else, addressed to a different coordinate, or will not decrypt.
+   * Partial is not an acceptable answer for a membership list: a caller that
+   * accepted "most of the roster" would treat the absent members as not
+   * approved. Page addresses are `<d>:N`, which could in principle be another
+   * space's own `d` under this coordinator, so the `a` tag is checked as well as
+   * the author.
+   */
+  private async fetchRosterPages(
+    state: EventState,
+    author: string,
+    pages: number,
+  ): Promise<RosterContent[] | undefined> {
+    const { identifier } = parseCoordinate(state.coordinate);
+    const ds = rosterContinuationDs(identifier, pages);
+    const events = await this.deps.transport.fetch(
+      { kinds: [KIND_ROSTER], authors: [author], "#d": ds },
+      state.configRelays,
+    );
+    const out: RosterContent[] = [];
+    for (let page = 1; page < pages; page++) {
+      const d = rosterPageD(identifier, page);
+      const candidates = events
+        .filter(
+          (e) =>
+            e.pubkey === author &&
+            e.tags.some((t) => t[0] === "d" && t[1] === d) &&
+            e.tags.some((t) => t[0] === "a" && t[1] === state.coordinate),
+        )
+        .sort(compareLatest);
+      let parsed: RosterContent | undefined;
+      for (const ev of candidates) {
+        const json = this.tryEckDecrypt(state, ev.content);
+        if (!json) continue;
+        try {
+          parsed = rosterContentSchema.parse(JSON.parse(json));
+          break;
+        } catch {
+          /* malformed — try an older revision of this page */
+        }
+      }
+      if (!parsed) return undefined;
+      out.push(parsed);
+    }
+    return out;
+  }
+
   private async bootstrapHandover(state: EventState): Promise<void> {
     const { identifier } = parseCoordinate(state.coordinate);
     let rosterEvents: NostrEvent[];
@@ -2952,6 +3012,21 @@ export class Coordinator {
       }
     }
     if (!roster || !rosterAuthor || roster.attendees.length === 0) return;
+    // A paginated roster (PROTOCOL-NIP.md §6.2) has the rest of its membership on
+    // `<d>:1`…`<d>:N-1`. Bootstrapping from page 0 alone would silently adopt a
+    // fraction of the event and — because everyone missing is never re-granted —
+    // lock the remainder out of the directory. So: all pages, from the SAME
+    // author, or nothing.
+    if ((roster.pages ?? 1) > 1) {
+      const rest = await this.fetchRosterPages(state, rosterAuthor, roster.pages!).catch(() => undefined);
+      if (!rest) {
+        log(
+          `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} is paginated (${roster.pages} pages) and not every page was readable`,
+        );
+        return;
+      }
+      roster = mergeRosterPages([roster, ...rest]);
+    }
     log(
       `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
         (rosterAuthor === state.eidPubkey ? " (E_id)" : " (prior coordinator)"),
@@ -3214,30 +3289,33 @@ export class Coordinator {
   }
 
   /**
-   * Would this event's roster still ENCRYPT with one more member in it?
+   * Would this event's roster still PUBLISH with one more member in it?
    *
-   * A 31604 is a single NIP-44 payload, and NIP-44 v2 caps plaintext at 65,535
-   * bytes — a hard protocol ceiling, unrelated to the 2,000-member intake cap the
-   * schema and the join gate advertise. A minimal entry is ~135 bytes and one with
-   * a chat device ~265, so a real event runs out somewhere between roughly 240 and
-   * 480 approved members, not 2,000.
+   * A 31604 page is a single NIP-44 payload and NIP-44 v2 caps plaintext at
+   * 65,535 bytes. That used to be the whole answer, and it put the real ceiling
+   * somewhere between roughly 240 and 480 approved members while the schema
+   * advertised 2,000: past it, `buildRoster` threw from inside the approve path
+   * with the ECK grant already published, so the ceiling was moved HERE, before
+   * the grant, and reported to the organizer in terms they can act on (audit
+   * B-8).
    *
-   * Past that, `buildRoster` threw from inside the approve path: the ECK grant had
-   * already been published (the attendee genuinely holds the key), the roster never
-   * went out, and the organizer saw a failed command with a crypto error in it —
-   * for the 400th person, at the door, with no way to know that the 399th was fine.
-   * So the ceiling is enforced HERE, before the grant, and reported to the organizer
-   * in terms they can act on (audit B-8).
-   *
-   * The honest fix for large events is roster pagination, which is a wire change
-   * against a frozen NIP and an owner decision, not a patch. Until then this is a
-   * real cap, and it says so out loud — see PROTOCOL-NIP.md §31604, which now
-   * documents the measured ceiling instead of only the ≤2000 array bound.
+   * Pagination (PROTOCOL-NIP.md §6.2) removed the byte ceiling as the binding
+   * constraint — a roster that outgrows one payload is now split across pages —
+   * but it did not remove the gate, only what "fits" means. What binds now is
+   * `MAX_ROSTER` (2,000 members in total, the number the schema and the join gate
+   * have always advertised) and `MAX_ROSTER_PAGES`, which a pathological entry
+   * size could reach first. The ordering is unchanged and is the point: refuse
+   * before granting, never mid-publish.
    */
-  private rosterCapacity(state: EventState, adding?: string): { bytes: number; fits: boolean; count: number } {
+  private rosterCapacity(
+    state: EventState,
+    adding?: string,
+  ): { bytes: number; fits: boolean; count: number; pages: number } {
     const roster = this.buildRosterContent(state, adding);
     const bytes = utf8ToBytes(JSON.stringify(roster)).length;
-    return { bytes, fits: bytes <= NIP44_MAX_PLAINTEXT_BYTES, count: roster.attendees.length };
+    const count = roster.attendees.length;
+    const pages = rosterPageCount(roster);
+    return { bytes, count, pages, fits: count <= MAX_ROSTER && pages <= MAX_ROSTER_PAGES };
   }
 
   /**
@@ -3247,18 +3325,18 @@ export class Coordinator {
    * "this event is full" is never the first anyone hears of it.
    */
   private async admitToRoster(state: EventState, pubkey: string): Promise<boolean> {
-    const { bytes, fits, count } = this.rosterCapacity(state, pubkey);
+    const { bytes, fits, count, pages } = this.rosterCapacity(state, pubkey);
     if (!fits) {
       log(
-        `[roster] REFUSED approval of ${short(pubkey)} for ${state.coordinate}: the 31604 roster would be ${bytes} bytes, over the ${NIP44_MAX_PLAINTEXT_BYTES}-byte NIP-44 ceiling at ${count} members`,
+        `[roster] REFUSED approval of ${short(pubkey)} for ${state.coordinate}: the 31604 roster would be ${count} members over ${pages} pages (${bytes} bytes), past the ${MAX_ROSTER}-member / ${MAX_ROSTER_PAGES}-page cap`,
       );
       await this.emitRosterFullStatus(state, count).catch(() => {});
       return false;
     }
-    if (bytes >= NIP44_MAX_PLAINTEXT_BYTES * ROSTER_WARN_FRACTION && !this.rosterWarned.has(state.coordinate)) {
+    if (count >= MAX_ROSTER * ROSTER_WARN_FRACTION && !this.rosterWarned.has(state.coordinate)) {
       this.rosterWarned.add(state.coordinate);
       log(
-        `[roster] ${state.coordinate} is near the roster ceiling: ${bytes}/${NIP44_MAX_PLAINTEXT_BYTES} bytes at ${count} members`,
+        `[roster] ${state.coordinate} is near the roster ceiling: ${count}/${MAX_ROSTER} members over ${pages} page(s), ${bytes} bytes`,
       );
       await this.emitRosterNearFullStatus(state, count).catch(() => {});
     }
@@ -3299,10 +3377,45 @@ export class Coordinator {
     log(`[roster] published 21606 roster_nearly_full for ${state.coordinate} (${count} members)`);
   }
 
+  /**
+   * Publish the roster, as one 31604 or as the pages it needs (PROTOCOL-NIP.md
+   * §6.2) — and publish ONLY the pages whose contents actually changed.
+   *
+   * That last part is the whole reason this bothers to remember anything. An
+   * approval appends one entry, and front-to-back packing means that lands on
+   * the last page; republishing all N instead would turn one approval into N
+   * relay publishes for the length of an event, against relays already carrying
+   * the join traffic that caused it. Opening a NEW page costs two (the new page,
+   * plus page 0 whose `pages` count moved) — never N.
+   *
+   * The record is in memory, so the first publish after a restart republishes
+   * every page once. That is a correctness-preserving over-publish, and the
+   * alternative — a durable per-page hash — buys one redundant publish per
+   * process lifetime.
+   */
   private async publishRoster(state: EventState): Promise<void> {
     const roster = this.buildRosterContent(state);
-    const event = buildRoster(this.publishKeys(state), state.coordinate, roster, this.nextCreatedAt);
-    await this.publish(event, state.configRelays);
+    const pages = splitRoster(roster);
+    const key = state.coordinate;
+    const published = [...(this.rosterPagesPublished.get(key) ?? [])];
+    const wire = pages.map((p) => JSON.stringify(p));
+    for (const [i, page] of pages.entries()) {
+      if (published[i] === wire[i]) continue;
+      const event = buildRoster(this.publishKeys(state), key, page, this.nextCreatedAt, i);
+      await this.publish(event, state.configRelays);
+      // Record per page, not once at the end: a publish that throws halfway must
+      // leave the pages it did NOT reach marked unpublished, so the next run
+      // retries exactly those.
+      published[i] = wire[i]!;
+      this.rosterPagesPublished.set(key, published.slice(0, pages.length));
+    }
+    // A roster that shrank (a revoke) leaves stale higher pages on relays. They
+    // are unreachable — readers take the page count from page 0 — but the record
+    // must forget them, or a later regrowth would think they were still current.
+    this.rosterPagesPublished.set(key, published.slice(0, pages.length));
+    if (pages.length > 1) {
+      log(`[roster] ${key}: ${roster.attendees.length} members across ${pages.length} pages`);
+    }
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
@@ -4732,8 +4845,16 @@ export class Coordinator {
         pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
       }
     }
-    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded).
-    pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER));
+    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded). The
+    // roster may have paginated (PROTOCOL-NIP.md §6.2), and a roster that later
+    // SHRANK leaves stale higher pages on relays that nothing reads but that
+    // still hold member pubkeys. Nothing durably records how many pages this
+    // event ever had, so retention deletes every address pagination could have
+    // used: deleting one that was never published costs a tag pair and is a
+    // no-op at the relay, whereas missing one leaves member data behind.
+    for (const d of rosterPageDs(state.identifier, MAX_ROSTER_PAGES)) {
+      pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${d}`, String(KIND_ROSTER));
+    }
     pushAddr(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX));
     // Published 31610 talks: delete under every historical ECK version (audit C5),
     // not only the one recorded on the row, so a rotated-away talk address is cleaned.
@@ -5143,6 +5264,13 @@ export class Coordinator {
   private rosterDirty = new Set<string>();
   /** The in-flight roster publisher per coordinate, awaited by later callers. */
   private rosterRunners = new Map<string, Promise<void>>();
+  /**
+   * The serialized contents of each roster PAGE as last published, per
+   * coordinate — how {@link Coordinator.publishRoster} knows an approval touched
+   * only the last page and the other N-1 need no relay traffic. In memory on
+   * purpose; see that method.
+   */
+  private rosterPagesPublished = new Map<string, string[]>();
 
   /**
    * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:

@@ -26,6 +26,11 @@ import {
   KIND_KEY_GRANT,
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
+  MAX_ROSTER,
+  splitRoster,
+  mergeRosterPages,
+  rosterContinuationDs,
+  rosterPageD,
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_DELETION,
@@ -103,7 +108,7 @@ export function cachedCoordinatorLastSeen(coordinate: string): number | undefine
 // Both read-modify-write republishes in this module — the 31604 roster and the
 // 31601 invite list — are WHOLE-DOCUMENT rewrites: what the read returned is what
 // gets published, and both publishers deliberately stamp the result NEWER than
-// what they read (buildRosterEvent's `base + 1`, publishMonotonic's tie-break
+// what they read (buildRosterEvents' `base + 1`, publishMonotonic's tie-break
 // bump) so the rewrite always wins the replaceable-event race. Which means a lost
 // read is not a failed operation, it is silent destruction: one empty answer from
 // a struggling venue-Wi-Fi relay republishes as "this event has one attendee" or
@@ -443,15 +448,23 @@ export async function approveAttendee(
     await loadRoster(ctx, eckBytes),
     eck.id,
   );
+  // Snapshot BEFORE the append: a paginated roster republishes only the pages
+  // whose bytes changed, and this is what "changed" is measured against.
+  const previous: RosterContent = { ...roster, attendees: [...roster.attendees] };
   if (!roster.attendees.some((a) => a.pubkey === req.attendeePubkey)) {
     roster.attendees.push({ pubkey: req.attendeePubkey, d: entryD, role });
   }
-  const rosterEvent = buildRosterEvent(ctx, eidSk, eckBytes, eck.id, roster, rosterAt);
+  if (roster.attendees.length > MAX_ROSTER) {
+    throw new Error(
+      `This event's roster is full (${MAX_ROSTER} members). Remove someone before approving anyone else.`,
+    );
+  }
+  const rosterEvents = buildRosterEvents(ctx, eidSk, eckBytes, eck.id, roster, rosterAt, previous);
 
   await Promise.all([
     publishAccountGiftWrap(grantWrap as any, req.attendeePubkey, ctx.config.relays),
     publishOrQueue(entryEvent, ctx.config.relays),
-    publishOrQueue(rosterEvent, ctx.config.relays),
+    ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
   ]);
 }
 
@@ -489,7 +502,7 @@ export type RosterRead =
  * (e.g. "Approve all", where three publishes can land in one wall-clock second)
  * produces sibling replaceable events with equal created_at, and NIP-01's
  * tie-break (keep the lowest id) can leave a stale, fewer-attendee roster winning
- * — silently dropping the last-added attendee. See buildRosterEvent.
+ * — silently dropping the last-added attendee. See buildRosterEvents.
  *
  * It used to answer BOTH failure modes — nothing came back, and came back but
  * would not decrypt — with `{roster: {attendees: []}, at: 0}`, and every caller
@@ -518,15 +531,67 @@ export async function loadRoster(
   if (!latest) {
     return { state: "absent", suspect: hasSeenPublished(ctx.coordinate, "roster") };
   }
-  const at = latest.created_at ?? 0;
+  let at = latest.created_at ?? 0;
   try {
     const { eckDecrypt } = await import("@nostrautica/protocol");
-    const roster = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    const page0 = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    let roster = page0;
+    // A paginated roster (PROTOCOL-NIP.md §6.2) keeps the rest of its membership
+    // on `<event-d>:1`… A rewrite path that read only page 0 would republish the
+    // event minus everyone past it — the same "erase people by rewriting blind"
+    // failure this whole function exists to prevent, just with a subtler cause.
+    // So an unreadable continuation page is `unreadable`, not a smaller roster.
+    const pages = page0.pages ?? 1;
+    if (pages > 1) {
+      const rest = await loadRosterPages(ctx, eckBytes, latest.pubkey!, pages);
+      if (!rest) return { state: "unreadable", at };
+      roster = mergeRosterPages([page0, ...rest.pages]);
+      // The republish must beat the newest page it read, not just page 0.
+      at = Math.max(at, rest.at);
+    }
     markPublished(ctx.coordinate, "roster", at);
     return { state: "ok", roster, at };
   } catch {
     return { state: "unreadable", at };
   }
+}
+
+/**
+ * Pages 1..N-1 of a paginated roster, from the same author whose page 0 we just
+ * read, in one relay-only REQ. `undefined` if any page is missing or unreadable
+ * — see {@link loadRoster} for why partial is not an answer here.
+ */
+async function loadRosterPages(
+  ctx: EventContext,
+  eckBytes: Uint8Array,
+  author: string,
+  pages: number,
+): Promise<{ pages: RosterContent[]; at: number } | undefined> {
+  const { eckDecrypt } = await import("@nostrautica/protocol");
+  const { identifier } = splitCoordinate(ctx.coordinate);
+  const events = await fetchEventsRelayOnly(
+    { kinds: [KIND_ROSTER], authors: [author], "#d": rosterContinuationDs(identifier, pages) },
+    ctx.config.relays,
+  );
+  // Same authority boundary as page 0, plus the `a` tag: page N's address could
+  // belong to a different space whose own `d` ends in `:N`.
+  const usable = onlyByAuthors(onlyVerified(events), [author]).filter((e) =>
+    e.tags?.some((t) => t[0] === "a" && t[1] === ctx.coordinate),
+  );
+  const out: RosterContent[] = [];
+  let at = 0;
+  for (let page = 1; page < pages; page++) {
+    const d = rosterPageD(identifier, page);
+    const latest = pickLatest(usable.filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)));
+    if (!latest) return undefined;
+    try {
+      out.push(JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent);
+    } catch {
+      return undefined;
+    }
+    at = Math.max(at, latest.created_at ?? 0);
+  }
+  return { pages: out, at };
 }
 
 /**
@@ -554,16 +619,40 @@ function rosterForRewrite(
   return { roster: { v: 2, eck_current: eckCurrent, attendees: [] }, at: 0 };
 }
 
-function buildRosterEvent(
+/**
+ * Build the 31604(s) that carry this roster — one event for a roster that fits
+ * in a single NIP-44 payload (unchanged, and that is the overwhelming majority),
+ * or one per page for a roster that does not (PROTOCOL-NIP.md §6.2).
+ *
+ * `previous` is the roster as it was READ, and it is what keeps an approval
+ * costing one publish rather than N: pages are packed front to back, so
+ * appending a member changes only the last page, and any page whose bytes are
+ * identical to what is already on the relay is not republished. Pass it only
+ * when the pages are comparable — a revoke or a coordinator rotation re-derives
+ * every attendee's blinded `d` under a NEW ECK, so every page genuinely changed
+ * and those callers pass nothing.
+ */
+function buildRosterEvents(
   ctx: EventContext,
   eidSk: Uint8Array,
   eckBytes: Uint8Array,
   eckId: number,
   roster: RosterContent,
   baseCreatedAt = 0,
-): VerifiedEvent {
+  previous?: RosterContent,
+): VerifiedEvent[] {
   const { identifier } = splitCoordinate(ctx.coordinate);
-  const content: RosterContent = { ...roster, eck_current: eckId };
+  const pages = splitRoster({ ...roster, eck_current: eckId });
+  let onRelay: string[] = [];
+  if (previous) {
+    try {
+      onRelay = splitRoster({ ...previous, eck_current: eckId }).map((p) => JSON.stringify(p));
+    } catch {
+      // An unsplittable previous roster (over the caps, malformed) tells us
+      // nothing about what is on the relay — republish every page.
+      onRelay = [];
+    }
+  }
   // Strictly newer than the roster we read (baseCreatedAt) so this republish
   // always wins the replaceable-event race — see loadRoster. Clamp to now so a
   // steady state (base far in the past) still uses the wall clock.
@@ -573,20 +662,31 @@ function buildRosterEvent(
   // built we have committed to it (publishOrQueue may durably queue it offline,
   // which still means a roster exists for this event as far as we're concerned).
   markPublished(ctx.coordinate, "roster", createdAt);
-  return finalizeEvent(
-    {
-      kind: KIND_ROSTER,
-      created_at: createdAt,
-      tags: [
-        ["d", identifier],
-        ["a", ctx.coordinate],
-        ["eck", String(eckId)],
-        ["v", "2"],
-      ],
-      content: eckEncrypt(eckBytes, JSON.stringify(content)),
-    },
-    eidSk,
-  );
+  const events: VerifiedEvent[] = [];
+  for (const [page, content] of pages.entries()) {
+    const json = JSON.stringify(content);
+    if (onRelay[page] === json) continue;
+    events.push(
+      finalizeEvent(
+        {
+          kind: KIND_ROSTER,
+          created_at: createdAt,
+          tags: [
+            ["d", rosterPageD(identifier, page)],
+            ["a", ctx.coordinate],
+            ["eck", String(eckId)],
+            // The event envelope is still wire v2 even when the PAYLOAD declares
+            // v3 — see buildRoster in the coordinator's publisher for why an old
+            // client must still be able to fetch page 0 in order to fail loudly.
+            ["v", "2"],
+          ],
+          content: eckEncrypt(eckBytes, json),
+        },
+        eidSk,
+      ),
+    );
+  }
+  return events;
 }
 
 function splitCoordinate(coordinate: string): { identifier: string } {
@@ -1117,7 +1217,11 @@ export async function revokeAttendeeClient(
     pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
 
-  pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
+  // No `previous`: every entry's blinded `d` was re-derived under the NEW ECK, so
+  // every page genuinely changed and there is nothing on the relay to skip.
+  for (const ev of buildRosterEvents(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt)) {
+    pubs.push(publishOrQueue(ev, ctx.config.relays));
+  }
   await Promise.all(pubs);
 }
 
@@ -1200,7 +1304,11 @@ async function rotateEckAndInbox(
     });
     pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
-  pubs.push(publishOrQueue(buildRosterEvent(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt), ctx.config.relays));
+  // No `previous`: every entry's blinded `d` was re-derived under the NEW ECK, so
+  // every page genuinely changed and there is nothing on the relay to skip.
+  for (const ev of buildRosterEvents(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt)) {
+    pubs.push(publishOrQueue(ev, ctx.config.relays));
+  }
   await Promise.all(pubs);
 
   // Persist: append the new ECK, retain the old inbox secret for history reading,

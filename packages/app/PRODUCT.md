@@ -98,9 +98,13 @@ event.
 - **Dark and light themes** are both first-class (`data-theme` on `<html>`,
   system-following by default).
 - **Undecided / not shipped:** pay-with-Bitcoin ticketing is a roadmap idea in
-  the pitch, not a feature — do not design as if it exists. Roster pagination
-  above a few hundred attendees is a known open owner decision
-  (GPT-ASTRA audit).
+  the pitch, not a feature — do not design as if it exists.
+- **Event size is no longer capped at a few hundred.** The roster used to be one
+  NIP-44 payload, which ran out somewhere around 240-480 approved members; it now
+  paginates (PROTOCOL-NIP.md §6.2.1) up to `MAX_ROSTER` (2000). Design the member
+  list for thousands, not hundreds — and note that a community (31612) is a
+  standing group that only ever grows, so it reaches those numbers by sitting
+  still.
 
 ## Brand Commitments
 
