@@ -1,3 +1,38 @@
+<script lang="ts" module>
+  import { profileDisplayName } from "$lib/events/social.js";
+
+  /**
+   * The name at the top of an attendee's page, in the order this app trusts its
+   * three sources: their live kind-0, the name frozen into their directory entry
+   * at join time, then a slice of their event bio, then the generic fallback.
+   *
+   * The kind-0 step goes through `profileDisplayName` — it used to read the raw
+   * `name` field off the parsed content, which is the ONE field the rest of the
+   * app does not prefer. Everything else (the People roster, matches, talk
+   * cards, DM headers) resolves names through `fetchProfiles`, which resolves
+   * `display_name` first, so the same person could be "Ada Lovelace" in the
+   * roster and "ada1815" on the page you opened by tapping that row. Worse, the
+   * wrong name arrived SECOND here: the cache paint below uses the already-
+   * resolved cached meta, then the relay fetch overwrote `kind0` with the raw
+   * content and the heading changed under the reader.
+   *
+   * Pure and exported so the precedence is unit-testable without a browser (the
+   * same reason Attendees.svelte exports its empty-state classifier).
+   */
+  export function attendeeDisplayName(
+    kind0: unknown,
+    entry: { name?: string; profile?: { about?: string } } | null | undefined,
+    fallback: string,
+  ): string {
+    return (
+      profileDisplayName(kind0) ||
+      entry?.name ||
+      entry?.profile?.about?.slice(0, 40) ||
+      fallback
+    );
+  }
+</script>
+
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { decode, nprofileEncode } from "nostr-tools/nip19";
@@ -258,9 +293,7 @@
     }
   }
 
-  const displayName = $derived(
-    kind0?.name || entry?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"),
-  );
+  const displayName = $derived(attendeeDisplayName(kind0, entry, t("attendee.name")));
   const has = (list?: string[]) => !!list?.includes(pubkey);
 
   // A coordinator-published translation of the user's authored fields into the

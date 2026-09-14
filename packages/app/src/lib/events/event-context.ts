@@ -19,6 +19,7 @@ import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 import { swr } from "$lib/cache/swr.js";
 import { session } from "$lib/signer/session.svelte.js";
+import { profileDisplayName } from "./social.js";
 
 export interface EventContext {
   naddr: string;
@@ -157,7 +158,12 @@ export async function loadEventContext(
     naddr,
     coordinate,
     config,
-    title: (evt && tag(evt.tags, "title")) ?? kind0.name ?? "Untitled event",
+    // Same precedence as every other name in the app (`profileDisplayName`):
+    // an organizer who renames the event in another Nostr client edits the field
+    // those clients label "Display name", and reading a bare `kind0.name` here
+    // made that rename invisible — an event kind-0 carrying only a
+    // `display_name` rendered as "Untitled event".
+    title: (evt && tag(evt.tags, "title")) ?? profileDisplayName(kind0) ?? "Untitled event",
     summary: (evt && tag(evt.tags, "summary")) ?? kind0.about ?? "",
     start: evt ? Number(tag(evt.tags, "start")) || undefined : undefined,
     end: evt ? Number(tag(evt.tags, "end")) || undefined : undefined,
