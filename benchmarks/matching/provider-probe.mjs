@@ -16,8 +16,24 @@
  *     5 of 5 calls here, for a third reason nothing was measuring: its
  *     mandatory reasoning exhausts `batchMaxTokens(10)` and the response comes
  *     back `finish_reason=length`, which `venice.ts` rejects outright.
+ *  3. 2026-09-14: and the cause of THAT was not what it looked like either.
+ *     Venice had stopped answering `disable_thinking` with a 400 and started
+ *     accepting-then-ignoring it — whereupon GLM 5.3 Flash spends the entire
+ *     budget reasoning and returns nothing (12000/12000 completion tokens, all
+ *     reasoning). The per-model probe in `venice.ts` watched for the 400, so it
+ *     never fired. `venice.ts` now learns the same fact from the truncation and
+ *     reserves reasoning tokens on top of the caller's answer budget, which took
+ *     this arm from 0 of 5 to 4 of 5 with no config at all.
+ *  4. The fifth call is a DIFFERENT failure and is not fixed. It hit the
+ *     20000-token ceiling having spent only 2549 tokens on reasoning, so it
+ *     emitted some 17k tokens of "answer" for a ten-candidate batch. No reserve
+ *     addresses that, and raising the ceiling only makes each occurrence dearer:
+ *     a truncated batch is unparseable JSON, so the whole batch fails and is
+ *     billed for the full ceiling plus its retries. Reasoning was never the
+ *     whole story, which is the reason this arm exists rather than an inference
+ *     from the catalogue.
  *
- * The lesson both times is the same, so this arm stops re-deriving the answer:
+ * The lesson every time is the same, so this arm stops re-deriving the answer:
  * it imports `VeniceLlm` and `scoreReverseBatch` from `packages/coordinator/dist`
  * and runs the real thing. If a call fails here, it fails in production — no
  * inference, no reimplementation to keep in sync.
@@ -32,6 +48,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { SIGNED_PERSONAS, buildReverseDenseCases } from "./icebreaker-fixture.mjs";
+import { priceOf } from "./lib.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DIST = join(here, "../../packages/coordinator/dist");
@@ -72,6 +89,30 @@ function classify(message) {
 /** Failures that say something about the ENVIRONMENT, not about the model. */
 const ENVIRONMENTAL = new Set(["unreachable", "unauthorized"]);
 
+/**
+ * Wrap the provider so this arm can see what a call COST, not only whether it
+ * worked. `scoreReverseBatch` takes the value and drops the usage, so without
+ * this the one arm that drives production's own code is also the one arm with no
+ * cost number in it.
+ *
+ * It matters most for exactly the model this arm exists to clear: a model that
+ * reasons unconditionally is billed for thousands of tokens per call that never
+ * appear in the response body, and for a call the adapter has to correct and
+ * retry, the retry's usage alone understates the call by a whole budget. The
+ * tally is whatever `providers/venice.ts` reports — so if it ever dropped
+ * reasoning tokens, this number would visibly fall short of the bill.
+ */
+function metered(llm) {
+  const usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0, reasoningTokens: 0 };
+  const inner = llm.completeStructured.bind(llm);
+  llm.completeStructured = async (req) => {
+    const out = await inner(req);
+    for (const k of Object.keys(usage)) usage[k] += out.usage?.[k] ?? 0;
+    return out;
+  };
+  return usage;
+}
+
 export async function providerProbe(model, calls = 5, refresh = false) {
   const file = join(here, "results", `PROBE_${model.replace(/[^a-zA-Z0-9._-]/g, "")}.json`);
   if (!refresh && existsSync(file)) {
@@ -86,6 +127,10 @@ export async function providerProbe(model, calls = 5, refresh = false) {
   const apiKey = process.env.VENICE_API_KEY;
   if (!apiKey) throw new Error("VENICE_API_KEY is not set");
   const llm = new VeniceLlm({ payment: new ApiKeyPayment(apiKey), requirePrivate: false });
+  // Deliberately NO per-model traits: the point of this arm is whether the
+  // adapter can drive the model with nothing but the model id, which is all
+  // production has when an operator points `models.match` at a new id.
+  const usage = metered(llm);
 
   // The reverse batch at K=10: production's default batch size, and the shape
   // with the largest output budget — so the one a model fails first.
@@ -144,6 +189,7 @@ export async function providerProbe(model, calls = 5, refresh = false) {
   // while dropping targets is only partly usable — recorded, not hidden.
   const asked = rows.filter((r) => r.ok).reduce((a, r) => a + r.asked, 0);
   const scored = rows.filter((r) => r.ok).reduce((a, r) => a + r.scored, 0);
+  const price = priceOf(model);
   const out = {
     model,
     calls: rows.length,
@@ -152,6 +198,13 @@ export async function providerProbe(model, calls = 5, refresh = false) {
     kinds,
     entryYield: asked ? Math.round((scored / asked) * 1000) / 10 : null,
     latencyMsP50: [...rows.map((r) => r.ms)].sort((a, b) => a - b)[Math.floor(rows.length / 2)] ?? null,
+    // Everything the adapter reported, failed attempts included — reasoning is a
+    // SUBSET of completionTokens on Venice, listed so a model that thinks for
+    // half its output budget cannot look as cheap as its per-token price.
+    usage,
+    usdSpent: price
+      ? Math.round(((usage.promptTokens / 1e6) * price.in + (usage.completionTokens / 1e6) * price.out) * 1e6) / 1e6
+      : null,
     at: new Date().toISOString(),
     rows,
   };
@@ -170,6 +223,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       (r.entryYield !== null ? ` — ${r.entryYield}% of requested entries scored` : ""),
   );
   if (r.failed) console.log(`failure kinds: ${JSON.stringify(r.kinds)}`);
+  if (r.usage) {
+    const u = r.usage;
+    console.log(
+      `tokens: ${u.promptTokens} in / ${u.completionTokens} out` +
+        (u.reasoningTokens ? ` (${u.reasoningTokens} of them reasoning, billed and invisible)` : "") +
+        (r.usdSpent !== null ? ` — $${r.usdSpent.toFixed(4)} over ${r.calls} calls` : ""),
+    );
+  }
   console.log(`wrote results/PROBE_${r.model.replace(/[^a-zA-Z0-9._-]/g, "")}.json`);
   // Fixture personas are the same ones every other arm uses; assert that so a
   // future fixture edit cannot silently change what "production shape" means.

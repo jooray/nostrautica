@@ -738,8 +738,31 @@ that has been quoted since August, because that card measured the prompt it no
 longer runs.
 
 **No model change.** `deepseek-v4-flash-0731` stays. The one model that beats it
-on quality is blocked on the same two provider changes as before and now costs
-42% more per attendee.
+on quality, `z-ai-glm-5-3-flash`, is no longer blocked on the adapter, and that
+is worth separating from whether it is adoptable.
+
+The adapter changes landed on 2026-09-14. `providers/venice.ts` now learns from a
+model's own behaviour that it reasons unconditionally and reserves completion
+tokens for the reasoning on top of the caller's answer budget, so an operator can
+point `models.match` at such a model with nothing but the id. The August blocker
+was also not what it looked like: Venice had stopped refusing `disable_thinking`
+with a 400 and started accepting it and ignoring it, whereupon GLM 5.3 Flash
+spent the entire budget on chain-of-thought and returned empty content on 4 of 4
+calls. The recovery was watching for the 400, so it never fired.
+
+What stops the model now is the model. Driven through production's own code at
+production's own shape (reverse batch, K=10, Slovak, `batchMaxTokens(10)`), it
+answered 4 of 5 calls. The fifth hit the 20000-token ceiling having spent only
+2549 tokens on reasoning, so it produced roughly 17k tokens of "answer" for ten
+candidates. No reserve fixes that, and a truncated batch is unparseable JSON:
+the whole batch fails and is billed for the full ceiling plus its retries. It is
+also slow, 73s at the median against 12s for `deepseek-v4-1-flash` on the same
+probe, and it still costs 42% more per attendee. A 20% batch-failure rate at six
+times the latency is not a quality win.
+
+Re-run `node provider-probe.mjs z-ai-glm-5-3-flash --refresh` before revisiting
+this: the finding above is one run of five calls, which is enough to disqualify
+and not enough to characterise.
 
 *Suite v2 cost: $2.07 of Venice API across six models' arm D. The scoring arms
 were cached, so re-running them cost nothing.*
