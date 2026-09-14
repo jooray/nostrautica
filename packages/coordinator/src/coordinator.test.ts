@@ -30,6 +30,8 @@ import {
   KIND_TALK_SUBMISSION,
   KIND_ATTENDEE_WITHDRAWAL,
   KIND_DELETION,
+  KIND_CALENDAR_EVENT,
+  KIND_COMMUNITY,
   talkContentSchema,
   directoryEntryContentSchema,
   matchListContentSchema,
@@ -329,6 +331,8 @@ interface Harness {
   eidSk: Uint8Array;
   einboxSk: Uint8Array;
   coordinate: string;
+  /** The space's kind — 31923 (default) or 31612 when `opts.spaceKind` says so. */
+  spaceKind: number;
   eck: Uint8Array;
   invites: Uint8Array[];
   nextInvite: number;
@@ -363,6 +367,13 @@ async function setup(
     /** Per-role provider routing (H-1): route summary+translate to one instance
      *  ("provA") and match+embed to another ("provB"), exposed as h.llmA/h.llmB. */
     splitProviders?: boolean;
+    /**
+     * Which of the two space kinds this space is published under (PROTOCOL-NIP.md
+     * §1.1): 31923 (dated NIP-52 event, the default) or 31612 (standing community).
+     * Drives BOTH the coordinate's kind and the kind of the seeded metadata record,
+     * because those two are the same thing — a coordinate is `kind:pubkey:d`.
+     */
+    spaceKind?: number;
     /** Retention policy (NIP §6.2): seed a `retention` tag on the 31600 and an
      *  `end` tag on the 31923 so the retention sweep has a deadline to test. */
     retentionDays?: number;
@@ -401,7 +412,8 @@ async function setup(
   const eidPubkey = getPublicKey(eidSk);
   const einboxSk = generateSecretKey();
   const d = "cypherpunk";
-  const coordinate = makeCoordinate(eidPubkey, d);
+  const spaceKind = opts.spaceKind ?? KIND_CALENDAR_EVENT;
+  const coordinate = makeCoordinate(eidPubkey, d, spaceKind);
   const eck = generateEck();
   const eckVersions: EckVersion[] = [{ id: 1, key: bytesToBase64(eck) }];
   const invites = Array.from({ length: 6 }, () => generateSecretKey());
@@ -412,7 +424,7 @@ async function setup(
   const store = new Store(":memory:", coordSk);
   const transport = new FakeTransport();
   transport.seed.push(
-    { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
+    { kind: spaceKind, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
     { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
@@ -492,7 +504,7 @@ async function setup(
     });
   }
 
-  return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
+  return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, spaceKind, eck, invites, nextInvite: 0, clock };
 }
 
 async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<string> {
@@ -4806,6 +4818,67 @@ describe("audit P9 — 31923 metadata selection uses the latest-event comparator
       tags: [["d", "cypherpunk"], ["title", "Stale"], ["end", "1"]], content: "", sig: "",
     } as any);
     expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+  });
+});
+
+describe("a community's metadata is read under its OWN kind (31612), not 31923", () => {
+  it("installs a 31612 community with its real title/summary/topics in the scoring context", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    expect(h.coordinate.startsWith(`${KIND_COMMUNITY}:`)).toBe(true);
+    // Against the unfixed code this is the placeholder `"the event"` with no
+    // topics: the install fetched a 31612 and then selected `kind === 31923`
+    // from the result, which matches nothing. Every match prompt for every
+    // community would have read "EVENT: the event", with no ABOUT and no TOPICS.
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({
+      title: "Cypherpunk Assembly",
+      hashtags: ["cypherpunk"],
+    });
+  });
+
+  it("subscribes for live 31612 edits and applies them", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    // The config subscription must ASK for 31612. A 31923-only filter means the
+    // relay never sends a community's title edit at all, so the coordinator keeps
+    // scoring against install-time metadata until the daemon is restarted.
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(KIND_COMMUNITY) && s.filter.kinds?.includes(31600),
+    );
+    expect(cfgSub, "no config subscription asked for kind 31612").toBeDefined();
+    cfgSub!.onEvent({
+      kind: KIND_COMMUNITY, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "c-20",
+      tags: [["d", "cypherpunk"], ["title", "Renamed Community"], ["summary", "now about rust"]],
+      content: "", sig: "",
+    } as any);
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({
+      title: "Renamed Community",
+      summary: "now about rust",
+    });
+  });
+
+  it("a community has no retention anchor — it is a standing group, not a dated event", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    // Deliberate: 31612 carries no `start`/`end`, so eventEndSec stays 0 and the
+    // retention sweep never expires a community. Pinned so a future "fix" doesn't
+    // synthesise an end date for communities.
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(0);
+  });
+
+  it("does not cross the two namespaces: a 31923 sharing the E_id and `d` never edits the community", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(KIND_COMMUNITY) && s.filter.kinds?.includes(31600),
+    )!;
+    // Same author, same `d`, different kind ⇒ a DIFFERENT space (`31923:X:d` and
+    // `31612:X:d` are two coordinates). Widening the guard to "either space kind"
+    // would let this rename the community and, worse, hand it an `end` date that
+    // arms the retention sweep against it.
+    cfgSub.onEvent({
+      kind: KIND_CALENDAR_EVENT, pubkey: getPublicKey(h.eidSk), created_at: 99, id: "ev-99",
+      tags: [["d", "cypherpunk"], ["title", "A Different, Dated Event"], ["end", "5000"]],
+      content: "", sig: "",
+    } as any);
+    expect(h.coordinator.scoringContextOf(h.coordinate)!.title).toBe("Cypherpunk Assembly");
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(0);
   });
 });
 

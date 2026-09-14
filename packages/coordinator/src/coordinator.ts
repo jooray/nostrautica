@@ -26,7 +26,6 @@ import {
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
-  KIND_CALENDAR_EVENT,
   KIND_DELETION,
   KIND_NOTE,
   KIND_REPOST,
@@ -317,6 +316,9 @@ function effectiveMaxMediaSec(configured: number): number {
  * retention window (NIP §6.2) counts from. Prefers the `end` tag; falls back to
  * `start` (an instant event with no distinct end). 0 when neither is a valid int —
  * the retention sweep then skips the event (it cannot know when the window opened).
+ * A 31612 community has neither tag BY DESIGN (it is a standing group, not a dated
+ * event), so it reads 0 and is never retention-swept, which is the correct
+ * behaviour and not an omission to "fix" with a synthesised end date.
  */
 function parseEventEndSec(evt: NostrEvent | undefined): number {
   if (!evt) return 0;
@@ -635,6 +637,17 @@ export interface CoordinatorDeps {
 
 interface EventState {
   coordinate: string;
+  /**
+   * The kind half of {@link coordinate} — 31923 for a dated NIP-52 event, 31612
+   * for a standing community (PROTOCOL-NIP.md §1.1). Everything that reads the
+   * space's own metadata record (title/summary/`t`, and the `end` anchor a dated
+   * event has) must filter on THIS and not on a literal 31923: a community's
+   * metadata is published under its own kind and would otherwise never be read.
+   * It is also not merely "either space kind" — an E_id may hold a 31923 and a
+   * 31612 sharing one `d`, and they are two different spaces, so a community's
+   * title must never be applied to the event's state or vice versa.
+   */
+  spaceKind: number;
   identifier: string;
   eidPubkey: string;
   inboxSk: Uint8Array;
@@ -670,11 +683,13 @@ interface EventState {
    *  `eventEndSec + retentionDays·86400`. */
   retentionDays?: number;
   /** The event's end time (unix seconds) from its 31923 `end` tag (falls back to
-   *  `start`), the anchor the retention window counts from. 0 when unknown. */
+   *  `start`), the anchor the retention window counts from. 0 when unknown — and
+   *  always 0 for a 31612 community, which has no end (see parseEventEndSec). */
   eventEndSec: number;
-  /** Newest applied 31923 metadata event id + timestamp (audit P9 replaceable
-   *  ordering). A live 31923 edit is applied only when it SUPERSEDES this, so a
-   *  shuffled relay re-read can never regress title/eventEndSec to a stale revision. */
+  /** Newest applied space-metadata event id + timestamp (audit P9 replaceable
+   *  ordering). A live edit of the {@link spaceKind} record is applied only when it
+   *  SUPERSEDES this, so a shuffled relay re-read can never regress
+   *  title/eventEndSec to a stale revision. */
   metaEventId?: string;
   metaCreatedAt: number;
   /** True once the retention sweep has expired this event: paid processing is parked
@@ -1207,7 +1222,7 @@ export class Coordinator {
      */
     source?: "grant" | "restore";
   }): Promise<void> {
-    const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
+    const { kind: spaceKind, pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
     // wss-only, no credentials/fragments, public host, allowlist, deduped, capped
     // (audit COORD-16 + C4).
@@ -1217,9 +1232,9 @@ export class Coordinator {
     // Load public config + event details for scoring context.
     const cfgEvents = await this.phase("install:config-fetch", () =>
       this.deps.transport.fetch(
-        // 31612 is the community twin of 31923 (PROTOCOL-NIP.md §1.1): ask for
-        // both and let the coordinate decide which one came back.
-        { kinds: [31600, 31923, 31612], authors: [eidPubkey], "#d": [identifier] },
+        // The space record's kind comes from the coordinate: 31923 for a dated
+        // NIP-52 event, 31612 for a standing community (PROTOCOL-NIP.md §1.1).
+        { kinds: [KIND_EVENT_CONFIG, spaceKind], authors: [eidPubkey], "#d": [identifier] },
         relays,
       ),
     );
@@ -1227,13 +1242,18 @@ export class Coordinator {
     // arbitrary order. Pick with the shared §3.1 comparator — higher created_at,
     // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
     // disagreed with the convention and with every other reader.
-    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31600));
-    // Newest 31923 wins too (audit P9): relays return replaceable events in arbitrary
-    // order and this event controls the title and, critically, `eventEndSec` — the
-    // anchor the retention sweep deletes member records from. v1 took the FIRST
-    // returned 31923, so a shuffled relay order (or a restart) could select a stale
-    // revision with an earlier end date and expire member records prematurely.
-    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31923));
+    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === KIND_EVENT_CONFIG));
+    // Newest space record wins too (audit P9): relays return replaceable events in
+    // arbitrary order and this event controls the title and, critically,
+    // `eventEndSec` — the anchor the retention sweep deletes member records from. v1
+    // took the FIRST returned one, so a shuffled relay order (or a restart) could
+    // select a stale revision with an earlier end date and expire member records
+    // prematurely. The kind is the coordinate's, not a literal 31923: matching on
+    // 31923 alone found nothing for a community, so every 31612 installed with an
+    // EMPTY scoring context — the matcher prompt said "EVENT: the event" with no
+    // ABOUT and no TOPICS for the whole life of the install, and no live title edit
+    // could ever repair it.
+    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === spaceKind));
     // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
     // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
     // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
@@ -1404,6 +1424,7 @@ export class Coordinator {
 
     const state: EventState = {
       coordinate: grant.coordinate,
+      spaceKind,
       identifier,
       eidPubkey,
       inboxSk: hexToBytes(grant.inboxSkHex),
@@ -5511,23 +5532,28 @@ export class Coordinator {
    * Subscribe to the event's live 31600 config (audit H5), so relay/matching/
    * visibility/language changes take effect without a restart or reinstall.
    * Also watches 31601 invite lists (audit COORD-29): a new invite list
-   * invalidates the per-event invite-hash cache.
+   * invalidates the per-event invite-hash cache, and the space's own metadata
+   * record — 31923 for a dated event, 31612 for a community — for live
+   * title/summary/`end` edits (audit P9).
    */
   private subscribeEventConfig(state: EventState): void {
     const key = `${state.eidPubkey}:${state.identifier}|${relayKey(state.configRelays)}`;
     this.replaceSubscription(this.configSubs, state.coordinate, key, () =>
       (this.deps.transport as any).subscribe?.(
-        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST, KIND_CALENDAR_EVENT], authors: [state.eidPubkey], "#d": [state.identifier] },
+        // The space kind is the coordinate's (31923 or 31612), not a literal
+        // calendar kind: a community publishes its title/summary edits under
+        // 31612, which a 31923-only filter never delivers.
+        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST, state.spaceKind], authors: [state.eidPubkey], "#d": [state.identifier] },
         (e: NostrEvent) => {
           if (e.kind === KIND_INVITE_LIST) {
             this.inviteHashCache.delete(state.coordinate);
             log(`[join] invite list updated for "${state.scoringCtx.title}" — invite cache invalidated`);
             return;
           }
-          // Live 31923 metadata edit (audit P9): the title/summary and — critically —
+          // Live space-metadata edit (audit P9): the title/summary and — critically —
           // the retention anchor `eventEndSec` are editable after install, so watch
-          // for a superseding revision instead of only reading the 31923 once.
-          if (e.kind === KIND_CALENDAR_EVENT) {
+          // for a superseding revision instead of only reading the record once.
+          if (e.kind === state.spaceKind) {
             this.handleMetaUpdate(state.coordinate, e);
             return;
           }
@@ -5543,9 +5569,10 @@ export class Coordinator {
   }
 
   /**
-   * Apply a live 31923 metadata edit (audit P9). Accepted only from this event's
-   * E_id, matching its `d`, and only when it SUPERSEDES the applied metadata under
-   * the global §3.1 comparator (strictly newer, or same created_at with a lower id).
+   * Apply a live space-metadata edit (audit P9) — the coordinate's own 31923 or
+   * 31612 record. Accepted only from this event's E_id, matching its `d`, under its
+   * own kind, and only when it SUPERSEDES the applied metadata under the global
+   * §3.1 comparator (strictly newer, or same created_at with a lower id).
    * Updates the scoring context (title/summary/hashtags) and, decisively, the
    * retention anchor `eventEndSec` — so a moved end date re-times the retention
    * sweep instead of leaving it pinned to the install-time value.
@@ -5553,7 +5580,10 @@ export class Coordinator {
   private handleMetaUpdate(coordinate: string, event: NostrEvent): void {
     const state = this.events.get(coordinate);
     if (!state) return;
-    if (event.kind !== KIND_CALENDAR_EVENT) return;
+    // This space's OWN kind. Not "either space kind": one E_id can publish a
+    // 31923 and a 31612 under the same `d`, and those are two distinct spaces
+    // whose titles must never cross.
+    if (event.kind !== state.spaceKind) return;
     if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
     const d = event.tags.find((t) => t[0] === "d")?.[1];
     if (d !== state.identifier) return; // wrong event
@@ -5573,7 +5603,7 @@ export class Coordinator {
     };
     state.metaEventId = event.id;
     state.metaCreatedAt = event.created_at;
-    log(`[config] applied live 31923 metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
+    log(`[config] applied live kind-${event.kind} metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
   }
 
   /**
@@ -6190,6 +6220,14 @@ export class Coordinator {
    *  by the newest 31923 metadata revision. */
   eventEndSecOf(coordinate: string): number | undefined {
     return this.events.get(coordinate)?.eventEndSec;
+  }
+
+  /** Test accessor: the scoring context the matcher prompt is built from — the
+   *  title/summary/hashtags read off the space's own metadata record (31923 or
+   *  31612). Empty here means every match prompt for this space says
+   *  "EVENT: the event" with no ABOUT and no TOPICS. */
+  scoringContextOf(coordinate: string): EventContextForScoring | undefined {
+    return this.events.get(coordinate)?.scoringCtx;
   }
 
   /** Grant a fresh key backup shape for a coordinator-issued grant. */
