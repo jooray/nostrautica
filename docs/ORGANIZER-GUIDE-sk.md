@@ -200,13 +200,18 @@ Na zdieľanie máte tri druhy odkazov:
   QR kódy. Kód sa nesie vo fragmente URL a nikdy sa nedostane na server, takže s
   každým odkazom zaobchádzajte ako s lístkom.
 - **Zdieľaný vstupný kód**: jeden QR kód, ktorý naskenuje naraz celá miestnosť,
-  namiesto odkazu pre každého zvlášť. Nastavte **počet ľudí** (0 pre
-  neobmedzený) a **platnosť** v hodinách, potom klepnite na **Vytvoriť zdieľaný
-  kód** a dostanete jeden odkaz + QR na úvodnú snímku. Existuje len v tejto
-  karte prehliadača, takže ho skopírujte alebo ukážte skôr, než stránku
-  zavriete, pretože sa už nedá znova získať. Platnosť držte krátku: keď kód
-  vyprší, oneskorenci jednoducho skončia vo fronte na schválenie namiesto toho,
-  aby ich to odmietlo.
+  namiesto odkazu pre každého zvlášť. Nastavte **počet ľudí** a **platnosť**,
+  potom klepnite na **Vytvoriť zdieľaný kód** a dostanete jeden odkaz + QR na
+  úvodnú snímku. **0** funguje v oboch políčkach a v oboch znamená „bez
+  limitu“: 0 ľudí je ľubovoľný počet, 0 hodín je kód, ktorý nikdy nevyprší.
+  Formulár slovami napíše, čo kód, ktorý sa chystáte vytvoriť, spraví („Vyprší
+  15. 9. 2026, 23:26“ alebo „Tento kód nevyprší“), a panel s hotovým kódom to
+  zopakuje pod QR, takže si pred rozposlaním skontrolujte, či tam stojí to, čo
+  ste mysleli. Kód existuje len v tejto karte prehliadača, takže ho skopírujte
+  alebo ukážte skôr, než stránku zavriete, pretože sa už nedá znova získať.
+  Kratšie okno je bezpečnejšie, lebo kto kód naskenuje, môže odkaz poslať
+  ďalej; a keď kód vyprší, nie je odmietnutý, oneskorenci jednoducho skončia vo
+  fronte na schválenie.
 
 ![Vygenerované pozývacie kódy s QR](images/organizer-sk/04-invites-light.png)
 

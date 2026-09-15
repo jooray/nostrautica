@@ -70,6 +70,7 @@ import {
   approveAttendee,
   generateInvites,
   revokeAttendeeClient,
+  sharedInviteExp,
   updateEventConfig,
   type PendingRequest,
   fetchPending,} from "./organizer.js";
@@ -304,6 +305,53 @@ describe("generateInvites label numbering", () => {
     const enCtx = { ...ctx, config: { ...ctx.config, lang: "en" } } as EventContext;
     const [en] = await generateInvites({} as AppSigner, enCtx, 1, "https://app.example/");
     expect(en.link).not.toContain("lang=");
+  });
+});
+
+/**
+ * The shared entry code's policy as it reaches the wire.
+ *
+ * `sharedInviteExp` (unit-tested at the bottom of this file) decides that 0
+ * hours means "no deadline"; this is the other half — that `generateInvites`
+ * actually OMITS `exp` rather than writing some falsy value into the published
+ * entry. `exp` is `positive()` in the schema, so an `exp: 0` would make the whole
+ * invite list unparseable to the coordinator and revoke every code on it, not
+ * just this one.
+ */
+describe("shared entry code policy", () => {
+  async function publishedEntry(opts: { uses?: number; exp?: number }) {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    const [generated] = await generateInvites(
+      {} as AppSigner,
+      ctx,
+      1,
+      "https://app.example/",
+      "door",
+      opts,
+    );
+    const content: InviteListContent = JSON.parse(publishSigned.mock.calls[0][0].content);
+    return { generated, entry: content.invites[0] };
+  }
+
+  it("publishes an unlimited, never-expiring code with no exp key at all", async () => {
+    const { generated, entry } = await publishedEntry({ uses: 0, exp: undefined });
+
+    expect(entry.uses).toBe(0);
+    expect("exp" in entry).toBe(false);
+    // And the in-tab record the QR panel renders from agrees, so the panel can
+    // say "never expires" from `generated.exp === undefined` alone.
+    expect(generated.exp).toBeUndefined();
+    expect(generated.uses).toBe(0);
+  });
+
+  it("publishes the deadline when one was asked for", async () => {
+    const exp = 1_789_500_000 + 168 * 3600;
+    const { generated, entry } = await publishedEntry({ uses: 100, exp });
+
+    expect(entry.uses).toBe(100);
+    expect(entry.exp).toBe(exp);
+    expect(generated.exp).toBe(exp);
   });
 });
 
@@ -891,5 +939,42 @@ describe("updateEventConfig relay editing", () => {
       /at least one relay/,
     );
     expect(publishSigned).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The "valid for (hours)" field on the shared entry code.
+ *
+ * The regression this pins is not a crash — it is a silent substitution. The
+ * handler used to compute `Math.max(1, hours) * 3600`, so an organizer asking
+ * for no expiry (0, the same thing 0 means in the headcount field next to it)
+ * got a one-hour code: the most restrictive window the form can express, handed
+ * out as if it were the least. Nothing on screen said so, and the symptom only
+ * surfaces hours later as "some people got in, most are stuck in the queue".
+ */
+describe("sharedInviteExp", () => {
+  const NOW = 1_789_500_000_000; // ms
+
+  it("omits exp entirely for 0, so the published code never expires", () => {
+    expect(sharedInviteExp(0, NOW)).toBeUndefined();
+  });
+
+  it("treats an emptied field (null/undefined/NaN) as no expiry, not as one hour", () => {
+    expect(sharedInviteExp(null, NOW)).toBeUndefined();
+    expect(sharedInviteExp(undefined, NOW)).toBeUndefined();
+    expect(sharedInviteExp(NaN, NOW)).toBeUndefined();
+    expect(sharedInviteExp(-5, NOW)).toBeUndefined();
+  });
+
+  it("converts hours to a unix-SECONDS deadline", () => {
+    expect(sharedInviteExp(1, NOW)).toBe(1_789_500_000 + 3600);
+    expect(sharedInviteExp(4, NOW)).toBe(1_789_500_000 + 4 * 3600);
+    expect(sharedInviteExp(168, NOW)).toBe(1_789_500_000 + 168 * 3600);
+  });
+
+  it("produces an integer for a fractional hour count", () => {
+    const exp = sharedInviteExp(0.5, NOW);
+    expect(exp).toBe(1_789_500_000 + 1800);
+    expect(Number.isInteger(exp)).toBe(true);
   });
 });

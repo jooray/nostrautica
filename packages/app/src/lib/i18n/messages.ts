@@ -1081,11 +1081,14 @@ export const messages = {
     "admin.invites.shared.title": "Shared entry code (one QR for the room)",
     "admin.invites.shared.body":
       "One code everyone can scan: put it on the opening slide and people join without waiting for approval. The link is the secret: knowing the event is not enough to get in.",
-    "admin.invites.shared.uses": "People",
-    "admin.invites.shared.hours": "Valid for (hours)",
+    "admin.invites.shared.uses": "People (0 = no limit)",
+    "admin.invites.shared.hours": "Valid for (hours, 0 = never expires)",
     "admin.invites.shared.generate": "Create shared code",
-    "admin.invites.shared.usesHint":
-      "0 means no limit. Anyone who scans it can forward the link, so keep the window short. After it expires, latecomers land in the approval queue instead of being turned away.",
+    "admin.invites.shared.usesHint": "0 means any number of people.",
+    "admin.invites.shared.noExpiry": "This code never expires.",
+    "admin.invites.shared.expiresAt": "Expires {date}.",
+    "admin.invites.shared.forwardHint":
+      "Anyone who scans it can forward the link, so a shorter window is safer. Once it expires the code is not refused; latecomers simply land in the approval queue.",
     "admin.invites.shared.ephemeral":
       "This code is only in this tab. It is never saved. Show or copy it before you close the page.",
     "admin.invites.copyAll": "Copy all links (one per line)",
@@ -2697,11 +2700,14 @@ export const messages = {
     "admin.invites.shared.title": "Zdieľaný vstupný kód (jeden QR pre celú sálu)",
     "admin.invites.shared.body":
       "Jeden kód, ktorý naskenujú všetci: daj ho na úvodnú snímku a ľudia sa pripoja bez čakania na schválenie. Tajomstvom je odkaz: vedieť o podujatí nestačí.",
-    "admin.invites.shared.uses": "Počet ľudí",
-    "admin.invites.shared.hours": "Platnosť (hodiny)",
+    "admin.invites.shared.uses": "Počet ľudí (0 = bez limitu)",
+    "admin.invites.shared.hours": "Platnosť (hodiny, 0 = nevyprší)",
     "admin.invites.shared.generate": "Vytvoriť zdieľaný kód",
-    "admin.invites.shared.usesHint":
-      "0 znamená bez limitu. Kto ho naskenuje, môže odkaz poslať ďalej, preto nechaj okno krátke. Po vypršaní sa oneskorenci dostanú do frontu na schválenie, nie sú odmietnutí.",
+    "admin.invites.shared.usesHint": "0 znamená ľubovoľný počet ľudí.",
+    "admin.invites.shared.noExpiry": "Tento kód nevyprší.",
+    "admin.invites.shared.expiresAt": "Vyprší {date}.",
+    "admin.invites.shared.forwardHint":
+      "Kto kód naskenuje, môže odkaz poslať ďalej, takže kratšie okno je bezpečnejšie. Po vypršaní sa kód neodmieta, oneskorenci len skončia vo fronte na schválenie.",
     "admin.invites.shared.ephemeral":
       "Tento kód existuje len v tomto okne. Nikde sa neukladá. Ukáž alebo skopíruj ho skôr, než stránku zavrieš.",
     "admin.invites.copyAll": "Kopírovať všetky odkazy (po riadkoch)",
@@ -4303,11 +4309,14 @@ export const messages = {
     "admin.invites.shared.title": "Sdílený vstupní kód (jeden QR pro celý sál)",
     "admin.invites.shared.body":
       "Jeden kód, který naskenují všichni: dej ho na úvodní snímek a lidé se připojí bez čekání na schválení. Tajemstvím je odkaz: vědět o akci nestačí.",
-    "admin.invites.shared.uses": "Počet lidí",
-    "admin.invites.shared.hours": "Platnost (hodiny)",
+    "admin.invites.shared.uses": "Počet lidí (0 = bez limitu)",
+    "admin.invites.shared.hours": "Platnost (hodiny, 0 = nevyprší)",
     "admin.invites.shared.generate": "Vytvořit sdílený kód",
-    "admin.invites.shared.usesHint":
-      "0 znamená bez limitu. Kdo ho naskenuje, může odkaz poslat dál, proto nech okno krátké. Po vypršení se opozdilci dostanou do fronty na schválení, nejsou odmítnuti.",
+    "admin.invites.shared.usesHint": "0 znamená libovolný počet lidí.",
+    "admin.invites.shared.noExpiry": "Tento kód nevyprší.",
+    "admin.invites.shared.expiresAt": "Vyprší {date}.",
+    "admin.invites.shared.forwardHint":
+      "Kdo kód naskenuje, může odkaz poslat dál, takže kratší okno je bezpečnější. Po vypršení se kód neodmítá, opozdilci jen skončí ve frontě na schválení.",
     "admin.invites.shared.ephemeral":
       "Tento kód existuje jen v tomto okně. Nikde se neukládá. Ukaž nebo zkopíruj ho dřív, než stránku zavřeš.",
     "admin.invites.copyAll": "Kopírovat všechny odkazy (po řádcích)",

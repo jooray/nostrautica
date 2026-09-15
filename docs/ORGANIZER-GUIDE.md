@@ -185,12 +185,17 @@ You have three kinds of links to share:
   + QR per code. Send one per person, or print the QR codes. The code rides the
   URL fragment and never touches a server, so treat each link like a ticket.
 - **Shared entry code**: one QR the whole room scans at once, instead of one
-  link per person. Set a headcount (0 for unlimited) and how many hours the
-  code stays valid, then tap **Create shared code** for a single link + QR to
-  put on the opening slide. It only exists in this browser tab, so copy or show
-  it before you close the page, because it can't be retrieved again. Keep the
-  validity window short: once it expires, latecomers simply land in the
-  approval queue instead of being turned away.
+  link per person. Set a headcount and a validity window, then tap **Create
+  shared code** for a single link + QR to put on the opening slide. **0** works
+  in both boxes and means "no limit" in both: 0 people is any number of them,
+  0 hours is a code that never expires. The form says in words what the code you
+  are about to create will do ("Expires 15 Sep 2026, 23:26" or "This code never
+  expires"), and the generated panel repeats it under the QR, so check it says
+  what you meant before handing the link out. The code only exists in this
+  browser tab, so copy or show it before you close the page, because it can't be
+  retrieved again. A short window is safer, because anyone who scans the code can
+  forward the link; and when a code does expire it is not refused, latecomers
+  simply land in the approval queue.
 
 ![Generated invite codes with QR](images/organizer/04-invites-light.png)
 

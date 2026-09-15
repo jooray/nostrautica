@@ -196,12 +196,17 @@ Ke sdílení máte tři druhy odkazů:
   vytiskněte. Kód se veze ve fragmentu URL a nikdy se nedostane na server, takže
   s každým odkazem zacházejte jako s lístkem.
 - **Sdílený vstupní kód**: jeden QR kód, který naskenuje celý sál najednou,
-  místo jednoho odkazu na osobu. Nastavte počet lidí (0 znamená bez limitu) a na
-  kolik hodin má kód platit, pak klepněte na **Vytvořit sdílený kód** a
-  dostanete jeden odkaz + QR na úvodní snímek. Existuje jen v tomto okně
-  prohlížeče, takže ho zkopírujte nebo ukažte, než stránku zavřete, protože se
-  pak už nedá znovu získat. Platnost držte krátkou: jakmile vyprší, opozdilci
-  prostě skončí ve frontě na schválení, místo aby byli odmítnuti.
+  místo jednoho odkazu na osobu. Nastavte **počet lidí** a **platnost**, pak
+  klepněte na **Vytvořit sdílený kód** a dostanete jeden odkaz + QR na úvodní
+  snímek. **0** funguje v obou políčkách a v obou znamená „bez limitu“: 0 lidí
+  je libovolný počet, 0 hodin je kód, který nikdy nevyprší. Formulář slovy
+  napíše, co kód, který se chystáte vytvořit, udělá („Vyprší 15. 9. 2026,
+  23:26“ nebo „Tento kód nevyprší“), a panel s hotovým kódem to zopakuje pod QR,
+  takže si před rozesláním zkontrolujte, jestli tam stojí to, co jste mysleli.
+  Kód existuje jen v tomto okně prohlížeče, takže ho zkopírujte nebo ukažte, než
+  stránku zavřete, protože se pak už nedá znovu získat. Kratší okno je
+  bezpečnější, protože kdo kód naskenuje, může odkaz poslat dál; a když kód
+  vyprší, není odmítnut, opozdilci prostě skončí ve frontě na schválení.
 
 ![Vygenerované pozvánkové kódy s QR](images/organizer-cs/04-invites-light.png)
 

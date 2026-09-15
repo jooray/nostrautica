@@ -912,6 +912,35 @@ export interface InviteOptions {
 }
 
 /**
+ * The `exp` a shared entry code should carry, from the organizer's "valid for
+ * (hours)" field. `undefined` means the code never stops auto-approving: `exp`
+ * is then omitted from the published entry entirely, which is the only way to
+ * say "no expiry" on the wire — the field is `positive()` in the schema, so
+ * there is no sentinel value for it and 0 is not sayable.
+ *
+ * 0 means exactly that, matching the headcount field beside it, where 0 has
+ * always meant "no limit". An emptied field is the same answer: `bind:value` on
+ * a number input hands back `null`, and an organizer who cleared the box did not
+ * ask for a deadline either.
+ *
+ * This used to be `Math.max(1, hours)` inline in the form handler, which turned
+ * "no expiry" into the SHORTEST window the form can express — one hour. Two
+ * shared codes for a live community were minted that way before anyone worked
+ * out why, and both looked fine from the organizer's side: whoever scanned
+ * inside the hour walked straight in, and everyone after them landed in the
+ * approval queue with nothing on screen saying the code had lapsed (production
+ * incident, 2026-09-15). Silently substituting the most restrictive possible
+ * value for the most permissive one is the specific failure this guards.
+ */
+export function sharedInviteExp(
+  hours: number | null | undefined,
+  nowMs: number,
+): number | undefined {
+  if (hours == null || !Number.isFinite(hours) || hours <= 0) return undefined;
+  return Math.floor(nowMs / 1000) + Math.round(hours * 3600);
+}
+
+/**
  * Every invite ever issued for this event: the `{h, label}` set from the
  * published 31601 (replaceable, so it accumulates across every batch the
  * organizer generated, on any of their devices).
