@@ -25,6 +25,18 @@ comes after People, or after Talks when both are on. If you don't see either,
 this event simply doesn't use them. A small header at the top always tells you
 which event you're in and whether you're a visitor, waiting, or in.
 
+### If you installed Nostrautica to your home screen
+
+An installed app is its own browser. A link you tap in a chat app opens in
+Safari or Chrome, which knows nothing about the identity you set up inside the
+app — different session, no events — so the invite arrives in the one place it
+can't be used, and it looks like the organizer's link is broken.
+
+Copy the link instead, open Nostrautica from your home screen, and paste it
+into **Add an event from a link** on the events screen. It opens exactly as
+tapping it would have, invite code and all. A bare `naddr1…` address works too,
+and so does a link to a standing community rather than a dated event.
+
 ![Event overview](images/participant/02-event-overview-light.png)
 
 ## 2. Join
@@ -411,6 +423,11 @@ they open the attendee list. Nothing:
 - **I'm still "waiting for approval".** Unless you used an invite link, the
   organizer approves people by hand, so give it a few minutes, or find them at the
   event. You can safely close the app; check back by reopening the event link.
+
+- **The invite link opened a browser where I'm not signed in.** The installed
+  app is a separate browser from the one that handles links. Copy the link, open
+  Nostrautica from your home screen, and paste it into **Add an event from a
+  link** on the events screen (§1).
 
 - **My camera won't start.** Your phone or browser is asking for camera
   permission. Look for the prompt (often in the address bar) and allow it. If

@@ -25,6 +25,20 @@ a ak sú zapnuté aj Prednášky, tak až za nimi. Ak ich nevidíte, toto poduja
 ich jednoducho nepoužíva. Malá hlavička navrchu vám vždy hovorí, v ktorom podujatí ste a či
 ste návštevník, čakáte, alebo ste vnútri.
 
+### Ak máte Nostrauticu nainštalovanú na ploche
+
+Nainštalovaná aplikácia je vlastný prehliadač. Odkaz, na ktorý klepnete v
+četovacej aplikácii, sa otvorí v Safari alebo Chrome, a ten o identite, ktorú
+ste si vytvorili v aplikácii, nevie nič — iné prihlásenie, žiadne podujatia —
+takže pozvánka dorazí na jediné miesto, kde sa nedá použiť, a vyzerá to, akoby
+organizátorov odkaz nefungoval.
+
+Odkaz si radšej skopírujte, otvorte Nostrauticu z plochy a vložte ho na
+obrazovke s podujatiami do políčka **Pridať podujatie z odkazu**. Otvorí sa
+presne tak, ako keby ste naň klepli, aj s pozývacím kódom. Funguje aj samotná
+adresa `naddr1…` a rovnako aj odkaz na stálu komunitu, nielen na podujatie s
+dátumom.
+
 ![Prehľad podujatia](images/participant-sk/02-event-overview-light.png)
 
 ## 2. Pripojenie
@@ -441,6 +455,11 @@ zoznam účastníkov pre niekoho, kto nie je účastníkom. Nijako:
   odkaz, organizátor schvaľuje ľudí ručne, takže dajte tomu pár minút, alebo ho
   nájdite priamo na podujatí. Aplikáciu môžete pokojne zatvoriť; skontrolujte to
   opätovným otvorením odkazu na podujatie.
+
+- **Pozvánka sa otvorila v prehliadači, kde nemám účet.** Nainštalovaná
+  aplikácia je iný prehliadač než ten, ktorý otvára odkazy. Skopírujte odkaz,
+  otvorte Nostrauticu z plochy a vložte ho na obrazovke s podujatiami do
+  políčka **Pridať podujatie z odkazu** (§1).
 
 - **Kamera sa mi nespúšťa.** Telefón alebo prehliadač žiada o povolenie na
   kameru. Hľadajte výzvu (často v adresnom riadku) a povoľte ju. Ak sa výzva

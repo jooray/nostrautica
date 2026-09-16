@@ -55,6 +55,9 @@ export const ICONS = {
   warning:
     '<path d="M12 4.5L21 19a1 1 0 0 1-.9 1.5H3.9A1 1 0 0 1 3 19z"/><path d="M12 10v4"/><path d="M12 17v.5"/>',
   send: '<path d="M21 4L3 11l7 3 3 7z"/><path d="M21 4l-11 10"/>',
+  // Two shackles of a chain — the "paste a link" affordance on Home. Not a
+  // calendar or a clock, so the imagery ban above is intact.
+  link: '<path d="M10.4 13.6a3.9 3.9 0 0 0 5.5 0l2.9-2.9a3.9 3.9 0 0 0-5.5-5.5l-1.5 1.5"/><path d="M13.6 10.4a3.9 3.9 0 0 0-5.5 0l-2.9 2.9a3.9 3.9 0 0 0 5.5 5.5l1.5-1.5"/>',
 } as const;
 
 export type IconName = keyof typeof ICONS;

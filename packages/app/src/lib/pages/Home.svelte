@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import AddEventByLink from "$lib/components/AddEventByLink.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { coordinateToNaddr, parseCoordinate, isCommunityCoordinate } from "@nostrautica/protocol";
   import { cachedDirectory } from "$lib/events/attendee.js";
@@ -524,6 +525,15 @@
     {@render diagnostics()}
   {/if}
 {/if}
+
+<!--
+  Rendered in EVERY state of the list above, deliberately. It is the answer to
+  "no events yet" on a fresh install, to a short list missing the one event the
+  user came for, and to a key grant this device is holding for an event it can't
+  reach ("home.keysWaiting" already tells people to open the invite link here —
+  installed as an app, this is the only way to do that).
+-->
+<AddEventByLink />
 
 <!--
   The honest floor under every "you have no events"-shaped claim on this screen.

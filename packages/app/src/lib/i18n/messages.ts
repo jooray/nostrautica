@@ -92,6 +92,19 @@ export const messages = {
     "home.awaitingKey.note":
       "You asked to join these, but the key that opens them hasn't reached this device yet. Open one to keep trying, or search your whole history below.",
     "home.createAnother": "Create another event or community",
+    // Paste-a-link (components/AddEventByLink.svelte). The body has to name the
+    // PWA problem out loud: to the person holding the phone this looks like the
+    // organizer's link being broken, not like two browsers not sharing a session.
+    "home.addByLink.title": "Add an event from a link",
+    "home.addByLink.body":
+      "Installed as an app, Nostrautica can't see links you open in your browser: that's a separate session. Paste an invite or event link here and it opens with this identity.",
+    "home.addByLink.label": "Event link",
+    "home.addByLink.placeholder": "Paste a link, or naddr1…",
+    "home.addByLink.action": "Open",
+    "home.addByLink.error.notAnEvent":
+      "That's a Nostr link, but it doesn't point to an event or a community.",
+    "home.addByLink.error.unrecognized":
+      "No event link in there. Paste the whole link, including everything after the #.",
     "home.getStarted": "Get started",
     "home.getStarted.body": "Open an event invite link, or create your own.",
     "home.loginOrCreate": "Log in or create an identity",
@@ -1725,6 +1738,16 @@ export const messages = {
     "home.awaitingKey.note":
       "Požiadali ste o vstup, ale kľúč, ktorý ich otvorí, sa na toto zariadenie zatiaľ nedostal. Otvorte niektoré z nich a skúsime to znova, alebo nižšie prehľadajte celú históriu.",
     "home.createAnother": "Vytvoriť ďalšie podujatie alebo komunitu",
+    "home.addByLink.title": "Pridať podujatie z odkazu",
+    "home.addByLink.body":
+      "Keď máte Nostrauticu nainštalovanú ako aplikáciu, nevidí odkazy, ktoré otvoríte v prehliadači: je to samostatné prihlásenie. Vložte sem pozvánku alebo odkaz na podujatie a otvorí sa pod touto identitou.",
+    "home.addByLink.label": "Odkaz na podujatie",
+    "home.addByLink.placeholder": "Vložte odkaz alebo naddr1…",
+    "home.addByLink.action": "Otvoriť",
+    "home.addByLink.error.notAnEvent":
+      "Toto je nostr odkaz, ale nevedie na podujatie ani na komunitu.",
+    "home.addByLink.error.unrecognized":
+      "Nenašli sme v tom odkaz na podujatie. Vložte celý odkaz vrátane všetkého za znakom #.",
     "home.getStarted": "Začať",
     "home.getStarted.body": "Otvorte pozvánku na podujatie, alebo si vytvorte vlastné.",
     "home.loginOrCreate": "Prihlásiť sa alebo vytvoriť identitu",
@@ -3336,6 +3359,15 @@ export const messages = {
     "home.awaitingKey.note":
       "Požádali jste o vstup, ale klíč, který je otevře, se na toto zařízení zatím nedostal. Otevřete některé z nich a zkusíme to znovu, nebo níže prohledejte celou historii.",
     "home.createAnother": "Vytvořit další akci nebo komunitu",
+    "home.addByLink.title": "Přidat akci z odkazu",
+    "home.addByLink.body":
+      "Když máte Nostrauticu nainstalovanou jako aplikaci, nevidí odkazy, které otevřete v prohlížeči: je to samostatné přihlášení. Vložte sem pozvánku nebo odkaz na akci a otevře se pod touto identitou.",
+    "home.addByLink.label": "Odkaz na akci",
+    "home.addByLink.placeholder": "Vložte odkaz nebo naddr1…",
+    "home.addByLink.action": "Otevřít",
+    "home.addByLink.error.notAnEvent": "Tohle je nostr odkaz, ale nevede na akci ani na komunitu.",
+    "home.addByLink.error.unrecognized":
+      "Nenašli jsme v tom odkaz na akci. Vložte celý odkaz včetně všeho za znakem #.",
     "home.getStarted": "Začít",
     "home.getStarted.body": "Otevřete pozvánku na akci, nebo si vytvořte vlastní.",
     "home.loginOrCreate": "Přihlaste se nebo vytvořte identitu",

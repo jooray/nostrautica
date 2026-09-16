@@ -25,6 +25,19 @@ zapnuté i Přednášky, tak až za nimi. Pokud je nevidíte, tato akce je prost
 nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a
 jestli jste návštěvník, čekáte, nebo jste uvnitř.
 
+### Pokud máte Nostrauticu nainstalovanou na ploše
+
+Nainstalovaná aplikace je vlastní prohlížeč. Odkaz, na který klepnete v
+chatovací aplikaci, se otevře v Safari nebo Chrome, a ten o identitě, kterou
+jste si vytvořili v aplikaci, neví nic — jiné přihlášení, žádné akce — takže
+pozvánka dorazí na jediné místo, kde se nedá použít, a vypadá to, jako by
+organizátorův odkaz nefungoval.
+
+Odkaz si raději zkopírujte, otevřete Nostrauticu z plochy a vložte ho na
+obrazovce s akcemi do políčka **Přidat akci z odkazu**. Otevře se přesně tak,
+jako byste na něj klepli, i s pozvánkovým kódem. Funguje i samotná adresa
+`naddr1…` a stejně tak odkaz na stálou komunitu, nejen na akci s datem.
+
 ![Přehled akce](images/participant-cs/02-event-overview-light.png)
 
 ## 2. Připojení
@@ -441,6 +454,11 @@ představení a profily, aby napsala svá doporučení. Takhle vypadá seznam
   pozvánkový odkaz, organizátor schvaluje lidi ručně, takže dejte tomu pár
   minut, nebo ho najděte přímo na akci. Aplikaci můžete klidně zavřít;
   zkontrolujte to opětovným otevřením odkazu na akci.
+
+- **Pozvánka se otevřela v prohlížeči, kde nemám účet.** Nainstalovaná
+  aplikace je jiný prohlížeč než ten, který otevírá odkazy. Zkopírujte odkaz,
+  otevřete Nostrauticu z plochy a vložte ho na obrazovce s akcemi do políčka
+  **Přidat akci z odkazu** (§1).
 
 - **Kamera se mi nespouští.** Telefon nebo prohlížeč žádá o povolení ke kameře.
   Hledejte výzvu (často v adresním řádku) a povolte ji. Pokud se výzva neobjeví,
