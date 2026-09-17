@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import {
+  GIFTWRAP_MAX_BACKDATE_SEC,
   makeCoordinate,
   bytesToHex,
   bytesToBase64,
@@ -31,6 +32,7 @@ import {
   receiveGrants,
   MAX_GRANT_WRAPS,
   GRANT_BACKFILL_TTL_MS,
+  GRANT_SCAN_LOOKBACK_SEC,
   GRANT_PAGE_SIZE,
   GRANT_MAX_PAGES,
 } from "./attendee.js";
@@ -874,6 +876,38 @@ describe("grant backfill window", () => {
     // Now that custody exists, the fresh marker is believed again.
     await receiveGrants(attendee);
     expect(sinceOf(1)).toBeGreaterThan(0);
+  });
+
+  it("the narrow window covers the whole interval the marker lets it skip", async () => {
+    // The two numbers are one mechanism, and for a while they were picked
+    // independently: the marker bought 7 days of skipping while the narrow scan
+    // reached back 3, leaving 4 days in which a grant could be published and this
+    // device would never ask a question wide enough to see it. NIP-59's
+    // up-to-2-day backdating stretched that blind window to 6.
+    //
+    // Reported 2026-09-17: an attendee approved on the 13th had both 21602 wraps
+    // on the relays at `created_at` 09-12 and 09-13, and on the 17th their second
+    // device — fresh marker, custody held, so the narrow branch — was asking only
+    // for wraps newer than 09-14. Stuck on "waiting for organizer approval", with
+    // no error anywhere, until the marker happened to expire.
+    store.set(markerKey(), String(Date.now()));
+    await saveEventKeys({ coordinate, role: "attendee", eck: [{ id: 1, key: "x" }] });
+    fetchEventsRelayOnly.mockResolvedValue([]);
+
+    await receiveGrants(attendee);
+    const since = sinceOf(0);
+    expect(since).toBeGreaterThan(0); // narrow branch, not a full sweep
+
+    const reach = Math.floor(Date.now() / 1000) - since;
+    expect(reach).toBeGreaterThanOrEqual(
+      GRANT_BACKFILL_TTL_MS / 1000 + GIFTWRAP_MAX_BACKDATE_SEC,
+    );
+    expect(GRANT_SCAN_LOOKBACK_SEC).toBeGreaterThanOrEqual(
+      GRANT_BACKFILL_TTL_MS / 1000 + GIFTWRAP_MAX_BACKDATE_SEC,
+    );
+
+    // The reported case, concretely: a grant wrap four days old is inside it.
+    expect(since).toBeLessThan(Math.floor(Date.now() / 1000) - 4 * 24 * 60 * 60);
   });
 
   it("`force` re-widens regardless of a fresh marker", async () => {

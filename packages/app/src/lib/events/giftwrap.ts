@@ -26,16 +26,16 @@ import {
   assertNip44CiphertextCeiling,
   assertVerifiedSeal,
   finalizeUnwrappedRumor,
+  GIFTWRAP_MAX_BACKDATE_SEC,
   nip44Encrypt,
   type RumorKind,
 } from "@nostrautica/protocol";
 import type { Rumor, GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 
-const DAY = 24 * 60 * 60;
-
 /**
- * A timestamp randomized up to 2 days into the past (NIP-59).
+ * A timestamp randomized up to {@link GIFTWRAP_MAX_BACKDATE_SEC} into the past
+ * (NIP-59).
  *
  * `crypto.getRandomValues`, not `Math.random` (audit PROTO-2). This offset is a
  * PRIVACY parameter — it is what stops the wrap's `created_at` from revealing
@@ -49,9 +49,9 @@ function randomPastTimestamp(): number {
   const now = Math.floor(Date.now() / 1000);
   const buf = new Uint32Array(1);
   crypto.getRandomValues(buf);
-  // Scale a uniform 32-bit draw onto [0, 2 days) — no modulo bias, since the
-  // range is not a divisor of 2^32.
-  const offset = Math.floor((buf[0]! / 2 ** 32) * 2 * DAY);
+  // Scale a uniform 32-bit draw onto [0, GIFTWRAP_MAX_BACKDATE_SEC) — no modulo
+  // bias, since the range is not a divisor of 2^32.
+  const offset = Math.floor((buf[0]! / 2 ** 32) * GIFTWRAP_MAX_BACKDATE_SEC);
   return now - offset;
 }
 

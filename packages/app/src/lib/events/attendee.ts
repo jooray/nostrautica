@@ -14,7 +14,7 @@ import {
   KIND_DIRECTORY_ENTRY,
   KIND_ROSTER,
   KIND_MATCH_LIST,
-  giftwrapSince,
+  GIFTWRAP_MAX_BACKDATE_SEC,
   eckDecrypt,
   base64ToBytes,
   hexToBytes,
@@ -204,7 +204,7 @@ function grantsBackfilledKey(pubkey: string): string {
  * event simply was not there — not stale, not spinning, absent, with the phone
  * cheerfully rendering "No events yet" underneath it. The phone had latched the
  * marker back in July, so every scan since then asked the relays only for wraps
- * newer than `giftwrapSince()` (now − 3 days). The 21602 key grant was still
+ * newer than {@link grantScanSince}. The 21602 key grant was still
  * sitting on the relays the whole time; the phone had simply stopped asking a
  * question wide enough to include it, and nothing — not a relaunch, not the
  * Retry button, not a reinstall short of clearing site data — ever widened it
@@ -219,6 +219,40 @@ function grantsBackfilledKey(pubkey: string): string {
  * paid rarely.
  */
 export const GRANT_BACKFILL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * How far back the NARROW grant scan reads — the one that runs while the
+ * backfill marker is still trusted.
+ *
+ * It is DERIVED from {@link GRANT_BACKFILL_TTL_MS}, not chosen, because the two
+ * numbers are one mechanism and picking them independently opens a hole. They
+ * were independent until 2026-09-17 and the hole was real: the marker let a
+ * device skip the full sweep for 7 days while the narrow scan reached back only
+ * `giftwrapSince()` = 3 days, so there were 4 days in the middle in which a grant
+ * could be published and this device would never ask a question wide enough to
+ * see it. NIP-59's up-to-2-day backdating (GIFTWRAP_MAX_BACKDATE_SEC) widens that
+ * blind window to 6 days, since a wrap published on day 5 may legitimately carry
+ * a `created_at` from day 3.
+ *
+ * Confirmed against a real report: an attendee approved on 2026-09-13 had both
+ * their 21602 wraps sitting on the relays with `created_at` 09-12 and 09-13, and
+ * on 09-17 their second device — which held keys for another event and so took
+ * the narrow branch — was asking only for wraps newer than 09-14. The grant was
+ * two days below the floor and the device was stuck on "waiting for organizer
+ * approval" with no error anywhere.
+ *
+ * So the window must cover the whole interval this device is allowed to SKIP,
+ * plus the jitter, plus a day of slack for clock skew between the publisher and
+ * this device. Widening it costs one `since` value on a paginated relay read —
+ * no extra signer round trips, because every wrap already processed is memoized.
+ */
+export const GRANT_SCAN_LOOKBACK_SEC =
+  GRANT_BACKFILL_TTL_MS / 1000 + GIFTWRAP_MAX_BACKDATE_SEC + 24 * 60 * 60;
+
+/** `since` for a narrow (marker-trusted) grant scan. See {@link GRANT_SCAN_LOOKBACK_SEC}. */
+export function grantScanSince(nowSec: number = Math.floor(Date.now() / 1000)): number {
+  return nowSec - GRANT_SCAN_LOOKBACK_SEC;
+}
 
 /**
  * Any stored value below this is not a timestamp this code wrote. In practice it
@@ -467,7 +501,7 @@ export async function receiveGrants(
   const { wraps, complete: readComplete } = await readGrantWraps(
     pubkey,
     relays,
-    fullBackfill ? 0 : giftwrapSince(),
+    fullBackfill ? 0 : grantScanSince(),
   );
   // A read we could not finish must not be presented as the whole truth — it is
   // the same class of half-answer as a truncated signer budget, and the caller
@@ -481,7 +515,7 @@ export async function receiveGrants(
   // on a remote signer (Amber) every unwrap is two NIP-46 round trips, and a
   // signer that was unreachable/unapproved for the whole pass fails all of them
   // identically to "no grants here". Latching `markGrantsBackfilled` on that
-  // narrows every later scan to `giftwrapSince()` (now − 3 days), so an ECK
+  // narrows every later scan to `grantScanSince()`, so an ECK
   // grant from an event joined last month becomes PERMANENTLY undiscoverable on
   // this device. Mirrors the `meaningful` guard recover.ts already has.
   let unwrapped = 0;
@@ -699,7 +733,7 @@ export async function receiveGrants(
   // a relay timeout, a dropped socket, or an EOSE that beat the wraps home all
   // look identical to a genuinely empty inbox — and `unwrapFailed === 0` was
   // trivially true for all of them. Latching on that narrowed every later scan on
-  // this device to `giftwrapSince()` (now − 3 days), which made an ECK grant for an
+  // this device to `grantScanSince()`, which made an ECK grant for an
   // event joined last month PERMANENTLY undiscoverable here: the user opens their
   // own event and is told they're a visitor who should join. An identity whose
   // inbox really is empty simply keeps doing the full-history read — which is a

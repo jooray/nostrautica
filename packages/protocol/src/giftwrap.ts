@@ -368,11 +368,30 @@ export function rumorPayload<T = unknown>(rumor: Rumor): T {
 }
 
 /**
- * `since` value for gift-wrap subscriptions: now − 3 days, accounting for the
- * up-to-2-day past randomization of wrap timestamps (IMPLEMENTATION_PLAN §3.4).
+ * How far into the PAST a NIP-59 wrap's `created_at` may be randomized.
+ *
+ * NIP-59 backdates seals and wraps by a random offset to stop the timestamp from
+ * revealing when its author actually sent it; nostr-tools' `wrapEvent` (which
+ * `wrapRumor` delegates to) and the app's own `signerWrap` both draw from
+ * [0, 2 days). Exported because it is not a cosmetic detail: EVERY `since` filter
+ * over kind-1059 must subtract it on top of whatever real reach it wants, or a
+ * wrap published today is invisible to a scan that only asks for "today".
+ */
+export const GIFTWRAP_MAX_BACKDATE_SEC = 2 * 24 * 60 * 60;
+
+/**
+ * `since` value for gift-wrap subscriptions: now − 3 days, i.e.
+ * {@link GIFTWRAP_MAX_BACKDATE_SEC} of timestamp jitter plus ONE day of real
+ * reach (IMPLEMENTATION_PLAN §3.4).
+ *
+ * That one day is the whole budget, so this is only correct for a scan that runs
+ * at least daily and re-reads what it already saw. A scan that is allowed to
+ * SKIP passes — the grant scan, which trusts a backfill marker for a week — must
+ * not use this: see `attendee.ts#grantScanSince`, which derives its window from
+ * how long it is permitted to skip rather than from this constant.
  */
 export function giftwrapSince(nowSec: number = Math.floor(Date.now() / 1000)): number {
-  return nowSec - 3 * 24 * 60 * 60;
+  return nowSec - GIFTWRAP_MAX_BACKDATE_SEC - 24 * 60 * 60;
 }
 
 /** The public key corresponding to a secret key (re-export for convenience). */
