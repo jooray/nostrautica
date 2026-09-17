@@ -31,11 +31,38 @@ import {
   isMuted,
   fetchMuteList,
   setMuted,
+  UnreadableMuteListError,
   type MuteListState,
 } from "./mutes.js";
 
 const PK = "b".repeat(64);
 const OTHER = "c".repeat(64);
+
+/**
+ * Reversible stand-in for NIP-44 that is SHAPE-valid.
+ *
+ * `fetchMuteList` now refuses to spend a signer round trip on content that could
+ * not be a NIP-44 payload at all (see `isNip44Ciphertext` and the 2026-09-17
+ * NIP-04 mute-list report), so a fixture has to look like one: standard base64
+ * alphabet, length a multiple of 4, at least the spec's 132-char floor. The
+ * previous fixtures were prefixed JSON, none of those things, and would now be
+ * rejected before reaching the mock signer at all, which would pass this suite
+ * for entirely the wrong reason.
+ *
+ * A lookup table rather than a real encoding, so the fixtures stay readable.
+ */
+const vault = new Map<string, string>();
+let ctSeq = 0;
+function enc(plain: string): string {
+  const ct = `A${String(ctSeq++).padStart(3, "0")}`.padEnd(132, "B");
+  vault.set(ct, plain);
+  return ct;
+}
+function dec(ct: string): string {
+  const plain = vault.get(ct);
+  if (plain === undefined) throw new Error("test decrypt: unknown ciphertext");
+  return plain;
+}
 
 describe("mute merge (pure)", () => {
   it("mutedPubkeys unions public + private p items", () => {
@@ -85,8 +112,8 @@ describe("fetch/merge/write round-trip", () => {
         return { ...tpl, id: "x", pubkey: PK, sig: "s" } as unknown as VerifiedEvent;
       },
       // Deterministic reversible "encryption" so the test can inspect round-trips.
-      nip44Encrypt: async (_pk: string, plain: string) => `enc:${plain}`,
-      nip44Decrypt: async (_pk: string, ct: string) => ct.replace(/^enc:/, ""),
+      nip44Encrypt: async (_pk: string, plain: string) => enc(plain),
+      nip44Decrypt: async (_pk: string, ct: string) => dec(ct),
     };
   }
 
@@ -108,7 +135,7 @@ describe("fetch/merge/write round-trip", () => {
         kind: KIND_MUTE_LIST,
         created_at: 10,
         tags: [["t", "keepme"]],
-        content: `enc:${JSON.stringify([["p", OTHER]])}`,
+        content: enc(JSON.stringify([["p", OTHER]])),
       },
     ]);
     const store = { content: "" };
@@ -123,7 +150,7 @@ describe("fetch/merge/write round-trip", () => {
     expect(muted.has(OTHER)).toBe(true); // pre-existing private mute survived
     expect(publishMonotonic).toHaveBeenCalledTimes(1);
     // The new pubkey went into the encrypted content, not a public tag.
-    const written = JSON.parse(store.content.replace(/^enc:/, ""));
+    const written = JSON.parse(dec(store.content));
     expect(written).toContainEqual(["p", PK]);
     expect(written).toContainEqual(["p", OTHER]);
   });
@@ -136,7 +163,7 @@ describe("fetch/merge/write round-trip", () => {
         kind: KIND_MUTE_LIST,
         created_at: 10,
         tags: [],
-        content: `enc:${JSON.stringify([["p", PK]])}`,
+        content: enc(JSON.stringify([["p", PK]])),
       },
     ]);
     const store = { content: "sentinel" };
@@ -158,7 +185,7 @@ describe("fetch/merge/write round-trip", () => {
         kind: KIND_MUTE_LIST,
         created_at: 10,
         tags: [["t", "keepme"]],
-        content: `enc:${JSON.stringify([["p", OTHER]])}`,
+        content: enc(JSON.stringify([["p", OTHER]])),
       },
     ]);
     const store = { content: "sentinel" };
@@ -174,6 +201,59 @@ describe("fetch/merge/write round-trip", () => {
     expect(store.content).toBe("sentinel"); // nothing signed, nothing overwritten
   });
 
+  it("never asks the signer to decrypt a legacy NIP-04 list", async () => {
+    // Reported 2026-09-17. The account's kind-10000 was written in 2024 by
+    // another client with NIP-04, and its content is `<base64>?iv=<base64>` —
+    // which is not base64 at all. Every visit to a mute-aware screen sent it to
+    // the user's signer, which is a relay round trip to their phone, and Clave
+    // (iOS) shows a "Signing Failed: nip44_decrypt failed: Invalid base64" push
+    // notification for each one. We could always have known the answer without
+    // asking, and the refusal has to stay a refusal: flattening it to "no private
+    // mutes" is what the republish below would then overwrite the list with.
+    fetchEvents.mockResolvedValue([
+      {
+        id: "a1",
+        pubkey: PK,
+        kind: KIND_MUTE_LIST,
+        created_at: 10,
+        tags: [["t", "keepme"]],
+        content: "f+/YOKe898cbiM09+vtfyA==?iv=jwq9ef0jRSVZGPVQZqltfw==",
+      },
+    ]);
+    const store = { content: "sentinel" };
+    const asked = vi.fn(async () => "[]");
+    const s = { ...signer(store), nip44Decrypt: asked };
+
+    await expect(fetchMuteList(s)).rejects.toThrow(UnreadableMuteListError);
+    await expect(fetchMuteList(s)).rejects.toMatchObject({ legacy: true });
+    expect(asked).not.toHaveBeenCalled();
+
+    // And a write still refuses rather than republishing an empty private list.
+    await expect(setMuted(s, OTHER, true)).rejects.toThrow(UnreadableMuteListError);
+    expect(publishMonotonic).not.toHaveBeenCalled();
+    expect(store.content).toBe("sentinel");
+  });
+
+  it("still refuses a non-NIP-44 list that isn't NIP-04 either", async () => {
+    // kind-30078 in the wild carries plaintext; kind-10000 could too. The refusal
+    // is the same, but `legacy` is false so the UI doesn't blame NIP-04 for it.
+    fetchEvents.mockResolvedValue([
+      {
+        id: "a1",
+        pubkey: PK,
+        kind: KIND_MUTE_LIST,
+        created_at: 10,
+        tags: [],
+        content: "Records read time to sync notification status across devices.",
+      },
+    ]);
+    const s = signer({ content: "" });
+    await expect(fetchMuteList(s)).rejects.toMatchObject({
+      name: "UnreadableMuteListError",
+      legacy: false,
+    });
+  });
+
   it("ignores a kind-10000 by another key, so it can't wedge mute/unmute", async () => {
     // The pin has to be here as well as in the relay filter: an undecryptable list
     // is now fatal, so a foreign kind-10000 answered at a high created_at would
@@ -186,7 +266,7 @@ describe("fetch/merge/write round-trip", () => {
         kind: KIND_MUTE_LIST,
         created_at: 10,
         tags: [],
-        content: `enc:${JSON.stringify([["p", OTHER]])}`,
+        content: enc(JSON.stringify([["p", OTHER]])),
       },
     ]);
     const list = await fetchMuteList(signer({ content: "" }));

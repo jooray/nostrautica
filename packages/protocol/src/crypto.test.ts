@@ -11,6 +11,8 @@ import {
   nip44Decrypt,
   selfEncrypt,
   selfDecrypt,
+  isNip44Ciphertext,
+  isNip04Ciphertext,
   blindedD,
   blindedDLiteral,
   collidesWithBlindedDMessage,
@@ -338,5 +340,52 @@ describe("NIP-44 decrypt ciphertext ceiling (P10)", () => {
     const ct = nip44Encrypt(sk, getPublicKey(to), "yo");
     expect(nip44Decrypt(to, getPublicKey(sk), ct)).toBe("yo");
     expect(selfDecrypt(sk, selfEncrypt(sk, "me"))).toBe("me");
+  });
+});
+
+describe("NIP-44 ciphertext shape guard", () => {
+  /**
+   * The point of this guard is NOT correctness of decryption — a wrong payload
+   * fails either way. It is that a REMOTE signer's failure is expensive: a relay
+   * round trip to someone's phone, and on Clave (iOS) a "Signing Failed" push
+   * notification the user sees. Reported 2026-09-17: a recurring
+   * "nip44_decrypt failed: Invalid base64" that was this account's own kind-10000
+   * mute list, written by another client in 2024 with NIP-04. We had been asking
+   * their signer to decrypt `<base64>?iv=<base64>` on every visit to any
+   * mute-aware screen.
+   */
+  it("accepts what our own encrypt produces, at both ends of the size range", () => {
+    const sk = generateSecretKey();
+    expect(isNip44Ciphertext(selfEncrypt(sk, "x"))).toBe(true);
+    expect(isNip44Ciphertext(selfEncrypt(sk, "x".repeat(65_535)))).toBe(true);
+    const eck = generateEck();
+    expect(isNip44Ciphertext(eckEncrypt(eck, "hello"))).toBe(true);
+  });
+
+  it("rejects the reported NIP-04 payload", () => {
+    // Verbatim from the reporting account's kind-10000 (16-byte ciphertext, so
+    // its plaintext was at most 15 bytes: an empty list).
+    const nip04 = "f+/YOKe898cbiM09+vtfyA==?iv=jwq9ef0jRSVZGPVQZqltfw==";
+    expect(isNip44Ciphertext(nip04)).toBe(false);
+    expect(isNip04Ciphertext(nip04)).toBe(true);
+  });
+
+  it("rejects everything else a strict decoder would", () => {
+    const sk = generateSecretKey();
+    const valid = selfEncrypt(sk, "x");
+    expect(isNip44Ciphertext("")).toBe(false); // an empty replaceable-event content
+    expect(isNip44Ciphertext(undefined)).toBe(false);
+    expect(isNip44Ciphertext("Records read time to sync across devices.")).toBe(false);
+    expect(isNip44Ciphertext(valid.slice(0, -1))).toBe(false); // truncated: length % 4
+    expect(isNip44Ciphertext(`${valid.slice(0, -4)}-_==`)).toBe(false); // URL-safe alphabet
+    expect(isNip44Ciphertext(`#${valid.slice(1)}`)).toBe(false); // future version marker
+    expect(isNip44Ciphertext("A".repeat(128))).toBe(false); // under the 132 floor
+    expect(isNip44Ciphertext("A".repeat(87_476))).toBe(false); // over the ceiling
+  });
+
+  it("is a shape test only, and says so honestly", () => {
+    // 132 chars of valid base64 is indistinguishable from a real payload here.
+    // Proving it decrypts is the signer's job; this only stops us wasting its time.
+    expect(isNip44Ciphertext("A".repeat(132))).toBe(true);
   });
 });

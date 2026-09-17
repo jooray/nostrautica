@@ -383,7 +383,7 @@
   }
 </script>
 
-{#if error}<ErrorState {error} />{/if}
+{#if error}<ErrorState {error} body={mutes.unreadable ? "mute.unreadable" : undefined} />{/if}
 
 {#if invalidNpub}
   <!-- No interactive shell for a malformed link (audit UX-23). -->

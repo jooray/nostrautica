@@ -1534,6 +1534,8 @@ export const messages = {
     "attendee.showAnyway": "Show anyway",
     "mute.confirm":
       "Muted in Nostrautica and compatible Nostr clients; other clients may behave differently.",
+    "mute.unreadable":
+      "Your mute list was written by an older Nostr client using NIP-04 encryption, which this app can't read. Muting is disabled here rather than risk overwriting the list. Unmute everyone in that client, or clear the list there, and it will work again.",
 
     // Pre-submit disclosure (H10)
     "record.disclosure.title": "Before you share this",
@@ -3151,6 +3153,8 @@ export const messages = {
     "attendee.showAnyway": "Napriek tomu zobraziť",
     "mute.confirm":
       "Stlmené v Nostrautice a kompatibilných Nostr klientoch; iní klienti sa môžu správať inak.",
+    "mute.unreadable":
+      "Váš zoznam stlmených napísal starší Nostr klient šifrovaním NIP-04, ktoré táto aplikácia nevie prečítať. Stlmenie je tu vypnuté, aby sme ten zoznam neprepísali. Zrušte stlmenia v tom klientovi alebo tam zoznam vymažte a bude to znova fungovať.",
 
     // Pre-submit disclosure (H10)
     "record.disclosure.title": "Skôr než to zdieľate",
@@ -4777,6 +4781,8 @@ export const messages = {
     "attendee.showAnyway": "Přesto zobrazit",
     "mute.confirm":
       "Ztlumeno v Nostrautice a kompatibilních Nostr klientech; jiní klienti se mohou chovat jinak.",
+    "mute.unreadable":
+      "Váš seznam ztlumených napsal starší Nostr klient šifrováním NIP-04, které tato aplikace neumí přečíst. Ztlumení je tu vypnuté, abychom ten seznam nepřepsali. Zrušte ztlumení v tom klientovi nebo tam seznam smažte a bude to zase fungovat.",
 
     // Upozornění před odesláním (H10)
     "record.disclosure.title": "Než to sdílíte",

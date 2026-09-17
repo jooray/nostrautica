@@ -439,7 +439,7 @@
   {/if}
 
   {#if error}
-    <ErrorState {error} />
+    <ErrorState {error} body={mutes.unreadable ? "mute.unreadable" : undefined} />
   {/if}
 
   <!-- The transcript takes the height actually left on screen (fillHeight), so
