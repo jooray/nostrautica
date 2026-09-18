@@ -89,9 +89,23 @@ export default defineConfig({
         start_url: "./",
         scope: "./",
         id: "./",
+        // `any` + a separate `maskable` (audit U6 follow-up, 2026-09-18). An
+        // icon with no maskable variant is treated by Android as a legacy icon:
+        // the launcher shrinks it and centres it on a WHITE adaptive-icon
+        // background, which is what a user reported seeing instead of the logo.
+        // A maskable icon is drawn edge-to-edge and cropped to the launcher's
+        // shape instead, so it needs its artwork inside the safe zone — the
+        // centre circle of 80% diameter — which is why this one is rendered at a
+        // smaller scale on the same background rather than being the same file.
         icons: [
-          { src: "icon-192.png", sizes: "192x192", type: "image/png" },
-          { src: "icon-512.png", sizes: "512x512", type: "image/png" },
+          { src: "icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+          { src: "icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+          {
+            src: "icon-512-maskable.png",
+            sizes: "512x512",
+            type: "image/png",
+            purpose: "maskable",
+          },
         ],
       },
     }),
