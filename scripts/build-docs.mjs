@@ -59,6 +59,10 @@ const SECTIONS = [
       { file: "PARTICIPANT-GUIDE-sk.md", title: "Príručka účastníka (Slovensky)" },
       { file: "ORGANIZER-GUIDE-cs.md", title: "Průvodce pro organizátory (Česky)" },
       { file: "PARTICIPANT-GUIDE-cs.md", title: "Průvodce pro účastníky (Česky)" },
+      { file: "ORGANIZER-GUIDE-de.md", title: "Leitfaden für Veranstalter (Deutsch)" },
+      { file: "PARTICIPANT-GUIDE-de.md", title: "Leitfaden für Teilnehmende (Deutsch)" },
+      { file: "ORGANIZER-GUIDE-es.md", title: "Guía para organizadores (Español)" },
+      { file: "PARTICIPANT-GUIDE-es.md", title: "Guía para asistentes (Español)" },
     ],
   },
   {
