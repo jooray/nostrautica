@@ -61,7 +61,7 @@ import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
 import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
 import { recordOwnStatus } from "./attendee-status.js";
 import {
@@ -527,6 +527,12 @@ export async function receiveGrants(
   // untouched). Memoization happens only AFTER the outcome is known (audit
   // APPK-5): a transient signer failure, or a 21602 whose 31600 config can't be
   // fetched right now, is NOT memoized, so the next scan retries it.
+  // Behind the real mirror read: this memo is written back IN FULL below, so
+  // loading it from a mirror that has not been hydrated yet does not merely lose
+  // the memo for this scan — it persists the empty one over it, and every later
+  // boot re-unwraps every gift wrap the user has ever received. That is the
+  // Amber prompt storm this memo exists to prevent.
+  await whenCacheReady();
   const memo: Record<string, true> = { ...(cacheGet<Record<string, true>>("grantwraps")?.data ?? {}) };
   let memoDirty = false;
   // Cache the (network-fetched) signed 31600 per coordinate so multiple grants
@@ -999,6 +1005,9 @@ function streamDirectoryEvents(
     ),
   );
   return {
+    // ALL parts, not any: this is a fan-out over `d` chunks, so an absence is
+    // only believable when every chunk was answered (see StreamHandle.answered).
+    answered: () => parts.every((p) => p.answered()),
     ready: Promise.all(parts.map((p) => p.ready)).then((sets) => {
       const byId = new Map<string, (typeof sets)[number][number]>();
       for (const events of sets) for (const e of events) byId.set(e.id, e);

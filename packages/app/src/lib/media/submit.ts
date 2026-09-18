@@ -30,10 +30,10 @@ import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { cachedDirectoryEntry, fetchDirectoryEntry } from "$lib/events/attendee.js";
-import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { fetchEvents, fetchEventsAnswered, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 // The self-copy (31602) and reuse library are decrypted private data, cached
@@ -148,6 +148,12 @@ export type ReuseLibrary = {
   media: MediaDescriptor[];
   texts: string[];
   at: Record<string, number>;
+  /**
+   * Whether this is the library as the relays report it, or just the shape of a
+   * read that did not land. `false` means empty-because-unknown, and
+   * `addToLibrary` refuses to republish over it — see there.
+   */
+  known: boolean;
 };
 
 /**
@@ -325,13 +331,20 @@ export interface SubmitOutcome {
   submission: PublishOutcome;
   /** The attendee's own 31602 self-copy. */
   selfCopy: PublishOutcome;
-  /** The cross-event reuse library entry. */
-  library: PublishOutcome;
+  /**
+   * The cross-event reuse library entry. `skipped` is its own outcome rather
+   * than a failure: the intro reached the organizer, and the library write was
+   * deliberately not attempted because the current library could not be read
+   * and publishing would have replaced it with a truncated one. Reported, not
+   * swallowed — collapsing it into `published` would claim a clip is reusable
+   * at the next event when it is not.
+   */
+  library: PublishOutcome | "skipped";
 }
 
 /** The worst-case single outcome: `queued` if anything is still local (U2). */
 export function aggregateOutcome(o: SubmitOutcome): PublishOutcome {
-  return o.submission === "queued" || o.selfCopy === "queued" || o.library === "queued"
+  return o.submission === "queued" || o.selfCopy === "queued" || o.library !== "published"
     ? "queued"
     : "published";
 }
@@ -513,7 +526,7 @@ export async function addToLibrary(
   signer: AppSigner,
   blindingKey: Uint8Array,
   additions: { media?: MediaDescriptor[]; texts?: string[] },
-): Promise<PublishOutcome> {
+): Promise<PublishOutcome | "skipped"> {
   const media = additions.media ?? [];
   const texts = (additions.texts ?? []).map((s) => s.trim()).filter(Boolean);
   // Nothing to add — treat as already-published (no relay work owed).
@@ -521,19 +534,35 @@ export async function addToLibrary(
 
   const pubkey = await signer.getPublicKey();
   const libD = blindedDLiteral(blindingKey, "library");
+  // This publish REPLACES the stored library event, and the library is
+  // append-only, so anything missing from `existing` is deleted by it. Two
+  // routine outcomes produce an empty `existing` that has nothing to do with the
+  // library being empty: a relay that did not answer inside the read's timeout
+  // (venue Wi-Fi — the same scenario this file's `rev` high-water mark already
+  // exists for), and a decrypt that failed. Either one used to publish a library
+  // containing only the clip just recorded, wiping every intro the user had.
+  await whenCacheReady();
   const existing = await loadLibraryFull(signer, blindingKey);
+  if (!existing.known) return "skipped";
 
+  // Belt and braces for the case the flag cannot cover: union with this device's
+  // last known copy. The library only ever grows — there is no removal path — so
+  // a union can restore but never resurrect.
   const byHash = new Map<string, MediaDescriptor>();
-  for (const d of [...existing.media, ...media]) byHash.set(d.x, d);
+  for (const d of [...(cachedLibrary() ?? []), ...existing.media, ...media]) byHash.set(d.x, d);
   const mergedMedia = [...byHash.values()];
   // Stamp only what is genuinely new. Re-adding a clip that is already in the
   // library must not move it to the top of the gallery: the question the date
   // answers is when it was MADE, not when it was last touched.
   const nowSec = Math.floor(Date.now() / 1000);
-  const mergedAt: Record<string, number> = { ...existing.at };
+  const mergedAt: Record<string, number> = {
+    ...(cacheGet<Record<string, number>>(MEDIALIB_AT_KEY)?.data ?? {}),
+    ...existing.at,
+  };
   for (const d of mergedMedia) if (mergedAt[d.x] === undefined) mergedAt[d.x] = nowSec;
 
-  const mergedTexts = [...existing.texts];
+  const priorTexts = cachedTextLibrary() ?? [];
+  const mergedTexts = [...priorTexts.filter((t) => !existing.texts.includes(t)), ...existing.texts];
   for (const txt of texts) {
     const at = mergedTexts.indexOf(txt);
     if (at >= 0) mergedTexts.splice(at, 1); // re-adding bumps it to most-recent
@@ -701,13 +730,15 @@ export async function loadLibraryFull(
 ): Promise<ReuseLibrary> {
   const pubkey = await signer.getPublicKey();
   const libD = blindedDLiteral(blindingKey, "library");
-  const events = await fetchEvents({
+  const { events, answered } = await fetchEventsAnswered({
     kinds: [KIND_MY_PROFILE],
     authors: [pubkey],
     "#d": [libD],
   });
   const latest = pickLatest(events);
-  if (!latest) return { media: [], texts: [], at: {} };
+  // No event AND no relay answer is not an empty library, it is an unread one.
+  // Rendering it as empty is harmless; republishing over it is not.
+  if (!latest) return { media: [], texts: [], at: {}, known: answered };
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
     const parsed = JSON.parse(json) as {
@@ -723,9 +754,12 @@ export async function loadLibraryFull(
     cacheSet(MEDIALIB_KEY, media, latest.created_at ?? 0);
     cacheSet(TEXTLIB_KEY, texts, latest.created_at ?? 0);
     cacheSet(MEDIALIB_AT_KEY, at, latest.created_at ?? 0);
-    return { media, texts, at };
+    return { media, texts, at, known: true };
   } catch {
-    return { media: [], texts: [], at: {} };
+    // The library IS there and would not decrypt (a signer that dropped the
+    // request, a payload from a future schema). The one case where "empty" is
+    // definitely wrong.
+    return { media: [], texts: [], at: {}, known: false };
   }
 }
 

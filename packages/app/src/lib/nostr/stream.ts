@@ -40,6 +40,23 @@ export interface StreamHandle {
   ready: Promise<NDKEvent[]>;
   /** Idempotent; also resolves `ready` if it hasn't settled yet. */
   stop: () => void;
+  /**
+   * Whether any relay actually said "that is everything" (EOSE) before `ready`
+   * settled. Read AFTER awaiting `ready`.
+   *
+   * This is the difference between "the relays have no such event" and "nobody
+   * answered in time", which `ready` alone cannot express — it resolves with
+   * whatever arrived, and an empty array is both. Most callers rightly do not
+   * care: a roster that did not load paints from cache and refreshes next tick.
+   *
+   * It matters when absence is about to be ACTED on — specifically when the
+   * action REPLACES what could not be read. Minting a new blinding seed because
+   * the stored one did not arrive, or republishing a reuse library that came
+   * back empty, both destroy the thing they failed to see (see
+   * `events/blinding.ts` and `media/submit.ts`). Those callers must treat an
+   * unanswered read as "unknown", not as "none".
+   */
+  answered: () => boolean;
 }
 
 export function streamEvents(
@@ -56,6 +73,8 @@ export function streamEvents(
   let settled = false;
   let graceTimer: ReturnType<typeof setTimeout> | undefined;
   let hardTimer: ReturnType<typeof setTimeout> | undefined;
+  /** At least one relay EOSEd before we settled — see StreamHandle.answered. */
+  let sawEose = false;
 
   let resolveReady!: (v: NDKEvent[]) => void;
   const ready = new Promise<NDKEvent[]>((r) => (resolveReady = r));
@@ -141,6 +160,7 @@ export function streamEvents(
       }
     });
     sub.on("eose", () => {
+      sawEose = true;
       if (settled || stopped) return;
       if (graceTimer) clearTimeout(graceTimer);
       graceTimer = setTimeout(settle, graceMs);
@@ -158,6 +178,10 @@ export function streamEvents(
     if (typeof origEoseReceived === "function" && typeof sub.relaysMissingEose === "function") {
       sub.eoseReceived = (relay: Parameters<typeof origEoseReceived>[0]) => {
         origEoseReceived(relay);
+        // A per-relay EOSE is an answer even when the aggregated one never
+        // comes (one live relay in a set of three) — record it before the
+        // early returns below, which are about SETTLING, not about answering.
+        sawEose = true;
         if (settled || stopped || graceTimer) return;
         try {
           if ((sub?.eosesSeen?.size ?? 0) === 0) return; // nothing executed yet
@@ -175,5 +199,5 @@ export function streamEvents(
     stop(); // subscribe failed (no relays?) — resolve with whatever we have
   }
 
-  return { ready, stop };
+  return { ready, stop, answered: () => sawEose };
 }
