@@ -49,13 +49,13 @@
    * back on its own.
    *
    * Both read caches, never the network: `cachedDirectory` is whatever this
-   * device last decrypted and `matchBadge` is a pure read of the watermark. A
+   * device last decrypted and `peopleBadge` is a pure read of the watermark. A
    * card with no cached roster simply says nothing about size, which is honest.
    */
   function cardFacts(coordinate: string): { community: boolean; people?: number; fresh: number } {
     const community = isCommunityCoordinate(coordinate);
     const people = cachedDirectory(coordinate)?.length;
-    return { community, people, fresh: whatsNew.matchBadge(coordinate) };
+    return { community, people, fresh: whatsNew.peopleBadge(coordinate) };
   }
 
   // "No events yet" is only the truth once the relay scans have SETTLED. On a

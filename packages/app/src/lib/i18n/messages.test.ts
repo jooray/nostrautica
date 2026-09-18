@@ -25,6 +25,7 @@ import { tc, tcp } from "./i18n.svelte.js";
 const PLURAL_FAMILIES = [
   "me.logout.warnUnsent",
   "nav.matches.new",
+  "nav.people.new",
   "dm.unread",
   "event.attendeesSection.count",
   "outbox.retries",

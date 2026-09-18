@@ -17,10 +17,17 @@ const mocks = vi.hoisted(() => ({
 vi.mock("$lib/cache/persist.js", () => ({
   cacheGet: mocks.cacheGet,
   cacheSet: mocks.cacheSet,
+  // Real callers await the boot bulk read before touching a record they will
+  // write back in full; here the mocked mirror is warm from the start.
+  whenCacheReady: async () => {},
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({
   fetchEvents: mocks.fetchEvents,
   fetchEventsRelayOnly: mocks.fetchEventsRelayOnly,
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await mocks.fetchEvents(...args),
+    answered: true,
+  }),
 }));
 vi.mock("$lib/events/attendee.js", () => ({
   cachedDirectoryEntry: mocks.cachedDirectoryEntry,

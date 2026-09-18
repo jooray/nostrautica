@@ -270,6 +270,10 @@ class Session {
     // dropped rather than clobbering the newer session or undoing the logout.
     const tok = this.nextOp();
     this.restoring = true;
+    // "My events" is per-identity, and until `adopt()` runs we do not have one.
+    // Hold it — see `RecentEvents.pendingIdentity` for what rendering the
+    // logged-out list in this window looked like from the outside.
+    recentEvents.awaitIdentity();
     this.restoreError = false;
     this.restoreErrorMessage = null;
     this.restoreErrorKind = null;
@@ -333,7 +337,13 @@ class Session {
       }
       return false;
     } finally {
-      if (tok === this.opToken) this.restoring = false;
+      if (tok === this.opToken) {
+        this.restoring = false;
+        // Whatever the outcome — adopted, failed, no stored session — the answer
+        // is now in. `adopt()` already settled this via `setOwner`; this is the
+        // path where there was nobody to adopt, and it is idempotent.
+        recentEvents.identitySettled();
+      }
     }
   }
 

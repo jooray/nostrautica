@@ -155,9 +155,39 @@ function load(owner: string | null): RecentEvent[] {
   }
 }
 
+/** Bound on records held while an identity is being restored (see `awaitIdentity`). */
+const MAX_QUEUED = MAX;
+
 class RecentEvents {
   list = $state<RecentEvent[]>([]);
   owner = $state<string | null>(null);
+  /**
+   * True while a persisted session is still being restored, so WHOSE list this
+   * is has not been decided yet.
+   *
+   * The list is per-identity (`storageKey`), and until `adopt()` runs the owner
+   * is `null` — which is not "logged out", it is "not known yet". Those two read
+   * identically to every method here, and the difference is visible (user report
+   * 2026-09-18): a NIP-46 restore is deliberately NOT awaited before the shell
+   * paints (UX-19), so Home rendered the UNSCOPED list — typically a stray entry
+   * or two left by an event opened before signing in — then swapped in the real
+   * list seconds later when the bunker answered, and did it again on every
+   * reload. Records made in that window went to the unscoped key too, where
+   * their owner never saw them again.
+   *
+   * So the window is made explicit: show nothing, and hold writes until we know
+   * who they belong to. Everything here is local and synchronous, so nobody
+   * waits on it for longer than the restore itself — during which Home already
+   * says "restoring your session".
+   */
+  private pendingIdentity = $state(false);
+  private queued: Array<{ evt: Omit<RecentEvent, "at"> & { at?: number }; authoritative: boolean }> =
+    [];
+
+  /** Whether the identity this list belongs to is still being resolved. */
+  get identityPending(): boolean {
+    return this.pendingIdentity;
+  }
 
   init(): void {
     const cleaned = load(this.owner); // migrates legacy entries + dedupes
@@ -166,11 +196,33 @@ class RecentEvents {
     this.list = cleaned;
   }
 
+  /** A restore has started: stop answering for an identity we don't have yet. */
+  awaitIdentity(): void {
+    if (this.pendingIdentity) return;
+    this.pendingIdentity = true;
+    this.list = [];
+  }
+
+  /**
+   * The restore finished, one way or the other. Load the list that actually
+   * belongs to whoever we ended up as, and replay anything recorded meanwhile —
+   * including into the logged-out list, when the restore failed and `null` turned
+   * out to be the real answer.
+   */
+  identitySettled(): void {
+    if (!this.pendingIdentity) return;
+    this.pendingIdentity = false;
+    this.init();
+    const replay = this.queued.splice(0);
+    for (const q of replay) this.record(q.evt, q.authoritative);
+  }
+
   /** Switch the visible role/navigation cache to the active identity. */
   setOwner(owner: string | null): void {
-    if (this.owner === owner) return;
+    const changed = this.owner !== owner;
     this.owner = owner;
-    this.init();
+    if (this.pendingIdentity) return this.identitySettled();
+    if (changed) this.init();
   }
 
   /**
@@ -179,6 +231,14 @@ class RecentEvents {
    */
   record(evt: Omit<RecentEvent, "at"> & { at?: number }, authoritativeRole = false): void {
     if (typeof localStorage === "undefined") return;
+    // Deep-linking into an event while a bunker reconnects lands here with no
+    // owner. Hold it rather than filing it under the logged-out list, where its
+    // real owner would never see it (see `pendingIdentity`).
+    if (this.pendingIdentity) {
+      this.queued.push({ evt, authoritative: authoritativeRole });
+      if (this.queued.length > MAX_QUEUED) this.queued.shift();
+      return;
+    }
     // Never store an unnavigable entry (see dedupe): reconstruct the naddr from
     // the coordinate, or refuse the record.
     const naddr = naddrOf(evt as RecentEvent);
@@ -214,6 +274,10 @@ class RecentEvents {
 
   /** True if an event (by coordinate) is already tracked. */
   has(coordinate: string): boolean {
+    // Not "no" — "we can't say yet". Callers use this to decide whether to
+    // record, and recording is the safe answer: the write queues and replays
+    // against the right list.
+    if (this.pendingIdentity) return false;
     return load(this.owner).some((e) => e.coordinate === coordinate);
   }
 

@@ -138,7 +138,7 @@
    * where this page says nothing at all, so their best band is promoted and the
    * lead line says plainly that nothing here is sharp yet.
    */
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { npubEncode, decode as decodeNip19 } from "nostr-tools/nip19";
   import type { DirectoryEntryContent, PerEventSettings, Match } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
@@ -151,7 +151,7 @@
   import { loadPerEventSettings, toggleSetting, cachedPerEventSettings } from "$lib/events/settings.js";
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
-  import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+  import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { directoryEntryFields, searchRank } from "$lib/events/search.js";
@@ -159,7 +159,7 @@
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { dmPrefill } from "$lib/stores/dm-prefill.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
-  import { loadWatermark, newMatchPubkeys } from "$lib/events/whats-new.js";
+  import { loadWatermark, newSincePubkeys } from "$lib/events/whats-new.js";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { bandAtCut, byMatchRank, strongCutFor, type ConfidenceBand } from "$lib/events/confidence.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
@@ -202,12 +202,23 @@
   let followsKnown = $state(cachedFollows !== undefined);
   let matchList = $state<Match[]>(cachedMatchList?.matches ?? []);
   /**
-   * Which matches are new since the last visit. Captured ONCE, from the
-   * watermark as it stood before this visit — `markMatchesSeen` then clears the
-   * nav badge, and reading the watermark afterwards would always return "none
-   * new" and the markers would never appear.
+   * Who is new since the last visit — new matches AND new roster arrivals, the
+   * same set the People tab's badge counts (`newSincePubkeys`).
+   *
+   * Captured from the watermark as it stood BEFORE this visit, because marking
+   * the list seen is the next thing that happens: read the watermark afterwards
+   * and it always says "nobody is new", so no row would ever be marked. It is
+   * added to rather than replaced as the roster streams in, so somebody who
+   * arrives while the list is open is marked too.
    */
   let newPubkeys = $state<Set<string>>(new Set());
+  /**
+   * The roster as it stood at the last visit, read once the cache is warm.
+   * `undefined` means "not known yet" — either the read hasn't happened or this
+   * device has never recorded a baseline — and until it is known nobody can be
+   * called new. See `Watermark.seenPeople`.
+   */
+  let priorSeen = $state<{ matches: string[]; people: string[] | undefined } | null>(null);
   let settings = $state<PerEventSettings | null>(
     cachedCtx ? (cachedPerEventSettings(cachedCtx.coordinate) ?? null) : null,
   );
@@ -251,32 +262,63 @@
 
   if (cachedEntries.length) perfMark("Attendees", "cache-paint");
 
+  /**
+   * Read the watermark ONCE, before anything marks it.
+   *
+   * It has to be read before it is written — this visit is what clears it — and
+   * it has to be an effect rather than a call at each of the sites that produce
+   * a list (the cache-painted initial state, background hydration, the network).
+   * The first of those has no hook to call from at all: it is a `$state`
+   * initialiser, and writing another component's rune from there is exactly the
+   * state_unsafe_mutation the badge was rewritten to avoid. The hole that left
+   * was small but real — open the list offline, paint from cache, and the nav
+   * badge never cleared because only the network path marked it.
+   */
+  let capturing = false;
+  $effect(() => {
+    const coordinate = ctx?.coordinate;
+    if (capturing || priorSeen || !coordinate) return;
+    capturing = true;
+    // Not `loadWatermark` straight away: boot does not wait for IndexedDB, and a
+    // watermark read from a cold mirror is an empty one — which would mark the
+    // whole roster NEW on a reload and then write that emptiness back over the
+    // real record (the same cold-read bug as the DM badge, 2026-09-18).
+    void whenCacheReady().then(() => {
+      const wm = loadWatermark(coordinate);
+      priorSeen = { matches: wm.seenMatches, people: wm.seenPeople };
+    });
+  });
+
+  /**
+   * Mark what is on screen as seen, and remember who was new before we did.
+   *
+   * Re-runs as the roster and the match list stream in, for two reasons: the
+   * marker set has to grow with late arrivals, and the baseline written for the
+   * NEXT visit has to cover everyone this visit actually showed — otherwise
+   * people who land while the list is open are announced as new tomorrow.
+   */
+  $effect(() => {
+    const coordinate = ctx?.coordinate;
+    const seen = priorSeen;
+    const people = entries.map((e) => e.pubkey);
+    const list = matchList;
+    if (!coordinate || !seen) return;
+    const fresh = newSincePubkeys({ matches: list }, entries, {
+      seenMatches: seen.matches,
+      seenPeople: seen.people,
+      seenApproved: false,
+      at: 0,
+    });
+    untrack(() => {
+      if (fresh.some((p) => !newPubkeys.has(p))) newPubkeys = new Set([...newPubkeys, ...fresh]);
+      if (list.length > 0) whatsNew.markMatchesSeen(coordinate);
+      if (people.length > 0) whatsNew.markRosterSeen(coordinate, people);
+    });
+  });
+
   // Cache-paint after background hydration (§7.4.5): boot no longer waits on the
   // mirror, so re-read the roster/directory snapshots when hydration lands while
   // the list is still empty.
-  /**
-   * Mark the matches seen, once, however they arrived.
-   *
-   * This has to read the watermark BEFORE clearing it — which is why it is one
-   * effect rather than a call at each of the three sites that can produce a
-   * list (the cache-painted initial state, background hydration, the network).
-   * The first of those has no hook to call from at all: it is a `$state`
-   * initialiser, and writing another component's rune from there is exactly the
-   * state_unsafe_mutation the Matches tab's badge was rewritten to avoid. The
-   * hole that left was small but real — open the list offline, paint from cache,
-   * and the nav badge never cleared because only the network path marked it.
-   */
-  let markedSeen = false;
-  $effect(() => {
-    const coordinate = ctx?.coordinate;
-    if (markedSeen || !coordinate || matchList.length === 0) return;
-    markedSeen = true;
-    newPubkeys = new Set(
-      newMatchPubkeys({ matches: matchList }, loadWatermark(coordinate).seenMatches),
-    );
-    whatsNew.markMatchesSeen(coordinate);
-  });
-
   $effect(() => {
     void cacheHydration.version;
     if (entries.length > 0) return;
@@ -877,6 +919,7 @@
               line={bioOf(e.pubkey) || e.ai_profile?.summary}
               picture={profiles.get(e.pubkey)?.picture}
               onOpen={() => open(e.pubkey)}
+              isNew={newPubkeys.has(e.pubkey)}
               last={e.pubkey === visible[visible.length - 1]?.pubkey}
               selected={selectedPubkey === e.pubkey}
             >

@@ -12,7 +12,19 @@ import {
 // end to end (same relay-mock pattern as posts.test.ts).
 const published: { kind: number; tags: string[][]; content: string; created_at: number }[] = [];
 const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  fetchEvents,
+  fetchEventsRelayOnly: vi.fn(),
+  // The real helper also reports whether a relay said EOSE — see
+  // StreamHandle.answered. The mock relay always answers; the test that cares
+  // about the other case overrides this.
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await (fetchEvents as (...a: unknown[]) => Promise<unknown[]>)(...args),
+    answered: answeredNext,
+  }),
+}));
+/** What the mocked `fetchEventsAnswered` reports. Reset per test. */
+let answeredNext = true;
 vi.mock("$lib/nostr/publish-queue.js", () => ({
   publishOrQueue: vi.fn(async (ev: { kind: number; tags: string[][]; content: string; created_at: number }) => {
     published.push(ev);
@@ -83,6 +95,7 @@ describe("cross-event reuse library (media + text)", () => {
     setActiveCacheOwner(await signer.getPublicKey());
     // The library d-tag is blinded over the user's self-conversation key.
     bk = selfConversationKey(signer.getSecretKey());
+    answeredNext = true;
     serveLatestLibrary();
   });
 
@@ -150,6 +163,42 @@ describe("cross-event reuse library (media + text)", () => {
     const lib = await loadLibraryFull(signer, bk);
     expect(lib.texts).toEqual([]);
     expect(lib.media).toHaveLength(1);
+  });
+
+  it("refuses to republish the library when the read came back unanswered", async () => {
+    // The library event is REPLACEABLE and the library is append-only, so
+    // publishing a merge against an empty read deletes everything it failed to
+    // see. An unanswered read (venue Wi-Fi, a relay that never EOSEs — the same
+    // scenario this file's `rev` high-water mark exists for) produces exactly
+    // that empty read, and used to publish a library of one clip.
+    await addToLibrary(signer, bk, { media: [descriptor("a".repeat(64))] });
+    expect(published).toHaveLength(1);
+
+    answeredNext = false;
+    fetchEvents.mockImplementation(async () => []); // nobody answered in time
+    const outcome = await addToLibrary(signer, bk, { media: [descriptor("b".repeat(64))] });
+    expect(outcome).toBe("skipped");
+    expect(published).toHaveLength(1); // nothing was replaced
+
+    // And the real library is intact once the relays come back.
+    answeredNext = true;
+    serveLatestLibrary();
+    const lib = await loadLibraryFull(signer, bk);
+    expect(lib.media.map((d) => d.x)).toEqual(["a".repeat(64)]);
+  });
+
+  it("merges against this device's cached copy, not only the relay read", async () => {
+    // Belt and braces for the case the answered-flag cannot cover: the relay
+    // answers, but with nothing (a replica that has not caught up). The cached
+    // copy still holds the library, and a union can only ever restore — there is
+    // no path that removes a clip.
+    await addToLibrary(signer, bk, { media: [descriptor("a".repeat(64))] });
+    fetchEvents.mockImplementation(async () => []); // answered, but stale/empty
+    await addToLibrary(signer, bk, { media: [descriptor("b".repeat(64))] });
+
+    serveLatestLibrary();
+    const lib = await loadLibraryFull(signer, bk);
+    expect(lib.media.map((d) => d.x).sort()).toEqual(["a".repeat(64), "b".repeat(64)]);
   });
 
   it("a no-op call (no media, no non-empty text) publishes nothing", async () => {

@@ -206,3 +206,51 @@ describe("recentEvents pending-key state", () => {
     expect(recentEvents.list[0]?.pendingKey).toBe(true);
   });
 });
+
+describe("identity is pending, not absent, while a session restores", () => {
+  it("shows no list, and never the logged-out one, until the owner is known", () => {
+    // User report 2026-09-18: "I see two events, then the load displays them all,
+    // but next refresh shows only two." A NIP-46 restore is deliberately not
+    // awaited before the shell paints, so Home rendered whatever sat under the
+    // UNSCOPED key until the bunker answered seconds later.
+    seed([{ coordinate: OTHER_COORD, naddr: OTHER_NADDR, title: "Stray", role: "visitor", at: 1 }]);
+    recentEvents.init();
+    expect(recentEvents.list).toHaveLength(1);
+
+    recentEvents.awaitIdentity();
+    expect(recentEvents.identityPending).toBe(true);
+    expect(recentEvents.list).toEqual([]);
+
+    store.set(
+      `${KEY}:${OWNER_A}`,
+      JSON.stringify([
+        { coordinate: COORD, naddr: NADDR, title: "Mine", role: "organizer", at: 5 },
+      ]),
+    );
+    recentEvents.setOwner(OWNER_A);
+    expect(recentEvents.identityPending).toBe(false);
+    expect(recentEvents.list.map((e) => e.title)).toEqual(["Mine"]);
+  });
+
+  it("files an event opened mid-restore under the identity it turns out to be", () => {
+    // Deep-linking into an event while the bunker reconnects. The record used to
+    // land in the logged-out list, where its owner never saw it again.
+    recentEvents.awaitIdentity();
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Opened", role: "visitor" });
+    expect(recentEvents.list).toEqual([]);
+    expect(store.get(KEY)).toBeUndefined();
+
+    recentEvents.setOwner(OWNER_A);
+    expect(recentEvents.list.map((e) => e.coordinate)).toEqual([COORD]);
+    expect(JSON.parse(store.get(`${KEY}:${OWNER_A}`)!)).toHaveLength(1);
+  });
+
+  it("settles to the logged-out list when the restore finds nobody", () => {
+    recentEvents.awaitIdentity();
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Opened", role: "visitor" });
+    recentEvents.identitySettled();
+    expect(recentEvents.identityPending).toBe(false);
+    expect(recentEvents.list.map((e) => e.coordinate)).toEqual([COORD]);
+    expect(JSON.parse(store.get(KEY)!)).toHaveLength(1);
+  });
+});

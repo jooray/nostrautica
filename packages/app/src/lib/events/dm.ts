@@ -14,7 +14,7 @@ import { fetchEvents, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
 
 export interface DmMessage {
   id: string; // rumor id (stable across the recipient/self copies)
@@ -220,6 +220,12 @@ export async function scanDmGiftWraps(
   me: string,
   opts: { history?: boolean } = {},
 ): Promise<GiftWrap[]> {
+  // The scan CURSOR is one of the accumulated records described in
+  // `whenCacheReady`: read before the mirror is warm it says "never scanned",
+  // and the write at the end of this function then persists that lie over the
+  // real cursor. Every reload re-walked five pages of DM history from scratch —
+  // and, with a remote signer, re-unwrapped all of it.
+  await whenCacheReady();
   const now = Math.floor(Date.now() / 1000);
   const state = dmScanState(me);
   const ownDmRelays = await fetchDmRelays(me).catch(() => []);
@@ -292,6 +298,11 @@ export async function scanDmGiftWraps(
 
 export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   const me = await signer.getPublicKey();
+  // Same reason as in `scanDmGiftWraps`, one record over: hydrating the memo
+  // from a cold mirror loaded NOTHING and still latched `unwrapCacheOwner`, so
+  // the memo was never re-read for the rest of the session and the first
+  // `persistUnwrapCache` wrote that empty memo over the full one on disk.
+  await whenCacheReady();
   if (unwrapCacheOwner !== me) hydrateUnwrapCache(me);
   const events = await scanDmGiftWraps(me);
   for (const wrap of events) {

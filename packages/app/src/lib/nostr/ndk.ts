@@ -494,6 +494,21 @@ export async function fetchEvents(
  * arrived is surfaced — the grant then sits invisible until some later fetch.
  * Time-bounded exactly like `fetchEvents` (UX-1).
  */
+/**
+ * Like `fetchEvents`, but also reports whether a relay actually answered — see
+ * `StreamHandle.answered`. For the callers whose next move on an empty result is
+ * to REPLACE what they failed to read; everyone else wants `fetchEvents`.
+ */
+export async function fetchEventsAnswered(
+  filters: Filter | Filter[],
+  relays?: string[],
+  opts: { timeoutMs?: number; graceMs?: number; relayOnly?: boolean } = {},
+): Promise<{ events: NDKEvent[]; answered: boolean }> {
+  const handle = streamEvents(filters, { relays, ...opts });
+  const events = await handle.ready;
+  return { events, answered: handle.answered() };
+}
+
 export async function fetchEventsRelayOnly(
   filters: Filter | Filter[],
   relays?: string[],

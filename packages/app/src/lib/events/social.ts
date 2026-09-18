@@ -268,7 +268,16 @@ export async function fetchFollowSet(
  * merge into this copy (§2.2, HARD CONSTRAINT 4).
  */
 export function noteFollowChange(pubkey: string, following: boolean): void {
-  const current = new Set(cacheGet<string[]>(FOLLOWS_KEY)?.data ?? []);
+  const entry = cacheGet<string[]>(FOLLOWS_KEY);
+  // A MISSING entry means "we have not fetched your follows", not "you follow
+  // nobody", and `cachedFollowSet()` returns undefined for exactly that reason —
+  // Attendees turns it into `followsKnown`, which decides whether a Follow
+  // button may claim anything at all. Writing a one-element set here would turn
+  // that honest unknown into a confident lie about everyone else on the page,
+  // and at boot (where the mirror is briefly cold for every key) it would do it
+  // over the real set. There is nothing to repaint in that state anyway.
+  if (!entry) return;
+  const current = new Set(entry.data);
   if (following) current.add(pubkey);
   else current.delete(pubkey);
   cacheSet(FOLLOWS_KEY, [...current]);

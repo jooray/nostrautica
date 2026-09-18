@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DmMessage } from "$lib/events/dm.js";
-import { __resetPersistForTests, __setPersistBackend } from "$lib/cache/persist.js";
+import {
+  __resetPersistForTests,
+  __setPersistBackend,
+  cacheGet,
+  hydrateAppCache,
+} from "$lib/cache/persist.js";
 import {
   DmUnreadStore,
   compareDmPosition,
@@ -13,18 +18,25 @@ const OWNER_A = "a".repeat(64);
 const OWNER_B = "b".repeat(64);
 const PEER = "c".repeat(64);
 const PEER_2 = "d".repeat(64);
+/** Scope/key separator in persist.ts\u2019s composite IndexedDB key. */
+const SEP = "\x1f";
 
 function message(id: string, at: number, from = PEER): DmMessage {
   return { id, at, from, peer: PEER, text: id };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   __setPersistBackend({
     getAll: async () => [],
     put: async () => {},
     delete: async () => {},
   });
   __resetPersistForTests();
+  // The store refuses to report an unread count until the persisted watermark
+  // map has actually been read back (see `DmUnreadStore.loaded`) — an empty
+  // mirror is "not loaded yet", not "nothing read". Boot does that read; here,
+  // do it explicitly, or every count below is a legitimate 0.
+  await hydrateAppCache();
 });
 
 describe("DM unread positions", () => {
@@ -106,6 +118,68 @@ describe("DmUnreadStore", () => {
     restored.init(OWNER_A);
     restored.syncMessages(OWNER_A, [message("p1-a", 1), message("p1-b", 2)]);
     expect(restored.confirmedCount).toBe(0);
+  });
+
+  it("counts nothing until the persisted watermark map has been read back", async () => {
+    // The reload bug (user report 2026-09-18). Boot doesn't wait for IndexedDB,
+    // so the store is initialised against a cold mirror while messages arrive
+    // from relays on their own schedule. Reading "no watermarks" out of a mirror
+    // that simply hasn't loaded yet made every already-read message unread, and
+    // the badge sat on 9 until hydration caught up seconds later.
+    const seeded = new DmUnreadStore();
+    seeded.init(OWNER_A);
+    seeded.syncMessages(OWNER_A, [message("one", 1)]);
+    seeded.markThreadRead(PEER);
+    const stored = cacheGet("dm-read-watermarks", OWNER_A)!;
+
+    // A fresh boot: an empty mirror, with that entry still on "disk".
+    __resetPersistForTests();
+    __setPersistBackend({
+      getAll: async () => [[`${OWNER_A}${SEP}dm-read-watermarks`, stored]],
+      put: async () => {},
+      delete: async () => {},
+    });
+
+    const cold = new DmUnreadStore();
+    cold.init(OWNER_A);
+    // "one" was read on the last visit; "two" arrived since.
+    cold.syncMessages(OWNER_A, [message("one", 1), message("two", 2)]);
+    expect(cold.confirmedCount).toBe(0);
+    expect(cold.threadCount(PEER)).toBe(0);
+    expect(cold.ready).toBe(false);
+
+    await hydrateAppCache();
+    await Promise.resolve();
+    expect(cold.ready).toBe(true);
+    // Exactly the one that really is new — not both, which is what the cold read
+    // reported, and not zero, which gating alone would have reported forever.
+    expect(cold.confirmedCount).toBe(1);
+  });
+
+  it("a read taken before hydration survives the disk copy landing", async () => {
+    __resetPersistForTests();
+    let released: (() => void) | null = null;
+    __setPersistBackend({
+      getAll: () =>
+        new Promise((resolve) => {
+          released = () => resolve([]);
+        }),
+      put: async () => {},
+      delete: async () => {},
+    });
+
+    const store = new DmUnreadStore();
+    store.init(OWNER_A);
+    store.syncMessages(OWNER_A, [message("one", 1)]);
+    // The user opens the thread while IndexedDB is still being read.
+    store.markThreadRead(PEER);
+    released!();
+    await hydrateAppCache();
+    await Promise.resolve();
+    expect(store.ready).toBe(true);
+    // `init`'s post-hydration read MERGES; assigning the (empty) disk map here
+    // would put the thread back to unread.
+    expect(store.threadCount(PEER)).toBe(0);
   });
 
   it("markAllRead never moves a watermark backwards and is idempotent", () => {

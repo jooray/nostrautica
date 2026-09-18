@@ -149,6 +149,18 @@ async function reconcile(signer: AppSigner): Promise<void> {
   const remote = await fetchRemote(signer, pubkey);
   if (remote) dmUnread.mergeRemoteWatermarks(pubkey, remote.threads);
 
+  // PULL always; PUSH only from a map we have actually finished loading.
+  //
+  // `fetchRemote` returning null is ambiguous — no event, an unreachable relay,
+  // a decrypt that failed — and the branch below treats it as "publish mine,
+  // which self-heals the stored event". That is only true when "mine" is the
+  // real map. Boot reads the watermarks from an IndexedDB mirror that may still
+  // be cold (see dm-unread's `loaded`), so a publish in that window would put a
+  // near-empty map on the relay under a monotonic `created_at` and take every
+  // other device's read state down with it. The pull above has already done the
+  // useful half; the push can wait for the next poll.
+  if (!dmUnread.ready) return;
+
   const local = prunedForPublish(dmUnread.readWatermarks);
   // Nothing read anywhere yet — an empty event is pure noise.
   if (Object.keys(local).length === 0) return;
