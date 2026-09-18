@@ -63,6 +63,60 @@ export function incomingUnreadCount(
   ).length;
 }
 
+/**
+ * The newest message the OWNER sent in a thread.
+ *
+ * Every NIP-17 send produces a self-addressed wrap alongside the recipient's, so
+ * this is visible here no matter which client sent it — including a phone, or a
+ * different Nostr app entirely.
+ */
+function newestOutgoing(messages: DmMessage[], owner: string, peer: string): DmPosition | undefined {
+  let newest: DmPosition | undefined;
+  for (const message of messages) {
+    if (message.peer !== peer || message.from !== owner) continue;
+    const position = { at: message.at, id: message.id };
+    if (!newest || compareDmPosition(position, newest) > 0) newest = position;
+  }
+  return newest;
+}
+
+/**
+ * The position at or before which everything is certainly read: the recorded
+ * watermark, or the owner's own newest message in the thread, whichever is later.
+ *
+ * REPLYING IS READING. This app only ever recorded a read when the user opened a
+ * thread inside it, so a conversation carried on from a phone or another Nostr
+ * client stayed "unread" forever — reported 2026-09-18 as a badge of 9 that came
+ * back on every reload, over four threads whose newest message was the user's own
+ * reply. Their read state had not moved since 2026-09-04. Nothing was stale; the
+ * app had simply never been told, and the one place it looks (the thread view)
+ * was the one place that user never went.
+ *
+ * The signal was already on the device. A send self-wraps, so `messages` holds
+ * the user's own replies whatever sent them, and a reply is proof they read what
+ * they replied to — the rule every messenger uses.
+ *
+ * DERIVED, never stored. Persisting it would be a write performed by a getter,
+ * and it would also be a claim about the past that a later, older-timestamped
+ * message could not correct. Computing it live costs one pass over a thread and
+ * is idempotent everywhere — including on another device, which reaches the same
+ * answer from the same self-wraps without any of them having to agree first.
+ *
+ * It does NOT swallow a genuinely new message: anything that arrives after the
+ * reply sorts above it and still counts.
+ */
+function effectiveWatermark(
+  messages: DmMessage[],
+  owner: string,
+  peer: string,
+  stored?: DmPosition,
+): DmPosition | undefined {
+  const mine = newestOutgoing(messages, owner, peer);
+  if (!mine) return stored;
+  if (!stored) return mine;
+  return compareDmPosition(mine, stored) > 0 ? mine : stored;
+}
+
 function newestIncoming(messages: DmMessage[], owner: string, peer: string): DmPosition | undefined {
   let newest: DmPosition | undefined;
   for (const message of messages) {
@@ -193,7 +247,12 @@ export class DmUnreadStore {
 
   threadCount(peer: string): number {
     if (!this.owner || !this.loaded) return 0;
-    return incomingUnreadCount(this.messages, this.owner, peer, this.watermarks[peer]);
+    return incomingUnreadCount(
+      this.messages,
+      this.owner,
+      peer,
+      effectiveWatermark(this.messages, this.owner, peer, this.watermarks[peer]),
+    );
   }
 
   get confirmedCount(): number {

@@ -100,7 +100,11 @@ describe("DmUnreadStore", () => {
       message("p1-a", 1),
       message("p1-b", 2),
       { id: "p2-a", at: 3, from: PEER_2, peer: PEER_2, text: "p2-a" },
-      { id: "mine", at: 4, from: OWNER_A, peer: PEER_2, text: "mine" },
+      // Deliberately OLDER than p2-a: an outgoing message must not be counted as
+      // unread, which is what this line is here to prove. A NEWER one would also
+      // mark p2-a read (see "a reply of your own…" above) and this case would
+      // stop testing what it is named for.
+      { id: "mine", at: 2, from: OWNER_A, peer: PEER_2, text: "mine" },
     ]);
     store.observeEncryptedWrapIds(OWNER_A, ["wrap-1"]);
     store.observeEncryptedWrapIds(OWNER_A, ["wrap-1", "wrap-2"]);
@@ -180,6 +184,53 @@ describe("DmUnreadStore", () => {
     // `init`'s post-hydration read MERGES; assigning the (empty) disk map here
     // would put the thread back to unread.
     expect(store.threadCount(PEER)).toBe(0);
+  });
+
+  it("a reply of your own marks everything before it read, whatever sent it", async () => {
+    // The reported case, from the reporter's own IndexedDB (2026-09-18): a badge
+    // of 9 over four threads, one of which had never been marked at all, and
+    // every one of which had the user's own reply as its newest message. Their
+    // stored read state had not moved in two weeks, because this app only ever
+    // recorded a read when a thread was opened INSIDE it — and they read and
+    // reply on a phone.
+    //
+    // The evidence was already on the device: a NIP-17 send self-wraps, so the
+    // reply is in the same memo regardless of which client sent it.
+    const store = new DmUnreadStore();
+    store.init(OWNER_A);
+    store.syncMessages(OWNER_A, [
+      message("in-1", 10),
+      message("in-2", 20),
+      message("in-3", 30),
+      { id: "my-reply", at: 40, from: OWNER_A, peer: PEER, text: "reply" },
+    ]);
+    expect(store.threadCount(PEER)).toBe(0);
+    expect(store.confirmedCount).toBe(0);
+
+    // Nothing is swallowed: a message that arrives AFTER the reply is still new.
+    store.syncMessages(OWNER_A, [
+      message("in-1", 10),
+      { id: "my-reply", at: 40, from: OWNER_A, peer: PEER, text: "reply" },
+      message("in-later", 50),
+    ]);
+    expect(store.threadCount(PEER)).toBe(1);
+
+    // And it is derived, not recorded — nothing was written to say so, so a
+    // device that has never seen the reply is not told anything false.
+    expect(cacheGet("dm-read-watermarks", OWNER_A)).toBeUndefined();
+  });
+
+  it("does not let one thread's reply silence another thread", async () => {
+    const store = new DmUnreadStore();
+    store.init(OWNER_A);
+    store.syncMessages(OWNER_A, [
+      { id: "p1-in", at: 10, from: PEER, peer: PEER, text: "hi" },
+      { id: "p1-mine", at: 20, from: OWNER_A, peer: PEER, text: "reply" },
+      { id: "p2-in", at: 15, from: PEER_2, peer: PEER_2, text: "hi" },
+    ]);
+    expect(store.threadCount(PEER)).toBe(0);
+    expect(store.threadCount(PEER_2)).toBe(1);
+    expect(store.confirmedCount).toBe(1);
   });
 
   it("markAllRead never moves a watermark backwards and is idempotent", () => {
